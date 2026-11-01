@@ -335,15 +335,18 @@ pub struct NativePtyOwner {
     reader_thread: Option<JoinHandle<()>>,
     cleanup_probe: Option<Arc<dyn NativePtyTermination>>,
     close_state: Weak<Mutex<NativePtyCloseState>>,
+    counters: Arc<TerminalCounters>,
 }
 
 impl NativePtyOwner {
+    /// Starts a PTY whose Line Mode reads count in `counters`.
     pub fn start(
         adapter_factory: &dyn NativePtyAdapterFactory,
         launch: PreparedShellLaunch,
         size: NativePtySize,
         output: Arc<dyn NativePtyOutputSink>,
         close_handle: &NativePtyCloseHandle,
+        counters: Arc<TerminalCounters>,
     ) -> Result<Self, NativePtyStartupFailure> {
         let parts = adapter_factory
             .create(launch, size)
@@ -353,13 +356,14 @@ impl NativePtyOwner {
                 }
             })
             .map_err(NativePtyStartupFailure::Adapter)?;
-        Self::install_adapter_parts(parts, output, close_handle)
+        Self::install_adapter_parts(parts, output, close_handle, counters)
     }
 
     fn install_adapter_parts(
         mut parts: NativePtyAdapterParts,
         output: Arc<dyn NativePtyOutputSink>,
         close_handle: &NativePtyCloseHandle,
+        counters: Arc<TerminalCounters>,
     ) -> Result<Self, NativePtyStartupFailure> {
         let termination_supervisor = close_handle
             .install(Arc::clone(&parts.termination))
@@ -376,6 +380,7 @@ impl NativePtyOwner {
             reader_thread: Some(reader_thread),
             cleanup_probe: Some(parts.termination),
             close_state: Arc::downgrade(&close_handle.state),
+            counters,
         })
     }
 
@@ -384,7 +389,7 @@ impl NativePtyOwner {
     }
 
     pub fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
-        TerminalCounters::process().record_line_mode_read();
+        self.counters.record_line_mode_read();
         self.adapter().line_mode()
     }
 
@@ -455,10 +460,7 @@ fn spawn_reader(
             loop {
                 let event = match reader.read(&mut buffer) {
                     Ok(0) => NativePtyOutput::Stopped(None),
-                    Ok(read) => {
-                        TerminalCounters::process().record_pty_read(read);
-                        NativePtyOutput::Bytes(buffer[..read].to_vec())
-                    }
+                    Ok(read) => NativePtyOutput::Bytes(buffer[..read].to_vec()),
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => {
                         NativePtyOutput::Stopped(Some(NativePtyReadFailure::new(error.kind())))
@@ -650,6 +652,7 @@ mod tests {
             size,
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
+            Arc::default(),
         )
         .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 
@@ -672,6 +675,7 @@ mod tests {
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &close_handle,
+            Arc::default(),
         )
         .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 
@@ -735,6 +739,7 @@ mod tests {
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
+            Arc::default(),
         )
         .err()
         .expect("adapter construction should fail");
@@ -767,6 +772,7 @@ mod tests {
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             close_handle,
+            Arc::default(),
         )
         .expect("fake Native PTY Owner should start");
         (owner, observation)
@@ -822,60 +828,37 @@ mod tests {
         }
     }
 
-    /// Returns `reads` reads of `bytes` bytes each, then end of file.
-    struct ChunkedReader {
-        reads: usize,
-        bytes: usize,
-    }
-
-    impl Read for ChunkedReader {
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            if self.reads == 0 {
-                return Ok(0);
-            }
-            self.reads -= 1;
-            buffer[..self.bytes].fill(b'y');
-            Ok(self.bytes)
-        }
-    }
-
-    // Other tests in this process record into the same counters, so these check lower bounds
-    // large enough that concurrent recording cannot supply them.
     #[test]
-    fn each_pty_read_counts_one_read_and_its_bytes() {
-        let before = TerminalCounters::process().snapshot();
-
-        spawn_reader(
-            Box::new(ChunkedReader {
-                reads: 300,
-                bytes: 1_001,
+    fn each_line_mode_read_counts_once_in_the_owners_counters() {
+        let counters = Arc::new(TerminalCounters::default());
+        let factory = OneShotAdapterFactory(Mutex::new(Some(NativePtyAdapterParts {
+            adapter: Box::new(ObservedAdapter {
+                observation: Arc::default(),
+                exit: NativePtyExit::Success,
             }),
+            termination: Arc::new(CountingTermination(Arc::new(AtomicUsize::new(0)))),
+        })));
+        let owner = NativePtyOwner::start(
+            &factory,
+            PreparedShellLaunch::for_test(PathBuf::from("/project")),
+            NativePtySize::default(),
             Arc::new(DiscardOutput),
+            &NativePtyCloseHandle::default(),
+            Arc::clone(&counters),
         )
-        .unwrap()
-        .join()
         .unwrap();
 
-        let after = TerminalCounters::process().snapshot();
-        assert!(after.pty_reads - before.pty_reads >= 300);
-        assert!(after.pty_read_bytes - before.pty_read_bytes >= 300_300);
-    }
-
-    #[test]
-    fn each_line_mode_read_is_counted() {
-        let (owner, _observation) = observed_owner(
-            NativePtyExit::Success,
-            &NativePtyCloseHandle::default(),
-            Arc::new(CountingTermination(Arc::new(AtomicUsize::new(0)))),
-        );
-        let before = TerminalCounters::process().snapshot();
-
-        for _ in 0..500 {
+        for _ in 0..3 {
             owner.line_mode().unwrap();
         }
 
-        let after = TerminalCounters::process().snapshot();
-        assert!(after.line_mode_reads - before.line_mode_reads >= 500);
+        assert_eq!(
+            counters.snapshot(),
+            spaceterm_server::diagnostics::TerminalCounterSnapshot {
+                line_mode_reads: 3,
+                ..Default::default()
+            }
+        );
     }
 
     struct BlockingTermination {
@@ -994,6 +977,7 @@ mod tests {
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
+            Arc::default(),
         )
         .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 

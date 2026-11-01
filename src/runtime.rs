@@ -17,9 +17,12 @@ pub use crate::terminal::session::{
     TerminalRuntime, TerminalSessionEvent,
 };
 
-/// Returns the native PTY adapter used by the desktop and headless hosts.
-pub fn native_pty_factory() -> std::sync::Arc<dyn NativePtyAdapterFactory> {
-    crate::platform::runtime_pty_factory()
+/// Returns the native PTY adapter used by the desktop and headless hosts, whose PTYs count their
+/// native reads in `counters`.
+pub fn native_pty_factory(
+    counters: std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters>,
+) -> std::sync::Arc<dyn NativePtyAdapterFactory> {
+    crate::platform::runtime_pty_factory(counters)
 }
 
 /// Returns authority for explicit local file and directory operations on this host.

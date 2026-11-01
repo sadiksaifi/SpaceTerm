@@ -123,21 +123,30 @@ pub struct NativeTerminalSessionFactory {
     local_machine: LocalMachine,
     native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
     launch_planner: ShellLaunchPlanner,
+    counters: Arc<TerminalCounters>,
 }
 
 impl NativeTerminalSessionFactory {
+    /// Each Terminal Session it starts records into `counters`.
     pub fn new(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         launch_planner: ShellLaunchPlanner,
         local_filesystem: LocalFilesystemAuthority,
         local_machine: LocalMachine,
+        counters: Arc<TerminalCounters>,
     ) -> Self {
         Self {
             local_filesystem,
             local_machine,
             native_pty_adapter_factory,
             launch_planner,
+            counters,
         }
+    }
+
+    /// The counters its Terminal Sessions record into.
+    pub fn counters(&self) -> &Arc<TerminalCounters> {
+        &self.counters
     }
 
     /// Starts an owned runtime without requiring a presentation or graphical session.
@@ -176,6 +185,7 @@ impl NativeTerminalSessionFactory {
             launch,
             self.local_filesystem.clone(),
             initial_appearance,
+            Arc::clone(&self.counters),
         )
     }
 }
@@ -189,6 +199,7 @@ impl TerminalRuntime {
         working_directory: &Path,
         local_hostname: Option<&str>,
         local_filesystem: LocalFilesystemAuthority,
+        counters: Arc<TerminalCounters>,
     ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
         let launch = TerminalSessionLaunch::local(
             launch_planner,
@@ -202,6 +213,7 @@ impl TerminalRuntime {
             launch,
             local_filesystem,
             test_terminal_appearance_update(),
+            counters,
         )
         .map(|(runtime, subscription)| (runtime, subscription.events, subscription.accessibility))
     }
@@ -212,21 +224,30 @@ impl TerminalRuntime {
         launch: TerminalSessionLaunch,
         filesystem: LocalFilesystemAuthority,
         initial_appearance: TerminalAppearanceUpdate,
+        counters: Arc<TerminalCounters>,
     ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
+        let owner_counters = Arc::clone(&counters);
         Self::start_deferred_with_context(
             geometry,
             launch.metadata,
             launch.fallback_title,
             filesystem,
             initial_appearance,
+            counters,
             move |size, output, close_handle| {
                 let prepared = launch.process.prepare().inspect_err(|_| {
                     close_handle.confirm_unstarted();
                 })?;
                 let terminal_name = prepared.terminal_name();
                 let integration_expected = prepared.integration_expected();
-                let owner =
-                    NativePtyOwner::start(factory.as_ref(), prepared, size, output, close_handle)?;
+                let owner = NativePtyOwner::start(
+                    factory.as_ref(),
+                    prepared,
+                    size,
+                    output,
+                    close_handle,
+                    owner_counters,
+                )?;
                 Ok(StartedPty {
                     owner,
                     terminal_name,
@@ -261,6 +282,7 @@ impl TerminalRuntime {
             test_launch_planner().fallback_title(),
             LocalFilesystemAuthority::testing(),
             test_terminal_appearance_update(),
+            Arc::default(),
             move |size, output, close_handle| {
                 start_native_pty(size, output, close_handle).map(|owner| StartedPty {
                     owner,
@@ -279,6 +301,7 @@ impl TerminalRuntime {
         fallback_title: String,
         local_filesystem: LocalFilesystemAuthority,
         initial_appearance: TerminalAppearanceUpdate,
+        counters: Arc<TerminalCounters>,
         start_native_pty: impl FnOnce(
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
@@ -288,6 +311,7 @@ impl TerminalRuntime {
         + 'static,
     ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
         let (command_tx, command_rx) = mpsc::channel();
+        let command_rx = WorkerCommands::new(command_rx, counters);
         let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
         let clipboard_authority = Arc::clone(&clipboard.authority);
         let reader_transport =

@@ -1331,6 +1331,7 @@ pub(super) fn present(
         attachment,
         control: _,
         state,
+        counters,
     } = factory;
     let presenter = reservation.activate(&alive);
     let _control =
@@ -1418,10 +1419,14 @@ pub(super) fn present(
             let mut active_size = grant_size;
             let mut ready = false;
             let mut graphics = graphics::Graphics::default();
-            let mut semantic = accessibility::Fetcher::new(lease);
+            let mut semantic = accessibility::Fetcher::new(lease, Arc::clone(&counters));
             let mut latest_screen = None;
             let mut shown = None;
-            let mut screens = ScreenReceiver::new(local_files.as_ref(), remote_metadata.as_ref());
+            let mut screens = ScreenReceiver::new(
+                local_files.as_ref(),
+                remote_metadata.as_ref(),
+                Arc::clone(&counters),
+            );
             let mut predictor = prediction::Predictor::default();
             // Cached rows survive a reconnect to the same Terminal Session.
             state

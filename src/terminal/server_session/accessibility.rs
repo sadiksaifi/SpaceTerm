@@ -172,10 +172,12 @@ pub(super) struct Fetcher {
     requested: bool,
     /// A partial transfer whose next chunk is ready now.
     continues: bool,
+    /// Counts each rebind that produced a model.
+    counters: Arc<TerminalCounters>,
 }
 
 impl Fetcher {
-    pub(super) fn new(lease: Lease) -> Self {
+    pub(super) fn new(lease: Lease, counters: Arc<TerminalCounters>) -> Self {
         Self {
             lease,
             server_revision: None,
@@ -183,6 +185,7 @@ impl Fetcher {
             transfer: None,
             requested: false,
             continues: false,
+            counters,
         }
     }
 
@@ -210,7 +213,7 @@ impl Fetcher {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .rebind(generation)
-            .inspect(|_| TerminalCounters::process().record_accessibility_rebind())
+            .inspect(|_| self.counters.record_accessibility_rebind())
     }
 
     /// Advances the current transfer by one chunk, returning a model to publish when one
@@ -558,7 +561,7 @@ mod tests {
     #[test]
     fn a_delta_keeps_unchanged_row_identities_through_growth() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let mut server = Server::new(snapshot(1, &[0, 1], vec![row(0, 1, "ab"), row(1, 1, "cd")]));
         let first = fetcher
             .poll(
@@ -599,7 +602,7 @@ mod tests {
     #[test]
     fn a_delta_missing_retained_rows_refetches_every_row() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let mut server = Server::new(snapshot(4, &[0, 1], vec![row(1, 1, "cd")]));
         let missing = fetcher
             .poll(
@@ -627,7 +630,7 @@ mod tests {
     #[test]
     fn a_current_revision_issues_no_request() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let mut server = Server::new(snapshot(1, &[0], vec![row(0, 1, "ab")]));
         fetcher
             .poll(
@@ -651,7 +654,7 @@ mod tests {
     #[test]
     fn selection_resolves_only_within_the_epoch_that_fetched_it() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let mut server = Server::new(snapshot(1, &[0, 1], vec![row(0, 1, "ab"), row(1, 1, "cd")]));
         let model = fetcher
             .poll(
@@ -699,7 +702,7 @@ mod tests {
     #[test]
     fn a_snapshot_naming_another_screen_is_a_protocol_failure() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let mut mixed = snapshot(1, &[0], vec![row(0, 1, "ab")]);
         mixed.topology[0].screen = wire::Screen::Alternate;
         let mut server = Server::new(mixed);
@@ -719,7 +722,7 @@ mod tests {
     #[test]
     fn a_chunk_out_of_order_is_a_protocol_failure() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let result = fetcher.poll(&state, PresentationGeneration::default(), &mut |_| {
             Ok(Reply::Accessibility(Ok(wire::Chunk {
                 revision: 1,
@@ -735,7 +738,7 @@ mod tests {
     #[test]
     fn ending_demand_tells_the_server_once() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let mut server = Server::new(snapshot(1, &[0], vec![row(0, 1, "ab")]));
         fetcher
             .poll(
@@ -788,7 +791,7 @@ mod tests {
     #[test]
     fn the_published_model_follows_a_scrolled_view_and_the_local_selection() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         // Two history lines above a two-line screen.
         let mut document = snapshot(
             1,
@@ -855,7 +858,7 @@ mod tests {
     #[test]
     fn a_newer_screen_rebinds_the_retained_document() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let mut server = Server::new(snapshot(1, &[0], vec![row(0, 1, "ab")]));
         let first = fetcher
             .poll(
@@ -874,33 +877,37 @@ mod tests {
         );
     }
 
-    // Other tests in this process record into the same counters, so this checks a lower bound
-    // large enough that concurrent recording cannot supply it.
     #[test]
-    fn each_rebind_to_a_newer_screen_is_counted() {
+    fn each_rebind_to_a_newer_screen_counts_once() {
+        use spaceterm_server::diagnostics::TerminalCounterSnapshot;
+        let counters = Arc::new(TerminalCounters::default());
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::clone(&counters));
         let mut server = Server::new(snapshot(1, &[0], vec![row(0, 1, "ab")]));
         let mut generation = PresentationGeneration::default();
         fetcher
             .poll(&state, generation, &mut server.exchange())
             .unwrap()
             .unwrap();
-        let before = TerminalCounters::process().snapshot();
 
-        for _ in 0..500 {
+        for _ in 0..5 {
             generation = generation.next();
             fetcher.rebind(&state, generation).unwrap();
         }
 
-        let after = TerminalCounters::process().snapshot();
-        assert!(after.accessibility_rebinds - before.accessibility_rebinds >= 500);
+        assert_eq!(
+            counters.snapshot(),
+            TerminalCounterSnapshot {
+                accessibility_rebinds: 5,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
     fn a_large_document_arrives_one_chunk_per_turn_without_awaiting_output_checks() {
         let state = demanded();
-        let mut fetcher = Fetcher::new(lease());
+        let mut fetcher = Fetcher::new(lease(), Arc::default());
         let text = "x".repeat(200);
         let topology: Vec<u16> = (0..100).collect();
         let document = snapshot(

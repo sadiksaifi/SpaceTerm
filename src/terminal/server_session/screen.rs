@@ -15,9 +15,10 @@ impl<'a> ScreenReceiver<'a> {
     pub(super) fn new(
         local_files: Option<&'a crate::platform::local_filesystem::LocalFilesystemAuthority>,
         remote_metadata: Option<&'a super::super::metadata::RemoteTerminalMetadataContext>,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
     ) -> Self {
         Self {
-            decoder: ScreenDecoder::default(),
+            decoder: ScreenDecoder::new(counters),
             local_files,
             remote_metadata,
         }

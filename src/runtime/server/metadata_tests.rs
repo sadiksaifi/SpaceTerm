@@ -85,7 +85,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
     }
     let mut prototype = host();
     prototype.factory = NativeTerminalSessionFactory::new(
-        native_pty_factory(),
+        native_pty_factory(Arc::default()),
         ShellLaunchPlanner::new(
             "/bin/sh".into(),
             std::path::PathBuf::new(),
@@ -100,6 +100,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         ),
         local_filesystem(),
         LocalMachine::new(Some("alice"), Some("build.test"), Some("/home/alice")),
+        Arc::default(),
     );
     let mut host = WorkspaceHost::new(prototype);
     host.prepare_initial_organization().unwrap();

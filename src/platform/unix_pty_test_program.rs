@@ -25,7 +25,8 @@ impl TestProgram {
             cols: Self::COLUMNS,
             ..PtySize::default()
         };
-        let (mut pty, _terminator) = spawn_command_in_pty(test_host(), size, command).unwrap();
+        let (mut pty, _terminator) =
+            spawn_command_in_pty(test_host(), size, command, Arc::default()).unwrap();
         let mut reader = pty.take_reader().unwrap();
         let output = Arc::new(Mutex::new(Vec::new()));
         let collected = Arc::clone(&output);

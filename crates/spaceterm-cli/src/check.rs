@@ -39,8 +39,9 @@ pub fn run() -> Result<(), ServerError> {
     let directory = filesystem
         .validate_directory(&std::env::current_dir().map_err(|_| ServerError::StartupFailed)?)
         .map_err(|_| ServerError::StartupFailed)?;
+    let counters = std::sync::Arc::default();
     let factory = NativeTerminalSessionFactory::new(
-        native_pty_factory(),
+        native_pty_factory(std::sync::Arc::clone(&counters)),
         ShellLaunchPlanner::new(
             "/bin/sh".into(),
             resources,
@@ -55,6 +56,7 @@ pub fn run() -> Result<(), ServerError> {
         ),
         filesystem,
         LocalMachine::default(),
+        counters,
     );
     let geometry = TerminalGeometry::from_viewport(
         LogicalSize::new(640.0, 432.0),

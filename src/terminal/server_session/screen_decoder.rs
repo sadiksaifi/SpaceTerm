@@ -23,12 +23,13 @@ pub(super) enum UpdateError {
 
 /// One channel's decoder. It holds the last applied frame and the channel's style and link
 /// tables.
-#[derive(Default)]
 pub(super) struct ScreenDecoder {
     frame: Option<u64>,
     styles: HashMap<u16, CellSnapshot>,
     links: HashMap<u16, Option<Arc<HyperlinkTarget>>>,
     screen: Option<DecodedScreen>,
+    /// Counts each decoded frame.
+    counters: Arc<TerminalCounters>,
 }
 
 /// The server's screen as of the decoder's last frame.
@@ -56,8 +57,18 @@ impl ScreenDecoder {
         self.frame
     }
 
+    pub(super) fn new(counters: Arc<TerminalCounters>) -> Self {
+        Self {
+            frame: None,
+            styles: HashMap::new(),
+            links: HashMap::new(),
+            screen: None,
+            counters,
+        }
+    }
+
     pub(super) fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self::new(Arc::clone(&self.counters));
     }
 
     /// Applies frame `frame`, which the server encoded against `base`. A file link becomes a
@@ -74,7 +85,7 @@ impl ScreenDecoder {
     ) -> Result<&DecodedScreen, UpdateError> {
         match self.decode(frame, base, update, local_files) {
             Ok(()) => {
-                TerminalCounters::process().record_frame_decoded();
+                self.counters.record_frame_decoded();
                 self.screen.as_ref().ok_or(UpdateError::Malformed)
             }
             Err(error) => {
@@ -336,7 +347,7 @@ fn rgb(color: [u8; 3]) -> crate::appearance::Color {
 /// The text of each row of a keyframe, with a wide character's spacer as a space.
 #[cfg(test)]
 pub(super) fn keyframe_lines(update: &ScreenUpdate) -> Vec<String> {
-    ScreenDecoder::default()
+    ScreenDecoder::new(Arc::default())
         .apply(1, None, update.clone(), None)
         .map(DecodedScreen::lines)
         .unwrap_or_default()

@@ -590,17 +590,22 @@ mod linux_ssh_executable;
 #[cfg(feature = "desktop")]
 mod linux_updates;
 
-/// Composes the existing native PTY adapter without opening a graphical session.
-pub(crate) fn runtime_pty_factory() -> std::sync::Arc<dyn native_pty::NativePtyAdapterFactory> {
+/// Composes the existing native PTY adapter without opening a graphical session. Its PTYs count
+/// their native reads in `counters`.
+pub(crate) fn runtime_pty_factory(
+    counters: std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters>,
+) -> std::sync::Arc<dyn native_pty::NativePtyAdapterFactory> {
     #[cfg(target_os = "macos")]
     let host = std::sync::Arc::new(macos_pty_host::MacosPtyHost);
     #[cfg(target_os = "linux")]
     let host = std::sync::Arc::new(linux_pty_host::LinuxPtyHost);
-    std::sync::Arc::new(unix_pty::UnixNativePtyAdapterFactory::new(host))
+    std::sync::Arc::new(unix_pty::UnixNativePtyAdapterFactory::new(host, counters))
 }
 
-pub(crate) fn service_pty_factory() -> std::sync::Arc<dyn native_pty::NativePtyAdapterFactory> {
-    let factory = runtime_pty_factory();
+pub(crate) fn service_pty_factory(
+    counters: std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters>,
+) -> std::sync::Arc<dyn native_pty::NativePtyAdapterFactory> {
+    let factory = runtime_pty_factory(counters);
     #[cfg(target_os = "linux")]
     return linux_service_pty::factory(factory);
     #[cfg(not(target_os = "linux"))]

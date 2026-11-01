@@ -139,7 +139,7 @@ impl ServerPaneHost {
             screen_generation: 0,
             size,
             effects: NativeEffects::default(),
-            accessibility: accessibility::Accessibility::default(),
+            accessibility: accessibility::Accessibility::new(Arc::clone(self.factory.counters())),
             metadata_revision: 0,
         });
         self.dormant = None;

@@ -99,6 +99,7 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
         &std::env::current_dir().unwrap(),
         Some("fixture.test"),
         LocalFilesystemAuthority::testing(),
+        Arc::default(),
     )
     .unwrap();
     let session = JoinedRealPtySession(session);
@@ -161,6 +162,7 @@ fn real_shell_exit_command_emits_an_exited_event() {
         &std::env::current_dir().unwrap(),
         Some("fixture.test"),
         LocalFilesystemAuthority::testing(),
+        Arc::default(),
     )
     .unwrap();
     let session = JoinedRealPtySession(session);

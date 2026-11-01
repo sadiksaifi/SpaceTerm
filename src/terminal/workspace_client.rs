@@ -801,7 +801,8 @@ mod tests {
         impl Server {
             pub fn new(client: [u8; 32]) -> Self {
                 let (sync, _) = SyncWorker::spawn().unwrap();
-                let host = crate::runtime::WorkspaceHost::local(sync.clone()).unwrap();
+                let host =
+                    crate::runtime::WorkspaceHost::local(sync.clone(), Arc::default()).unwrap();
                 Self {
                     service: Arc::new(Mutex::new(Box::new(crate::runtime::Served::new(host)))),
                     sync,

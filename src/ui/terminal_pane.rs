@@ -4036,6 +4036,7 @@ impl TerminalPane {
         let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
         let receiver = cx.prompt_for_new_path(&directory, Some("SpaceTerm-diagnostics.txt"));
         let diagnostics = self.diagnostics.clone();
+        let counters = std::sync::Arc::clone(&self.lifecycle_dependencies.counters);
         cx.spawn(async move |this, cx| {
             let response = receiver.await;
             let _ = this.update(cx, |this, cx| {
@@ -4048,7 +4049,7 @@ impl TerminalPane {
             let exported_path = path.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { diagnostics.export(&exported_path) })
+                .spawn(async move { diagnostics.export(&exported_path, &counters.snapshot()) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.finish_export(operation, result, path, cx);
@@ -5257,6 +5258,7 @@ impl Render for TerminalPane {
                 active_hyperlink: active_hovered_link
                     .as_ref()
                     .map(|hovered| (hovered.target.identity, hovered.cell)),
+                counters: Arc::clone(&self.lifecycle_dependencies.counters),
                 fallback: (presentation_operation.is_some()
                     && !Arc::ptr_eq(&display_screen, &self.last_valid_screen))
                 .then(|| {

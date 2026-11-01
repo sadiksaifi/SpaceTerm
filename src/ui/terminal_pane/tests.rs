@@ -4057,12 +4057,12 @@ fn block_cursor_hides_overhang_from_a_neighboring_row_on_both_cursor_paths() {
     }
 }
 
-// Other tests in this process record into the same counters, so this checks a lower bound
-// large enough that concurrent recording cannot supply it.
 #[gpui::test]
-fn each_painted_grid_counts_as_a_painted_frame(cx: &mut TestAppContext) {
-    use spaceterm_server::diagnostics::TerminalCounters;
+fn each_painted_grid_counts_once_as_a_painted_frame(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
+    let counters = pane.read_with(cx, |pane, _| {
+        Arc::clone(&pane.lifecycle_dependencies.counters)
+    });
     let mut screen = text_screen(10, &["first row", "second row"]);
     cx.simulate_resize(gpui::size(px(324.0), px(162.0)));
     pane.update(cx, |pane, cx| {
@@ -4077,9 +4077,9 @@ fn each_painted_grid_counts_as_a_painted_frame(cx: &mut TestAppContext) {
         cx.notify();
     });
     cx.run_until_parked();
-    let before = TerminalCounters::process().snapshot();
+    let before = counters.snapshot();
 
-    for generation in 1..=100 {
+    for generation in 1..=10 {
         let changed = Arc::make_mut(&mut screen);
         changed.generation = crate::terminal::PresentationGeneration::test(10 + generation);
         Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].text = generation.to_string();
@@ -4090,8 +4090,13 @@ fn each_painted_grid_counts_as_a_painted_frame(cx: &mut TestAppContext) {
         cx.run_until_parked();
     }
 
-    let after = TerminalCounters::process().snapshot();
-    assert!(after.frames_painted - before.frames_painted >= 100);
+    assert_eq!(
+        counters.snapshot(),
+        spaceterm_server::diagnostics::TerminalCounterSnapshot {
+            frames_painted: before.frames_painted + 10,
+            ..before
+        }
+    );
 }
 
 #[gpui::test]

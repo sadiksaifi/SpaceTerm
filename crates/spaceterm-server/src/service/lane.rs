@@ -18,7 +18,7 @@ use super::operations::{
 use super::tokens::Tokens;
 use super::{RetainedInstallation, Service, runtime};
 use crate::ServerError;
-use crate::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
+use crate::diagnostics::TerminalCounterSnapshot;
 use crate::hierarchy::Id;
 use crate::permissions::{
     PermissionError, PermissionsReport, RequestOutcome, SetupReadiness, SystemPermission,
@@ -292,6 +292,8 @@ pub trait LaneHost: Send + Sync {
     fn release_fence(&self);
     /// The live Terminal Session IDs.
     fn sessions(&self) -> Vec<Id>;
+    /// The running server's Terminal Diagnostics counters.
+    fn terminal_counters(&self) -> TerminalCounterSnapshot;
     fn devices(&self) -> Result<Vec<LaneDevice>, ServerError>;
     fn network(&self) -> Result<LaneNetwork, ServerError>;
     /// Whether the server is stopping. The lane then closes its connections, which is how a
@@ -1122,7 +1124,7 @@ impl Admin<'_> {
                 network: offline_network(self.service)?,
                 devices: offline_devices(self.service)?,
                 lane_major: LANE_MAJOR,
-                terminal_counters: live.map(|_| TerminalCounters::process().snapshot()),
+                terminal_counters: live.map(LaneHost::terminal_counters),
             });
         };
         let unresolved = state
@@ -1162,7 +1164,7 @@ impl Admin<'_> {
                 None => offline_devices(self.service)?,
             },
             lane_major: LANE_MAJOR,
-            terminal_counters: live.map(|_| TerminalCounters::process().snapshot()),
+            terminal_counters: live.map(LaneHost::terminal_counters),
         })
     }
 

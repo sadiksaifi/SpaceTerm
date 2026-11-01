@@ -1297,7 +1297,14 @@ mod tests {
         let controls = PaneControls::default();
         let server = ServerConnection::for_identity("spaceterm-development").unwrap();
         let open = |controls: &PaneControls, pane| {
-            ServerSessionFactory::for_origin(server.clone(), controls, None, None, pane)
+            ServerSessionFactory::for_origin(
+                server.clone(),
+                controls,
+                None,
+                None,
+                pane,
+                Arc::default(),
+            )
         };
         let (old, state) = open(&controls, [2; 32]);
         lose_start(&state);
@@ -1374,6 +1381,7 @@ mod tests {
                 None,
                 None,
                 [2; 32],
+                Arc::default(),
             );
             lose_start(&state);
             cx.update(|cx| {
@@ -1390,6 +1398,7 @@ mod tests {
                 None,
                 None,
                 [2; 32],
+                Arc::default(),
             );
             assert!(
                 state.start_unconfirmed(),
@@ -1422,6 +1431,7 @@ mod tests {
                 None,
                 None,
                 [2; 32],
+                Arc::default(),
             );
             assert!(replacement_state.start_unconfirmed());
 
@@ -1431,8 +1441,14 @@ mod tests {
                 disconnected_direct_handle(31, 32, 7),
             ] {
                 let client = cx.update(|cx| Client::for_direct([31; 32], other.clone(), cx));
-                let (_, other_state) =
-                    ServerSessionFactory::for_origin(other, &client.controls, None, None, [2; 32]);
+                let (_, other_state) = ServerSessionFactory::for_origin(
+                    other,
+                    &client.controls,
+                    None,
+                    None,
+                    [2; 32],
+                    Arc::default(),
+                );
                 assert!(!other_state.start_unconfirmed());
             }
             let independent = cx.update(|cx| Client::for_direct([34; 32], server.clone(), cx));
@@ -1442,6 +1458,7 @@ mod tests {
                 None,
                 None,
                 [2; 32],
+                Arc::default(),
             );
             assert!(
                 !independent_state.start_unconfirmed(),

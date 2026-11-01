@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let filesystem = local_filesystem();
     let directory = filesystem.validate_directory(&std::env::current_dir()?)?;
     let factory = NativeTerminalSessionFactory::new(
-        native_pty_factory(),
+        native_pty_factory(std::sync::Arc::default()),
         ShellLaunchPlanner::new(
             "/bin/sh".into(),
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
         filesystem,
         LocalMachine::default(),
+        std::sync::Arc::default(),
     );
     let mut runtime = factory.start_runtime(
         geometry(80, 24),

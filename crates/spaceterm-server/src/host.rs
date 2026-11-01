@@ -408,6 +408,7 @@ impl DirectManagement for HostDirect {
 /// devices.
 struct HostLane {
     panes: SharedPaneService,
+    counters: Arc<crate::diagnostics::TerminalCounters>,
     fence: Arc<AtomicBool>,
     direct: Option<crate::direct::host::Shared>,
     stop: Arc<Stop>,
@@ -449,6 +450,9 @@ impl crate::service::lane::LaneHost for HostLane {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .sessions()
+    }
+    fn terminal_counters(&self) -> crate::diagnostics::TerminalCounterSnapshot {
+        self.counters.snapshot()
     }
     fn devices(&self) -> Result<Vec<crate::service::lane::LaneDevice>, ServerError> {
         let Some(crate::direct::ManagementReply::Devices(devices)) =
@@ -574,9 +578,10 @@ fn serve_runtime_ready(
         }),
     });
     let (sync, sync_thread) = SyncWorker::spawn().map_err(|_| ServerError::StartupFailed)?;
-    let inner = match panes {
-        Some(build) => build(sync.clone())?,
-        None => Box::new(NoPanes),
+    let (inner, counters) = match panes {
+        Some(factory) => ((factory.build)(sync.clone())?, factory.counters),
+        // A host without Panes runs no Terminal Session, so nothing records into its counters.
+        None => (Box::new(NoPanes) as Box<dyn PaneService>, Arc::default()),
     };
     let fence = Arc::new(AtomicBool::new(false));
     let mut panes: Box<dyn PaneService> = Box::new(HostService {
@@ -645,6 +650,7 @@ fn serve_runtime_ready(
         paths,
         Arc::new(HostLane {
             panes: Arc::clone(&panes),
+            counters,
             fence,
             direct: direct.clone(),
             stop: Arc::clone(&stop),
@@ -1637,7 +1643,7 @@ mod startup_tests {
                 data: root.join("d"),
                 runtime: root.join("r"),
             },
-            crate::panes({
+            crate::panes(Arc::default(), {
                 let root = root.clone();
                 move |_| Ok(Panes(root))
             }),
@@ -1877,7 +1883,7 @@ mod startup_tests {
                 runtime: root.join("r"),
             },
             // Like a real service, this one keeps the shared sync worker until it is dropped.
-            Some(crate::panes(move |sync| {
+            Some(crate::panes(Arc::default(), move |sync| {
                 Ok(Answering(move |operation| {
                     let _ = &sync;
                     if stopped {
@@ -1941,7 +1947,7 @@ mod startup_tests {
                 data: root.join("d"),
                 runtime: root.join("r"),
             },
-            Some(crate::panes(|_| Ok(Deferring::default()))),
+            Some(crate::panes(Arc::default(), |_| Ok(Deferring::default()))),
         )
         .unwrap();
         fs::write(root.join("stopped"), []).unwrap();
@@ -2000,7 +2006,7 @@ mod startup_tests {
                 data: root.join("d"),
                 runtime: root.join("r"),
             },
-            Some(crate::panes(|_| {
+            Some(crate::panes(Arc::default(), |_| {
                 Ok(Answering(|operation| {
                     Dispatch::reply(Ok(match operation {
                         Operation::Claim(claim) => {

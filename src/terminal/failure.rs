@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 
-use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
+use spaceterm_server::diagnostics::TerminalCounterSnapshot;
 
 use super::emulator::PresentationGeneration;
 use super::key::KeyAction;
@@ -393,22 +393,19 @@ impl DiagnosticBundle {
         }
     }
 
-    /// Writes every record and this client process's Terminal Diagnostics counters.
-    pub(crate) fn export(&self, path: &Path) -> std::io::Result<()> {
-        std::fs::write(
-            path,
-            self.export_text(&TerminalCounters::process().snapshot()),
-        )
-    }
-
-    fn export_text(&self, counters: &TerminalCounterSnapshot) -> String {
+    /// Writes every record, then the desktop's Terminal Diagnostics `counters`.
+    pub(crate) fn export(
+        &self,
+        path: &Path,
+        counters: &TerminalCounterSnapshot,
+    ) -> std::io::Result<()> {
         let mut text = self.encode_from(0);
         for line in counters.lines().lines() {
             text.push_str("client_counter.");
             text.push_str(line);
             text.push('\n');
         }
-        text
+        std::fs::write(path, text)
     }
 }
 
@@ -541,7 +538,9 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let path = directory.join("diagnostics.txt");
         assert!(!path.exists());
-        bundle.export(&path).unwrap();
+        bundle
+            .export(&path, &TerminalCounterSnapshot::default())
+            .unwrap();
         let exported = fs::read_to_string(&path).unwrap();
         assert!(exported.contains("schema=3\n"));
         assert!(exported.contains(&format!("build_version={}\n", env!("SPACETERM_VERSION"))));
@@ -573,7 +572,9 @@ mod tests {
         }
         assert!(bytes.record_count() < 128);
         assert!(bytes.encoded_len() <= 65_536);
-        bytes.export(&path).unwrap();
+        bytes
+            .export(&path, &TerminalCounterSnapshot::default())
+            .unwrap();
         let exported = fs::read_to_string(&path).unwrap();
         let records_only: usize = exported
             .split_inclusive('\n')
@@ -593,30 +594,78 @@ mod tests {
     }
 
     #[test]
-    fn export_states_each_client_counter_after_the_records() {
+    fn export_writes_every_client_counter_after_the_records() {
+        use spaceterm_server::diagnostics::{PaneWorkerCommands, PaneWorkerWaits};
         let mut bundle = DiagnosticBundle::default();
         bundle.record(&TerminalFailure::platform("native-event"));
         let counters = TerminalCounterSnapshot {
-            accessibility_rebinds: 3,
-            frames_decoded: 7,
-            frames_painted: 5,
-            ..TerminalCounterSnapshot::default()
+            accessibility_revisions: 101,
+            accessibility_revision_bytes: 102,
+            accessibility_rebinds: 103,
+            line_mode_reads: 104,
+            pty_read_attempts: 105,
+            pty_data_reads: 106,
+            pty_read_bytes: 107,
+            frames_published: 108,
+            frames_decoded: 109,
+            frames_painted: 110,
+            pane_worker_waits: PaneWorkerWaits {
+                output: 111,
+                input: 112,
+                accessibility: 113,
+                client: 114,
+                other: 115,
+                deadline: 116,
+                disconnected: 117,
+            },
+            pane_worker_commands_without_wait: PaneWorkerCommands {
+                output: 118,
+                input: 119,
+                accessibility: 120,
+                client: 121,
+                other: 122,
+            },
         };
-
-        let text = bundle.export_text(&counters);
-
-        let (records, counter_lines) = text.split_at(bundle.encode_from(0).len());
-        assert_eq!(records, bundle.encode_from(0));
-        assert_eq!(counter_lines.lines().count(), 15);
-        assert!(
-            counter_lines
-                .lines()
-                .all(|line| line.starts_with("client_counter."))
-        );
-        assert!(counter_lines.contains("client_counter.accessibility_rebinds=3\n"));
-        assert!(counter_lines.contains(
-            "client_counter.frames_published=0\nclient_counter.frames_decoded=7\nclient_counter.frames_painted=5\n"
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-diagnostics-counters-{}",
+            std::process::id()
         ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("diagnostics.txt");
+
+        bundle.export(&path, &counters).unwrap();
+
+        let exported = fs::read_to_string(&path).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        let records = bundle.encode_from(0);
+        assert!(records.contains("schema=3\n"));
+        assert_eq!(
+            exported.strip_prefix(records.as_str()),
+            Some(
+                "client_counter.accessibility_revisions=101\n\
+                 client_counter.accessibility_revision_bytes=102\n\
+                 client_counter.accessibility_rebinds=103\n\
+                 client_counter.line_mode_reads=104\n\
+                 client_counter.pty_read_attempts=105\n\
+                 client_counter.pty_data_reads=106\n\
+                 client_counter.pty_read_bytes=107\n\
+                 client_counter.frames_published=108\n\
+                 client_counter.frames_decoded=109\n\
+                 client_counter.frames_painted=110\n\
+                 client_counter.pane_worker_waits.output=111\n\
+                 client_counter.pane_worker_waits.input=112\n\
+                 client_counter.pane_worker_waits.accessibility=113\n\
+                 client_counter.pane_worker_waits.client=114\n\
+                 client_counter.pane_worker_waits.other=115\n\
+                 client_counter.pane_worker_waits.deadline=116\n\
+                 client_counter.pane_worker_waits.disconnected=117\n\
+                 client_counter.pane_worker_commands_without_wait.output=118\n\
+                 client_counter.pane_worker_commands_without_wait.input=119\n\
+                 client_counter.pane_worker_commands_without_wait.accessibility=120\n\
+                 client_counter.pane_worker_commands_without_wait.client=121\n\
+                 client_counter.pane_worker_commands_without_wait.other=122\n"
+            )
+        );
     }
 
     #[test]
@@ -638,7 +687,9 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("diagnostics.txt");
-        bundle.export(&path).unwrap();
+        bundle
+            .export(&path, &TerminalCounterSnapshot::default())
+            .unwrap();
         let exported = fs::read_to_string(&path).unwrap();
 
         let records = diagnostic_records(&exported);

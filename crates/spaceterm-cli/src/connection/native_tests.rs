@@ -37,9 +37,9 @@ fn native_owner() {
     let (ready, waiting) = std::sync::mpsc::sync_channel(1);
     let server = std::thread::spawn(move || {
         spaceterm_server::run_owned_development(
-            spaceterm_server::panes(|sync| {
+            spaceterm_server::panes(std::sync::Arc::default(), |sync| {
                 Ok(spaceterm::runtime::Served::new(
-                    spaceterm::runtime::WorkspaceHost::local(sync)?,
+                    spaceterm::runtime::WorkspaceHost::local(sync, std::sync::Arc::default())?,
                 ))
             }),
             owner,

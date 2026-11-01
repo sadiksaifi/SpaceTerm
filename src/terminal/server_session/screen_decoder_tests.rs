@@ -31,7 +31,7 @@ impl Session {
         Self {
             emulator: TerminalEmulator::new(geometry(columns, rows)).unwrap(),
             encoder: ScreenEncoder::default(),
-            decoder: ScreenDecoder::default(),
+            decoder: ScreenDecoder::new(Arc::default()),
             screen: None,
             generation: 0,
             frame: 0,
@@ -439,19 +439,23 @@ fn random_terminal_output_round_trips_through_every_frame() {
     assert!(selected > 0 && images > 0, "{selected} {images}");
 }
 
-// Other tests in this process record into the same counters, so this checks a lower bound
-// large enough that concurrent recording cannot supply it.
 #[test]
-fn each_decoded_frame_is_counted() {
-    use spaceterm_server::diagnostics::TerminalCounters;
+fn each_decoded_frame_counts_once() {
+    use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
+    let counters = Arc::new(TerminalCounters::default());
     let mut session = Session::new(20, 4);
-    let before = TerminalCounters::process().snapshot();
-    for line in 0..300 {
+    session.decoder = ScreenDecoder::new(Arc::clone(&counters));
+    for line in 0..30 {
         session.emulator.feed(format!("line {line}\r\n").as_bytes());
         session.sync().unwrap();
     }
-    let after = TerminalCounters::process().snapshot();
-    assert!(after.frames_decoded - before.frames_decoded >= 300);
+    assert_eq!(
+        counters.snapshot(),
+        TerminalCounterSnapshot {
+            frames_decoded: 30,
+            ..Default::default()
+        }
+    );
 }
 
 #[test]
@@ -681,7 +685,7 @@ fn snapshots_keep_program_colors_and_project_client_defaults() {
         }],
         ..ScreenUpdate::default()
     };
-    let mut decoder = ScreenDecoder::default();
+    let mut decoder = ScreenDecoder::new(Arc::default());
     let decoded = decoder.apply(1, None, update, None).unwrap();
     // A file link needs local authority, which this decoder was not given.
     assert_eq!(

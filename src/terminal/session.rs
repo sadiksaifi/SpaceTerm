@@ -20,6 +20,7 @@ use subscriptions::{TerminalEventPublisher, WorkerEventLifetime};
 mod schedules;
 use schedules::{ScheduleInput, WorkerSchedules};
 mod launch;
+mod worker_commands;
 use super::pointer_input::*;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 pub use launch::{LocalTerminalLaunchPlan, NativeTerminalSessionFactory};
@@ -31,13 +32,14 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver as CommandReceiver, Sender as CommandSender};
+use std::sync::mpsc::{self, Sender as CommandSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use spaceterm_server::diagnostics::{PaneWorkerWake, TerminalCounters};
+use spaceterm_server::diagnostics::{PaneWorkerCommand, TerminalCounters};
 use thiserror::Error;
+use worker_commands::{Waited, WorkerCommands};
 
 use crate::appearance::{AppearanceGeneration, ResolvedTerminalAppearance};
 use crate::platform::native_pty::{
@@ -1069,10 +1071,10 @@ impl Command {
         )
     }
 
-    /// The Terminal Diagnostics wake reason of a command that woke the worker.
-    const fn wake(&self) -> PaneWorkerWake {
+    /// The Terminal Diagnostics kind of this command.
+    const fn kind(&self) -> PaneWorkerCommand {
         match self {
-            Self::ReaderReady(_) | Self::ResumeOutput(_) => PaneWorkerWake::Output,
+            Self::ReaderReady(_) | Self::ResumeOutput(_) => PaneWorkerCommand::Output,
             Self::Run(..)
             | Self::Key(..)
             | Self::ApplicationPointer(..)
@@ -1084,12 +1086,12 @@ impl Command {
             | Self::InputSerial(..)
             | Self::RestartInputSerials
             | Self::CopyOrForward(..)
-            | Self::FlushInput => PaneWorkerWake::Input,
+            | Self::FlushInput => PaneWorkerCommand::Input,
             Self::ServerAccessibilitySelection(..)
             | Self::EndAccessibilityDemand(..)
             | Self::AccessibilityDemand
             | Self::AccessibilityContinue
-            | Self::PublishAccessibility => PaneWorkerWake::Accessibility,
+            | Self::PublishAccessibility => PaneWorkerCommand::Accessibility,
             Self::Subscribe { .. }
             | Self::Focus(..)
             | Self::Resize
@@ -1097,7 +1099,7 @@ impl Command {
             | Self::SetFrameRate(..)
             | Self::AppearanceChanged
             | Self::ClearScreenAndScrollback
-            | Self::ReadScrollback(..) => PaneWorkerWake::Client,
+            | Self::ReadScrollback(..) => PaneWorkerCommand::Client,
             Self::PasteConfirmationExpired
             | Self::PublishMetadata
             | Self::PublishPendingScreen
@@ -1108,7 +1110,7 @@ impl Command {
             | Self::Shutdown
             | Self::ReadLineMode
             | Self::CompleteClipboard(..)
-            | Self::ClipboardExpired => PaneWorkerWake::Other,
+            | Self::ClipboardExpired => PaneWorkerCommand::Other,
         }
     }
 }
@@ -1164,7 +1166,7 @@ struct TerminalWorker {
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
-    commands: CommandReceiver<Command>,
+    commands: WorkerCommands,
     reader_events: mpsc::Receiver<NativePtyOutput>,
     events: TerminalEventPublisher,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
@@ -1291,7 +1293,7 @@ impl TerminalWorker {
     fn run(
         native_pty: NativePtyOwner,
         context: TerminalWorkerContext,
-        commands: CommandReceiver<Command>,
+        commands: WorkerCommands,
         reader_transport: ReaderTransport,
         schedule_input: ScheduleInput,
         publishers: TerminalWorkerPublishers,
@@ -1494,18 +1496,15 @@ impl TerminalWorker {
             .flatten()
             .min();
             let Some(deadline) = deadline else {
-                let command = self.commands.recv().ok()?;
-                TerminalCounters::process().record_pane_worker_wake(command.wake());
+                let Waited::Command(command) = self.commands.wait(None) else {
+                    return None;
+                };
                 return Some(self.note_normal_command(command));
             };
             let timeout = deadline.saturating_duration_since(Instant::now());
-            match self.commands.recv_timeout(timeout) {
-                Ok(command) => {
-                    TerminalCounters::process().record_pane_worker_wake(command.wake());
-                    return Some(self.note_normal_command(command));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    TerminalCounters::process().record_pane_worker_wake(PaneWorkerWake::Deadline);
+            match self.commands.wait(Some(timeout)) {
+                Waited::Command(command) => return Some(self.note_normal_command(command)),
+                Waited::Deadline => {
                     if self
                         .input
                         .deadline()
@@ -1541,7 +1540,7 @@ impl TerminalWorker {
                         return Some(Command::CompressScrollback);
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+                Waited::Disconnected => return None,
             }
         }
     }

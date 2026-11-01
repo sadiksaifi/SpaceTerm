@@ -209,10 +209,10 @@ mod tests {
     fn a_stalled_run_admission_leaves_other_panes_available() {
         let (release, blocked) = mpsc::channel();
         let (entered, started) = mpsc::sync_channel(1);
-        let prototype = ServerPaneHost::local_with_pty_factory(Arc::new(StalledPty(
-            Mutex::new(blocked),
-            entered,
-        )))
+        let prototype = ServerPaneHost::local_with_pty_factory(
+            Arc::new(StalledPty(Mutex::new(blocked), entered)),
+            Arc::default(),
+        )
         .unwrap();
         let mut host = WorkspaceHost::new(prototype);
         let workspace = create_workspace(&mut host, 1);

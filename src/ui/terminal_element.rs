@@ -572,6 +572,8 @@ pub(crate) struct TerminalGridElement {
     fallback: Option<Box<TerminalGridElement>>,
     cursor_layer: Option<presentation::CursorLayer>,
     padding: TerminalPadding,
+    /// Counts each grid this element paints.
+    counters: Arc<TerminalCounters>,
 }
 
 pub(crate) struct TerminalGridConfiguration {
@@ -602,6 +604,7 @@ pub(crate) struct TerminalGridConfiguration {
         Entity<TerminalGridCache>,
         PreparedGraphics,
     )>,
+    pub(crate) counters: Arc<TerminalCounters>,
 }
 
 impl TerminalGridElement {
@@ -663,6 +666,7 @@ impl TerminalGridElement {
                         graphics_cache: configuration.graphics_cache.clone(),
                         active_hyperlink: None,
                         fallback: None,
+                        counters: Arc::clone(&configuration.counters),
                     },
                     cx,
                 ))
@@ -732,6 +736,7 @@ impl TerminalGridElement {
             fallback,
             cursor_layer: None,
             padding: configuration.padding,
+            counters: configuration.counters,
         }
     }
 }
@@ -2181,7 +2186,7 @@ impl Element for TerminalGridElement {
                 .submit(prepaint.candidate.grid_bounds, true, window, cx)
             {
                 Ok(()) => {
-                    TerminalCounters::process().record_frame_painted();
+                    self.counters.record_frame_painted();
                     presented_input = Some(self.input_geometry(prepaint.candidate.grid_bounds));
                     if let Some(layer) = &self.cursor_layer {
                         layer.set(prepaint.cursor.clone());

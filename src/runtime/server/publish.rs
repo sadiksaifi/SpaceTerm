@@ -44,6 +44,7 @@ pub struct Observation {
 struct ScreenPresentation {
     capture: ScreenCapture,
     encoder: Arc<Mutex<ScreenEncoder>>,
+    counters: Arc<TerminalCounters>,
 }
 
 impl Presentation for ScreenPresentation {
@@ -53,7 +54,7 @@ impl Presentation for ScreenPresentation {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .encode(&self.capture, ticket.frame, ticket.base)?;
-        TerminalCounters::process().record_frame_published();
+        self.counters.record_frame_published();
         Some(Presented {
             input: self.capture.screen.input_serial,
             update,
@@ -67,6 +68,8 @@ pub(super) struct Publication {
     channel: Channel,
     visible: bool,
     encoder: Arc<Mutex<ScreenEncoder>>,
+    /// Counts each screen frame encoded for this channel.
+    counters: Arc<TerminalCounters>,
     /// The wire screen generation last handed to the outbox while visible.
     presented: Option<u64>,
     /// The line state last sent. A new channel receives the current one first.
@@ -78,7 +81,11 @@ pub(super) struct Publication {
 impl Publication {
     /// Opens `channel` on `outbox` for an attached claim. It starts hidden and owes a keyframe,
     /// so a Pane claimed while hidden receives no screen; the client's first `View` shows it.
-    pub(super) fn bind(outbox: &Outbox, channel: Channel) -> Result<Self, OutboxError> {
+    pub(super) fn bind(
+        outbox: &Outbox,
+        channel: Channel,
+        counters: Arc<TerminalCounters>,
+    ) -> Result<Self, OutboxError> {
         outbox.open(channel)?;
         outbox.view(channel, false);
         Ok(Self {
@@ -86,6 +93,7 @@ impl Publication {
             channel,
             visible: false,
             encoder: Arc::default(),
+            counters,
             presented: None,
             line: None,
             progress: Default::default(),
@@ -171,6 +179,7 @@ impl Publication {
         let presentation = Box::new(ScreenPresentation {
             capture: capture.clone(),
             encoder: Arc::clone(&self.encoder),
+            counters: Arc::clone(&self.counters),
         });
         if self.deliver(self.outbox.present(self.channel, presentation)) {
             Ok(true)

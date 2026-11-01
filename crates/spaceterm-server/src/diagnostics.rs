@@ -1,14 +1,15 @@
-//! Terminal Diagnostics counters: typed totals of terminal pipeline stages in this process.
+//! Terminal Diagnostics counters: typed totals of terminal pipeline stages.
 //!
-//! Each counter is a relaxed atomic, so a hot path pays one uncontended add. A reader takes
-//! [`TerminalCounters::snapshot`] twice and divides the differences, such as bytes by reads.
-//! Counters hold counts only, never terminal content or other values.
+//! Application composition makes one [`TerminalCounters`] for a server and one for a desktop,
+//! and hands it to each module that records into it. Each counter is a relaxed atomic add. A
+//! reader takes [`TerminalCounters::snapshot`] twice and divides the differences, such as bytes
+//! by reads. Counters hold counts only, never terminal content or other values.
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// What woke a Pane worker from its wait.
+/// The kind of command a Pane worker took from its queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PaneWorkerWake {
+pub enum PaneWorkerCommand {
     /// The PTY reader delivered output.
     Output,
     /// Client Input, a paste, a pointer report or a command run.
@@ -19,51 +20,50 @@ pub enum PaneWorkerWake {
     Client,
     /// Another command, such as a graphics or clipboard completion.
     Other,
-    /// A scheduled deadline passed without a command.
-    Deadline,
 }
 
-/// The counters of one process. [`TerminalCounters::process`] is the one that terminal code
-/// records into.
+/// What ended a Pane worker's blocking wait for a command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneWorkerWaitEnd {
+    /// A command of this kind arrived.
+    Command(PaneWorkerCommand),
+    /// The worker's next deadline passed first.
+    Deadline,
+    /// Every sender of the worker's queue was dropped.
+    Disconnected,
+}
+
+const COMMAND_KINDS: usize = 5;
+const WAIT_ENDS: usize = COMMAND_KINDS + 2;
+
+impl PaneWorkerWaitEnd {
+    const fn index(self) -> usize {
+        match self {
+            Self::Command(kind) => kind as usize,
+            Self::Deadline => COMMAND_KINDS,
+            Self::Disconnected => COMMAND_KINDS + 1,
+        }
+    }
+}
+
+/// The counters of one server or desktop.
 #[derive(Debug, Default)]
 pub struct TerminalCounters {
     accessibility_revisions: AtomicU64,
     accessibility_revision_bytes: AtomicU64,
     accessibility_rebinds: AtomicU64,
     line_mode_reads: AtomicU64,
-    pty_reads: AtomicU64,
+    pty_read_attempts: AtomicU64,
+    pty_data_reads: AtomicU64,
     pty_read_bytes: AtomicU64,
     frames_published: AtomicU64,
     frames_decoded: AtomicU64,
     frames_painted: AtomicU64,
-    wakes: [AtomicU64; WAKE_REASONS],
+    pane_worker_waits: [AtomicU64; WAIT_ENDS],
+    pane_worker_commands_without_wait: [AtomicU64; COMMAND_KINDS],
 }
 
-const WAKE_REASONS: usize = 6;
-
-static PROCESS: TerminalCounters = TerminalCounters::new();
-
 impl TerminalCounters {
-    pub const fn new() -> Self {
-        Self {
-            accessibility_revisions: AtomicU64::new(0),
-            accessibility_revision_bytes: AtomicU64::new(0),
-            accessibility_rebinds: AtomicU64::new(0),
-            line_mode_reads: AtomicU64::new(0),
-            pty_reads: AtomicU64::new(0),
-            pty_read_bytes: AtomicU64::new(0),
-            frames_published: AtomicU64::new(0),
-            frames_decoded: AtomicU64::new(0),
-            frames_painted: AtomicU64::new(0),
-            wakes: [const { AtomicU64::new(0) }; WAKE_REASONS],
-        }
-    }
-
-    /// This process's counters.
-    pub fn process() -> &'static Self {
-        &PROCESS
-    }
-
     /// The server serialized one accessibility revision of `bytes` for a client.
     pub fn record_accessibility_revision(&self, bytes: usize) {
         add(&self.accessibility_revisions, 1);
@@ -80,10 +80,15 @@ impl TerminalCounters {
         add(&self.line_mode_reads, 1);
     }
 
-    /// A PTY reader read `bytes` of output.
-    pub fn record_pty_read(&self, bytes: usize) {
-        add(&self.pty_reads, 1);
-        add(&self.pty_read_bytes, self::bytes(bytes));
+    /// One native read of a PTY returned `result`. Every return is an attempt, including would
+    /// block, interruption, end of file and failure. A successful read of at least one byte is
+    /// also a data read.
+    pub fn record_pty_read(&self, result: &std::io::Result<usize>) {
+        add(&self.pty_read_attempts, 1);
+        if let Ok(read @ 1..) = result {
+            add(&self.pty_data_reads, 1);
+            add(&self.pty_read_bytes, self::bytes(*read));
+        }
     }
 
     /// The server encoded one screen frame for a client.
@@ -101,29 +106,47 @@ impl TerminalCounters {
         add(&self.frames_painted, 1);
     }
 
-    pub fn record_pane_worker_wake(&self, wake: PaneWorkerWake) {
-        add(&self.wakes[wake as usize], 1);
+    /// A Pane worker's blocking wait for a command ended.
+    pub fn record_pane_worker_wait(&self, end: PaneWorkerWaitEnd) {
+        add(&self.pane_worker_waits[end.index()], 1);
+    }
+
+    /// A Pane worker took an already queued command without blocking.
+    pub fn record_pane_worker_command_without_wait(&self, kind: PaneWorkerCommand) {
+        add(&self.pane_worker_commands_without_wait[kind as usize], 1);
     }
 
     pub fn snapshot(&self) -> TerminalCounterSnapshot {
-        let wake = |reason: PaneWorkerWake| read(&self.wakes[reason as usize]);
+        let wait = |end: PaneWorkerWaitEnd| read(&self.pane_worker_waits[end.index()]);
+        let waited = |kind| wait(PaneWorkerWaitEnd::Command(kind));
+        let queued =
+            |kind: PaneWorkerCommand| read(&self.pane_worker_commands_without_wait[kind as usize]);
         TerminalCounterSnapshot {
             accessibility_revisions: read(&self.accessibility_revisions),
             accessibility_revision_bytes: read(&self.accessibility_revision_bytes),
             accessibility_rebinds: read(&self.accessibility_rebinds),
             line_mode_reads: read(&self.line_mode_reads),
-            pty_reads: read(&self.pty_reads),
+            pty_read_attempts: read(&self.pty_read_attempts),
+            pty_data_reads: read(&self.pty_data_reads),
             pty_read_bytes: read(&self.pty_read_bytes),
             frames_published: read(&self.frames_published),
             frames_decoded: read(&self.frames_decoded),
             frames_painted: read(&self.frames_painted),
-            pane_worker_wakes: PaneWorkerWakes {
-                output: wake(PaneWorkerWake::Output),
-                input: wake(PaneWorkerWake::Input),
-                accessibility: wake(PaneWorkerWake::Accessibility),
-                client: wake(PaneWorkerWake::Client),
-                other: wake(PaneWorkerWake::Other),
-                deadline: wake(PaneWorkerWake::Deadline),
+            pane_worker_waits: PaneWorkerWaits {
+                output: waited(PaneWorkerCommand::Output),
+                input: waited(PaneWorkerCommand::Input),
+                accessibility: waited(PaneWorkerCommand::Accessibility),
+                client: waited(PaneWorkerCommand::Client),
+                other: waited(PaneWorkerCommand::Other),
+                deadline: wait(PaneWorkerWaitEnd::Deadline),
+                disconnected: wait(PaneWorkerWaitEnd::Disconnected),
+            },
+            pane_worker_commands_without_wait: PaneWorkerCommands {
+                output: queued(PaneWorkerCommand::Output),
+                input: queued(PaneWorkerCommand::Input),
+                accessibility: queued(PaneWorkerCommand::Accessibility),
+                client: queued(PaneWorkerCommand::Client),
+                other: queued(PaneWorkerCommand::Other),
             },
         }
     }
@@ -141,36 +164,56 @@ fn read(counter: &AtomicU64) -> u64 {
     counter.load(Ordering::Relaxed)
 }
 
-/// Totals since the process started. Each counter wraps at `u64::MAX`.
+/// Totals since the counters were made. Each counter wraps at `u64::MAX`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalCounterSnapshot {
     pub accessibility_revisions: u64,
     pub accessibility_revision_bytes: u64,
     pub accessibility_rebinds: u64,
     pub line_mode_reads: u64,
-    pub pty_reads: u64,
+    /// Native PTY reads, including those that would block, were interrupted, or ended output.
+    pub pty_read_attempts: u64,
+    /// Native PTY reads that returned at least one byte.
+    pub pty_data_reads: u64,
     pub pty_read_bytes: u64,
     pub frames_published: u64,
     pub frames_decoded: u64,
     pub frames_painted: u64,
-    pub pane_worker_wakes: PaneWorkerWakes,
+    pub pane_worker_waits: PaneWorkerWaits,
+    pub pane_worker_commands_without_wait: PaneWorkerCommands,
 }
 
-/// Pane worker wakes by [`PaneWorkerWake`].
+/// Pane worker blocking waits for a command, by what ended each: a command of one kind, the
+/// next deadline, or a closed queue.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PaneWorkerWakes {
+#[serde(deny_unknown_fields)]
+pub struct PaneWorkerWaits {
     pub output: u64,
     pub input: u64,
     pub accessibility: u64,
     pub client: u64,
     pub other: u64,
     pub deadline: u64,
+    pub disconnected: u64,
+}
+
+/// Commands a Pane worker took from its queue without blocking, by [`PaneWorkerCommand`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaneWorkerCommands {
+    pub output: u64,
+    pub input: u64,
+    pub accessibility: u64,
+    pub client: u64,
+    pub other: u64,
 }
 
 impl TerminalCounterSnapshot {
     /// Each counter as a `name=value` line, in declaration order.
     pub fn lines(&self) -> String {
-        let wakes = &self.pane_worker_wakes;
+        let waits = &self.pane_worker_waits;
+        let queued = &self.pane_worker_commands_without_wait;
         [
             ("accessibility_revisions", self.accessibility_revisions),
             (
@@ -179,17 +222,27 @@ impl TerminalCounterSnapshot {
             ),
             ("accessibility_rebinds", self.accessibility_rebinds),
             ("line_mode_reads", self.line_mode_reads),
-            ("pty_reads", self.pty_reads),
+            ("pty_read_attempts", self.pty_read_attempts),
+            ("pty_data_reads", self.pty_data_reads),
             ("pty_read_bytes", self.pty_read_bytes),
             ("frames_published", self.frames_published),
             ("frames_decoded", self.frames_decoded),
             ("frames_painted", self.frames_painted),
-            ("pane_worker_wakes.output", wakes.output),
-            ("pane_worker_wakes.input", wakes.input),
-            ("pane_worker_wakes.accessibility", wakes.accessibility),
-            ("pane_worker_wakes.client", wakes.client),
-            ("pane_worker_wakes.other", wakes.other),
-            ("pane_worker_wakes.deadline", wakes.deadline),
+            ("pane_worker_waits.output", waits.output),
+            ("pane_worker_waits.input", waits.input),
+            ("pane_worker_waits.accessibility", waits.accessibility),
+            ("pane_worker_waits.client", waits.client),
+            ("pane_worker_waits.other", waits.other),
+            ("pane_worker_waits.deadline", waits.deadline),
+            ("pane_worker_waits.disconnected", waits.disconnected),
+            ("pane_worker_commands_without_wait.output", queued.output),
+            ("pane_worker_commands_without_wait.input", queued.input),
+            (
+                "pane_worker_commands_without_wait.accessibility",
+                queued.accessibility,
+            ),
+            ("pane_worker_commands_without_wait.client", queued.client),
+            ("pane_worker_commands_without_wait.other", queued.other),
         ]
         .into_iter()
         .map(|(name, value)| format!("{name}={value}\n"))
@@ -200,34 +253,51 @@ impl TerminalCounterSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
 
     #[test]
     fn each_record_moves_only_its_own_counters() {
-        let counters = TerminalCounters::new();
+        let counters = TerminalCounters::default();
         counters.record_accessibility_revision(700);
         counters.record_accessibility_revision(300);
         counters.record_accessibility_rebind();
         counters.record_line_mode_read();
         counters.record_line_mode_read();
-        counters.record_pty_read(4096);
-        counters.record_pty_read(1);
-        counters.record_pty_read(3);
+        for result in [
+            Ok(4096),
+            Err(io::ErrorKind::WouldBlock.into()),
+            Ok(1),
+            Err(io::ErrorKind::Interrupted.into()),
+            Ok(3),
+            Ok(0),
+        ] {
+            counters.record_pty_read(&result);
+        }
         counters.record_frame_published();
         counters.record_frame_decoded();
         counters.record_frame_decoded();
         counters.record_frame_painted();
-        for wake in [
-            PaneWorkerWake::Output,
-            PaneWorkerWake::Output,
-            PaneWorkerWake::Input,
-            PaneWorkerWake::Accessibility,
-            PaneWorkerWake::Client,
-            PaneWorkerWake::Other,
-            PaneWorkerWake::Deadline,
-            PaneWorkerWake::Deadline,
-            PaneWorkerWake::Deadline,
+        for end in [
+            PaneWorkerWaitEnd::Command(PaneWorkerCommand::Output),
+            PaneWorkerWaitEnd::Command(PaneWorkerCommand::Output),
+            PaneWorkerWaitEnd::Command(PaneWorkerCommand::Input),
+            PaneWorkerWaitEnd::Command(PaneWorkerCommand::Accessibility),
+            PaneWorkerWaitEnd::Command(PaneWorkerCommand::Client),
+            PaneWorkerWaitEnd::Command(PaneWorkerCommand::Other),
+            PaneWorkerWaitEnd::Deadline,
+            PaneWorkerWaitEnd::Deadline,
+            PaneWorkerWaitEnd::Deadline,
+            PaneWorkerWaitEnd::Disconnected,
         ] {
-            counters.record_pane_worker_wake(wake);
+            counters.record_pane_worker_wait(end);
+        }
+        for kind in [
+            PaneWorkerCommand::Input,
+            PaneWorkerCommand::Input,
+            PaneWorkerCommand::Client,
+            PaneWorkerCommand::Other,
+        ] {
+            counters.record_pane_worker_command_without_wait(kind);
         }
 
         assert_eq!(
@@ -237,36 +307,86 @@ mod tests {
                 accessibility_revision_bytes: 1000,
                 accessibility_rebinds: 1,
                 line_mode_reads: 2,
-                pty_reads: 3,
+                pty_read_attempts: 6,
+                pty_data_reads: 3,
                 pty_read_bytes: 4100,
                 frames_published: 1,
                 frames_decoded: 2,
                 frames_painted: 1,
-                pane_worker_wakes: PaneWorkerWakes {
+                pane_worker_waits: PaneWorkerWaits {
                     output: 2,
                     input: 1,
                     accessibility: 1,
                     client: 1,
                     other: 1,
                     deadline: 3,
+                    disconnected: 1,
+                },
+                pane_worker_commands_without_wait: PaneWorkerCommands {
+                    output: 0,
+                    input: 2,
+                    accessibility: 0,
+                    client: 1,
+                    other: 1,
                 },
             }
         );
     }
 
     #[test]
-    fn lines_name_every_counter_once() {
-        let counters = TerminalCounters::new();
-        counters.record_pty_read(9);
-        counters.record_pane_worker_wake(PaneWorkerWake::Deadline);
-        let lines = counters.snapshot().lines();
-        assert_eq!(lines.lines().count(), 15);
-        assert!(lines.contains("pty_reads=1\npty_read_bytes=9\n"));
-        assert!(lines.ends_with("pane_worker_wakes.deadline=1\n"));
-        let names: std::collections::BTreeSet<_> = lines
-            .lines()
-            .map(|line| line.split_once('=').unwrap().0)
-            .collect();
-        assert_eq!(names.len(), 15);
+    fn lines_name_every_counter_with_its_value() {
+        let snapshot = TerminalCounterSnapshot {
+            accessibility_revisions: 1,
+            accessibility_revision_bytes: 2,
+            accessibility_rebinds: 3,
+            line_mode_reads: 4,
+            pty_read_attempts: 5,
+            pty_data_reads: 6,
+            pty_read_bytes: 7,
+            frames_published: 8,
+            frames_decoded: 9,
+            frames_painted: 10,
+            pane_worker_waits: PaneWorkerWaits {
+                output: 11,
+                input: 12,
+                accessibility: 13,
+                client: 14,
+                other: 15,
+                deadline: 16,
+                disconnected: 17,
+            },
+            pane_worker_commands_without_wait: PaneWorkerCommands {
+                output: 18,
+                input: 19,
+                accessibility: 20,
+                client: 21,
+                other: 22,
+            },
+        };
+        assert_eq!(
+            snapshot.lines(),
+            "accessibility_revisions=1\n\
+             accessibility_revision_bytes=2\n\
+             accessibility_rebinds=3\n\
+             line_mode_reads=4\n\
+             pty_read_attempts=5\n\
+             pty_data_reads=6\n\
+             pty_read_bytes=7\n\
+             frames_published=8\n\
+             frames_decoded=9\n\
+             frames_painted=10\n\
+             pane_worker_waits.output=11\n\
+             pane_worker_waits.input=12\n\
+             pane_worker_waits.accessibility=13\n\
+             pane_worker_waits.client=14\n\
+             pane_worker_waits.other=15\n\
+             pane_worker_waits.deadline=16\n\
+             pane_worker_waits.disconnected=17\n\
+             pane_worker_commands_without_wait.output=18\n\
+             pane_worker_commands_without_wait.input=19\n\
+             pane_worker_commands_without_wait.accessibility=20\n\
+             pane_worker_commands_without_wait.client=21\n\
+             pane_worker_commands_without_wait.other=22\n"
+        );
     }
 }

@@ -27,9 +27,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map_err(|_| "fault setup")?;
         return spaceterm_server::run_local_with_panes(
             "spaceterm-development",
-            spaceterm_server::panes(|sync| {
+            spaceterm_server::panes(std::sync::Arc::default(), |sync| {
                 Ok(spaceterm::runtime::Served::new(
-                    spaceterm::runtime::WorkspaceHost::local(sync)?,
+                    spaceterm::runtime::WorkspaceHost::local(sync, std::sync::Arc::default())?,
                 ))
             }),
         )
