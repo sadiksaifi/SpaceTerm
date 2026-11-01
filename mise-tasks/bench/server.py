@@ -5,7 +5,7 @@
 # USAGE flag "--workloads <list>" help="Comma-separated workloads: yes, cat, scroll, partial, vim" default="yes,cat,scroll,partial,vim"
 # USAGE flag "--conditions <list>" help="Comma-separated conditions: plain, accessibility" default="plain,accessibility"
 # USAGE flag "--host <name>" help="Baseline name; defaults to this machine's short host name"
-# USAGE flag "--record" help="Store the medians as this host's baseline instead of comparing"
+# USAGE flag "--record" help="Store the medians of every workload and condition as this host's baseline instead of comparing"
 # USAGE flag "--output <directory>" help="Directory for results.json; defaults to target/bench/server/TIME"
 """Measure a temporary Development server under fixed workloads.
 
@@ -17,14 +17,18 @@ the desktop does while an assistive application reads the Pane; in `plain` it fe
 
 Each workload runs in that Pane: `yes | head -n 20000000`, `cat` of a fixed 200 MB file, and
 bench:workload's scroll and partial modes and a vim redraw loop for `--seconds`. The Pane's shell
-writes a receipt when a workload finishes, after which the task waits for presentation work to
-settle. The task records the server's CPU seconds, peak footprint, footprint 10 s after the
-workload and the bytes the server sent the client, then confirms with `spaceterm pane read` that
-the Pane shows the workload's completion marker.
+clears the Pane, and the task waits until the server is idle before its first measurement. The
+shell writes a receipt when the workload finishes, after which the task waits for presentation
+work to settle again. A workload that failed fails the task. The task records the server's CPU
+seconds, peak footprint, footprint 10 s after the workload and every byte the server wrote to the
+client's connection, then confirms with `spaceterm pane read` that the Pane shows the workload's
+completion marker. When the server reports Terminal Diagnostics counters in `spaceterm server
+status`, the task records how much each moved during the workload.
 
 Results go to `--output`. The medians are compared with mise-tasks/bench/baselines/server/HOST.json;
-the task fails when one exceeds the baseline by more than mise-tasks/bench/budgets.json allows.
-`--record` replaces the baseline instead.
+the task fails when one exceeds the baseline by more than mise-tasks/bench/budgets.json allows,
+and when the baseline is missing, lacks a measurement the run has, or measured other settings, input
+or hardware. `--record` replaces the baseline instead and needs every workload and condition.
 
 On macOS the server uses the account's Development state, so no other Development server may run.
 On Linux with bwrap, the server, client and CLI run with private, temporary Development state, so
@@ -52,15 +56,20 @@ from spaceterm_tasks.bench import (
     MIB,
     Jobs,
     Sampler,
+    check_receipt,
+    check_seconds,
+    cli_json,
+    compare_server,
+    counter_difference,
     delta,
     environment,
     fixed_input,
     host_name,
     load_budgets,
-    median,
-    regressions,
     settle,
     snapshot,
+    summarize_server,
+    wait_ready,
     write_json,
 )
 from spaceterm_tasks.cargo import build_executable
@@ -71,7 +80,8 @@ BUILD = ("--package", "spaceterm-cli", "--release", "--locked")
 WORKLOADS = ("yes", "cat", "scroll", "partial", "vim")
 CONDITIONS = ("plain", "accessibility")
 AFTER_SECONDS = 10
-METRICS = ("cpu_s", "peak_footprint_bytes", "after_footprint_bytes", "bytes_sent")
+# The longest a workload's presentation work may continue after it ends.
+SETTLE_LIMIT_SECONDS = 120
 
 
 class Jail:
@@ -217,22 +227,31 @@ def confirm(cli, jail, env, client, number):
         raise TaskError(f"spaceterm pane read did not see workload {number} finish")
 
 
+def counters(context):
+    """The server's Terminal Diagnostics counters, or None from a server that reports none."""
+    command = [context["cli"], "--server", "local", "--json", "server", "status"]
+    envelope = cli_json(context["jail"].wrap(command), context["env"])
+    data = (envelope or {}).get("data") or {}
+    return data.get("terminal_counters")
+
+
 def measure(context, client, workload, args):
     jobs, server = context["jobs"], context["server"]
     members = [{"pid": server.pid, "role": "server", "command": "spaceterm"}]
-    number, command = jobs.prepare(
-        workload, file=str(context["input"]), seconds=args.seconds, lines=20_000_000
-    )
+    parameters = {"file": str(context["input"]), "seconds": args.seconds, "lines": 20_000_000}
+    number, command = jobs.prepare(workload, **parameters)
     client.type(command)
-    jobs.wait(number, ".ready", 60)
+    ready_s = wait_ready(jobs, number, members)
+    counted = counters(context)
     sent = client.stats()
     before = snapshot(members)
-    with Sampler([server.pid]) as sampler:
+    with Sampler(members) as sampler:
         jobs.start(number)
-        receipt = jobs.receipt(number, 900)
-        settled = settle(members)
+        receipt = check_receipt(jobs.receipt(number, 900), workload, **parameters)
+        settled = settle(members, limit_s=SETTLE_LIMIT_SECONDS)
         after = snapshot(members)
     received = client.stats()
+    counted = counter_difference(counted, counters(context))
     time.sleep(AFTER_SECONDS)
     later = snapshot(members)
     confirm(context["cli"], context["jail"], context["env"], client, number)
@@ -248,26 +267,20 @@ def measure(context, client, workload, args):
     }
     details = {
         "elapsed_s": after["monotonic"] - before["monotonic"],
+        "ready_settle_s": ready_s,
         "settle_s": settled,
         "frames": received["frames"] - sent["frames"],
+        "events": received["events"] - sent["events"],
         "accessibility_revisions": received["accessibility_revisions"]
         - sent["accessibility_revisions"],
-        "accessibility_bytes": received["accessibility_bytes"] - sent["accessibility_bytes"],
+        "accessibility_payload_bytes": received["accessibility_payload_bytes"]
+        - sent["accessibility_payload_bytes"],
+        "server_counters": counted,
         "receipt": receipt,
     }
     if "written_bytes" in row:
         details["written_bytes"] = row["written_bytes"]
     return values, details
-
-
-def summarize(runs):
-    groups = {}
-    for run in runs:
-        groups.setdefault(f"{run['workload']}/{run['condition']}", []).append(run["values"])
-    return {
-        name: {metric: median([values[metric] for values in group]) for metric in METRICS}
-        for name, group in groups.items()
-    }
 
 
 def table(summary):
@@ -297,6 +310,10 @@ def run(args):
     conditions = choices(args.conditions, CONDITIONS, "--conditions")
     if args.runs < 1:
         raise TaskError("--runs needs at least 1")
+    check_seconds(args.seconds, "--seconds")
+    if args.record and (set(workloads) != set(WORKLOADS) or set(conditions) != set(CONDITIONS)):
+        # A baseline covers the whole matrix, so every later run has something to compare with.
+        raise TaskError("--record needs every workload and condition")
     host = args.host or host_name()
     output = (
         Path(args.output)
@@ -329,7 +346,7 @@ def run(args):
                 client.type(command)
                 jobs.wait(number, ".ready", 60)
                 jobs.start(number)
-                jobs.receipt(number, 30)
+                check_receipt(jobs.receipt(number, 30), "receipt")
                 for workload in workloads:
                     for repeat in range(1, args.runs + 1):
                         print(
@@ -342,7 +359,7 @@ def run(args):
                             {"workload": workload, "condition": condition, "run": repeat}
                             | {"values": values, "details": details}
                         )
-    summary = summarize(runs)
+    summary = summarize_server(runs)
     results = {
         "environment": dict(
             environment(), jailed=jail.directory is not None, input_sha256=input_digest
@@ -371,19 +388,19 @@ def run(args):
         write_json(output / "results.json", results)
         print(f"bench:server: recorded the baseline for {host}")
         return 0
-    if not baseline_path.exists():
-        write_json(output / "results.json", results)
-        print(f"bench:server: no baseline for {host}; run with --record to store one")
-        return 0
-    baseline = json.loads(baseline_path.read_text())
-    comparisons = regressions(baseline["summary"], summary, budgets)
-    results["baseline"] = {
-        "host": host,
-        "commit": baseline["environment"].get("commit"),
-        "comparisons": comparisons,
-    }
+    baseline = json.loads(baseline_path.read_text()) if baseline_path.exists() else None
+    comparison = compare_server(baseline, results, budgets)
+    results["baseline"] = dict(
+        comparison, host=host, commit=(baseline or {}).get("environment", {}).get("commit")
+    )
     write_json(output / "results.json", results)
-    regressed = [entry for entry in comparisons if entry["regressed"]]
+    if comparison["status"] == "incomparable":
+        for reason in comparison["reasons"]:
+            print(f"incomparable: {reason}")
+        raise TaskError(
+            f"{host}'s baseline cannot judge this run; record one with --record on a clean checkout"
+        )
+    regressed = [entry for entry in comparison["comparisons"] if entry["regressed"]]
     for entry in regressed:
         print(
             f"regression: {entry['measurement']} {entry['metric']} {entry['value']:.6g} "

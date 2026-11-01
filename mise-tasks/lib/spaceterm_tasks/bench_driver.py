@@ -2,7 +2,8 @@
 
 bench:desktop:macos and bench:server type `sh DIRECTORY/go NUMBER` into a Pane, which runs this script
 with NUMBER and DIRECTORY. It reads `NUMBER.json`, clears the screen and Scrollback, writes `NUMBER.ready` and waits for the benchmark to create
-`NUMBER.go` after its first measurement. Then it runs the workload on the Pane's terminal,
+`NUMBER.go`. The benchmark creates it after SpaceTerm has presented the clear and gone idle and
+after its first measurement. Then it runs the workload on the Pane's terminal,
 writes the receipt `NUMBER.done.json` and prints a completion marker. The typed command never
 contains the marker, so the marker on the screen also means the workload finished.
 
@@ -59,7 +60,8 @@ def run(job, directory):
         )
         if producer.stdout is not None:
             producer.stdout.close()
-        producer.wait()
+        # yes ends by SIGPIPE when head closes the pipe; the benchmark judges each code.
+        result["producer_returncode"] = producer.wait()
         result["returncode"] = consumer.returncode
     elif kind in ("scroll", "partial"):
         with open(directory / f"{job['number']}.workload.json", "w") as log:
@@ -80,8 +82,11 @@ def run(job, directory):
         for _ in range(job.get("lines", 100_000) // 1000):
             write_all(FILL_LINE * 1000)
         result["lines"] = job.get("lines", 100_000)
+        result["pane"] = os.environ.get("SPACETERM_PANE")
     elif kind == "receipt":
         result["returncode"] = 0
+        # The Pane that runs this receipt, which bench:desktop:macos asks the CLI about.
+        result["pane"] = os.environ.get("SPACETERM_PANE")
     else:
         raise SystemExit(f"unknown workload {kind}")
     return result

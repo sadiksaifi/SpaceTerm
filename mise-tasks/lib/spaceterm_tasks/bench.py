@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import shlex
+import signal
 import socket
 import statistics
 import subprocess
@@ -224,12 +225,13 @@ def snapshot(members):
 PRODUCT_ROLES = ("client", "server")
 
 
-def delta(before, after, *, new_from_zero=False, peaks=None):
+def delta(before, after, *, new_from_zero=False, peaks=None, product_peak=0):
     """Per-process and per-role differences between two snapshots.
 
     CPU and wakeups are differences, memory is the value at `after`. Processes that started
     between the snapshots count from zero with `new_from_zero` and are skipped otherwise.
-    `peaks` maps pids to the highest footprint a Sampler saw.
+    `peaks` maps pids to the highest footprint a Sampler saw; `product_peak` is the highest
+    client and server footprint it saw at one moment.
     """
     elapsed = after["monotonic"] - before["monotonic"]
     earlier = {process["pid"]: process["usage"] for process in before["processes"]}
@@ -263,14 +265,24 @@ def delta(before, after, *, new_from_zero=False, peaks=None):
         if "written_bytes" in now:
             row["written_bytes"] = now["written_bytes"] - old.get("written_bytes", 0)
         rows.append(row)
-    return {"elapsed_s": elapsed, "processes": rows, "roles": totals(rows, elapsed)}
+    return {
+        "elapsed_s": elapsed,
+        "processes": rows,
+        "roles": totals(rows, elapsed, product_peak),
+    }
 
 
 METRICS = ("cpu_s", "rss_bytes", "footprint_bytes", "peak_footprint_bytes", "wakeups_per_s")
 
 
-def totals(rows, elapsed):
-    """Sums per role, plus `product`: the client and server, excluding shells and programs."""
+def totals(rows, elapsed, product_peak=0):
+    """Sums per role, plus `product`: the client and server, excluding shells and programs.
+
+    A role's peak footprint is the sum of its processes' own peaks. The product's peak is the
+    highest sum observed at one moment: `product_peak` from a Sampler, or the sum in `rows`.
+    Processes rarely peak together, so the sum of the client's and server's peaks would
+    overstate it.
+    """
     result = {}
     for role in ("client", "server", "shell", "program", "product"):
         members = [
@@ -281,25 +293,43 @@ def totals(rows, elapsed):
         if not members:
             continue
         total = {metric: sum(row[metric] for row in members) for metric in METRICS}
+        if role == "product":
+            current = sum(row["footprint_bytes"] for row in members)
+            total["peak_footprint_bytes"] = max(product_peak, current)
         total["cpu_percent"] = 100 * total["cpu_s"] / elapsed if elapsed > 0 else 0.0
         total["processes"] = len(members)
         result[role] = total
     return result
 
 
-class Sampler:
-    """Polls the footprint of a set of processes on a thread and keeps each one's maximum."""
+class Clock:
+    """Waits and the time they are measured against. Scenarios take one so tests can replace it."""
 
-    def __init__(self, pids, interval=0.05):
-        self.pids = list(pids)
+    sleep = staticmethod(time.sleep)
+    monotonic = staticmethod(time.monotonic)
+
+
+CLOCK = Clock()
+
+
+class Sampler:
+    """Polls the footprint of a set of processes on a thread.
+
+    `peaks` holds each process's maximum. `product_peak` is the maximum of the client and server
+    footprints summed within one poll, the product's simultaneous peak.
+    """
+
+    def __init__(self, members, interval=0.05):
+        self.members = [member for member in members if member["role"] in PRODUCT_ROLES]
         self.interval = interval
         self.peaks = {}
+        self.product_peak = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def __enter__(self):
-        for pid in self.pids:
-            reset_peak(pid)
+        for member in self.members:
+            reset_peak(member["pid"])
         self._thread.start()
         return self
 
@@ -309,33 +339,54 @@ class Sampler:
         self._sample()
         return False
 
+    def record(self, readings):
+        """Takes one poll: `readings` maps pids to their usage, or None for an ended process.
+
+        A process's own peak includes the kernel's interval maximum where the system keeps one.
+        That maximum may come from any moment of the interval, so the product peak sums only
+        the footprints read in this poll.
+        """
+        product = 0
+        for pid, current in readings.items():
+            if current is None:
+                continue
+            product += current["footprint_bytes"]
+            peak = max(current["footprint_bytes"], current.get("interval_max_footprint_bytes", 0))
+            self.peaks[pid] = max(self.peaks.get(pid, 0), peak)
+        self.product_peak = max(self.product_peak, product)
+
     def _sample(self):
-        for pid in self.pids:
-            current = usage(pid)
-            if current is not None:
-                peak = max(
-                    current["footprint_bytes"], current.get("interval_max_footprint_bytes", 0)
-                )
-                self.peaks[pid] = max(self.peaks.get(pid, 0), peak)
+        self.record({member["pid"]: usage(member["pid"]) for member in self.members})
 
     def _run(self):
         while not self._stop.wait(self.interval):
             self._sample()
 
 
-def settle(members, *, quiet_cpu_s=0.015, window_s=0.25, calm_windows=2, limit_s=30):
-    """Wait until the members' total CPU stays under `quiet_cpu_s` per window, so the
-    presentation work that follows a finished producer is measured too. Returns seconds waited."""
-    started = time.monotonic()
+def settle(members, *, quiet_cpu_s=0.015, window_s=0.25, calm_windows=2, limit_s=30, clock=CLOCK):
+    """Wait until the members' total CPU stays under `quiet_cpu_s` per window. Returns seconds
+    waited, and fails when the members are still busy after `limit_s`, since a measurement
+    that starts or ends during their work would count work that belongs elsewhere."""
+    started = clock.monotonic()
     calm = 0
     previous = snapshot(members)
-    while calm < calm_windows and time.monotonic() - started < limit_s:
-        time.sleep(window_s)
+    while calm < calm_windows:
+        if clock.monotonic() - started >= limit_s:
+            raise TaskError(f"SpaceTerm did not become idle within {limit_s:g} s")
+        clock.sleep(window_s)
         current = snapshot(members)
         spent = delta(previous, current)["roles"].get("product", {}).get("cpu_s", 0)
         calm = calm + 1 if spent < quiet_cpu_s else 0
         previous = current
-    return time.monotonic() - started
+    return clock.monotonic() - started
+
+
+def wait_ready(jobs, number, members, *, timeout=60, clock=CLOCK):
+    """Waits for workload `number` to clear its Pane, then for SpaceTerm to finish presenting
+    that and the typed command, so a measurement taken next starts from idle. Returns the
+    seconds spent settling."""
+    jobs.wait(number, ".ready", timeout)
+    return settle(members, clock=clock)
 
 
 # Workloads inside a Pane
@@ -407,6 +458,37 @@ def fixed_input(path=INPUT, size=INPUT_BYTES):
     return path, digest.hexdigest()
 
 
+# The longest duration bench:workload accepts, which the vim workload shares.
+MAX_SECONDS = 3600
+MIN_SECONDS = 0.1
+
+
+def check_seconds(value, option):
+    """A workload duration both the workload producers and the measurement accept."""
+    if not MIN_SECONDS <= value <= MAX_SECONDS:
+        raise TaskError(f"{option} accepts {MIN_SECONDS:g} to {MAX_SECONDS} seconds")
+    return value
+
+
+def check_receipt(receipt, kind, **parameters):
+    """Fails unless `receipt` reports that workload `kind` ran to completion.
+
+    `yes` ends when `head` closes the pipe, so `yes` itself dies of SIGPIPE; only `head` decides
+    whether that workload succeeded.
+    """
+    if receipt.get("kind") != kind:
+        raise TaskError(f"the {kind} workload wrote another workload's receipt")
+    if kind == "fill":
+        if receipt.get("lines") != parameters.get("lines"):
+            raise TaskError("the fill workload wrote fewer lines than requested")
+        return receipt
+    if receipt.get("returncode") != 0:
+        raise TaskError(f"the {kind} workload failed (exit {receipt.get('returncode')})")
+    if kind == "yes" and receipt.get("producer_returncode") not in (0, -signal.SIGPIPE):
+        raise TaskError(f"yes failed (exit {receipt.get('producer_returncode')})")
+    return receipt
+
+
 # Summaries, budgets and baselines
 
 
@@ -458,7 +540,7 @@ def lookup(summary, name, role, metric):
     return entry["roles"].get(role, {}).get(metric)
 
 
-def evaluate(summary, budgets, *, reference=None, hardware=None):
+def evaluate(summary, budgets, *, reference=None, hardware=None, scenarios=None, states=None):
     """Check a desktop summary against `budgets["desktop"]`.
 
     Each budget names a measurement (`scenario/phase`), a role and a metric and holds at least
@@ -466,7 +548,14 @@ def evaluate(summary, budgets, *, reference=None, hardware=None):
     same measurement in `reference` under the same Accessibility state; `accessibility_ratio`,
     a limit for Accessibility on against off; `per_10k_rows`, a limit for what Accessibility on
     adds per 10,000 rows the measurement's `rows` value counts; or `after_ratio`, a limit for
-    the measurement against `before`. Returns one verdict per bound that has the values it needs.
+    the measurement against `before`.
+
+    A budget is requested when its scenario is in `scenarios` (default: every scenario). Each
+    bound is requested in each state of `states` (default: off and on), except that
+    `accessibility_ratio` and `per_10k_rows` are requested in the on state when both states
+    are, `ratio` when `reference` is given and `max` on the budget hardware. Every requested
+    bound yields one verdict. A verdict whose value or comparison value is missing has
+    `missing` set to what was absent and fails.
 
     Ratio budgets compare with v0.6.8, so `reference` is the summary of a v0.6.8 run. Roles are
     `client`, `server` and `product`, their sum without shells and the programs they run.
@@ -474,14 +563,18 @@ def evaluate(summary, budgets, *, reference=None, hardware=None):
     """
     desktop = budgets["desktop"]
     absolute = hardware == desktop["hardware"]
+    states = tuple(states or ("off", "on"))
+    both = "off" in states and "on" in states
     verdicts = []
     for budget in desktop["budget"]:
         measurement, role, metric = budget["measurement"], budget["role"], budget["metric"]
-        for accessibility in ("off", "on"):
+        if scenarios is not None and measurement.split("/")[0] not in scenarios:
+            continue
+        for accessibility in states:
             name = f"{measurement}/{accessibility}"
             value = lookup(summary, name, role, metric)
 
-            def verdict(kind, limit, actual, against=None):
+            def verdict(kind, limit, actual, against=None, missing=None):
                 verdicts.append(
                     {
                         "budget": budget["name"],
@@ -492,51 +585,65 @@ def evaluate(summary, budgets, *, reference=None, hardware=None):
                         "limit": limit,
                         "value": actual,
                         "against": against,
-                        "pass": actual is not None and actual <= limit,
+                        "missing": missing,
+                        "pass": missing is None and actual is not None and actual <= limit,
                     }
                 )
 
-            if value is None:
-                continue
+            def compare(kind, limit, against, against_name, combine):
+                """A verdict of `combine(value, against)`, or a missing one."""
+                if value is None:
+                    verdict(kind, limit, None, missing=name)
+                elif not against:
+                    verdict(kind, limit, None, missing=against_name)
+                else:
+                    verdict(kind, limit, combine(value, against), against)
+
+            def ratio(value, against):
+                return value / against
+
             if "max" in budget and absolute:
-                verdict("max", budget["max"], value)
+                verdict("max", budget["max"], value, missing=None if value is not None else name)
             if "ratio" in budget and reference is not None:
                 base = lookup(reference, name, role, metric)
-                if base:
-                    verdict("ratio", budget["ratio"], value / base, base)
-            if "accessibility_ratio" in budget and accessibility == "on":
-                off = lookup(summary, f"{measurement}/off", role, metric)
-                if off:
-                    verdict("accessibility_ratio", budget["accessibility_ratio"], value / off, off)
-            if "per_10k_rows" in budget and accessibility == "on":
-                off = lookup(summary, f"{measurement}/off", role, metric)
+                compare("ratio", budget["ratio"], base, f"reference {name}", ratio)
+            off_name = f"{measurement}/off"
+            off = lookup(summary, off_name, role, metric)
+            if "accessibility_ratio" in budget and accessibility == "on" and both:
+                compare("accessibility_ratio", budget["accessibility_ratio"], off, off_name, ratio)
+            if "per_10k_rows" in budget and accessibility == "on" and both:
                 rows = lookup(summary, name, "value", "rows")
-                if off is not None and rows:
-                    added = (value - off) / (rows / 10_000)
-                    verdict("per_10k_rows", budget["per_10k_rows"], added, off)
+                if value is not None and off is not None and not rows:
+                    verdict("per_10k_rows", budget["per_10k_rows"], None, missing=f"{name} rows")
+                else:
+                    compare(
+                        "per_10k_rows",
+                        budget["per_10k_rows"],
+                        # An off footprint of zero is a value, not an absence.
+                        None if off is None else (off, rows),
+                        off_name,
+                        lambda value, against: (value - against[0]) / (against[1] / 10_000),
+                    )
             if "after_ratio" in budget:
-                before = lookup(summary, f"{budget['before']}/{accessibility}", role, metric)
-                if before:
-                    verdict("after_ratio", budget["after_ratio"], value / before, before)
+                before_name = f"{budget['before']}/{accessibility}"
+                before = lookup(summary, before_name, role, metric)
+                compare("after_ratio", budget["after_ratio"], before, before_name, ratio)
     return verdicts
 
 
 def regressions(baseline, current, server_budgets):
     """Server medians in `current` that exceed `baseline` by more than the allowed fraction.
 
-    A difference under the metric's noise floor never counts. Returns one entry per comparison.
+    A difference under the metric's noise floor never counts. Returns one entry per comparison;
+    `compare_server` first establishes that the two are comparable and complete.
     """
     allowed = server_budgets["regression"]
     floors = server_budgets["floor"]
     results = []
     for name, metrics in sorted(current.items()):
-        old = baseline.get(name)
-        if old is None:
-            continue
+        old = baseline[name]
         for metric, value in sorted(metrics.items()):
-            before = old.get(metric)
-            if before is None or value is None:
-                continue
+            before = old[metric]
             limit = before * (1 + allowed)
             regressed = value > limit and value - before > floors.get(metric, 0)
             results.append(
@@ -549,6 +656,108 @@ def regressions(baseline, current, server_budgets):
                 }
             )
     return results
+
+
+SERVER_METRICS = ("cpu_s", "peak_footprint_bytes", "after_footprint_bytes", "bytes_sent")
+# Settings that define the work a bench:server run measures.
+SERVER_SETTINGS = ("seconds", "columns", "rows", "max_hz")
+# Environment facts that a baseline is valid for: the same host, hardware, isolation and input.
+SERVER_ENVIRONMENT = ("host", "hardware", "cpus", "memory_bytes", "jailed", "input_sha256")
+
+
+def summarize_server(runs):
+    """Medians of each bench:server metric per `workload/condition` across runs."""
+    groups = {}
+    for run in runs:
+        groups.setdefault(f"{run['workload']}/{run['condition']}", []).append(run["values"])
+    return {
+        name: {metric: median([values[metric] for values in group]) for metric in SERVER_METRICS}
+        for name, group in groups.items()
+    }
+
+
+def compare_server(baseline, results, server_budgets):
+    """Compares a bench:server run with a host baseline.
+
+    Returns `{"status", "reasons", "comparisons"}`. Status is `incomparable` when the baseline
+    is absent, measured different work or another machine, or lacks a measurement or metric the
+    run has; `regressed` when a median exceeds the baseline by more than the budget allows; and
+    `within` otherwise. Only `within` is success.
+    """
+    if baseline is None:
+        return {"status": "incomparable", "reasons": ["no baseline"], "comparisons": []}
+    reasons = []
+    for key in SERVER_SETTINGS:
+        if baseline["settings"].get(key) != results["settings"].get(key):
+            reasons.append(f"setting {key} differs")
+    for key in SERVER_ENVIRONMENT:
+        if baseline["environment"].get(key) != results["environment"].get(key):
+            reasons.append(f"environment {key} differs")
+    for name, metrics in sorted(results["summary"].items()):
+        old = baseline["summary"].get(name)
+        if old is None:
+            reasons.append(f"baseline lacks {name}")
+            continue
+        for metric in SERVER_METRICS:
+            if metrics.get(metric) is None:
+                reasons.append(f"run lacks {name} {metric}")
+            elif old.get(metric) is None:
+                reasons.append(f"baseline lacks {name} {metric}")
+    if reasons:
+        return {"status": "incomparable", "reasons": reasons, "comparisons": []}
+    comparisons = regressions(baseline["summary"], results["summary"], server_budgets)
+    regressed = any(entry["regressed"] for entry in comparisons)
+    return {
+        "status": "regressed" if regressed else "within",
+        "reasons": [],
+        "comparisons": comparisons,
+    }
+
+
+# Facts the CLI reports
+
+
+def retained_rows(envelope):
+    """Rows a Pane retains, from a `spaceterm --json pane read` envelope: its Scrollback rows
+    `oldest..total` and its visible screen rows."""
+    rows = envelope["data"]["rows"]
+    history = rows["history"]
+    return history["total"] - history["oldest"] + rows["screen"]["size"]["rows"]
+
+
+def cli_json(command, env=None):
+    """The envelope of a `spaceterm --json` command, or None when it fails or is unknown."""
+    try:
+        result = subprocess.run(
+            [str(part) for part in command],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        return None
+
+
+def counter_difference(before, after):
+    """`after - before` for two Terminal Diagnostics counter snapshots, nested objects
+    included, or None unless both exist."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return None
+    result = {}
+    for key, value in after.items():
+        if isinstance(value, dict):
+            result[key] = counter_difference(before.get(key), value)
+        elif isinstance(value, int) and isinstance(before.get(key), int):
+            result[key] = value - before[key]
+    return result
 
 
 def host_name():

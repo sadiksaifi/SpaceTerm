@@ -15,16 +15,21 @@
 """Measure an installed SpaceTerm app in the ten scenarios of #773.
 
 The task drives the app with posted keyboard and mouse events and reads the window list, so it
-never queries the app through the Accessibility API while Accessibility is off. With
-Accessibility on, it reads the focused Pane's text through the Accessibility API after every
-launch, which switches the app's accessibility work on, as an assistive application does. Each
-state starts with a fresh client. Workloads run in the focused Pane and finish with a receipt
-file that the Pane's shell writes.
+never queries the app through the Accessibility API while Accessibility is off. Accessibility
+work is demanded per Pane and ends when the Pane is hidden. So with Accessibility on, the task
+reads the text of every Pane it creates or focuses through the Accessibility API, as an
+assistive application does, and fails unless the read reached that Pane. Each state starts with
+a fresh client. Workloads run in the focused Pane and finish with a receipt file that the Pane's
+shell writes; a failed workload fails the task. Before each workload the task waits until the
+app is idle, so the workload's measurement excludes the typed command and the cleared Pane.
 
 Every observation records each SpaceTerm process's CPU seconds, RSS, physical footprint, peak
 footprint and wakeups per second. Roles are `client`, `server`, `shell` and `program`; `product`
-is the client and server. Results go to `--output` after each observation, then the task checks
-the medians against mise-tasks/bench/budgets.json and fails when a budget is missed.
+is the client and server, and its peak is their highest simultaneous sum. When the server reports
+Terminal Diagnostics counters in `spaceterm server status`, workloads also record how much they
+moved. Results go to `--output` after each observation, then the task checks the medians against
+mise-tasks/bench/budgets.json and fails when a budget is missed or a requested budget has no
+measurement.
 
 The app needs a shell prompt in its focused Pane. The Python given by `--input-python` must hold
 the Accessibility permission in System Settings > Privacy & Security. Leave the keyboard, mouse
@@ -45,19 +50,26 @@ from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, main
 from spaceterm_tasks.bench import (
+    CLOCK,
     MIB,
     Jobs,
     Sampler,
+    check_receipt,
+    check_seconds,
     classify,
+    cli_json,
+    counter_difference,
     delta,
     environment,
     evaluate,
     fixed_input,
     load_budgets,
     processes,
+    retained_rows,
     settle,
     snapshot,
     summarize,
+    wait_ready,
     write_json,
 )
 from spaceterm_tasks.latency import screen_lock
@@ -71,6 +83,11 @@ ORIGIN = (80, 80)
 COLD_SETTLE_SECONDS = 10
 FILLED_PANES = 10
 FILL_LINES = 100_000
+# The longest a workload's presentation work may continue after it ends.
+SETTLE_LIMIT_SECONDS = 120
+# The desktop's counters through the CLI, once it has such a command (#773). Until then the
+# command fails and the task records no client counters.
+CLIENT_COUNTERS = ("desktop", "diagnostics")
 
 
 @dataclass(frozen=True)
@@ -153,12 +170,15 @@ def wait_until(condition, timeout, failure, interval=0.05):
 class Desktop:
     """One installed app: its processes, window and focused Pane."""
 
-    def __init__(self, app, keyboard, jobs, accessibility):
+    def __init__(self, app, keyboard, jobs, accessibility, clock=CLOCK):
         self.app = app
+        self.clock = clock
         self.input = keyboard
         self.jobs = jobs
         self.accessibility = accessibility
         self.reads = []
+        # The Pane each read text area belongs to, per client process.
+        self.elements = {}
 
     # Processes
 
@@ -244,6 +264,9 @@ class Desktop:
         match = re.search(r"=\s*(\d+)", info.stdout)
         return int(match.group(1)) if match else None
 
+    def show_finder(self):
+        subprocess.run(["open", "-a", "Finder"], check=True)
+
     def activate(self):
         self.launch()
         wait_until(self.window, 10, f"{self.app.name} shows no window")
@@ -310,17 +333,57 @@ class Desktop:
         self.input.call("type", text=text)
 
     def run_job(self, kind, **parameters):
+        """Types workload `kind` into the focused Pane and waits until the app is idle after the
+        Pane cleared. Returns the workload's number and the seconds spent settling."""
         number, command = self.jobs.prepare(kind, **parameters)
         self.input.key("u", "control")
         self.type(command + "\n")
-        self.jobs.wait(number, ".ready", 60)
-        return number
+        settled = wait_ready(self.jobs, number, self.members(), clock=self.clock)
+        return number, settled
+
+    def finish_job(self, number, kind, timeout, **parameters):
+        return check_receipt(self.jobs.receipt(number, timeout), kind, **parameters)
 
     def receipt(self):
-        """Proves the focused Pane runs typed commands: its shell writes a receipt file."""
-        number = self.run_job("receipt")
+        """Proves the focused Pane runs typed commands: its shell writes a receipt file, which
+        names the Pane."""
+        number, _ = self.run_job("receipt")
         self.jobs.start(number)
-        self.jobs.receipt(number, 30)
+        receipt = self.finish_job(number, "receipt", 30)
+        if not receipt.get("pane"):
+            raise TaskError("the focused Pane's shell does not know its Pane")
+        return receipt
+
+    def focused(self, step):
+        """Proves the focused Pane runs typed commands and, with Accessibility on, demands its
+        accessibility work. Call after every change of the focused or visible Panes, with
+        `step` naming the change. Returns the Pane id."""
+        pane = self.receipt()["pane"]
+        if self.accessibility:
+            self.read_text(step, pane)
+        return pane
+
+    def retained_rows(self, pane):
+        """Rows Pane `pane` retains, Scrollback and screen, as the CLI reports them."""
+        command = [self.cli(), "--server", "local", "--json", "--quiet", "pane", "read"]
+        command += ["--pane", f"id:{pane}", "--rows", "1", "--max-bytes", "4096"]
+        envelope = cli_json(command)
+        if envelope is None:
+            raise TaskError("spaceterm pane read did not report the Pane's history")
+        return retained_rows(envelope)
+
+    def server_counters(self):
+        """The server's Terminal Diagnostics counters, or None from a server that reports none."""
+        envelope = cli_json([self.cli(), "--server", "local", "--json", "server", "status"])
+        return ((envelope or {}).get("data") or {}).get("terminal_counters")
+
+    def client_counters(self):
+        """The desktop's Terminal Diagnostics counters, or None while no CLI command reads them."""
+        envelope = cli_json([self.cli(), "--json", *CLIENT_COUNTERS])
+        return ((envelope or {}).get("data") or {}).get("terminal_counters")
+
+    def counters(self):
+        return {"server": self.server_counters(), "client": self.client_counters()}
 
     def start_session(self):
         """A restored Pane offers Start Session after the server restarts; Tab focuses it."""
@@ -328,12 +391,17 @@ class Desktop:
         time.sleep(0.2)
         self.input.key("return")
 
-    def read_text(self):
-        """Switches Accessibility on: reads the focused Pane's text through the Accessibility API."""
-        result = self.input.call("read_text", pid=self.client())
-        self.reads.append(result)
+    def read_text(self, step, pane):
+        """Demands Pane `pane`'s accessibility work: reads the focused Pane's text through the
+        Accessibility API, and fails unless the read reached a text area of that Pane alone."""
+        client = self.client()
+        result = self.input.call("read_text", pid=client)
+        self.reads.append(dict(result, step=step, pane=pane))
         if not result.get("read"):
             raise TaskError(f"the Accessibility read failed ({result.get('reason')})")
+        owner = self.elements.setdefault((client, result["element"]), pane)
+        if owner != pane:
+            raise TaskError("the Accessibility read reached another Pane than the focused one")
 
     def ready(self):
         """One visible, frontmost window of WINDOW size whose focused Pane runs typed commands."""
@@ -351,9 +419,7 @@ class Desktop:
         if not wait_until(self.shells, 3, None):
             self.start_session()
             wait_until(self.shells, 15, "the focused Pane started no shell")
-        self.receipt()
-        if self.accessibility:
-            self.read_text()
+        self.focused("ready")
 
     def restart(self):
         if self.client() is not None:
@@ -364,14 +430,17 @@ class Desktop:
 class Bench:
     """Runs scenarios and records each observation."""
 
-    def __init__(self, desktop, args, output, results):
+    def __init__(self, desktop, args, output, results, clock=CLOCK):
         self.desktop = desktop
         self.args = args
         self.output = output
         self.results = results
+        self.clock = clock
         self.run = 0
 
-    def record(self, scenario, phase, metrics, values=None):
+    def record(self, scenario, phase, metrics, values=None, counters=None):
+        """Stores one observation. `values` are numbers the summary takes medians of;
+        `counters` are the Terminal Diagnostics counters that moved, kept per run."""
         measurement = {
             "scenario": scenario,
             "phase": phase,
@@ -379,6 +448,7 @@ class Bench:
             "run": self.run,
             "metrics": metrics,
             "values": values or {},
+            "counters": counters,
         }
         self.results["measurements"].append(measurement)
         write_json(self.output, self.results)
@@ -402,47 +472,57 @@ class Bench:
         """CPU and wakeups across `action` or `seconds`, and memory at their end."""
         members = self.desktop.members()
         before = before or snapshot(members)
-        pids = [member["pid"] for member in members if member["role"] in ("client", "server")]
-        with Sampler(pids) as sampler:
+        with Sampler(members) as sampler:
             if action:
                 values = dict(values or {}, **action())
             else:
-                time.sleep(seconds)
+                self.clock.sleep(seconds)
         after = snapshot(self.desktop.members())
-        metrics = delta(before, after, new_from_zero=new_from_zero, peaks=sampler.peaks)
+        metrics = delta(
+            before,
+            after,
+            new_from_zero=new_from_zero,
+            peaks=sampler.peaks,
+            product_peak=sampler.product_peak,
+        )
         self.record(scenario, phase, metrics, values)
 
     def job(self, scenario, phase, kind, **parameters):
         """A workload from its start to the end of the presentation work that follows it."""
-        number = self.desktop.run_job(kind, **parameters)
-        members = self.desktop.members()
+        desktop = self.desktop
+        number, ready_s = desktop.run_job(kind, **parameters)
+        members = desktop.members()
+        counted = desktop.counters()
         before = snapshot(members)
-        pids = [member["pid"] for member in members if member["role"] in ("client", "server")]
-        with Sampler(pids) as sampler:
-            self.desktop.jobs.start(number)
-            receipt = self.desktop.jobs.receipt(number, 900)
-            settled = settle(members)
-            after = snapshot(self.desktop.members())
-        metrics = delta(before, after, peaks=sampler.peaks)
-        self.record(scenario, phase, metrics, {"wall_s": receipt["wall_s"], "settle_s": settled})
+        with Sampler(members) as sampler:
+            desktop.jobs.start(number)
+            receipt = desktop.finish_job(number, kind, 900, **parameters)
+            settled = settle(members, limit_s=SETTLE_LIMIT_SECONDS, clock=self.clock)
+            after = snapshot(desktop.members())
+        later = desktop.counters()
+        metrics = delta(before, after, peaks=sampler.peaks, product_peak=sampler.product_peak)
+        values = {"wall_s": receipt["wall_s"], "ready_settle_s": ready_s, "settle_s": settled}
+        moved = {side: counter_difference(counted[side], later[side]) for side in counted}
+        self.record(scenario, phase, metrics, values, counters=moved)
 
     # Scenarios
 
     def s1(self):
         """Cold start: the first 10 s after a usable shell receipt, from no running processes."""
         desktop = self.desktop
+        clock = self.clock
         if desktop.client() is not None:
             desktop.terminate()
         server = desktop.has_server()
         if server:
             desktop.service("stop")
+        started = clock.monotonic()
         before = {"monotonic": time.monotonic(), "processes": []}
-        started = before["monotonic"]
         if server:
             desktop.service("start")
         desktop.launch()
         wait_until(desktop.window, 30, "the cold client showed no window")
-        window_s = time.monotonic() - started
+        window_s = clock.monotonic() - started
         started_session = False
         if not wait_until(desktop.shells, 3, None):
             wait_until(
@@ -454,13 +534,13 @@ class Bench:
         wait_until(
             lambda: desktop.frontmost() == desktop.client(), 5, "the client is not frontmost"
         )
-        desktop.receipt()
-        usable_s = time.monotonic() - started
+        pane = desktop.receipt()["pane"]
+        usable_s = clock.monotonic() - started
         if desktop.accessibility:
-            desktop.read_text()
+            desktop.read_text("S1 cold start", pane)
 
         def hold():
-            time.sleep(max(0, started + usable_s + COLD_SETTLE_SECONDS - time.monotonic()))
+            clock.sleep(max(0, started + usable_s + COLD_SETTLE_SECONDS - clock.monotonic()))
             return {"window_s": window_s, "usable_s": usable_s, "started_session": started_session}
 
         self.observe("S1", "cold-start", action=hold, before=before, new_from_zero=True)
@@ -473,7 +553,7 @@ class Bench:
     def s3(self):
         desktop = self.desktop
         desktop.ready()
-        subprocess.run(["open", "-a", "Finder"], check=True)
+        desktop.show_finder()
         wait_until(
             lambda: desktop.frontmost() != desktop.client(), 5, "Finder did not come to the front"
         )
@@ -481,7 +561,7 @@ class Bench:
         desktop.activate()
         desktop.input.key("m", "command")
         wait_until(lambda: desktop.window() is None, 5, "the window did not minimize")
-        time.sleep(2)
+        self.clock.sleep(2)
         self.observe("S3", "minimized", self.args.idle_seconds)
 
     def s4(self):
@@ -490,7 +570,7 @@ class Bench:
         # Quit closes every window while the status menu keeps the client running.
         desktop.input.key("q", "command")
         wait_until(lambda: desktop.window() is None, 10, "the windows did not close")
-        time.sleep(2)
+        self.clock.sleep(2)
         if desktop.client() is not None:
             self.observe("S4", "windows-closed", self.args.idle_seconds)
             desktop.terminate()
@@ -506,7 +586,13 @@ class Bench:
             wait_until(lambda: desktop.shells() < remaining, 10, "a Pane did not close")
 
     def s5(self):
-        """Twelve idle Panes: two splits here, then three new Workspaces with two splits each."""
+        """Twelve idle Panes: two splits here, then three new Workspaces with two splits each.
+
+        The observation exercises the three Panes of the last Workspace, which are the visible
+        ones; the other Workspaces' Panes are hidden and have no Accessibility demand. With
+        Accessibility on, each Pane is read when it is created, so all three visible Panes hold
+        demand during the observation.
+        """
         desktop = self.desktop
         desktop.ready()
         base = desktop.shells()
@@ -514,12 +600,15 @@ class Bench:
             if workspace:
                 desktop.input.key("n", "command")
                 desktop.wait_shells(base + 3 * workspace)
-                time.sleep(0.3)
+                self.clock.sleep(0.3)
+                desktop.focused(f"S5 Workspace {workspace + 1}")
             desktop.input.key("d", "command")
             desktop.wait_shells(base + 3 * workspace + 1)
+            desktop.focused(f"S5 Workspace {workspace + 1} split 1")
             desktop.input.key("d", "command", "shift")
             desktop.wait_shells(base + 3 * workspace + 2)
-        time.sleep(10)
+            desktop.focused(f"S5 Workspace {workspace + 1} split 2")
+        self.clock.sleep(10)
         self.observe("S5", "idle-panes", self.args.idle_seconds)
         self.close_panes(base)
 
@@ -534,22 +623,31 @@ class Bench:
             self.job("S7", kind, kind, seconds=self.args.seconds)
 
     def s8(self):
-        """Ten Tabs filled with 100,000 lines each, then closed."""
+        """Ten Tabs filled with 100,000 lines each, then closed.
+
+        With Accessibility on, each Tab's Pane is read before it fills, so it fills with demand.
+        Only the visible Tab keeps demand, so `filled` records as `rows` the rows that Tab's
+        Pane retains; the Accessibility memory budget divides by them. Hidden Tabs' Panes keep
+        their history, and any accessibility memory they keep counts against those rows too.
+        """
         desktop = self.desktop
         desktop.ready()
         base = desktop.shells()
         desktop.input.key("k", "command")
         self.observe("S8", "empty", 10)
-        for pane in range(FILLED_PANES):
-            if pane:
+        pane = None
+        for tab in range(FILLED_PANES):
+            if tab:
                 desktop.input.key("t", "command")
-                desktop.wait_shells(base + pane)
-                time.sleep(0.3)
-            number = desktop.run_job("fill", lines=FILL_LINES)
+                desktop.wait_shells(base + tab)
+                self.clock.sleep(0.3)
+                desktop.focused(f"S8 Tab {tab + 1}")
+            number, _ = desktop.run_job("fill", lines=FILL_LINES)
             desktop.jobs.start(number)
-            desktop.jobs.receipt(number, 120)
-        settle(desktop.members())
-        self.observe("S8", "filled", 10, values={"rows": FILLED_PANES * FILL_LINES})
+            pane = desktop.finish_job(number, "fill", 120, lines=FILL_LINES)["pane"]
+        rows = desktop.retained_rows(pane)
+        settle(desktop.members(), limit_s=SETTLE_LIMIT_SECONDS, clock=self.clock)
+        self.observe("S8", "filled", 10, values={"rows": rows, "panes": FILLED_PANES})
         # A fresh Tab stays while the first Tab, filled, closes ten times over.
         desktop.input.key("t", "command")
         desktop.wait_shells(base + FILLED_PANES)
@@ -558,6 +656,7 @@ class Bench:
             desktop.input.key("1", "command")
             desktop.input.key("w", "command")
             wait_until(lambda: desktop.shells() < remaining, 10, "a filled Tab did not close")
+        desktop.focused("S8 remaining Tab")
         self.observe("S8", "closed", 10)
 
     def s9(self):
@@ -571,18 +670,19 @@ class Bench:
 
     def s10(self):
         desktop = self.desktop
+        clock = self.clock
         desktop.ready()
         desktop.place(*WINDOW)
         self.observe("S10", "before", 1)
 
         def resize():
-            started = time.monotonic()
+            started = clock.monotonic()
             count = 0
-            while time.monotonic() - started < 20:
+            while clock.monotonic() - started < 20:
                 desktop.resize(*(LARGE_WINDOW if count % 2 == 0 else WINDOW))
                 desktop.input.key("b", "command")
                 count += 1
-                time.sleep(max(0, started + count * 0.5 - time.monotonic()))
+                clock.sleep(max(0, started + count * 0.5 - clock.monotonic()))
             # An even count leaves the window and sidebar as they were.
             if count % 2:
                 desktop.resize(*WINDOW)
@@ -591,11 +691,11 @@ class Bench:
             return {
                 "resizes": count,
                 "sidebar_toggles": count,
-                "wall_s": time.monotonic() - started,
+                "wall_s": clock.monotonic() - started,
             }
 
         self.observe("S10", "resize-sidebar", action=resize)
-        time.sleep(9)
+        clock.sleep(9)
         self.observe("S10", "after", 1)
 
 
@@ -631,10 +731,11 @@ def app_version(app):
 def report(verdicts):
     for verdict in verdicts:
         status = "pass" if verdict["pass"] else "MISS"
-        print(
-            f"{status} {verdict['budget']} ({verdict['measurement']}, {verdict['bound']}): "
-            f"{verdict['value']:.4g} against {verdict['limit']:.4g}"
-        )
+        heading = f"{status} {verdict['budget']} ({verdict['measurement']}, {verdict['bound']})"
+        if verdict["missing"]:
+            print(f"{heading}: no measurement of {verdict['missing']}")
+        else:
+            print(f"{heading}: {verdict['value']:.4g} against {verdict['limit']:.4g}")
 
 
 def run(args):
@@ -647,6 +748,8 @@ def run(args):
     states = choices(args.accessibility, ("off", "on"), "--accessibility")
     if args.runs < 1:
         raise TaskError("--runs needs at least 1")
+    check_seconds(args.seconds, "--seconds")
+    check_seconds(args.idle_seconds, "--idle-seconds")
     check_isolation(app)
     output = (
         Path(args.output)
@@ -701,6 +804,8 @@ def run(args):
             budgets,
             reference=reference,
             hardware=results["environment"]["hardware"],
+            scenarios=scenarios,
+            states=states,
         )
         results["budgets"] = verdicts
     write_json(path, results)

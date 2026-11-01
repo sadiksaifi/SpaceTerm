@@ -53,6 +53,8 @@ CF.CFStringGetLength.argtypes = [void_p]
 CF.CFStringGetLength.restype = ctypes.c_long
 CF.CFStringGetCString.argtypes = [void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
 CF.CFStringGetCString.restype = ctypes.c_bool
+CF.CFHash.argtypes = [void_p]
+CF.CFHash.restype = ctypes.c_ulong
 CF.CFGetTypeID.argtypes = [void_p]
 CF.CFGetTypeID.restype = ctypes.c_ulong
 CF.CFStringGetTypeID.restype = ctypes.c_ulong
@@ -273,7 +275,11 @@ def text_area(element, depth=0, budget=None):
 
 
 def read_text(pid):
-    """Reads the focused Pane's text through the Accessibility API and returns its length."""
+    """Reads the focused Pane's text through the Accessibility API.
+
+    Returns the text's length and the text area's hash, which names the element: two reads of
+    one Pane return the same hash and reads of different Panes return different hashes.
+    """
     application = AX.AXUIElementCreateApplication(pid)
     try:
         focused = copy_attribute(application, "AXFocusedUIElement")
@@ -288,6 +294,7 @@ def read_text(pid):
                 area = text_area(window) if window else None
             if not area:
                 return {"read": False, "reason": "no text area"}
+            element = CF.CFHash(area)
             value = copy_attribute(area, "AXValue")
             CF.CFRelease(area)
             if not value:
@@ -298,7 +305,7 @@ def read_text(pid):
                 else 0
             )
             CF.CFRelease(value)
-            return {"read": True, "length": length}
+            return {"read": True, "length": length, "element": element}
         finally:
             CF.CFRelease(root)
             if window and window != root:

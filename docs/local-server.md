@@ -159,6 +159,6 @@ On macOS, remote tasks accept `--interface` with a remote host, and the pixel, i
 
 ## Measure CPU and memory
 
-`bench:desktop:macos` measures an installed Preflight or Release app in the ten scenarios of #773, with Accessibility off and on. `bench:server` measures a foreground Development server built from this checkout and fails when a median exceeds this host's baseline in `mise-tasks/bench/baselines/server/` by more than 10%; `--record` replaces that baseline. Both tasks check [the budgets](../mise-tasks/bench/budgets.json), and `mise run <task> --help` describes their options and output.
+`bench:desktop:macos` measures an installed Preflight or Release app in the ten scenarios of #773, with Accessibility off and on. `bench:server` measures a foreground Development server built from this checkout and fails when a median exceeds this host's baseline in `mise-tasks/bench/baselines/server/` by more than 10%, or when that baseline is missing or was recorded with other settings, input or hardware. `--record` replaces the baseline and needs every workload and condition; record it on a clean checkout after a change to what the task measures. Both tasks check [the budgets](../mise-tasks/bench/budgets.json), and `mise run <task> --help` describes their options and output.
 
 A foreground Development server refuses to start while the account's Development identity has service state, as `mise run development` does. On Linux with bwrap, `bench:server` gives its server private Development state instead.
