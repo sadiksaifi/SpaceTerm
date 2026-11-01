@@ -4,8 +4,10 @@
 //! wakes the worker. The worker waits for that wake, for input, or for a view change, never for a
 //! timer. It drains the inbox in order: each frame is applied, then acknowledged so the server may
 //! send the next, and the newest screen that changed something visible is handed to the view once
-//! per drain, before any Pane event that follows it.
+//! per drain, before any Pane event that follows it. Semantic messages are staged in the same
+//! order, and a revision is acknowledged once its tail applies it.
 use spaceterm_server::connection::link::{ChannelEvent, ChannelSink};
+use spaceterm_server::pane::accessibility::Update;
 use spaceterm_server::protocol::{Frame, PaneEvent};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -132,13 +134,15 @@ impl Inbox {
         queue.events.front().map(|(due, _)| *due)
     }
 
-    /// Applies every queued event in order. Each frame is applied, then acknowledged. The newest
-    /// frame that changed something visible reaches `deliver` once, before any Pane event after
-    /// it. Stops after the channel's last event, which `deliver` receives.
+    /// Applies every queued event in order. Each frame is applied, then acknowledged, and each
+    /// semantic revision is acknowledged once its last message applies it. The newest frame that
+    /// changed something visible reaches `deliver` once, before any Pane event after it. Stops
+    /// after the channel's last event, which `deliver` receives, discarding an unfinished
+    /// semantic revision.
     pub(super) fn drain<A, E>(
         &self,
         applier: &mut A,
-        mut acknowledge: impl FnMut(u64) -> Result<(), E>,
+        mut acknowledge: impl FnMut(Ack) -> Result<(), E>,
         mut deliver: impl FnMut(Delivery<A::Screen>),
     ) -> Result<Flow, E>
     where
@@ -150,14 +154,17 @@ impl Inbox {
             match event {
                 // The worker learns of the link's end from its own link.
                 ChannelEvent::Closed(_) => {}
-                // The link delivers no semantic updates until this worker stages them (#777).
-                ChannelEvent::Accessibility(_) => {}
+                ChannelEvent::Accessibility(update) => {
+                    if let Some(ack) = applier.accessibility(*update)? {
+                        acknowledge(ack)?;
+                    }
+                }
                 ChannelEvent::Frame(frame) => {
                     let number = frame.frame;
                     if let Some(screen) = applier.apply(*frame)? {
                         changed = Some(screen);
                     }
-                    acknowledge(number)?;
+                    acknowledge(Ack::Frame(number))?;
                 }
                 ChannelEvent::Pane(event) => {
                     applier.event(&event);
@@ -167,6 +174,7 @@ impl Inbox {
                     let last = event.last();
                     deliver(Delivery::Pane(event));
                     if last {
+                        applier.end();
                         return Ok(Flow::Ended);
                     }
                 }
@@ -194,7 +202,7 @@ impl ChannelSink for Inbox {
     }
 }
 
-/// Applies a pushed frame to the screen the client holds.
+/// Applies a pushed frame to the screen the client holds, and stages semantic messages.
 pub(super) trait Apply {
     type Screen;
     type Error;
@@ -202,6 +210,21 @@ pub(super) trait Apply {
     fn apply(&mut self, frame: Frame) -> Result<Option<Self::Screen>, Self::Error>;
     /// Sees each Pane event in channel order with the frames, before the worker handles it.
     fn event(&mut self, _event: &PaneEvent) {}
+    /// Stages one message of a semantic revision. Returns the revision's acknowledgement when
+    /// the message completed and applied it.
+    fn accessibility(&mut self, update: Update) -> Result<Option<Ack>, Self::Error>;
+    /// Sees the channel's last event: an unfinished semantic revision is discarded.
+    fn end(&mut self);
+}
+
+/// What the worker acknowledges, each on the channel's own credit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Ack {
+    Frame(u64),
+    Semantics {
+        demand_generation: u64,
+        revision: u64,
+    },
 }
 
 /// What a drain hands to the view and the worker, in channel order.
@@ -267,14 +290,49 @@ mod tests {
     use spaceterm_server::protocol::{Channel, ScreenUpdate};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Applies a frame's generation as the screen; generation 0 changes nothing visible.
-    struct Generations;
+    /// Applies a frame's generation as the screen; generation 0 changes nothing visible. Stages
+    /// each semantic message, completing its revision at the tail, and records what it saw.
+    #[derive(Default)]
+    struct Generations {
+        staged: Vec<u64>,
+        ended: bool,
+    }
     impl Apply for Generations {
         type Screen = u64;
         type Error = Overflow;
         fn apply(&mut self, frame: Frame) -> Result<Option<u64>, Overflow> {
             Ok((frame.update.generation != 0).then_some(frame.update.generation))
         }
+        fn accessibility(&mut self, update: Update) -> Result<Option<Ack>, Overflow> {
+            self.staged.push(update.header.revision);
+            Ok(update.tail.map(|_| Ack::Semantics {
+                demand_generation: update.header.demand_generation,
+                revision: update.header.revision,
+            }))
+        }
+        fn end(&mut self) {
+            self.ended = true;
+        }
+    }
+
+    fn semantic(revision: u64, tail: bool) -> ChannelEvent {
+        use spaceterm_server::pane::accessibility::{Header, Screen, Tail};
+        ChannelEvent::Accessibility(Box::new(Update {
+            header: Header {
+                demand_generation: 1,
+                revision,
+                base: None,
+                screen: Screen::Primary,
+                screen_generation: 1,
+            },
+            splices: Vec::new(),
+            rows: Vec::new(),
+            tail: tail.then_some(Tail {
+                visible_lines: 0..0,
+                cursor: None,
+                selection: None,
+            }),
+        }))
     }
 
     fn frame(number: u64, generation: u64) -> ChannelEvent {
@@ -300,10 +358,25 @@ mod tests {
     }
 
     fn drain(inbox: &Inbox) -> (Result<Flow, Overflow>, Vec<u64>, Vec<Delivery<u64>>) {
+        let (flow, acknowledged, delivered) = drain_all(inbox, &mut Generations::default());
+        let frames = acknowledged
+            .into_iter()
+            .filter_map(|ack| match ack {
+                Ack::Frame(frame) => Some(frame),
+                Ack::Semantics { .. } => None,
+            })
+            .collect();
+        (flow, frames, delivered)
+    }
+
+    fn drain_all(
+        inbox: &Inbox,
+        applier: &mut Generations,
+    ) -> (Result<Flow, Overflow>, Vec<Ack>, Vec<Delivery<u64>>) {
         let mut acknowledged = Vec::new();
         let mut delivered = Vec::new();
         let flow = inbox.drain(
-            &mut Generations,
+            applier,
             |frame| {
                 acknowledged.push(frame);
                 Ok(())
@@ -423,6 +496,55 @@ mod tests {
         assert_eq!(acknowledged, [1]);
         assert!(matches!(delivered.as_slice(), [Delivery::Screen(1)]));
         assert_eq!(inbox.due(), None);
+    }
+
+    #[test]
+    fn semantic_messages_are_staged_in_channel_order_and_acknowledged_at_their_tail() {
+        let (inbox, _) = inbox();
+        inbox.deliver(semantic(7, false));
+        inbox.deliver(frame(1, 1));
+        inbox.deliver(semantic(7, true));
+        inbox.deliver(frame(2, 2));
+
+        let mut applier = Generations::default();
+        let (flow, acknowledged, delivered) = drain_all(&inbox, &mut applier);
+
+        assert_eq!(flow, Ok(Flow::Open));
+        assert_eq!(applier.staged, [7, 7]);
+        assert_eq!(
+            acknowledged,
+            [
+                Ack::Frame(1),
+                Ack::Semantics {
+                    demand_generation: 1,
+                    revision: 7
+                },
+                Ack::Frame(2)
+            ],
+            "a revision is acknowledged once, after its tail, in order with frames"
+        );
+        assert!(matches!(delivered.as_slice(), [Delivery::Screen(2)]));
+        assert!(!applier.ended);
+    }
+
+    #[test]
+    fn the_channels_last_event_discards_an_unfinished_semantic_revision() {
+        let (inbox, _) = inbox();
+        inbox.deliver(semantic(3, false));
+        inbox.deliver(ChannelEvent::Pane(PaneEvent::Ended));
+        inbox.deliver(semantic(3, true));
+
+        let mut applier = Generations::default();
+        let (flow, acknowledged, _) = drain_all(&inbox, &mut applier);
+
+        assert_eq!(flow, Ok(Flow::Ended));
+        assert!(applier.ended, "the applier hears of the channel's end");
+        assert_eq!(
+            applier.staged,
+            [3],
+            "nothing after the last event is staged"
+        );
+        assert!(acknowledged.is_empty());
     }
 
     #[test]

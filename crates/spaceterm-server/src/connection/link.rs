@@ -15,9 +15,10 @@ use super::health::{Check, Death, Liveness};
 use crate::pane::{AttachmentClaim, PaneSize, PresentationStyle, accessibility, effects};
 use crate::protocol::frame::{Assembler, encode_client};
 use crate::protocol::{
-    Acknowledge, Cancel, Channel, Claim, ClientMessage, EffectDone, Fatal, Frame, FrameAck, Input,
-    InputEvent, InventoryRevision, Operation, PaneEvent, Ping, Pong, RawFrame, Refusal, Reply,
-    ReplyBody, Request, RequestId, ServerMessage, View, limits,
+    AccessibilityAck, AccessibilityMessage, Acknowledge, Cancel, Channel, Claim, ClientMessage,
+    EffectDone, Fatal, Frame, FrameAck, Input, InputEvent, InventoryRevision, Operation, PaneEvent,
+    Ping, Pong, RawFrame, Refusal, Reply, ReplyBody, Request, RequestId, ServerMessage, View,
+    limits,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
@@ -418,10 +419,13 @@ impl ServerLink {
                     );
                 }
             },
-            // This client requests no pushed semantics yet, so an update is one it never asked for.
-            ServerMessage::Accessibility(_) => {
-                self.fail(LinkError::Violation);
-                return Err(LinkError::Violation);
+            // Nobody holds the channel any more. The server drops its semantic store when it
+            // processes the `Release`, so the message needs no acknowledgement.
+            ServerMessage::Accessibility(message) => {
+                let AccessibilityMessage { channel, update } = *message;
+                if let Some(sink) = self.sink(channel, false) {
+                    sink.deliver(ChannelEvent::Accessibility(Box::new(update)));
+                }
             }
             ServerMessage::Pane(pane) => {
                 let last = pane.event.last();
@@ -870,6 +874,23 @@ impl ChannelHandle {
             ClientMessage::FrameAck(FrameAck {
                 channel: self.channel()?,
                 frame,
+            }),
+            true,
+        )
+    }
+
+    /// Acknowledges the semantic revision whose tail the owner applied, returning the channel's
+    /// semantic credit (ADR 0062).
+    pub fn acknowledge_accessibility(
+        &self,
+        demand_generation: u64,
+        revision: u64,
+    ) -> Result<(), LinkError> {
+        self.send_simple(
+            ClientMessage::AccessibilityAck(AccessibilityAck {
+                channel: self.channel()?,
+                demand_generation,
+                revision,
             }),
             true,
         )

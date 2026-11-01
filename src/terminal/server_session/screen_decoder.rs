@@ -40,7 +40,6 @@ pub(super) struct DecodedScreen {
     pub(super) history: History,
     pub(super) graphics: Option<Result<graphics::Snapshot, graphics::Error>>,
     pub(super) generation: u64,
-    pub(super) accessibility_revision: u64,
     pub(super) rows: Arc<[RowSnapshot]>,
     pub(super) wrapped: Arc<[bool]>,
     /// Whether each row shows blinking text, kept up to date row by row.
@@ -179,7 +178,6 @@ impl ScreenDecoder {
             history: update.history,
             graphics,
             generation: update.generation,
-            accessibility_revision: update.accessibility_revision,
             rows,
             wrapped,
             blinking,

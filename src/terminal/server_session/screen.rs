@@ -24,8 +24,8 @@ impl<'a> ScreenReceiver<'a> {
     }
 
     /// Applies a frame with its graphics, and maps it to the server's generation and size.
-    /// Returns the screen, its mapping and its accessibility revision. A frame whose base this
-    /// receiver does not hold breaks the channel's credit rule.
+    /// Returns the screen and its mapping. A frame whose base this receiver does not hold breaks
+    /// the channel's credit rule.
     pub(super) fn receive(
         &mut self,
         frame: Frame,
@@ -34,7 +34,7 @@ impl<'a> ScreenReceiver<'a> {
         active_size: PaneSize,
         graphics: &mut graphics::Graphics,
         appearance: &Mutex<TerminalAppearanceUpdate>,
-    ) -> Result<(Arc<ScreenSnapshot>, ScreenMapping, u64), ServerError> {
+    ) -> Result<(Arc<ScreenSnapshot>, ScreenMapping), ServerError> {
         let decoded =
             match self
                 .decoder
@@ -83,19 +83,23 @@ impl<'a> ScreenReceiver<'a> {
                 super::super::metadata::TerminalMetadataContext::Remote(metadata.clone());
         }
         screen.graphics = graphics.snapshot();
-        Ok((Arc::new(screen), mapping, decoded.accessibility_revision))
+        Ok((Arc::new(screen), mapping))
     }
 }
 
-/// Applies a Pane worker's pushed frames to its screen, for [`super::inbox::Inbox::drain`].
+/// Applies a Pane worker's pushed frames to its screen and stages its semantic revisions, for
+/// [`super::inbox::Inbox::drain`].
 pub(super) struct Frames<'a, 'b> {
+    pub(super) state: &'a ServerPaneState,
     pub(super) screens: &'a mut ScreenReceiver<'b>,
     pub(super) epoch: u64,
     pub(super) generation: &'a mut PresentationGeneration,
     pub(super) active_size: PaneSize,
     pub(super) graphics: &'a mut graphics::Graphics,
     pub(super) appearance: &'a Mutex<TerminalAppearanceUpdate>,
-    pub(super) semantic: &'a mut super::accessibility::Fetcher,
+    /// A revision applies to the retained document bound to the newest presentation, and never
+    /// waits for a frame that carries its revision.
+    pub(super) semantic: &'a mut super::accessibility::Semantics,
     /// What the view shows of the last visible frame.
     pub(super) shown: &'a mut Option<Shown>,
     /// Judges predictions against each frame and follows the line state in channel order.
@@ -140,7 +144,7 @@ impl super::inbox::Apply for Frames<'_, '_> {
         let shown = Shown::of(&frame.update);
         let input = frame.input;
         let previous = *self.generation;
-        let (screen, mapping, revision) = self.screens.receive(
+        let (screen, mapping) = self.screens.receive(
             frame,
             self.epoch,
             self.generation,
@@ -148,7 +152,6 @@ impl super::inbox::Apply for Frames<'_, '_> {
             self.graphics,
             self.appearance,
         )?;
-        self.semantic.note_revision(revision);
         self.predictor
             .frame(&screen, input, std::time::Instant::now());
         if invisible {
@@ -164,6 +167,18 @@ impl super::inbox::Apply for Frames<'_, '_> {
         if let PaneEvent::Line(line) = event {
             self.predictor.line(*line);
         }
+    }
+
+    fn accessibility(
+        &mut self,
+        update: pane::accessibility::Update,
+    ) -> Result<Option<super::inbox::Ack>, ServerError> {
+        self.semantic
+            .receive(update, &self.state.accessibility, *self.generation)
+    }
+
+    fn end(&mut self) {
+        self.semantic.cancel();
     }
 }
 

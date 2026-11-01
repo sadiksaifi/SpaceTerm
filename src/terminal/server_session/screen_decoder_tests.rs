@@ -175,10 +175,6 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
         (history.epoch, history.oldest, history.total)
     );
     assert_eq!(decoded.generation, capture.generation);
-    assert_eq!(
-        decoded.accessibility_revision,
-        capture.accessibility_revision
-    );
     let appearance = crate::terminal::test_terminal_appearance_update();
     let rendered = decoded.snapshot(PresentationGeneration::test(1), &appearance);
     assert!(Arc::ptr_eq(&rendered.rows, &decoded.rows));

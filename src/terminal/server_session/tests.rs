@@ -1980,3 +1980,30 @@ fn selecting_an_ended_pane_queues_no_start() {
     restored.select();
     assert!(restored.selected.load(Ordering::Acquire));
 }
+
+#[test]
+fn hiding_a_pane_keeps_its_semantic_demand_and_document() {
+    let adapter = Adapter::new();
+    adapter
+        .handle
+        .accessibility_demand_sender()
+        .expect("a server Pane accepts semantic demand")
+        .request();
+    adapter.handle.set_presentable(false);
+    assert!(
+        adapter
+            .handle
+            .state
+            .accessibility_demand
+            .load(Ordering::Acquire),
+        "hiding a Pane must not end its semantic demand, or showing it would resend everything"
+    );
+    adapter.handle.set_presentable(true);
+    assert!(
+        adapter
+            .handle
+            .state
+            .accessibility_demand
+            .load(Ordering::Acquire)
+    );
+}

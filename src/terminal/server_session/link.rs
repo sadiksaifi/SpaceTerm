@@ -953,8 +953,9 @@ impl PaneLink {
         self.pushed = None;
     }
 
-    /// Applies every pushed event in order: each frame is applied, then acknowledged, and
-    /// `deliver` receives the newest visible screen once per drain and every Pane event.
+    /// Applies every pushed event in order: each frame is applied, then acknowledged, each
+    /// semantic revision is acknowledged once its tail applies it, and `deliver` receives the
+    /// newest visible screen once per drain and every Pane event.
     pub(super) fn drain<A>(
         &self,
         applier: &mut A,
@@ -969,7 +970,16 @@ impl PaneLink {
         };
         pushed.drain(
             applier,
-            |frame| channel.acknowledge(frame).map_err(ServerError::from),
+            |ack| {
+                match ack {
+                    super::inbox::Ack::Frame(frame) => channel.acknowledge(frame),
+                    super::inbox::Ack::Semantics {
+                        demand_generation,
+                        revision,
+                    } => channel.acknowledge_accessibility(demand_generation, revision),
+                }
+                .map_err(ServerError::from)
+            },
             deliver,
         )
     }
@@ -1083,20 +1093,6 @@ impl PaneLink {
                 ReplyBody::Graphics(chunk) => Ok(Reply::GraphicsChunk(chunk)),
                 _ => Err(ServerError::Protocol),
             },
-            Request::Accessibility {
-                lease,
-                revision,
-                offset,
-                base,
-            } => match self.request(Operation::Accessibility {
-                channel: channel(lease)?,
-                revision,
-                offset: offset as u64,
-                base,
-            })? {
-                ReplyBody::Accessibility(chunk) => Ok(Reply::Accessibility(chunk)),
-                _ => Err(ServerError::Protocol),
-            },
             Request::AccessibilitySelection {
                 lease,
                 focus_generation,
@@ -1112,11 +1108,6 @@ impl PaneLink {
                     _ => Err(ServerError::Protocol),
                 }
             }
-            Request::EndAccessibilityDemand { lease } => self
-                .request(Operation::EndAccessibility {
-                    channel: channel(lease)?,
-                })
-                .map(|_| Reply::Unchanged),
             Request::AccessibilityDemand { lease, demand } => {
                 match self.request(Operation::AccessibilityDemand {
                     channel: channel(lease)?,
@@ -1146,6 +1137,10 @@ impl PaneLink {
             }
             // The Workspace client reads pushed inventory and resolves by dispatching.
             Request::Inventory | Request::Resolve { .. } => Err(ServerError::Unsupported),
+            // Semantics are pushed while demand stands (ADR 0062); nothing pulls them.
+            Request::Accessibility { .. } | Request::EndAccessibilityDemand { .. } => {
+                Err(ServerError::Unsupported)
+            }
             Request::Acknowledge { sequence } => {
                 self.link.acknowledge(sequence)?;
                 Ok(Reply::Unchanged)
@@ -1429,7 +1424,9 @@ pub(super) fn present(
             let mut active_size = grant_size;
             let mut ready = false;
             let mut graphics = graphics::Graphics::default();
-            let mut semantic = accessibility::Fetcher::new(lease);
+            // Channels are never reused on a connection, so each claim numbers its own demand
+            // generations from 1.
+            let mut semantic = accessibility::Semantics::new();
             let mut latest_screen = None;
             let mut shown = None;
             let mut screens = ScreenReceiver::new(local_files.as_ref(), remote_metadata.as_ref());
@@ -1495,6 +1492,7 @@ pub(super) fn present(
                 let mut delivered = Vec::new();
                 let flow = connection.drain(
                     &mut screen::Frames {
+                        state: &state,
                         screens: &mut screens,
                         epoch,
                         generation: &mut generation,
@@ -1527,9 +1525,6 @@ pub(super) fn present(
                                     request,
                                 )?,
                                 PaneEvent::Line(line) => effects.line(&state, &events, line)?,
-                                PaneEvent::Accessibility { revision } => {
-                                    semantic.note_revision(revision)
-                                }
                                 PaneEvent::Ended => {
                                     connection.release();
                                     state.set(ServerPaneStatus::Ended);
@@ -1547,10 +1542,12 @@ pub(super) fn present(
                                 }
                                 PaneEvent::Failed => return Err(ServerError::StartupFailed),
                                 // The link settles input outcomes before they reach the inbox.
-                                // Progress and run receipts are for CLI channels only.
+                                // Progress and run receipts are for CLI channels only. Semantic
+                                // revisions announce themselves (ADR 0062).
                                 PaneEvent::Input { .. }
                                 | PaneEvent::Progress { .. }
-                                | PaneEvent::RunFinished(_) => {}
+                                | PaneEvent::RunFinished(_)
+                                | PaneEvent::Accessibility { .. } => {}
                             }
                             continue;
                         }
@@ -1616,6 +1613,16 @@ pub(super) fn present(
                         let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
                     }
                 }
+                // A revision that completed in this drain is bound to the presentation it applied
+                // with. A screen shown after it bound the document again and published that.
+                if let Some(model) = semantic.take_published()
+                    && model.generation() == generation
+                {
+                    if !presenter.current() {
+                        return Err(ServerError::NotRunning);
+                    }
+                    let _ = semantics.force_send(model);
+                }
                 if flow == inbox::Flow::Ended {
                     return Err(ServerError::Protocol);
                 }
@@ -1627,7 +1634,7 @@ pub(super) fn present(
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                 }
-                // Graphics and semantic transfers continue one chunk per turn without waiting.
+                // Graphics transfers continue one chunk per turn without waiting.
                 let mut busy = more_input;
                 let mut deadline = None;
                 if ready && let Some((_, mapping)) = &mut latest_screen {
@@ -1742,21 +1749,21 @@ pub(super) fn present(
                     // A failed image waits for the next turn; a finished one goes on at once.
                     busy |= graphics.transferring() || (completed && graphics.wants());
                 }
-                // Semantic transfer follows its own explicit demand, even while hidden, and a
-                // partial document continues one chunk per turn. It sends nothing while the
-                // client holds the server's revision.
+                // Semantic demand follows assistive technology's request, even while hidden. The
+                // server pushes revisions for as long as it stands, so nothing is fetched here.
                 if ready {
-                    let model = semantic.poll(&state, generation, &mut |request| {
-                        send(&presenter, &alive, &mut connection, request)
-                    })?;
-                    if state.epoch.load(Ordering::Acquire) != epoch {
-                        return Err(ServerError::Protocol);
-                    }
-                    if let Some(model) = model {
-                        let _ = semantics.force_send(model);
-                    }
+                    semantic.follow(
+                        state.accessibility_demand.load(Ordering::Acquire),
+                        |demand| {
+                            expect_unchanged(send(
+                                &presenter,
+                                &alive,
+                                &mut connection,
+                                &Request::AccessibilityDemand { lease, demand },
+                            )?)
+                        },
+                    )?;
                 }
-                busy |= semantic.can_continue();
                 // The worker waits for pushed events, input, a view change or a Scrollback page.
                 // A selection drag past an edge, an unechoed prediction and a Development push
                 // delay have deadlines.
@@ -1771,7 +1778,14 @@ pub(super) fn present(
             if alive.load(Ordering::Acquire) {
                 return attached;
             }
-            // Dismissal, even mid-exchange, unfocuses the Pane in order; its control remains.
+            // Dismissal, even mid-exchange, unfocuses the Pane in order; its control remains. The
+            // detached channel keeps no semantic store.
+            if semantic.demanded() {
+                let _ = connection.exchange(&Request::AccessibilityDemand {
+                    lease,
+                    demand: pane::accessibility::Demand::End,
+                });
+            }
             presenter.retire(lease, |request| connection.exchange(request));
             Ok(())
         })();
