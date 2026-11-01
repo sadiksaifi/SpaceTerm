@@ -1320,8 +1320,10 @@ pub(super) fn present(
             return;
         }
         state.retry.store(false, Ordering::Release);
+        let mut connected_link = None;
         let connected = (|| {
             let link = server.link_cancellable(&|| !alive.load(Ordering::Acquire))?;
+            connected_link = Some(link.clone());
             let mut connection = PaneLink::new(link, attachment.clone(), {
                 let state = Arc::clone(&state);
                 Arc::new(move || state.wake.notify())
@@ -1733,6 +1735,23 @@ pub(super) fn present(
             // A successor owns this Pane's state now; leave it untouched.
             Err(_) if !alive.load(Ordering::Acquire) || !presenter.current() => return,
             Err(error) => {
+                // A live paired link retains its typed transport loss even though command
+                // adapters use Protocol for exchanges that could not complete. A protocol
+                // violation or authenticated refusal keeps its own classification.
+                let error = if error == ServerError::Protocol
+                    && !server.is_account_local()
+                    && connected_link.as_ref().is_some_and(|link| {
+                        matches!(
+                            link.health(),
+                            spaceterm_server::connection::link::Health::Closed(
+                                LinkError::Closed | LinkError::Unresponsive | LinkError::Stalled
+                            )
+                        )
+                    }) {
+                    ServerError::Direct(DirectError::Transport)
+                } else {
+                    error
+                };
                 // A missing old Session does not mean its retained Pane was removed. Reconcile
                 // by Pane identity before deciding, even after several End All operations.
                 let error = if error == ServerError::SessionUnavailable

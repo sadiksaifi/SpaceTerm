@@ -6,7 +6,7 @@ use spaceterm_server::connection::carrier::{
     Carrier, CarrierError, Flush, Offer, Priority, Readiness,
 };
 use spaceterm_server::connection::io;
-use spaceterm_server::connection::link::{LinkEvent, LinkSink};
+use spaceterm_server::connection::link::LinkSink;
 use spaceterm_server::connection::loopback::Loopback;
 use spaceterm_server::connection::outbox::Outbox;
 use spaceterm_server::connection::server::AdmittedConnection;
@@ -79,12 +79,8 @@ impl Carrier for Counting {
     }
 }
 
-struct Ignore;
-impl LinkSink for Ignore {
-    fn deliver(&self, _: LinkEvent) {}
-}
-
 type Bell = Arc<(Mutex<bool>, std::sync::Condvar)>;
+type Stops = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
 fn ring(bell: &Bell) {
     *bell.0.lock().unwrap() = true;
@@ -128,10 +124,15 @@ pub(crate) struct ConnectedPane {
     pub(crate) factory: ServerSessionFactory,
     traffic: Arc<Traffic>,
     stop: Option<Box<dyn FnOnce()>>,
+    reconnect: Box<dyn Fn() -> spaceterm_server::connection::link::ServerLink>,
 }
 
 impl ConnectedPane {
     pub(crate) fn new() -> Self {
+        Self::with_connection(ServerConnection::for_identity("spaceterm-development").unwrap())
+    }
+
+    fn with_connection(connection: ServerConnection) -> Self {
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
         let Reply::Inventory { inventory, .. } = host.request([1; 32], [1; 32], Request::Inventory)
@@ -140,6 +141,19 @@ impl ConnectedPane {
         };
         let workspace = inventory.workspaces[0].id;
         let pane_id = inventory.workspaces[0].tabs[0].root_pane;
+        let attachments = spaceterm_server::attachments::Attachments::memory();
+        attachments.initialize(&inventory, Some(workspace)).unwrap();
+        let permit = attachments.permit(pane_id).unwrap();
+        let controls = PaneControls::default();
+        let (factory, state) = ServerSessionFactory::for_pane(
+            connection.clone(),
+            &controls,
+            crate::platform::runtime_local_filesystem(),
+            pane_id,
+        );
+        state.start_created();
+        let watch = claim::ControlWatch::new(Arc::clone(&state), pane_id);
+        let factory = factory.with_attachment(permit);
         let traffic = Arc::new(Traffic::default());
         let service: SharedPaneService = Arc::new(Mutex::new(Box::new(Served::new(host))));
         let running = Arc::new(AtomicBool::new(true));
@@ -149,64 +163,160 @@ impl ConnectedPane {
             Arc::clone(&running),
             Arc::clone(&bell),
         );
-
-        let (client, server) = Loopback::pair(1 << 20).unwrap();
-        let server = Counting {
-            inner: server,
-            traffic: Arc::clone(&traffic),
-        };
-        let (waker, wake) = io::Waker::new().unwrap();
-        let outbox = Outbox::new(Arc::clone(&wake));
-        let peer = Peer {
-            client: [1; 32],
-            connection: [1; 32],
-            pairing: None,
-        };
-        service
-            .lock()
-            .unwrap()
-            .admitted(&peer, "Test".into(), outbox.clone());
-        let (sync, _sync_thread) = SyncWorker::spawn().unwrap();
-        let stopping = Arc::new(AtomicBool::new(false));
-        let serving = {
-            let (service, stopping) = (Arc::clone(&service), Arc::clone(&stopping));
-            std::thread::spawn(move || {
-                let connection = AdmittedConnection::new(peer, outbox, sync, None, Instant::now());
-                io::serve(Box::new(server), connection, &waker, &service, &stopping);
-            })
-        };
-        let link = io::spawn_link(Box::new(client), Arc::new(Ignore)).unwrap();
-        let connection = ServerConnection::for_identity("spaceterm-development").unwrap();
-        connection.adopt(link.clone());
-
-        let attachments = spaceterm_server::attachments::Attachments::memory();
-        attachments.initialize(&inventory, Some(workspace)).unwrap();
-        let permit = attachments
-            .permit(pane_id)
-            .expect("an attached Pane has a permit");
-        let controls = PaneControls::default();
-        let (factory, state) = ServerSessionFactory::for_pane(
-            connection,
-            &controls,
-            crate::platform::runtime_local_filesystem(),
-            pane_id,
-        );
-        state.start_created();
-        let factory = factory.with_attachment(permit);
+        let stops = Stops::default();
+        let reconnect = Box::new({
+            let (service, traffic, stops) = (
+                Arc::clone(&service),
+                Arc::clone(&traffic),
+                Arc::clone(&stops),
+            );
+            let count = AtomicUsize::new(0);
+            move || {
+                let (client, server) = Loopback::pair(1 << 20).unwrap();
+                let server = Counting {
+                    inner: server,
+                    traffic: Arc::clone(&traffic),
+                };
+                let (waker, wake) = io::Waker::new().unwrap();
+                let outbox = Outbox::new(Arc::clone(&wake));
+                let mut id = [1; 32];
+                id[..8]
+                    .copy_from_slice(&(count.fetch_add(1, Ordering::SeqCst) as u64).to_le_bytes());
+                let peer = Peer {
+                    client: [1; 32],
+                    connection: id,
+                    pairing: None,
+                };
+                service
+                    .lock()
+                    .unwrap()
+                    .admitted(&peer, "Test".into(), outbox.clone());
+                let (sync, _sync_thread) = SyncWorker::spawn().unwrap();
+                let stopping = Arc::new(AtomicBool::new(false));
+                // Adopt before serving, so an inventory wake can only find this admitted link.
+                let events = Arc::downgrade(&watch);
+                let link = io::spawn_link(
+                    Box::new(client),
+                    Arc::new(move |event| {
+                        if let Some(watch) = events.upgrade() {
+                            watch.deliver(event);
+                        }
+                    }),
+                )
+                .unwrap();
+                connection.adopt(link.clone());
+                let serving = {
+                    let (service, stopping) = (Arc::clone(&service), Arc::clone(&stopping));
+                    std::thread::spawn(move || {
+                        let admitted =
+                            AdmittedConnection::new(peer, outbox, sync, None, Instant::now());
+                        io::serve(Box::new(server), admitted, &waker, &service, &stopping);
+                    })
+                };
+                let closed = link.clone();
+                stops.lock().unwrap().push(Box::new(move || {
+                    stopping.store(true, Ordering::Release);
+                    wake.wake();
+                    closed.close();
+                    serving.join().unwrap();
+                }));
+                link
+            }
+        });
+        reconnect();
         Self {
             factory,
             traffic,
+            reconnect,
             stop: Some(Box::new(move || {
                 running.store(false, Ordering::Release);
                 ring(&bell);
-                stopping.store(true, Ordering::Release);
-                wake.wake();
-                link.close();
-                let _ = serving.join();
-                let _ = ticks.join();
+                for stop in std::mem::take(&mut *stops.lock().unwrap()) {
+                    stop();
+                }
+                ticks.join().unwrap();
                 service.lock().unwrap().shutdown().unwrap();
             })),
         }
+    }
+}
+
+fn paired_connection(
+    connector: Arc<dyn spaceterm_server::direct::DirectConnector>,
+) -> ServerConnection {
+    use spaceterm_server::direct::{PairedDevice, ServerPin};
+    ServerConnection::direct(
+        "spaceterm-development",
+        [4; 32],
+        PairedDevice {
+            pin: ServerPin {
+                build: "spaceterm-development".into(),
+                server: [9; 32],
+                public_key: [2; 32],
+                certificate: [3; 32],
+            },
+            pairing: [5; 32],
+            client: [1; 32],
+        },
+        connector,
+    )
+    .unwrap()
+}
+
+fn await_status(state: &ServerPaneState, expected: ServerPaneStatus) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.status() != expected {
+        assert!(
+            Instant::now() < until,
+            "expected {expected:?}, got {:?}",
+            state.status()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_live_paired_pane_recovers_after_transport_loss() {
+    use spaceterm_server::connection::link::LinkError;
+    use spaceterm_server::direct::{DirectConnection, DirectConnector, DirectError};
+    struct Away;
+    impl DirectConnector for Away {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            Err(DirectError::Transport)
+        }
+    }
+    for lost in [
+        LinkError::Closed,
+        LinkError::Unresponsive,
+        LinkError::Stalled,
+    ] {
+        let server = ConnectedPane::with_connection(paired_connection(Arc::new(Away)));
+        let state = Arc::clone(&server.factory.state);
+        let started = server
+            .factory
+            .start(
+                *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+                TerminalAppearanceUpdate::builtin().unwrap(),
+            )
+            .unwrap();
+        await_status(&state, ServerPaneStatus::Connected);
+        let generation = state.connection_generation();
+        let link = server.factory.server.link().unwrap();
+        link.fail(lost);
+        let expected = ServerPaneStatus::Failed(ServerError::Direct(DirectError::Transport));
+        let until = Instant::now() + Duration::from_secs(8);
+        while !matches!(state.status(), ServerPaneStatus::Failed(_)) {
+            assert!(
+                Instant::now() < until,
+                "the outage never exhausted recovery"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(state.status(), expected, "live loss {lost:?}");
+        (server.reconnect)();
+        await_status(&state, ServerPaneStatus::Connected);
+        assert!(state.connection_generation() > generation);
+        drop(started);
     }
 }
 
