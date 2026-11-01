@@ -335,15 +335,15 @@ impl AccessibilityRowBlock {
         })
     }
 
-    /// The page this block's rows belong to. Every read counts as one identity-search probe.
+    /// The page this block's rows belong to. Every read counts as one search step.
     fn key(&self) -> (usize, u64) {
-        count_probe();
+        count_search_step();
         self.page
     }
 
     fn local_row(&self, id: AccessibilityRowId) -> Option<usize> {
         let page_row = |local: usize| {
-            count_probe();
+            count_search_step();
             self.rows[local].id.page_row
         };
         let first = self
@@ -857,7 +857,7 @@ impl TerminalAccessibilityModel {
         generation: PresentationGeneration,
     ) -> Self {
         let mut selected = Vec::new();
-        let mut rows = RetainedRows::default();
+        let mut retained = Vec::with_capacity(lines.len());
         let mut topology = Vec::with_capacity(lines.len());
         for (line_index, line) in lines.into_iter().enumerate() {
             let id = AccessibilityRowId {
@@ -879,13 +879,18 @@ impl TerminalAccessibilityModel {
                     cell
                 })
                 .collect();
-            rows.insert(AccessibilityRow::from_update(AccessibilityRowUpdate {
+            retained.push(AccessibilityRow::from_update(AccessibilityRowUpdate {
                 id,
                 revision: 1,
                 soft_wrapped: line.soft_wrapped,
                 cells,
             }));
             topology.push(id);
+        }
+        let mut rows = RetainedRows::default();
+        rows.set_topology(&topology);
+        for row in retained {
+            rows.insert(row).expect("the topology names every row");
         }
         let document = build_document(&topology, &rows, None);
         let visible_lines =
@@ -1208,81 +1213,115 @@ impl TerminalAccessibilityModel {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Retained-row map lookups plus row blocks and rows that row-identity searches visited on this
-/// thread, so a test can prove that a re-bind's cost does not follow the retained row count.
+/// Work that row-identity lookups did on one thread, so a test can prove that a re-bind's cost
+/// does not follow the retained row count.
 #[cfg(test)]
 #[cfg_attr(
     not(feature = "desktop"),
     allow(dead_code, reason = "the re-bind cost test drives the desktop client")
 )]
-pub(crate) fn probes() -> usize {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Probes {
+    /// Lookups in a screen's retained rows or live identities.
+    pub(crate) map_lookups: usize,
+    /// Row blocks and rows that row-identity searches visited in a document.
+    pub(crate) search_steps: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PROBES: std::cell::Cell<Probes> = const {
+        std::cell::Cell::new(Probes { map_lookups: 0, search_steps: 0 })
+    };
+}
+
+/// The lookups this thread has made so far.
+#[cfg(test)]
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(dead_code, reason = "the re-bind cost test drives the desktop client")
+)]
+pub(crate) fn probes() -> Probes {
     PROBES.with(std::cell::Cell::get)
 }
 
-fn count_probe() {
+fn count_map_lookup() {
     #[cfg(test)]
-    PROBES.with(|probes| probes.set(probes.get() + 1));
+    PROBES.with(|probes| {
+        let mut counted = probes.get();
+        counted.map_lookups += 1;
+        probes.set(counted);
+    });
 }
 
-/// The retained rows of one screen, keyed by identity.
+fn count_search_step() {
+    #[cfg(test)]
+    PROBES.with(|probes| {
+        let mut counted = probes.get();
+        counted.search_steps += 1;
+        probes.set(counted);
+    });
+}
+
+/// A changed row whose identity the screen's topology does not name.
+#[derive(Debug, Eq, PartialEq)]
+struct RowOutsideTopology;
+
+/// The live identities one screen's topology names and the rows retained for them. It retains
+/// only live identities, so equal counts mean every live identity is retained.
 #[derive(Debug, Default)]
-struct RetainedRows(BTreeMap<AccessibilityRowId, Arc<AccessibilityRow>>);
+struct RetainedRows {
+    live: BTreeSet<AccessibilityRowId>,
+    rows: BTreeMap<AccessibilityRowId, Arc<AccessibilityRow>>,
+}
 
 impl RetainedRows {
+    /// Makes `topology` the live identities and drops every row it no longer names.
+    fn set_topology(&mut self, topology: &[AccessibilityRowId]) {
+        self.live = topology.iter().copied().collect();
+        self.rows.retain(|id, _| self.live.contains(id));
+    }
+
     fn get(&self, id: &AccessibilityRowId) -> Option<&Arc<AccessibilityRow>> {
-        count_probe();
-        self.0.get(id)
+        count_map_lookup();
+        self.rows.get(id)
     }
 
     #[cfg(feature = "desktop")]
     fn contains_key(&self, id: &AccessibilityRowId) -> bool {
-        count_probe();
-        self.0.contains_key(id)
+        count_map_lookup();
+        self.rows.contains_key(id)
     }
 
-    fn insert(&mut self, row: Arc<AccessibilityRow>) {
-        self.0.insert(row.id, row);
+    /// Retains `row` when the topology names its identity.
+    fn insert(&mut self, row: Arc<AccessibilityRow>) -> Result<(), RowOutsideTopology> {
+        count_map_lookup();
+        if !self.live.contains(&row.id) {
+            return Err(RowOutsideTopology);
+        }
+        self.rows.insert(row.id, row);
+        Ok(())
     }
 
-    fn retain_live(&mut self, live: &BTreeSet<AccessibilityRowId>) {
-        self.0.retain(|id, _| live.contains(id));
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
+    /// Whether every identity the topology names is retained, without visiting the rows.
+    fn is_complete(&self) -> bool {
+        self.rows.len() == self.live.len()
     }
 }
 
 #[derive(Debug)]
 struct AccessibilityScreenState {
     topology: Arc<[AccessibilityRowId]>,
-    live_rows: BTreeSet<AccessibilityRowId>,
-    /// Holds only identities in `live_rows`: a topology drops the rest, and a changed row enters
-    /// only when the topology names it.
     rows: RetainedRows,
     document: Arc<AccessibilityDocument>,
     document_dirty: bool,
     content_revision: u64,
 }
 
-impl AccessibilityScreenState {
-    /// Whether every identity the topology names is retained. Because `rows` holds only live
-    /// identities, equal counts mean equal sets, so no re-bind visits the retained rows.
-    fn is_complete(&self) -> bool {
-        self.rows.len() == self.live_rows.len()
-    }
-}
-
 impl Default for AccessibilityScreenState {
     fn default() -> Self {
         Self {
             topology: Arc::from([]),
-            live_rows: BTreeSet::new(),
             rows: RetainedRows::default(),
             document: AccessibilityDocument::empty(),
             document_dirty: false,
@@ -1333,16 +1372,13 @@ impl TerminalAccessibilityState {
             }) {
                 return None;
             }
-            let live = topology.iter().copied().collect::<BTreeSet<_>>();
-            state.rows.retain_live(&live);
+            state.rows.set_topology(topology);
             state.document_dirty |= state.topology.as_ref() != topology.as_slice();
             state.topology = Arc::from(topology.clone());
-            state.live_rows = live;
         }
         for changed in update.changed_rows {
             if changed.id.screen != update.screen
                 || changed.id.screen_generation != update.screen_generation
-                || !state.live_rows.contains(&changed.id)
             {
                 continue;
             }
@@ -1353,12 +1389,11 @@ impl TerminalAccessibilityState {
                     && existing.text == replacement.text
                     && existing.cells == replacement.cells
             });
-            if !unchanged {
+            if !unchanged && state.rows.insert(replacement).is_ok() {
                 state.document_dirty = true;
-                state.rows.insert(replacement);
             }
         }
-        if !update.complete || !state.is_complete() {
+        if !update.complete || !state.rows.is_complete() {
             return None;
         }
 
@@ -2537,6 +2572,104 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fresh.text(), "fresh");
+    }
+
+    #[test]
+    fn retained_rows_reject_a_row_the_topology_does_not_name() {
+        let live = row_id(AccessibilityScreen::Primary, 1, 10, 0);
+        let outside = row_id(AccessibilityScreen::Primary, 1, 10, 1);
+        let mut rows = RetainedRows::default();
+        rows.set_topology(&[live]);
+
+        assert_eq!(
+            rows.insert(AccessibilityRow::from_update(update_row(
+                outside, 1, "outside", false
+            ))),
+            Err(RowOutsideTopology)
+        );
+        assert!(
+            !rows.is_complete(),
+            "a rejected row cannot stand in for a missing live row"
+        );
+        assert_eq!(
+            rows.insert(AccessibilityRow::from_update(update_row(
+                live, 1, "live", false
+            ))),
+            Ok(())
+        );
+        assert!(rows.is_complete());
+    }
+
+    #[test]
+    fn a_same_generation_update_publishes_a_changed_cursor_selection_or_visible_start() {
+        let ids =
+            [0, 1, 2, 3].map(|page_row| row_id(AccessibilityScreen::Primary, 1, 10, page_row));
+        let cell = |line: usize, column: u16| AccessibilityCellRef {
+            row: ids[line],
+            row_revision: 1,
+            column,
+        };
+        let update = |topology: bool,
+                      visible_lines: Range<usize>,
+                      cursor: AccessibilityCellRef,
+                      selection: Option<AccessibilitySelectionRefs>| {
+            AccessibilityUpdate {
+                revision: 1,
+                screen: AccessibilityScreen::Primary,
+                screen_generation: 1,
+                complete: true,
+                more: false,
+                topology: topology.then(|| ids.to_vec()),
+                visible_lines,
+                cursor: Some(cursor),
+                selection,
+                changed_rows: if topology {
+                    ["ab", "cd", "ef", "gh"]
+                        .iter()
+                        .zip(ids)
+                        .map(|(text, id)| update_row(id, 1, text, false))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            }
+        };
+        let generation = PresentationGeneration::test(1);
+        let selection = AccessibilitySelectionRefs {
+            start: cell(0, 0),
+            end: cell(0, 1),
+            rectangle: false,
+        };
+        let mut state = TerminalAccessibilityState::default();
+        let initial = state
+            .apply(update(true, 0..4, cell(0, 0), None), generation)
+            .unwrap();
+        assert_eq!(initial.text(), "ab\ncd\nef\ngh");
+        assert!(
+            state
+                .apply(update(false, 0..4, cell(0, 0), None), generation)
+                .is_none(),
+            "an unchanged presentation is not republished"
+        );
+
+        let moved = state
+            .apply(update(false, 0..4, cell(0, 1), None), generation)
+            .expect("a cursor move alone is published");
+        assert_eq!(moved.cursor_range(), 1..1);
+        let selected = state
+            .apply(update(false, 0..4, cell(0, 1), Some(selection)), generation)
+            .expect("a Selection change alone is published");
+        assert_eq!(selected.selection_range(), Some(0..2));
+        let scrolled = state
+            .apply(update(false, 1..4, cell(0, 1), Some(selection)), generation)
+            .expect("a visible start change alone is published");
+        assert_eq!(scrolled.visible_lines(), 1..4);
+        assert!(
+            state
+                .apply(update(false, 1..9, cell(0, 1), Some(selection)), generation)
+                .is_none(),
+            "a visible end past the document end clamps to the published visible lines"
+        );
     }
 
     #[test]
