@@ -30,6 +30,8 @@ pub(super) struct ScreenDecoder {
     screen: Option<DecodedScreen>,
     /// Counts each decoded frame.
     counters: Arc<TerminalCounters>,
+    /// Where each row's cells are decoded, reused across rows.
+    cells: Vec<CellSnapshot>,
 }
 
 /// The server's screen as of the decoder's last frame.
@@ -64,6 +66,7 @@ impl ScreenDecoder {
             links: HashMap::new(),
             screen: None,
             counters,
+            cells: Vec::new(),
         }
     }
 
@@ -123,35 +126,43 @@ impl ScreenDecoder {
         }
         let geometry = required(update.geometry, previous.as_ref().map(|p| p.geometry))?;
         let modes = required(update.modes, previous.as_ref().map(|p| p.modes))?;
-        let colors = required(update.colors, previous.as_ref().map(|p| p.colors.clone()))?;
         let columns = usize::from(geometry.columns);
         let row_count = usize::from(geometry.rows);
-        // A new grid size starts from blank rows.
-        let kept = previous.as_ref().filter(|previous| {
-            (previous.geometry.columns, previous.geometry.rows) == (geometry.columns, geometry.rows)
-        });
-        let blank = kept.map_or_else(
-            || Arc::from(vec![blank_cell(); columns]),
-            |kept| Arc::clone(&kept.blank),
-        );
-        let (mut rows, mut wrapped, mut blinking) = match kept {
-            Some(kept) => (
-                kept.rows.to_vec(),
-                kept.wrapped.to_vec(),
-                kept.blinking.clone(),
-            ),
-            None => (
-                vec![Arc::clone(&blank); row_count],
-                vec![false; row_count],
-                vec![false; row_count],
-            ),
+        // The base frame's values move into this frame, so a frame that leaves them out
+        // allocates nothing for them.
+        let (colors, graphics, kept) = match previous {
+            Some(previous) => {
+                // A new grid size starts from blank rows.
+                let same_grid = (previous.geometry.columns, previous.geometry.rows)
+                    == (geometry.columns, geometry.rows);
+                (
+                    update.colors.or(Some(previous.colors)),
+                    update.graphics.or(previous.graphics),
+                    same_grid.then_some(Grid {
+                        rows: previous.rows,
+                        wrapped: previous.wrapped,
+                        blinking: previous.blinking,
+                        blank: previous.blank,
+                    }),
+                )
+            }
+            None => (update.colors, update.graphics, None),
         };
+        let colors = colors.ok_or(UpdateError::Malformed)?;
+        let Grid {
+            mut rows,
+            mut wrapped,
+            mut blinking,
+            blank,
+        } = kept.unwrap_or_else(|| Grid::blank(columns, row_count));
+        // Rows and markers the update leaves alone keep their arrays. The first change copies
+        // an array the renderer still holds, so its screen stays as it was.
         if let Some(shift) = update.shift {
             shift
-                .apply(&mut rows, || Arc::clone(&blank))
+                .apply(Arc::make_mut(&mut rows), || Arc::clone(&blank))
                 .ok_or(UpdateError::Malformed)?;
             shift
-                .apply(&mut wrapped, || false)
+                .apply(Arc::make_mut(&mut wrapped), || false)
                 .ok_or(UpdateError::Malformed)?;
             shift
                 .apply(&mut blinking, || false)
@@ -162,30 +173,20 @@ impl ScreenDecoder {
             if index >= row_count {
                 return Err(UpdateError::Malformed);
             }
-            let decoded = self.row(row, columns)?;
+            let decoded = decode_row(row, columns, &self.styles, &self.links, &mut self.cells)?;
             blinking[index] = decoded
                 .iter()
                 .any(|cell| cell.blinking && !cell.invisible && !cell.spacer_tail);
-            rows[index] = decoded;
-            wrapped[index] = row.wrapped;
+            Arc::make_mut(&mut rows)[index] = decoded;
+            if wrapped[index] != row.wrapped {
+                Arc::make_mut(&mut wrapped)[index] = row.wrapped;
+            }
         }
         if let Some(position) = update.cursor.position
             && (position.row >= geometry.rows || position.column >= geometry.columns)
         {
             return Err(UpdateError::Malformed);
         }
-        let graphics = match update.graphics {
-            Some(graphics) => Some(graphics),
-            None => previous
-                .as_ref()
-                .and_then(|previous| previous.graphics.clone()),
-        };
-        let (rows, wrapped) =
-            match kept.filter(|_| update.shift.is_none() && update.rows.is_empty()) {
-                // Nothing moved or changed, so the renderer sees the same row list.
-                Some(kept) => (Arc::clone(&kept.rows), Arc::clone(&kept.wrapped)),
-                None => (Arc::from(rows), Arc::from(wrapped)),
-            };
         self.screen = Some(DecodedScreen {
             geometry,
             modes,
@@ -203,9 +204,26 @@ impl ScreenDecoder {
         self.frame = Some(frame);
         Ok(())
     }
+}
 
-    fn row(&self, row: &Row, columns: usize) -> Result<RowSnapshot, UpdateError> {
-        decode_row(row, columns, &self.styles, &self.links)
+/// The rows of a frame and what the decoder tracks for each.
+struct Grid {
+    rows: Arc<[RowSnapshot]>,
+    wrapped: Arc<[bool]>,
+    blinking: Vec<bool>,
+    /// The row that fills rows a scroll vacates.
+    blank: RowSnapshot,
+}
+
+impl Grid {
+    fn blank(columns: usize, rows: usize) -> Self {
+        let blank: RowSnapshot = Arc::from(vec![blank_cell(); columns]);
+        Self {
+            rows: vec![Arc::clone(&blank); rows].into(),
+            wrapped: vec![false; rows].into(),
+            blinking: vec![false; rows],
+            blank,
+        }
     }
 }
 
@@ -231,6 +249,7 @@ pub(super) fn decode_page(
             )
         })
         .collect();
+    let mut cells = Vec::new();
     page.rows
         .iter()
         .enumerate()
@@ -239,7 +258,7 @@ pub(super) fn decode_page(
                 return Err(UpdateError::Malformed);
             }
             Ok((
-                decode_row(row, usize::from(columns), &styles, &links)?,
+                decode_row(row, usize::from(columns), &styles, &links, &mut cells)?,
                 row.wrapped,
             ))
         })
@@ -251,14 +270,17 @@ fn required<T>(value: Option<T>, previous: Option<T>) -> Result<T, UpdateError> 
     value.or(previous).ok_or(UpdateError::Malformed)
 }
 
+/// Decodes `row` through `cells`, which only holds cells while it runs.
 fn decode_row(
     row: &Row,
     columns: usize,
     styles: &HashMap<u16, CellSnapshot>,
     links: &HashMap<u16, Option<Arc<HyperlinkTarget>>>,
+    cells: &mut Vec<CellSnapshot>,
 ) -> Result<RowSnapshot, UpdateError> {
     let default = blank_cell();
-    let mut cells = Vec::with_capacity(columns);
+    cells.clear();
+    cells.reserve(columns);
     for run in &row.runs {
         let inline;
         let template = match run.style {
@@ -280,12 +302,9 @@ fn decode_row(
             let spacer_tail = range.is_empty();
             cells.push(CellSnapshot {
                 text: if spacer_tail {
-                    " ".to_owned()
+                    CellText::new_inline(" ")
                 } else {
-                    run.text
-                        .get(range)
-                        .ok_or(UpdateError::Malformed)?
-                        .to_owned()
+                    CellText::new(run.text.get(range).ok_or(UpdateError::Malformed)?)
                 },
                 spacer_tail,
                 hyperlink: link.clone(),
@@ -294,7 +313,8 @@ fn decode_row(
         }
     }
     cells.resize(columns, default);
-    Ok(Arc::from(cells))
+    // The row's only allocation: the drain has an exact length.
+    Ok(cells.drain(..).collect())
 }
 
 fn blank_cell() -> CellSnapshot {
@@ -305,7 +325,7 @@ fn blank_cell() -> CellSnapshot {
 fn template(style: &Style) -> CellSnapshot {
     let flag = |flag: u16| style.flags & flag != 0;
     CellSnapshot {
-        text: " ".to_owned(),
+        text: CellText::new_inline(" "),
         foreground_source: color(style.foreground),
         background_source: color(style.background),
         inverse: flag(flags::INVERSE),
@@ -380,20 +400,134 @@ impl DecodedScreen {
             .map(|row| row.iter().map(|cell| cell.text.as_str()).collect())
             .collect()
     }
+}
 
-    /// The screen the renderer draws, with the client's own colors wherever the program did not
-    /// override them. Graphics and Pane metadata are left to the caller.
+/// Turns decoded frames into the screens the renderer draws, with the client's own colors
+/// wherever the program did not override them. It keeps the client's default screen and the
+/// projected palette until their inputs change, so consecutive screens share them.
+#[derive(Default)]
+pub(super) struct Presenter {
+    /// Where the Pane's metadata comes from, when it is not this machine.
+    metadata: Option<super::super::metadata::TerminalMetadataContext>,
+    defaults: Option<Defaults>,
+    palette: Option<Palette>,
+}
+
+/// The screen every snapshot starts from, for one appearance.
+struct Defaults {
+    appearance: TerminalAppearanceUpdate,
+    screen: ScreenSnapshot,
+}
+
+/// The palette the renderer draws, projected from the program's palette and an appearance.
+struct Palette {
+    program: Vec<[u8; 3]>,
+    overrides: [u64; 4],
+    appearance: Arc<crate::appearance::ResolvedTerminalAppearance>,
+    colors: Arc<[crate::appearance::Color; 256]>,
+    overridden: Arc<[bool; 256]>,
+}
+
+impl Presenter {
+    pub(super) fn new(
+        remote_metadata: Option<&super::super::metadata::RemoteTerminalMetadataContext>,
+    ) -> Self {
+        Self {
+            metadata: remote_metadata.map(|context| {
+                super::super::metadata::TerminalMetadataContext::Remote(context.clone())
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// The screen the renderer draws for `decoded`. Graphics are left to the caller.
     pub(super) fn snapshot(
-        &self,
+        &mut self,
+        decoded: &DecodedScreen,
         generation: PresentationGeneration,
         appearance: &TerminalAppearanceUpdate,
     ) -> ScreenSnapshot {
         let configured = &appearance.appearance.colors;
-        let mut screen = (*ScreenSnapshot::empty_with_appearance(
-            crate::local_path::LocalPathSemantics::Posix,
-            appearance,
-        ))
-        .clone();
+        let mut screen = self.defaults(appearance).clone();
+        let (palette, palette_overrides) = self.palette(&decoded.colors, appearance);
+        screen.colors.palette = palette;
+        screen.colors.palette_overrides = palette_overrides;
+        decoded.present(&mut screen, generation, configured);
+        screen
+    }
+
+    fn defaults(&mut self, appearance: &TerminalAppearanceUpdate) -> &ScreenSnapshot {
+        let current = self.defaults.as_ref().is_some_and(|defaults| {
+            defaults.appearance.generation == appearance.generation
+                && Arc::ptr_eq(&defaults.appearance.appearance, &appearance.appearance)
+        });
+        if !current {
+            let mut screen = (*ScreenSnapshot::empty_with_appearance(
+                crate::local_path::LocalPathSemantics::Posix,
+                appearance,
+            ))
+            .clone();
+            if let Some(context) = &self.metadata {
+                Arc::make_mut(&mut screen.metadata).context = context.clone();
+            }
+            self.defaults = Some(Defaults {
+                appearance: appearance.clone(),
+                screen,
+            });
+        }
+        &self
+            .defaults
+            .as_ref()
+            .expect("the defaults were just set")
+            .screen
+    }
+
+    fn palette(
+        &mut self,
+        colors: &Colors,
+        appearance: &TerminalAppearanceUpdate,
+    ) -> (Arc<[crate::appearance::Color; 256]>, Arc<[bool; 256]>) {
+        let current = self.palette.as_ref().filter(|palette| {
+            palette.overrides == colors.palette_overrides
+                && Arc::ptr_eq(&palette.appearance, &appearance.appearance)
+                && palette.program == colors.palette
+        });
+        if let Some(palette) = current {
+            return (Arc::clone(&palette.colors), Arc::clone(&palette.overridden));
+        }
+        let configured = &appearance.appearance.colors;
+        let overridden =
+            |index: usize| colors.palette_overrides[index / 64] & (1 << (index % 64)) != 0;
+        let mut projected = [crate::appearance::Color::BLACK; 256];
+        for (index, (destination, source)) in projected.iter_mut().zip(&colors.palette).enumerate()
+        {
+            *destination = match index {
+                0..8 if !overridden(index) => configured.normal[index],
+                8..16 if !overridden(index) => configured.bright[index - 8],
+                _ => rgb(*source),
+            };
+        }
+        let palette = Palette {
+            program: colors.palette.clone(),
+            overrides: colors.palette_overrides,
+            appearance: Arc::clone(&appearance.appearance),
+            colors: Arc::new(projected),
+            overridden: Arc::new(std::array::from_fn(overridden)),
+        };
+        let shared = (Arc::clone(&palette.colors), Arc::clone(&palette.overridden));
+        self.palette = Some(palette);
+        shared
+    }
+}
+
+impl DecodedScreen {
+    /// Writes this frame's state over the client's default `screen`.
+    fn present(
+        &self,
+        screen: &mut ScreenSnapshot,
+        generation: PresentationGeneration,
+        configured: &crate::appearance::TerminalColors,
+    ) {
         screen.generation = generation;
         if let Some((width, height)) = self.geometry.cell_pixels {
             screen.cell_pixels = (u32::from(width), u32::from(height));
@@ -433,18 +567,6 @@ impl DecodedScreen {
         } else {
             configured.background
         };
-        let overridden =
-            |index: usize| colors.palette_overrides[index / 64] & (1 << (index % 64)) != 0;
-        let mut palette = [crate::appearance::Color::BLACK; 256];
-        for (index, (destination, source)) in palette.iter_mut().zip(&colors.palette).enumerate() {
-            *destination = match index {
-                0..8 if !overridden(index) => configured.normal[index],
-                8..16 if !overridden(index) => configured.bright[index - 8],
-                _ => rgb(*source),
-            };
-        }
-        screen.colors.palette = Arc::new(palette);
-        screen.colors.palette_overrides = Arc::new(std::array::from_fn(overridden));
         screen.colors.reversed = self.modes.reversed;
         screen.background = screen.colors.effective_background();
         screen.active_screen = if self.modes.alternate_screen {
@@ -479,6 +601,5 @@ impl DecodedScreen {
             },
         };
         screen.text_blinking = self.blinking.contains(&true);
-        screen
     }
 }
