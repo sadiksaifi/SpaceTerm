@@ -12,8 +12,8 @@
 //! arrives after an input method consumed it going down. Keys going down reach a keystroke
 //! interceptor first, because a Shortcut's action runs before any element's own key listener.
 //! Input handlers report composition start through the same capture scope, before key release.
-//! Both listen only while a remembered choice is held. A command chosen from the menu bar reaches the window as an action with
-//! no input event, so the menu adapter reports it through [`crate::app::menu_command_chosen`].
+//! Both listen only while a remembered choice is held. A menu-bar command that activates another
+//! window settles the originating window's restore through [`crate::app::menu_command_chosen`].
 //! The window's own changes are not input, so they never settle anything.
 
 use gpui::{App, Context, Window};

@@ -963,10 +963,9 @@ fn listens(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> bo
     })
 }
 
-/// A command chosen from the menu bar reaches the window as an action with no key or press. The
-/// menu adapter reports it, so the remembered Workspace never replaces the person's choice.
+/// A menu command that leaves this window active does not replace the held Workspace choice.
 #[gpui::test]
-fn a_menu_bar_command_after_reopening_keeps_the_view_when_the_server_returns(
+fn a_menu_command_that_keeps_the_active_window_preserves_the_restore(
     cx: &mut TestAppContext,
 ) {
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
@@ -983,15 +982,19 @@ fn a_menu_bar_command_after_reopening_keeps_the_view_when_the_server_returns(
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     window.update(|window, _| window.activate_window());
     window.run_until_parked();
-    // Window > Next Tab, chosen with the pointer.
+    // A command such as Window > Zoom leaves this Workspace Window active.
     let origin = window.update(|window, _| window.window_handle());
-    cx.update(|cx| crate::app::menu_command_chosen(origin, cx));
+    cx.update(|cx| {
+        assert_eq!(cx.active_window(), Some(origin));
+        crate::app::menu_command_chosen(origin, cx);
+        assert_eq!(cx.active_window(), Some(origin));
+    });
     window.run_until_parked();
 
     offline.set_inventory(server_inventory(2, &[("Far", 5)]));
     offline.set_connected(true);
     sync(&manager, key, &mut window);
-    assert_eq!(active_name(&manager, &mut window), "Here");
+    assert_eq!(active_name(&manager, &mut window), "Far");
 }
 
 #[gpui::test]

@@ -342,10 +342,12 @@ pub(crate) fn init(
     Ok(())
 }
 
-/// The person chose a menu-bar command in `origin`. Its action may have activated another window
-/// since, so the originating Workspace Window takes it as the person's input.
+/// A menu-bar command that activated another window settles its originating Workspace Window's
+/// held restore. A command that keeps the same window active leaves the restore held.
 pub(crate) fn menu_command_chosen(origin: gpui::AnyWindowHandle, cx: &mut App) {
-    if let Some(window) = origin.downcast::<WorkspaceManager>() {
+    if open_active_window(cx).is_some_and(|active| active != origin)
+        && let Some(window) = origin.downcast::<WorkspaceManager>()
+    {
         let _ = window.update(cx, |manager, _, cx| manager.person_input(cx));
     }
 }
