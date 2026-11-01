@@ -112,14 +112,10 @@ fn git(
         .ok_or(Error::Unavailable)?;
     let home = std::fs::canonicalize(home).map_err(|_| Error::Unavailable)?;
     let runner: Arc<dyn RepositoryProgramRunner> = Arc::new(WriteRunner(lock));
-    let (status, _) = crate::repository_status::tool_check::check_tools(
+    let status = crate::repository_status::tool_check::check_git(
         runner.as_ref(),
-        &crate::repository_status::ToolInventory {
-            git: tools.git.clone(),
-            github_cli: None,
-        },
+        tools.git.as_deref(),
         &home,
-        &[],
         Instant::now() + Duration::from_secs(5),
         token,
     );

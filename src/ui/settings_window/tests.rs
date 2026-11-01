@@ -4254,7 +4254,7 @@ fn git_switches_save_reset_and_hiding_repository_status_locks_pull_requests(
 fn the_github_cli_row_follows_this_computer_and_the_git_row_only_its_server(
     cx: &mut TestAppContext,
 ) {
-    use crate::repository_status::{GitHubCliStatus, GitToolStatus, ToolVersion};
+    use crate::repository_status::GitHubCliStatus;
     use crate::ui::repository_status_store::RepositoryTools;
 
     let (_window, _harness, cx) = open_settings(cx);
@@ -4267,11 +4267,6 @@ fn the_github_cli_row_follows_this_computer_and_the_git_row_only_its_server(
 
     cx.update(|_, cx| {
         cx.set_global(RepositoryTools {
-            git: GitToolStatus::Ready(ToolVersion {
-                major: 2,
-                minor: 47,
-                patch: 0,
-            }),
             github_cli: GitHubCliStatus::SignedOut,
         });
     });

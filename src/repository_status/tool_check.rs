@@ -1,4 +1,4 @@
-//! The readiness check behind the Git Settings Section.
+//! Server Git readiness and client GitHub CLI login checks.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -9,7 +9,6 @@ use super::pull_request::github_cli_environment;
 use super::tools::{git_tool_status, parse_git_version};
 use super::{
     GitHubCliStatus, GitToolStatus, ProgramError, ProgramRequest, RepositoryProgramRunner,
-    ToolInventory,
 };
 use crate::cancellation::CancellationToken;
 
@@ -20,88 +19,85 @@ const AUTH_STATUS_JSON_ARGUMENTS: [&str; 4] = ["auth", "status", "--json", "host
 /// signed in.
 const AUTH_STATUS_ARGUMENTS: [&str; 2] = ["auth", "status"];
 
-/// Runs `git --version` and `gh auth status` once each. Blocking.
-///
-/// Git that cannot be run or reports no version counts as not found. The GitHub CLI is signed in
-/// when any host, such as github.com or a GitHub Enterprise Server, has an active working login.
-pub(crate) fn check_tools(
+/// Checks the Git the owning SpaceTerm Server uses. Blocking.
+/// Git that cannot be run or reports no version counts as not found.
+pub(crate) fn check_git(
     runner: &dyn RepositoryProgramRunner,
-    inventory: &ToolInventory,
+    git: Option<&Path>,
+    home: &Path,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+) -> GitToolStatus {
+    git.map_or(GitToolStatus::NotFound, |git| {
+        let request = ProgramRequest {
+            executable: git.to_path_buf(),
+            arguments: vec!["--version".into()],
+            directory: home.to_path_buf(),
+            environment: git_environment(git, home),
+            stdout_limit: Some(TOOL_CHECK_OUTPUT_LIMIT),
+            deadline: Some(deadline),
+            keep_process_group_on_exit: false,
+        };
+        let mut output = Vec::new();
+        match runner.run(
+            &request,
+            &mut |chunk| output.extend_from_slice(chunk),
+            cancellation,
+        ) {
+            Ok(exit) if exit.success() => {
+                parse_git_version(&output).map_or(GitToolStatus::NotFound, git_tool_status)
+            }
+            _ => GitToolStatus::NotFound,
+        }
+    })
+}
+
+/// Checks this SpaceTerm Client's GitHub CLI login. Blocking.
+/// Any active working login, including a GitHub Enterprise Server, counts as signed in.
+pub(crate) fn check_github_cli(
+    runner: &dyn RepositoryProgramRunner,
+    github_cli: Option<&Path>,
     home: &Path,
     github_cli_passthrough: &[(OsString, OsString)],
     deadline: Instant,
     cancellation: &CancellationToken,
-) -> (GitToolStatus, GitHubCliStatus) {
-    let git = inventory
-        .git
-        .as_deref()
-        .map_or(GitToolStatus::NotFound, |git| {
+) -> GitHubCliStatus {
+    github_cli.map_or(GitHubCliStatus::NotFound, |github_cli| {
+        let run = |arguments: &[&str], output: &mut Vec<u8>| {
             let request = ProgramRequest {
-                executable: git.to_path_buf(),
-                arguments: vec!["--version".into()],
+                executable: github_cli.to_path_buf(),
+                arguments: arguments.iter().map(OsString::from).collect(),
                 directory: home.to_path_buf(),
-                environment: git_environment(git, home),
+                environment: github_cli_environment(github_cli, home, github_cli_passthrough),
                 stdout_limit: Some(TOOL_CHECK_OUTPUT_LIMIT),
                 deadline: Some(deadline),
                 keep_process_group_on_exit: false,
             };
-            let mut output = Vec::new();
-            match runner.run(
+            runner.run(
                 &request,
                 &mut |chunk| output.extend_from_slice(chunk),
                 cancellation,
-            ) {
-                Ok(exit) if exit.success() => {
-                    parse_git_version(&output).map_or(GitToolStatus::NotFound, git_tool_status)
-                }
-                _ => GitToolStatus::NotFound,
-            }
-        });
-    let github_cli =
-        inventory
-            .github_cli
-            .as_deref()
-            .map_or(GitHubCliStatus::NotFound, |github_cli| {
-                let run = |arguments: &[&str], output: &mut Vec<u8>| {
-                    let request = ProgramRequest {
-                        executable: github_cli.to_path_buf(),
-                        arguments: arguments.iter().map(OsString::from).collect(),
-                        directory: home.to_path_buf(),
-                        environment: github_cli_environment(
-                            github_cli,
-                            home,
-                            github_cli_passthrough,
-                        ),
-                        stdout_limit: Some(TOOL_CHECK_OUTPUT_LIMIT),
-                        deadline: Some(deadline),
-                        keep_process_group_on_exit: false,
-                    };
-                    runner.run(
-                        &request,
-                        &mut |chunk| output.extend_from_slice(chunk),
-                        cancellation,
-                    )
+            )
+        };
+        let mut output = Vec::new();
+        match run(&AUTH_STATUS_JSON_ARGUMENTS, &mut output) {
+            Ok(exit) if exit.success() => {
+                return match any_host_signed_in(&output) {
+                    Some(true) => GitHubCliStatus::SignedIn,
+                    Some(false) => GitHubCliStatus::SignedOut,
+                    None => GitHubCliStatus::Unavailable,
                 };
-                let mut output = Vec::new();
-                match run(&AUTH_STATUS_JSON_ARGUMENTS, &mut output) {
-                    Ok(exit) if exit.success() => {
-                        return match any_host_signed_in(&output) {
-                            Some(true) => GitHubCliStatus::SignedIn,
-                            Some(false) => GitHubCliStatus::SignedOut,
-                            None => GitHubCliStatus::Unavailable,
-                        };
-                    }
-                    Ok(_) => {}
-                    Err(error) => return github_cli_error(error),
-                }
-                // A GitHub CLI without `--json` exits with an error; ask it the older way.
-                match run(&AUTH_STATUS_ARGUMENTS, &mut Vec::new()) {
-                    Ok(exit) if exit.success() => GitHubCliStatus::SignedIn,
-                    Ok(_) => GitHubCliStatus::SignedOut,
-                    Err(error) => github_cli_error(error),
-                }
-            });
-    (git, github_cli)
+            }
+            Ok(_) => {}
+            Err(error) => return github_cli_error(error),
+        }
+        // A GitHub CLI without `--json` exits with an error; ask it the older way.
+        match run(&AUTH_STATUS_ARGUMENTS, &mut Vec::new()) {
+            Ok(exit) if exit.success() => GitHubCliStatus::SignedIn,
+            Ok(_) => GitHubCliStatus::SignedOut,
+            Err(error) => github_cli_error(error),
+        }
+    })
 }
 
 fn github_cli_error(error: ProgramError) -> GitHubCliStatus {
@@ -142,7 +138,34 @@ mod tests {
 
     use super::*;
     use crate::repository_status::testing::{FakeResponse, FakeRunner, exit};
-    use crate::repository_status::{MINIMUM_GIT_VERSION, ToolVersion};
+    use crate::repository_status::{MINIMUM_GIT_VERSION, ToolInventory, ToolVersion};
+
+    fn check_tools(
+        runner: &dyn RepositoryProgramRunner,
+        inventory: &ToolInventory,
+        home: &Path,
+        passthrough: &[(OsString, OsString)],
+        deadline: Instant,
+        cancellation: &CancellationToken,
+    ) -> (GitToolStatus, GitHubCliStatus) {
+        (
+            check_git(
+                runner,
+                inventory.git.as_deref(),
+                home,
+                deadline,
+                cancellation,
+            ),
+            check_github_cli(
+                runner,
+                inventory.github_cli.as_deref(),
+                home,
+                passthrough,
+                deadline,
+                cancellation,
+            ),
+        )
+    }
 
     const GIT: &str = "/tools/git/bin/git";
     const GH: &str = "/tools/gh/bin/gh";

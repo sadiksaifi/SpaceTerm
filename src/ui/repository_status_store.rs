@@ -15,9 +15,9 @@ use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global};
 use crate::cancellation::CancellationToken;
 use crate::repository_status::pull_request::PullRequestQuery;
 use crate::repository_status::pull_request_lookup::{GitHubCliLookup, GitHubHosts};
-use crate::repository_status::tool_check::check_tools;
+use crate::repository_status::tool_check::check_github_cli;
 use crate::repository_status::{
-    GitHubCliStatus, GitToolStatus, PullRequest, PullRequestError, RepositoryProgramRunner,
+    GitHubCliStatus, PullRequest, PullRequestError, RepositoryProgramRunner,
     RepositoryStatusPreferences, RepositoryToolDiscovery,
 };
 use crate::settings::Settings;
@@ -25,7 +25,6 @@ use crate::settings::Settings;
 /// What SpaceTerm last learned about the programs Repository Status runs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RepositoryTools {
-    pub(crate) git: GitToolStatus,
     pub(crate) github_cli: GitHubCliStatus,
 }
 
@@ -185,10 +184,9 @@ impl RepositoryStatusStore {
             .try_global::<RepositoryTools>()
             .copied()
             .unwrap_or_default();
-        let git_missing = !matches!(tools.git, GitToolStatus::Ready(_));
         let github_cli_missing = self.preferences.pull_requests_enabled()
             && tools.github_cli != GitHubCliStatus::SignedIn;
-        if self.tools.checked && (git_missing || github_cli_missing) {
+        if self.tools.checked && github_cli_missing {
             self.check_tools(cx);
         }
         self.lookup_server_pull_requests(cx);
@@ -357,19 +355,19 @@ impl RepositoryStatusStore {
         self.read(
             move || {
                 let inventory = adapters.discovery.discover();
-                let (git, github_cli) = check_tools(
+                let github_cli = check_github_cli(
                     adapters.runner.as_ref(),
-                    &inventory,
+                    inventory.github_cli.as_deref(),
                     &adapters.physical_home,
                     &adapters.github_cli_environment,
                     Instant::now() + TOOL_CHECK_TIMEOUT,
                     &cancellation,
                 );
-                (inventory, git, github_cli)
+                (inventory, github_cli)
             },
             |store, result, cx| {
-                let (inventory, git, github_cli) = result.unwrap_or_default();
-                store.tools_checked(inventory, git, github_cli, cx);
+                let (inventory, github_cli) = result.unwrap_or_default();
+                store.tools_checked(inventory, github_cli, cx);
             },
             cx,
         );
@@ -378,7 +376,6 @@ impl RepositoryStatusStore {
     fn tools_checked(
         &mut self,
         inventory: crate::repository_status::ToolInventory,
-        git: GitToolStatus,
         github_cli: GitHubCliStatus,
         cx: &mut Context<Self>,
     ) {
@@ -392,7 +389,7 @@ impl RepositoryStatusStore {
                 self.adapters.github_cli_environment.clone(),
             ))
         });
-        cx.set_global(RepositoryTools { git, github_cli });
+        cx.set_global(RepositoryTools { github_cli });
         // Server branches waiting for the first check, or for a login, are looked up now. A
         // check that changes nothing looks nothing up again.
         let was_enabled = self.server_pull_requests_enabled(self.server_github_cli);
@@ -438,8 +435,7 @@ mod server_pull_request_tests {
         GitHubRepository, ProgramError, ProgramExit, ProgramRequest, ToolInventory,
     };
 
-    /// A local GitHub CLI that is signed in and lists one Pull Request for any branch. Git is
-    /// absent, so nothing reads a repository here.
+    /// A local GitHub CLI that is signed in and lists one Pull Request for any branch.
     #[derive(Default)]
     struct LocalGitHubCli {
         requests: Mutex<Vec<ProgramRequest>>,
@@ -493,7 +489,7 @@ mod server_pull_request_tests {
     impl RepositoryToolDiscovery for Tools {
         fn discover(&self) -> ToolInventory {
             ToolInventory {
-                git: None,
+                git: Some("/usr/local/bin/git".into()),
                 github_cli: Some("/usr/local/bin/gh".into()),
             }
         }

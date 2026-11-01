@@ -547,16 +547,10 @@ fn discover_git(cancellation: &CancellationToken) -> (Option<PathBuf>, PathBuf, 
         .unwrap_or_else(|| PathBuf::from("/"));
     let home = std::fs::canonicalize(&home).unwrap_or(home);
     let runner: Arc<dyn RepositoryProgramRunner> = Arc::new(DeadlineRunner);
-    // Deliberately exclude the GitHub CLI: its authentication and lookup belong to each client.
-    let inventory = policy::ToolInventory {
-        git: tools.git.clone(),
-        github_cli: None,
-    };
-    let (status, _) = policy::tool_check::check_tools(
+    let status = policy::tool_check::check_git(
         runner.as_ref(),
-        &inventory,
+        tools.git.as_deref(),
         &home,
-        &[],
         Instant::now() + Duration::from_secs(5),
         cancellation,
     );
