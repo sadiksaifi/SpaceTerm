@@ -224,7 +224,7 @@ impl OwnedPane {
     /// Drains the Terminal Session for the controlling channel. Client effects are released
     /// only under a focus generation the client sent.
     pub(super) fn observe(&mut self) -> Observation {
-        // The Terminal Session drops demand it receives before its first subscriber, so each
+        // The Terminal Session drops demand it receives before its subscription, so each
         // observation asks again; a request the session already holds costs one lock.
         self.request_semantics();
         self.drain();

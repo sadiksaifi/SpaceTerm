@@ -1023,6 +1023,76 @@ fn a_start_after_an_end_rebuilds_an_idle_panes_complete_document() {
     host.shutdown().unwrap();
 }
 
+/// A Terminal Session drops demand that reaches it before its subscription does: taking a
+/// subscription clears the request, and so does a screen published to a closed one. The
+/// subscription's own model still arrives, but later output reaches the Pane only because the
+/// Pane asks again when it observes the new subscription. Neither needs another client request.
+/// The worker is held while a closed subscription and the Pane's new one wait behind each other,
+/// as they do when a Terminal Session starts.
+#[test]
+fn demand_that_reaches_the_session_before_its_subscription_still_delivers_a_document() {
+    use std::sync::mpsc;
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    command(
+        &mut host,
+        1,
+        lease,
+        "stty -echo; printf 'subscribed-marker\\r\\n'",
+    );
+    idle(&mut host, lease);
+    let (entered, held) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let (notify, notified) = mpsc::channel();
+    let pane = host.pane.as_mut().unwrap();
+    pane.runtime.read_scrollback(
+        0,
+        0,
+        1,
+        crate::terminal::session::ScrollbackReply::new(move |_| {
+            let _ = entered.send(());
+            let _ = released.recv();
+        }),
+    );
+    held.recv_timeout(Duration::from_secs(10)).unwrap();
+    drop(pane.runtime.subscribe());
+    pane.subscription = pane.runtime.subscribe_notifying(Some(Arc::new(move || {
+        let _ = notify.send(());
+    })));
+    assert!(matches!(demand(&mut host, lease), Reply::Unchanged));
+    release.send(()).unwrap();
+
+    // Every observation follows a notification from the Terminal Session.
+    let mut next = |host: &mut ServerPaneHost, marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            notified
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no document with {marker}"));
+            let Observed::Live(observation) = host.observe([1; 32], &lease) else {
+                panic!("the Pane is live");
+            };
+            if let Some(model) = observation.accessibility {
+                let mut client = Client::default();
+                client.revision(encode(&model, None));
+                if client.line(marker).is_some() {
+                    return;
+                }
+            }
+        }
+    };
+    next(&mut host, "subscribed-marker");
+    command(
+        &mut host,
+        1,
+        lease,
+        "printf 'after-subscription-marker\\r\\n'",
+    );
+    next(&mut host, "after-subscription-marker");
+    host.shutdown().unwrap();
+}
+
 #[test]
 fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions() {
     let mut host = host();
