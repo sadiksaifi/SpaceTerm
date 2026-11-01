@@ -1,7 +1,7 @@
 {
   "environment": {
     "checkout_clean": true,
-    "commit": "91bdb8f6a7793cbd7d49a8e3f95105cd822ce00b",
+    "commit": "f041f73984f204aa01d73e0256d319625345e817",
     "cpus": 11,
     "hardware": "Apple M3 Pro",
     "host": "macbook-pro-personal",
@@ -9,7 +9,7 @@
     "jailed": false,
     "memory_bytes": 19327352832,
     "system": "macOS 26.6.2",
-    "time": "2026-11-01T22:15:09+0530"
+    "time": "2026-11-01T23:08:19+0530"
   },
   "settings": {
     "columns": 120,
@@ -20,64 +20,64 @@
   },
   "summary": {
     "cat/accessibility": {
-      "after_footprint_bytes": 117523032,
-      "bytes_sent": 28294941,
-      "cpu_s": 3.353487874999985,
-      "peak_footprint_bytes": 145588896
+      "after_footprint_bytes": 86688320,
+      "bytes_sent": 28371468,
+      "cpu_s": 3.2605728750000083,
+      "peak_footprint_bytes": 87097920
     },
     "cat/plain": {
-      "after_footprint_bytes": 16220640,
-      "bytes_sent": 8808,
-      "cpu_s": 2.1753552916666763,
-      "peak_footprint_bytes": 16695776
+      "after_footprint_bytes": 16204256,
+      "bytes_sent": 10599,
+      "cpu_s": 2.180075291666668,
+      "peak_footprint_bytes": 16679392
     },
     "partial/accessibility": {
-      "after_footprint_bytes": 26837664,
-      "bytes_sent": 1992040,
-      "cpu_s": 0.6754616666666777,
-      "peak_footprint_bytes": 67666592
+      "after_footprint_bytes": 24035928,
+      "bytes_sent": 1998906,
+      "cpu_s": 0.674126583333333,
+      "peak_footprint_bytes": 63701592
     },
     "partial/plain": {
-      "after_footprint_bytes": 6259168,
-      "bytes_sent": 165001,
-      "cpu_s": 0.4684235000000001,
-      "peak_footprint_bytes": 6259168
+      "after_footprint_bytes": 6357472,
+      "bytes_sent": 168092,
+      "cpu_s": 0.4843889583333265,
+      "peak_footprint_bytes": 6357472
     },
     "scroll/accessibility": {
-      "after_footprint_bytes": 109265568,
-      "bytes_sent": 115735340,
-      "cpu_s": 4.448289375000002,
-      "peak_footprint_bytes": 109675168
+      "after_footprint_bytes": 105267800,
+      "bytes_sent": 116619458,
+      "cpu_s": 4.083217916666683,
+      "peak_footprint_bytes": 105677400
     },
     "scroll/plain": {
-      "after_footprint_bytes": 16089568,
-      "bytes_sent": 1137633,
-      "cpu_s": 2.1109554583333363,
-      "peak_footprint_bytes": 16499168
+      "after_footprint_bytes": 16171488,
+      "bytes_sent": 1140469,
+      "cpu_s": 2.158832458333336,
+      "peak_footprint_bytes": 16581088
     },
     "vim/accessibility": {
-      "after_footprint_bytes": 27345568,
-      "bytes_sent": 13604489,
-      "cpu_s": 2.761145499999998,
-      "peak_footprint_bytes": 27378336
+      "after_footprint_bytes": 14369368,
+      "bytes_sent": 13336114,
+      "cpu_s": 2.7198551666666617,
+      "peak_footprint_bytes": 14402136
     },
     "vim/plain": {
-      "after_footprint_bytes": 6586848,
-      "bytes_sent": 1596800,
-      "cpu_s": 2.21860241666667,
-      "peak_footprint_bytes": 6586848
+      "after_footprint_bytes": 7045600,
+      "bytes_sent": 1709190,
+      "cpu_s": 2.251536625,
+      "peak_footprint_bytes": 7045600
     },
     "yes/accessibility": {
-      "after_footprint_bytes": 32358952,
-      "bytes_sent": 5128216,
-      "cpu_s": 19.29487916666666,
-      "peak_footprint_bytes": 37339688
+      "after_footprint_bytes": 30704144,
+      "bytes_sent": 5127834,
+      "cpu_s": 19.045274708333338,
+      "peak_footprint_bytes": 32981520
     },
     "yes/plain": {
-      "after_footprint_bytes": 16089568,
-      "bytes_sent": 28641,
-      "cpu_s": 25.150683708333332,
-      "peak_footprint_bytes": 16531936
+      "after_footprint_bytes": 16007648,
+      "bytes_sent": 30193,
+      "cpu_s": 25.14664725,
+      "peak_footprint_bytes": 16482784
     }
   }
 }
