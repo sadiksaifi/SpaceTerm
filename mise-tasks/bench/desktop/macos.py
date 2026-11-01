@@ -228,20 +228,32 @@ class Desktop:
     def has_server(self):
         return self.app.installations.exists()
 
-    def service(self, action):
-        """Runs `spaceterm server ACTION`, confirming the preview it may return."""
-        command = [self.cli(), "--json", "--no-input", "server", action]
+    def confirmed(self, *arguments):
+        """Runs a `spaceterm` command, confirming the preview it may return. Returns the exit
+        status and the error code of the final attempt."""
+        command = [self.cli(), "--json", "--no-input", *arguments]
         result = subprocess.run(command, capture_output=True, text=True)
         envelope = json.loads(result.stdout) if result.stdout.strip() else {}
         if result.returncode == 3:
             token = envelope["data"]["confirmation"]["token"]
             result = subprocess.run(command + ["--confirm", token], capture_output=True, text=True)
             envelope = json.loads(result.stdout) if result.stdout.strip() else {}
-        code = (envelope.get("error") or {}).get("code")
-        if result.returncode and not (action == "stop" and code == "stopped"):
-            raise TaskError(f"server {action} failed ({code or result.returncode})")
+        return result.returncode, (envelope.get("error") or {}).get("code")
+
+    def service(self, action):
+        """Runs `spaceterm server ACTION`."""
+        status, code = self.confirmed("server", action)
+        if status and not (action == "stop" and code == "stopped"):
+            raise TaskError(f"server {action} failed ({code or status})")
         if action == "stop":
             wait_until(lambda: not self.pids("server"), 30, "the server did not stop")
+
+    def close_pane(self, pane):
+        """Closes Pane `pane` through the CLI, and its Workspace when it is the last Pane there,
+        which the desktop would only do after a confirmation dialog."""
+        status, code = self.confirmed("--server", "local", "pane", "close", "--pane", f"id:{pane}")
+        if status:
+            raise TaskError(f"spaceterm pane close failed ({code or status})")
 
     # Window and focus
 
@@ -577,14 +589,6 @@ class Bench:
         if desktop.pids("server"):
             self.observe("S4", "client-quit", self.args.idle_seconds)
 
-    def close_panes(self, count):
-        """Closes the focused Pane until `count` shells remain."""
-        desktop = self.desktop
-        while desktop.shells() > count:
-            remaining = desktop.shells()
-            desktop.input.key("w", "command")
-            wait_until(lambda: desktop.shells() < remaining, 10, "a Pane did not close")
-
     def s5(self):
         """Twelve idle Panes: two splits here, then three new Workspaces with two splits each.
 
@@ -596,21 +600,24 @@ class Bench:
         desktop = self.desktop
         desktop.ready()
         base = desktop.shells()
+        created = []
         for workspace in range(4):
             if workspace:
                 desktop.input.key("n", "command")
                 desktop.wait_shells(base + 3 * workspace)
                 self.clock.sleep(0.3)
-                desktop.focused(f"S5 Workspace {workspace + 1}")
+                created.append(desktop.focused(f"S5 Workspace {workspace + 1}"))
             desktop.input.key("d", "command")
             desktop.wait_shells(base + 3 * workspace + 1)
-            desktop.focused(f"S5 Workspace {workspace + 1} split 1")
+            created.append(desktop.focused(f"S5 Workspace {workspace + 1} split 1"))
             desktop.input.key("d", "command", "shift")
             desktop.wait_shells(base + 3 * workspace + 2)
-            desktop.focused(f"S5 Workspace {workspace + 1} split 2")
+            created.append(desktop.focused(f"S5 Workspace {workspace + 1} split 2"))
         self.clock.sleep(10)
         self.observe("S5", "idle-panes", self.args.idle_seconds)
-        self.close_panes(base)
+        for pane in reversed(created):
+            desktop.close_pane(pane)
+        desktop.wait_shells(base)
 
     def s6(self):
         self.desktop.ready()
@@ -783,6 +790,8 @@ def run(args):
         with screen_lock():
             for state in states:
                 desktop = Desktop(app, keyboard, jobs, state == "on")
+                # Saved with every observation, so a failed run keeps the reads made so far.
+                results.setdefault("accessibility_reads", {})[state] = desktop.reads
                 bench = Bench(desktop, args, path, results)
                 # A fresh client starts each state, so Accessibility from an earlier read is off.
                 desktop.restart()
@@ -790,7 +799,6 @@ def run(args):
                     for repeat in range(1, args.runs + 1):
                         bench.run = repeat
                         getattr(bench, scenario.lower())()
-                results.setdefault("accessibility_reads", {})[state] = desktop.reads
                 write_json(path, results)
     finally:
         keyboard.close()

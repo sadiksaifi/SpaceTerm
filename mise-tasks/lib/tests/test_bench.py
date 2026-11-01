@@ -554,9 +554,17 @@ class FakeApp:
             self.window = "closed"
         self.changed()
 
-    def close(self):
+    def close(self, pane=None):
+        pane = pane or self.focus
+        location = next(
+            (index, number)
+            for index, workspace in enumerate(self.workspaces)
+            for number, tab in enumerate(workspace)
+            if pane in tab
+        )
+        self.workspace, self.tabs[location[0]] = location
         tab = self.tab()
-        tab.remove(self.focus)
+        tab.remove(pane)
         workspace = self.workspaces[self.workspace]
         if not tab:
             workspace.remove(tab)
@@ -675,6 +683,10 @@ def fake_desktop(task, app, accessibility, clock):
 
         def resize(self, width, height):
             pass
+
+        def close_pane(self, pane):
+            app.close(pane)
+            app.changed()
 
         def retained_rows(self, pane):
             app.rows_asked = pane
