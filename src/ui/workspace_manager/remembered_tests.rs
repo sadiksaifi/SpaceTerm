@@ -965,9 +965,7 @@ fn listens(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> bo
 
 /// A menu command that leaves this window active does not replace the held Workspace choice.
 #[gpui::test]
-fn a_menu_command_that_keeps_the_active_window_preserves_the_restore(
-    cx: &mut TestAppContext,
-) {
+fn a_menu_command_that_keeps_the_active_window_preserves_the_restore(cx: &mut TestAppContext) {
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
 
     let (manager, mut window) = open_window(cx);
@@ -1001,6 +999,44 @@ fn a_menu_command_that_keeps_the_active_window_preserves_the_restore(
 fn a_menu_command_that_activates_settings_cancels_the_originating_windows_restore(
     cx: &mut TestAppContext,
 ) {
+    let origin = std::cell::Cell::new(None);
+    menu_command_activates_settings(
+        cx,
+        |cx| origin.set(cx.active_window()),
+        |cx| crate::app::menu_command_chosen(origin.get().expect("the origin is active"), cx),
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_native_menu_command_captures_the_workspace_before_settings_activates(cx: &mut TestAppContext) {
+    let notifications = std::cell::RefCell::new(Vec::new());
+    let _observers = crate::platform::macos_application_menu::observe_menu_commands(
+        |name, callback| notifications.borrow_mut().push((name, callback)),
+        |cx: &mut gpui::App| cx.active_window(),
+        crate::app::menu_command_chosen,
+    );
+    // Drive the production registrations through the native notification boundary. Neither
+    // callback receives a window from the test; capture must query the active window itself.
+    let notify = |name, cx: &mut gpui::App| {
+        for (registered, callback) in notifications.borrow().iter() {
+            if *registered == name {
+                callback(cx);
+            }
+        }
+    };
+    menu_command_activates_settings(
+        cx,
+        |cx| notify("NSMenuWillSendActionNotification", cx),
+        |cx| notify("NSMenuDidSendActionNotification", cx),
+    );
+}
+
+fn menu_command_activates_settings(
+    cx: &mut TestAppContext,
+    before: impl FnOnce(&mut gpui::App),
+    after: impl FnOnce(&mut gpui::App),
+) {
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
     let (manager, mut window) = open_window(cx);
     present(
@@ -1014,7 +1050,7 @@ fn a_menu_command_that_activates_settings_cancels_the_originating_windows_restor
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     window.update(|window, _| window.activate_window());
     window.run_until_parked();
-    let origin = window.update(|window, _| window.window_handle());
+    cx.update(before);
     cx.update(|cx| {
         use crate::platform::window_movement::WindowMovementFactory;
         use crate::platform::window_movement::{
@@ -1059,7 +1095,7 @@ fn a_menu_command_that_activates_settings_cancels_the_originating_windows_restor
                 .downcast::<WorkspaceManager>()
                 .is_none()
         );
-        crate::app::menu_command_chosen(origin, cx);
+        after(cx);
     });
 
     offline.set_inventory(server_inventory(2, &[("Far", 5)]));

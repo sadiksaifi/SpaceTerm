@@ -456,6 +456,33 @@ fn native_menu_shortcuts(menus: &[Menu], keymap: &Keymap) -> Vec<NativeMenuShort
     keys
 }
 
+pub(crate) type MenuActionCallback<C> = std::rc::Rc<dyn Fn(&mut C)>;
+
+/// Registers origin capture and delivery at AppKit's action boundaries. The host supplies its
+/// notification registry and active-window lookup, so both callbacks share the same captured origin.
+pub(crate) fn observe_menu_commands<C: 'static, W: 'static, T>(
+    mut observe: impl FnMut(&'static str, MenuActionCallback<C>) -> T,
+    active_window: impl Fn(&mut C) -> Option<W> + 'static,
+    chosen: impl Fn(W, &mut C) + 'static,
+) -> [T; 2] {
+    let origin = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let capture = std::rc::Rc::clone(&origin);
+    let before = observe(
+        "NSMenuWillSendActionNotification",
+        std::rc::Rc::new(move |cx| *capture.borrow_mut() = active_window(cx)),
+    );
+    let after = observe(
+        "NSMenuDidSendActionNotification",
+        std::rc::Rc::new(move |cx| {
+            let origin = origin.borrow_mut().take();
+            if let Some(origin) = origin {
+                chosen(origin, cx);
+            }
+        }),
+    );
+    [before, after]
+}
+
 #[cfg(not(test))]
 mod native {
     use objc2::runtime::AnyObject;
@@ -477,20 +504,20 @@ mod native {
 
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
-    /// AppKit's notice that a menu item is about to send its action. Only the menu bar's commands count:
-    /// the status item's commands open or raise windows and control servers, and choose nothing
-    /// a window shows.
+    /// Keeps AppKit's before-action and after-action observers while the adapter lives.
     pub(crate) struct ChosenCommands {
         center: objc2::rc::Retained<objc2_foundation::NSNotificationCenter>,
-        observer: objc2::rc::Retained<
+        observers: [objc2::rc::Retained<
             objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>,
-        >,
+        >; 2],
     }
 
     impl Drop for ChosenCommands {
         fn drop(&mut self) {
-            // SAFETY: This is the observer token returned by this center during registration.
-            unsafe { self.center.removeObserver((*self.observer).as_ref()) };
+            for observer in &self.observers {
+                // SAFETY: This center returned each token during registration.
+                unsafe { self.center.removeObserver((**observer).as_ref()) };
+            }
         }
     }
 
@@ -500,21 +527,38 @@ mod native {
     ) -> Option<ChosenCommands> {
         let executor = cx.foreground_executor().clone();
         let app = cx.to_async();
-        let block = block2::RcBlock::new(
-            move |notification: std::ptr::NonNull<objc2_foundation::NSNotification>| {
-                // SAFETY: AppKit passes a live notification for the duration of this call.
-                let notification = unsafe { notification.as_ref() };
-                if !sent_from_menu_bar(notification) {
-                    return;
+        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+        let observers = super::observe_menu_commands(
+            |name, callback: super::MenuActionCallback<()>| {
+                let block = block2::RcBlock::new(
+                    move |notification: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                        // SAFETY: AppKit passes a live notification during this call.
+                        let notification = unsafe { notification.as_ref() };
+                        // Status-item commands do not choose anything a Workspace Window shows.
+                        if sent_from_menu_bar(notification) {
+                            callback(&mut ());
+                        }
+                    },
+                );
+                let name = NSString::from_str(name);
+                // SAFETY: AppKit posts these notifications on the main thread. The adapter
+                // removes each observer before dropping its main-thread-only callback.
+                unsafe {
+                    center.addObserverForName_object_queue_usingBlock(
+                        Some(&name),
+                        None,
+                        None,
+                        &block,
+                    )
                 }
-                let Some(mtm) = MainThreadMarker::new() else {
-                    return;
-                };
-                let Some(origin) = NSApplication::sharedApplication(mtm).keyWindow() else {
-                    return;
-                };
-                // Keep the native origin before the action changes the key window. GPUI may
-                // still be borrowed here, so resolve its handle after this native callback.
+            },
+            |_: &mut ()| {
+                let mtm = MainThreadMarker::new()?;
+                NSApplication::sharedApplication(mtm).keyWindow()
+            },
+            move |origin, _: &mut ()| {
+                // GPUI may still be borrowed during native dispatch, so resolve the captured
+                // native window after the action and its notification return.
                 let (app, chosen) = (app.clone(), std::rc::Rc::clone(&chosen));
                 executor
                     .spawn(async move {
@@ -550,14 +594,7 @@ mod native {
                     .detach();
             },
         );
-        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
-        let name = NSString::from_str("NSMenuWillSendActionNotification");
-        // SAFETY: AppKit posts menu notifications on the main thread, where the callback runs.
-        // The adapter removes the observer before dropping its main-thread-only callback.
-        let observer = unsafe {
-            center.addObserverForName_object_queue_usingBlock(Some(&name), None, None, &block)
-        };
-        Some(ChosenCommands { center, observer })
+        Some(ChosenCommands { center, observers })
     }
 
     /// Whether the notice's menu is the menu bar or one of its submenus.
