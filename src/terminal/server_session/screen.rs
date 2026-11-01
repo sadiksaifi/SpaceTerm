@@ -1,5 +1,5 @@
 //! Applies pushed screen frames to desktop snapshots and encodes the presentation style.
-use super::screen_decoder::{ScreenDecoder, UpdateError};
+use super::screen_decoder::{Presenter, ScreenDecoder, UpdateError};
 use super::*;
 use spaceterm_server::protocol::screen::{Cursor, History, ScreenUpdate};
 use spaceterm_server::protocol::{Frame, PaneEvent};
@@ -8,18 +8,18 @@ use spaceterm_server::protocol::{Frame, PaneEvent};
 pub(super) struct ScreenReceiver<'a> {
     /// Updates apply only to this exact lease's own previous frame.
     decoder: ScreenDecoder,
+    presenter: Presenter,
     local_files: Option<&'a crate::platform::local_filesystem::LocalFilesystemAuthority>,
-    remote_metadata: Option<&'a super::super::metadata::RemoteTerminalMetadataContext>,
 }
 impl<'a> ScreenReceiver<'a> {
     pub(super) fn new(
         local_files: Option<&'a crate::platform::local_filesystem::LocalFilesystemAuthority>,
-        remote_metadata: Option<&'a super::super::metadata::RemoteTerminalMetadataContext>,
+        remote_metadata: Option<&super::super::metadata::RemoteTerminalMetadataContext>,
     ) -> Self {
         Self {
             decoder: ScreenDecoder::default(),
+            presenter: Presenter::new(remote_metadata),
             local_files,
-            remote_metadata,
         }
     }
 
@@ -74,14 +74,11 @@ impl<'a> ScreenReceiver<'a> {
             alternate: decoded.modes.alternate_screen,
             alternate_scroll: decoded.modes.alternate_scroll,
         };
-        let mut screen = decoded.snapshot(
+        let mut screen = self.presenter.snapshot(
+            decoded,
             *generation,
             &appearance.lock().unwrap_or_else(|e| e.into_inner()),
         );
-        if let Some(metadata) = self.remote_metadata {
-            Arc::make_mut(&mut screen.metadata).context =
-                super::super::metadata::TerminalMetadataContext::Remote(metadata.clone());
-        }
         screen.graphics = graphics.snapshot();
         Ok((Arc::new(screen), mapping, decoded.accessibility_revision))
     }

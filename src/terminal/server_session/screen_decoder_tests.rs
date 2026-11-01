@@ -1,9 +1,10 @@
 //! Round trips from a real emulator through the server encoder, the wire and this decoder.
-use super::screen_decoder::{DecodedScreen, ScreenDecoder, UpdateError, decode_page};
+use super::screen_decoder::{DecodedScreen, Presenter, ScreenDecoder, UpdateError, decode_page};
 use super::*;
 use crate::runtime::screen_encoder::{ScreenCapture, ScreenEncoder, encode_page};
 use crate::terminal::emulator::TerminalEmulator;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
+use crate::terminal::testing::count_allocations;
 use spaceterm_server::protocol::frame::{Assembler, encode_server};
 use spaceterm_server::protocol::screen::{Cells, Row, Run, ScreenUpdate, ScrollShift, StyleRef};
 use spaceterm_server::protocol::{Channel, Frame, RawFrame, ServerMessage, limits};
@@ -16,11 +17,13 @@ fn geometry(columns: u16, rows: u16) -> TerminalGeometry {
     )
 }
 
-/// An emulator on the server, its channel encoder, and the client's decoder.
+/// An emulator on the server, its channel encoder, and the client's decoder and presenter.
 struct Session {
     emulator: TerminalEmulator,
     encoder: ScreenEncoder,
     decoder: ScreenDecoder,
+    presenter: Presenter,
+    appearance: TerminalAppearanceUpdate,
     screen: Option<Arc<ScreenSnapshot>>,
     generation: u64,
     frame: u64,
@@ -32,6 +35,8 @@ impl Session {
             emulator: TerminalEmulator::new(geometry(columns, rows)).unwrap(),
             encoder: ScreenEncoder::default(),
             decoder: ScreenDecoder::default(),
+            presenter: Presenter::default(),
+            appearance: crate::terminal::test_terminal_appearance_update(),
             screen: None,
             generation: 0,
             frame: 0,
@@ -54,14 +59,19 @@ impl Session {
     /// Presents the emulator's state against `base` through the wire, and checks that the
     /// decoder then holds exactly the server's screen.
     fn sync_against(&mut self, base: Option<u64>) -> Option<&DecodedScreen> {
+        let (capture, frame, update) = self.next_against(base)?;
+        let decoded = self.decoder.apply(frame, base, update, None).unwrap();
+        assert_same(decoded, &capture, &mut self.presenter, &self.appearance);
+        Some(decoded)
+    }
+
+    /// The emulator's state as the next frame against `base`, after the wire.
+    fn next_against(&mut self, base: Option<u64>) -> Option<(ScreenCapture, u64, ScreenUpdate)> {
         let capture = self.capture();
         let frame = self.frame + 1;
         let update = self.encoder.encode(&capture, frame, base)?;
         self.frame = frame;
-        let update = through_wire(frame, base, update);
-        let decoded = self.decoder.apply(frame, base, update, None).unwrap();
-        assert_same(decoded, &capture);
-        Some(decoded)
+        Some((capture, frame, through_wire(frame, base, update)))
     }
 
     fn sync(&mut self) -> Option<&DecodedScreen> {
@@ -105,7 +115,7 @@ fn sent(cell: &CellSnapshot) -> SentCell {
     let mut text = if cell.spacer_tail {
         " ".to_owned()
     } else {
-        cell.text.clone()
+        cell.text.to_string()
     };
     if text.len() > limits::MAX_CELL_BYTES {
         let mut end = limits::MAX_CELL_BYTES;
@@ -142,7 +152,12 @@ fn sent(cell: &CellSnapshot) -> SentCell {
     }
 }
 
-fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
+fn assert_same(
+    decoded: &DecodedScreen,
+    capture: &ScreenCapture,
+    presenter: &mut Presenter,
+    appearance: &TerminalAppearanceUpdate,
+) {
     let screen = capture.screen.as_ref();
     assert_eq!(decoded.rows.len(), screen.rows.len());
     for (index, (decoded, expected)) in decoded.rows.iter().zip(screen.rows.iter()).enumerate() {
@@ -179,8 +194,7 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
         decoded.accessibility_revision,
         capture.accessibility_revision
     );
-    let appearance = crate::terminal::test_terminal_appearance_update();
-    let rendered = decoded.snapshot(PresentationGeneration::test(1), &appearance);
+    let rendered = presenter.snapshot(decoded, PresentationGeneration::test(1), appearance);
     assert!(Arc::ptr_eq(&rendered.rows, &decoded.rows));
     assert_eq!(rendered.cursor.position, screen.cursor.position);
     assert_eq!(rendered.cursor.visible, screen.cursor.visible);
@@ -674,7 +688,8 @@ fn snapshots_keep_program_colors_and_project_client_defaults() {
         crate::runtime::HyperlinkKind::Url
     );
     assert!(decoded.rows[0][1].hyperlink.is_none());
-    let screen = decoded.snapshot(PresentationGeneration::test(1), &appearance);
+    let screen =
+        Presenter::default().snapshot(decoded, PresentationGeneration::test(1), &appearance);
     assert_eq!(
         screen.colors.foreground,
         crate::appearance::Color::rgb(0x0a141e)
@@ -709,4 +724,160 @@ fn truecolor_beyond_the_style_table_keeps_every_color() {
     }
     session.emulator.feed(b"\x1b[0m\x1b[1;1Hx");
     session.sync().unwrap();
+}
+
+#[test]
+fn a_frame_that_changes_only_metadata_allocates_nothing() {
+    let mut session = Session::new(80, 24);
+    session.emulator.feed(b"\x1b[31mhello\r\n\x1b[5mworld");
+    session.sync().unwrap();
+    session.emulator.feed(b"\x1b[3;5H");
+    let base = session.decoder.frame();
+    let (_, frame, update) = session.next_against(base).unwrap();
+    assert!(update.rows.is_empty() && update.shift.is_none() && update.colors.is_none());
+    let (applied, allocations) = count_allocations(|| {
+        session
+            .decoder
+            .apply(frame, base, update, None)
+            .map(|decoded| decoded.cursor.position)
+    });
+    assert!(applied.unwrap().is_some());
+    assert_eq!(allocations.count, 0);
+}
+
+#[test]
+fn a_changed_row_allocates_nothing_per_cell() {
+    let mut session = Session::new(200, 3);
+    session.emulator.feed(b"warm\r\n");
+    // The renderer still holds the rows of the screen it draws.
+    let _drawn = Arc::clone(&session.sync().unwrap().rows);
+    let line = "ab \u{754c}\u{9762} e\u{301}\u{30d} \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} \u{1f642} ";
+    session.emulator.feed(line.repeat(8).as_bytes());
+    let base = session.decoder.frame();
+    let (_, frame, update) = session.next_against(base).unwrap();
+    assert_eq!(update.rows.len(), 1);
+    let (applied, allocations) = count_allocations(|| {
+        session
+            .decoder
+            .apply(frame, base, update, None)
+            .map(|decoded| decoded.rows[0].len())
+    });
+    assert_eq!(applied, Ok(200));
+    // The row itself, and the copy of the row list the renderer holds.
+    assert!(allocations.count <= 2, "{allocations:?}");
+}
+
+#[test]
+fn consecutive_screens_share_the_projected_palette_until_its_inputs_change() {
+    use spaceterm_server::protocol::screen::{Colors, CursorPosition, Geometry};
+    let colors = Colors {
+        foreground: [10, 20, 30],
+        background: [0, 0, 0],
+        cursor: [0, 0, 0],
+        cursor_text: [0, 0, 0],
+        palette: vec![[40, 50, 60]; 256],
+        foreground_overridden: false,
+        background_overridden: false,
+        cursor_overridden: false,
+        palette_overrides: [0, 0, 0, 0],
+    };
+    let keyframe = ScreenUpdate {
+        geometry: Some(Geometry {
+            columns: 4,
+            rows: 2,
+            cell_pixels: None,
+        }),
+        modes: Some(Default::default()),
+        colors: Some(colors.clone()),
+        ..ScreenUpdate::default()
+    };
+    let moved = |column| ScreenUpdate {
+        cursor: spaceterm_server::protocol::screen::Cursor {
+            position: Some(CursorPosition {
+                row: 1,
+                column,
+                width: 1,
+            }),
+            ..Default::default()
+        },
+        ..ScreenUpdate::default()
+    };
+    let generation = PresentationGeneration::test;
+    let mut appearance = crate::terminal::test_terminal_appearance_update();
+    let mut decoder = ScreenDecoder::default();
+    let mut presenter = Presenter::default();
+    let decoded = decoder.apply(1, None, keyframe, None).unwrap();
+    let first = presenter.snapshot(decoded, generation(1), &appearance);
+    let decoded = decoder.apply(2, Some(1), moved(1), None).unwrap();
+    let (second, allocations) =
+        count_allocations(|| presenter.snapshot(decoded, generation(2), &appearance));
+    assert_eq!(allocations.count, 0);
+    assert!(Arc::ptr_eq(&first.colors.palette, &second.colors.palette));
+    assert_eq!(
+        second.cursor.position.map(|position| position.column),
+        Some(1)
+    );
+    assert_eq!(second.generation, generation(2));
+
+    // A program's palette entry and a new appearance each project a new palette.
+    let decoded = decoder
+        .apply(
+            3,
+            Some(2),
+            ScreenUpdate {
+                colors: Some(Colors {
+                    palette_overrides: [0b100, 0, 0, 0],
+                    ..colors
+                }),
+                ..moved(2)
+            },
+            None,
+        )
+        .unwrap();
+    let third = presenter.snapshot(decoded, generation(3), &appearance);
+    assert_eq!(
+        third.colors.palette[2],
+        crate::appearance::Color::rgb(0x28323c)
+    );
+    assert!(third.colors.palette_overrides[2]);
+    let configured = Arc::make_mut(&mut appearance.appearance);
+    configured.colors.normal[1] = crate::appearance::Color::rgb(0x112233);
+    configured.colors.background = crate::appearance::Color::rgb(0x445566);
+    let decoded = decoder.apply(4, Some(3), moved(3), None).unwrap();
+    let fourth = presenter.snapshot(decoded, generation(4), &appearance);
+    assert_eq!(
+        fourth.colors.palette[1],
+        crate::appearance::Color::rgb(0x112233)
+    );
+    assert_eq!(fourth.background, crate::appearance::Color::rgb(0x445566));
+    assert_eq!(
+        fourth.colors.palette[2],
+        crate::appearance::Color::rgb(0x28323c)
+    );
+}
+
+#[test]
+fn a_program_that_changes_one_palette_entry_again_shows_its_new_color() {
+    let mut session = Session::new(8, 2);
+    let mut palette_entry = |osc: &[u8]| {
+        session.emulator.feed(osc);
+        let base = session.decoder.frame();
+        let (_, frame, update) = session.next_against(base).unwrap();
+        let decoded = session.decoder.apply(frame, base, update, None).unwrap();
+        let rendered = session.presenter.snapshot(
+            decoded,
+            PresentationGeneration::test(frame),
+            &session.appearance,
+        );
+        assert!(rendered.colors.palette_overrides[2]);
+        rendered.colors.palette[2]
+    };
+    assert_eq!(
+        palette_entry(b"\x1b]4;2;rgb:01/02/03\x1b\\"),
+        crate::appearance::Color::rgb(0x010203)
+    );
+    assert_eq!(
+        palette_entry(b"\x1b]4;2;rgb:04/05/06\x1b\\"),
+        crate::appearance::Color::rgb(0x040506)
+    );
 }

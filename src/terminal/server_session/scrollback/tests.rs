@@ -23,7 +23,7 @@ fn row(text: &str) -> RowSnapshot {
     let mut cells = Vec::new();
     for character in text.chars() {
         cells.push(CellSnapshot {
-            text: character.to_string(),
+            text: character.to_string().into(),
             ..row::blank_cell()
         });
         if wide(character) {

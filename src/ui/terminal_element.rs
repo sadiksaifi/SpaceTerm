@@ -116,11 +116,16 @@ impl TerminalGridCache {
                 .source
                 .iter()
                 .map(|cell| {
-                    cell.text.capacity()
-                        + cell.hyperlink.as_ref().map_or(0, |link| {
-                            std::mem::size_of::<crate::terminal::HyperlinkTarget>()
-                                + link.value.capacity()
-                        })
+                    // Short text is stored inside the cell.
+                    let text = if cell.text.is_heap_allocated() {
+                        cell.text.len()
+                    } else {
+                        0
+                    };
+                    text + cell.hyperlink.as_ref().map_or(0, |link| {
+                        std::mem::size_of::<crate::terminal::HyperlinkTarget>()
+                            + link.value.capacity()
+                    })
                 })
                 .sum::<usize>();
             let row = &entry.prepared;
@@ -4546,7 +4551,7 @@ mod tests {
 
     fn cell(text: &str) -> CellSnapshot {
         CellSnapshot {
-            text: text.to_owned(),
+            text: text.into(),
             foreground_source: crate::terminal::TerminalColor::Default,
             background_source: crate::terminal::TerminalColor::Default,
             inverse: false,
@@ -6455,7 +6460,7 @@ mod tests {
         decorated.overline = true;
         decorated.strikethrough = true;
         let mut tail = decorated.clone();
-        tail.text = " ".to_owned();
+        tail.text = " ".into();
         tail.spacer_tail = true;
         let row = Arc::<[CellSnapshot]>::from([decorated, tail]);
 
@@ -6794,7 +6799,7 @@ mod tests {
         wide_block.inverse = true;
         wide_block.selected = true;
         let mut tail = wide_block.clone();
-        tail.text = " ".to_owned();
+        tail.text = " ".into();
         tail.spacer_tail = true;
         let row = Arc::<[CellSnapshot]>::from([box_line, variation_sequence, wide_block, tail]);
 
@@ -6824,7 +6829,7 @@ mod tests {
         let mut block = cell("█");
         block.blinking = true;
         let mut tail = block.clone();
-        tail.text = " ".to_owned();
+        tail.text = " ".into();
         tail.spacer_tail = true;
         let row = Arc::<[CellSnapshot]>::from([block, tail]);
         let input = prepare_row(&row, &colors(), &"Menlo".into());

@@ -79,9 +79,13 @@ impl From<RgbColor> for Color {
     }
 }
 
+/// A cell's grapheme cluster. Clusters of up to 23 bytes are stored inline; longer ones share
+/// one heap allocation among clones.
+pub type CellText = smol_str::SmolStr;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CellSnapshot {
-    pub text: String,
+    pub text: CellText,
     pub foreground_source: TerminalColor,
     pub background_source: TerminalColor,
     pub inverse: bool,
@@ -2418,6 +2422,7 @@ impl TerminalEmulator {
                     let mut hyperlink_uri = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
                     let mut hyperlink_userdata = [0; crate::terminal::hyperlink::MAX_LINK_BYTES];
                     let mut column_index = 0_u16;
+                    let mut graphemes = String::new();
                     let mut cell_iteration = self.cells.update(row)?;
 
                     while let Some(cell) = cell_iteration.next() {
@@ -2442,13 +2447,15 @@ impl TerminalEmulator {
                             selected |= head.selected;
                             head.selected = selected;
                         }
-                        let mut text = String::with_capacity(4);
+                        graphemes.clear();
                         if !spacer_tail {
-                            cell.graphemes_utf8(&mut text)?;
+                            cell.graphemes_utf8(&mut graphemes)?;
                         }
-                        if text.is_empty() {
-                            text.push(' ');
-                        }
+                        let text = if graphemes.is_empty() {
+                            CellText::new_inline(" ")
+                        } else {
+                            CellText::new(&graphemes)
+                        };
                         let hyperlink = if raw_cell.has_hyperlink()? {
                             let reference =
                                 self.terminal.grid_ref(Point::Viewport(PointCoordinate {
