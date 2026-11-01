@@ -1901,6 +1901,43 @@ fn queued_input_runs_before_due_scrollback_compression() {
     worker.finish();
 }
 
+/// A server Pane keeps no model without demand, so it drops the model a subscription publishes
+/// before demand starts. Demand that starts later publishes the current model again, even though
+/// nothing changed since.
+#[test]
+fn new_demand_publishes_the_current_model_again() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events.into();
+    let (accessibility, models) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(Instant::now(), input.clone());
+    worker.emulator.feed(b"unchanged");
+    assert!(worker.publish_screen());
+    let mut model = |worker: &mut TerminalWorker, first: Command| {
+        assert!(worker.process_command(first));
+        for _ in 0..128 {
+            if let Ok(model) = models.try_recv() {
+                return Some(model);
+            }
+            let command = worker.take_accessibility_continuation()?;
+            assert!(worker.process_command(command));
+        }
+        panic!("accessibility work must finish within the budget")
+    };
+    let seed = model(&mut worker, Command::PublishAccessibility).expect("the seed publishes");
+    assert!(seed.text().contains("unchanged"));
+
+    assert!(input.enqueue_accessibility_demand(Instant::now()));
+    assert!(worker.process_command(Command::AccessibilityDemand));
+    let command = worker.receive_next_command();
+    assert!(matches!(command, Some(Command::PublishAccessibility)));
+    let again = model(&mut worker, command.unwrap()).expect("new demand publishes a model");
+    assert_eq!(again.text(), seed.text());
+    worker.finish();
+}
+
 /// Demand that arrives while a screen waits for its paced deadline builds the model at once and
 /// binds it to the screen published last. It publishes no screen.
 #[test]

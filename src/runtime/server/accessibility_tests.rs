@@ -773,19 +773,42 @@ fn a_model_equal_to_its_base_encodes_nothing() {
     state.start();
     state.update(Arc::clone(&model));
     let first = state.take_changed().unwrap();
-    // Demand that starts again hands the same revision, unchanged.
     assert!(state.take_changed().is_none());
-    state.end();
+    // A new generation, while demand stands, hands the same revision unchanged.
     state.start();
     let again = state.take_changed().unwrap();
     assert_eq!(again.revision(), first.revision());
     assert!(encode(&again, Some(&first)).is_empty());
-    state.end();
+}
+
+/// Ending demand drops the Pane's model and ignores models published after it, so a later start
+/// hands only a model built after the end.
+#[test]
+fn ending_demand_drops_the_panes_model_and_ignores_late_ones() {
+    let mut terminal = Terminal::new();
+    let mut state = accessibility::Accessibility::default();
+    state.start();
+    let model = terminal.history(10_000, 80);
+    let held = Arc::downgrade(&model);
     state.update(model);
+    drop(state.take_changed().unwrap());
+    state.end();
+    assert!(held.upgrade().is_none(), "the Pane released its model");
+
+    let late = terminal.history(30, 10);
+    let held = Arc::downgrade(&late);
+    state.update(late);
+    assert!(
+        held.upgrade().is_none(),
+        "a model after the end is not kept"
+    );
+    state.start();
     assert!(
         state.take_changed().is_none(),
-        "nothing is handed without demand"
+        "nothing is handed until a new model"
     );
+    state.update(terminal.history(40, 10));
+    assert!(state.take_changed().is_some());
 }
 
 #[test]
@@ -908,6 +931,35 @@ fn server_semantics_push_history_and_refuse_a_disconnected_or_replaced_lease() {
     host.shutdown().unwrap();
 }
 
+/// The Pane's screen generation once no screen has published for half a second.
+fn idle(host: &mut ServerPaneHost, lease: Lease) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut quiet = None;
+    loop {
+        let Observed::Live(observation) = host.observe([1; 32], &lease) else {
+            panic!("the Pane is live");
+        };
+        let screen = observation.screen.map(|screen| screen.generation);
+        match quiet {
+            Some((generation, since)) if Some(generation) == screen => {
+                if Instant::now().duration_since(since) > Duration::from_millis(500) {
+                    return generation;
+                }
+            }
+            _ => quiet = screen.map(|generation| (generation, Instant::now())),
+        }
+        assert!(Instant::now() < deadline, "the Pane never went idle");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn screen_generation(host: &mut ServerPaneHost, lease: Lease) -> Option<u64> {
+    let Observed::Live(observation) = host.observe([1; 32], &lease) else {
+        panic!("the Pane is live");
+    };
+    observation.screen.map(|screen| screen.generation)
+}
+
 /// An idle Pane's first demand builds its complete document without publishing a screen.
 #[test]
 fn an_idle_panes_first_demand_delivers_a_complete_document_without_a_screen() {
@@ -919,37 +971,54 @@ fn an_idle_panes_first_demand_delivers_a_complete_document_without_a_screen() {
         lease,
         "stty -echo; printf 'idle-marker\\r\\n'",
     );
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut quiet = None;
-    // Idle: no screen for a while after the marker appeared.
-    loop {
-        let Observed::Live(observation) = host.observe([1; 32], &lease) else {
-            panic!("the Pane is live");
-        };
-        let screen = observation.screen.map(|screen| screen.generation);
-        match quiet {
-            Some((generation, since)) if Some(generation) == screen => {
-                if Instant::now().duration_since(since) > Duration::from_millis(500) {
-                    break;
-                }
-            }
-            _ => quiet = screen.map(|generation| (generation, Instant::now())),
-        }
-        assert!(Instant::now() < deadline, "the Pane never went idle");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let (idle, _) = quiet.unwrap();
+    let idle = idle(&mut host, lease);
     let client = document(&mut host, lease, |client| {
         client.line("idle-marker").is_some()
     });
     assert!(client.applied.is_some());
-    let Observed::Live(observation) = host.observe([1; 32], &lease) else {
-        panic!("the Pane is live");
-    };
     assert_eq!(
-        observation.screen.map(|screen| screen.generation),
+        screen_generation(&mut host, lease),
         Some(idle),
         "demand published no screen"
+    );
+    host.shutdown().unwrap();
+}
+
+/// Ending demand releases the semantic store, and a later start on an idle Pane builds its
+/// complete document again from the Terminal Session, without output or a screen.
+#[test]
+fn a_start_after_an_end_rebuilds_an_idle_panes_complete_document() {
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    command(
+        &mut host,
+        1,
+        lease,
+        "stty -echo; printf 'released-marker\\r\\n'",
+    );
+    document(&mut host, lease, |client| {
+        client.line("released-marker").is_some()
+    });
+    let idle = idle(&mut host, lease);
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::AccessibilityDemand {
+                lease,
+                demand: wire::Demand::End,
+            },
+        ),
+        Reply::Unchanged
+    ));
+    let client = document(&mut host, lease, |client| {
+        client.line("released-marker").is_some()
+    });
+    assert!(client.applied.is_some());
+    assert_eq!(
+        screen_generation(&mut host, lease),
+        Some(idle),
+        "the new start published no screen"
     );
     host.shutdown().unwrap();
 }
@@ -1098,6 +1167,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
     };
     let generation = PresentationGeneration::default();
     let mut publication = accessibility::Accessibility::default();
+    publication.start();
     let linear = semantics.apply(update.clone(), generation).unwrap();
     let range = linear.selection_range();
     publication.update(linear);

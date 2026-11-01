@@ -2194,6 +2194,15 @@ impl TerminalEmulator {
         Ok((model, more))
     }
 
+    /// Drops the retained semantic store, in Ghostty and here. The next snapshot extracts the
+    /// whole terminal again.
+    pub(crate) fn release_accessibility(&mut self) -> Result<(), TerminalFailure> {
+        self.ghostty_accessibility = ghostty_accessibility::State::new()
+            .map_err(|error| TerminalFailure::emulator_error("release-terminal-text", error))?;
+        self.accessibility = TerminalAccessibilityState::default();
+        Ok(())
+    }
+
     pub(crate) fn reset_accessibility_presentation(&mut self) {
         self.accessibility.reset_presentation();
     }

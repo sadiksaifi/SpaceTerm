@@ -683,6 +683,13 @@ impl TerminalRuntime {
             let _ = commands.send(Command::EndAccessibilityDemand(Instant::now()));
         }
     }
+    /// Ends server client accessibility demand and drops the semantic store. The next demand
+    /// builds a complete model again, even when the terminal has not changed.
+    pub(crate) fn release_server_accessibility(&self) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ReleaseAccessibility(Instant::now()));
+        }
+    }
     /// Sends application mouse input without starting a server-owned Selection.
     /// Adapter snapshot numbers fence starts; accepted gestures retain their starting snapshot.
     pub fn application_pointer(&self, input: PointerInput, snapshot: u64, current_snapshot: u64) {
@@ -997,6 +1004,7 @@ enum Command {
     Run(String, RunReply),
     ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
     EndAccessibilityDemand(Instant),
+    ReleaseAccessibility(Instant),
     Subscribe {
         accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
         clipboard: async_channel::Sender<ClipboardRequest>,
@@ -1076,6 +1084,7 @@ impl fmt::Debug for Command {
             Self::Run(..) => "Run",
             Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
+            Self::ReleaseAccessibility(..) => "ReleaseAccessibility",
             Self::Subscribe { .. } => "Subscribe",
             Self::Key(..) => "Key",
             Self::ClearScreenAndScrollback => "ClearScreenAndScrollback",
@@ -1540,6 +1549,15 @@ impl TerminalWorker {
                 self.schedules.end_accessibility_demand(ended_at);
                 true
             }
+            Command::ReleaseAccessibility(ended_at) => {
+                if let Err(error) = self.emulator.release_accessibility() {
+                    self.send_runtime_failure(error);
+                    return false;
+                }
+                self.schedules
+                    .release_accessibility(ended_at, self.schedules.now());
+                true
+            }
             Command::Subscribe {
                 accessibility,
                 clipboard,
@@ -1680,7 +1698,11 @@ impl TerminalWorker {
                 keep_running
             }
             Command::AccessibilityDemand => {
-                self.schedules.accessibility_demand_received(Instant::now());
+                // A server Pane keeps no model without demand, so new demand publishes the
+                // current model even when it equals the one published last.
+                if self.schedules.accessibility_demand_received(Instant::now()) {
+                    self.emulator.reset_accessibility_presentation();
+                }
                 true
             }
             Command::AccessibilityContinue => self.publish_accessibility(false),

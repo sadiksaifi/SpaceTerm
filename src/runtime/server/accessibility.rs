@@ -43,8 +43,12 @@ impl Accessibility {
         self.handed = None;
     }
 
+    /// Ends demand and drops the latest model. Models published before the Terminal Session
+    /// released its store are ignored; the next start hands the first model built after it.
     pub(super) fn end(&mut self) {
         self.demanded = false;
+        self.latest = None;
+        self.handed = None;
     }
 
     /// The latest model, if demand stands and the channel was not handed this revision yet.
@@ -60,10 +64,11 @@ impl Accessibility {
         }))
     }
 
-    /// Takes the Terminal Session's newest model. The revision advances when the document, the
-    /// visible lines, the cursor, the Selection or the screen changed.
+    /// Takes the Terminal Session's newest model while demand stands. The revision advances when
+    /// the document, the visible lines, the cursor, the Selection or the screen changed.
     pub(super) fn update(&mut self, model: Arc<TerminalAccessibilityModel>) {
-        if self.resetting
+        if !self.demanded
+            || self.resetting
             || self
                 .minimum_generation
                 .is_some_and(|minimum| model.generation() < minimum)
@@ -87,7 +92,6 @@ impl Accessibility {
     /// Session published before the reset are ignored until one binds to a later screen.
     pub(super) fn reset(&mut self) {
         self.end();
-        self.latest = None;
         self.resetting = true;
     }
 

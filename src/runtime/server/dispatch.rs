@@ -94,7 +94,7 @@ impl ServerPaneHost {
                 ..
             } => {
                 pane.accessibility.end();
-                pane.runtime.end_server_accessibility_demand();
+                pane.runtime.release_server_accessibility();
                 Ok(Reply::Unchanged)
             }
             Request::AccessibilitySelection {
