@@ -101,6 +101,7 @@ impl LinkSink for ControlWatch {
     fn deliver(&self, event: LinkEvent) {
         let changed = match event {
             LinkEvent::Inventory(revision) => {
+                self.state.server_reachable();
                 let facts = ControlFacts::of(&revision.inventory, self.pane);
                 let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
                 (*seen != facts) && {
@@ -479,6 +480,119 @@ mod tests {
             directory_unavailable: false,
             session_ended: None,
         }
+    }
+
+    fn reachable(watch: &ControlWatch) {
+        use spaceterm_server::{hierarchy::Inventory, protocol::InventoryRevision};
+        watch.deliver(LinkEvent::Inventory(Arc::new(InventoryRevision {
+            inventory: Inventory {
+                revision: 1,
+                workspaces: Vec::new(),
+                close: None,
+                repositories: None,
+            },
+            next_sequence: 1,
+        })));
+    }
+
+    /// The exchange double changes reachability without opening a network connection. A long
+    /// outage exhausts the Pane's retries, then the route's confirmed inventory wakes it again.
+    #[test]
+    fn a_paired_pane_reconnects_when_its_server_becomes_reachable() {
+        let state = Arc::new(ServerPaneState::new());
+        let watch = ControlWatch::new(Arc::clone(&state), [2; 32]);
+        // An inventory may confirm reachability without changing this Pane's control facts.
+        reachable(&watch);
+        for attempt in 0..4 {
+            let failure = run_claim(&state, |_| {
+                Err(ServerError::Direct(
+                    spaceterm_server::direct::DirectError::Transport,
+                ))
+            })
+            .err()
+            .unwrap();
+            assert_eq!(state.connection_failed(failure, false), attempt < 3);
+        }
+        assert!(!state.retry.load(Ordering::Acquire));
+        reachable(&watch);
+        assert!(state.retry.swap(false, Ordering::AcqRel));
+        let grant = run_claim(&state, |request| {
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            Ok(Reply::Attached {
+                lease: Lease {
+                    server: [1; 32],
+                    session: [3; 32],
+                    control: [4; 32],
+                    connection: [5; 32],
+                },
+            })
+        })
+        .unwrap()
+        .expect("the existing Terminal Session reconnects without Try Again");
+        assert_eq!(grant.lease.session, [3; 32]);
+    }
+
+    #[test]
+    fn a_paired_pane_recovers_a_restarted_server_without_starting_a_shell() {
+        let state = Arc::new(ServerPaneState::new());
+        let watch = ControlWatch::new(Arc::clone(&state), [2; 32]);
+        let failure = run_claim(&state, |_| {
+            Err(ServerError::Direct(
+                spaceterm_server::direct::DirectError::Transport,
+            ))
+        })
+        .err()
+        .unwrap();
+        assert!(state.connection_failed(failure, false));
+        reachable(&watch);
+        assert!(state.retry.swap(false, Ordering::AcqRel));
+
+        let alive = AtomicBool::new(true);
+        let grant = ClaimWorker {
+            state: &state,
+            pane_id: [2; 32],
+            alive: &alive,
+            attachment: &None,
+            size: &Mutex::new(PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 16,
+            }),
+            appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
+            attached_session: &mut true,
+            takeover: &mut false,
+            paste_unconfirmed: &mut false,
+        }
+        .run(
+            |request| {
+                assert!(matches!(
+                    request,
+                    Request::SelectPane {
+                        explicit: false,
+                        ..
+                    }
+                ));
+                // Dismiss after reading the passive reply, without entering the claim's wait.
+                alive.store(false, Ordering::Release);
+                exchange(&state, [2; 32], request, |_| Ok(restored(9)))
+            },
+            || {},
+        )
+        .unwrap();
+        assert!(grant.is_none());
+        assert_eq!(state.status(), ServerPaneStatus::Restored);
+        let copy = crate::ui::server_pane::DormantCopy::of(None);
+        assert_eq!(
+            (copy.title, copy.label),
+            ("Server Restarted", "Start Session")
+        );
     }
 
     #[test]

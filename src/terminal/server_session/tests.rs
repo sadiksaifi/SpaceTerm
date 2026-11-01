@@ -2,6 +2,62 @@ use super::link::{ActiveInput, present};
 use super::*;
 
 #[test]
+fn an_unreachable_paired_pane_bounds_and_spaces_its_connection_attempts() {
+    use spaceterm_server::direct::{DirectConnection, DirectConnector, DirectError};
+    use std::time::Instant;
+
+    struct Unreachable(mpsc::Sender<Instant>);
+    impl DirectConnector for Unreachable {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            self.0.send(Instant::now()).unwrap();
+            Err(DirectError::Transport)
+        }
+    }
+    let (attempts, observed) = mpsc::channel();
+    let server = ServerConnection::direct(
+        "spaceterm-development",
+        [4; 32],
+        spaceterm_server::direct::PairedDevice {
+            pin: spaceterm_server::direct::ServerPin {
+                build: "spaceterm-development".into(),
+                server: [9; 32],
+                public_key: [2; 32],
+                certificate: [3; 32],
+            },
+            pairing: [5; 32],
+            client: [6; 32],
+        },
+        Arc::new(Unreachable(attempts)),
+    )
+    .unwrap();
+    let (factory, state) = ServerSessionFactory::for_pane(
+        server,
+        &PaneControls::default(),
+        crate::platform::runtime_local_filesystem(),
+        [8; 32],
+    );
+    let started = factory
+        .start(
+            *Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    let attempts: Vec<_> = (0..4)
+        .map(|_| observed.recv_timeout(Duration::from_secs(5)).unwrap())
+        .collect();
+    for pair in attempts.windows(2) {
+        assert!(pair[1].duration_since(pair[0]) >= Duration::from_secs(1));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while state.status() != ServerPaneStatus::Failed(ServerError::Direct(DirectError::Transport)) {
+        assert!(Instant::now() < deadline, "the Pane did not stop retrying");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(observed.try_recv().is_err());
+    drop(started);
+}
+
+#[test]
 fn paired_panes_have_no_local_file_authority_even_with_local_composition() {
     struct Route;
     impl spaceterm_server::direct::DirectConnector for Route {
@@ -1715,6 +1771,47 @@ fn an_outage_during_protocol_recovery_retains_the_original_failure() {
         state.status(),
         ServerPaneStatus::Failed(ServerError::Protocol)
     );
+}
+
+#[test]
+fn paired_reachability_does_not_renew_protocol_recovery_or_identity_refusals() {
+    use spaceterm_server::direct::DirectError;
+    for takeover in [false, true] {
+        for refusal in [
+            DirectError::PinMismatch,
+            DirectError::Revoked,
+            DirectError::AuthenticationRefused,
+            DirectError::CredentialUnavailable,
+            DirectError::InteractionRequired,
+            DirectError::IncompatibleProtocol,
+        ] {
+            let state = ServerPaneState::new();
+            assert!(state.connection_failed(ServerError::Direct(DirectError::Transport), takeover));
+            assert!(!state.connection_failed(ServerError::Direct(refusal), takeover));
+            state.server_reachable();
+            assert!(!state.retry.load(Ordering::Acquire));
+        }
+
+        let state = ServerPaneState::new();
+        assert!(state.connection_failed(ServerError::Direct(DirectError::Transport), takeover));
+        assert!(state.connection_failed(ServerError::Protocol, takeover));
+        for retryable in [true, false] {
+            state.server_reachable();
+            assert!(!state.retry.load(Ordering::Acquire));
+            assert_eq!(
+                state.connection_failed(ServerError::Direct(DirectError::Transport), takeover),
+                retryable
+            );
+        }
+        assert_eq!(
+            state.status(),
+            if takeover {
+                ServerPaneStatus::TakeoverFailed(ServerError::Protocol)
+            } else {
+                ServerPaneStatus::Failed(ServerError::Protocol)
+            }
+        );
+    }
 }
 
 /// Selecting a Pane whose Session ended in this server run, by focus, Tab opening or a click,

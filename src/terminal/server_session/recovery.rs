@@ -30,6 +30,15 @@ impl Recovery {
         self.healthy_since = None;
     }
 
+    pub fn direct_reachable(&mut self) -> bool {
+        if self.cause == Some(ServerError::Direct(DirectError::Transport)) {
+            self.retry();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Starts, or keeps, the healthy period of a live connection.
     pub fn connected(&mut self, now: Instant) {
         let since = *self.healthy_since.get_or_insert(now);
@@ -40,8 +49,9 @@ impl Recovery {
     }
 
     /// Returns the retained cause and whether another automatic connection is allowed.
-    /// Ordinary transport outages keep their existing recovery behavior. A protocol failure
-    /// or unconfirmed shell start bounds the entire episode, including later transport errors.
+    /// Account-local transport outages keep their existing recovery behavior. A paired transport
+    /// outage, protocol failure or unconfirmed shell start bounds the entire episode. A confirmed
+    /// paired connection renews a transport outage, but never a protocol failure.
     /// A connection that stayed healthy for [`HEALTHY_CONNECTION`] before failing at `now`
     /// renews recovery first, so an idle Pane whose worker never turned is judged by time.
     pub fn failed(&mut self, error: ServerError, now: Instant) -> (ServerError, bool) {
@@ -54,9 +64,18 @@ impl Recovery {
         }
         if self.cause.is_none() {
             self.cause = self.start.as_ref().and_then(|start| start.cause);
-            if error == ServerError::Protocol {
+            if matches!(
+                error,
+                ServerError::Protocol | ServerError::Direct(DirectError::Transport)
+            ) {
                 self.cause.get_or_insert(error);
             }
+        }
+        // Once protocol recovery begins, another inventory is not proof of protocol health.
+        if error == ServerError::Protocol
+            && self.cause == Some(ServerError::Direct(DirectError::Transport))
+        {
+            self.cause = Some(error);
         }
         if let Some(cause) = self.cause {
             self.failures = self.failures.saturating_add(1);
