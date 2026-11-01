@@ -899,14 +899,17 @@ fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<Bui
     let info = contents(bytes, identity, |path, is_directory, mode, signed| {
         if !path.as_os_str().is_empty() {
             let file = open_relative(directory, path, is_directory)?;
-            let metadata = file
-                .metadata()
-                .map_err(|_| ServerError::StorageUnavailable)?;
+            let metadata = if is_directory {
+                file.metadata()
+                    .map_err(|_| ServerError::StorageUnavailable)?
+            } else {
+                files::regular(&file)?
+            };
             if metadata.is_dir() != is_directory || metadata.mode() & 0o7777 != mode {
                 return Err(ServerError::RuntimeUnavailable);
             }
             if !is_directory {
-                if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() != signed.size() {
+                if metadata.len() != signed.size() {
                     return Err(ServerError::RuntimeUnavailable);
                 }
                 compare(file, signed, &mut installed)?;
@@ -966,26 +969,13 @@ fn compare(mut file: File, signed: &mut Member<'_>, buffer: &mut [u8]) -> Result
             return Err(ServerError::RuntimeUnavailable);
         }
     }
-    let after = loop {
-        match file.read(&mut buffer[..1]) {
-            Ok(read) => break read,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return Err(ServerError::StorageUnavailable),
-        }
-    };
-    if after != 0 {
-        return Err(ServerError::RuntimeUnavailable);
-    }
-    Ok(())
+    files::ended(&mut file)
 }
 fn read_file(directory: &File, path: &Path, maximum: u64) -> Result<Vec<u8>, ServerError> {
     bounded(open_relative(directory, path, false)?, maximum)
 }
 fn bounded(file: File, maximum: u64) -> Result<Vec<u8>, ServerError> {
-    let metadata = file
-        .metadata()
-        .map_err(|_| ServerError::StorageUnavailable)?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > maximum {
+    if files::regular(&file)?.len() > maximum {
         return Err(ServerError::RuntimeUnavailable);
     }
     let mut bytes = Vec::new();

@@ -1066,26 +1066,13 @@ fn incompressible(size: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Retains a signed fixture whose native executable holds `executable` bytes.
-fn installation_with_executable(root: &Path, executable: Vec<u8>) -> PathBuf {
+/// Retains a signed fixture after `edit` changes its archive entries.
+fn installation_with(root: &Path, edit: impl FnMut(&mut Vec<(String, Vec<u8>, u32)>)) -> PathBuf {
     with_artifact(
         &root.join("source"),
         "spaceterm-development",
         |archive, signature| {
-            let main = format!(
-                "server/{}",
-                Layout::host("spaceterm-development")
-                    .unwrap()
-                    .executable()
-                    .display()
-            );
-            rewrite(archive, signature, |entries| {
-                entries
-                    .iter_mut()
-                    .find(|(name, _, _)| *name == main)
-                    .unwrap()
-                    .1 = executable.clone();
-            });
+            rewrite(archive, signature, edit);
             provision(
                 &root.join("installations"),
                 "spaceterm-development",
@@ -1099,6 +1086,151 @@ fn installation_with_executable(root: &Path, executable: Vec<u8>) -> PathBuf {
             .directory
         },
     )
+}
+
+/// Retains a signed fixture whose native executable holds `executable` bytes.
+fn installation_with_executable(root: &Path, executable: Vec<u8>) -> PathBuf {
+    let main = format!(
+        "server/{}",
+        Layout::host("spaceterm-development")
+            .unwrap()
+            .executable()
+            .display()
+    );
+    installation_with(root, |entries| {
+        entries
+            .iter_mut()
+            .find(|(name, _, _)| *name == main)
+            .unwrap()
+            .1 = executable.clone();
+    })
+}
+
+/// The installed path of the fixture's zsh environment resource.
+fn zshenv(installation: &Path) -> PathBuf {
+    installation
+        .join(Layout::host("spaceterm-development").unwrap().resources())
+        .join("shell-integration/zsh/.zshenv")
+}
+
+#[test]
+fn verification_refuses_a_retained_file_with_a_second_name() {
+    let root = temporary();
+    let installation = installation_with_executable(&root, b"signed".to_vec());
+    let check =
+        || test_support::with_fixture_trust(|| verify(&installation, "spaceterm-development"));
+    assert_eq!(check(), Ok(()));
+    for retained in [zshenv(&installation), installation.join("artifact.tar.gz")] {
+        let outside = root.join("second-name");
+        std::fs::hard_link(&retained, &outside).unwrap();
+        assert_eq!(
+            check(),
+            Err(ServerError::RuntimeUnavailable),
+            "{} passed verification with a second name",
+            retained.display()
+        );
+        std::fs::remove_file(&outside).unwrap();
+        assert_eq!(check(), Ok(()));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verification_refuses_a_fifo_in_place_of_an_empty_installed_file() {
+    // An empty entry leaves the file type as the only difference: a FIFO with no writer has
+    // length zero and reads as immediately ended.
+    let root = temporary();
+    let installation = installation_with(&root, |entries| {
+        entries
+            .iter_mut()
+            .find(|(name, _, _)| name.ends_with("/shell-integration/zsh/.zshenv"))
+            .unwrap()
+            .1
+            .clear();
+    });
+    let check =
+        || test_support::with_fixture_trust(|| verify(&installation, "spaceterm-development"));
+    assert_eq!(check(), Ok(()));
+    let resource = zshenv(&installation);
+    std::fs::remove_file(&resource).unwrap();
+    let name = CString::new(resource.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the terminated path stays live through the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+    std::fs::set_permissions(&resource, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(check(), Err(ServerError::RuntimeUnavailable));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verification_refuses_an_installed_file_with_another_mode() {
+    let root = temporary();
+    let installation = installation_with_executable(&root, b"signed".to_vec());
+    let check =
+        || test_support::with_fixture_trust(|| verify(&installation, "spaceterm-development"));
+    assert_eq!(check(), Ok(()));
+    std::fs::set_permissions(
+        zshenv(&installation),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(check(), Err(ServerError::RuntimeUnavailable));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verification_refuses_an_installation_named_for_another_digest() {
+    let root = temporary();
+    let installation = installation_with_executable(&root, b"signed".to_vec());
+    let renamed = installation.with_file_name("0".repeat(64));
+    std::fs::rename(&installation, &renamed).unwrap();
+    assert_eq!(
+        test_support::with_fixture_trust(|| verify(&renamed, "spaceterm-development")),
+        Err(ServerError::RuntimeUnavailable)
+    );
+    std::fs::rename(&renamed, &installation).unwrap();
+    assert_eq!(
+        test_support::with_fixture_trust(|| verify(&installation, "spaceterm-development")),
+        Ok(())
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn snapshot_refuses_an_archive_that_grows_while_it_is_read() {
+    /// Appends a byte to the file at `path` once the first read of `file` returns.
+    struct Growing {
+        file: File,
+        path: PathBuf,
+        grown: bool,
+    }
+    impl Read for Growing {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.file.read(buffer)?;
+            if !self.grown {
+                self.grown = true;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.path)?
+                    .write_all(&[0])?;
+            }
+            Ok(read)
+        }
+    }
+    let root = temporary();
+    let path = root.join("artifact.tar.gz");
+    std::fs::write(&path, incompressible(4 * CHUNK)).unwrap();
+    let source = |grown| Growing {
+        file: File::open(&path).unwrap(),
+        path: path.clone(),
+        grown,
+    };
+    let length = 4 * CHUNK;
+    assert!(files::Snapshot::copy(source(true), length).is_ok());
+    assert_eq!(
+        files::Snapshot::copy(source(false), length).map(|_| ()),
+        Err(ServerError::RuntimeUnavailable)
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

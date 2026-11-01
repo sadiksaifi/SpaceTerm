@@ -323,6 +323,40 @@ fn remove_tree(parent: &File, name: &CStr, directory: &File) -> Result<(), Serve
         .map_err(|_| ServerError::StorageUnavailable)
 }
 
+/// The metadata of `file` when it's a regular file with exactly one link, so no other name can
+/// change its contents.
+///
+/// # Errors
+/// Returns RuntimeUnavailable for another file type or a linked file; StorageUnavailable when its
+/// metadata can't be read.
+pub(super) fn regular(file: &File) -> Result<std::fs::Metadata, ServerError> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| ServerError::StorageUnavailable)?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    Ok(metadata)
+}
+
+/// Confirm `source` holds no byte past what was already read from it.
+///
+/// # Errors
+/// Returns RuntimeUnavailable when another byte follows; StorageUnavailable when it can't be read.
+pub(super) fn ended(source: &mut impl Read) -> Result<(), ServerError> {
+    let after = loop {
+        match source.read(&mut [0]) {
+            Ok(read) => break read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(ServerError::StorageUnavailable),
+        }
+    };
+    if after != 0 {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    Ok(())
+}
+
 /// A process-private copy of one retained file, read once through its descriptor into anonymous
 /// memory outside the heap. Later writes to or truncation of the file can't reach it, and its
 /// pages return to the operating system when it drops.
@@ -339,19 +373,23 @@ impl Snapshot {
     /// or a file whose length changes while it's read; StorageUnavailable when the file can't be
     /// read or the memory can't be reserved.
     pub fn read(directory: &File, path: &Path, maximum: u64) -> Result<Self, ServerError> {
-        let mut file = open_relative(directory, path, false)?;
-        let metadata = file
-            .metadata()
-            .map_err(|_| ServerError::StorageUnavailable)?;
-        if !metadata.is_file()
-            || metadata.nlink() != 1
-            || metadata.len() == 0
-            || metadata.len() > maximum
-        {
+        let file = open_relative(directory, path, false)?;
+        let length = regular(&file)?.len();
+        if length == 0 || length > maximum {
             return Err(ServerError::RuntimeUnavailable);
         }
-        let length =
-            usize::try_from(metadata.len()).map_err(|_| ServerError::RuntimeUnavailable)?;
+        Self::copy(
+            file,
+            usize::try_from(length).map_err(|_| ServerError::RuntimeUnavailable)?,
+        )
+    }
+
+    /// Copy exactly `length` nonzero bytes from `source`, which must end right after them.
+    ///
+    /// # Errors
+    /// Returns RuntimeUnavailable when `source` holds fewer or more bytes; StorageUnavailable when
+    /// it can't be read or the memory can't be reserved.
+    pub fn copy(mut source: impl Read, length: usize) -> Result<Self, ServerError> {
         // SAFETY: a fresh anonymous private mapping at a kernel-chosen address; no file or other
         // process shares its pages.
         let address = unsafe {
@@ -373,25 +411,16 @@ impl Snapshot {
             length,
         };
         // SAFETY: the region holds `length` writable bytes that only `snapshot` owns, and this is
-        // the only borrow of it until `read` returns.
+        // the only borrow of it until `copy` returns.
         let bytes = unsafe { std::slice::from_raw_parts_mut(snapshot.address.as_ptr(), length) };
-        file.read_exact(bytes).map_err(|error| {
+        source.read_exact(bytes).map_err(|error| {
             if error.kind() == std::io::ErrorKind::UnexpectedEof {
                 ServerError::RuntimeUnavailable
             } else {
                 ServerError::StorageUnavailable
             }
         })?;
-        let after = loop {
-            match file.read(&mut [0]) {
-                Ok(read) => break read,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return Err(ServerError::StorageUnavailable),
-            }
-        };
-        if after != 0 {
-            return Err(ServerError::RuntimeUnavailable);
-        }
+        ended(&mut source)?;
         Ok(snapshot)
     }
 }
@@ -399,7 +428,7 @@ impl std::ops::Deref for Snapshot {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        // SAFETY: `read` filled all `length` bytes, and only this value reaches the region until
+        // SAFETY: `copy` filled all `length` bytes, and only this value reaches the region until
         // drop unmaps it.
         unsafe { std::slice::from_raw_parts(self.address.as_ptr(), self.length) }
     }
