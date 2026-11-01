@@ -38,7 +38,7 @@ pub(super) fn reader_output(capacity: usize) -> (ReaderOutputSender, ReaderOutpu
     )
 }
 
-/// The worker dropped its end, so no read will be received.
+/// The reader dropped its end and the worker has received every read it queued.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReaderOutputClosed;
 
