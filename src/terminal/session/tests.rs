@@ -1915,7 +1915,7 @@ fn new_demand_publishes_the_current_model_again() {
     worker.schedules = WorkerSchedules::new(Instant::now(), input.clone());
     worker.emulator.feed(b"unchanged");
     assert!(worker.publish_screen());
-    let mut model = |worker: &mut TerminalWorker, first: Command| {
+    let model = |worker: &mut TerminalWorker, first: Command| {
         assert!(worker.process_command(first));
         for _ in 0..128 {
             if let Ok(model) = models.try_recv() {

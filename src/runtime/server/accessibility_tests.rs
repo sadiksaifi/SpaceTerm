@@ -1063,7 +1063,7 @@ fn demand_that_reaches_the_session_before_its_subscription_still_delivers_a_docu
     release.send(()).unwrap();
 
     // Every observation follows a notification from the Terminal Session.
-    let mut next = |host: &mut ServerPaneHost, marker: &str| {
+    let next = |host: &mut ServerPaneHost, marker: &str| {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
