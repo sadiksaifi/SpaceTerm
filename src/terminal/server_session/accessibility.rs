@@ -1032,10 +1032,7 @@ mod tests {
                 "the new generation's complete document applies, even with a revision number \
                  the old generation used"
             );
-            assert_eq!(
-                texts(&client.publish(generation).unwrap()),
-                ["fresh"]
-            );
+            assert_eq!(texts(&client.publish(generation).unwrap()), ["fresh"]);
         }
     }
 
@@ -1572,9 +1569,8 @@ mod tests {
         let next = PresentationGeneration::default().next();
 
         let before = crate::terminal::accessibility::probes();
-        let (rebound, allocations) = crate::terminal::testing::count_allocations(|| {
-            client.publish(next)
-        });
+        let (rebound, allocations) =
+            crate::terminal::testing::count_allocations(|| client.publish(next));
         let after = crate::terminal::accessibility::probes();
         let probes = crate::terminal::accessibility::Probes {
             map_lookups: after.map_lookups - before.map_lookups,

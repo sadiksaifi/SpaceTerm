@@ -666,19 +666,21 @@ mod tests {
             }],
         );
         for line in 0..rows {
-            messages.extend(packer.row(RowUpdate::new(
-                line,
-                1,
-                false,
-                cell.repeat(512),
-                (0..512)
-                    .map(|column| CellSpan {
-                        column,
-                        width: 1,
-                        bytes: cell.len() as u16,
-                    })
-                    .collect::<Vec<_>>(),
-            )));
+            messages.extend(
+                packer.row(RowUpdate::new(
+                    line,
+                    1,
+                    false,
+                    cell.repeat(512),
+                    (0..512)
+                        .map(|column| CellSpan {
+                            column,
+                            width: 1,
+                            bytes: cell.len() as u16,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+            );
         }
         messages.push(packer.finish(Tail {
             visible_lines: rows - 24..rows,
@@ -729,7 +731,11 @@ mod tests {
         let (channel, _) = inbox();
         channel.deliver(semantic(7, true));
         channel.deliver(semantic(8, false));
-        assert_eq!(drain(&channel).0, Err(Overflow), "revision 7 holds the credit");
+        assert_eq!(
+            drain(&channel).0,
+            Err(Overflow),
+            "revision 7 holds the credit"
+        );
 
         // Once the worker drained revision 7, the server may send the next one.
         let (channel, _) = inbox();

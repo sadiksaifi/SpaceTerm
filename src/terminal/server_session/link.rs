@@ -1117,10 +1117,7 @@ impl PaneLink {
                         pane::accessibility::Demand::End => None,
                     });
                 }
-                match self.request(Operation::AccessibilityDemand {
-                    channel,
-                    demand,
-                })? {
+                match self.request(Operation::AccessibilityDemand { channel, demand })? {
                     ReplyBody::Done => Ok(Reply::Unchanged),
                     _ => Err(ServerError::Protocol),
                 }
