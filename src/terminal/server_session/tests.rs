@@ -2034,13 +2034,23 @@ impl PushedPane {
             emulator.feed(b"line\r\n");
         }
         emulator.feed(b"line");
+        let inbox = super::inbox::Inbox::new(Arc::new(|| {}));
         let mut semantic = accessibility::Semantics::new();
-        semantic.follow(true, |_| Ok(())).unwrap();
+        // The link declares each demand to the inbox as it sends it.
+        semantic
+            .follow(true, |demand| {
+                let pane::accessibility::Demand::Start { generation } = demand else {
+                    panic!("demand starts")
+                };
+                inbox.demand(Some(generation));
+                Ok(())
+            })
+            .unwrap();
         Self {
             adapter,
             emulator,
             encoder: Default::default(),
-            inbox: super::inbox::Inbox::new(Arc::new(|| {})),
+            inbox,
             screens: screen::ScreenReceiver::new(None, None),
             graphics: Default::default(),
             predictor: Default::default(),
