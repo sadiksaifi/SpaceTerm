@@ -518,8 +518,14 @@ impl ServerConnection {
         &self,
         cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<(Box<dyn crate::connection::carrier::Carrier>, ClientScope), ServerError> {
+        if cancelled.is_some_and(|cancelled| cancelled()) {
+            return Err(ServerError::ServiceBusy);
+        }
         if let Some(direct) = &self.direct {
             let connection = direct.connector.connect().map_err(ServerError::from)?;
+            if cancelled.is_some_and(|cancelled| cancelled()) {
+                return Err(ServerError::ServiceBusy);
+            }
             if connection.paired() != &direct.paired {
                 return Err(ServerError::AuthenticationRefused);
             }
@@ -603,8 +609,8 @@ impl ServerConnection {
             link.close();
         }
     }
-    /// [`Self::link`] for a worker that may stop while admission waits for a Restart or Update.
-    /// `cancelled` ends that wait with ServiceBusy.
+    /// [`Self::link`] for a worker that may stop while another caller connects or admission
+    /// waits for a Restart or Update. `cancelled` ends those waits with ServiceBusy.
     pub fn link_cancellable(
         &self,
         cancelled: &dyn Fn() -> bool,
@@ -612,9 +618,28 @@ impl ServerConnection {
         self.link_with(Some(cancelled))
     }
     fn link_with(&self, cancelled: Option<&dyn Fn() -> bool>) -> Result<ServerLink, ServerError> {
-        // Callers wait for one connection attempt, so simultaneous Pane workers never open a
-        // connection each.
-        let mut saved = self.shared.link.lock().unwrap_or_else(|e| e.into_inner());
+        // Callers share a successful connection. Paired presentation reads live_link instead
+        // of queuing behind a dial.
+        let mut saved = loop {
+            if cancelled.is_some_and(|cancelled| cancelled()) {
+                return Err(ServerError::ServiceBusy);
+            }
+            match self.shared.link.try_lock() {
+                Ok(saved) => break saved,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) if cancelled.is_none() => {
+                    break self.shared.link.lock().unwrap_or_else(|e| e.into_inner());
+                }
+                // The callback has no wake handle. A bounded wait lets a queued caller
+                // cancel without waiting for another caller's network deadline.
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
+        if cancelled.is_some_and(|cancelled| cancelled()) {
+            return Err(ServerError::ServiceBusy);
+        }
         if let Some(link) = saved.as_ref()
             && link.health() == crate::connection::link::Health::Live
         {
@@ -1233,6 +1258,105 @@ mod tests {
             assert_eq!(restored.enabled, initial.enabled);
             reopened.lock().unwrap().stop();
         }
+    }
+
+    #[test]
+    fn queued_connections_cancel_before_the_shared_probe_finishes() {
+        use crate::direct::{DirectConnection, DirectConnector, DirectError};
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+
+        struct Probe {
+            calls: AtomicUsize,
+            entered: mpsc::SyncSender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl DirectConnector for Probe {
+            fn connect(&self) -> Result<DirectConnection, DirectError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.entered.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                }
+                Err(DirectError::Transport)
+            }
+        }
+        struct Release(mpsc::SyncSender<()>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = self.0.try_send(());
+            }
+        }
+        let (entered, probing) = mpsc::sync_channel(1);
+        let (release, held) = mpsc::sync_channel(1);
+        let release = Release(release);
+        let probe = Arc::new(Probe {
+            calls: AtomicUsize::new(0),
+            entered,
+            release: Mutex::new(held),
+        });
+        let server = ServerConnection::direct(
+            "spaceterm-development",
+            [3; 32],
+            paired_identity(),
+            probe.clone(),
+        )
+        .unwrap();
+        let owner = std::thread::spawn({
+            let server = server.clone();
+            move || server.link().err()
+        });
+        probing.recv_timeout(Duration::from_secs(5)).unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let queued = Arc::new(Barrier::new(3));
+        let (finished, finished_calls) = mpsc::channel();
+        let callers: Vec<_> = (0..2)
+            .map(|_| {
+                let (server, closed, queued, finished) = (
+                    server.clone(),
+                    Arc::clone(&closed),
+                    Arc::clone(&queued),
+                    finished.clone(),
+                );
+                std::thread::spawn(move || {
+                    queued.wait();
+                    let result = server.link_cancellable(&|| closed.load(Ordering::Acquire));
+                    finished.send(result.err()).unwrap();
+                })
+            })
+            .collect();
+        queued.wait();
+        closed.store(true, Ordering::Release);
+        let outcomes: Vec<_> = (0..2)
+            .map(|_| finished_calls.recv_timeout(Duration::from_secs(2)))
+            .collect();
+        // Always release and join the probe, including on the pre-fix failure path.
+        drop(release);
+        assert_eq!(
+            owner.join().unwrap(),
+            Some(ServerError::Direct(DirectError::Transport))
+        );
+        for caller in callers {
+            caller.join().unwrap();
+        }
+        assert!(
+            outcomes
+                .iter()
+                .all(|result| *result == Ok(Some(ServerError::ServiceBusy))),
+            "cancelled callers waited behind the probe: {outcomes:?}"
+        );
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            1,
+            "cancelled callers dialed again"
+        );
     }
 
     struct NoConnect;
