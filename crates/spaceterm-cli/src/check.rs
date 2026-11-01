@@ -28,7 +28,7 @@ pub fn resources() -> Result<PathBuf, ServerError> {
             .file_name()
             .is_some_and(|name| name == "bin" || name == "MacOS")
     {
-        return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets"));
+        return Ok(PathBuf::from(env!("OUT_DIR")).join("resources"));
     }
     Err(ServerError::StartupFailed)
 }
@@ -71,7 +71,7 @@ pub fn run() -> Result<(), ServerError> {
         .map_err(|_| ServerError::StartupFailed)?;
     let subscription = runtime.subscribe();
     runtime.focus(true);
-    // The child checks the installed environment, never a source-tree fallback.
+    // The child checks the resources selected for its shell environment.
     runtime.key(KeyInput::text_input("stty -echo; test -f \"$TERMINFO/x/xterm-spaceterm\" -o -f \"$TERMINFO/78/xterm-spaceterm\" && printf '\\033[2J\\033[HSPACETERM_PACKAGE_OK\\n'"));
     let mut enter = KeyInput::text_input("");
     enter.physical_key = PhysicalKey::Enter;

@@ -1,3 +1,4 @@
+mod build_resources;
 #[path = "../../build/identity.rs"]
 mod identity;
 #[path = "../spaceterm-server/src/protocol/major.rs"]
@@ -38,6 +39,9 @@ fn main() {
     let output = std::path::PathBuf::from(
         std::env::var_os("OUT_DIR").expect("Cargo supplies the output directory"),
     );
+    if !packaged {
+        build_resources::stage(&root, &output);
+    }
     let source = std::env::var("SPACETERM_CLI_SOURCE_STATE").ok();
     assert!(
         source.as_deref().is_none_or(|value| value.len() == 64
