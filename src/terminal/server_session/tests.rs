@@ -1981,33 +1981,6 @@ fn selecting_an_ended_pane_queues_no_start() {
     assert!(restored.selected.load(Ordering::Acquire));
 }
 
-#[test]
-fn hiding_a_pane_keeps_its_semantic_demand_and_document() {
-    let adapter = Adapter::new();
-    adapter
-        .handle
-        .accessibility_demand_sender()
-        .expect("a server Pane accepts semantic demand")
-        .request();
-    adapter.handle.set_presentable(false);
-    assert!(
-        adapter
-            .handle
-            .state
-            .accessibility_demand
-            .load(Ordering::Acquire),
-        "hiding a Pane must not end its semantic demand, or showing it would resend everything"
-    );
-    adapter.handle.set_presentable(true);
-    assert!(
-        adapter
-            .handle
-            .state
-            .accessibility_demand
-            .load(Ordering::Acquire)
-    );
-}
-
 use spaceterm_server::connection::link::{ChannelEvent, ChannelSink as _};
 use spaceterm_server::protocol::PaneEvent;
 
@@ -2094,14 +2067,15 @@ impl PushedPane {
         let base = (self.frame > 0).then_some(self.frame);
         self.frame += 1;
         let update = self.encoder.encode(&capture, self.frame, base).unwrap();
-        self.inbox
-            .deliver(ChannelEvent::Frame(Box::new(spaceterm_server::protocol::Frame {
+        self.inbox.deliver(ChannelEvent::Frame(Box::new(
+            spaceterm_server::protocol::Frame {
                 channel: spaceterm_server::protocol::Channel(1),
                 frame: self.frame,
                 base,
                 input: 0,
                 update,
-            })));
+            },
+        )));
     }
 
     fn push_semantics(&self, messages: Vec<pane::accessibility::Update>) {
@@ -2159,10 +2133,7 @@ impl PushedPane {
                 super::inbox::Delivery::Pane(event) => events.push(event),
             }
         }
-        if let Some(model) = self
-            .semantic
-            .publish(&state.accessibility, self.generation)
-        {
+        if let Some(model) = self.semantic.publish(&state.accessibility, self.generation) {
             self.semantics.0.force_send(model).unwrap();
         }
         (flow, events)
@@ -2182,7 +2153,7 @@ fn semantic_lines(
     from: u32,
     lines: u32,
 ) -> Vec<pane::accessibility::Update> {
-    use pane::accessibility::{Header, Packer, Run, RowUpdate, Screen, Tail};
+    use pane::accessibility::{Header, Packer, RowUpdate, Run, Screen, Tail};
     let mut packer = Packer::new(Header {
         demand_generation: 1,
         revision,
@@ -2233,7 +2204,11 @@ fn a_frame_then_a_semantic_tail_in_one_drain_publish_the_view_the_frame_moved() 
             (&pane.events.0, &pane.semantics.0),
             &mut pane.semantic,
             None,
-            (pane.adapter.active.epoch, pane.generation, pane.mapping.unwrap()),
+            (
+                pane.adapter.active.epoch,
+                pane.generation,
+                pane.mapping.unwrap(),
+            ),
             false,
         )
         .unwrap(),
@@ -2286,4 +2261,60 @@ fn a_semantic_tail_before_the_channels_end_publishes_the_ended_panes_document() 
         "the revision completed before the end is the final document"
     );
     assert!(pane.semantics.1.try_recv().is_err());
+}
+
+#[test]
+fn hiding_a_pane_keeps_its_semantic_demand_and_document() {
+    let mut pane = PushedPane::new(0);
+    let handle = &pane.adapter.handle;
+    handle
+        .accessibility_demand_sender()
+        .expect("a server Pane accepts semantic demand")
+        .request();
+    pane.push_frame();
+    pane.push_semantics(semantic_lines(1, None, 0, 6));
+    pane.turn();
+    let before = pane.published();
+    let request = before.selection_request(0..2).unwrap();
+    let state = Arc::clone(&pane.adapter.handle.state);
+    let resolved = state
+        .accessibility
+        .lock()
+        .unwrap()
+        .resolve_selection(&request);
+    assert!(matches!(resolved, Some(Some(_))));
+
+    pane.adapter.handle.set_presentable(false);
+    assert!(
+        state.accessibility_demand.load(Ordering::Acquire),
+        "hiding a Pane must not end its semantic demand, or showing it would resend everything"
+    );
+    pane.adapter.handle.set_presentable(true);
+
+    assert!(state.accessibility_demand.load(Ordering::Acquire));
+    assert_eq!(
+        state
+            .accessibility
+            .lock()
+            .unwrap()
+            .resolve_selection(&request),
+        resolved,
+        "native Selection still resolves against the document published before hiding"
+    );
+    let shown = pane
+        .semantic
+        .publish(&state.accessibility, pane.generation.next())
+        .expect("the next presentation binds the kept document");
+    assert!(shown.shares_document(&before));
+    assert_eq!(
+        shown
+            .rows()
+            .map(|row| (row.id, row.revision))
+            .collect::<Vec<_>>(),
+        before
+            .rows()
+            .map(|row| (row.id, row.revision))
+            .collect::<Vec<_>>(),
+        "the kept rows keep their identities"
+    );
 }
