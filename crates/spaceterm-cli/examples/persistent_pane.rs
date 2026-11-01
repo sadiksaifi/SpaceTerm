@@ -24,7 +24,10 @@ use spaceterm_server::{
     pane::*,
     protocol::{Channel, Operation},
 };
-use std::{error::Error, time::Duration};
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
 use support::Claimed;
 use terminal_semantics::{Failure, stage};
 
@@ -176,11 +179,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("baseline terminal work changed during the fixture".into());
     }
     let (second, pid, report) = exercise?;
-    // SAFETY: signal zero observes only the fixture shell; it never signals a process.
-    if unsafe { libc::kill(pid, 0) } != -1
-        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-    {
-        return Err("fixture close did not reap its shell".into());
+    // The server ends the shell's process group before replying. The operating system may
+    // still be reaping descendants of the login process when that reply arrives.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // SAFETY: signal zero observes only the fixture shell; it never signals a process.
+        if unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("fixture close did not reap its shell".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
     if shutdown {
         support::done(&second, Operation::Shutdown)
