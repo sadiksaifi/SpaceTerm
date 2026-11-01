@@ -84,6 +84,7 @@ fn status(runtime: LaneVersion) -> LaneStatus {
         },
         devices: Vec::new(),
         lane_major: 1,
+        terminal_counters: None,
     }
 }
 

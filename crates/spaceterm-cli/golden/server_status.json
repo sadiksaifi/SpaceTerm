@@ -49,6 +49,25 @@
       }
     ],
     "lane_major": 1,
+    "terminal_counters": {
+      "accessibility_revisions": 0,
+      "accessibility_revision_bytes": 0,
+      "accessibility_rebinds": 0,
+      "line_mode_reads": 0,
+      "pty_reads": 4,
+      "pty_read_bytes": 10000,
+      "frames_published": 0,
+      "frames_decoded": 0,
+      "frames_painted": 0,
+      "pane_worker_wakes": {
+        "output": 4,
+        "input": 0,
+        "accessibility": 0,
+        "client": 0,
+        "other": 0,
+        "deadline": 2
+      }
+    },
     "recovered_operations": [
       {
         "operation": "fedcba9876543210fedcba9876543210",

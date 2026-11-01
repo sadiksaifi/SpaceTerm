@@ -1514,6 +1514,8 @@ pub struct ServerStatus {
     pub devices: Vec<Device>,
     pub held_outcomes: Vec<HeldOutcomes>,
     pub lane_major: u16,
+    /// The running server's Terminal Diagnostics counters, totals since it started.
+    pub terminal_counters: Option<spaceterm_server::diagnostics::TerminalCounterSnapshot>,
 }
 
 /// `server.permissions`.

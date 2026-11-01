@@ -610,6 +610,7 @@ fn status_reports_the_approved_runtime_and_live_sessions() {
         assert_eq!(status.activation, LaneActivation::Settled);
         assert_eq!(status.lane_major, LANE_MAJOR);
         assert!(status.staged.is_empty());
+        assert!(status.terminal_counters.is_some());
     });
 }
 

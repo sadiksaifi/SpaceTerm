@@ -18,6 +18,7 @@ use super::operations::{
 use super::tokens::Tokens;
 use super::{RetainedInstallation, Service, runtime};
 use crate::ServerError;
+use crate::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
 use crate::hierarchy::Id;
 use crate::permissions::{
     PermissionError, PermissionsReport, RequestOutcome, SetupReadiness, SystemPermission,
@@ -241,6 +242,8 @@ pub struct LaneStatus {
     pub network: LaneNetwork,
     pub devices: Vec<LaneDevice>,
     pub lane_major: u16,
+    /// The running server's Terminal Diagnostics counters. A stopped server has none.
+    pub terminal_counters: Option<TerminalCounterSnapshot>,
 }
 
 /// Mirrors the `server.update --check` data of the CLI output contract.
@@ -1119,6 +1122,7 @@ impl Admin<'_> {
                 network: offline_network(self.service)?,
                 devices: offline_devices(self.service)?,
                 lane_major: LANE_MAJOR,
+                terminal_counters: live.map(|_| TerminalCounters::process().snapshot()),
             });
         };
         let unresolved = state
@@ -1158,6 +1162,7 @@ impl Admin<'_> {
                 None => offline_devices(self.service)?,
             },
             lane_major: LANE_MAJOR,
+            terminal_counters: live.map(|_| TerminalCounters::process().snapshot()),
         })
     }
 

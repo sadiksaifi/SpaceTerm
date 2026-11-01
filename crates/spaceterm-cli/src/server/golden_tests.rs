@@ -7,6 +7,7 @@ use crate::contract::{
     ServerRef, ServerSetup, ServerStart, ServerUnpair, ServiceAction, SetupNetwork, SetupStep,
     SetupStepName, StepResult, UpdateEffects, UpdateKind, Version,
 };
+use spaceterm_server::diagnostics::{PaneWorkerWakes, TerminalCounterSnapshot};
 use spaceterm_server::service::lane::client::Outcome;
 use spaceterm_server::service::lane::{
     LaneAction, LaneActivation, LaneCheck, LaneDevice, LaneEffects, LaneNetwork,
@@ -91,6 +92,16 @@ fn server_status_reports_service_network_devices_and_held_outcomes() {
             last_connected_at: Some("2026-10-30T11:00:00Z".into()),
         }],
         lane_major: 1,
+        terminal_counters: Some(TerminalCounterSnapshot {
+            pty_reads: 4,
+            pty_read_bytes: 10_000,
+            pane_worker_wakes: PaneWorkerWakes {
+                output: 4,
+                deadline: 2,
+                ..PaneWorkerWakes::default()
+            },
+            ..TerminalCounterSnapshot::default()
+        }),
     };
     let held = vec![HeldOutcomes {
         identity: RecoveredIdentity::Agent("agent-1".parse().unwrap()),
