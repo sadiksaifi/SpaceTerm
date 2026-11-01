@@ -734,7 +734,9 @@ impl PaneLink {
                     ChannelEvent::Closed(error) => {
                         received.closed.get_or_insert(error.into());
                     }
-                    event @ (ChannelEvent::Frame(_) | ChannelEvent::Pane(_)) => {
+                    event @ (ChannelEvent::Frame(_)
+                    | ChannelEvent::Pane(_)
+                    | ChannelEvent::Accessibility(_)) => {
                         drop(received);
                         // The inbox wakes the worker.
                         pushed.deliver(event);

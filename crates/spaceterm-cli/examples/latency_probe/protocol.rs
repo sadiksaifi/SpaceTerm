@@ -267,7 +267,7 @@ impl Pushed {
             }
             ChannelEvent::Pane(event) if event.last() => received.ended = true,
             ChannelEvent::Closed(_) => received.ended = true,
-            ChannelEvent::Pane(_) => return,
+            ChannelEvent::Pane(_) | ChannelEvent::Accessibility(_) => return,
         }
         drop(received);
         self.ready.notify_all();

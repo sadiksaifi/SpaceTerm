@@ -150,6 +150,8 @@ impl Inbox {
             match event {
                 // The worker learns of the link's end from its own link.
                 ChannelEvent::Closed(_) => {}
+                // The link delivers no semantic updates until this worker stages them (#777).
+                ChannelEvent::Accessibility(_) => {}
                 ChannelEvent::Frame(frame) => {
                     let number = frame.frame;
                     if let Some(screen) = applier.apply(*frame)? {

@@ -403,7 +403,7 @@ impl Events {
                 received.ending.get_or_insert(Ending::Link(error));
             }
             // These checks read neither hidden input nor accessibility revisions.
-            ChannelEvent::Pane(_) => return,
+            ChannelEvent::Pane(_) | ChannelEvent::Accessibility(_) => return,
         }
         drop(received);
         self.ready.notify_all();
