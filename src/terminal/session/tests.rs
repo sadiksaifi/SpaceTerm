@@ -2012,70 +2012,105 @@ fn accessibility_demand_binds_to_the_last_published_screen_without_flushing_the_
     worker.finish();
 }
 
-/// Runs `millis` milliseconds of continuous output on a fixed clock, one line per millisecond,
-/// and returns how many screens published. After each line the worker runs one more command, as
-/// it interleaves them with output: due work, or else a semantic continuation. With `demanded`, a
-/// semantic update always has rows left to copy, as it does while output outpaces it.
-fn screens_during_continuous_output(demanded: bool, millis: u64) -> usize {
+/// What continuous output published: its screens, and the millisecond the first complete
+/// semantic model arrived.
+struct ContinuousOutput {
+    screens: usize,
+    first_model: Option<u64>,
+}
+
+/// Runs `millis` milliseconds of continuous output on a fixed clock, one write per millisecond,
+/// after 3,000 lines of history. With `appending`, each write is a new line; otherwise it rewrites
+/// the last line in place, like a progress bar. After each write the worker runs one more
+/// command, as it interleaves them with output: due work, or else a semantic continuation.
+/// Copying the history into a semantic model takes dozens of bounded steps, so with `demanded`
+/// a model is built while screens keep publishing.
+fn continuous_output(demanded: bool, appending: bool, millis: u64) -> ContinuousOutput {
     let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let history: Vec<u8> = (0..3_000)
+        .flat_map(|line| format!("history {line}\r\n").into_bytes())
+        .collect();
+    assert!(worker.feed_test_output(vec![history]));
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     worker.events = events.into();
-    let (accessibility, _semantics) = async_channel::bounded(1);
+    let (accessibility, semantics) = async_channel::bounded(1);
     worker.accessibility = accessibility;
     let start = Instant::now();
     let input = ScheduleInput::default();
     worker.schedules = WorkerSchedules::new(start, input.clone());
+    // Ends the seed every new schedule requires, so only demand builds models.
+    worker.schedules.mark_accessibility_presented(start, true);
     if demanded {
         assert!(input.enqueue_accessibility_demand(start));
         worker.schedules.accessibility_demand_received(start);
     }
-    let mut screens = 0;
-    let mut semantic_steps = 0;
+    let mut published = ContinuousOutput {
+        screens: 0,
+        first_model: None,
+    };
     for step in 0..millis {
         let now = start + Duration::from_millis(step);
         worker.schedules.fix_clock(now);
-        assert!(worker.feed_test_output(vec![format!("y {step}\r\n").into_bytes()]));
-        if demanded {
-            worker.schedules.update_accessibility(true);
-        }
+        let output = if appending {
+            format!("y {step}\r\n")
+        } else {
+            format!("\rprogress {step}")
+        };
+        assert!(worker.feed_test_output(vec![output.into_bytes()]));
         let command = match worker.schedules.take_due(now) {
             Some(command) => Some(worker.order_presentation_barrier(command)),
             None => worker.take_accessibility_continuation(),
         };
         // The barrier leaves the command it ordered in the pending slot.
         for command in command.into_iter().chain(worker.pending_command.take()) {
-            semantic_steps += usize::from(matches!(
-                command,
-                Command::PublishAccessibility | Command::AccessibilityContinue
-            ));
             assert!(worker.process_command(command));
         }
         while let Ok(event) = receiver.try_recv() {
-            screens += usize::from(matches!(event, TerminalSessionEvent::Screen(_)));
+            published.screens += usize::from(matches!(event, TerminalSessionEvent::Screen(_)));
+        }
+        if semantics.try_recv().is_ok() {
+            published.first_model.get_or_insert(step);
         }
     }
-    assert!(
-        !demanded || semantic_steps * 10 >= millis as usize * 9,
-        "semantic work ran after most lines: {semantic_steps}"
-    );
     worker.finish();
-    screens
+    published
 }
 
 /// With an accessibility client attached, `yes` published about 44,000 frames in 23 s against
-/// about 1,100 without, because every semantic step flushed the pending screen. Demanding
-/// semantics now publishes exactly the paced screens.
+/// about 1,100 without, because every semantic step flushed the pending screen. Lines appended
+/// every millisecond keep the semantic update unfinished, so it continues after every line;
+/// demanding semantics still publishes exactly the paced screens.
 #[test]
 fn demanded_semantics_add_no_screens_during_continuous_output() {
-    let paced = screens_during_continuous_output(false, 500);
-    let demanded = screens_during_continuous_output(true, 500);
+    let paced = continuous_output(false, true, 500);
+    let demanded = continuous_output(true, true, 500);
 
     assert_eq!(
-        demanded, paced,
+        demanded.screens, paced.screens,
         "demanded semantics publish only paced screens"
     );
     // At 60 Hz with output every millisecond, each burst publishes 18 ms after it began.
-    assert_eq!(paced, 28);
+    assert_eq!(paced.screens, 28);
+    assert_eq!(paced.first_model, None, "no model without demand");
+}
+
+/// Paced screens never cancel the semantic update in progress. While output rewrites a line
+/// every millisecond, the update that copies the history completes before the next semantic
+/// capture, 100 ms later, would have to restart it.
+#[test]
+fn a_semantic_update_completes_while_paced_screens_publish() {
+    let paced = continuous_output(false, false, 300);
+    let demanded = continuous_output(true, false, 300);
+
+    assert_eq!(
+        demanded.screens, paced.screens,
+        "demanded semantics publish only paced screens"
+    );
+    assert!(paced.screens > 5, "{} screens", paced.screens);
+    let first = demanded
+        .first_model
+        .expect("a model completes during output");
+    assert!(first < 100, "the first model completed at {first} ms");
 }
 
 #[test]
