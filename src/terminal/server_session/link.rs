@@ -1506,6 +1506,7 @@ pub(super) fn present(
                     |delivery| delivered.push(delivery),
                 )?;
                 let mut presented = false;
+                let mut ended = false;
                 for delivery in delivered {
                     // A frame that arrived after a successor claimed the Pane is not published.
                     if !presenter.current() {
@@ -1525,14 +1526,8 @@ pub(super) fn present(
                                     request,
                                 )?,
                                 PaneEvent::Line(line) => effects.line(&state, &events, line)?,
-                                PaneEvent::Ended => {
-                                    connection.release();
-                                    state.set(ServerPaneStatus::Ended);
-                                    let _ = events.force_send(TerminalSessionEvent::Exited(
-                                        TerminalSessionExit::Success,
-                                    ));
-                                    return Ok(());
-                                }
+                                // The drain ends with it. Semantics publish first.
+                                PaneEvent::Ended => ended = true,
                                 // Another lease holds the Pane now; a new claim says how.
                                 PaneEvent::SessionEnded | PaneEvent::Takeover(_) => {
                                     return Err(ServerError::StaleControl);
@@ -1596,32 +1591,36 @@ pub(super) fn present(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .predict(predictor.overlay());
-                    let mapping = reading::show(
+                    let mapping = show(
                         &state,
-                        &events,
+                        (&events, &semantics),
+                        &mut semantic,
                         Some(Arc::clone(&screen)),
                         (epoch, generation, mapping),
                         paste_unconfirmed,
                     )?;
                     latest_screen = Some((screen, mapping));
-                    if let Some(model) = semantic.rebind(&state, generation) {
-                        let _ = semantics.force_send(model);
-                    }
                     takeover = false;
                     if paste_unconfirmed {
                         paste_unconfirmed = false;
                         let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
                     }
                 }
-                // A revision that completed in this drain is bound to the presentation it applied
-                // with. A screen shown after it bound the document again and published that.
-                if let Some(model) = semantic.take_published()
-                    && model.generation() == generation
-                {
+                // A revision whose tail this drain applied after the last screen it presented,
+                // including one that arrived before the channel's end, publishes bound to the
+                // current presentation and view.
+                if let Some(model) = semantic.publish(&state.accessibility, generation) {
                     if !presenter.current() {
                         return Err(ServerError::NotRunning);
                     }
                     let _ = semantics.force_send(model);
+                }
+                if ended {
+                    connection.release();
+                    state.set(ServerPaneStatus::Ended);
+                    let _ = events
+                        .force_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success));
+                    return Ok(());
                 }
                 if flow == inbox::Flow::Ended {
                     return Err(ServerError::Protocol);
@@ -1669,16 +1668,14 @@ pub(super) fn present(
                     // A changed prediction shows without waiting for a frame.
                     if turn.present || predicted {
                         generation = generation.next();
-                        *mapping = reading::show(
+                        *mapping = show(
                             &state,
-                            &events,
+                            (&events, &semantics),
+                            &mut semantic,
                             None,
                             (epoch, generation, *mapping),
                             paste_unconfirmed,
                         )?;
-                        if let Some(model) = semantic.rebind(&state, generation) {
-                            let _ = semantics.force_send(model);
-                        }
                     }
                     deadline = turn.deadline;
                     let requests = state
@@ -1735,16 +1732,14 @@ pub(super) fn present(
                         let next = Arc::make_mut(screen);
                         next.generation = generation;
                         next.graphics = graphics.snapshot();
-                        *mapping = reading::show(
+                        *mapping = show(
                             &state,
-                            &events,
+                            (&events, &semantics),
+                            &mut semantic,
                             Some(Arc::clone(screen)),
                             (epoch, generation, *mapping),
                             paste_unconfirmed,
                         )?;
-                        if let Some(model) = semantic.rebind(&state, generation) {
-                            let _ = semantics.force_send(model);
-                        }
                     }
                     // A failed image waits for the next turn; a finished one goes on at once.
                     busy |= graphics.transferring() || (completed && graphics.wants());
@@ -1842,6 +1837,26 @@ pub(super) fn present(
             }
         }
     }
+}
+
+/// Presents this client's view as `generation`, of `frame` when one arrived, then publishes the
+/// semantic document bound to that presentation and view. Returns the frame's mapping.
+pub(super) fn show(
+    state: &ServerPaneState,
+    (events, semantics): (
+        &async_channel::Sender<TerminalSessionEvent>,
+        &async_channel::Sender<Arc<super::super::accessibility::TerminalAccessibilityModel>>,
+    ),
+    semantic: &mut accessibility::Semantics,
+    frame: Option<Arc<ScreenSnapshot>>,
+    presentation: (u64, PresentationGeneration, ScreenMapping),
+    paste_unconfirmed: bool,
+) -> Result<ScreenMapping, ServerError> {
+    let mapping = reading::show(state, events, frame, presentation, paste_unconfirmed)?;
+    if let Some(model) = semantic.publish(&state.accessibility, presentation.1) {
+        let _ = semantics.force_send(model);
+    }
+    Ok(mapping)
 }
 
 fn drain_input(state: &ServerPaneState, input: &mpsc::Receiver<SubmittedInput>) {

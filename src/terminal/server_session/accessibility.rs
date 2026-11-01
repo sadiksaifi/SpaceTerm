@@ -50,12 +50,13 @@ impl RetainedSemantics {
         }))
     }
 
-    /// Applies a whole revision atomically, bound to the presentation `generation`.
+    /// Applies a whole revision atomically, bound to the presentation `generation`. Returns
+    /// whether it changed what the document presents.
     fn apply(
         &mut self,
         revision: AccessibilityRevision,
         generation: PresentationGeneration,
-    ) -> Result<Option<Arc<TerminalAccessibilityModel>>, ServerError> {
+    ) -> Result<bool, ServerError> {
         let applied = Applied {
             screen: revision.screen,
             screen_generation: revision.screen_generation,
@@ -68,10 +69,7 @@ impl RetainedSemantics {
             .apply_revision(revision, generation)
             .map_err(|_| ServerError::Protocol)?;
         self.last = Some(applied);
-        if self.view == Default::default() {
-            return Ok(model);
-        }
-        Ok(self.rebind(generation))
+        Ok(model.is_some())
     }
 
     /// Follows this client's view. Returns whether it changed.
@@ -111,8 +109,8 @@ impl RetainedSemantics {
         (shown, selection)
     }
 
-    /// Binds the retained document to a newer presentation, so the Pane never drops semantics
-    /// that were published just before a later Screen.
+    /// Binds the retained document to `generation` and this client's view. `None` when nothing
+    /// is retained or the binding presents what the latest model already does.
     fn rebind(
         &mut self,
         generation: PresentationGeneration,
@@ -149,8 +147,8 @@ pub(super) struct Semantics {
     /// The revision applied last in the current generation, the only base a delta may name.
     applied: Option<u64>,
     staging: Option<Staging>,
-    /// The model the last applied revision published, until the worker sends it to the view.
-    published: Option<Arc<TerminalAccessibilityModel>>,
+    /// A revision applied since the last publication changed what the document presents.
+    unpublished: bool,
 }
 
 impl Semantics {
@@ -160,7 +158,7 @@ impl Semantics {
             demanded: false,
             applied: None,
             staging: None,
-            published: None,
+            unpublished: false,
         }
     }
 
@@ -234,11 +232,8 @@ impl Semantics {
         };
         let mut retained = retained.lock().unwrap_or_else(|e| e.into_inner());
         let revision = staging.finish(tail, retained.rows.applied())?;
-        let model = retained.apply(revision, generation)?;
+        self.unpublished |= retained.apply(revision, generation)?;
         self.applied = Some(header.revision);
-        if model.is_some() {
-            self.published = model;
-        }
         Ok(Some(Ack::Semantics {
             demand_generation: header.demand_generation,
             revision: header.revision,
@@ -250,26 +245,27 @@ impl Semantics {
         self.staging = None;
     }
 
-    /// The model the last applied revision published, bound to the presentation generation it
-    /// was applied with.
-    pub(super) fn take_published(&mut self) -> Option<Arc<TerminalAccessibilityModel>> {
-        self.published.take()
-    }
-
-    /// Binds the retained document to a newer presentation while demand stands.
-    pub(super) fn rebind(
-        &self,
-        state: &ServerPaneState,
+    /// The model to hand to the view now, while demand stands: the retained document bound to
+    /// the presentation `generation` and this client's current scrolled view and Selection.
+    /// `None` when it presents what the last publication did. The worker calls this after it
+    /// presents a screen or applies revisions, so the model it sends last always follows the
+    /// newest presentation and view, whatever order a drain applied frames and tails in.
+    pub(super) fn publish(
+        &mut self,
+        retained: &Mutex<RetainedSemantics>,
         generation: PresentationGeneration,
     ) -> Option<Arc<TerminalAccessibilityModel>> {
+        let unpublished = std::mem::take(&mut self.unpublished);
         if !self.demanded {
             return None;
         }
-        state
-            .accessibility
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .rebind(generation)
+        let mut retained = retained.lock().unwrap_or_else(|e| e.into_inner());
+        // A revision applied with this generation and view is already the latest model.
+        retained.rebind(generation).or_else(|| {
+            unpublished
+                .then(|| retained.rows.latest().cloned().map(Arc::new))
+                .flatten()
+        })
     }
 }
 
@@ -795,17 +791,12 @@ mod tests {
             Ok(acks)
         }
 
-        /// The retained document bound to `generation`, whether or not it changed.
-        fn rebind(
-            &self,
+        /// What the worker hands to the view after presenting `generation`.
+        fn publish(
+            &mut self,
             generation: PresentationGeneration,
         ) -> Option<Arc<TerminalAccessibilityModel>> {
-            *self.state.accessibility.lock().unwrap() =
-                std::mem::take(&mut *self.retained.lock().unwrap());
-            let model = self.semantics.rebind(&self.state, generation);
-            *self.retained.lock().unwrap() =
-                std::mem::take(&mut *self.state.accessibility.lock().unwrap());
-            model
+            self.semantics.publish(&self.retained, generation)
         }
     }
 
@@ -961,7 +952,7 @@ mod tests {
             .deliver(complete(1, 1, &["ab", "cd"]), generation)
             .unwrap();
         assert_eq!(acks, [ack(1, 1)]);
-        let first = client.semantics.take_published().unwrap();
+        let first = client.publish(generation).unwrap();
         assert_eq!(texts(&first), ["ab", "cd"]);
 
         // Row 1 changes, and one row is appended. The cursor stays on the kept row 0.
@@ -980,7 +971,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(acks, [ack(1, 2)]);
-        let second = client.semantics.take_published().unwrap();
+        let second = client.publish(generation).unwrap();
         assert_eq!(texts(&second), ["ab", "cX", "ef"]);
         assert_eq!(
             second
@@ -1026,9 +1017,9 @@ mod tests {
                 Ok(Vec::new()),
                 "messages of generation 1 are discarded after a restart at message {boundary}"
             );
-            assert!(client.semantics.take_published().is_none());
+            assert!(client.publish(generation).is_none());
             assert!(
-                client.rebind(generation.next()).is_none(),
+                client.publish(generation.next()).is_none(),
                 "nothing was applied"
             );
 
@@ -1042,7 +1033,7 @@ mod tests {
                  the old generation used"
             );
             assert_eq!(
-                texts(&client.semantics.take_published().unwrap()),
+                texts(&client.publish(generation).unwrap()),
                 ["fresh"]
             );
         }
@@ -1056,7 +1047,7 @@ mod tests {
             client.deliver(complete(1, 1, &["late"]), PresentationGeneration::default()),
             Ok(Vec::new())
         );
-        assert!(client.semantics.take_published().is_none());
+        assert!(client.publish(PresentationGeneration::default()).is_none());
     }
 
     #[test]
@@ -1094,7 +1085,7 @@ mod tests {
         client
             .deliver(complete(1, 1, &["old"]), generation)
             .unwrap();
-        client.semantics.take_published();
+        client.publish(generation);
         let mut messages = long_revision(1);
         for message in &mut messages {
             message.header.base = Some(1);
@@ -1110,13 +1101,13 @@ mod tests {
         assert_eq!(client.deliver(messages, generation), Ok(Vec::new()));
         // While the channel is hidden no message arrives. The partial revision publishes
         // nothing and the retained document is untouched.
-        let hidden = client.rebind(generation.next()).unwrap();
+        let hidden = client.publish(generation.next()).unwrap();
         assert_eq!(texts(&hidden), ["old"]);
-        assert!(client.semantics.take_published().is_none());
+        assert!(client.publish(generation.next()).is_none());
 
         // Shown again, the rest of the revision arrives and applies at once.
         assert_eq!(client.deliver(last, generation.next()), Ok(vec![ack(1, 2)]));
-        let shown = client.semantics.take_published().unwrap();
+        let shown = client.publish(generation.next()).unwrap();
         assert_eq!(shown.rows().count(), 3);
         assert_eq!(shown.row(2).unwrap().text, "last");
     }
@@ -1133,8 +1124,8 @@ mod tests {
 
         client.semantics.cancel();
 
-        assert!(client.semantics.take_published().is_none());
-        assert!(client.rebind(generation.next()).is_none());
+        assert!(client.publish(generation).is_none());
+        assert!(client.publish(generation.next()).is_none());
         // The rest of the cancelled revision is no revision of its own.
         assert_eq!(
             client.deliver(messages[1..].to_vec(), generation),
@@ -1147,7 +1138,7 @@ mod tests {
         let mut client = Client::demanded();
         let shown = PresentationGeneration::default().next().next();
         client.deliver(complete(1, 1, &["one"]), shown).unwrap();
-        client.semantics.take_published();
+        client.publish(shown);
         // The frame that carried revision 2 was coalesced into a later one, and the Pane is idle:
         // revision 2 applies to the presentation already shown.
         let acks = client
@@ -1163,13 +1154,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(acks, [ack(1, 2)]);
-        let model = client.semantics.take_published().unwrap();
+        let model = client.publish(shown).unwrap();
         assert_eq!(
             (model.generation(), texts(&model)),
             (shown, vec!["two".into()])
         );
         // A later frame binds the same document again.
-        let rebound = client.rebind(shown.next()).unwrap();
+        let rebound = client.publish(shown.next()).unwrap();
         assert!(rebound.shares_document(&model));
         assert_eq!(rebound.generation(), shown.next());
     }
@@ -1189,7 +1180,7 @@ mod tests {
         let acks = client.deliver(complete(1, 4, &["idle"]), shown).unwrap();
 
         assert_eq!(acks, [ack(1, 4)]);
-        let model = client.semantics.take_published().unwrap();
+        let model = client.publish(shown).unwrap();
         assert_eq!(model.generation(), shown);
         assert_eq!(texts(&model), ["idle"]);
     }
@@ -1229,7 +1220,7 @@ mod tests {
         client
             .deliver(messages, PresentationGeneration::default())
             .unwrap();
-        let model = client.semantics.take_published().unwrap();
+        let model = client.publish(PresentationGeneration::default()).unwrap();
 
         for (index, cells) in rows.iter().enumerate() {
             let retained = model.row(index + 1).unwrap();
@@ -1432,8 +1423,7 @@ mod tests {
             );
             assert!(
                 client
-                    .semantics
-                    .take_published()
+                    .publish(generation)
                     .is_some_and(|model| texts(&model) == ["a", "b", "c"]),
                 "{case}: nothing of the refused revision was published"
             );
@@ -1449,7 +1439,7 @@ mod tests {
                 PresentationGeneration::default(),
             )
             .unwrap();
-        let model = client.semantics.take_published().unwrap();
+        let model = client.publish(PresentationGeneration::default()).unwrap();
         let request = model.selection_request(0..2).unwrap();
         let cell = |column| wire::CellRef {
             row: wire::RowId {
@@ -1494,7 +1484,7 @@ mod tests {
         client
             .deliver(messages, PresentationGeneration::default())
             .unwrap();
-        let first = client.semantics.take_published().unwrap();
+        let first = client.publish(PresentationGeneration::default()).unwrap();
         assert_eq!(first.visible_lines(), 2..4);
         // Scrolled back one row, with the Selection from "old1" column 1 to "scr0" column 2.
         client
@@ -1506,7 +1496,7 @@ mod tests {
                 selection: Some(((-1, 1), (0, 2))),
             });
         let next = PresentationGeneration::default().next();
-        let scrolled = client.rebind(next).unwrap();
+        let scrolled = client.publish(next).unwrap();
         assert_eq!(
             scrolled.visible_lines(),
             1..3,
@@ -1532,7 +1522,7 @@ mod tests {
                 scrolled: 9,
                 selection: None,
             });
-        let top = client.rebind(next.next()).unwrap();
+        let top = client.publish(next.next()).unwrap();
         assert_eq!(top.visible_lines(), 0..2);
         assert!(top.selection_refs().is_none());
     }
@@ -1578,14 +1568,12 @@ mod tests {
         client
             .deliver(messages, PresentationGeneration::default())
             .unwrap();
-        let first = client.semantics.take_published().unwrap();
-        *client.state.accessibility.lock().unwrap() =
-            std::mem::take(&mut *client.retained.lock().unwrap());
+        let first = client.publish(PresentationGeneration::default()).unwrap();
         let next = PresentationGeneration::default().next();
 
         let before = crate::terminal::accessibility::probes();
         let (rebound, allocations) = crate::terminal::testing::count_allocations(|| {
-            client.semantics.rebind(&client.state, next)
+            client.publish(next)
         });
         let after = crate::terminal::accessibility::probes();
         let probes = crate::terminal::accessibility::Probes {
@@ -1700,7 +1688,7 @@ mod tests {
         });
 
         assert_eq!(acks.unwrap().len(), 1);
-        let model = client.semantics.take_published().unwrap();
+        let model = client.publish(PresentationGeneration::default()).unwrap();
         assert_eq!(model.rows().count(), 10_000);
         assert!(
             allocations.bytes < 2 * encoded,
