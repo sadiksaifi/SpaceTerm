@@ -2163,7 +2163,7 @@ fn semantic_lines(
     from: u32,
     lines: u32,
 ) -> Vec<pane::accessibility::Update> {
-    use pane::accessibility::{Header, Packer, RowUpdate, Run, Screen, Tail};
+    use pane::accessibility::{CellSpan, Header, Packer, RowUpdate, Run, Screen, Tail};
     let mut packer = Packer::new(Header {
         demand_generation: 1,
         revision,
@@ -2186,7 +2186,11 @@ fn semantic_lines(
             revision,
             false,
             "line".into(),
-            Vec::new(),
+            (0..4).map(|column| CellSpan {
+                column,
+                width: 1,
+                bytes: 1,
+            }),
         )));
     }
     messages.push(packer.finish(Tail {
