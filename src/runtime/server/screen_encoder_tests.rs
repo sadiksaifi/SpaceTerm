@@ -151,7 +151,7 @@ fn a_three_line_log_scroll_costs_about_half_a_kilobyte() {
 /// A log line with styles and wide characters. Every tenth line adds a link, an emoji and a
 /// combining mark, which the emulator's debug build is slow to store.
 fn rich_line(number: usize) -> String {
-    let rare = if number % 10 == 0 {
+    let rare = if number.is_multiple_of(10) {
         "\x1b]8;;https://example.com/\x1b\\link\x1b]8;;\x1b\\ 👨‍👩‍👧 e\u{301}"
     } else {
         "text"
