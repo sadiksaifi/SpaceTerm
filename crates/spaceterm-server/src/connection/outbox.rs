@@ -3,30 +3,34 @@
 //! | Level | Carries |
 //! |---|---|
 //! | L0 | Ping, Pong, Goodbye |
-//! | L1 | small replies, Pane events, frames and inventory, in publication order |
+//! | L1 | small replies, Pane events, frames, semantic updates and inventory, in publication order |
 //! | L2 | bulk replies, in frames of at most [`limits::BULK_CHUNK_BYTES`] |
 //!
 //! The I/O thread writes one frame per [`Outbox::next_frame`] call, so L0 interleaves between the
 //! frames of a large L1 or L2 message. Inventory and each channel's presentation are latest-state
 //! slots: publishing again replaces a state that is not yet written but keeps its place in L1.
-//! Each channel has one frame of credit, returned by its acknowledgement.
+//! Each channel has one frame of credit, returned by its acknowledgement, and one semantic credit
+//! of its own ([`semantics`]).
 //!
 //! Replies, Pane events and inventory are encoded when they are queued, on the producer's thread,
 //! so the producer receives any encoding error. Presentation is encoded by
 //! [`Presentation::encode`] on the I/O thread, outside the `PaneService` lock and this outbox's
-//! lock.
+//! lock, and so are semantic updates, one message per L1 turn.
 use super::Wake;
 use super::carrier::Priority;
 use crate::protocol::frame::{EncodeError, encode_server};
 use crate::protocol::screen::ScreenUpdate;
 use crate::protocol::{
-    Channel, Fatal, Frame, InventoryRevision, PaneEvent, PaneMessage, Ping, Pong, Refusal, Reply,
-    ReplyBody, RequestId, ServerMessage, limits,
+    AccessibilityMessage, Channel, Fatal, Frame, InventoryRevision, PaneEvent, PaneMessage, Ping,
+    Pong, Refusal, Reply, ReplyBody, RequestId, ServerMessage, limits,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+mod semantics;
+pub use semantics::{SemanticEncoding, SemanticTicket, Semantics};
 
 /// A Pane's screen state captured under the `PaneService` lock and encoded later outside it.
 /// It owns its snapshot, for example through an `Arc`, and never borrows service state.
@@ -133,6 +137,8 @@ enum Entry {
     Message(Frames, Option<RequestId>),
     Inventory,
     Frame(Channel),
+    /// The channel's next semantic message, encoded when taken.
+    Semantics(Channel),
 }
 
 struct Slot {
@@ -146,11 +152,13 @@ struct Slot {
     keyframe: bool,
     /// Set by [`Outbox::end`]: written after the final frame, then the slot is removed.
     end: Option<Frames>,
+    semantics: semantics::Slot,
 }
 
 enum Taken {
     Frame(Vec<u8>, Priority),
     Present(FrameTicket, Box<dyn Presentation>, Option<Frames>),
+    Semantics(semantics::Work),
     Skip,
 }
 
@@ -339,6 +347,7 @@ impl Outbox {
                     acknowledged: None,
                     keyframe: true,
                     end: None,
+                    semantics: semantics::Slot::default(),
                 },
             );
             Ok(())
@@ -367,6 +376,8 @@ impl Outbox {
             if slot.end.is_some() {
                 return Ok(());
             }
+            // The last event waits for frame credit only, never for a semantic acknowledgement.
+            slot.semantics.end();
             if slot.pending.is_none() && slot.in_flight.is_none() {
                 state.channels.remove(&channel);
                 state.closed.push(channel);
@@ -382,8 +393,10 @@ impl Outbox {
         std::mem::take(&mut self.lock().closed)
     }
 
-    /// A hidden channel drops its pending state and receives no frames. Revealing keeps the
-    /// acknowledged baseline; the publisher presents the current state again.
+    /// A hidden channel drops its pending state and receives no frames or semantic updates.
+    /// Revealing keeps the acknowledged baseline; the publisher presents the current state again.
+    /// A semantic revision whose messages started stays suspended while hidden, keeping its model
+    /// and credit, and continues through its tail when shown.
     pub fn view(&self, channel: Channel, visible: bool) {
         let mut state = self.lock();
         let mut ended = None;
@@ -396,12 +409,18 @@ impl Outbox {
                 }
             }
         }
+        let before = (state.l1.len(), state.closing);
         if let Some(frames) = ended {
             state.channels.remove(&channel);
             state.closed.push(channel);
             // A full L1 closes the outbox with `Goodbye(Stalled)`, so the event is not lost
             // silently: the whole connection ends.
             let _ = state.push_l1(Entry::Message(frames, None));
+        } else if visible {
+            // A full L1 closes the outbox with `Goodbye(Stalled)`.
+            let _ = state.queue_semantics(channel);
+        }
+        if (state.l1.len(), state.closing) != before {
             drop(state);
             self.shared.wake.wake();
         }
@@ -463,6 +482,44 @@ impl Outbox {
         })
     }
 
+    /// Starts semantic demand generation `generation` on `channel`: forgets the acknowledged
+    /// base, abandons an unfinished revision without waiting for its credit, and sends the next
+    /// model as a complete document. A generation not above the channel's last start is a
+    /// violation. Ignored for a channel the outbox does not hold.
+    pub fn start_semantics(&self, channel: Channel, generation: u64) -> Result<(), OutboxError> {
+        self.with(|state| state.start_semantics(channel, generation))
+    }
+
+    /// Ends semantic demand on `channel`: drops its store and abandons an unfinished revision
+    /// without waiting for its credit.
+    pub fn end_semantics(&self, channel: Channel) {
+        self.lock().end_semantics(channel);
+    }
+
+    /// Replaces the channel's semantic model not yet started. Ignored while the channel has no
+    /// demand, and for an ending or closed channel. A hidden channel keeps it until shown.
+    pub fn semantics(
+        &self,
+        channel: Channel,
+        model: Arc<dyn Semantics>,
+    ) -> Result<(), OutboxError> {
+        self.with(|state| {
+            state.open()?;
+            state.offer_semantics(channel, model)
+        })
+    }
+
+    /// Returns the channel's semantic credit under the acknowledgement rule of ADR 0062. An
+    /// acknowledgement for a channel the server already forgot is ignored.
+    pub fn acknowledge_semantics(
+        &self,
+        channel: Channel,
+        demand_generation: u64,
+        revision: u64,
+    ) -> Result<(), OutboxError> {
+        self.with(|state| state.acknowledge_semantics(channel, demand_generation, revision))
+    }
+
     /// Records that the I/O thread wrote a frame. Starts the acknowledgement timer of every frame
     /// taken but not yet written.
     pub fn written(&self, now: Instant) {
@@ -497,6 +554,10 @@ impl Outbox {
             let (ticket, presentation, end) = match taken? {
                 Taken::Frame(frame, priority) => return Some((frame, priority)),
                 Taken::Skip => continue,
+                Taken::Semantics(work) => match self.semantics_frame(work) {
+                    Some(frame) => return Some((frame, Priority::L1)),
+                    None => continue,
+                },
                 Taken::Present(ticket, presentation, end) => (ticket, presentation, end),
             };
             let encoded = match presentation.encode(ticket) {
@@ -538,6 +599,51 @@ impl Outbox {
             }
             return Some((first, Priority::L1));
         }
+    }
+}
+
+impl Outbox {
+    /// Encodes one semantic message outside the outbox lock and returns its frame. `None` means
+    /// there is nothing to write: the model equalled its base, or its revision was abandoned
+    /// while it encoded. A message this server cannot encode ends its channel with
+    /// `PaneEvent::Failed`, as a frame does.
+    fn semantics_frame(&self, work: semantics::Work) -> Option<Vec<u8>> {
+        let semantics::Encoded {
+            channel,
+            serial,
+            update,
+            rest,
+        } = match work.run() {
+            Ok(encoded) => encoded,
+            Err((channel, serial)) => {
+                self.lock().semantics_unsent(channel, serial);
+                return None;
+            }
+        };
+        let message = encode(&ServerMessage::Accessibility(Box::new(
+            AccessibilityMessage { channel, update },
+        )));
+        let mut state = self.lock();
+        let frames = match message {
+            // Dropped when its revision was abandoned meanwhile, or when the outbox closed.
+            Ok(frames) => match state.semantics_taken(channel, serial, rest) {
+                Ok(true) => frames,
+                Ok(false) | Err(_) => return None,
+            },
+            Err(_) => {
+                state.channels.remove(&channel)?;
+                state.closed.push(channel);
+                encode(&ServerMessage::Pane(PaneMessage {
+                    channel,
+                    event: PaneEvent::Failed,
+                }))
+                .ok()?
+            }
+        };
+        let mut frames = frames.into_iter();
+        let first = frames.next()?;
+        state.l1_rest.extend(frames);
+        Some(first)
     }
 }
 
@@ -590,7 +696,7 @@ impl State {
         self.open()?;
         let bytes = match &entry {
             Entry::Message(frames, _) => size(frames),
-            Entry::Inventory | Entry::Frame(_) => 0,
+            Entry::Inventory | Entry::Frame(_) | Entry::Semantics(_) => 0,
         };
         if self.l1.len() >= limits::MAX_L1_MESSAGES || self.l1_bytes + bytes > limits::MAX_L1_BYTES
         {
@@ -634,6 +740,12 @@ impl State {
                     (self.inventory.take().unwrap_or_default(), None)
                 }
                 Entry::Frame(channel) => return Some(self.present(channel)),
+                Entry::Semantics(channel) => {
+                    return Some(
+                        self.take_semantics(channel)
+                            .map_or(Taken::Skip, Taken::Semantics),
+                    );
+                }
             };
             return Some(self.first(frames, reply, Priority::L1));
         }

@@ -637,3 +637,109 @@ fn channels_can_be_claimed_in_a_different_order_than_their_handles_were_opened()
     }
     assert_eq!(harness.link.health(), Health::Live);
 }
+
+/// A one-message semantic revision.
+struct Semantic(u64);
+impl super::outbox::Semantics for Semantic {
+    fn revision(&self) -> u64 {
+        self.0
+    }
+    fn encode(
+        self: Arc<Self>,
+        ticket: super::outbox::SemanticTicket,
+        _base: Option<Arc<dyn super::outbox::Semantics>>,
+    ) -> Option<Box<dyn super::outbox::SemanticEncoding>> {
+        struct Tail(Option<crate::pane::accessibility::Update>);
+        impl super::outbox::SemanticEncoding for Tail {
+            fn next(&mut self) -> crate::pane::accessibility::Update {
+                self.0.take().expect("one message")
+            }
+        }
+        Some(Box::new(Tail(Some(crate::pane::accessibility::Update {
+            header: crate::pane::accessibility::Header {
+                demand_generation: ticket.demand_generation,
+                revision: ticket.revision,
+                base: ticket.base,
+                screen: crate::pane::accessibility::Screen::Primary,
+                screen_generation: 0,
+            },
+            splices: Vec::new(),
+            rows: Vec::new(),
+            tail: Some(crate::pane::accessibility::Tail {
+                visible_lines: 0..0,
+                cursor: None,
+                selection: None,
+            }),
+        }))))
+    }
+}
+
+/// Sends `message` from the client and applies it on the server.
+fn from_client(
+    harness: &mut Harness,
+    message: crate::protocol::ClientMessage,
+) -> Result<Option<super::server::Inbound>, Fatal> {
+    let frames = crate::protocol::frame::encode_client(&message)
+        .unwrap()
+        .frames;
+    harness
+        .client
+        .offer(&frames[0], super::carrier::Priority::L1)
+        .unwrap();
+    let frame = harness.server.receive().unwrap().unwrap();
+    harness.connection.receive(frame, Instant::now())
+}
+
+fn ack(channel: Channel, demand_generation: u64, revision: u64) -> crate::protocol::ClientMessage {
+    crate::protocol::ClientMessage::AccessibilityAck(crate::protocol::AccessibilityAck {
+        channel,
+        demand_generation,
+        revision,
+    })
+}
+
+/// A semantic acknowledgement returns its channel's credit on the I/O thread. One for a channel
+/// the server forgot is ignored, so the connection's other Panes continue; one the rule refuses
+/// ends the connection.
+#[test]
+fn semantic_acknowledgements_return_credit_and_a_closed_channel_ends_nothing() {
+    let mut harness = Harness::new(None);
+    let (released, _) = claimed(&mut harness);
+    let gone = released.channel().unwrap();
+    drop(released);
+    harness.pump().unwrap();
+    assert_eq!(harness.recorded.lock().unwrap().released, [gone]);
+    let (channel, events) = claimed(&mut harness);
+    let id = channel.channel().unwrap();
+    channel.acknowledge(1).unwrap();
+    harness.pump().unwrap();
+    frames(&events);
+
+    assert!(
+        from_client(&mut harness, ack(gone, 1, 1))
+            .unwrap()
+            .is_none(),
+        "a released channel's acknowledgement is ignored"
+    );
+    let outbox = harness.connection.outbox().clone();
+    outbox.start_semantics(id, 1).unwrap();
+    outbox.semantics(id, Arc::new(Semantic(1))).unwrap();
+    assert!(outbox.next_frame().is_some(), "the revision is written");
+    outbox.semantics(id, Arc::new(Semantic(2))).unwrap();
+    assert!(outbox.next_frame().is_none(), "no credit yet");
+    assert!(from_client(&mut harness, ack(id, 1, 1)).unwrap().is_none());
+    assert!(
+        outbox.next_frame().is_some(),
+        "the acknowledgement returned credit"
+    );
+
+    outbox.present(id, Box::new(Screen(5))).unwrap();
+    harness.pump().unwrap();
+    assert_eq!(frames(&events), [(2, Some(1), 5)], "the channel continues");
+
+    assert_eq!(
+        from_client(&mut harness, ack(id, 2, 1)).unwrap_err(),
+        Fatal::ProtocolViolation,
+        "a generation the channel never started"
+    );
+}
