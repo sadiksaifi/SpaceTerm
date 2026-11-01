@@ -984,8 +984,80 @@ fn a_menu_bar_command_after_reopening_keeps_the_view_when_the_server_returns(
     window.update(|window, _| window.activate_window());
     window.run_until_parked();
     // Window > Next Tab, chosen with the pointer.
-    cx.update(crate::app::menu_command_chosen);
+    let origin = window.update(|window, _| window.window_handle());
+    cx.update(|cx| crate::app::menu_command_chosen(origin, cx));
     window.run_until_parked();
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
+}
+
+#[gpui::test]
+fn a_menu_command_that_activates_settings_cancels_the_originating_windows_restore(
+    cx: &mut TestAppContext,
+) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+    let (manager, mut window) = open_window(cx);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    window.update(|window, _| window.activate_window());
+    window.run_until_parked();
+    let origin = window.update(|window, _| window.window_handle());
+    cx.update(|cx| {
+        use crate::platform::window_movement::WindowMovementFactory;
+        use crate::platform::window_movement::{
+            OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
+        };
+        struct SettingsMovement;
+        impl WindowMovementFactory for SettingsMovement {
+            fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
+                Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+            }
+        }
+        crate::ui::appearance_runtime::install(
+            crate::settings::Settings::load(std::sync::Arc::new(
+                crate::settings::storage::testing::MemoryStorage::default(),
+            )),
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::settings_window::configure_window_chrome(
+            Rc::new(SettingsMovement),
+            Default::default(),
+            crate::theme_registry::testing::offline(),
+            cx,
+        );
+        crate::ui::settings_window::open_or_activate(None, cx);
+    });
+    window.run_until_parked();
+    let settings = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+        .expect("Settings opened");
+    settings
+        .update(cx, |_, window, _| window.activate_window())
+        .expect("Settings is open");
+    window.run_until_parked();
+    cx.update(|cx| {
+        assert!(
+            cx.active_window()
+                .unwrap()
+                .downcast::<WorkspaceManager>()
+                .is_none()
+        );
+        crate::app::menu_command_chosen(origin, cx);
+    });
 
     offline.set_inventory(server_inventory(2, &[("Far", 5)]));
     offline.set_connected(true);

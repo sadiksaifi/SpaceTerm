@@ -1,5 +1,5 @@
 use super::application_menu::{
-    ApplicationMenuAdapter, ApplicationMenuCommand, ApplicationMenuError,
+    ApplicationMenuAdapter, ApplicationMenuCommand, ApplicationMenuError, MenuCommandHandler,
 };
 use crate::application_identity::ApplicationIdentity;
 use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, RELEASE_NOTES_TITLE};
@@ -382,7 +382,7 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
         native::perform(command, self.identity.display_name())
     }
 
-    fn follow_chosen_commands(&self, chosen: std::rc::Rc<dyn Fn(&mut App)>, cx: &mut App) {
+    fn follow_chosen_commands(&self, chosen: MenuCommandHandler, cx: &mut App) {
         *self.chosen.borrow_mut() = native::follow_chosen_commands(chosen, cx);
     }
 }
@@ -463,7 +463,7 @@ mod native {
     use objc2_app_kit::{
         NSAboutPanelOptionApplicationIcon, NSAboutPanelOptionApplicationName,
         NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionCredits, NSApplication,
-        NSEventModifierFlags, NSHelpManager, NSImage, NSMenu, NSMenuItem, NSTextAlignment,
+        NSEventModifierFlags, NSHelpManager, NSImage, NSMenu, NSMenuItem, NSTextAlignment, NSView,
         NSWorkspace,
     };
     use objc2_foundation::{
@@ -472,12 +472,12 @@ mod native {
 
     use super::{
         ApplicationMenuCommand, ApplicationMenuError, DEVELOP_MENU_ITEM_ICONS, MENU_ITEM_ICONS,
-        MenuItemIcon, NativeMenuShortcut,
+        MenuCommandHandler, MenuItemIcon, NativeMenuShortcut,
     };
 
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
-    /// AppKit's notice that a menu item sent its action. Only the menu bar's commands count:
+    /// AppKit's notice that a menu item is about to send its action. Only the menu bar's commands count:
     /// the status item's commands open or raise windows and control servers, and choose nothing
     /// a window shows.
     pub(crate) struct ChosenCommands {
@@ -495,7 +495,7 @@ mod native {
     }
 
     pub(super) fn follow_chosen_commands(
-        chosen: std::rc::Rc<dyn Fn(&mut gpui::App)>,
+        chosen: MenuCommandHandler,
         cx: &mut gpui::App,
     ) -> Option<ChosenCommands> {
         let executor = cx.foreground_executor().clone();
@@ -507,15 +507,51 @@ mod native {
                 if !sent_from_menu_bar(notification) {
                     return;
                 }
-                // AppKit posts this as the menu returns, which may be while GPUI still runs.
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let Some(origin) = NSApplication::sharedApplication(mtm).keyWindow() else {
+                    return;
+                };
+                // Keep the native origin before the action changes the key window. GPUI may
+                // still be borrowed here, so resolve its handle after this native callback.
                 let (app, chosen) = (app.clone(), std::rc::Rc::clone(&chosen));
                 executor
-                    .spawn(async move { app.update(|cx| chosen(cx)) })
+                    .spawn(async move {
+                        app.update(|cx| {
+                            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+                            let origin = cx.windows().into_iter().find(|handle| {
+                                handle
+                                    .update(cx, |_, window, _| {
+                                        let Ok(handle) = HasWindowHandle::window_handle(window)
+                                        else {
+                                            return false;
+                                        };
+                                        let RawWindowHandle::AppKit(handle) = handle.as_raw()
+                                        else {
+                                            return false;
+                                        };
+                                        // SAFETY: GPUI owns this live NSView during the update.
+                                        let view =
+                                            unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+                                        view.window().is_some_and(|window| {
+                                            objc2::rc::Retained::as_ptr(&window)
+                                                == objc2::rc::Retained::as_ptr(&origin)
+                                        })
+                                    })
+                                    .unwrap_or(false)
+                            });
+                            if let Some(origin) = origin {
+                                chosen(origin, cx);
+                            }
+                        })
+                    })
                     .detach();
             },
         );
         let center = objc2_foundation::NSNotificationCenter::defaultCenter();
-        let name = NSString::from_str("NSMenuDidSendActionNotification");
+        let name = NSString::from_str("NSMenuWillSendActionNotification");
         // SAFETY: AppKit posts menu notifications on the main thread, where the callback runs.
         // The adapter removes the observer before dropping its main-thread-only callback.
         let observer = unsafe {
@@ -769,7 +805,7 @@ mod native {
     pub(crate) struct ChosenCommands;
 
     pub(super) fn follow_chosen_commands(
-        _: std::rc::Rc<dyn Fn(&mut gpui::App)>,
+        _: super::MenuCommandHandler,
         _: &mut gpui::App,
     ) -> Option<ChosenCommands> {
         None

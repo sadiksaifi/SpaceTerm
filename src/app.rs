@@ -342,12 +342,10 @@ pub(crate) fn init(
     Ok(())
 }
 
-/// The person chose a menu-bar command, which acts on the active window. A Workspace Window that
-/// still holds a remembered choice takes it as the person's input.
-pub(crate) fn menu_command_chosen(cx: &mut App) {
-    if let Some(window) =
-        open_active_window(cx).and_then(|window| window.downcast::<WorkspaceManager>())
-    {
+/// The person chose a menu-bar command in `origin`. Its action may have activated another window
+/// since, so the originating Workspace Window takes it as the person's input.
+pub(crate) fn menu_command_chosen(origin: gpui::AnyWindowHandle, cx: &mut App) {
+    if let Some(window) = origin.downcast::<WorkspaceManager>() {
         let _ = window.update(cx, |manager, _, cx| manager.person_input(cx));
     }
 }
