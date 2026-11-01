@@ -258,6 +258,19 @@ impl WorkerSchedules {
         self.line.transition(now);
     }
 
+    pub(super) fn note_line_output(&mut self, now: Instant) {
+        self.line.output(now);
+    }
+
+    /// Whether output arrived since the latest line mode read, so a frame capture reads first.
+    pub(super) fn line_output_unread(&self) -> bool {
+        self.line.output_unread()
+    }
+
+    fn line_deadline(&self) -> Option<Instant> {
+        self.line.deadline(self.presentation.is_presentable())
+    }
+
     pub(super) fn request_presentation(&mut self) {
         self.presentation.request();
     }
@@ -434,7 +447,7 @@ impl WorkerSchedules {
             self.metadata_deadline(),
             self.graphics_animation,
             self.compression.deadline(),
-            self.line.deadline,
+            self.line_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -462,8 +475,7 @@ impl WorkerSchedules {
         if self.metadata_deadline().is_some_and(|due| now >= due) {
             return Some(Command::PublishMetadata);
         }
-        self.line
-            .deadline
+        self.line_deadline()
             .is_some_and(|deadline| now >= deadline)
             .then_some(Command::ReadLineMode)
     }
@@ -568,29 +580,63 @@ impl AccessibilityContinuationSchedule {
     }
 }
 
-/// Reads the PTY's line mode after output, focus changes and written input. An idle session reads
-/// nothing: a program that changes the mode silently is seen at the next of those, which is no
-/// later than the person's first keystroke reaching it.
+/// Reads the PTY's line mode after written input and focus changes, and before capturing a frame
+/// of unread output. Input, focus changes and output also schedule one read 200 ms later, because
+/// programs may print their prompt before they change the mode. A hidden Terminal Session captures
+/// no frames, so it reads unread output at most once per [`METADATA_PRESENTATION_INTERVAL`]. An idle
+/// session reads nothing: a program that changes the mode silently is seen at the next of those,
+/// which is no later than the person's first keystroke reaching it.
 struct LineSchedule {
     state: LineState,
-    deadline: Option<Instant>,
-    settle: bool,
+    /// A read due now: the first read, or one after input or a focus change.
+    due: Option<Instant>,
+    /// The read 200 ms after the latest input, focus change or output.
+    settle: Option<Instant>,
+    /// When the first output since the latest read arrived.
+    unread_output: Option<Instant>,
+    /// When the latest read happened.
+    last_read: Option<Instant>,
 }
 
 impl LineSchedule {
     fn new(now: Instant) -> Self {
         Self {
             state: LineState::default(),
-            deadline: Some(now),
-            settle: false,
+            due: Some(now),
+            settle: None,
+            unread_output: None,
+            last_read: None,
         }
     }
 
     fn transition(&mut self, now: Instant) {
-        self.deadline = Some(now);
-        // Programs may write their prompt before changing termios. Read again once the
-        // transition has settled.
-        self.settle = true;
+        self.due = Some(now);
+        self.settle = Some(now + LINE_SETTLE_INTERVAL);
+    }
+
+    /// Records output. The next frame capture reads first, and the settle read moves to 200 ms
+    /// after this output.
+    fn output(&mut self, now: Instant) {
+        self.unread_output.get_or_insert(now);
+        self.settle = Some(now + LINE_SETTLE_INTERVAL);
+    }
+
+    fn output_unread(&self) -> bool {
+        self.unread_output.is_some()
+    }
+
+    /// The next read that needs no frame capture. A hidden session also reads unread output on the
+    /// metadata pace.
+    fn deadline(&self, presentable: bool) -> Option<Instant> {
+        let hidden_output = self.unread_output.filter(|_| !presentable).map(|output| {
+            self.last_read.map_or(output, |read| {
+                output.max(read + METADATA_PRESENTATION_INTERVAL)
+            })
+        });
+        [self.due, self.settle, hidden_output]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Returns the new state when the mode differs from the last one read.
@@ -599,7 +645,10 @@ impl LineSchedule {
         now: Instant,
         result: Result<LineMode, NativePtyOperationFailure>,
     ) -> Option<LineState> {
-        self.deadline = std::mem::take(&mut self.settle).then(|| now + LINE_SETTLE_INTERVAL);
+        self.due = None;
+        self.settle = self.settle.filter(|settle| *settle > now);
+        self.unread_output = None;
+        self.last_read = Some(now);
         let mode = result.unwrap_or_else(|_| {
             eprintln!("PTY line mode inspection failed; releasing secure input");
             LineMode::UNKNOWN
@@ -911,7 +960,7 @@ mod tests {
             .unwrap();
         assert_eq!((failed.epoch, failed.mode), (2, LineMode::UNKNOWN));
         assert!(!failed.mode.hidden_input());
-        assert_eq!(schedule.deadline, None);
+        assert_eq!(schedule.deadline(true), None);
     }
 
     #[test]
