@@ -61,6 +61,9 @@ class ServerSourceTests(unittest.TestCase):
             (root / "assets").mkdir()
             shutil.copyfile(ROOT / "build/identity.rs", root / "build/identity.rs")
             shutil.copyfile(ROOT / "crates/spaceterm-cli/build.rs", crate / "build.rs")
+            shutil.copyfile(
+                ROOT / "crates/spaceterm-cli/build_resources.rs", crate / "build_resources.rs"
+            )
             major = root / server_package.PROTOCOL_MAJOR_SOURCE
             major.parent.mkdir(parents=True)
             shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
