@@ -156,3 +156,9 @@ mise run bench:latency:netem --owner-host penguin --jail /var/tmp/spaceterm-nete
 The idle task reads per-flow UDP byte counters with `nettop`, so it sees paired QUIC connections but not account-local IPC.
 
 On macOS, remote tasks accept `--interface` with a remote host, and the pixel, idle and protocol tasks take that host as `--route-host`. A task given them refuses to run unless the route to the host uses that interface, and every established TCP connection and connected UDP socket to the host uses an address on it. A paired connection's QUIC socket is a connected UDP socket, so the guard also refuses an app whose socket stayed on another interface. Use them to keep a wired batch on Ethernet.
+
+## Measure CPU and memory
+
+`bench:desktop:macos` measures an installed Preflight or Release app in the ten scenarios of #773, with Accessibility off and on. Its ratio budgets compare with a run of v0.6.8 through `--app reference` on the same Mac with the same settings; the task refuses any other reference. `bench:server` measures a foreground Development server built from this checkout and fails when a median exceeds this host's baseline in `mise-tasks/bench/baselines/server/` by more than 10%, or when that baseline is missing or was recorded with other settings, input or hardware. `--record` replaces the baseline and needs every workload and condition; record it on a clean checkout after a change to what the task measures. Both tasks check [the budgets](../mise-tasks/bench/budgets.json), and `mise run <task> --help` describes their options and output.
+
+A foreground Development server refuses to start while the account's Development identity has service state, as `mise run development` does. On Linux with bwrap, `bench:server` gives its server private Development state instead.

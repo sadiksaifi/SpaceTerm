@@ -78,6 +78,18 @@ impl PaneService for Toy {
                     Err(Refusal::StorageUnavailable)
                 }))
             }
+            Operation::Accessibility { revision, .. } => {
+                // Larger than one bulk frame, so the reply continues over several frames.
+                let bytes = vec![b'a'; crate::protocol::limits::BULK_CHUNK_BYTES * 2 + 100];
+                Dispatch::reply(Ok(ReplyBody::Accessibility(Ok(
+                    crate::pane::accessibility::Chunk {
+                        revision: revision.unwrap_or(1),
+                        offset: 0,
+                        total: bytes.len(),
+                        bytes,
+                    },
+                ))))
+            }
             _ => Dispatch::reply(Ok(ReplyBody::Done)),
         }
     }
@@ -118,6 +130,8 @@ struct Harness {
     recorded: Arc<Mutex<Recorded>>,
     events: Arc<Mutex<Vec<LinkEvent>>>,
     direct: Arc<Direct>,
+    /// Every byte the server end wrote, frame headers included.
+    server_wrote: usize,
 }
 
 impl Harness {
@@ -153,6 +167,7 @@ impl Harness {
             recorded,
             events,
             direct,
+            server_wrote: 0,
         }
     }
 
@@ -188,6 +203,7 @@ impl Harness {
                 }
             }
             if let Some((frame, priority)) = self.connection.outbox().next_frame() {
+                self.server_wrote += frame.len();
                 assert_eq!(
                     self.server.offer(&frame, priority).unwrap(),
                     Offer::Accepted
@@ -634,4 +650,46 @@ fn channels_can_be_claimed_in_a_different_order_than_their_handles_were_opened()
         ));
     }
     assert_eq!(harness.link.health(), Health::Live);
+}
+
+#[test]
+fn the_link_counts_every_byte_the_server_wrote() {
+    let mut harness = Harness::new(None);
+    let (channel, events) = claimed(&mut harness);
+    channel.view(true, 120).unwrap();
+    let outbox = harness.connection.outbox().clone();
+    let id = channel.channel().unwrap();
+    outbox
+        .inventory(InventoryRevision {
+            inventory: crate::hierarchy::State::empty().inventory,
+            next_sequence: 2,
+        })
+        .unwrap();
+    outbox
+        .pane(id, PaneEvent::Accessibility { revision: 1 })
+        .unwrap();
+    let reply = channel
+        .request(Operation::Accessibility {
+            channel: id,
+            revision: None,
+            offset: 0,
+            base: None,
+        })
+        .unwrap();
+    harness.pump().unwrap();
+    assert!(matches!(reply.wait(), Ok(ReplyBody::Accessibility(Ok(_)))));
+    assert!(matches!(
+        events.lock().unwrap().as_slice(),
+        [
+            ChannelEvent::Frame(_),
+            ChannelEvent::Pane(PaneEvent::Accessibility { .. })
+        ]
+    ));
+    assert!(matches!(
+        harness.events.lock().unwrap().as_slice(),
+        [LinkEvent::Inventory(_)]
+    ));
+    // The claim reply, frame, inventory, Pane event and a bulk reply of three frames.
+    assert!(harness.server_wrote > crate::protocol::limits::BULK_CHUNK_BYTES * 2);
+    assert_eq!(harness.link.received_bytes(), harness.server_wrote as u64);
 }
