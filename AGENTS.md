@@ -11,6 +11,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 ## Architecture
 
+- Nothing has been released yet, so maintain no backward compatibility for anything. Pick the best solution for every change and replace the old one in place, with no migrations, aliases, fallbacks or readers for old versions.
 - Each SpaceTerm Server owns its Workspaces, Tabs, Panes, and Terminal Sessions. Each SpaceTerm Client owns its presentation and client view over account-local IPC or paired QUIC connections. SSH is temporary provisioning authority inside the desktop's Add Server.
 - Put behavior, invariants, and cleanup in deep modules with narrow interfaces. Expose intentional operations and typed recoverable failures.
 - Keep product policy portable. Reach frameworks, external systems, and operating system capabilities through narrow adapters chosen by constructor injection. Add a boundary only for durable replaceability or locality.
@@ -21,7 +22,6 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 - Errors and Terminal Diagnostics carry typed classifications and bounded metadata only. They never carry terminal or clipboard contents, environment values, paths, credentials, labels, or raw native errors.
 - SpaceTerm sends no automatic telemetry or crash reports.
 - Local file actions require explicit local authority. Remote values grant none.
-- Replace obsolete server-client formats directly, including Settings and serialized Commands. Add no migrations, legacy readers, dual transports or SSH runtime fallbacks.
 
 ## Work
 
