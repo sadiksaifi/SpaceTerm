@@ -1012,7 +1012,7 @@ mod tests {
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
         schedules.update_line(now, Ok(LineMode::UNKNOWN));
         let due = now + Duration::from_secs(30);
-        // Output just before `due` asks for a line mode read.
+        // Input just before `due` asks for a line mode read.
         schedules.line_transition(due);
         schedules
             .request_paste_confirmation(PreparedPaste::prepare("one\ntwo".into()).unwrap(), now)
