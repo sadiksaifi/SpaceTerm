@@ -414,6 +414,11 @@ impl ServerLink {
                     );
                 }
             },
+            // This client requests no pushed semantics yet, so an update is one it never asked for.
+            ServerMessage::Accessibility(_) => {
+                self.fail(LinkError::Violation);
+                return Err(LinkError::Violation);
+            }
             ServerMessage::Pane(pane) => {
                 let last = pane.event.last();
                 if let Some(sink) = self.sink(pane.channel, last) {

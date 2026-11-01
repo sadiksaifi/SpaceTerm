@@ -28,6 +28,10 @@ pub const MAX_EFFECT_DONE_BYTES: usize = crate::pane::effects::MAX_CLIPBOARD_BYT
 
 /// Largest single screen update across all of its frames.
 pub const MAX_UPDATE_BYTES: usize = 16 * 1024 * 1024;
+/// Largest semantic update message. Servers fill messages to
+/// [`crate::pane::accessibility::UPDATE_TARGET_BYTES`]; a single row at
+/// [`crate::pane::accessibility::MAX_ROW_TEXT_BYTES`] with a span per column stays under this.
+pub const MAX_ACCESSIBILITY_BYTES: usize = 64 * 1024;
 /// Largest reply across all of its frames.
 pub const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
 /// Largest Pane event, which can carry a clipboard write.

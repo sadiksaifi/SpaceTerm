@@ -1115,6 +1115,15 @@ impl PaneLink {
                     channel: channel(lease)?,
                 })
                 .map(|_| Reply::Unchanged),
+            Request::AccessibilityDemand { lease, requested } => {
+                match self.request(Operation::AccessibilityDemand {
+                    channel: channel(lease)?,
+                    requested,
+                })? {
+                    ReplyBody::Done => Ok(Reply::Unchanged),
+                    _ => Err(ServerError::Protocol),
+                }
+            }
             Request::Release { lease } => {
                 self.bound(lease)?;
                 // Dropping the handle sends `Release` in order behind earlier input.
