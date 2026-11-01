@@ -414,8 +414,6 @@ class Bench:
 
     def job(self, scenario, phase, kind, **parameters):
         """A workload from its start to the end of the presentation work that follows it."""
-        self.desktop.input.key("k", "command")
-        time.sleep(0.5)
         number = self.desktop.run_job(kind, **parameters)
         members = self.desktop.members()
         before = snapshot(members)

@@ -1,7 +1,7 @@
 """Run one benchmark workload inside a SpaceTerm Pane and write a receipt when it finishes.
 
 bench:desktop:macos and bench:server type `sh DIRECTORY/go NUMBER` into a Pane, which runs this script
-with NUMBER and DIRECTORY. It reads `NUMBER.json`, writes `NUMBER.ready` and waits for the benchmark to create
+with NUMBER and DIRECTORY. It reads `NUMBER.json`, clears the screen and Scrollback, writes `NUMBER.ready` and waits for the benchmark to create
 `NUMBER.go` after its first measurement. Then it runs the workload on the Pane's terminal,
 writes the receipt `NUMBER.done.json` and prints a completion marker. The typed command never
 contains the marker, so the marker on the screen also means the workload finished.
@@ -37,6 +37,7 @@ while reltimefloat(reltime(started)) < duration
 endwhile
 qa!
 """
+CLEAR = b"\x1b[H\x1b[2J\x1b[3J"
 FILL_LINE = b"0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n"
 
 
@@ -76,7 +77,6 @@ def run(job, directory):
         command = ["vim", "-Nu", "NONE", "-i", "NONE", "-n", "-S", str(script), str(text)]
         result["returncode"] = subprocess.run(command, env=environment).returncode
     elif kind == "fill":
-        write_all(b"\x1b[3J\x1b[2J\x1b[H")
         for _ in range(job.get("lines", 100_000) // 1000):
             write_all(FILL_LINE * 1000)
         result["lines"] = job.get("lines", 100_000)
@@ -91,6 +91,9 @@ def main():
     number, directory = sys.argv[1], Path(sys.argv[2])
     job = json.loads((directory / f"{number}.json").read_text())
     job["number"] = number
+    # Each workload starts from an empty screen and Scrollback, so earlier workloads' history
+    # never changes what this one costs.
+    write_all(CLEAR)
     (directory / f"{number}.ready").write_text(str(os.getpid()))
     go = directory / f"{number}.go"
     deadline = time.monotonic() + job.get("start_timeout", 120)
