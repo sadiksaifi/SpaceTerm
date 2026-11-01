@@ -963,12 +963,9 @@ fn listens(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) -> bo
     })
 }
 
-/// A command chosen from the menu bar reaches the window as an action with no key or press. The
-/// menu adapter reports it, so the remembered Workspace never replaces the person's choice.
+/// A menu command that leaves this window active does not replace the held Workspace choice.
 #[gpui::test]
-fn a_menu_bar_command_after_reopening_keeps_the_view_when_the_server_returns(
-    cx: &mut TestAppContext,
-) {
+fn a_menu_command_that_keeps_the_active_window_preserves_the_restore(cx: &mut TestAppContext) {
     let (local, offline) = closed_on_an_offline_servers_workspace(cx);
 
     let (manager, mut window) = open_window(cx);
@@ -983,9 +980,225 @@ fn a_menu_bar_command_after_reopening_keeps_the_view_when_the_server_returns(
     let key = present_penguin(&manager, &offline, &[5], &mut window);
     window.update(|window, _| window.activate_window());
     window.run_until_parked();
-    // Window > Next Tab, chosen with the pointer.
-    cx.update(crate::app::menu_command_chosen);
+    // A command such as Window > Zoom leaves this Workspace Window active.
+    let origin = window.update(|window, _| window.window_handle());
+    cx.update(|cx| {
+        assert_eq!(cx.active_window(), Some(origin));
+        crate::app::menu_command_chosen(origin, cx);
+        assert_eq!(cx.active_window(), Some(origin));
+    });
     window.run_until_parked();
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Far");
+}
+
+#[gpui::test]
+fn a_menu_command_that_activates_settings_cancels_the_originating_windows_restore(
+    cx: &mut TestAppContext,
+) {
+    let origin = std::cell::Cell::new(None);
+    menu_command_activates_settings(
+        cx,
+        |cx| origin.set(cx.active_window()),
+        |cx| crate::app::menu_command_chosen(origin.get().expect("the origin is active"), cx),
+    );
+}
+
+#[cfg(all(test, target_os = "macos", feature = "native-tests"))]
+#[path = "../../platform/macos_adapter_tests/remembered_menu.rs"]
+mod macos_adapter_tests;
+
+fn menu_command_activates_settings(
+    cx: &mut TestAppContext,
+    before: impl FnOnce(&mut gpui::App),
+    after: impl FnOnce(&mut gpui::App),
+) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+    let (manager, mut window) = open_window(cx);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    window.update(|window, _| window.activate_window());
+    window.run_until_parked();
+    cx.update(before);
+    cx.update(|cx| {
+        use crate::platform::window_movement::WindowMovementFactory;
+        use crate::platform::window_movement::{
+            OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
+        };
+        struct SettingsMovement;
+        impl WindowMovementFactory for SettingsMovement {
+            fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
+                Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+            }
+        }
+        crate::ui::appearance_runtime::install(
+            crate::settings::Settings::load(std::sync::Arc::new(
+                crate::settings::storage::testing::MemoryStorage::default(),
+            )),
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::settings_window::configure_window_chrome(
+            Rc::new(SettingsMovement),
+            Default::default(),
+            crate::theme_registry::testing::offline(),
+            cx,
+        );
+        crate::ui::settings_window::open_or_activate(None, cx);
+    });
+    window.run_until_parked();
+    let settings = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+        .expect("Settings opened");
+    settings
+        .update(cx, |_, window, _| window.activate_window())
+        .expect("Settings is open");
+    window.run_until_parked();
+    cx.update(|cx| {
+        assert!(
+            cx.active_window()
+                .unwrap()
+                .downcast::<WorkspaceManager>()
+                .is_none()
+        );
+        after(cx);
+    });
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
+}
+
+#[gpui::test]
+fn starting_composition_cancels_restore_before_key_release_or_server_publication(
+    cx: &mut TestAppContext,
+) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+    let panes = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _created = cx.update(|cx| {
+        let panes = Rc::clone(&panes);
+        cx.observe_new::<crate::ui::terminal_pane::TerminalPane>(move |_, _, cx| {
+            panes.borrow_mut().push(cx.entity());
+        })
+    });
+    let (manager, mut window) = open_window(cx);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    focus_content(&manager, &mut window);
+    let pane = window.update(|window, cx| {
+        panes
+            .borrow()
+            .iter()
+            .find(|pane| pane.read(cx).is_focused(window))
+            .cloned()
+            .expect("the Focused Pane accepts input")
+    });
+    let mut input = window.update(|window, cx| {
+        gpui::PlatformInputHandler::new(
+            window.to_async(cx),
+            Box::new(gpui::ElementInputHandler::new(
+                gpui::Bounds::default(),
+                pane,
+            )),
+        )
+    });
+    // The input method consumes key-down. Publication arrives before any key-up.
+    input.replace_and_mark_text_in_range(None, "に", Some(1..1));
+    assert!(input.marked_text_range().is_some());
+
+    offline.set_inventory(server_inventory(2, &[("Far", 5)]));
+    offline.set_connected(true);
+    sync(&manager, key, &mut window);
+    assert_eq!(active_name(&manager, &mut window), "Here");
+}
+
+#[gpui::test]
+fn starting_find_composition_keeps_the_view_when_the_server_publishes(cx: &mut TestAppContext) {
+    let (local, offline) = closed_on_an_offline_servers_workspace(cx);
+    let inputs = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let panes = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _panes_created = cx.update(|cx| {
+        let panes = Rc::clone(&panes);
+        cx.observe_new::<crate::ui::terminal_pane::TerminalPane>(move |_, _, cx| {
+            panes.borrow_mut().push(cx.entity());
+        })
+    });
+    let _created = cx.update(|cx| {
+        let inputs = Rc::clone(&inputs);
+        cx.observe_new::<spaceterm_ui::TextInput>(move |_, _, cx| {
+            inputs.borrow_mut().push(cx.entity());
+        })
+    });
+    let (manager, mut window) = open_window(cx);
+    present(
+        &manager,
+        ServerOrigin::Local,
+        LOCAL_OWNER,
+        &local,
+        &[1],
+        &mut window,
+    );
+    let key = present_penguin(&manager, &offline, &[5], &mut window);
+    // A restored Pane can show Find before its Terminal Session supplies a reading.
+    // Present it without a key or pointer event, leaving the Workspace restore held.
+    focus_content(&manager, &mut window);
+    window.update(|window, cx| {
+        let pane = panes
+            .borrow()
+            .iter()
+            .find(|pane| pane.read(cx).is_focused(window))
+            .cloned()
+            .expect("Here has the Focused Pane");
+        pane.update(cx, |pane, cx| {
+            pane.restore_remembered(
+                &crate::ui::remembered_view::RememberedPane {
+                    font_zoom: 0.0,
+                    find: Some(String::new()),
+                },
+                window,
+                cx,
+            );
+        });
+    });
+    window.run_until_parked();
+    let mut input = window.update(|window, cx| {
+        let input = inputs
+            .borrow()
+            .last()
+            .cloned()
+            .expect("Terminal Find is presented");
+        input.read(cx).focus_handle().focus(window, cx);
+        gpui::PlatformInputHandler::new(
+            window.to_async(cx),
+            Box::new(gpui::ElementInputHandler::new(
+                gpui::Bounds::default(),
+                input,
+            )),
+        )
+    });
+    input.replace_and_mark_text_in_range(None, "に", Some(1..1));
+    assert!(input.marked_text_range().is_some());
 
     offline.set_inventory(server_inventory(2, &[("Far", 5)]));
     offline.set_connected(true);

@@ -4857,6 +4857,13 @@ impl EntityInputHandler for TerminalPane {
             self.invalidate_preedit_layout();
             return;
         }
+        if self.ime.marked_text().is_none() {
+            self.focus_handle.dispatch_action(
+                &spaceterm_ui::InputMethodCompositionStarted,
+                window,
+                cx,
+            );
+        }
         self.ime
             .replace_and_mark(range, new_text, new_selected_range);
         self.input_method_generation = Some(self.current_input_generation());

@@ -1,5 +1,7 @@
 use gpui::App;
 
+pub(crate) type MenuCommandHandler = std::rc::Rc<dyn Fn(gpui::AnyWindowHandle, &mut App)>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ApplicationMenuCommand {
     ShowAbout,
@@ -35,9 +37,9 @@ pub(crate) trait ApplicationMenuAdapter {
         Err(ApplicationMenuError::Unavailable)
     }
 
-    /// Calls `chosen` after the person chooses a command from the application's menu bar, with
-    /// the pointer or the keyboard. A host without a native menu bar never calls it.
-    fn follow_chosen_commands(&self, _chosen: std::rc::Rc<dyn Fn(&mut App)>, _cx: &mut App) {}
+    /// Reports a menu-bar command with the window active before its action. The callback may run
+    /// after the action activates another window. A host without a native menu bar never calls it.
+    fn follow_chosen_commands(&self, _chosen: MenuCommandHandler, _cx: &mut App) {}
 }
 
 #[cfg(test)]
