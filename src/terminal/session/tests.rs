@@ -1806,8 +1806,11 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
     worker.finish();
 }
 
+/// A semantic continuation due after a queued command never publishes the pending screen ahead
+/// of its paced deadline (ADR 0062). It used to take the presentation barrier, so every
+/// continuation flushed a screen.
 #[test]
-fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
+fn a_semantic_continuation_leaves_the_pending_screen_to_its_paced_deadline() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
@@ -1844,16 +1847,13 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
     ));
     assert!(matches!(
         worker.receive_next_command(),
-        Some(Command::PublishPendingScreen)
+        Some(Command::AccessibilityContinue)
     ));
-    assert!(matches!(
-        worker.pending_command,
-        Some(Command::PublishAccessibility)
-    ));
-    assert!(matches!(
-        worker.receive_next_command(),
-        Some(Command::PublishAccessibility)
-    ));
+    assert!(worker.pending_command.is_none());
+    assert!(
+        worker.schedules.take_presentation_barrier(),
+        "the screen still waits for its paced publication"
+    );
     worker.finish();
 }
 
@@ -1901,8 +1901,10 @@ fn queued_input_runs_before_due_scrollback_compression() {
     worker.finish();
 }
 
+/// Demand that arrives while a screen waits for its paced deadline builds the model at once and
+/// binds it to the screen published last. It publishes no screen.
 #[test]
-fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
+fn accessibility_demand_binds_to_the_last_published_screen_without_flushing_the_pending_one() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
@@ -1929,7 +1931,9 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         progress: Default::default(),
     };
     assert!(worker.publish_screen());
-    let _ = receiver.try_recv().unwrap();
+    let TerminalSessionEvent::Screen(published) = receiver.try_recv().unwrap() else {
+        panic!("the first screen publishes")
+    };
     worker
         .schedules
         .mark_accessibility_presented(Instant::now(), true);
@@ -1944,31 +1948,97 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
 
     assert!(matches!(
         worker.receive_next_command(),
-        Some(Command::PublishPendingScreen)
-    ));
-    assert!(worker.process_command(Command::PublishPendingScreen));
-    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
-        panic!("the visual presentation must precede its accessibility model")
-    };
-    assert!(matches!(
-        worker.receive_next_command(),
         Some(Command::PublishAccessibility)
     ));
     assert!(worker.process_command(Command::PublishAccessibility));
-    while accessibility_receiver.is_empty() {
-        assert!(worker.process_command(Command::AccessibilityContinue));
+    for _ in 0..128 {
+        if !accessibility_receiver.is_empty() {
+            break;
+        }
+        let command = worker
+            .take_accessibility_continuation()
+            .expect("accessibility work must finish within the budget");
+        assert!(matches!(command, Command::AccessibilityContinue));
+        assert!(worker.process_command(command));
     }
     let model = accessibility_receiver.try_recv().unwrap();
-    assert_eq!(
-        model.selection_request(0..0).unwrap().generation,
-        screen.generation
+    assert!(model.text().contains("new generation"));
+    assert_eq!(model.generation(), published.generation);
+    assert!(
+        receiver.try_recv().is_err(),
+        "semantic work published no screen"
     );
     assert!(
-        !worker
-            .schedules
-            .accessibility_presentation_due(Instant::now())
+        worker.schedules.take_presentation_barrier(),
+        "the changed screen still waits for its paced publication"
     );
     worker.finish();
+}
+
+/// Runs `millis` milliseconds of continuous output on a fixed clock, one line per millisecond,
+/// and returns how many screens published. After each line the worker runs one more command, as
+/// it interleaves them with output: due work, or else a semantic continuation. With `demanded`, a
+/// semantic update always has rows left to copy, as it does while output outpaces it.
+fn screens_during_continuous_output(demanded: bool, millis: u64) -> usize {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events.into();
+    let (accessibility, _semantics) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    let start = Instant::now();
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(start, input.clone());
+    if demanded {
+        assert!(input.enqueue_accessibility_demand(start));
+        worker.schedules.accessibility_demand_received(start);
+    }
+    let mut screens = 0;
+    let mut semantic_steps = 0;
+    for step in 0..millis {
+        let now = start + Duration::from_millis(step);
+        worker.schedules.fix_clock(now);
+        assert!(worker.feed_test_output(vec![format!("y {step}\r\n").into_bytes()]));
+        if demanded {
+            worker.schedules.update_accessibility(true);
+        }
+        let command = match worker.schedules.take_due(now) {
+            Some(command) => Some(worker.order_presentation_barrier(command)),
+            None => worker.take_accessibility_continuation(),
+        };
+        // The barrier leaves the command it ordered in the pending slot.
+        for command in command.into_iter().chain(worker.pending_command.take()) {
+            semantic_steps += usize::from(matches!(
+                command,
+                Command::PublishAccessibility | Command::AccessibilityContinue
+            ));
+            assert!(worker.process_command(command));
+        }
+        while let Ok(event) = receiver.try_recv() {
+            screens += usize::from(matches!(event, TerminalSessionEvent::Screen(_)));
+        }
+    }
+    assert!(
+        !demanded || semantic_steps * 10 >= millis as usize * 9,
+        "semantic work ran after most lines: {semantic_steps}"
+    );
+    worker.finish();
+    screens
+}
+
+/// With an accessibility client attached, `yes` published about 44,000 frames in 23 s against
+/// about 1,100 without, because every semantic step flushed the pending screen. Demanding
+/// semantics now publishes exactly the paced screens.
+#[test]
+fn demanded_semantics_add_no_screens_during_continuous_output() {
+    let paced = screens_during_continuous_output(false, 500);
+    let demanded = screens_during_continuous_output(true, 500);
+
+    assert_eq!(
+        demanded, paced,
+        "demanded semantics publish only paced screens"
+    );
+    // At 60 Hz with output every millisecond, each burst publishes 18 ms after it began.
+    assert_eq!(paced, 28);
 }
 
 #[test]

@@ -1058,13 +1058,13 @@ enum Command {
 }
 
 impl Command {
+    /// Whether the command acts on what the client sees, so a pending screen publishes first.
+    /// Semantic construction never does: it binds to the last published presentation, so
+    /// demanding semantics adds no frames ahead of the pacing deadline (ADR 0062).
     fn requires_presentation_barrier(&self) -> bool {
         matches!(
             self,
-            Self::ApplicationPointer(..)
-                | Self::ServerAccessibilitySelection(..)
-                | Self::AccessibilityContinue
-                | Self::PublishAccessibility
+            Self::ApplicationPointer(..) | Self::ServerAccessibilitySelection(..)
         )
     }
 }
@@ -1505,20 +1505,8 @@ impl TerminalWorker {
     }
 
     fn order_presentation_barrier(&mut self, command: Command) -> Command {
-        if !self.schedules.is_presentable()
-            && matches!(
-                &command,
-                Command::AccessibilityContinue | Command::PublishAccessibility
-            )
-        {
-            return command;
-        }
         if command.requires_presentation_barrier() && self.schedules.take_presentation_barrier() {
-            self.pending_command = Some(if matches!(&command, Command::AccessibilityContinue) {
-                Command::PublishAccessibility
-            } else {
-                command
-            });
+            self.pending_command = Some(command);
             Command::PublishPendingScreen
         } else {
             command
@@ -1528,7 +1516,7 @@ impl TerminalWorker {
     fn take_accessibility_continuation(&mut self) -> Option<Command> {
         self.schedules
             .take_accessibility_continuation()
-            .then(|| self.order_presentation_barrier(Command::AccessibilityContinue))
+            .then_some(Command::AccessibilityContinue)
     }
 
     fn process_command(&mut self, command: Command) -> bool {
@@ -2352,7 +2340,7 @@ impl TerminalWorker {
                     if self.accessibility.is_closed() {
                         self.schedules.disable_accessibility();
                     } else if semantics_changed {
-                        self.schedules.update_accessibility(false);
+                        // A semantic update in progress continues; it never waits for screens.
                         self.schedules.note_screen_published();
                     }
                 }
