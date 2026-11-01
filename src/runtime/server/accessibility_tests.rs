@@ -5,7 +5,7 @@ use crate::terminal::accessibility::{
     TerminalAccessibilityState,
 };
 use pane::accessibility as wire;
-use spaceterm_server::connection::outbox::{Outbox, SemanticTicket, Semantics};
+use spaceterm_server::connection::outbox::{Outbox, SemanticEncoding, SemanticTicket, Semantics};
 use spaceterm_server::protocol::frame::Assembler;
 use spaceterm_server::protocol::{AccessibilityMessage, Channel, RawFrame, ServerMessage, limits};
 use std::collections::HashMap;
@@ -424,58 +424,175 @@ fn a_cursor_selection_or_scroll_only_revision_at_ten_thousand_rows_is_a_small_ta
     }
 }
 
+/// The threads a model's encoding ran on, against the thread that writes the connection.
+struct Threads {
+    io: std::thread::ThreadId,
+    calls: std::sync::atomic::AtomicUsize,
+    elsewhere: std::sync::atomic::AtomicUsize,
+}
+
+impl Threads {
+    /// Watches encodings for the calling thread, which writes the connection.
+    fn here() -> Arc<Self> {
+        Arc::new(Self {
+            io: std::thread::current().id(),
+            calls: Default::default(),
+            elsewhere: Default::default(),
+        })
+    }
+
+    fn note(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.calls.fetch_add(1, Relaxed);
+        if std::thread::current().id() != self.io {
+            self.elsewhere.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Asserts that at least `steps` encoding steps ran, all on the writing thread.
+    fn ran_on_the_writing_thread(&self, steps: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        assert!(self.calls.load(Relaxed) >= steps);
+        assert_eq!(
+            self.elsewhere.load(Relaxed),
+            0,
+            "every encoding step runs on the writing thread"
+        );
+    }
+
+    /// `model` as the outbox receives it, noting the thread of every encoding step.
+    fn watch(self: &Arc<Self>, model: Arc<dyn Semantics>) -> Arc<dyn Semantics> {
+        Arc::new(Watched {
+            model,
+            threads: Arc::clone(self),
+        })
+    }
+}
+
+struct Watched {
+    model: Arc<dyn Semantics>,
+    threads: Arc<Threads>,
+}
+
+impl Semantics for Watched {
+    fn revision(&self) -> u64 {
+        self.model.revision()
+    }
+
+    fn encode(
+        self: Arc<Self>,
+        ticket: SemanticTicket,
+        base: Option<Arc<dyn Semantics>>,
+    ) -> Option<Box<dyn SemanticEncoding>> {
+        self.threads.note();
+        let encoding = Arc::clone(&self.model).encode(ticket, base)?;
+        Some(Box::new(WatchedEncoding {
+            encoding,
+            threads: Arc::clone(&self.threads),
+        }))
+    }
+}
+
+struct WatchedEncoding {
+    encoding: Box<dyn SemanticEncoding>,
+    threads: Arc<Threads>,
+}
+
+impl SemanticEncoding for WatchedEncoding {
+    fn next(&mut self) -> wire::Update {
+        self.threads.note();
+        self.encoding.next()
+    }
+}
+
 /// A complete 10,000 by 80 document leaves the outbox one bounded message per I/O turn, encoded
-/// on the thread that writes it. Each turn allocates a bounded amount whatever the document's
-/// size, so no turn holds the encoded document, and the largest turn stays under twice the
-/// encoded size: an upper bound on the encoder's peak transient allocation, since each turn hands
-/// its message to the writer and keeps nothing.
+/// on the thread that writes it. The bytes that thread holds from the encoder, net of what it
+/// frees, peak under twice the encoded size and fall back once each message is written, once the
+/// revision is written, and once demand or the channel ends in the middle of a revision.
 #[test]
 fn a_complete_ten_thousand_by_eighty_document_is_written_one_bounded_message_per_turn() {
+    use crate::terminal::testing::LiveBytes;
     let model = Terminal::new().history(10_000, 80);
-    let semantics = Revisions::new().next(Arc::clone(&model)).unwrap();
+    let mut revisions = Revisions::new();
+    let threads = Threads::here();
     let channel = Channel(u32::MAX);
     let outbox = Outbox::new(Arc::new(|| {}));
     outbox.open(channel).unwrap();
-    outbox.start_semantics(channel, 1).unwrap();
-    outbox.semantics(channel, semantics).unwrap();
+    let mut io = LiveBytes::default();
+    let mut demand = |io: &mut LiveBytes, generation| {
+        revisions.0.start();
+        let semantics = threads.watch(revisions.next(Arc::clone(&model)).unwrap());
+        io.measure(|| {
+            outbox.start_semantics(channel, generation).unwrap();
+            outbox.semantics(channel, semantics).unwrap();
+        });
+    };
+    // What a turn leaves behind: the revision's position, its packer's unfinished message and
+    // the messages its last item completed, never a written one.
+    let between_turns = 2 * wire::UPDATE_TARGET_BYTES as isize;
 
+    demand(&mut io, 1);
     let mut assembler = Assembler::default();
     let mut client = Client::default();
-    let (mut encoded, mut allocated, mut largest, mut turns) = (0, 0, 0, 0);
-    loop {
-        let (frame, counted) = crate::terminal::testing::count_allocations(|| outbox.next_frame());
-        let Some((frame, _)) = frame else {
-            break;
-        };
+    let (mut encoded, mut turns) = (0, 0);
+    while let Some((frame, _)) = io.measure(|| outbox.next_frame()) {
         turns += 1;
         encoded += frame.len();
-        allocated += counted.bytes;
-        largest = largest.max(counted.bytes);
         assert!(frame.len() <= wire::UPDATE_TARGET_BYTES + limits::HEADER_BYTES);
-        // One message's rows, their vector's growth, and the frame's growing buffer.
-        assert!(
-            counted.bytes < 8 * wire::UPDATE_TARGET_BYTES,
-            "turn {turns} allocated {} B",
-            counted.bytes
-        );
         let Some(ServerMessage::Accessibility(message)) =
             assembler.server(RawFrame::parse(&frame).unwrap()).unwrap()
         else {
             panic!("one semantic message per frame")
         };
+        io.measure(|| drop(frame));
+        assert!(
+            io.live() < between_turns,
+            "{} B held after turn {turns}",
+            io.live()
+        );
         client.apply(message.update);
     }
+    client.assert_presents(&model);
+    threads.ran_on_the_writing_thread(turns);
     assert!(encoded < 1_200_000, "{encoded} B");
     assert!(turns > 20, "{turns} messages");
     assert!(
-        largest < 2 * encoded,
-        "largest turn {largest} B of {encoded} B"
+        io.peak() < 2 * encoded as isize,
+        "peak {} B of {encoded} B",
+        io.peak()
     );
     assert!(
-        allocated >= encoded,
-        "the writing thread allocated the messages it wrote: {allocated} B for {encoded} B"
+        io.peak() < 8 * wire::UPDATE_TARGET_BYTES as isize,
+        "peak {} B, whatever the document's size",
+        io.peak()
     );
-    client.assert_presents(&model);
+    // The revision waits for its acknowledgement holding its model, not its messages.
+    let written = io.live();
+    assert!(written < 4096, "{written} B held after the tail");
+
+    // Ending demand, then closing the channel, in the middle of a revision.
+    for (generation, end) in [
+        (2, Outbox::end_semantics as fn(&Outbox, Channel)),
+        (3, Outbox::close),
+    ] {
+        demand(&mut io, generation);
+        for _ in 0..3 {
+            let (frame, _) = io.measure(|| outbox.next_frame()).unwrap();
+            io.measure(|| drop(frame));
+        }
+        assert!(
+            io.live() > written + 512,
+            "the unfinished revision holds its encoder"
+        );
+        io.measure(|| end(&outbox, channel));
+        assert!(
+            io.live() < written + 128,
+            "{} B held after generation {generation} ended",
+            io.live()
+        );
+    }
+
+    threads.ran_on_the_writing_thread(turns);
 }
 
 /// Scrollback that trims at the top while output appends at the bottom sends two small splices
@@ -584,7 +701,10 @@ fn deltas_reproduce_every_kind_of_change() {
         rectangle: false,
     };
     let model = terminal.apply(None, empty, 0..24, None, Some(selected));
-    assert!(model.selection_refs().is_some(), "the model keeps the Selection");
+    assert!(
+        model.selection_refs().is_some(),
+        "the model keeps the Selection"
+    );
     let revision = revisions.next(Arc::clone(&model)).unwrap();
     client.revision(encode(&revision, Some(&base)));
     client.assert_presents(&model);
