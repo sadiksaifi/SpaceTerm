@@ -78,11 +78,11 @@ pub enum Operation {
         channel: Channel,
     },
     /// Starts or ends this client's semantic demand for the channel, replied `Done`. Each start
-    /// begins without a base, so the first update after it is a complete document. Refused on an
-    /// observation channel.
+    /// names a new demand generation and begins without a base, so the generation's first update
+    /// is a complete document. Refused on an observation channel.
     AccessibilityDemand {
         channel: Channel,
-        requested: bool,
+        demand: crate::pane::accessibility::Demand,
     },
     /// Replied when the read settles. `Cancel` abandons it.
     DirectoryRead(directories::Operation),

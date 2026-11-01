@@ -1115,10 +1115,10 @@ impl PaneLink {
                     channel: channel(lease)?,
                 })
                 .map(|_| Reply::Unchanged),
-            Request::AccessibilityDemand { lease, requested } => {
+            Request::AccessibilityDemand { lease, demand } => {
                 match self.request(Operation::AccessibilityDemand {
                     channel: channel(lease)?,
-                    requested,
+                    demand,
                 })? {
                     ReplyBody::Done => Ok(Reply::Unchanged),
                     _ => Err(ServerError::Protocol),

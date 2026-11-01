@@ -108,10 +108,11 @@ pub struct FrameAck {
 }
 
 /// Acknowledges a semantic revision after the client applied its last message. It returns the
-/// channel's semantic credit and makes `revision` the base of the next update.
+/// channel's semantic credit and makes `revision` the base of the generation's next update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessibilityAck {
     pub channel: Channel,
+    pub demand_generation: u64,
     pub revision: u64,
 }
 

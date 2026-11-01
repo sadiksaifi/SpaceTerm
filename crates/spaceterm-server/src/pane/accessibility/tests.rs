@@ -19,6 +19,16 @@ fn simple(text: &str) -> impl Iterator<Item = CellSpan> + '_ {
         })
 }
 
+fn header(revision: u64, base: Option<u64>) -> Header {
+    Header {
+        demand_generation: 1 << 20,
+        revision,
+        base,
+        screen: Screen::Primary,
+        screen_generation: 1 << 20,
+    }
+}
+
 fn tail() -> Tail {
     Tail {
         visible_lines: ROWS - 24..ROWS,
@@ -40,10 +50,11 @@ fn tail() -> Tail {
     }
 }
 
-/// Encodes `update` as the server writes it, and returns its bytes on the wire.
+/// Encodes `update` as the server writes it, on the widest channel, and returns its bytes on the
+/// wire.
 fn wire(update: Update) -> (usize, Update) {
     let message = ServerMessage::Accessibility(Box::new(AccessibilityMessage {
-        channel: Channel(127),
+        channel: Channel(u32::MAX),
         update,
     }));
     let encoded = encode_server(&message).unwrap();
@@ -58,24 +69,18 @@ fn wire(update: Update) -> (usize, Update) {
     (encoded.bytes(), decoded.update)
 }
 
-/// Every message of a complete 10,000 by 80 ASCII document, packed as a server packs it.
+/// Every message of a complete 10,000 by 80 ASCII document, packed as a server packs it: one
+/// splice inserts every run.
 fn document() -> Vec<Update> {
     // Large magnitudes, so varints take the room real counters take.
     let revision = 1 << 40;
-    let mut packer = Packer::new(revision, None, Screen::Primary, 1 << 20);
-    let mut messages = Vec::new();
-    for page in 0..ROWS.div_ceil(PAGE_ROWS) {
-        let count = PAGE_ROWS.min(ROWS - page * PAGE_ROWS) as u16;
-        messages.extend(packer.splice(Splice {
-            at: page * PAGE_ROWS,
-            remove: 0,
-            insert: vec![Run {
-                node_serial: (1 << 32) + u64::from(page),
-                page_row: 0,
-                count,
-            }],
-        }));
-    }
+    let mut packer = Packer::new(header(revision, None));
+    let runs = (0..ROWS.div_ceil(PAGE_ROWS)).map(|page| Run {
+        node_serial: (1 << 32) + u64::from(page),
+        page_row: 0,
+        count: PAGE_ROWS.min(ROWS - page * PAGE_ROWS) as u16,
+    });
+    let mut messages = packer.splice(0, 0, runs);
     for line in 0..ROWS {
         let text = (0..80)
             .map(|column| char::from(b' ' + ((line + column) % 95) as u8))
@@ -93,13 +98,25 @@ fn document() -> Vec<Update> {
     messages
 }
 
+/// Applies `splices` in order to `topology`, as a client applies them, with each row named by its
+/// page node and page row.
+fn apply(topology: &mut Vec<(u64, u16)>, splices: &[Splice]) {
+    for splice in splices {
+        let at = splice.at as usize;
+        let rows = splice.insert.iter().flat_map(|run| {
+            (run.page_row..run.page_row + run.count).map(|page_row| (run.node_serial, page_row))
+        });
+        topology.splice(at..at + splice.remove as usize, rows);
+    }
+}
+
 #[test]
 fn a_cursor_only_revision_at_ten_thousand_rows_encodes_under_256_bytes_with_no_rows() {
     let update = Update {
-        revision: 1 << 40,
-        base: Some((1 << 40) - 1),
-        screen: Screen::Alternate,
-        screen_generation: 1 << 20,
+        header: Header {
+            screen: Screen::Alternate,
+            ..header(1 << 40, Some((1 << 40) - 1))
+        },
         splices: Vec::new(),
         rows: Vec::new(),
         tail: Some(tail()),
@@ -114,27 +131,23 @@ fn a_cursor_only_revision_at_ten_thousand_rows_encodes_under_256_bytes_with_no_r
 fn a_complete_ten_thousand_by_eighty_document_encodes_under_1_2_mb_in_bounded_messages() {
     let messages = document();
     let mut total = 0;
-    let mut lines = 0_u32;
+    let mut topology = Vec::new();
     let mut rows = Vec::new();
+    let count = messages.len();
     for (index, message) in messages.into_iter().enumerate() {
-        let last = message.tail.is_some();
         let (bytes, decoded) = wire(message);
         assert!(
             bytes <= limits::HEADER_BYTES + UPDATE_TARGET_BYTES,
             "message {index} took {bytes} bytes"
         );
-        assert_eq!((decoded.revision, decoded.base), (1 << 40, None));
-        for splice in &decoded.splices {
-            assert!(rows.is_empty(), "every splice precedes every row");
-            assert_eq!((splice.at, splice.remove), (lines, 0));
-            lines += splice
-                .insert
-                .iter()
-                .map(|run| u32::from(run.count))
-                .sum::<u32>();
-        }
+        assert_eq!(decoded.header, header(1 << 40, None));
+        assert!(
+            decoded.splices.is_empty() || rows.is_empty(),
+            "every splice precedes every row"
+        );
+        apply(&mut topology, &decoded.splices);
         assert_eq!(
-            last,
+            index + 1 == count,
             decoded.tail == Some(tail()),
             "only the last message has the tail"
         );
@@ -142,13 +155,176 @@ fn a_complete_ten_thousand_by_eighty_document_encodes_under_1_2_mb_in_bounded_me
         total += bytes;
     }
     assert!(total < 1_200_000, "the document took {total} bytes");
-    assert_eq!(lines, ROWS);
+    let expected = (0..ROWS)
+        .map(|line| {
+            (
+                (1 << 32) + u64::from(line / PAGE_ROWS),
+                (line % PAGE_ROWS) as u16,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(topology, expected);
     assert_eq!(rows.len(), ROWS as usize);
     assert!(
         rows.iter()
             .zip(0..)
-            .all(|(row, line)| row.line == line && row.cells.is_none())
+            .all(|(row, line)| row.line == line && row.cells.is_none() && !row.continues)
     );
+}
+
+#[test]
+fn one_large_insertion_travels_as_bounded_splices_with_one_removal() {
+    let base = (0..20).map(|page_row| (7, page_row)).collect::<Vec<_>>();
+    let runs = (0..10_000_u64).map(|index| Run {
+        node_serial: (1 << 32) + index,
+        page_row: 3,
+        count: 1,
+    });
+    let mut expected = base.clone();
+    expected.splice(5..8, runs.clone().map(|run| (run.node_serial, 3)));
+
+    let mut packer = Packer::new(header(2, Some(1)));
+    let mut messages = packer.splice(5, 3, runs);
+    messages.push(packer.finish(tail()));
+    assert!(messages.len() > 1, "the insertion fits no single message");
+    let mut topology = base;
+    let mut removals = 0;
+    for message in messages {
+        let (_, decoded) = wire(message);
+        removals += decoded
+            .splices
+            .iter()
+            .filter(|splice| splice.remove > 0)
+            .count();
+        apply(&mut topology, &decoded.splices);
+    }
+    assert_eq!(removals, 1);
+    assert_eq!(topology, expected);
+}
+
+#[test]
+fn the_last_message_has_room_for_the_widest_tail_and_channel_however_full_it_is() {
+    let widest = Point {
+        line: u32::MAX,
+        column: u16::MAX,
+    };
+    let tail = Tail {
+        visible_lines: u32::MAX..u32::MAX,
+        cursor: Some(widest),
+        selection: Some(Selection {
+            start: widest,
+            end: widest,
+            rectangle: true,
+        }),
+    };
+    let row = |line, length| {
+        let text = "a".repeat(length);
+        RowUpdate::new(line, u64::MAX, false, text.clone(), simple(&text))
+    };
+    // Rows of 512 characters, one fewer than fill a message, so the first row's length sweeps
+    // what is left of it from hundreds of bytes down to none.
+    let widest_row = usize::from(crate::pane::MAX_COLUMNS);
+    let rows = UPDATE_TARGET_BYTES / encoded_len(&row(1, widest_row)) - 1;
+    for first in 1..=widest_row {
+        let mut packer = Packer::new(Header {
+            demand_generation: u64::MAX,
+            revision: u64::MAX,
+            base: Some(u64::MAX - 1),
+            screen: Screen::Alternate,
+            screen_generation: u64::MAX,
+        });
+        let _ = packer.row(row(0, first));
+        for line in 1..=rows as u32 {
+            let _ = packer.row(row(line, widest_row));
+        }
+        let (_, last) = wire(packer.finish(tail.clone()));
+        assert_eq!(last.tail.as_ref(), Some(&tail));
+    }
+}
+
+/// Packs `row` between two small rows, joins its fragments from the decoded messages as a client
+/// joins them, and returns the joined row.
+fn through_the_wire(row: RowUpdate) -> RowUpdate {
+    let small = |line| RowUpdate::new(line, 1, false, "a".into(), simple("a"));
+    let mut packer = Packer::new(header(2, Some(1)));
+    let mut messages = packer.row(small(0));
+    messages.extend(packer.row(row));
+    messages.extend(packer.row(small(2)));
+    messages.push(packer.finish(tail()));
+    let count = messages.len();
+    let mut rows = Vec::<RowUpdate>::new();
+    for (index, message) in messages.into_iter().enumerate() {
+        let (_, decoded) = wire(message);
+        assert_eq!(decoded.tail.is_some(), index + 1 == count);
+        for fragment in decoded.rows {
+            match rows.last_mut() {
+                Some(joined) if joined.continues => {
+                    assert_eq!(
+                        (fragment.line, fragment.revision, fragment.soft_wrapped),
+                        (joined.line, joined.revision, joined.soft_wrapped),
+                        "a fragment continues its row"
+                    );
+                    joined.text.push_str(&fragment.text);
+                    let spans = joined.cells.as_mut().expect("a fragment has spans");
+                    spans.extend(fragment.cells.expect("a fragment has spans"));
+                    joined.continues = fragment.continues;
+                }
+                _ => rows.push(fragment),
+            }
+        }
+    }
+    assert_eq!(
+        rows.iter().map(|row| row.line).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    rows.swap_remove(1)
+}
+
+/// Each cell's UTF-16 range in its row's text, as a client derives it.
+fn utf16(row: &RowUpdate) -> Vec<Range<usize>> {
+    let mut offset = 0;
+    row.cells()
+        .map(|(_, bytes)| {
+            let start = offset;
+            offset += row.text[bytes].encode_utf16().count();
+            start..offset
+        })
+        .collect()
+}
+
+#[test]
+fn rows_of_the_longest_graphemes_cross_messages_without_losing_text() {
+    // The longest grapheme the engine keeps in one cell: a base and 64 suffix codepoints.
+    let combining = ("e".to_owned() + &"\u{301}".repeat(64), 1, 65);
+    let supplementary = ("\u{1F600}".to_owned() + &"\u{E0100}".repeat(64), 1, 130);
+    let wide = (supplementary.0.clone(), 2, 130);
+    assert_eq!(supplementary.0.len(), MAX_CELL_TEXT_BYTES);
+    for (cluster, width, units) in [combining, supplementary, wide] {
+        let cells = crate::pane::MAX_COLUMNS / width;
+        let text = cluster.repeat(usize::from(cells));
+        let spans = (0..cells).map(|cell| CellSpan {
+            column: cell * width,
+            width,
+            bytes: cluster.len() as u16,
+        });
+        let row = RowUpdate::new(1, 1, true, text, spans);
+        assert!(row.text.len() > UPDATE_TARGET_BYTES && row.text.len() <= MAX_ROW_TEXT_BYTES);
+
+        let joined = through_the_wire(row.clone());
+        assert_eq!(
+            joined.text, row.text,
+            "every byte of the row's text arrives"
+        );
+        assert_eq!(
+            joined.cells().collect::<Vec<_>>(),
+            row.cells().collect::<Vec<_>>()
+        );
+        assert!(!joined.continues);
+        let expected = (0..usize::from(cells))
+            .map(|cell| cell * units..(cell + 1) * units)
+            .collect::<Vec<_>>();
+        assert_eq!(utf16(&joined), expected);
+    }
 }
 
 #[test]
@@ -208,6 +384,7 @@ fn row(text: &str, cells: Option<Vec<CellSpan>>) -> RowUpdate {
         soft_wrapped: false,
         text: text.into(),
         cells,
+        continues: false,
     }
 }
 
@@ -224,10 +401,7 @@ type Break = fn(&mut Update);
 #[test]
 fn validation_refuses_updates_one_message_shows_are_inconsistent() {
     let valid = Update {
-        revision: 2,
-        base: Some(1),
-        screen: Screen::Primary,
-        screen_generation: 0,
+        header: header(2, Some(1)),
         splices: vec![Splice {
             at: 0,
             remove: 1,
@@ -241,8 +415,10 @@ fn validation_refuses_updates_one_message_shows_are_inconsistent() {
         }),
     };
     assert_eq!(valid.validate(), Ok(()));
-    let cases: [(&str, Break); 13] = [
-        ("a base at or after its revision", |u| u.base = Some(2)),
+    let cases: [(&str, Break); 16] = [
+        ("a base at or after its revision", |u| {
+            u.header.base = Some(2)
+        }),
         ("an empty splice", |u| u.splices[0].remove = 0),
         ("an empty run", |u| {
             u.splices[0].insert.push(Run {
@@ -284,11 +460,26 @@ fn validation_refuses_updates_one_message_shows_are_inconsistent() {
         ("a simple row wider than the grid", |u| {
             u.rows[0] = row(&"a".repeat(usize::from(crate::pane::MAX_COLUMNS) + 1), None)
         }),
-        ("a row over the text bound", |u| {
-            u.rows[0] = row(
-                &"a".repeat(MAX_ROW_TEXT_BYTES + 1),
-                Some(vec![span(0, 1, u16::MAX)]),
-            )
+        ("a span over the cell text bound", |u| {
+            let cell = "\u{1F600}".repeat(MAX_CELL_TEXT_BYTES / 4 + 1);
+            u.rows[0] = row(&cell, Some(vec![span(0, 1, cell.len() as u16)]))
+        }),
+        ("a simple fragment", |u| {
+            u.rows[0] = RowUpdate {
+                continues: true,
+                ..row("a", None)
+            }
+        }),
+        ("a fragment continued on another line", |u| {
+            u.rows[0].continues = true;
+            u.rows.push(RowUpdate {
+                line: 1,
+                ..row("b", Some(vec![span(3, 1, 1)]))
+            });
+            u.tail = None;
+        }),
+        ("a tail after a fragment that continues", |u| {
+            u.rows[0].continues = true
         }),
         ("reversed visible lines", |u| {
             u.tail.as_mut().unwrap().visible_lines = Range { start: 1, end: 0 }
@@ -316,54 +507,17 @@ fn validation_refuses_updates_one_message_shows_are_inconsistent() {
 }
 
 #[test]
-fn a_row_larger_than_the_target_travels_alone_within_the_message_bound() {
-    let cell = "e\u{301}".repeat(21) + "e";
-    let text = cell.repeat(usize::from(crate::pane::MAX_COLUMNS));
-    assert_eq!(text.len(), MAX_ROW_TEXT_BYTES);
-    let spans = (0..crate::pane::MAX_COLUMNS).map(|column| CellSpan {
-        column,
-        width: 1,
-        bytes: cell.len() as u16,
-    });
-    let largest = RowUpdate::new(1, 1, false, text, spans);
-    let small = RowUpdate::new(0, 1, false, "a".into(), simple("a"));
-
-    let mut packer = Packer::new(2, Some(1), Screen::Primary, 0);
-    assert_eq!(packer.row(small.clone()), None);
-    let first = packer
-        .row(largest.clone())
-        .expect("the large row starts a message");
-    assert_eq!(first.rows, [small]);
-    assert_eq!(
-        (first.revision, first.base, first.tail.clone()),
-        (2, Some(1), None)
-    );
-    let second = packer.finish(Tail {
-        visible_lines: 0..2,
-        cursor: None,
-        selection: None,
-    });
-    assert_eq!(second.rows, [largest]);
-    let (bytes, _) = wire(second);
-    assert!(
-        bytes > limits::HEADER_BYTES + UPDATE_TARGET_BYTES
-            && bytes <= limits::HEADER_BYTES + limits::MAX_ACCESSIBILITY_BYTES,
-        "the largest row took {bytes} bytes"
-    );
-}
-
-#[test]
 #[should_panic(expected = "a revision's splices precede its rows")]
 fn a_splice_after_a_row_is_a_server_bug() {
-    let mut packer = Packer::new(1, None, Screen::Primary, 0);
+    let mut packer = Packer::new(header(1, None));
     let _ = packer.row(RowUpdate::new(0, 1, false, "a".into(), simple("a")));
-    let _ = packer.splice(Splice {
-        at: 0,
-        remove: 0,
-        insert: vec![Run {
+    let _ = packer.splice(
+        0,
+        0,
+        [Run {
             node_serial: 0,
             page_row: 0,
             count: 1,
         }],
-    });
+    );
 }

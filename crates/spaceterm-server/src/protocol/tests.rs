@@ -129,9 +129,24 @@ fn golden_client_vectors() {
     assert_eq!(
         client_bytes(&ClientMessage::AccessibilityAck(AccessibilityAck {
             channel: Channel(3),
+            demand_generation: 2,
             revision: 300,
         })),
-        [0, 0, 0, 4, 0x0a, 3, 0xac, 0x02]
+        [0, 0, 0, 5, 0x0a, 3, 2, 0xac, 0x02]
+    );
+    assert_eq!(
+        client_bytes(&request(Operation::AccessibilityDemand {
+            channel: Channel(2),
+            demand: pane::accessibility::Demand::Start { generation: 300 },
+        })),
+        [0, 0, 0, 7, 0x01, 7, 13, 2, 0, 0xac, 0x02]
+    );
+    assert_eq!(
+        client_bytes(&request(Operation::AccessibilityDemand {
+            channel: Channel(2),
+            demand: pane::accessibility::Demand::End,
+        })),
+        [0, 0, 0, 5, 0x01, 7, 13, 2, 1]
     );
     assert_eq!(
         client_bytes(&request(Operation::Release {
@@ -207,8 +222,9 @@ fn golden_server_vectors() {
             }
         ))),
         [
-            0, 0, 0, 16, 0x49, // header
-            1, 5, 1, 4, 0, 2, // channel, revision, base, screen, screen generation
+            0, 0, 0, 17, 0x49, // header
+            1,    // channel
+            1, 5, 1, 4, 0, 2, // demand generation, revision, base, screen, screen generation
             0, 0, // splices, rows
             1, 0, 24, 1, 23, 3, 0, // tail: visible lines, cursor, no Selection
         ]
@@ -218,10 +234,13 @@ fn golden_server_vectors() {
 /// A cursor-only revision: no splices and no rows.
 fn accessibility_tail() -> pane::accessibility::Update {
     pane::accessibility::Update {
-        revision: 5,
-        base: Some(4),
-        screen: pane::accessibility::Screen::Primary,
-        screen_generation: 2,
+        header: pane::accessibility::Header {
+            demand_generation: 1,
+            revision: 5,
+            base: Some(4),
+            screen: pane::accessibility::Screen::Primary,
+            screen_generation: 2,
+        },
         splices: Vec::new(),
         rows: Vec::new(),
         tail: Some(pane::accessibility::Tail {
@@ -232,6 +251,32 @@ fn accessibility_tail() -> pane::accessibility::Update {
             }),
             selection: None,
         }),
+    }
+}
+
+#[test]
+fn a_demand_decodes_with_its_channel_and_whether_it_starts_or_ends() {
+    use pane::accessibility::Demand;
+    for demand in [Demand::Start { generation: 300 }, Demand::End] {
+        let wire = encode_client(&request(Operation::AccessibilityDemand {
+            channel: Channel(2),
+            demand,
+        }))
+        .unwrap();
+        let decoded = Assembler::default()
+            .client(RawFrame::parse(&wire.frames[0]).unwrap())
+            .unwrap();
+        let Some(ClientMessage::Request(request)) = decoded else {
+            panic!("a demand decodes as a request");
+        };
+        let Operation::AccessibilityDemand {
+            channel,
+            demand: decoded,
+        } = request.operation
+        else {
+            panic!("a demand decodes as a demand");
+        };
+        assert_eq!((channel, decoded), (Channel(2), demand));
     }
 }
 
@@ -359,7 +404,13 @@ fn every_operation_round_trips() {
         Operation::EndAccessibility { channel },
         Operation::AccessibilityDemand {
             channel,
-            requested: true,
+            demand: pane::accessibility::Demand::Start {
+                generation: u64::MAX,
+            },
+        },
+        Operation::AccessibilityDemand {
+            channel,
+            demand: pane::accessibility::Demand::End,
         },
         Operation::DirectoryRead(directories::Operation::Match {
             path: PathBuf::from("/a"),
@@ -441,6 +492,7 @@ fn every_client_message_round_trips() {
     }));
     client_round_trip(ClientMessage::AccessibilityAck(AccessibilityAck {
         channel: Channel(1),
+        demand_generation: u64::MAX,
         revision: u64::MAX,
     }));
     client_round_trip(ClientMessage::Acknowledge(Acknowledge { sequence: 3 }));
@@ -687,10 +739,13 @@ fn every_server_message_round_trips() {
         AccessibilityMessage {
             channel: Channel(2),
             update: pane::accessibility::Update {
-                revision: 9,
-                base: None,
-                screen: pane::accessibility::Screen::Alternate,
-                screen_generation: u64::MAX,
+                header: pane::accessibility::Header {
+                    demand_generation: u64::MAX,
+                    revision: 9,
+                    base: None,
+                    screen: pane::accessibility::Screen::Alternate,
+                    screen_generation: u64::MAX,
+                },
                 splices: vec![pane::accessibility::Splice {
                     at: 0,
                     remove: 0,
