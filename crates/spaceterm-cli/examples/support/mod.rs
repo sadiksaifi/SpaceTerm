@@ -186,7 +186,7 @@ pub fn claim_in(
             channel.view(true, 60)?;
             Ok(Claimed::Attached(Pane {
                 link: link.clone(),
-                id: channel.channel(),
+                id: channel.channel()?,
                 channel: Some(channel),
                 lease,
                 events,

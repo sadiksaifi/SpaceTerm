@@ -356,12 +356,12 @@ fn claimed_channels_receive_frames_under_one_frame_of_credit() {
     harness
         .connection
         .outbox()
-        .present(channel.channel(), Box::new(Screen(9)))
+        .present(channel.channel().unwrap(), Box::new(Screen(9)))
         .unwrap();
     harness
         .connection
         .outbox()
-        .end(channel.channel(), PaneEvent::Ended)
+        .end(channel.channel().unwrap(), PaneEvent::Ended)
         .unwrap();
     harness.pump().unwrap();
     assert!(events.lock().unwrap().is_empty());
@@ -384,7 +384,7 @@ fn claimed_channels_receive_frames_under_one_frame_of_credit() {
 fn dropping_a_channel_releases_it_and_acknowledges_late_frames() {
     let mut harness = Harness::new(None);
     let (channel, _) = claimed(&mut harness);
-    let id = channel.channel();
+    let id = channel.channel().unwrap();
     channel.acknowledge(1).unwrap();
     harness.pump().unwrap();
     let outbox = harness.connection.outbox().clone();
@@ -601,4 +601,37 @@ fn a_claim_past_the_channel_bound_is_refused_and_the_connection_continues() {
     assert!(refused);
     assert!(!outbox.is_closing());
     drop(channels);
+}
+
+/// Pane workers can open handles in one order and reach claim submission in another.
+#[test]
+fn channels_can_be_claimed_in_a_different_order_than_their_handles_were_opened() {
+    let mut harness = Harness::new(None);
+    let first = harness.link.open_channel(Arc::new(|_| {})).unwrap();
+    let second = harness.link.open_channel(Arc::new(|_| {})).unwrap();
+    let claim = |channel: &super::link::ChannelHandle| {
+        channel
+            .claim(
+                attachment(),
+                [2; 32],
+                AttachmentClaim::Select { explicit: false },
+                size(),
+                None,
+            )
+            .unwrap()
+    };
+    let second_reply = claim(&second);
+    let first_reply = claim(&first);
+    assert_eq!(
+        harness.pump(),
+        Ok(()),
+        "concurrent Pane claims must preserve wire channel order"
+    );
+    for reply in [second_reply, first_reply] {
+        assert!(matches!(
+            reply.wait(),
+            Ok(ReplyBody::Claim(ClaimReply::Attached { .. }))
+        ));
+    }
+    assert_eq!(harness.link.health(), Health::Live);
 }
