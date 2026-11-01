@@ -11,7 +11,8 @@
 //! reads one command per line on standard input:
 //!
 //! - `type TEXT` types TEXT and Enter into the Pane.
-//! - `stats` prints one JSON line with the messages and bytes received so far.
+//! - `stats` prints one JSON line with the messages received so far and every byte the server
+//!   wrote on this connection.
 //!
 //! When its input ends, it closes the Workspace and exits. It prints no terminal contents.
 use spaceterm::runtime::PhysicalKey;
@@ -97,37 +98,29 @@ enum Message {
     End,
 }
 
-/// Messages and bytes received. Bytes are the postcard encoding of each pushed message or
-/// reply plus its frame header, which is how the server wrote it.
+/// Messages received, and the accessibility payload bytes among them. The byte count the task
+/// compares is the link's: every frame the server wrote on this connection, headers included.
 #[derive(Default)]
 struct Received {
     frames: u64,
-    frame_bytes: u64,
     events: u64,
-    event_bytes: u64,
     accessibility_chunks: u64,
     accessibility_revisions: u64,
-    accessibility_bytes: u64,
+    accessibility_payload_bytes: u64,
 }
 
 impl Received {
-    fn json(&self) -> serde_json::Value {
+    fn json(&self, link: &ServerLink) -> serde_json::Value {
         serde_json::json!({
             "event": "stats",
             "frames": self.frames,
-            "frame_bytes": self.frame_bytes,
             "events": self.events,
-            "event_bytes": self.event_bytes,
             "accessibility_chunks": self.accessibility_chunks,
             "accessibility_revisions": self.accessibility_revisions,
-            "accessibility_bytes": self.accessibility_bytes,
-            "bytes": self.frame_bytes + self.event_bytes + self.accessibility_bytes,
+            "accessibility_payload_bytes": self.accessibility_payload_bytes,
+            "bytes": link.received_bytes(),
         })
     }
-}
-
-fn encoded<T: serde::Serialize>(value: &T) -> u64 {
-    postcard::to_allocvec(value).map_or(0, |bytes| (bytes.len() + limits::HEADER_BYTES) as u64)
 }
 
 /// Follows the server's accessibility revisions the way the desktop's fetcher does: one chunk
@@ -164,13 +157,13 @@ impl Fetcher {
             "accessibility",
             at("accessibility", channel.request(operation))?.wait(),
         )?;
-        received.accessibility_bytes += encoded(&reply);
         let ReplyBody::Accessibility(result) = reply else {
             return fail("accessibility reply");
         };
         match result {
             Ok(chunk) => {
                 received.accessibility_chunks += 1;
+                received.accessibility_payload_bytes += chunk.bytes.len() as u64;
                 let offset = offset + chunk.bytes.len();
                 if offset >= chunk.total {
                     received.accessibility_revisions += 1;
@@ -317,7 +310,7 @@ fn present(
                 )?;
             }
             Ok(Message::Stats) => {
-                println!("{}", received.json());
+                println!("{}", received.json(link));
                 flush();
             }
             Ok(Message::End) | Err(RecvTimeoutError::Disconnected) => break,
@@ -341,14 +334,12 @@ fn deliver(
     match event {
         ChannelEvent::Frame(frame) => {
             received.frames += 1;
-            received.frame_bytes += encoded(&*frame);
             fetcher.announced = fetcher.announced.max(frame.update.accessibility_revision);
             fetcher.retry_at = None;
             at("acknowledge", channel.acknowledge(frame.frame))?;
         }
         ChannelEvent::Pane(event) => {
             received.events += 1;
-            received.event_bytes += encoded(&event);
             match &event {
                 PaneEvent::Accessibility { revision } => {
                     fetcher.announced = fetcher.announced.max(*revision);
