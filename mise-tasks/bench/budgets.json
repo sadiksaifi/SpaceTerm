@@ -1,0 +1,37 @@
+{
+  "source": "#773",
+  "desktop": {
+    "hardware": "Apple M3 Pro",
+    "budget": [
+      {"name": "S1 cold start CPU", "measurement": "S1/cold-start", "role": "product", "metric": "cpu_s", "max": 1.1},
+      {"name": "S1 cold start memory under 200 MiB", "measurement": "S1/cold-start", "role": "product", "metric": "footprint_bytes", "max": 209715200},
+      {"name": "S3 minimized memory under 120 MiB", "measurement": "S3/minimized", "role": "product", "metric": "footprint_bytes", "max": 125829120},
+      {"name": "S4 client with every window closed under 60 MiB", "measurement": "S4/windows-closed", "role": "client", "metric": "footprint_bytes", "max": 62914560},
+      {"name": "S4 server after the client quit under 30 MiB", "measurement": "S4/client-quit", "role": "server", "metric": "footprint_bytes", "max": 31457280},
+      {"name": "S5 client wakeups", "measurement": "S5/idle-panes", "role": "client", "metric": "wakeups_per_s", "max": 6},
+      {"name": "S6 yes CPU", "measurement": "S6/yes", "role": "product", "metric": "cpu_s", "ratio": 1.35, "accessibility_ratio": 1.1},
+      {"name": "S6 cat CPU", "measurement": "S6/cat", "role": "product", "metric": "cpu_s", "ratio": 1.3, "accessibility_ratio": 1.1},
+      {"name": "S7 scroll CPU", "measurement": "S7/scroll", "role": "product", "metric": "cpu_s", "ratio": 1.35, "accessibility_ratio": 1.1},
+      {"name": "S7 partial redraw CPU", "measurement": "S7/partial", "role": "product", "metric": "cpu_s", "ratio": 1.35, "accessibility_ratio": 1.1},
+      {"name": "S7 vim CPU", "measurement": "S7/vim", "role": "product", "metric": "cpu_s", "ratio": 1.35, "accessibility_ratio": 1.1},
+      {"name": "S8 Accessibility memory under 3 MiB per 10,000 rows", "measurement": "S8/filled", "role": "product", "metric": "footprint_bytes", "per_10k_rows": 3145728},
+      {"name": "S9 typing CPU", "measurement": "S9/typing", "role": "product", "metric": "cpu_s", "ratio": 1.3, "accessibility_ratio": 1.1},
+      {"name": "S10 resize and sidebar CPU", "measurement": "S10/resize-sidebar", "role": "product", "metric": "cpu_s", "ratio": 1.3, "accessibility_ratio": 1.1},
+      {"name": "S10 resize and sidebar peak memory", "measurement": "S10/resize-sidebar", "role": "product", "metric": "peak_footprint_bytes", "ratio": 1.5},
+      {"name": "S10 memory 10 s after the workload within 15% of before it", "measurement": "S10/after", "role": "product", "metric": "footprint_bytes", "before": "S10/before", "after_ratio": 1.15}
+    ],
+    "unmeasured": [
+      {"name": "S9 echo latency p50 and p99 no worse than before", "measured_by": "bench:latency:keystroke:macos"},
+      {"name": "Accessibility updates no later than 100 ms plus one frame after the screen", "measured_by": "no task yet"}
+    ]
+  },
+  "server": {
+    "regression": 0.1,
+    "floor": {
+      "cpu_s": 0.05,
+      "peak_footprint_bytes": 2097152,
+      "after_footprint_bytes": 2097152,
+      "bytes_sent": 65536
+    }
+  }
+}

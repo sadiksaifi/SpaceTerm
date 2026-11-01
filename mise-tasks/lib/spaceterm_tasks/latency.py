@@ -29,8 +29,6 @@ PIXEL_SOURCE = Path(__file__).with_name("latency_pixels.swift")
 PROTOCOL_PROBE = (
     "--package",
     "spaceterm-cli",
-    "--features",
-    "client",
     "--release",
     "--locked",
 )
