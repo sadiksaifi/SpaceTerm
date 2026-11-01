@@ -911,10 +911,13 @@ fn an_interrupt_after_a_desktop_request_settles_its_answer_within_the_grace() {
         process.interrupt();
         if let Some(after) = answer_after {
             std::thread::sleep(after);
+            let reply = serde_json::json!({
+                "schema": spaceterm::desktop_channel::SCHEMA,
+                "identity": IDENTITY,
+                "body": "done",
+            });
             stream
-                .write_all(
-                    br#"{"schema":"spaceterm.desktop.v1","identity":"spaceterm-development","body":"done"}"#,
-                )
+                .write_all(&serde_json::to_vec(&reply).unwrap())
                 .unwrap();
             drop(stream);
             let (output, _) = process.wait(Duration::from_secs(3));
