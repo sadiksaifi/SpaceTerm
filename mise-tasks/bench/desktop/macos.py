@@ -24,19 +24,20 @@ shell writes; a failed workload fails the task. Before each workload the task wa
 app is idle, so the workload's measurement excludes the typed command and the cleared Pane.
 
 Every observation records each SpaceTerm process's CPU seconds, RSS, physical footprint, peak
-footprint and wakeups per second. Roles are `client`, `server`, `shell` and `program`; `product`
-is the client and server, and its peak is their highest simultaneous sum. When the server reports
-Terminal Diagnostics counters in `spaceterm server status`, workloads also record how much they
-moved. Results go to `--output` after each observation, then the task checks the medians against
-mise-tasks/bench/budgets.json and fails when a budget is missed or a requested budget has no
-measurement.
+footprint and wakeups per second. Roles are `client`, `server`, `shell` and `program`; `product` is
+the client and server, and its peak is their highest simultaneous sum. Every observation after S1
+also records how much the server's Terminal Diagnostics counters moved, and the client's while it
+runs, read from `spaceterm server status` and `spaceterm diagnostics` outside the measured window;
+a failed read fails the task. Results go to `--output` after each observation, then the task checks
+the medians against mise-tasks/bench/budgets.json and fails when a budget is missed or a requested
+budget has no measurement.
 
-`--app reference` measures v0.6.8, the build the ratio budgets compare with, and checks no
-budgets. v0.6.8 is one process without a server, a CLI or a Pane identity in the Pane's
-environment, so this run identifies a Pane by its shell's session and records nothing in S4,
-whose quit ends v0.6.8. `--reference` takes its results.json and refuses one that measured other
-work: other durations, workloads, window sizes or `cat` input, another Mac or macOS version, or
-another app version, or one that lacks a measurement a requested ratio budget compares with.
+`--app reference` measures v0.6.8, the build the ratio budgets compare with, and checks no budgets.
+v0.6.8 is one process without a server, a CLI or a Pane identity in the Pane's environment, so this
+run identifies a Pane by its shell's session, records no counters, and records nothing in S4, whose
+quit ends v0.6.8. `--reference` takes its results.json and refuses one that measured other work:
+other durations, workloads, window sizes or `cat` input, another Mac or macOS version, or another
+app version, or one that lacks a measurement a requested ratio budget compares with.
 
 The app needs a shell prompt in its focused Pane. The Python given by `--input-python` must hold
 the Accessibility permission in System Settings > Privacy & Security. Leave the keyboard, mouse
@@ -78,6 +79,7 @@ from spaceterm_tasks.bench import (
     settle,
     snapshot,
     summarize,
+    terminal_counters,
     wait_ready,
     write_json,
 )
@@ -112,9 +114,9 @@ WORKLOADS = {
 REFERENCE_SCROLLBACK_ROWS = 10_000
 # The longest a workload's presentation work may continue after it ends.
 SETTLE_LIMIT_SECONDS = 120
-# The desktop's counters through the CLI, once it has such a command (#773). Until then the
-# command fails and the task records no client counters.
-CLIENT_COUNTERS = ("desktop", "diagnostics")
+# The CLI command that reads the desktop's Terminal Diagnostics counters
+# (crates/spaceterm-cli/golden/diagnostics.json).
+CLIENT_COUNTERS = ("diagnostics",)
 
 
 @dataclass(frozen=True)
@@ -238,8 +240,10 @@ class Desktop:
         `receipt`."""
         raise NotImplementedError
 
-    def counters(self):
-        """Terminal Diagnostics counters, `{"server": ..., "client": ...}`, None where absent."""
+    def counters(self, client=True):
+        """Terminal Diagnostics counters, `{"server": ..., "client": ...}`. `client` False
+        reads no client counters, for a run without a client. An app that keeps counters fails
+        the task when a read fails; v0.6.8 keeps none."""
         raise NotImplementedError
 
     # Processes
@@ -518,17 +522,21 @@ class CurrentDesktop(Desktop):
         return retained_rows(envelope)
 
     def server_counters(self):
-        """The server's Terminal Diagnostics counters, or None from a server that reports none."""
-        envelope = cli_json([self.cli(), "--server", "local", "--json", "server", "status"])
-        return ((envelope or {}).get("data") or {}).get("terminal_counters")
+        """The local server's Terminal Diagnostics counters."""
+        command = [self.cli(), "--server", "local", "--json", "server", "status"]
+        return terminal_counters(command, "spaceterm server status")
 
     def client_counters(self):
-        """The desktop's Terminal Diagnostics counters, or None while no CLI command reads them."""
-        envelope = cli_json([self.cli(), "--json", *CLIENT_COUNTERS])
-        return ((envelope or {}).get("data") or {}).get("terminal_counters")
+        """The desktop's Terminal Diagnostics counters."""
+        return terminal_counters(
+            [self.cli(), "--json", *CLIENT_COUNTERS], f"spaceterm {' '.join(CLIENT_COUNTERS)}"
+        )
 
-    def counters(self):
-        return {"server": self.server_counters(), "client": self.client_counters()}
+    def counters(self, client=True):
+        return {
+            "server": self.server_counters(),
+            "client": self.client_counters() if client else None,
+        }
 
 
 class ReferenceDesktop(Desktop):
@@ -568,7 +576,7 @@ class ReferenceDesktop(Desktop):
         and the screen's rows."""
         return min(receipt["lines"], REFERENCE_SCROLLBACK_ROWS) + receipt["rows"]
 
-    def counters(self):
+    def counters(self, client=True):
         return {"server": None, "client": None}
 
 
@@ -620,9 +628,15 @@ class Bench:
         before=None,
         new_from_zero=False,
         values=None,
+        client=True,
     ):
-        """CPU and wakeups across `action` or `seconds`, and memory at their end."""
+        """CPU and wakeups across `action` or `seconds`, and memory at their end.
+
+        The counters that moved are read outside the measured window. A caller's `before`
+        starts the window before the app runs, so that observation records no counters, and
+        `client` False reads none from the client."""
         members = self.desktop.members()
+        counted = None if before else self.desktop.counters(client=client)
         before = before or snapshot(members)
         with Sampler(members) as sampler:
             if action:
@@ -630,6 +644,10 @@ class Bench:
             else:
                 self.clock.sleep(seconds)
         after = snapshot(self.desktop.members())
+        moved = None
+        if counted is not None:
+            later = self.desktop.counters(client=client)
+            moved = {side: counter_difference(counted[side], later[side]) for side in counted}
         metrics = delta(
             before,
             after,
@@ -637,7 +655,7 @@ class Bench:
             peaks=sampler.peaks,
             product_peak=sampler.product_peak,
         )
-        self.record(scenario, phase, metrics, values)
+        self.record(scenario, phase, metrics, values, counters=moved)
 
     def job(self, scenario, phase, kind, **parameters):
         """A workload from its start to the end of the presentation work that follows it."""
@@ -718,7 +736,7 @@ class Bench:
             self.observe("S4", "windows-closed", self.args.idle_seconds)
             desktop.terminate()
         if desktop.pids("server"):
-            self.observe("S4", "client-quit", self.args.idle_seconds)
+            self.observe("S4", "client-quit", self.args.idle_seconds, client=False)
 
     def s5(self):
         """Twelve idle Panes: two splits here, then three new Workspaces with two splits each.

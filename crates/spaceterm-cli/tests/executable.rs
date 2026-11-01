@@ -102,6 +102,7 @@ fn machine_only_commands_reject_remote_routes_before_contacting_a_server() {
             &["server", "permissions", "settings", "device-control"][..],
             "server.permissions.settings",
         ),
+        (&["diagnostics"][..], "diagnostics"),
     ] {
         let mut argv = vec!["--server", "remote-fixture"];
         argv.extend(args);

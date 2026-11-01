@@ -509,13 +509,106 @@ class CliFactTests(unittest.TestCase):
         self.assertEqual(bench.retained_rows(envelope), 10_040)
 
     def test_counter_differences_include_nested_counters(self):
-        before = {"pty_reads": 3, "pane_worker_wakes": {"output": 1, "input": 2}}
-        after = {"pty_reads": 10, "pane_worker_wakes": {"output": 5, "input": 2}}
+        before = {"pty_read_attempts": 3, "pane_worker_waits": {"output": 1, "input": 2}}
+        after = {"pty_read_attempts": 10, "pane_worker_waits": {"output": 5, "input": 2}}
         self.assertEqual(
             bench.counter_difference(before, after),
-            {"pty_reads": 7, "pane_worker_wakes": {"output": 4, "input": 0}},
+            {"pty_read_attempts": 7, "pane_worker_waits": {"output": 4, "input": 0}},
         )
         self.assertIsNone(bench.counter_difference(None, after))
+
+
+def golden(name):
+    return json.loads((ROOT / "crates" / "spaceterm-cli" / "golden" / f"{name}.json").read_text())
+
+
+def command_words(envelope):
+    """The CLI arguments that name an envelope's command: `server.status` is `server status`."""
+    return envelope["command"].split(".")
+
+
+class CounterReadTests(unittest.TestCase):
+    """Counter reads run a CLI, here a script that records its arguments and prints a reply."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.argv = Path(self.directory.name) / "argv.json"
+        self.cli = Path(self.directory.name) / "spaceterm"
+
+    def answer(self, envelope, status=0):
+        """Makes the fake CLI print `envelope` and exit with `status`."""
+        self.cli.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            f"open({str(self.argv)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+            f"print({json.dumps(envelope)!r})\n"
+            f"sys.exit({status})\n"
+        )
+        self.cli.chmod(0o755)
+
+    def current_desktop(self):
+        task = load_desktop_task()
+        cli = str(self.cli)
+
+        class Installed(task.CurrentDesktop):
+            def cli(self):
+                return cli
+
+        return Installed(task.PREFLIGHT, None, None, False)
+
+    def test_the_desktop_reads_its_counters_with_the_cli_diagnostics_command(self):
+        reply = golden("diagnostics")
+        self.answer(reply)
+        counters = self.current_desktop().client_counters()
+        self.assertEqual(json.loads(self.argv.read_text()), ["--json", *command_words(reply)])
+        self.assertEqual(counters, reply["data"]["terminal_counters"])
+
+    def test_the_desktop_reads_the_local_servers_counters_from_server_status(self):
+        reply = golden("server_status")
+        self.answer(reply)
+        counters = self.current_desktop().server_counters()
+        self.assertEqual(
+            json.loads(self.argv.read_text()),
+            ["--server", "local", "--json", *command_words(reply)],
+        )
+        self.assertEqual(counters, reply["data"]["terminal_counters"])
+
+    def test_a_counter_read_that_fails_or_reports_no_counters_fails_the_task(self):
+        reply = golden("diagnostics")
+        failed = reply | {"status": "error", "data": None}
+        failed |= {"error": {"code": "desktop_incompatible"}}
+        cases = [
+            ("failed", failed, 1, "desktop_incompatible"),
+            ("null", reply | {"data": {"terminal_counters": None}}, 0, "no Terminal Diagnostics"),
+            ("missing", reply | {"data": {}}, 0, "no Terminal Diagnostics"),
+        ]
+        desktop = self.current_desktop()
+        for name, envelope, status, message in cases:
+            with self.subTest(case=name):
+                self.answer(envelope, status)
+                with self.assertRaisesRegex(TaskError, message):
+                    desktop.client_counters()
+                with self.assertRaisesRegex(TaskError, message):
+                    desktop.server_counters()
+        self.cli.write_text("#!/bin/sh\nexit 2\n")
+        with self.assertRaisesRegex(TaskError, "no JSON envelope"):
+            desktop.client_counters()
+
+    def test_bench_server_fails_when_its_server_reports_no_counters(self):
+        specification = importlib.util.spec_from_file_location(
+            "bench_server", ROOT / "mise-tasks" / "bench" / "server.py"
+        )
+        assert specification is not None and specification.loader is not None
+        task = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(task)
+        context = {"cli": str(self.cli), "jail": SimpleNamespace(wrap=list), "env": None}
+        reply = golden("server_status")
+        self.answer(reply)
+        self.assertEqual(task.counters(context), reply["data"]["terminal_counters"])
+        self.answer(reply | {"data": reply["data"] | {"terminal_counters": None}})
+        with self.assertRaisesRegex(TaskError, "spaceterm server status reported no"):
+            task.counters(context)
 
 
 def load_desktop_task():
@@ -560,6 +653,8 @@ class FakeApp:
         self.demand = set()
         self.reads = []
         self.lag = False
+        # Each read of the server's or client's counters, in order, and the task's snapshots.
+        self.counter_reads = []
 
     def reset(self):
         self.workspaces = [[[self.new_pane()]]]
@@ -780,8 +875,16 @@ def fake_desktop(task, app, accessibility, clock, reference=False):
             app.rows_asked = receipt["pane"]
             return 10_040
 
-        def counters(self):
-            return {"server": None, "client": None}
+        def server_counters(self):
+            app.counter_reads.append("server")
+            reads = app.counter_reads.count("server")
+            return {"pty_read_attempts": reads, "pane_worker_waits": {"input": 2 * reads}}
+
+        def client_counters(self):
+            if app.client is None:
+                raise TaskError("no desktop answers spaceterm diagnostics")
+            app.counter_reads.append("client")
+            return {"frames_painted": app.counter_reads.count("client")}
 
     return (Gui if reference else Cli)(
         task.RELEASE if reference else task.PREFLIGHT,
@@ -813,7 +916,18 @@ class DesktopScenarioTests(unittest.TestCase):
 
         def observed(scenario, phase, metrics, values=None, counters=None):
             observations.append((scenario, phase, app.visible(), set(app.demand)))
+            self.reads[(scenario, phase)] = list(app.counter_reads)
+            app.counter_reads.clear()
             record(scenario, phase, metrics, values, counters)
+
+        snapshot = self.task.snapshot
+
+        def snapshotted(members):
+            app.counter_reads.append("snapshot")
+            return snapshot(members)
+
+        self.task.snapshot = snapshotted
+        self.reads = {}
 
         bench_run.record = observed
         desktop.restart()
@@ -833,6 +947,33 @@ class DesktopScenarioTests(unittest.TestCase):
         self.assertEqual(len([kind for kind, _, _ in workloads if kind == "fill"]), 10)
         self.assertTrue(all(demanded for _, _, demanded in workloads), workloads)
         self.assertEqual({read["pane"] for read in desktop.reads}, set(app.reads))
+
+    def test_observations_record_the_counters_that_moved_read_outside_the_window(self):
+        _, _, results, _ = self.run_scenarios(False)
+        both = {
+            "server": {"pty_read_attempts": 1, "pane_worker_waits": {"input": 2}},
+            "client": {"frames_painted": 1},
+        }
+        for m in results["measurements"]:
+            identity = (m["scenario"], m["phase"])
+            with self.subTest(observation="/".join(identity)):
+                reads = self.reads[identity]
+                if identity == ("S1", "cold-start"):
+                    # The window opens before the app starts, so no counters exist before it.
+                    self.assertIsNone(m["counters"])
+                    self.assertNotIn("server", reads)
+                    continue
+                window = reads[reads.index("snapshot") : len(reads) - reads[::-1].index("snapshot")]
+                self.assertEqual(window, ["snapshot", "snapshot"], reads)
+                if identity == ("S4", "client-quit"):
+                    # The client has ended, so only the server answers.
+                    self.assertEqual(m["counters"], {"server": both["server"], "client": None})
+                    self.assertEqual(reads.count("client"), 0, reads)
+                else:
+                    self.assertEqual(m["counters"], both)
+        # Workloads (S6, S7) and observations (S9) both took part.
+        recorded = {(m["scenario"], m["phase"]) for m in results["measurements"]}
+        self.assertLessEqual({("S6", "cat"), ("S7", "vim"), ("S9", "typing")}, recorded)
 
     def test_accessibility_off_never_queries_the_app(self):
         app, desktop, _, observations = self.run_scenarios(False)

@@ -22,8 +22,9 @@ shell writes a receipt when the workload finishes, after which the task waits fo
 work to settle again. A workload that failed fails the task. The task records the server's CPU
 seconds, peak footprint, footprint 10 s after the workload and every byte the server wrote to the
 client's connection, then confirms with `spaceterm pane read` that the Pane shows the workload's
-completion marker. When the server reports Terminal Diagnostics counters in `spaceterm server
-status`, the task records how much each moved during the workload.
+completion marker. The task also records how much each of the server's Terminal Diagnostics
+counters moved during the workload, read from `spaceterm server status` outside the measured
+window; a failed read fails the task.
 
 Results go to `--output`. The medians are compared with mise-tasks/bench/baselines/server/HOST.json;
 the task fails when one exceeds the baseline by more than mise-tasks/bench/budgets.json allows,
@@ -58,7 +59,6 @@ from spaceterm_tasks.bench import (
     Sampler,
     check_receipt,
     check_seconds,
-    cli_json,
     compare_server,
     counter_difference,
     delta,
@@ -69,6 +69,7 @@ from spaceterm_tasks.bench import (
     settle,
     snapshot,
     summarize_server,
+    terminal_counters,
     wait_ready,
     write_json,
 )
@@ -228,11 +229,12 @@ def confirm(cli, jail, env, client, number):
 
 
 def counters(context):
-    """The server's Terminal Diagnostics counters, or None from a server that reports none."""
+    """The server's Terminal Diagnostics counters. This checkout's server always reports them,
+    so a failed read fails the task."""
     command = [context["cli"], "--server", "local", "--json", "server", "status"]
-    envelope = cli_json(context["jail"].wrap(command), context["env"])
-    data = (envelope or {}).get("data") or {}
-    return data.get("terminal_counters")
+    return terminal_counters(
+        context["jail"].wrap(command), "spaceterm server status", context["env"]
+    )
 
 
 def measure(context, client, workload, args):

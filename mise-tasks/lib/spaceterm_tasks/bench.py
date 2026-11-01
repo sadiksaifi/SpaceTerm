@@ -789,6 +789,38 @@ def cli_json(command, env=None):
         return None
 
 
+def terminal_counters(command, name, env=None):
+    """The Terminal Diagnostics counters in `data.terminal_counters` of a `spaceterm --json`
+    command. Raises a TaskError, naming the command as `name`, when the command fails or
+    reports no counters."""
+    try:
+        result = subprocess.run(
+            [str(part) for part in command],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise TaskError(f"{name} did not answer within 60 s") from None
+    except OSError:
+        raise TaskError(f"{name} could not start") from None
+    try:
+        envelope = json.loads(result.stdout)
+    except ValueError:
+        envelope = None
+    if not isinstance(envelope, dict):
+        raise TaskError(f"{name} reported no JSON envelope (exit status {result.returncode})")
+    if result.returncode:
+        code = (envelope.get("error") or {}).get("code")
+        raise TaskError(f"{name} failed ({code or result.returncode})")
+    counters = (envelope.get("data") or {}).get("terminal_counters")
+    if not isinstance(counters, dict):
+        raise TaskError(f"{name} reported no Terminal Diagnostics counters")
+    return counters
+
+
 def counter_difference(before, after):
     """`after - before` for two Terminal Diagnostics counter snapshots, nested objects
     included, or None unless both exist."""
