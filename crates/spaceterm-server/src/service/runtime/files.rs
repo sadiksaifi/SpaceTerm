@@ -1,4 +1,4 @@
-//! Descriptor-relative creation, mapping, publication and cleanup of retained installations.
+//! Descriptor-relative creation, snapshots, publication and cleanup of retained installations.
 use super::*;
 use std::{ffi::CStr, os::unix::fs::PermissionsExt};
 
@@ -323,21 +323,23 @@ fn remove_tree(parent: &File, name: &CStr, directory: &File) -> Result<(), Serve
         .map_err(|_| ServerError::StorageUnavailable)
 }
 
-/// A read-only private mapping of one retained file. Its pages are file-backed, so reading a
-/// large artifact through it never holds a heap copy of the whole file.
-pub(super) struct Mapped {
-    address: std::ptr::NonNull<libc::c_void>,
+/// A process-private copy of one retained file, read once through its descriptor into anonymous
+/// memory outside the heap. Later writes to or truncation of the file can't reach it, and its
+/// pages return to the operating system when it drops.
+pub(super) struct Snapshot {
+    address: std::ptr::NonNull<u8>,
     length: usize,
 }
-impl Mapped {
-    /// Map the single-link regular file at `path` beneath `directory`, opened without following
+impl Snapshot {
+    /// Copy the single-link regular file at `path` beneath `directory`, opened without following
     /// links, when it holds between one and `maximum` bytes.
     ///
     /// # Errors
-    /// Returns RuntimeUnavailable for another file type, a linked file or an out-of-bounds length;
-    /// StorageUnavailable when the file can't be read or mapped.
-    pub fn open(directory: &File, path: &Path, maximum: u64) -> Result<Self, ServerError> {
-        let file = open_relative(directory, path, false)?;
+    /// Returns RuntimeUnavailable for another file type, a linked file, an out-of-bounds length,
+    /// or a file whose length changes while it's read; StorageUnavailable when the file can't be
+    /// read or the memory can't be reserved.
+    pub fn read(directory: &File, path: &Path, maximum: u64) -> Result<Self, ServerError> {
+        let mut file = open_relative(directory, path, false)?;
         let metadata = file
             .metadata()
             .map_err(|_| ServerError::StorageUnavailable)?;
@@ -350,39 +352,63 @@ impl Mapped {
         }
         let length =
             usize::try_from(metadata.len()).map_err(|_| ServerError::RuntimeUnavailable)?;
-        // SAFETY: a fresh read-only private mapping of a live descriptor at a kernel-chosen address.
+        // SAFETY: a fresh anonymous private mapping at a kernel-chosen address; no file or other
+        // process shares its pages.
         let address = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 length,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE,
-                file.as_raw_fd(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
                 0,
             )
         };
         if address == libc::MAP_FAILED {
             return Err(ServerError::StorageUnavailable);
         }
-        let address = std::ptr::NonNull::new(address).ok_or(ServerError::StorageUnavailable)?;
-        Ok(Self { address, length })
+        let snapshot = Self {
+            address: std::ptr::NonNull::new(address.cast())
+                .ok_or(ServerError::StorageUnavailable)?,
+            length,
+        };
+        // SAFETY: the region holds `length` writable bytes that only `snapshot` owns, and this is
+        // the only borrow of it until `read` returns.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(snapshot.address.as_ptr(), length) };
+        file.read_exact(bytes).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                ServerError::RuntimeUnavailable
+            } else {
+                ServerError::StorageUnavailable
+            }
+        })?;
+        let after = loop {
+            match file.read(&mut [0]) {
+                Ok(read) => break read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(ServerError::StorageUnavailable),
+            }
+        };
+        if after != 0 {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        Ok(snapshot)
     }
 }
-impl std::ops::Deref for Mapped {
+impl std::ops::Deref for Snapshot {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        // SAFETY: the mapping stays readable for `length` bytes until drop. Retained installation
-        // files are created exclusively and never rewritten or truncated in place; truncation by
-        // another process of this account would end this one with SIGBUS, not expose stale bytes.
-        unsafe { std::slice::from_raw_parts(self.address.as_ptr().cast(), self.length) }
+        // SAFETY: `read` filled all `length` bytes, and only this value reaches the region until
+        // drop unmaps it.
+        unsafe { std::slice::from_raw_parts(self.address.as_ptr(), self.length) }
     }
 }
-impl Drop for Mapped {
+impl Drop for Snapshot {
     fn drop(&mut self) {
         // SAFETY: unmaps exactly the region this value mapped, after its last borrow.
         unsafe {
-            libc::munmap(self.address.as_ptr(), self.length);
+            libc::munmap(self.address.as_ptr().cast(), self.length);
         }
     }
 }

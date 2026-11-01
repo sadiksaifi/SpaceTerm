@@ -544,7 +544,7 @@ pub(super) fn authenticate(
 /// across majors.
 pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
     let directory = owned_directory(path)?;
-    let bytes = files::Mapped::open(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
+    let bytes = files::Snapshot::read(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
     let signature = read_file(&directory, Path::new("artifact.sig"), 64)?;
     if path.file_name().and_then(|v| v.to_str()) != Some(&digest(&bytes)) {
         return Err(ServerError::RuntimeUnavailable);

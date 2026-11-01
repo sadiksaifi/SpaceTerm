@@ -1129,18 +1129,30 @@ fn verification_holds_the_same_transient_memory_for_any_package_size() {
 }
 
 #[test]
-fn verification_compares_installed_files_to_their_last_byte() {
+fn verification_compares_every_piece_of_an_installed_file() {
     let root = temporary();
-    let signed = incompressible(1024 * 1024 + 1);
+    let signed = incompressible(16 * CHUNK + 1);
     let installation = installation_with_executable(&root, signed.clone());
     let executable = installation.join(Layout::host("spaceterm-development").unwrap().executable());
     let check =
         || test_support::with_fixture_trust(|| verify(&installation, "spaceterm-development"));
     assert_eq!(check(), Ok(()));
-    let mut changed = signed.clone();
-    *changed.last_mut().unwrap() ^= 1;
-    std::fs::write(&executable, &changed).unwrap();
-    assert_eq!(check(), Err(ServerError::RuntimeUnavailable));
+    for (piece, index) in [
+        ("first", 0),
+        ("middle", 8 * CHUNK + CHUNK / 2),
+        ("final", signed.len() - 1),
+    ] {
+        let mut changed = signed.clone();
+        changed[index] ^= 1;
+        std::fs::write(&executable, &changed).unwrap();
+        assert_eq!(
+            check(),
+            Err(ServerError::RuntimeUnavailable),
+            "a changed byte in the {piece} piece passed verification"
+        );
+        std::fs::write(&executable, &signed).unwrap();
+        assert_eq!(check(), Ok(()));
+    }
     let mut longer = signed.clone();
     longer.push(0);
     std::fs::write(&executable, &longer).unwrap();
@@ -1149,5 +1161,97 @@ fn verification_compares_installed_files_to_their_last_byte() {
     assert_eq!(check(), Err(ServerError::RuntimeUnavailable));
     std::fs::write(&executable, &signed).unwrap();
     assert_eq!(check(), Ok(()));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Retains a fixture, then builds a second signed archive of the same length whose executable
+/// differs in one byte. Returns the installation, the second archive and its executable.
+fn installation_with_same_length_substitute(root: &Path) -> (PathBuf, Vec<u8>, Vec<u8>) {
+    let signed = incompressible(4 * CHUNK);
+    let installation = installation_with_executable(root, signed.clone());
+    let main = format!(
+        "server/{}",
+        Layout::host("spaceterm-development")
+            .unwrap()
+            .executable()
+            .display()
+    );
+    let mut substitute = signed;
+    substitute[CHUNK] ^= 1;
+    let (archive, signature) = (root.join("substitute.tar.gz"), root.join("substitute.sig"));
+    std::fs::copy(installation.join("artifact.tar.gz"), &archive).unwrap();
+    rewrite(&archive, &signature, |entries| {
+        entries
+            .iter_mut()
+            .find(|(name, _, _)| *name == main)
+            .unwrap()
+            .1 = substitute.clone();
+    });
+    let replacement = std::fs::read(&archive).unwrap();
+    assert_eq!(
+        replacement.len() as u64,
+        std::fs::metadata(installation.join("artifact.tar.gz"))
+            .unwrap()
+            .len(),
+        "the substitute archive must have the retained archive's length"
+    );
+    (installation, replacement, substitute)
+}
+
+#[test]
+fn verification_compares_installed_files_to_the_authenticated_archive_after_an_in_place_rewrite() {
+    let root = temporary();
+    let (installation, replacement, substitute) = installation_with_same_length_substitute(&root);
+    let identity = "spaceterm-development";
+    let executable = installation.join(Layout::host(identity).unwrap().executable());
+    test_support::with_fixture_trust(|| {
+        let directory = owned_directory(&installation).unwrap();
+        let bytes =
+            files::Snapshot::read(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE).unwrap();
+        let signature = std::fs::read(installation.join("artifact.sig")).unwrap();
+        assert_eq!(authenticate(&bytes, &signature, identity), Ok(()));
+        assert_eq!(
+            authenticate(&replacement, &signature, identity),
+            Err(ServerError::RuntimeUnavailable)
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(installation.join("artifact.tar.gz"))
+            .unwrap()
+            .write_all(&replacement)
+            .unwrap();
+        std::fs::write(&executable, &substitute).unwrap();
+        assert_eq!(
+            verify_contents(&directory, &bytes, identity).map(|_| ()),
+            Err(ServerError::RuntimeUnavailable)
+        );
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verification_survives_a_truncated_archive_after_authentication() {
+    let root = temporary();
+    let installation = installation_with_executable(&root, incompressible(4 * CHUNK));
+    let identity = "spaceterm-development";
+    let archive = installation.join("artifact.tar.gz");
+    test_support::with_fixture_trust(|| {
+        let directory = owned_directory(&installation).unwrap();
+        let bytes =
+            files::Snapshot::read(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE).unwrap();
+        let signature = std::fs::read(installation.join("artifact.sig")).unwrap();
+        assert_eq!(authenticate(&bytes, &signature, identity), Ok(()));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&archive)
+            .unwrap()
+            .set_len(1)
+            .unwrap();
+        assert!(verify_contents(&directory, &bytes, identity).is_ok());
+        assert_eq!(
+            verify(&installation, identity),
+            Err(ServerError::RuntimeUnavailable)
+        );
+    });
     std::fs::remove_dir_all(root).unwrap();
 }
