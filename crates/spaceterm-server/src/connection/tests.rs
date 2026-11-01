@@ -266,7 +266,9 @@ fn frames(events: &Events) -> Vec<(u64, Option<u64>, u32)> {
         .into_iter()
         .map(|event| match event {
             ChannelEvent::Frame(frame) => (frame.frame, frame.base, frame.input),
-            ChannelEvent::Pane(_) | ChannelEvent::Closed(_) => panic!("unexpected channel event"),
+            ChannelEvent::Pane(_) | ChannelEvent::Accessibility(_) | ChannelEvent::Closed(_) => {
+                panic!("unexpected channel event")
+            }
         })
         .collect()
 }

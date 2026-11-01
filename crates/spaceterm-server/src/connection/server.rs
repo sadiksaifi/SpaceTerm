@@ -136,6 +136,9 @@ impl AdmittedConnection {
                 self.outbox.acknowledge(ack.channel, ack.frame)?;
                 None
             }
+            // This server sends no semantic updates yet, so every acknowledgement names a revision
+            // it never sent.
+            ClientMessage::AccessibilityAck(_) => return Err(Fatal::ProtocolViolation),
             ClientMessage::View(view) => {
                 self.claimed(view.channel)?;
                 self.outbox.view(view.channel, view.visible);

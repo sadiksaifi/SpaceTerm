@@ -3,7 +3,9 @@
 use super::limits;
 use super::operation::{Operation, ReplyBody, Takeover};
 use super::screen::ScreenUpdate;
-use crate::pane::{FocusTarget, Key, LineState, PaneSize, PasteOutcome, Pointer, Wheel, effects};
+use crate::pane::{
+    FocusTarget, Key, LineState, PaneSize, PasteOutcome, Pointer, Wheel, accessibility, effects,
+};
 use serde::{Deserialize, Serialize};
 
 pub use crate::pane::Refusal;
@@ -27,6 +29,7 @@ pub enum ClientMessage {
     /// Fire-and-forget terminal input. No reply; frames report the serials they reflect.
     Input(Input),
     FrameAck(FrameAck),
+    AccessibilityAck(AccessibilityAck),
     View(View),
     EffectDone(EffectDone),
     /// Retires a resolved Workspace edit. No reply.
@@ -41,6 +44,7 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     Reply(Box<Reply>),
     Frame(Box<Frame>),
+    Accessibility(Box<AccessibilityMessage>),
     Pane(PaneMessage),
     /// The latest Workspace inventory. A newer revision replaces one not yet written.
     Inventory(Box<InventoryRevision>),
@@ -103,6 +107,15 @@ pub struct FrameAck {
     pub frame: u64,
 }
 
+/// Acknowledges a semantic revision after the client applied its last message. It returns the
+/// channel's semantic credit and makes `revision` the base of the generation's next update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityAck {
+    pub channel: Channel,
+    pub demand_generation: u64,
+    pub revision: u64,
+}
+
 /// Whether the client presents a channel, and the frame rate it presents at. A hidden channel
 /// receives no frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +172,14 @@ pub struct Frame {
     /// The highest input serial written to the PTY before this state was captured.
     pub input: u32,
     pub update: ScreenUpdate,
+}
+
+/// One message of a semantic revision for one channel. Each channel has at most one
+/// unacknowledged revision.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccessibilityMessage {
+    pub channel: Channel,
+    pub update: accessibility::Update,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -262,6 +283,7 @@ impl ClientMessage {
                 _ => Ok(()),
             },
             Self::FrameAck(_)
+            | Self::AccessibilityAck(_)
             | Self::Acknowledge(_)
             | Self::Cancel(_)
             | Self::Ping(_)
@@ -306,6 +328,7 @@ impl ServerMessage {
                 check(frame.base.is_none_or(|base| base < frame.frame))?;
                 frame.update.validate()
             }
+            Self::Accessibility(message) => message.update.validate(),
             Self::Reply(reply) => match &reply.result {
                 Ok(body) => body.validate(),
                 Err(_) => Ok(()),
@@ -334,7 +357,7 @@ impl ServerMessage {
     }
 }
 
-pub(super) fn check(condition: bool) -> Result<(), Fatal> {
+pub(crate) fn check(condition: bool) -> Result<(), Fatal> {
     if condition {
         Ok(())
     } else {
