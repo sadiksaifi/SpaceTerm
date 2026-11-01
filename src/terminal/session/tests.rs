@@ -3911,6 +3911,43 @@ fn a_hidden_session_reads_line_mode_for_output_at_the_metadata_pace() {
     worker.finish();
 }
 
+#[test]
+fn synchronized_output_publishes_a_line_mode_change_within_100_ms() {
+    let start = Instant::now();
+    let (mut worker, records, receiver) = line_worker(start);
+    assert!(worker.publish_screen());
+    count_screens(&receiver);
+    assert!(worker.feed_test_output(vec![b"\x1b[?2026h".to_vec()]));
+    let changed = start + Duration::from_millis(300);
+    let mut published = None;
+    for tick in 1..=20 {
+        let now = start + Duration::from_millis(tick * 50);
+        if now == changed {
+            records.update(|state| state.line_mode = PASSWORD);
+        }
+        worker.schedules.fix_clock(now);
+        assert!(worker.feed_test_output(vec![b"Password: ".to_vec()]));
+        run_due_commands(&mut worker, now);
+        if published.is_none() && worker.events.line().mode == PASSWORD {
+            published = Some(now);
+        }
+    }
+    assert_eq!(
+        count_screens(&receiver),
+        0,
+        "synchronized output holds frames"
+    );
+    let published = published.expect("the mode change must be published while frames are held");
+    assert!(
+        published - changed <= Duration::from_millis(100),
+        "published {:?} after the change",
+        published - changed
+    );
+    // Held frames read at most once per 100 ms.
+    assert!(records.snapshot().line_reads - 1 <= 10);
+    worker.finish();
+}
+
 fn clipboard_worker() -> (
     TerminalWorker,
     ScriptedPtyRecords,

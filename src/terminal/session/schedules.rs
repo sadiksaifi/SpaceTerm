@@ -267,10 +267,6 @@ impl WorkerSchedules {
         self.line.output_unread()
     }
 
-    fn line_deadline(&self) -> Option<Instant> {
-        self.line.deadline(self.presentation.is_presentable())
-    }
-
     pub(super) fn request_presentation(&mut self) {
         self.presentation.request();
     }
@@ -447,7 +443,7 @@ impl WorkerSchedules {
             self.metadata_deadline(),
             self.graphics_animation,
             self.compression.deadline(),
-            self.line_deadline(),
+            self.line.deadline(),
         ]
         .into_iter()
         .flatten()
@@ -475,7 +471,8 @@ impl WorkerSchedules {
         if self.metadata_deadline().is_some_and(|due| now >= due) {
             return Some(Command::PublishMetadata);
         }
-        self.line_deadline()
+        self.line
+            .deadline()
             .is_some_and(|deadline| now >= deadline)
             .then_some(Command::ReadLineMode)
     }
@@ -582,10 +579,11 @@ impl AccessibilityContinuationSchedule {
 
 /// Reads the PTY's line mode after written input and focus changes, and before capturing a frame
 /// of unread output. Input, focus changes and output also schedule one read 200 ms later, because
-/// programs may print their prompt before they change the mode. A hidden Terminal Session captures
-/// no frames, so it reads unread output at most once per [`METADATA_PRESENTATION_INTERVAL`]. An idle
-/// session reads nothing: a program that changes the mode silently is seen at the next of those,
-/// which is no later than the person's first keystroke reaching it.
+/// programs may print their prompt before they change the mode. Unread output is also read once
+/// [`METADATA_PRESENTATION_INTERVAL`] has passed since the latest read, which bounds its staleness
+/// when no frame is captured: a hidden Pane, synchronized output, or no subscriber. An idle
+/// session reads nothing: a program that changes the mode silently is seen at the next read, which
+/// is no later than the person's first keystroke reaching it.
 struct LineSchedule {
     state: LineState,
     /// A read due now: the first read, or one after input or a focus change.
@@ -625,15 +623,16 @@ impl LineSchedule {
         self.unread_output.is_some()
     }
 
-    /// The next read that needs no frame capture. A hidden session also reads unread output on the
-    /// metadata pace.
-    fn deadline(&self, presentable: bool) -> Option<Instant> {
-        let hidden_output = self.unread_output.filter(|_| !presentable).map(|output| {
+    /// The next read that needs no frame capture. Unread output is read on the metadata pace, so
+    /// a session that captures no frames (hidden, held by synchronized output, or without a
+    /// subscriber) still sees a mode change within that interval.
+    fn deadline(&self) -> Option<Instant> {
+        let unread_output = self.unread_output.map(|output| {
             self.last_read.map_or(output, |read| {
                 output.max(read + METADATA_PRESENTATION_INTERVAL)
             })
         });
-        [self.due, self.settle, hidden_output]
+        [self.due, self.settle, unread_output]
             .into_iter()
             .flatten()
             .min()
@@ -960,7 +959,7 @@ mod tests {
             .unwrap();
         assert_eq!((failed.epoch, failed.mode), (2, LineMode::UNKNOWN));
         assert!(!failed.mode.hidden_input());
-        assert_eq!(schedule.deadline(true), None);
+        assert_eq!(schedule.deadline(), None);
     }
 
     #[test]
