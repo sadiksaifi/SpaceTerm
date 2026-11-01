@@ -148,6 +148,51 @@ fn a_three_line_log_scroll_costs_about_half_a_kilobyte() {
     assert!(bytes <= 550, "a 3-line scroll took {bytes} B");
 }
 
+/// A log line with styles and wide characters. Every tenth line adds a link, an emoji and a
+/// combining mark, which the emulator's debug build is slow to store.
+fn rich_line(number: usize) -> String {
+    let rare = if number.is_multiple_of(10) {
+        "\x1b]8;;https://example.com/\x1b\\link\x1b]8;;\x1b\\ 👨‍👩‍👧 e\u{301}"
+    } else {
+        "text"
+    };
+    format!(
+        "\x1b[1;3{}m{number:05}\x1b[0m {rare} 界面 {}\r\n",
+        number % 8,
+        "output ".repeat(number % 20 + 1),
+    )
+}
+
+#[test]
+fn a_scroll_encodes_only_the_rows_that_moved_in() {
+    let mut channel = Channel1::new(240, 100);
+    for number in 0..150 {
+        channel.emulator.feed(rich_line(number).as_bytes());
+    }
+    channel.present().unwrap();
+    assert_eq!(channel.encoder.encoded_rows(), 99);
+    for number in 150..157 {
+        channel.emulator.feed(rich_line(number).as_bytes());
+    }
+    let (update, _) = channel.present().unwrap();
+    assert_eq!(
+        update.shift.map(|shift| (shift.top, shift.lines)),
+        Some((0, 7))
+    );
+    assert_eq!(
+        update.rows.iter().map(|row| row.index).collect::<Vec<_>>(),
+        (92..99).collect::<Vec<_>>()
+    );
+    // The 92 rows that only moved are taken from the baseline without being encoded.
+    assert_eq!(channel.encoder.encoded_rows(), 7);
+    // Blank rows that scroll in at the top need no encoding either.
+    channel.emulator.feed(b"\x1b[3T");
+    let (update, _) = channel.present().unwrap();
+    assert_eq!(update.shift.map(|shift| shift.lines), Some(-3));
+    assert!(update.rows.is_empty());
+    assert_eq!(channel.encoder.encoded_rows(), 0);
+}
+
 #[test]
 fn a_scroll_region_keeps_its_status_line_and_scrolls_down_too() {
     let mut channel = Channel1::new(40, 10);
@@ -354,4 +399,74 @@ fn pages_carry_their_own_tables() {
     assert_eq!(first.styles.len(), 1);
     assert_eq!(first.links.len(), 1);
     first.validate().unwrap();
+}
+
+/// Captures for the encoder cost benchmark at 240x100, each with its iteration count. Captures
+/// alternate, so every frame but the first encodes a change, except in `unchanged`.
+fn cost_workloads() -> Vec<(&'static str, Vec<ScreenCapture>, u64)> {
+    fn pair(rows: u16, columns: usize) -> Vec<ScreenCapture> {
+        let mut channel = Channel1::new(240, 100);
+        let mut captures = Vec::new();
+        for character in ["a", "b"] {
+            for row in 1..=rows {
+                let line = format!("\x1b[{row};1H{}", character.repeat(columns));
+                channel.emulator.feed(line.as_bytes());
+            }
+            captures.push(channel.capture());
+        }
+        captures
+    }
+    let full_dense = pair(100, 240);
+    let unchanged = vec![full_dense[0].clone()];
+    let mut channel = Channel1::new(240, 100);
+    for row in 0..110 {
+        let line = format!("{row:05} {}\r\n", "log output ".repeat(10));
+        channel.emulator.feed(line.as_bytes());
+    }
+    let before = channel.capture();
+    channel.emulator.feed(b"00111 new log output\r\n");
+    let scroll = vec![before, channel.capture()];
+    vec![
+        ("unchanged", unchanged, 20_000),
+        ("one_cell", pair(1, 1), 10_000),
+        ("every_row_one_cell", pair(100, 1), 1_500),
+        ("full_screen", full_dense, 1_500),
+        ("one_line_scroll", scroll, 1_500),
+    ]
+}
+
+/// Microseconds per `encode` call, including dropping the update, over `iterations` frames
+/// that each acknowledge the last update.
+fn per_frame_us(captures: &[ScreenCapture], iterations: u64) -> f64 {
+    let mut encoder = ScreenEncoder::default();
+    let mut base = None;
+    let start = std::time::Instant::now();
+    for frame in 1..=iterations {
+        let capture = std::hint::black_box(&captures[(frame as usize - 1) % captures.len()]);
+        let update = encoder.encode(capture, frame, base);
+        if update.is_some() {
+            base = Some(frame);
+        }
+        std::hint::black_box(update);
+    }
+    start.elapsed().as_secs_f64() * 1e6 / iterations as f64
+}
+
+/// Prints the encoder's median time per frame over three rounds for each workload. Run it in a
+/// release build:
+/// `cargo test --release --package spaceterm --lib --no-default-features --locked
+/// encoder_cost_per_frame -- --ignored --nocapture --test-threads=1`.
+#[test]
+#[ignore = "benchmark; run in a release build"]
+fn encoder_cost_per_frame() {
+    for (name, captures, iterations) in cost_workloads() {
+        let mut rounds = (0..3)
+            .map(|_| per_frame_us(&captures, iterations))
+            .collect::<Vec<_>>();
+        rounds.sort_by(f64::total_cmp);
+        eprintln!(
+            "encoder_cost {name}: median {:.3} us/frame, rounds {rounds:.3?}",
+            rounds[1]
+        );
+    }
 }

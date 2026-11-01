@@ -27,6 +27,11 @@ struct Session {
     screen: Option<Arc<ScreenSnapshot>>,
     generation: u64,
     frame: u64,
+    /// Frames that carried a scroll.
+    shifts: usize,
+    /// The last frame's scroll and the indexes of the rows it sent.
+    last_shift: Option<ScrollShift>,
+    last_rows: Vec<u16>,
 }
 
 impl Session {
@@ -40,6 +45,9 @@ impl Session {
             screen: None,
             generation: 0,
             frame: 0,
+            shifts: 0,
+            last_shift: None,
+            last_rows: Vec::new(),
         }
     }
 
@@ -71,6 +79,9 @@ impl Session {
         let frame = self.frame + 1;
         let update = self.encoder.encode(&capture, frame, base)?;
         self.frame = frame;
+        self.shifts += usize::from(update.shift.is_some());
+        self.last_shift = update.shift;
+        self.last_rows = update.rows.iter().map(|row| row.index).collect();
         Some((capture, frame, through_wire(frame, base, update)))
     }
 
@@ -451,6 +462,158 @@ fn random_terminal_output_round_trips_through_every_frame() {
         }
     }
     assert!(selected > 0 && images > 0, "{selected} {images}");
+}
+
+/// A line of up to `columns` cells or more, with styles, links, wide characters, emoji and
+/// combining marks. Words repeat, so different rows often hold equal text. The emulator's debug
+/// build is slow to store links and graphemes, so they stay rare.
+fn rich_line(random: &mut Random, columns: u16) -> String {
+    let mut line = String::new();
+    for _ in 0..random.below(u64::from(columns) / 4 + 2) {
+        line.push_str(match random.below(9) {
+            3..=6 if random.below(8) != 0 => "same",
+            0 => "\x1b[1;31m",
+            1 => "\x1b[0m",
+            2 => "界面",
+            3 => "👨‍👩‍👧",
+            4 => "e\u{301}",
+            5 => "\x1b]8;;https://example.com/a\x1b\\same\x1b]8;;\x1b\\",
+            6 => "\x1b]8;;https://example.com/b\x1b\\same\x1b]8;;\x1b\\",
+            7 => "same",
+            _ => " word",
+        });
+    }
+    line
+}
+
+/// One step of output that mostly scrolls: lines, scroll regions, reverse index, scroll and
+/// line insertion commands, the alternate screen, and resizes that reflow wrapped lines. Lines
+/// end in a cleared Scrollback now and then, because the emulator's debug build checks every
+/// Scrollback cell on each write.
+fn scroll_step(random: &mut Random, session: &mut Session) {
+    let rows = session.emulator.geometry().grid().rows;
+    let columns = session.emulator.geometry().grid().cols;
+    let output = match random.below(12) {
+        0..=2 => {
+            let lines = (0..random.below(u64::from(rows) + 3) + 1)
+                .map(|_| format!("{}\r\n", rich_line(random, columns)))
+                .collect::<String>();
+            if random.below(4) == 0 {
+                lines + "\x1b[3J"
+            } else {
+                lines
+            }
+        }
+        3 => {
+            let top = random.below(u64::from(rows) / 2) + 1;
+            let bottom = top + 1 + random.below(u64::from(rows) - top);
+            let mut output = format!("\x1b[{top};{bottom}r\x1b[{bottom};1H");
+            for _ in 0..random.below(4) + 1 {
+                output.push('\n');
+                output.push_str(&rich_line(random, columns / 2));
+            }
+            output + "\x1b[r"
+        }
+        4 => format!(
+            "\x1b[{}{}",
+            random.below(5) + 1,
+            ["S", "T"][random.below(2) as usize]
+        ),
+        5 => format!(
+            "\x1b[r\x1b[1;1H{}{}",
+            "\x1bM".repeat(random.below(3) as usize + 1),
+            rich_line(random, columns / 2)
+        ),
+        6 => format!(
+            "\x1b[{};1H\x1b[{}{}",
+            random.below(u64::from(rows)) + 1,
+            random.below(3) + 1,
+            ["L", "M"][random.below(2) as usize]
+        ),
+        7 => ["\x1b[?1049h", "\x1b[?1049l"][random.below(2) as usize].to_owned(),
+        8 => {
+            let columns = 4 + random.below(60) as u16;
+            let rows = 3 + random.below(24) as u16;
+            session.emulator.resize(geometry(columns, rows)).unwrap();
+            String::new()
+        }
+        // A row rewritten in place after a scroll, with the same text and another link.
+        9 => format!(
+            "\r\n\x1b[{};1H{}",
+            random.below(u64::from(rows)) + 1,
+            [
+                "\x1b]8;;https://example.com/a\x1b\\same\x1b]8;;\x1b\\",
+                "same"
+            ][random.below(2) as usize]
+        ),
+        _ => {
+            step(random, session);
+            String::new()
+        }
+    };
+    session.emulator.feed(output.as_bytes());
+}
+
+#[test]
+fn scroll_heavy_output_round_trips_through_every_frame() {
+    let _graphics = crate::terminal::graphics::test_lock();
+    let mut shifts = 0;
+    for seed in 1..=8_u64 {
+        let mut random = Random(seed.wrapping_mul(0xd1b5_4a32_d192_ed03) | 1);
+        let mut session = Session::new(4 + random.below(60) as u16, 3 + random.below(24) as u16);
+        session.sync().unwrap();
+        for _ in 0..100 {
+            scroll_step(&mut random, &mut session);
+            if random.below(40) == 0 {
+                session.sync_against(None).unwrap();
+            } else {
+                session.sync();
+            }
+        }
+        shifts += session.shifts;
+    }
+    assert!(shifts > 200, "{shifts} frames scrolled");
+}
+
+/// A row rewritten after a scroll with the text and style of a row that moved, and another
+/// link, is sent with its own link.
+#[test]
+fn a_row_rewritten_with_another_link_after_a_scroll_keeps_its_link() {
+    let mut session = Session::new(20, 5);
+    session.emulator.feed(
+        b"zero\r\n\x1b]8;;https://example.com/a\x1b\\same\x1b]8;;\x1b\\\r\ntwo\r\nthree\r\nfour",
+    );
+    session.sync().unwrap();
+    session
+        .emulator
+        .feed(b"\r\nfive\x1b[1;1H\x1b]8;;https://example.com/b\x1b\\same\x1b]8;;\x1b\\");
+    session.sync().unwrap();
+    assert_eq!(session.shifts, 1);
+}
+
+/// Rows with equal text and distinct links still scroll, so only the row that moved in is
+/// encoded and sent.
+#[test]
+fn rows_that_differ_only_in_their_links_scroll() {
+    let mut session = Session::new(20, 5);
+    let line = |row: usize| format!("\x1b]8;;https://example.com/{row}\x1b\\same\x1b]8;;\x1b\\");
+    for row in 0..5 {
+        let at = format!("\x1b[{};1H", row + 1);
+        session.emulator.feed((at + &line(row)).as_bytes());
+    }
+    session.sync().unwrap();
+    session.emulator.feed(format!("\r\n{}", line(5)).as_bytes());
+    session.sync().unwrap();
+    assert_eq!(
+        session.last_shift,
+        Some(ScrollShift {
+            top: 0,
+            bottom: 5,
+            lines: 1
+        })
+    );
+    assert_eq!(session.last_rows, [4]);
+    assert_eq!(session.encoder.encoded_rows(), 1);
 }
 
 #[test]
