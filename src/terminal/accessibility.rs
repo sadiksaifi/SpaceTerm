@@ -1026,6 +1026,11 @@ impl TerminalAccessibilityModel {
         self.data.document.line_for_index(index)
     }
 
+    /// The line of the row that `id` names, found through the document's identity index.
+    pub(crate) fn line_for_row(&self, id: AccessibilityRowId) -> Option<usize> {
+        self.data.document.row_for_id(id).map(|(line, _)| line)
+    }
+
     #[cfg_attr(
         not(target_os = "macos"),
         allow(

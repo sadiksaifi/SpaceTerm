@@ -563,6 +563,33 @@ fn deltas_reproduce_every_kind_of_change() {
         base = revision;
     }
 
+    // Empty soft-wrapped rows all start at one UTF-16 offset, so only their identities tell them
+    // apart. A Selection from the first of them keeps both endpoints.
+    let empty = (10..15)
+        .map(|line| AccessibilityRowUpdate {
+            id: row_id(line),
+            revision: 5,
+            soft_wrapped: true,
+            cells: Vec::new(),
+        })
+        .collect();
+    let endpoint = |line, row_revision| AccessibilityCellRef {
+        row: row_id(line),
+        row_revision,
+        column: 0,
+    };
+    let selected = AccessibilitySelectionRefs {
+        start: endpoint(10, 5),
+        end: endpoint(15, 1),
+        rectangle: false,
+    };
+    let model = terminal.apply(None, empty, 0..24, None, Some(selected));
+    assert!(model.selection_refs().is_some(), "the model keeps the Selection");
+    let revision = revisions.next(Arc::clone(&model)).unwrap();
+    client.revision(encode(&revision, Some(&base)));
+    client.assert_presents(&model);
+    base = revision;
+
     // Long rows of the longest graphemes travel as fragments across messages, losslessly.
     let long: Vec<_> = (0..512)
         .map(|column| AccessibilityCell::at_column(longest.as_str(), column, 1))

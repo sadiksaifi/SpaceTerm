@@ -361,26 +361,13 @@ fn tail(model: &TerminalAccessibilityModel) -> wire::Tail {
 }
 
 fn selection(model: &TerminalAccessibilityModel) -> Option<wire::Selection> {
+    // The model publishes Selection endpoints only while both name retained row revisions.
     let refs = model.selection_refs()?;
-    let range = model.selection_range()?;
-    // The Selection's text range starts and ends in its endpoint rows, or at the start of the
-    // next row when an endpoint ends a soft-wrapped row. A lookup near each end finds the rows
-    // without searching the whole topology.
-    let near = [range.start, range.end.saturating_sub(1), range.end]
-        .into_iter()
-        .filter_map(|index| model.line_for_index(index))
-        .flat_map(|line| [line.saturating_sub(1), line, line + 1]);
     let point = |reference: AccessibilityCellRef| {
-        near.clone()
-            .find(|line| {
-                model.row(*line).is_some_and(|row| {
-                    row.id == reference.row && row.revision == reference.row_revision
-                })
-            })
-            .map(|line| wire::Point {
-                line: line as u32,
-                column: reference.column,
-            })
+        model.line_for_row(reference.row).map(|line| wire::Point {
+            line: line as u32,
+            column: reference.column,
+        })
     };
     Some(wire::Selection {
         start: point(refs.start)?,
