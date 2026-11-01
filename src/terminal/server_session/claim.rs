@@ -553,7 +553,13 @@ mod tests {
         reachable(&watch);
         assert!(state.retry.swap(false, Ordering::AcqRel));
 
+        use crate::ui::server_pane::{DormantCopy, ServerPaneScreen, ServerPaneView};
         let alive = AtomicBool::new(true);
+        let mut view = ServerPaneView::new(state.clone());
+        let mut starts = 0;
+        let mut passive_after_decision = 0;
+        // The inventory wake lets the claim pass its no-start decision and observe once more.
+        state.wake.notify();
         let grant = ClaimWorker {
             state: &state,
             pane_id: [2; 32],
@@ -572,27 +578,52 @@ mod tests {
         }
         .run(
             |request| {
-                assert!(matches!(
-                    request,
+                match request {
                     Request::SelectPane {
                         explicit: false,
+                        style,
                         ..
+                    } => {
+                        if style.is_none() {
+                            passive_after_decision += 1;
+                            view.sync();
+                            assert_eq!(
+                                view.screen(),
+                                Some(ServerPaneScreen::Restored {
+                                    starting: false,
+                                    unconfirmed: false,
+                                    offered: true,
+                                    ended: None,
+                                })
+                            );
+                            let Some(ServerPaneScreen::Restored { ended, .. }) = view.screen()
+                            else {
+                                unreachable!()
+                            };
+                            let copy = DormantCopy::of(ended);
+                            assert_eq!(
+                                (copy.title, copy.label),
+                                ("Server Restarted", "Start Session")
+                            );
+                            // Teardown only after the live claim chose observation over Start.
+                            alive.store(false, Ordering::Release);
+                        }
                     }
-                ));
-                // Dismiss after reading the passive reply, without entering the claim's wait.
-                alive.store(false, Ordering::Release);
+                    Request::StartRestored { .. } | Request::SelectPane { explicit: true, .. } => {
+                        starts += 1;
+                        alive.store(false, Ordering::Release);
+                    }
+                    _ => panic!("reconnection must only observe the Pane"),
+                }
                 exchange(&state, [2; 32], request, |_| Ok(restored(9)))
             },
             || {},
         )
         .unwrap();
         assert!(grant.is_none());
+        assert_eq!(starts, 0, "reachability authorized a replacement shell");
+        assert_eq!(passive_after_decision, 1);
         assert_eq!(state.status(), ServerPaneStatus::Restored);
-        let copy = crate::ui::server_pane::DormantCopy::of(None);
-        assert_eq!(
-            (copy.title, copy.label),
-            ("Server Restarted", "Start Session")
-        );
     }
 
     #[test]
