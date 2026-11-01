@@ -742,6 +742,22 @@ fn a_server_last_read_as_off_stays_off_and_says_when(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_incompatible_account_local_protocol_explains_the_version_mismatch(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
+    *access.status.lock().expect("status") =
+        Err(crate::server_connection::direct::DirectError::IncompatibleProtocol.into());
+    let (_, cx) = open_servers(&access, cx);
+
+    assert!(reads(
+        "This SpaceTerm Client and the SpaceTerm Server on \"This Computer\" use incompatible SpaceTerm Protocol versions.",
+        cx,
+    ));
+    assert!(!reads("Can\u{2019}t reach the server.", cx));
+    assert!(!open(ACCESS_SELECTOR, cx));
+    assert!(access.policies().is_empty());
+}
+
+#[gpui::test]
 fn network_access_controls_change_nothing_while_the_server_is_out_of_reach(
     cx: &mut TestAppContext,
 ) {
