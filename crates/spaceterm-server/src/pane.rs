@@ -255,6 +255,11 @@ pub enum Request {
     EndAccessibilityDemand {
         lease: Lease,
     },
+    /// Starts or ends semantic demand for the lease's channel. Replied `Unchanged`.
+    AccessibilityDemand {
+        lease: Lease,
+        demand: accessibility::Demand,
+    },
     Accessibility {
         lease: Lease,
         revision: Option<u64>,

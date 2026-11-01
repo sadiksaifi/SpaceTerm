@@ -12,7 +12,7 @@
 use super::Wake;
 use super::carrier::Priority;
 use super::health::{Check, Death, Liveness};
-use crate::pane::{AttachmentClaim, PaneSize, PresentationStyle, effects};
+use crate::pane::{AttachmentClaim, PaneSize, PresentationStyle, accessibility, effects};
 use crate::protocol::frame::{Assembler, encode_client};
 use crate::protocol::{
     Acknowledge, Cancel, Channel, Claim, ClientMessage, EffectDone, Fatal, Frame, FrameAck, Input,
@@ -103,6 +103,10 @@ pub enum ChannelEvent {
     /// An event for which [`PaneEvent::last`] holds is the channel's last. Every frame before it
     /// is still applied and acknowledged.
     Pane(PaneEvent),
+    /// One message of a semantic revision on a channel with standing demand (ADR 0062). The
+    /// owner stages a revision's messages in order with the channel's other events and applies
+    /// them at the tail.
+    Accessibility(Box<accessibility::Update>),
     /// The link ended. Final; the owner reconnects with a new link under ADR 0045.
     Closed(LinkError),
 }
@@ -424,6 +428,11 @@ impl ServerLink {
                     );
                 }
             },
+            // This client requests no pushed semantics yet, so an update is one it never asked for.
+            ServerMessage::Accessibility(_) => {
+                self.fail(LinkError::Violation);
+                return Err(LinkError::Violation);
+            }
             ServerMessage::Pane(pane) => {
                 let last = pane.event.last();
                 if let Some(sink) = self.sink(pane.channel, last) {

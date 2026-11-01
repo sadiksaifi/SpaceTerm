@@ -127,6 +127,28 @@ fn golden_client_vectors() {
         [0, 0, 0, 4, 0x03, 3, 0xac, 0x02]
     );
     assert_eq!(
+        client_bytes(&ClientMessage::AccessibilityAck(AccessibilityAck {
+            channel: Channel(3),
+            demand_generation: 2,
+            revision: 300,
+        })),
+        [0, 0, 0, 5, 0x0a, 3, 2, 0xac, 0x02]
+    );
+    assert_eq!(
+        client_bytes(&request(Operation::AccessibilityDemand {
+            channel: Channel(2),
+            demand: pane::accessibility::Demand::Start { generation: 300 },
+        })),
+        [0, 0, 0, 7, 0x01, 7, 13, 2, 0, 0xac, 0x02]
+    );
+    assert_eq!(
+        client_bytes(&request(Operation::AccessibilityDemand {
+            channel: Channel(2),
+            demand: pane::accessibility::Demand::End,
+        })),
+        [0, 0, 0, 5, 0x01, 7, 13, 2, 1]
+    );
+    assert_eq!(
         client_bytes(&request(Operation::Release {
             channel: Channel(2)
         })),
@@ -192,6 +214,70 @@ fn golden_server_vectors() {
             0, 0, 0, // graphics, accessibility, generation
         ]
     );
+    assert_eq!(
+        server_bytes(&ServerMessage::Accessibility(Box::new(
+            AccessibilityMessage {
+                channel: Channel(1),
+                update: accessibility_tail(),
+            }
+        ))),
+        [
+            0, 0, 0, 17, 0x49, // header
+            1,    // channel
+            1, 5, 1, 4, 0, 2, // demand generation, revision, base, screen, screen generation
+            0, 0, // splices, rows
+            1, 0, 24, 1, 23, 3, 0, // tail: visible lines, cursor, no Selection
+        ]
+    );
+}
+
+/// A cursor-only revision: no splices and no rows.
+fn accessibility_tail() -> pane::accessibility::Update {
+    pane::accessibility::Update {
+        header: pane::accessibility::Header {
+            demand_generation: 1,
+            revision: 5,
+            base: Some(4),
+            screen: pane::accessibility::Screen::Primary,
+            screen_generation: 2,
+        },
+        splices: Vec::new(),
+        rows: Vec::new(),
+        tail: Some(pane::accessibility::Tail {
+            visible_lines: 0..24,
+            cursor: Some(pane::accessibility::Point {
+                line: 23,
+                column: 3,
+            }),
+            selection: None,
+        }),
+    }
+}
+
+#[test]
+fn a_demand_decodes_with_its_channel_and_whether_it_starts_or_ends() {
+    use pane::accessibility::Demand;
+    for demand in [Demand::Start { generation: 300 }, Demand::End] {
+        let wire = encode_client(&request(Operation::AccessibilityDemand {
+            channel: Channel(2),
+            demand,
+        }))
+        .unwrap();
+        let decoded = Assembler::default()
+            .client(RawFrame::parse(&wire.frames[0]).unwrap())
+            .unwrap();
+        let Some(ClientMessage::Request(request)) = decoded else {
+            panic!("a demand decodes as a request");
+        };
+        let Operation::AccessibilityDemand {
+            channel,
+            demand: decoded,
+        } = request.operation
+        else {
+            panic!("a demand decodes as a demand");
+        };
+        assert_eq!((channel, decoded), (Channel(2), demand));
+    }
 }
 
 #[test]
@@ -316,6 +402,16 @@ fn every_operation_round_trips() {
             selection: None,
         },
         Operation::EndAccessibility { channel },
+        Operation::AccessibilityDemand {
+            channel,
+            demand: pane::accessibility::Demand::Start {
+                generation: u64::MAX,
+            },
+        },
+        Operation::AccessibilityDemand {
+            channel,
+            demand: pane::accessibility::Demand::End,
+        },
         Operation::DirectoryRead(directories::Operation::Match {
             path: PathBuf::from("/a"),
             candidates: vec![PathBuf::from("/a/b")],
@@ -393,6 +489,11 @@ fn every_client_message_round_trips() {
         generation: 2,
         effect: 3,
         completion: pane::effects::Completion::Text("clip".into()),
+    }));
+    client_round_trip(ClientMessage::AccessibilityAck(AccessibilityAck {
+        channel: Channel(1),
+        demand_generation: u64::MAX,
+        revision: u64::MAX,
     }));
     client_round_trip(ClientMessage::Acknowledge(Acknowledge { sequence: 3 }));
     client_round_trip(ClientMessage::Cancel(Cancel { id: RequestId(2) }));
@@ -628,6 +729,75 @@ fn every_server_message_round_trips() {
         inventory: inventory(),
         next_sequence: 9,
     })));
+    server_round_trip(ServerMessage::Accessibility(Box::new(
+        AccessibilityMessage {
+            channel: Channel(2),
+            update: accessibility_tail(),
+        },
+    )));
+    server_round_trip(ServerMessage::Accessibility(Box::new(
+        AccessibilityMessage {
+            channel: Channel(2),
+            update: pane::accessibility::Update {
+                header: pane::accessibility::Header {
+                    demand_generation: u64::MAX,
+                    revision: 9,
+                    base: None,
+                    screen: pane::accessibility::Screen::Alternate,
+                    screen_generation: u64::MAX,
+                },
+                splices: vec![pane::accessibility::Splice {
+                    at: 0,
+                    remove: 0,
+                    insert: vec![pane::accessibility::Run {
+                        node_serial: u64::MAX,
+                        page_row: 1,
+                        count: 2,
+                    }],
+                }],
+                rows: vec![
+                    pane::accessibility::RowUpdate::new(
+                        0,
+                        3,
+                        true,
+                        "ab".into(),
+                        [
+                            pane::accessibility::CellSpan {
+                                column: 0,
+                                width: 1,
+                                bytes: 1,
+                            },
+                            pane::accessibility::CellSpan {
+                                column: 1,
+                                width: 1,
+                                bytes: 1,
+                            },
+                        ],
+                    ),
+                    pane::accessibility::RowUpdate::new(
+                        1,
+                        4,
+                        false,
+                        "界".into(),
+                        [pane::accessibility::CellSpan {
+                            column: 0,
+                            width: 2,
+                            bytes: 3,
+                        }],
+                    ),
+                ],
+                tail: Some(pane::accessibility::Tail {
+                    visible_lines: 0..2,
+                    cursor: None,
+                    selection: Some(pane::accessibility::Selection {
+                        start: pane::accessibility::Point { line: 0, column: 1 },
+                        end: pane::accessibility::Point { line: 1, column: 0 },
+                        rectangle: true,
+                    }),
+                }),
+            },
+        },
+    )));
     server_round_trip(ServerMessage::Ping(Ping { nonce: 1 }));
     server_round_trip(ServerMessage::Pong(Pong { nonce: 1 }));
 }

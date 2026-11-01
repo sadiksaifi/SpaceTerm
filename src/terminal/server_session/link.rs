@@ -734,7 +734,9 @@ impl PaneLink {
                     ChannelEvent::Closed(error) => {
                         received.closed.get_or_insert(error.into());
                     }
-                    event @ (ChannelEvent::Frame(_) | ChannelEvent::Pane(_)) => {
+                    event @ (ChannelEvent::Frame(_)
+                    | ChannelEvent::Pane(_)
+                    | ChannelEvent::Accessibility(_)) => {
                         drop(received);
                         // The inbox wakes the worker.
                         pushed.deliver(event);
@@ -1115,6 +1117,15 @@ impl PaneLink {
                     channel: channel(lease)?,
                 })
                 .map(|_| Reply::Unchanged),
+            Request::AccessibilityDemand { lease, demand } => {
+                match self.request(Operation::AccessibilityDemand {
+                    channel: channel(lease)?,
+                    demand,
+                })? {
+                    ReplyBody::Done => Ok(Reply::Unchanged),
+                    _ => Err(ServerError::Protocol),
+                }
+            }
             Request::Release { lease } => {
                 self.bound(lease)?;
                 // Dropping the handle sends `Release` in order behind earlier input.

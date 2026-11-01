@@ -9,8 +9,9 @@
 //! Decoding is bounded per kind before allocation, and errors never carry peer bytes.
 use super::limits;
 use super::message::{
-    Acknowledge, Cancel, ClientMessage, EffectDone, Fatal, Frame, FrameAck, Input,
-    InventoryRevision, PaneMessage, Ping, Pong, Reply, Request, ServerMessage, View,
+    AccessibilityAck, AccessibilityMessage, Acknowledge, Cancel, ClientMessage, EffectDone, Fatal,
+    Frame, FrameAck, Input, InventoryRevision, PaneMessage, Ping, Pong, Reply, Request,
+    ServerMessage, View,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -28,6 +29,7 @@ pub enum Kind {
     Cancel = 0x07,
     ClientPing = 0x08,
     ClientPong = 0x09,
+    AccessibilityAck = 0x0a,
     Reply = 0x41,
     /// A reply written at L2 in chunks of at most [`limits::BULK_CHUNK_BYTES`].
     BulkReply = 0x42,
@@ -37,6 +39,7 @@ pub enum Kind {
     ServerPing = 0x46,
     ServerPong = 0x47,
     Goodbye = 0x48,
+    Accessibility = 0x49,
 }
 
 impl Kind {
@@ -51,6 +54,7 @@ impl Kind {
             0x07 => Self::Cancel,
             0x08 => Self::ClientPing,
             0x09 => Self::ClientPong,
+            0x0a => Self::AccessibilityAck,
             0x41 => Self::Reply,
             0x42 => Self::BulkReply,
             0x43 => Self::Frame,
@@ -59,6 +63,7 @@ impl Kind {
             0x46 => Self::ServerPing,
             0x47 => Self::ServerPong,
             0x48 => Self::Goodbye,
+            0x49 => Self::Accessibility,
             _ => return None,
         })
     }
@@ -75,6 +80,7 @@ impl Kind {
             Self::Input => limits::MAX_INPUT_BYTES,
             Self::EffectDone => limits::MAX_EFFECT_DONE_BYTES,
             Self::FrameAck
+            | Self::AccessibilityAck
             | Self::View
             | Self::Acknowledge
             | Self::Cancel
@@ -85,6 +91,7 @@ impl Kind {
             | Self::Goodbye => limits::MAX_CONTROL_BYTES,
             Self::Reply | Self::BulkReply => limits::MAX_REPLY_BYTES,
             Self::Frame => limits::MAX_UPDATE_BYTES,
+            Self::Accessibility => limits::MAX_ACCESSIBILITY_BYTES,
             Self::Pane => limits::MAX_PANE_EVENT_BYTES,
             Self::Inventory => limits::MAX_INVENTORY_BYTES,
         }
@@ -197,6 +204,7 @@ pub fn encode_client(message: &ClientMessage) -> Result<WireMessage, EncodeError
         ClientMessage::Request(value) => encode(Kind::Request, value),
         ClientMessage::Input(value) => encode(Kind::Input, value),
         ClientMessage::FrameAck(value) => encode(Kind::FrameAck, value),
+        ClientMessage::AccessibilityAck(value) => encode(Kind::AccessibilityAck, value),
         ClientMessage::View(value) => encode(Kind::View, value),
         ClientMessage::EffectDone(value) => encode(Kind::EffectDone, value),
         ClientMessage::Acknowledge(value) => encode(Kind::Acknowledge, value),
@@ -213,6 +221,7 @@ pub fn encode_server(message: &ServerMessage) -> Result<WireMessage, EncodeError
             encode(if bulk { Kind::BulkReply } else { Kind::Reply }, value)
         }
         ServerMessage::Frame(value) => encode(Kind::Frame, value),
+        ServerMessage::Accessibility(value) => encode(Kind::Accessibility, value),
         ServerMessage::Pane(value) => encode(Kind::Pane, value),
         ServerMessage::Inventory(value) => encode(Kind::Inventory, value),
         ServerMessage::Ping(value) => encode(Kind::ServerPing, value),
@@ -304,6 +313,9 @@ impl Assembler {
             Kind::Request => ClientMessage::Request(Box::new(decode::<Request>(&body)?)),
             Kind::Input => ClientMessage::Input(decode::<Input>(&body)?),
             Kind::FrameAck => ClientMessage::FrameAck(decode::<FrameAck>(&body)?),
+            Kind::AccessibilityAck => {
+                ClientMessage::AccessibilityAck(decode::<AccessibilityAck>(&body)?)
+            }
             Kind::View => ClientMessage::View(decode::<View>(&body)?),
             Kind::EffectDone => ClientMessage::EffectDone(decode::<EffectDone>(&body)?),
             Kind::Acknowledge => ClientMessage::Acknowledge(decode::<Acknowledge>(&body)?),
@@ -326,6 +338,9 @@ impl Assembler {
                 ServerMessage::Reply(Box::new(decode::<Reply>(&body)?))
             }
             Kind::Frame => ServerMessage::Frame(Box::new(decode::<Frame>(&body)?)),
+            Kind::Accessibility => {
+                ServerMessage::Accessibility(Box::new(decode::<AccessibilityMessage>(&body)?))
+            }
             Kind::Pane => ServerMessage::Pane(decode::<PaneMessage>(&body)?),
             Kind::Inventory => {
                 ServerMessage::Inventory(Box::new(decode::<InventoryRevision>(&body)?))

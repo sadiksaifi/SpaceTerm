@@ -305,7 +305,8 @@ impl Channel {
                 Event::Input { serial, outcome }
             }
             ChannelEvent::Pane(event) if event.last() => Event::Ended(event),
-            ChannelEvent::Pane(_) => return self.next(deadline),
+            // The CLI demands no semantics.
+            ChannelEvent::Pane(_) | ChannelEvent::Accessibility(_) => return self.next(deadline),
             ChannelEvent::Closed(error) => Event::Closed(error),
         }))
     }

@@ -77,6 +77,13 @@ pub enum Operation {
     EndAccessibility {
         channel: Channel,
     },
+    /// Starts or ends this client's semantic demand for the channel, replied `Done`. Each start
+    /// names a new demand generation and begins without a base, so the generation's first update
+    /// is a complete document. Refused on an observation channel.
+    AccessibilityDemand {
+        channel: Channel,
+        demand: crate::pane::accessibility::Demand,
+    },
     /// Replied when the read settles. `Cancel` abandons it.
     DirectoryRead(directories::Operation),
     /// Replied when the write settles. `Cancel` prevents the write if it has not started;

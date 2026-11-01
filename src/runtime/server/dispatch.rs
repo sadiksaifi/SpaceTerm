@@ -1528,6 +1528,8 @@ impl<H: HostCommands> Served<H> {
             Operation::EndAccessibility { channel } => self.on_channel(peer, channel, |lease| {
                 Request::EndAccessibilityDemand { lease }
             }),
+            // This server pushes no semantic updates yet.
+            Operation::AccessibilityDemand { .. } => Err(Refusal::Unsupported),
             Operation::DirectoryRead(operation) => {
                 return self.read(peer, id, HostRead::Directory(operation));
             }
