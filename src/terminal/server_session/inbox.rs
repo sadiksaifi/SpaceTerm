@@ -6,8 +6,14 @@
 //! send the next, and the newest screen that changed something visible is handed to the view once
 //! per drain, before any Pane event that follows it. Semantic messages are staged in the same
 //! order, and a revision is acknowledged once its tail applies it.
+//!
+//! A semantic revision can span more messages than the event bound, and the worker may be
+//! waiting for an input reply while it arrives. The revision's one credit bounds it instead: the
+//! inbox queues every message of the one revision the server may send without counting it, and
+//! a message that starts another revision of the current demand before the worker drained the
+//! first one's tail floods the channel.
 use spaceterm_server::connection::link::{ChannelEvent, ChannelSink};
-use spaceterm_server::pane::accessibility::Update;
+use spaceterm_server::pane::accessibility::{Header, Update};
 use spaceterm_server::protocol::{Frame, PaneEvent};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -47,8 +53,9 @@ impl Wake {
     }
 }
 
-/// Pane events the worker has not drained yet. Frames take one slot each and arrive one at a
-/// time under the channel's credit; more than this means the server floods the channel.
+/// Pane events the worker has not drained yet, besides semantic messages. Frames take one slot
+/// each and arrive one at a time under the channel's credit; more than this means the server
+/// floods the channel.
 const MAX_QUEUED: usize = 1024;
 
 /// Wakes the worker that owns the inbox. It must not block.
@@ -67,7 +74,61 @@ pub(super) struct Inbox {
 struct Queue {
     /// Each event with the instant the worker may drain it.
     events: VecDeque<(Instant, ChannelEvent)>,
+    /// How many of `events` are semantic messages, which `MAX_QUEUED` does not count.
+    semantic: usize,
+    admission: Admission,
     overflowed: bool,
+}
+
+impl Queue {
+    /// Whether the queued events other than semantic messages reached their bound.
+    fn full(&self) -> bool {
+        self.events.len() - self.semantic >= MAX_QUEUED
+    }
+}
+
+/// Which semantic messages the channel may queue: those of the current demand generation, one
+/// revision at a time, as its one semantic credit allows (ADR 0062).
+#[derive(Default)]
+struct Admission {
+    /// The current demand generation, or `None` while demand is ended.
+    generation: Option<u64>,
+    /// The revision whose messages are queued, until the worker drains its tail.
+    revision: Option<Header>,
+    /// Its tail is queued.
+    complete: bool,
+}
+
+enum Admit {
+    Queue,
+    /// Of another demand generation, or while demand is ended: the worker would discard it
+    /// unacknowledged.
+    Discard,
+    /// Another revision before the worker drained the queued one: the server ignored its credit.
+    Flood,
+}
+
+impl Admission {
+    fn admit(&mut self, update: &Update) -> Admit {
+        if self.generation != Some(update.header.demand_generation) {
+            return Admit::Discard;
+        }
+        match self.revision {
+            Some(header) if header != update.header || self.complete => return Admit::Flood,
+            _ => {}
+        }
+        self.revision = Some(update.header);
+        self.complete = update.tail.is_some();
+        Admit::Queue
+    }
+
+    /// The worker drained `update`: after its revision's tail, the next revision may follow.
+    fn drained(&mut self, update: &Update) {
+        if update.tail.is_some() && self.revision == Some(update.header) {
+            self.revision = None;
+            self.complete = false;
+        }
+    }
 }
 
 /// Holds every pushed event back by `SPACETERM_DEVELOPER_PUSH_DELAY_MS`, so a local Pane shows
@@ -113,6 +174,16 @@ impl Inbox {
         })
     }
 
+    /// Follows the channel's semantic demand: `Some(generation)` after a start, `None` after an
+    /// end. Call it before the server can see the demand.
+    pub(super) fn demand(&self, generation: Option<u64>) {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.admission = Admission {
+            generation,
+            ..Admission::default()
+        };
+    }
+
     /// Takes the events that are due, in order.
     fn take(&self) -> Result<Vec<ChannelEvent>, Overflow> {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -125,7 +196,14 @@ impl Inbox {
             .iter()
             .take_while(|(due, _)| *due <= now)
             .count();
-        Ok(queue.events.drain(..due).map(|(_, event)| event).collect())
+        let taken: Vec<_> = queue.events.drain(..due).map(|(_, event)| event).collect();
+        for event in &taken {
+            if let ChannelEvent::Accessibility(update) = event {
+                queue.semantic -= 1;
+                queue.admission.drained(update);
+            }
+        }
+        Ok(taken)
     }
 
     /// When the oldest held event becomes due, if one waits.
@@ -191,11 +269,23 @@ impl ChannelSink for Inbox {
     fn deliver(&self, event: ChannelEvent) {
         {
             let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-            if queue.events.len() >= MAX_QUEUED {
-                queue.overflowed = true;
-                queue.events.clear();
-            } else if !queue.overflowed {
-                queue.events.push_back((Instant::now() + self.delay, event));
+            let admitted = match &event {
+                ChannelEvent::Accessibility(update) => queue.admission.admit(update),
+                _ if queue.full() => Admit::Flood,
+                _ => Admit::Queue,
+            };
+            match admitted {
+                _ if queue.overflowed => {}
+                Admit::Flood => {
+                    queue.overflowed = true;
+                    queue.events.clear();
+                    queue.semantic = 0;
+                }
+                Admit::Discard => {}
+                Admit::Queue => {
+                    queue.semantic += usize::from(matches!(event, ChannelEvent::Accessibility(_)));
+                    queue.events.push_back((Instant::now() + self.delay, event));
+                }
             }
         }
         (self.notify)();
@@ -316,10 +406,14 @@ mod tests {
     }
 
     fn semantic(revision: u64, tail: bool) -> ChannelEvent {
-        use spaceterm_server::pane::accessibility::{Header, Screen, Tail};
+        semantic_in(1, revision, tail)
+    }
+
+    fn semantic_in(demand_generation: u64, revision: u64, tail: bool) -> ChannelEvent {
+        use spaceterm_server::pane::accessibility::{Screen, Tail};
         ChannelEvent::Accessibility(Box::new(Update {
             header: Header {
-                demand_generation: 1,
+                demand_generation,
                 revision,
                 base: None,
                 screen: Screen::Primary,
@@ -348,12 +442,14 @@ mod tests {
         }))
     }
 
+    /// An inbox whose channel's semantic demand stands in generation 1.
     fn inbox() -> (Arc<Inbox>, Arc<AtomicUsize>) {
         let wakes = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&wakes);
         let inbox = Inbox::new(Arc::new(move || {
             counter.fetch_add(1, Ordering::Relaxed);
         }));
+        inbox.demand(Some(1));
         (inbox, wakes)
     }
 
@@ -545,6 +641,122 @@ mod tests {
             "nothing after the last event is staged"
         );
         assert!(acknowledged.is_empty());
+    }
+
+    #[test]
+    fn a_valid_revision_longer_than_the_event_bound_queues_whole_while_the_worker_waits() {
+        use spaceterm_server::pane::accessibility::{CellSpan, Packer, RowUpdate, Run, Tail};
+        // Each row holds 512 cells of 33 bytes, so no message holds two of them.
+        let cell = format!("e{}", "\u{301}".repeat(16));
+        let rows = MAX_QUEUED as u32 + 64;
+        let mut packer = Packer::new(Header {
+            demand_generation: 1,
+            revision: 1,
+            base: None,
+            screen: spaceterm_server::pane::accessibility::Screen::Primary,
+            screen_generation: 1,
+        });
+        let mut messages = packer.splice(
+            0,
+            0,
+            vec![Run {
+                node_serial: 1,
+                page_row: 0,
+                count: rows as u16,
+            }],
+        );
+        for line in 0..rows {
+            messages.extend(packer.row(RowUpdate::new(
+                line,
+                1,
+                false,
+                cell.repeat(512),
+                (0..512)
+                    .map(|column| CellSpan {
+                        column,
+                        width: 1,
+                        bytes: cell.len() as u16,
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+        }
+        messages.push(packer.finish(Tail {
+            visible_lines: rows - 24..rows,
+            cursor: None,
+            selection: None,
+        }));
+        assert!(messages.len() > MAX_QUEUED);
+        assert!(messages.iter().all(|message| message.validate().is_ok()));
+
+        // The worker waits for an input reply while the whole revision arrives, with a frame
+        // and a Pane event in its midst.
+        let (inbox, _) = inbox();
+        let count = messages.len();
+        let mut messages = messages.into_iter();
+        for message in messages.by_ref().take(count / 2) {
+            inbox.deliver(ChannelEvent::Accessibility(Box::new(message)));
+        }
+        inbox.deliver(frame(1, 1));
+        inbox.deliver(ChannelEvent::Pane(PaneEvent::Line(LineState::default())));
+        for message in messages {
+            inbox.deliver(ChannelEvent::Accessibility(Box::new(message)));
+        }
+
+        let mut applier = Generations::default();
+        let (flow, acknowledged, delivered) = drain_all(&inbox, &mut applier);
+
+        assert_eq!(flow, Ok(Flow::Open), "one valid revision is no flood");
+        assert_eq!(applier.staged.len(), count, "every message is staged");
+        assert_eq!(
+            acknowledged,
+            [
+                Ack::Frame(1),
+                Ack::Semantics {
+                    demand_generation: 1,
+                    revision: 1
+                }
+            ],
+            "the frame keeps its place in channel order"
+        );
+        assert!(matches!(
+            delivered.as_slice(),
+            [Delivery::Screen(1), Delivery::Pane(PaneEvent::Line(_))]
+        ));
+    }
+
+    #[test]
+    fn a_second_revision_before_the_first_is_drained_floods_the_channel() {
+        let (channel, _) = inbox();
+        channel.deliver(semantic(7, true));
+        channel.deliver(semantic(8, false));
+        assert_eq!(drain(&channel).0, Err(Overflow), "revision 7 holds the credit");
+
+        // Once the worker drained revision 7, the server may send the next one.
+        let (channel, _) = inbox();
+        channel.deliver(semantic(7, true));
+        assert_eq!(drain(&channel).0, Ok(Flow::Open));
+        channel.deliver(semantic(8, true));
+        let mut applier = Generations::default();
+        assert_eq!(drain_all(&channel, &mut applier).0, Ok(Flow::Open));
+        assert_eq!(applier.staged, [8]);
+
+        // A restart abandons an unfinished revision: the new generation's document is admitted
+        // and late messages of the earlier one are not queued.
+        let (channel, _) = inbox();
+        channel.deliver(semantic(7, false));
+        channel.demand(Some(2));
+        channel.deliver(semantic(7, true));
+        channel.deliver(semantic_in(2, 1, true));
+        let mut applier = Generations::default();
+        assert_eq!(drain_all(&channel, &mut applier).0, Ok(Flow::Open));
+        assert_eq!(applier.staged, [7, 1]);
+
+        // Nothing is queued while demand is ended.
+        channel.demand(None);
+        channel.deliver(semantic_in(2, 2, true));
+        let mut applier = Generations::default();
+        assert_eq!(drain_all(&channel, &mut applier).0, Ok(Flow::Open));
+        assert!(applier.staged.is_empty());
     }
 
     #[test]

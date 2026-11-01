@@ -1109,8 +1109,16 @@ impl PaneLink {
                 }
             }
             Request::AccessibilityDemand { lease, demand } => {
+                let channel = channel(lease)?;
+                // The inbox admits the demand's messages before the server can send one.
+                if let Some(pushed) = &self.pushed {
+                    pushed.demand(match demand {
+                        pane::accessibility::Demand::Start { generation } => Some(generation),
+                        pane::accessibility::Demand::End => None,
+                    });
+                }
                 match self.request(Operation::AccessibilityDemand {
-                    channel: channel(lease)?,
+                    channel,
                     demand,
                 })? {
                     ReplyBody::Done => Ok(Reply::Unchanged),
