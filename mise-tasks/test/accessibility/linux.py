@@ -292,7 +292,7 @@ class Probe:
         self.open_workspace_menu(row, input_driver)
         self.activate_control("Kill Workspace")
         dialog = self.wait(
-            lambda: self.find_named_control(f'Kill Workspace "{name}"?'),
+            lambda: self.find_named_control(f"Kill Workspace \u201c{name}\u201d?"),
             "server_workspace_confirmation_missing",
         )
         self.activate_control("Kill Workspace", dialog)
