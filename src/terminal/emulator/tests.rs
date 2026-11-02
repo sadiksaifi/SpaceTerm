@@ -353,6 +353,35 @@ fn accessibility_captures_publish_only_rows_the_terminal_had_while_output_trims_
     assert!(model.text().trim_end_matches('\n').ends_with(&last));
 }
 
+/// A scroll region's rotation gives the page holding it a new serial while the pages around it
+/// stay. A capture used to drop that page as if output had trimmed it, and published the rows
+/// before and after it as adjacent: 908 of 1,001 rows, jumping from `line 836` to `line 930`. A
+/// capture now begins again from the live pages and publishes what the terminal shows.
+#[test]
+fn accessibility_captures_publish_the_live_rows_when_a_scroll_region_rotates_a_captured_page() {
+    let mut emulator = emulator(512, 256);
+    let history: String = (0..1000).map(|index| format!("line {index}\r\n")).collect();
+    emulator.feed(history.as_bytes());
+    emulator.snapshot().unwrap();
+    let (_, more) = emulator.accessibility_snapshot(false).unwrap();
+    assert!(more, "the capture walks 1,001 rows in several steps");
+
+    // Screen rows 100 to 110 hold lines 844 to 854. One line feed at the region's bottom
+    // removes line 844, moves the rest up, and blanks the region's last row.
+    emulator.feed(b"\x1b[100;110r\x1b[110;1H\n\x1b[r");
+    let model = finish_capture_during_output(&mut emulator, 1000, |_, _| {})
+        .expect("the capture finishes")
+        .expect("the capture publishes the live rows");
+
+    let mut expected: Vec<String> = (0..844).map(|index| format!("line {index}")).collect();
+    expected.extend((845..855).map(|index| format!("line {index}")));
+    expected.push(String::new());
+    expected.extend((855..1000).map(|index| format!("line {index}")));
+    expected.push(String::new());
+    assert_eq!(model.text(), expected.join("\n"));
+    assert_eq!(model.visible_lines(), 745..1001);
+}
+
 /// A capture used to extract again every row that changed after it extracted it, so a wide
 /// screen redrawn faster than a capture's steps never completed. Rows that change during a
 /// capture now wait for the next one.

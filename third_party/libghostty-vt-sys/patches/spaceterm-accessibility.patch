@@ -169,7 +169,7 @@ diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,902 @@
 +const std = @import("std");
 +const lib = @import("../lib.zig");
 +const PageList = @import("../PageList.zig");
@@ -301,6 +301,9 @@ new file mode 100644
 +    /// The live screen's pages differ from the topology this state holds. Its next capture
 +    /// replaces the topology.
 +    topology_stale: bool = false,
++    /// Leading pages of the capture's topology that output trimmed from the live screen. The
++    /// capture's completion drops them.
++    trimmed_pages: usize = 0,
 +
 +    fn deinit(self: *ScreenState, alloc: std.mem.Allocator) void {
 +        self.active_rows.deinit(alloc);
@@ -400,33 +403,23 @@ new file mode 100644
 +        self.topology_active = false;
 +    }
 +
-+    /// Removes from the committed topology every page that left the live screen, or that no
-+    /// longer holds the rows the topology names, with its rows. Rows of the remaining pages
-+    /// keep their order. Returns whether a page was removed.
-+    fn dropRemovedPages(self: *ScreenState, live: *const PageList, screen: Screen) bool {
-+        var kept_pages: usize = 0;
-+        var kept_rows: usize = 0;
-+        for (self.pages.items) |page| {
-+            const first: usize = page.first_row;
-+            const end = @min(first + page.rows, self.rows.items.len);
-+            const last: u16 = page.page_row_start + page.rows - 1;
-+            const node = findNodeForRow(live, screen, page.serial, page.page_row_start) orelse continue;
-+            const last_node = findNodeForRow(live, screen, page.serial, last) orelse continue;
-+            if (node != last_node) continue;
-+            std.mem.copyForwards(
-+                RowState,
-+                self.rows.items[kept_rows..],
-+                self.rows.items[@min(first, end)..end],
-+            );
-+            var moved = page;
-+            moved.first_row = @intCast(kept_rows);
-+            self.pages.items[kept_pages] = moved;
-+            kept_pages += 1;
-+            kept_rows += end - @min(first, end);
-+        }
-+        if (kept_pages == self.pages.items.len) return false;
-+        self.pages.shrinkRetainingCapacity(kept_pages);
++    /// Removes the trimmed pages from the start of the committed topology, with their rows.
++    /// Returns whether a page was removed.
++    fn dropTrimmedPages(self: *ScreenState) bool {
++        const trimmed = @min(self.trimmed_pages, self.pages.items.len);
++        self.trimmed_pages = 0;
++        if (trimmed == 0) return false;
++        const rows: usize = if (trimmed == self.pages.items.len)
++            self.rows.items.len
++        else
++            self.pages.items[trimmed].first_row;
++        const kept_rows = self.rows.items.len - rows;
++        std.mem.copyForwards(RowState, self.rows.items[0..kept_rows], self.rows.items[rows..]);
 +        self.rows.shrinkRetainingCapacity(kept_rows);
++        const kept_pages = self.pages.items.len - trimmed;
++        std.mem.copyForwards(PageInfo, self.pages.items[0..kept_pages], self.pages.items[trimmed..]);
++        self.pages.shrinkRetainingCapacity(kept_pages);
++        for (self.pages.items) |*page| page.first_row -= @intCast(rows);
 +        return true;
 +    }
 +
@@ -536,8 +529,15 @@ new file mode 100644
 +    // A capture in progress keeps the topology it began with: rows appended meanwhile wait
 +    // for the next capture, so output arriving faster than a capture's steps cannot restart
 +    // it forever. A new screen generation replaces every row identity, so it restarts.
-+    const begin = topology_changed and (!current.capturing or generation_changed);
++    // Appending output grows the last page and adds pages after it, and trimming Scrollback
++    // removes pages before the rest. Any other change, such as a scroll region rotating rows
++    // in a page and renewing its serial, separates rows the topology holds as adjacent, so
++    // the capture restarts rather than publish them together.
++    const trimmed = trimmedPages(compared_pages, observed.items);
++    const begin = topology_changed and
++        (!current.capturing or generation_changed or trimmed == null);
 +    current.topology_stale = topology_changed and !begin;
++    current.trimmed_pages = if (current.topology_stale) trimmed.? else 0;
 +    if (begin) {
 +        state.topology_epoch +%= 1;
 +        if (state.topology_epoch == 0) state.topology_epoch = 1;
@@ -698,7 +698,7 @@ new file mode 100644
 +    out.more = !complete;
 +    if (complete) {
 +        current.finishCapture();
-+        if (current.dropRemovedPages(&screen.pages, screen_tag)) {
++        if (current.dropTrimmedPages()) {
 +            if (current.rows.items.len == 0) {
 +                // Output removed every row the capture began with, so it describes no
 +                // state the terminal had. It finishes without a model, and the next
@@ -779,6 +779,29 @@ new file mode 100644
 +            lhs.cols != rhs.cols) return false;
 +    }
 +    return true;
++}
++
++/// The count of leading `held` pages that left the live screen, when `live` begins with the
++/// rest, unchanged except that the last may have grown. Null when `live` replaced or changed a
++/// page that remains.
++fn trimmedPages(held: []const PageInfo, live: []const PageInfo) ?usize {
++    const first_live = if (live.len == 0) null else live[0].serial;
++    const trimmed = for (held, 0..) |page, index| {
++        if (first_live == page.serial) break index;
++    } else held.len;
++    if (trimmed == held.len) {
++        for (held) |page| for (live) |now| if (page.serial == now.serial) return null;
++        return trimmed;
++    }
++    const kept = held[trimmed..];
++    if (live.len < kept.len) return null;
++    for (kept, live[0..kept.len], 0..) |page, now, index| {
++        const grown = index + 1 == kept.len and now.rows > page.rows;
++        if (page.serial != now.serial or page.cols != now.cols or
++            page.page_row_start != now.page_row_start or (page.rows != now.rows and !grown))
++            return null;
++    }
++    return trimmed;
 +}
 +
 +fn rowIdEql(a: RowId, b: RowId) bool {
