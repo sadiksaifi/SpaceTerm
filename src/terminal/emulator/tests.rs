@@ -4924,3 +4924,12 @@ fn cached_selection_copy_preserves_wide_cells_and_soft_wrap_options() {
     assert_eq!(wrapped.plain_text.as_ref(), "界ab\nce");
     assert!(wrapped.html.as_ref().unwrap().contains("&#30028;"));
 }
+
+/// Ghostty's `Debug` mode verifies a whole page after every grapheme it appends, so a debug build
+/// fed wide and combining text into a long history spent minutes where ASCII took seconds.
+#[cfg(debug_assertions)]
+#[test]
+fn a_debug_build_runs_ghostty_with_safety_checks_but_without_per_grapheme_page_verification() {
+    use libghostty_vt::build_info::{OptimizeMode, optimize_mode};
+    assert_eq!(optimize_mode().unwrap(), OptimizeMode::ReleaseSafe);
+}

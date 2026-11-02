@@ -1554,6 +1554,18 @@ mod startup_tests {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
+    /// Leaves a private socket entry at `path` that refuses every connection. Its socket binds
+    /// but never listens: on macOS a socket's close-on-exec flag is set after it is created, so a
+    /// child that another test spawns in between keeps a copy, and a listening copy would answer.
+    fn stale_socket(path: &Path) {
+        let socket =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&socket2::SockAddr::unix(path).unwrap())
+            .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     struct ChildGuard(Child);
     impl Drop for ChildGuard {
         fn drop(&mut self) {
@@ -2283,9 +2295,7 @@ mod startup_tests {
     #[test]
     fn startup_replaces_a_stale_socket_and_authenticates_the_saved_device() {
         let fixture = Fixture::new();
-        let stale = UnixListener::bind(fixture.paths.socket()).unwrap();
-        fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
-        drop(stale);
+        stale_socket(&fixture.paths.socket());
         let _child = fixture.start();
         // Generous, because a loaded test host can take seconds to start the child.
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -2316,10 +2326,8 @@ mod startup_tests {
         let fixture = Fixture::new();
         let runtime = Directory::open(&fixture.paths.runtime, false).unwrap();
         let _lock = runtime.lock("server.lock", true).unwrap();
-        let stale = UnixListener::bind(fixture.paths.socket()).unwrap();
-        fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
+        stale_socket(&fixture.paths.socket());
         let expected = runtime.socket_identity(c"s").unwrap().unwrap();
-        drop(stale);
         fs::rename(fixture.paths.socket(), fixture.paths.runtime.join("old")).unwrap();
         let _replacement = UnixListener::bind(fixture.paths.socket()).unwrap();
         fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
