@@ -721,6 +721,67 @@ fn optimistic_pane_move_presents_its_tab_at_once_and_keeps_the_pane_identity() {
 }
 
 #[test]
+fn an_accepted_move_or_merge_never_reopens_what_its_interaction_already_opened() {
+    use spaceterm_server::hierarchy::{PaneDestination, Side};
+
+    let server = DelayedServer::new();
+    let (source, mut model) = model(&server);
+    let workspace = server.inventory().workspaces[0].id;
+    let first = server.inventory().workspaces[0].tabs[0].clone();
+    source.submit(Mutation::SplitPane {
+        workspace,
+        tab: first.id,
+        source: first.root_pane,
+        axis: Axis::Right,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
+    });
+    server.finish(true, true);
+    model.poll();
+    source.submit(Mutation::CreateTab {
+        workspace,
+        source: None,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
+    });
+    server.finish(true, true);
+    model.poll();
+    let inventory = server.inventory();
+    let moved = inventory.workspaces[0].tabs[0].panes[1].id;
+    let second = inventory.workspaces[0].tabs[1].clone();
+
+    let mut accepted = Vec::new();
+    for mutation in [
+        Mutation::MovePane {
+            workspace,
+            tab: first.id,
+            pane: moved,
+            destination: PaneDestination::Beside {
+                tab: second.id,
+                pane: second.root_pane,
+                side: Side::Right,
+            },
+        },
+        Mutation::MergeTab {
+            workspace,
+            tab: first.id,
+            into: second.id,
+            beside: moved,
+            side: Side::Up,
+        },
+    ] {
+        assert_eq!(source.submit(mutation), WorkspaceSubmission::Submitted);
+        server.finish(true, true);
+        accepted.push(model.poll().accepted.is_some());
+    }
+
+    assert_eq!(
+        (accepted, server.inventory().workspaces[0].tabs.len()),
+        (vec![false, false], 1),
+        "the drop opened the destination already, so a later answer must not take the person \
+         back there"
+    );
+}
+
+#[test]
 fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
     let server = DelayedServer::new();
     let (source, mut model) = model(&server);

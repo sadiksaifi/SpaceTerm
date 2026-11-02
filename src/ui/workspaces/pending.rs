@@ -16,6 +16,9 @@ type Owner = std::rc::Weak<std::cell::Cell<Option<u64>>>;
 struct Edit {
     mutation: Mutation,
     creation: Option<Creation>,
+    /// Whether the interaction that submitted this edit presented its result at once, so its
+    /// answer opens nothing again.
+    presented: bool,
     dispatched: bool,
     projected: bool,
     reply: Option<Reply>,
@@ -129,9 +132,15 @@ impl PendingEdits {
                 target,
             });
         }
+        let presented = creation.is_some()
+            || matches!(
+                mutation,
+                Mutation::MovePane { .. } | Mutation::MergeTab { .. }
+            );
         self.edits.push_back(Edit {
             mutation,
             creation,
+            presented,
             dispatched: false,
             projected: false,
             reply,
@@ -295,7 +304,7 @@ impl PendingEdits {
                     self.completed.push_back(Completion {
                         outcome: outcome.clone(),
                         inventory: snapshot.inventory.clone(),
-                        optimistic: edit.creation.is_some(),
+                        optimistic: edit.presented,
                     });
                 }
             }
