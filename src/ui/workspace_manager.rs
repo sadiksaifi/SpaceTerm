@@ -4201,6 +4201,7 @@ impl WorkspaceManager {
             }
             Mutation::CreateTab { workspace, .. }
             | Mutation::SplitPane { workspace, .. }
+            | Mutation::MovePaneToNewTab { workspace, .. }
             | Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
                 workspace,
                 ..

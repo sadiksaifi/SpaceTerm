@@ -435,6 +435,12 @@ pub(crate) enum TabViewEvent {
         origin: PaneId,
         target: spaceterm_server::hierarchy::Placement,
     },
+    /// A Pane drag ended outside every Pane that could take it. The Tab strip that holds this
+    /// Tab decides whether the drop moves the Pane into a new Tab.
+    PaneDropped {
+        tab_id: TabId,
+        pane_id: PaneId,
+    },
 }
 
 impl std::fmt::Debug for TabViewEvent {
@@ -444,14 +450,16 @@ impl std::fmt::Debug for TabViewEvent {
             Self::CloseTabRequested { .. } => "TabViewEvent::CloseTabRequested",
             Self::PresentationChanged { .. } => "TabViewEvent::PresentationChanged",
             Self::RevealRequested { .. } => "TabViewEvent::RevealRequested",
+            Self::PaneDropped { .. } => "TabViewEvent::PaneDropped",
         })
     }
 }
 
 /// The value a Pane drag carries, scoped to the Pane Layout that owns the Pane.
-struct DraggedPane {
-    pane_id: PaneId,
-    owner: gpui::EntityId,
+pub(super) struct DraggedPane {
+    pub(super) pane_id: PaneId,
+    /// The Tab whose Pane Layout holds the Pane.
+    pub(super) owner: gpui::EntityId,
 }
 
 /// The widest a lifted Pane Caption grows, so a wide Pane lifts a card rather than a bar.
@@ -1253,6 +1261,11 @@ impl TabView {
             .into_any_element()
     }
 
+    /// The Pane a live drag carries out of this Tab's Pane Layout.
+    pub(crate) fn dragged_pane(&self) -> Option<PaneId> {
+        self.pane_drag.as_ref().map(|drag| drag.pane_id)
+    }
+
     fn drag_pane_to(&mut self, pane_id: PaneId, pointer: Point<Pixels>, cx: &mut Context<Self>) {
         let drop_target = self.drop_target(pane_id, pointer, pane_gap(cx));
         let Some(drag) = self
@@ -1285,6 +1298,10 @@ impl TabView {
         }
         let gap = pane_gap(cx);
         let Some((target_pane_id, drop)) = self.drop_target(drag.pane_id, pointer, gap) else {
+            cx.emit(TabViewEvent::PaneDropped {
+                tab_id: self.tab.id(),
+                pane_id: drag.pane_id,
+            });
             return;
         };
         let changed = match drop {
@@ -4586,6 +4603,18 @@ fn render_pane_corner_surface(
         .into_any_element()
 }
 
+/// The accent fill and outline marking where a dragged Pane goes if released now.
+pub(super) fn pane_drop_overlay(appearance: &super::appearance::ChromeAppearance) -> gpui::Div {
+    let accent = appearance.colors.primary_background;
+    div()
+        .absolute()
+        .bg(gpui_color(
+            accent.multiply_opacity(PANE_DROP_TARGET_FILL_OPACITY),
+        ))
+        .border_2()
+        .border_color(gpui_color(accent))
+}
+
 /// Shows the part of a target Pane that a dragged Pane takes when it is released: the half at an
 /// edge, or the whole Pane for a swap.
 fn render_pane_drop_target(
@@ -4594,19 +4623,12 @@ fn render_pane_drop_target(
     radius: Pixels,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
-    let accent = appearance.colors.primary_background;
     let place = match drop {
         PaneDrop::Edge(edge) => format!("{edge:?}").to_lowercase(),
         PaneDrop::Swap => "swap".to_owned(),
     };
-    let overlay = div()
+    let overlay = pane_drop_overlay(appearance)
         .debug_selector(move || format!("pane-drop-target-{}-{place}", pane_id.get()))
-        .absolute()
-        .bg(gpui_color(
-            accent.multiply_opacity(PANE_DROP_TARGET_FILL_OPACITY),
-        ))
-        .border_2()
-        .border_color(gpui_color(accent))
         .rounded(radius);
     match drop {
         PaneDrop::Edge(PaneEdge::Left) => overlay.top_0().bottom_0().left_0().w(relative(0.5)),

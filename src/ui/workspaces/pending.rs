@@ -21,11 +21,24 @@ struct Edit {
     owner: Option<Owner>,
 }
 
+/// The identities this client invented for what one edit creates, until the server answers
+/// with its own. A moved Pane keeps its identity, so its move creates only a Tab.
 #[derive(Clone, Copy)]
 struct Creation {
     workspace: Option<Id>,
     tab: Option<Id>,
-    pane: Id,
+    pane: Option<Id>,
+}
+
+impl Creation {
+    fn ids(self) -> impl Iterator<Item = Id> {
+        self.workspace.into_iter().chain(self.tab).chain(self.pane)
+    }
+
+    /// What the creation presents: its Workspace, else its Tab, else its Pane.
+    fn target(self) -> Option<Id> {
+        self.workspace.or(self.tab).or(self.pane)
+    }
 }
 
 pub(super) struct Completion {
@@ -85,26 +98,31 @@ impl PendingEdits {
             Mutation::CreateWorkspace { .. } => Some(Creation {
                 workspace: Some(new_id()?),
                 tab: Some(new_id()?),
-                pane: new_id()?,
+                pane: Some(new_id()?),
             }),
             Mutation::CreateTab { .. } | Mutation::Worktree(Operation::OpenTab { .. }) => {
                 Some(Creation {
                     workspace: None,
                     tab: Some(new_id()?),
-                    pane: new_id()?,
+                    pane: Some(new_id()?),
                 })
             }
             Mutation::SplitPane { .. } => Some(Creation {
                 workspace: None,
                 tab: None,
-                pane: new_id()?,
+                pane: Some(new_id()?),
+            }),
+            Mutation::MovePaneToNewTab { .. } => Some(Creation {
+                workspace: None,
+                tab: Some(new_id()?),
+                pane: None,
             }),
             _ => None,
         };
-        if let Some(ids) = creation {
+        if let Some(target) = creation.and_then(Creation::target) {
             self.presentations.push_back(WorkspaceAcceptance {
                 mutation: mutation.clone(),
-                target: ids.workspace.or(ids.tab).unwrap_or(ids.pane),
+                target,
             });
         }
         self.edits.push_back(Edit {
@@ -133,7 +151,7 @@ impl PendingEdits {
         self.edits
             .iter()
             .filter_map(|edit| edit.creation)
-            .any(|ids| ids.workspace == Some(id) || ids.tab == Some(id) || ids.pane == id)
+            .any(|ids| ids.ids().any(|created| created == id))
     }
 
     /// Retains an unapproved close only while its exact target depends on creation.
@@ -240,11 +258,7 @@ impl PendingEdits {
                 {
                     self.resolve(ids, *target, inventory);
                     if !edit.projected {
-                        self.aliases.remove(&ids.pane);
-                        if let Some(id) = ids.tab {
-                            self.aliases.remove(&id);
-                        }
-                        if let Some(id) = ids.workspace {
+                        for id in ids.ids() {
                             self.aliases.remove(&id);
                         }
                     }
@@ -291,7 +305,9 @@ impl PendingEdits {
                     if let Some(id) = ids.tab {
                         self.aliases.insert(id, tab.id);
                     }
-                    self.aliases.insert(ids.pane, tab.root_pane);
+                    if let Some(id) = ids.pane {
+                        self.aliases.insert(id, tab.root_pane);
+                    }
                 }
             }
         } else if let Some(tab) = ids.tab {
@@ -302,10 +318,12 @@ impl PendingEdits {
                 .find(|t| t.id == target)
             {
                 self.aliases.insert(tab, target);
-                self.aliases.insert(ids.pane, authority.root_pane);
+                if let Some(id) = ids.pane {
+                    self.aliases.insert(id, authority.root_pane);
+                }
             }
-        } else {
-            self.aliases.insert(ids.pane, target);
+        } else if let Some(id) = ids.pane {
+            self.aliases.insert(id, target);
         }
         let aliases = &self.aliases;
         for edit in &mut self.edits {
@@ -352,9 +370,7 @@ impl PendingEdits {
     }
 
     fn reject_dependencies(&mut self, ids: Creation) {
-        let mut rejected = vec![ids.pane];
-        rejected.extend(ids.workspace);
-        rejected.extend(ids.tab);
+        let mut rejected: Vec<Id> = ids.ids().collect();
         // Every dependency points backwards in this FIFO, so one pass rejects the transitive chain.
         self.edits.retain(|edit| {
             if references(&edit.mutation)
@@ -365,9 +381,7 @@ impl PendingEdits {
                     let _ = reply.try_send(Err(WorkspaceRefusalReason::Value));
                 }
                 if let Some(ids) = edit.creation {
-                    rejected.push(ids.pane);
-                    rejected.extend(ids.workspace);
-                    rejected.extend(ids.tab);
+                    rejected.extend(ids.ids());
                 }
                 false
             } else {
@@ -401,7 +415,7 @@ impl PendingEdits {
                 self.edits
                     .iter()
                     .filter_map(|e| e.creation)
-                    .any(|ids| ids.workspace.or(ids.tab).unwrap_or(ids.pane) == event.target)
+                    .any(|ids| ids.target() == Some(event.target))
             });
             self.disconnected = true;
         }
@@ -414,9 +428,10 @@ impl PendingEdits {
         let latest = self.presentations.pop_back();
         if let Some(event) = &latest {
             for edit in &mut self.edits {
-                if edit.creation.is_some_and(|ids| {
-                    ids.workspace.or(ids.tab).unwrap_or(ids.pane) == event.target
-                }) {
+                if edit
+                    .creation
+                    .is_some_and(|ids| ids.target() == Some(event.target))
+                {
                     edit.projected = true;
                 }
             }
@@ -463,6 +478,11 @@ fn references(mutation: &Mutation) -> Vec<Id> {
             source,
             ..
         } => vec![*workspace, *tab, *source],
+        Mutation::MovePaneToNewTab {
+            workspace,
+            tab,
+            pane,
+        } => vec![*workspace, *tab, *pane],
         Mutation::RenameWorkspace { workspace, .. } | Mutation::PinWorkspace { workspace, .. } => {
             vec![*workspace]
         }
@@ -492,6 +512,11 @@ fn remap(mutation: &mut Mutation, id: impl Fn(Id) -> Id) {
             tab,
             source,
             ..
+        }
+        | Mutation::MovePaneToNewTab {
+            workspace,
+            tab,
+            pane: source,
         } => {
             *workspace = id(*workspace);
             *tab = id(*tab);
@@ -526,6 +551,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
     {
         if let Some(ids) = creation {
             let tab = ids.tab.expect("a Workspace projection has a Tab");
+            let pane = ids.pane.expect("a Workspace projection has a Pane");
             inventory.workspaces.push(Workspace {
                 id: ids
                     .workspace
@@ -541,12 +567,12 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                 root_tab: tab,
                 tabs: vec![Tab {
                     id: tab,
-                    root_pane: ids.pane,
+                    root_pane: pane,
                     worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
                     worktree: None,
                     worktree_repository: None,
                     panes: vec![new_pane(
-                        ids.pane,
+                        pane,
                         None,
                         Axis::Right,
                         directory.clone().unwrap_or_default(),
@@ -585,6 +611,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         | Mutation::PinWorkspace { workspace, .. }
         | Mutation::CreateTab { workspace, .. }
         | Mutation::SplitPane { workspace, .. }
+        | Mutation::MovePaneToNewTab { workspace, .. }
         | Mutation::Worktree(Operation::OpenTab { workspace, .. }) => *workspace,
         _ => return,
     };
@@ -620,19 +647,27 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                 .clone()
                 .or_else(|| source_pane.map(|p| p.presented_directory().to_owned()))
                 .unwrap_or_default();
+            let pane = ids.pane.expect("a Tab projection has a Pane");
             workspace.tabs.push(Tab {
                 id: ids.tab.expect("a Tab projection has an identity"),
-                root_pane: ids.pane,
+                root_pane: pane,
                 worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
                 worktree: source_tab.and_then(|t| t.worktree.clone()),
                 worktree_repository: source_tab.and_then(|t| t.worktree_repository.clone()),
-                panes: vec![new_pane(ids.pane, None, Axis::Right, directory)],
+                panes: vec![new_pane(pane, None, Axis::Right, directory)],
             });
+        }
+        Mutation::MovePaneToNewTab { tab, pane, .. } => {
+            let Some(id) = creation.and_then(|ids| ids.tab) else {
+                return;
+            };
+            // A refusal leaves the presentation as the server will.
+            let _ = workspace.move_pane_to_new_tab(*tab, *pane, id);
         }
         Mutation::SplitPane {
             tab, source, axis, ..
         } => {
-            let Some(ids) = creation else {
+            let Some(pane) = creation.and_then(|ids| ids.pane) else {
                 return;
             };
             if let Some(tab) = workspace.tabs.iter_mut().find(|t| t.id == *tab) {
@@ -643,7 +678,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                     .map(|p| p.presented_directory().to_owned())
                     .unwrap_or_default();
                 tab.panes
-                    .push(new_pane(ids.pane, Some(*source), *axis, directory));
+                    .push(new_pane(pane, Some(*source), *axis, directory));
             }
         }
         _ => {}

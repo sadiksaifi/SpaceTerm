@@ -1538,6 +1538,15 @@ mod server {
             self.edits.editability()
         }
 
+        /// Asks the server to move one of the server Tab `tab`'s Panes into a new Tab.
+        pub(crate) fn move_pane_to_new_tab(&self, tab: Id, pane: Id) -> WorkspaceSubmission {
+            self.edits.submit(Mutation::MovePaneToNewTab {
+                workspace: self.workspace(),
+                tab: self.edits.canonical(tab),
+                pane: self.edits.canonical(pane),
+            })
+        }
+
         /// Asks the server for another Tab in this Workspace.
         pub(crate) fn create_tab(&self, source: Id) -> WorkspaceSubmission {
             let Some(inventory) = self.edits.presentation_inventory() else {
@@ -2804,7 +2813,8 @@ mod server {
                 // them with their own identities instead.
                 Mutation::CreateWorkspace { .. }
                 | Mutation::CreateTab { .. }
-                | Mutation::SplitPane { .. } => None,
+                | Mutation::SplitPane { .. }
+                | Mutation::MovePaneToNewTab { .. } => None,
                 // A stale close is answered with its own outcome rather than a field conflict.
                 Mutation::Close { .. } | Mutation::Worktree(_) => None,
                 // Ending Sessions edits no field, and its refusals reach Settings directly.

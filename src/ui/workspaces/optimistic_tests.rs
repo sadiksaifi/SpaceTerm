@@ -637,6 +637,75 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
 }
 
 #[test]
+fn optimistic_pane_move_presents_its_tab_at_once_and_keeps_the_pane_identity() {
+    let server = DelayedServer::new();
+    let (source, mut model) = model(&server);
+    let workspace = server.inventory().workspaces[0].id;
+    let tab = server.inventory().workspaces[0].tabs[0].clone();
+    source.submit(Mutation::SplitPane {
+        workspace,
+        tab: tab.id,
+        source: tab.root_pane,
+        axis: Axis::Right,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
+    });
+    server.finish(true, true);
+    model.poll();
+    let moved = server.inventory().workspaces[0].tabs[0].panes[1].id;
+    let mutation = Mutation::MovePaneToNewTab {
+        workspace,
+        tab: tab.id,
+        pane: moved,
+    };
+
+    assert_eq!(
+        source.submit(mutation.clone()),
+        WorkspaceSubmission::Submitted
+    );
+    let projected = source.presentation_inventory().unwrap();
+    let pending = projected.workspaces[0].tabs.last().unwrap().clone();
+    source.submit(Mutation::SplitPane {
+        workspace,
+        tab: pending.id,
+        source: moved,
+        axis: Axis::Down,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
+    });
+    assert_eq!(
+        (
+            projected.workspaces[0].tabs[0]
+                .panes
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            pending.panes.iter().map(|p| p.id).collect::<Vec<_>>(),
+            source.provisional(moved),
+            server.dispatched().last(),
+        ),
+        (vec![tab.root_pane], vec![moved], false, Some(&mutation)),
+        "the moved Pane keeps its identity, so the move dispatches at once"
+    );
+
+    let accepted = server.finish(true, true);
+    model.poll();
+    let Outcome::Accepted { target } = accepted.outcome else {
+        panic!("the server must accept the move");
+    };
+    assert_ne!(target, pending.id);
+    assert_eq!(
+        server.dispatched().last(),
+        Some(&Mutation::SplitPane {
+            workspace,
+            tab: target,
+            source: moved,
+            axis: Axis::Down,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
+        }),
+        "the split in the pending Tab waits for the Tab the server created"
+    );
+}
+
+#[test]
 fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
     let server = DelayedServer::new();
     let (source, mut model) = model(&server);
