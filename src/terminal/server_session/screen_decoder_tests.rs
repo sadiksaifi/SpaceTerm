@@ -1039,6 +1039,53 @@ fn consecutive_screens_share_the_projected_palette_until_its_inputs_change() {
 }
 
 #[test]
+fn a_new_appearance_reaches_the_next_screen() {
+    use spaceterm_server::protocol::screen::{Colors, Geometry};
+    let keyframe = ScreenUpdate {
+        geometry: Some(Geometry {
+            columns: 4,
+            rows: 2,
+            cell_pixels: None,
+        }),
+        modes: Some(Default::default()),
+        colors: Some(Colors {
+            foreground: [0, 0, 0],
+            background: [0, 0, 0],
+            cursor: [0, 0, 0],
+            cursor_text: [0, 0, 0],
+            palette: vec![[0, 0, 0]; 256],
+            foreground_overridden: false,
+            background_overridden: false,
+            cursor_overridden: false,
+            palette_overrides: [0, 0, 0, 0],
+        }),
+        ..ScreenUpdate::default()
+    };
+    let generation = PresentationGeneration::test;
+    let mut decoder = ScreenDecoder::default();
+    let mut presenter = Presenter::default();
+    let decoded = decoder.apply(1, None, keyframe, None).unwrap();
+    let mut appearance = crate::terminal::test_terminal_appearance_update();
+    let first = presenter.snapshot(decoded, generation(1), &appearance);
+    assert_eq!(first.appearance_generation, appearance.generation);
+
+    // A new generation of the same resolved appearance.
+    appearance.generation = appearance.generation.next().unwrap();
+    let second = presenter.snapshot(decoded, generation(2), &appearance);
+    assert_eq!(second.appearance_generation, appearance.generation);
+
+    // New colors and bold-as-bright under the same generation.
+    let mut resolved = (*appearance.appearance).clone();
+    resolved.colors.foreground = crate::appearance::Color::rgb(0x123456);
+    resolved.bold_as_bright = !resolved.bold_as_bright;
+    appearance.appearance = Arc::new(resolved);
+    let third = presenter.snapshot(decoded, generation(3), &appearance);
+    assert_eq!(third.appearance_generation, appearance.generation);
+    assert_eq!(*third.configured_colors, appearance.appearance.colors);
+    assert_eq!(third.bold_as_bright, appearance.appearance.bold_as_bright);
+}
+
+#[test]
 fn a_program_that_changes_one_palette_entry_again_shows_its_new_color() {
     let mut session = Session::new(8, 2);
     let mut palette_entry = |osc: &[u8]| {

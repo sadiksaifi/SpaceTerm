@@ -470,15 +470,14 @@ impl Pending<'_> {
     }
 
     /// Whether the client already shows this row where it shows `old`, a blank row when `None`.
-    /// Rows with equal hashes are compared up to their equal ends. The cells after the end are
-    /// blank on both sides, and blank cells differ only in semantic content, which is not sent.
+    /// Rows with equal hashes are compared cell by cell up to their ends. The cells after the end
+    /// are blank on both sides, and blank cells differ only in semantic content, which is not sent.
     fn shown_by(&self, old: Option<&Encoded>) -> bool {
         match old {
             Some(old) => {
                 old.line.wrapped == self.wrapped
                     && (Arc::ptr_eq(&old.source, self.source)
                         || (old.hash == self.hash
-                            && old.end == self.end
                             && same_cells(&old.source[..old.end], &self.source[..self.end])))
             }
             None => self.resembles(None),

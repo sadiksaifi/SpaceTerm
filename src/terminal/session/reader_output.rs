@@ -273,6 +273,26 @@ mod tests {
     }
 
     #[test]
+    fn full_reads_never_wait_however_long_the_burst() {
+        let capacity = 8;
+        let (sender, receiver) = reader_output(capacity);
+        let send = |length| {
+            let next = sender.send(NativePtyOutput::Bytes(vec![0; length]));
+            assert!(receiver.recv().is_ok());
+            next
+        };
+        for _ in 0..3 * capacity {
+            assert_eq!(send(TRICKLE_READ_BYTES), Some(NextRead::Now));
+        }
+        // A read one byte shorter is short, so a long burst of them waits for receipt.
+        let waits = (0..4 * capacity)
+            .map(|_| send(TRICKLE_READ_BYTES - 1))
+            .filter(|next| *next == Some(NextRead::AfterReceipt))
+            .count();
+        assert!(waits > 0);
+    }
+
+    #[test]
     fn dropping_the_workers_end_releases_a_waiting_reader() {
         for full in [true, false] {
             let (sender, receiver) = reader_output(1);
