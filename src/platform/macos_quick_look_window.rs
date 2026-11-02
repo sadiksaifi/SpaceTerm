@@ -1,6 +1,6 @@
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSBackingStoreType, NSPanel, NSWindowStyleMask};
+use objc2_app_kit::{NSBackingStoreType, NSPanel, NSWindowAnimationBehavior, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_quick_look_ui::{QLPreviewView, QLPreviewViewStyle};
 
@@ -34,6 +34,9 @@ impl OwnedQuickLookWindow {
         panel.setHidesOnDeactivate(true);
         panel.setBecomesKeyOnlyIfNeeded(true);
         panel.center();
+        // AppKit's ordering animations retain the panel. One that is still running when the owner
+        // closes the panel can keep the panel alive indefinitely.
+        panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
         // SAFETY: These properties are set while the preview and panel are both live.
         unsafe {
             preview.setShouldCloseWithWindow(true);
