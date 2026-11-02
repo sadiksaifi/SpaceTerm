@@ -3,11 +3,11 @@ use std::fs;
 
 use super::*;
 use crate::appearance::TerminalColors;
-use crate::terminal::TerminalAccessibilityModel;
 use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::metadata::{DirectoryProvenance, ProgressMetadata};
+use crate::terminal::{AccessibilityGeometry, TerminalAccessibilityModel};
 
 fn geometry(cols: u16, rows: u16, cell_width: f32, cell_height: f32) -> TerminalGeometry {
     TerminalGeometry::from_grid(
@@ -314,6 +314,13 @@ fn accessibility_captures_that_output_outran_keep_the_cursor_on_its_row() {
     assert_eq!(
         model.cursor_cell(),
         Some((visible.end - 1, format!("y {line}").len() as u16))
+    );
+    assert_eq!(
+        model.bounds_for_range(
+            model.cursor_range(),
+            AccessibilityGeometry::new(0.0, 0.0, 10.0, 20.0).unwrap(),
+        ),
+        Some((30.0, 460.0, 0.0, 20.0)),
     );
 }
 

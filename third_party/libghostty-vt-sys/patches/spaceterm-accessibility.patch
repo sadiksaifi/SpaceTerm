@@ -177,7 +177,7 @@ diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
-@@ -0,0 +1,981 @@
+@@ -0,0 +1,970 @@
 +const std = @import("std");
 +const lib = @import("../lib.zig");
 +const PageList = @import("../PageList.zig");
@@ -752,7 +752,7 @@ new file mode 100644
 +            out.topology_complete = true;
 +        }
 +        if (current.topology_stale) setStaleVisibleLines(out, current, screen, screen_tag);
-+        setCursorAndSelection(out, current, screen, screen_tag);
++        setCursorAndSelection(out, current, screen);
 +    } else {
 +        current.capturing = true;
 +    }
@@ -1105,37 +1105,26 @@ new file mode 100644
 +        .node_serial = top.node.serial,
 +        .page_row = @intCast(top.y),
 +    };
++    const len = @min(out.visible_len, rows);
++    out.visible_len = len;
 +    if (state.rowIndex(id)) |index| {
-+        out.visible_start = index;
-+        out.visible_len = @min(out.visible_len, rows - index);
++        // Keep a full viewport when its last live rows are newer than this capture.
++        out.visible_start = @min(index, rows - len);
 +    } else {
 +        // The viewport shows rows appended after the capture began; its last rows are the
 +        // closest this topology has.
-+        const len = @min(out.visible_len, rows);
 +        out.visible_start = rows - len;
-+        out.visible_len = len;
 +    }
 +}
 +
-+/// Places a cursor whose row a capture that output outran lacks on the topology row as far from
-+/// the topology's end as the cursor is from the live screen's end, the row the visible lines of
-+/// that capture show it on. Null when the topology has no such row.
-+fn staleCursorRef(state: *ScreenState, screen: anytype, screen_tag: Screen, pin: PageList.Pin) ?CellRef {
++/// Places a cursor whose row a capture that output outran lacks at its live visible row
++/// within the published viewport. Null when the viewport has no such row.
++fn staleCursorRef(out: *const Snapshot, state: *ScreenState, screen: anytype, pin: PageList.Pin) ?CellRef {
 +    if (!state.topology_stale) return null;
-+    const id: RowId = .{
-+        .screen = screen_tag,
-+        .screen_generation = state.generation,
-+        .node_serial = pin.node.serial,
-+        .page_row = pin.y,
-+    };
-+    const cursor_row = documentRow(&screen.pages, screen_tag, id) orelse return null;
-+    var live_rows: usize = 0;
-+    var it = screen.pages.pageIterator(.right_down, topPoint(screen_tag), null);
-+    while (it.next()) |chunk| live_rows += chunk.end - chunk.start;
-+    const below = live_rows - 1 - cursor_row;
-+    const rows = state.rows.items.len;
-+    if (below >= rows) return null;
-+    const row = state.rows.items[rows - 1 - below];
++    const cursor_point = screen.pages.pointFromPin(.viewport, pin) orelse return null;
++    const visible_row = cursor_point.viewport.y;
++    if (visible_row >= out.visible_len) return null;
++    const row = state.rows.items[out.visible_start + visible_row];
 +    if (row.revision == 0) return null;
 +    const cols = for (state.pages.items) |page| {
 +        if (page.serial == row.id.node_serial) break page.cols;
@@ -1143,10 +1132,10 @@ new file mode 100644
 +    return .{ .row = row.id, .row_revision = row.revision, .column = @min(pin.x, cols - 1) };
 +}
 +
-+fn setCursorAndSelection(out: *Snapshot, state: *ScreenState, screen: anytype, screen_tag: Screen) void {
++fn setCursorAndSelection(out: *Snapshot, state: *ScreenState, screen: anytype) void {
 +    if (state.rows.items.len == 0) return;
 +    const cursor_pin = screen.cursor.page_pin.*;
-+    if (refForPin(state, cursor_pin) orelse staleCursorRef(state, screen, screen_tag, cursor_pin)) |cursor| {
++    if (refForPin(state, cursor_pin) orelse staleCursorRef(out, state, screen, cursor_pin)) |cursor| {
 +        out.has_cursor = true;
 +        out.cursor = cursor;
 +    }
