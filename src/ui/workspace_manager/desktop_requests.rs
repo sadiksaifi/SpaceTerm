@@ -533,15 +533,63 @@ mod tests {
         )
     }
 
-    /// Hands the desktop one connection, then fails, which ends its channel thread.
-    struct OneConnection(Mutex<Option<End>>);
+    /// Hands the desktop one connection, then holds its channel thread in `accept` until the
+    /// test releases it. The thread ends only after the release, so its closing the request
+    /// channel never wakes the main thread while the test scheduler forbids foreign wakes.
+    struct OneConnection {
+        connection: Mutex<Option<End>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        ended: std::sync::mpsc::Sender<()>,
+    }
     impl DesktopChannelEndpoint for OneConnection {
         fn accept(&self) -> std::io::Result<Option<Box<dyn ChannelStream>>> {
-            match self.0.lock().unwrap().take() {
-                Some(end) => Ok(Some(Box::new(end))),
-                None => Err(std::io::ErrorKind::Other.into()),
+            if let Some(end) = self.connection.lock().unwrap().take() {
+                return Ok(Some(Box::new(end)));
             }
+            // Returns once the test drops its release sender.
+            let _ = self.release.lock().unwrap().recv();
+            Err(std::io::ErrorKind::Other.into())
         }
+    }
+    impl Drop for OneConnection {
+        fn drop(&mut self) {
+            let _ = self.ended.send(());
+        }
+    }
+
+    /// The endpoint, the sender that releases its thread, and the receiver that hears the
+    /// thread drop it.
+    fn one_connection(
+        end: End,
+    ) -> (
+        Arc<OneConnection>,
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    ) {
+        let (release, released) = std::sync::mpsc::channel();
+        let (ended, endings) = std::sync::mpsc::channel();
+        let endpoint = Arc::new(OneConnection {
+            connection: Mutex::new(Some(end)),
+            release: Mutex::new(released),
+            ended,
+        });
+        (endpoint, release, endings)
+    }
+
+    /// Ends the endpoint's channel thread and drains the main-thread work its closing wakes,
+    /// while the test still owns the scheduler.
+    fn finish(
+        cx: &mut gpui::TestAppContext,
+        release: std::sync::mpsc::Sender<()>,
+        ended: std::sync::mpsc::Receiver<()>,
+    ) {
+        // The thread's closing wakes the main thread from the channel thread.
+        cx.executor().allow_parking();
+        drop(release);
+        ended
+            .recv_timeout(TRANSFER_WINDOW)
+            .expect("the channel thread ends once released");
+        cx.run_until_parked();
     }
 
     #[gpui::test]
@@ -551,13 +599,9 @@ mod tests {
         counters.record_frame_painted();
         counters.record_frame_painted();
         let (client, desktop) = connection();
+        let (endpoint, release, ended) = one_connection(desktop);
         cx.update(|cx| {
-            serve(
-                Arc::new(OneConnection(Mutex::new(Some(desktop)))),
-                IDENTITY,
-                Arc::clone(&counters),
-                cx,
-            );
+            serve(endpoint, IDENTITY, Arc::clone(&counters), cx);
         });
 
         // The main thread never runs while the client waits, so the channel thread answers on
@@ -574,5 +618,6 @@ mod tests {
                 ..Default::default()
             }))
         );
+        finish(cx, release, ended);
     }
 }
