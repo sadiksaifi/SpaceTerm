@@ -722,6 +722,7 @@ impl super::outbox::Semantics for Semantic {
                 visible_lines: 0..0,
                 cursor: None,
                 selection: None,
+                origin: None,
             }),
         }))))
     }

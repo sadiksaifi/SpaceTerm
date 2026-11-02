@@ -160,6 +160,19 @@ pub struct Tail {
     pub visible_lines: Range<u32>,
     pub cursor: Option<Point>,
     pub selection: Option<Selection>,
+    /// Where line 0 of the revision's topology sat in the server's Scrollback when the server
+    /// captured it. `None` when the server measured no history for the capture.
+    pub origin: Option<Origin>,
+}
+
+/// The history epoch and absolute line of a topology's line 0 at capture: the oldest retained
+/// history row on the primary screen, or the first screen row on the alternate screen. Frames
+/// count Scrollback positions in the same epochs, so a client places the revision's lines in its
+/// Scrollback exactly, however far Ghostty trimmed history before the frame that shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Origin {
+    pub epoch: u64,
+    pub first: u64,
 }
 
 /// A cell named by its line in the topology and its column. The client derives the cell
@@ -356,6 +369,10 @@ impl Packer {
                 start: widest,
                 end: widest,
                 rectangle: true,
+            }),
+            origin: Some(Origin {
+                epoch: u64::MAX,
+                first: u64::MAX,
             }),
         };
         // Room for the channel the message adds, for the sequence lengths to grow to the largest

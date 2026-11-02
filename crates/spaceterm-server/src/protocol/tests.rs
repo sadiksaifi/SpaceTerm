@@ -250,6 +250,7 @@ fn accessibility_tail() -> pane::accessibility::Update {
                 column: 3,
             }),
             selection: None,
+            origin: None,
         }),
     }
 }
@@ -785,6 +786,7 @@ fn every_server_message_round_trips() {
                         end: pane::accessibility::Point { line: 1, column: 0 },
                         rectangle: true,
                     }),
+                    origin: None,
                 }),
             },
         },

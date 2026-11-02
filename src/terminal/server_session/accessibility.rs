@@ -34,46 +34,16 @@ struct Applied {
     visible_lines: Range<usize>,
     cursor: Option<AccessibilityCellRef>,
     selection: Option<AccessibilitySelectionRefs>,
-    /// Where the revision's lines sit in this client's Scrollback, once a frame of its screen
-    /// places them.
-    origin: Option<Origin>,
-}
-
-/// The absolute line of a revision's first line within one history epoch, so its lines and
-/// this client's Selection name the same rows however far later frames scrolled.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Origin {
-    epoch: u64,
-    first: u64,
-}
-
-impl Origin {
-    /// Places `applied` by the frame `view` presented last. A primary document starts at the
-    /// oldest retained history row, which output scrolling past the screen never moves; the
-    /// alternate screen has no history, so its document starts at the screen. `None` before a
-    /// frame, while the frame shows the other screen, or when the frame retains fewer history
-    /// rows than the document, because Scrollback was cleared or trimmed between them.
-    fn of(applied: &Applied, view: &super::scrollback::AccessibilityView) -> Option<Self> {
-        let history = view.history?;
-        let history_rows = u64::try_from(applied.visible_lines.start).ok()?;
-        let first = match (applied.screen, view.alternate) {
-            (AccessibilityScreen::Primary, false) => {
-                (history.total - history.oldest >= history_rows).then_some(history.oldest)?
-            }
-            (AccessibilityScreen::Alternate, true) => history.total.checked_sub(history_rows)?,
-            _ => return None,
-        };
-        Some(Self {
-            epoch: history.epoch,
-            first,
-        })
-    }
+    /// Where the revision's line 0 sat in the server's Scrollback when it captured the revision,
+    /// so its lines and this client's Selection name the same rows however far frames scrolled
+    /// or Scrollback trimmed since.
+    origin: Option<wire::Origin>,
 }
 
 impl RetainedSemantics {
     /// Resolves a native Selection request against the model this client published last into
-    /// this client's Selection, in the absolute lines of the history epoch that placed the
-    /// model. `Some(None)` clears the Selection. `None` means the request names content this
+    /// this client's Selection, in the absolute lines of the history epoch the server captured
+    /// the model in. `Some(None)` clears the Selection. `None` means the request names content this
     /// client no longer presents or has not placed.
     pub(super) fn resolve_selection(
         &self,
@@ -95,11 +65,12 @@ impl RetainedSemantics {
         }))
     }
 
-    /// Applies a whole revision atomically, bound to the presentation `generation`. Returns
-    /// whether it changed what the document presents.
+    /// Applies a whole revision atomically, with line 0 at `origin`, bound to the presentation
+    /// `generation`. Returns whether it changed what the document presents.
     fn apply(
         &mut self,
         revision: AccessibilityRevision,
+        origin: Option<wire::Origin>,
         generation: PresentationGeneration,
     ) -> Result<bool, ServerError> {
         let applied = Applied {
@@ -108,11 +79,7 @@ impl RetainedSemantics {
             visible_lines: revision.visible_lines.clone(),
             cursor: revision.cursor,
             selection: revision.selection,
-            origin: None,
-        };
-        let applied = Applied {
-            origin: Origin::of(&applied, &self.view),
-            ..applied
+            origin,
         };
         let model = self
             .rows
@@ -122,14 +89,8 @@ impl RetainedSemantics {
         Ok(model.is_some())
     }
 
-    /// Follows this client's view, and places the revision applied last by its frame if no
-    /// earlier frame did. Returns whether the view changed.
+    /// Follows this client's view. Returns whether the view changed.
     pub(super) fn set_view(&mut self, view: super::scrollback::AccessibilityView) -> bool {
-        if let Some(applied) = self.last.as_mut()
-            && applied.origin.is_none()
-        {
-            applied.origin = Origin::of(applied, &view);
-        }
         std::mem::replace(&mut self.view, view) != view
     }
 
@@ -145,8 +106,8 @@ impl RetainedSemantics {
         let Some(selection) = self.view.selection else {
             return (shown, applied.selection);
         };
-        // This client's Selection names the document's rows only within the epoch that placed
-        // the document.
+        // This client's Selection names the document's rows only within the epoch the server
+        // captured the document in.
         let origin = applied
             .origin
             .filter(|origin| origin.epoch == selection.epoch);
@@ -294,8 +255,9 @@ impl Semantics {
             return Ok(None);
         };
         let mut retained = retained.lock().unwrap_or_else(|e| e.into_inner());
+        let origin = tail.origin;
         let revision = staging.finish(tail, retained.rows.applied())?;
-        self.unpublished |= retained.apply(revision, generation)?;
+        self.unpublished |= retained.apply(revision, origin, generation)?;
         self.applied = Some(header.revision);
         Ok(Some(Ack::Semantics {
             demand_generation: header.demand_generation,
@@ -916,6 +878,7 @@ mod tests {
             visible_lines,
             cursor: None,
             selection: None,
+            origin: None,
         }
     }
 
@@ -1386,6 +1349,7 @@ mod tests {
                         visible_lines: 0..3,
                         cursor: Some(wire::Point { line: 3, column: 0 }),
                         selection: None,
+                        origin: None,
                     },
                 )],
             ),
@@ -1584,6 +1548,13 @@ mod tests {
         }
     }
 
+    /// `messages` with their tail placing line 0 at `first` of history epoch 2.
+    fn at_origin(mut messages: Vec<wire::Update>, first: u64) -> Vec<wire::Update> {
+        let tail = messages.last_mut().unwrap().tail.as_mut().unwrap();
+        tail.origin = Some(wire::Origin { epoch: 2, first });
+        messages
+    }
+
     #[test]
     fn selection_resolves_only_within_the_epoch_that_received_it() {
         let mut client = Client::demanded();
@@ -1598,10 +1569,19 @@ mod tests {
         assert_eq!(
             client.retained.lock().unwrap().resolve_selection(&request),
             None,
-            "no frame has placed the document yet"
+            "a document without an origin names no Scrollback rows"
         );
-        // The frame that places the document already scrolled its first line into history.
-        client.retained.lock().unwrap().set_view(view(None, 3, 5));
+
+        // The server captured the document with its first line at 3 of history epoch 2.
+        let mut client = Client::demanded();
+        client
+            .deliver(
+                at_origin(complete(1, 1, &["ab", "cd"]), 3),
+                PresentationGeneration::default(),
+            )
+            .unwrap();
+        let model = client.publish(PresentationGeneration::default()).unwrap();
+        let request = model.selection_request(0..2).unwrap();
         let placed = Some(Some(EpochSelection {
             epoch: 2,
             start: (3, 0),
@@ -1612,11 +1592,11 @@ mod tests {
             placed,
             "the Selection covers the first two cells of the document's first line"
         );
-        client.retained.lock().unwrap().set_view(view(None, 3, 9));
+        client.retained.lock().unwrap().set_view(view(None, 5, 9));
         assert_eq!(
             client.retained.lock().unwrap().resolve_selection(&request),
             placed,
-            "later frames that scroll the screen leave the Selection on its row"
+            "later frames that scroll the screen or trim history leave the Selection on its row"
         );
 
         *client.state.accessibility.lock().unwrap() =
@@ -1634,56 +1614,14 @@ mod tests {
         );
     }
 
-    /// A frame that cannot hold the document's history rows, or that shows the other screen,
-    /// does not place the document, so its Selection names no rows of that frame.
-    #[test]
-    fn a_frame_that_cleared_the_documents_history_or_shows_another_screen_places_nothing() {
-        let mut client = Client::demanded();
-        let mut messages = complete(1, 1, &["old0", "old1", "scr0", "scr1"]);
-        messages.last_mut().unwrap().tail = Some(tail(2..4));
-        client
-            .deliver(messages, PresentationGeneration::default())
-            .unwrap();
-        let model = client.publish(PresentationGeneration::default()).unwrap();
-        let request = model.selection_request(0..2).unwrap();
-        let resolve = |client: &Client| client.retained.lock().unwrap().resolve_selection(&request);
-
-        // Scrollback was cleared after the capture: the frame retains no history rows.
-        client.retained.lock().unwrap().set_view(view(None, 12, 12));
-        assert_eq!(resolve(&client), None);
-        client
-            .retained
-            .lock()
-            .unwrap()
-            .set_view(super::super::scrollback::AccessibilityView {
-                alternate: true,
-                ..view(None, 10, 12)
-            });
-        assert_eq!(
-            resolve(&client),
-            None,
-            "the frame shows the alternate screen"
-        );
-        client.retained.lock().unwrap().set_view(view(None, 10, 12));
-        assert_eq!(
-            resolve(&client),
-            Some(Some(EpochSelection {
-                epoch: 2,
-                start: (10, 0),
-                end: (10, 1),
-            })),
-            "the first frame that holds the document places it"
-        );
-    }
-
     #[test]
     fn the_published_model_follows_a_scrolled_view_and_the_local_selection() {
         let mut client = Client::demanded();
-        // Two history lines above a two-line screen.
+        // Two history lines, from line 10, above a two-line screen.
         let mut messages = complete(1, 1, &["old0", "old1", "scr0", "scr1"]);
         messages.last_mut().unwrap().tail = Some(tail(2..4));
         client
-            .deliver(messages, PresentationGeneration::default())
+            .deliver(at_origin(messages, 10), PresentationGeneration::default())
             .unwrap();
         let first = client.publish(PresentationGeneration::default()).unwrap();
         assert_eq!(first.visible_lines(), 2..4);
@@ -1772,6 +1710,7 @@ mod tests {
                     end: point(retained - 1),
                     rectangle: false,
                 }),
+                origin: None,
             },
         );
         client

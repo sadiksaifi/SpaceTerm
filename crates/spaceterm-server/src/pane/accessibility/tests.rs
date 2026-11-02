@@ -47,6 +47,7 @@ fn tail() -> Tail {
             },
             rectangle: false,
         }),
+        origin: None,
     }
 }
 
@@ -216,6 +217,7 @@ fn the_last_message_has_room_for_the_widest_tail_and_channel_however_full_it_is(
             end: widest,
             rectangle: true,
         }),
+        origin: None,
     };
     let row = |line, length| {
         let text = "a".repeat(length);
@@ -412,6 +414,7 @@ fn validation_refuses_updates_one_message_shows_are_inconsistent() {
             visible_lines: 0..1,
             cursor: None,
             selection: None,
+            origin: None,
         }),
     };
     assert_eq!(valid.validate(), Ok(()));

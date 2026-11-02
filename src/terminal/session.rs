@@ -2526,6 +2526,14 @@ impl TerminalWorker {
             self.schedules.note_screen_published();
         }
         if let Some(accessibility) = accessibility {
+            // Nothing was fed since the capture, so the history now is the history it read.
+            let accessibility = match self.emulator.semantic_origin() {
+                Ok(origin) => accessibility.with_origin(origin),
+                Err(error) => {
+                    self.send_runtime_failure(error);
+                    return false;
+                }
+            };
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.
             let _ = self.accessibility.force_send(accessibility);

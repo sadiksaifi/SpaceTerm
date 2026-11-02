@@ -2092,7 +2092,18 @@ impl PushedPane {
         )));
     }
 
-    fn push_semantics(&self, messages: Vec<pane::accessibility::Update>) {
+    /// Pushes a revision as if the server captured it now: a tail without an origin gets the
+    /// emulator's current one.
+    fn push_semantics(&mut self, mut messages: Vec<pane::accessibility::Update>) {
+        if let Some(tail) = messages.last_mut().and_then(|last| last.tail.as_mut())
+            && tail.origin.is_none()
+        {
+            let origin = self.emulator.semantic_origin().unwrap();
+            tail.origin = Some(pane::accessibility::Origin {
+                epoch: origin.epoch,
+                first: origin.first,
+            });
+        }
         for message in messages {
             self.inbox
                 .deliver(ChannelEvent::Accessibility(Box::new(message)));
@@ -2201,6 +2212,7 @@ fn semantic_lines(
         visible_lines: lines - 6..lines,
         cursor: None,
         selection: None,
+        origin: None,
     }));
     messages
 }
@@ -2384,6 +2396,85 @@ fn an_accessible_selection_made_while_frames_are_ahead_of_semantics_copies_its_r
         .accessibility_selection_sender()
         .unwrap()
         .request(current.selection_request(start..end).unwrap());
+
+    let copy = pane
+        .adapter
+        .handle
+        .copy_selection()
+        .unwrap()
+        .expect("Copy reads the accessible Selection");
+    assert_eq!(
+        copy.plain_text.as_ref(),
+        "ne\nli",
+        "the rows the request named, two rows higher on the screen now"
+    );
+}
+
+/// Ghostty trims a whole page from a full Scrollback between the semantic capture and the frame
+/// that shows it. The Selection still names the rows the capture named, because the revision
+/// carries where its first line sat at capture.
+#[test]
+fn an_accessible_selection_copies_its_rows_after_scrollback_trims_a_page_before_the_frame() {
+    use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+    // The 20 by 6 terminal of `PushedPane`, fed one line at a time: the lines after which
+    // Ghostty first and next trimmed history.
+    let mut probe = crate::terminal::emulator::TerminalEmulator::new(TerminalGeometry::from_grid(
+        CellGridSize::new(20, 6),
+        LogicalCellSize::new(10.0, 20.0),
+        BackingScale::ONE,
+    ))
+    .unwrap();
+    let mut trims = Vec::new();
+    // The history rows Ghostty retained after each line.
+    let mut retained = vec![0];
+    let mut oldest = probe.semantic_origin().unwrap().first;
+    for fed in 1..200_000_u64 {
+        probe.feed(b"line\r\n");
+        let history = probe.snapshot().unwrap().unwrap().history;
+        retained.push(history.total - history.oldest);
+        if history.oldest != oldest {
+            trims.push(fed);
+            if trims.len() == 2 {
+                break;
+            }
+        }
+        oldest = history.oldest;
+    }
+    let [_, trim] = trims[..] else {
+        panic!("Ghostty trimmed history twice")
+    };
+    // Two lines before the second trim, so the output below trims a page.
+    let mut pane = PushedPane::new(trim - 2 - 5);
+    pane.push_frame();
+    pane.turn();
+    let captured = pane.emulator.semantic_origin().unwrap();
+    // The document holds the retained history and the screen.
+    let lines = (retained[trim as usize - 2] + 6) as u32;
+
+    pane.emulator.feed(b"\r\nNEXT\r\nLAST");
+    let trimmed = pane.emulator.semantic_origin().unwrap();
+    assert!(
+        trimmed.first > captured.first + 2,
+        "Ghostty trimmed a page: {captured:?} then {trimmed:?}"
+    );
+    // The frame after the trim arrives with the revision captured before it.
+    pane.push_frame();
+    let mut messages = semantic_lines(1, None, 0, lines);
+    messages.last_mut().unwrap().tail.as_mut().unwrap().origin =
+        Some(pane::accessibility::Origin {
+            epoch: captured.epoch,
+            first: captured.first,
+        });
+    pane.push_semantics(messages);
+    pane.turn();
+    let model = pane.published();
+    let start = model.range_for_line(lines as usize - 2).unwrap().start + 2;
+    let end = model.range_for_line(lines as usize - 1).unwrap().start + 2;
+    pane.adapter
+        .handle
+        .accessibility_selection_sender()
+        .unwrap()
+        .request(model.selection_request(start..end).unwrap());
 
     let copy = pane
         .adapter
