@@ -412,6 +412,13 @@ impl Supervisor for UserService {
         }
         Ok(property(&state, "MainPID")? != "0")
     }
+    fn process(&self) -> Result<Option<u32>, ServerError> {
+        let state = self.observation()?;
+        Ok(property(&state, "MainPID")?
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| *pid > 0))
+    }
     fn enable_linger(&self, authorization: LingerAuthorization) -> Result<(), ServerError> {
         match self.linger() {
             Ok(()) => return Ok(()),

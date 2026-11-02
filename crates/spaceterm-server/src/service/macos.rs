@@ -86,7 +86,7 @@ impl LaunchAgent {
         {
             return Err(ServerError::CleanupUnresolved);
         }
-        running(bytes)
+        Ok(process(bytes)?.is_some())
     }
     fn absent_job(&self, error: ServerError) -> Result<bool, ServerError> {
         // Distinguish an absent job from an inaccessible login domain.
@@ -232,13 +232,16 @@ impl Supervisor for LaunchAgent {
         Duration::from_secs(EXIT_TIMEOUT)
     }
     fn running(&self) -> Result<bool, ServerError> {
+        Ok(self.process()?.is_some())
+    }
+    fn process(&self) -> Result<Option<u32>, ServerError> {
         let result = command(
             "/bin/launchctl",
             &["list".into(), self.label.clone().into()],
         );
         match result {
-            Ok(bytes) => running(&bytes),
-            Err(error) => self.absent_job(error),
+            Ok(bytes) => process(&bytes),
+            Err(error) => self.absent_job(error).map(|_| None),
         }
     }
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError> {
@@ -246,14 +249,14 @@ impl Supervisor for LaunchAgent {
     }
 }
 
-fn running(bytes: &[u8]) -> Result<bool, ServerError> {
+fn process(bytes: &[u8]) -> Result<Option<u32>, ServerError> {
     let text = std::str::from_utf8(bytes).map_err(|_| ServerError::ServiceUnavailable)?;
-    Ok(text.lines().any(|line| {
+    Ok(text.lines().find_map(|line| {
         line.trim()
             .strip_prefix("\"PID\" = ")
             .and_then(|value| value.strip_suffix(';'))
             .and_then(|value| value.parse::<u32>().ok())
-            .is_some_and(|pid| pid > 0)
+            .filter(|pid| *pid > 0)
     }))
 }
 

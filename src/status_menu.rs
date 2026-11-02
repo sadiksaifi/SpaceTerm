@@ -2,6 +2,7 @@
 //! status area, owned by the same process as the client's windows. The independently supervised
 //! server keeps running whether the client is windowed, menu-only, exited, or crashed.
 pub(crate) mod model;
+pub(crate) mod service_changes;
 pub(crate) mod worker;
 
 use gpui::{App, Global};
@@ -106,9 +107,8 @@ pub(crate) fn after_operations(cx: &mut App, work: impl FnOnce(&mut App) + 'stat
 }
 
 /// Subscribes `changes` to this client's link to its local server, now or once the client
-/// creates that link's handle, so the status item learns of a stopped, crashed or restarted server
-/// without reading the service on a timer. Before any Workspace Window or Settings connects, the
-/// item reads the service when its menu opens.
+/// creates that link's handle. The link reports a server this client used ending or admitting it
+/// again. Without a link, the worker's [`service_changes`] watch reports the same changes.
 pub(crate) fn follow_local_server(
     changes: std::sync::Weak<dyn spaceterm_server::connection::link::LinkSink>,
     cx: &mut App,

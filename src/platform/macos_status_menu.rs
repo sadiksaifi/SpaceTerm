@@ -68,9 +68,14 @@ pub(crate) fn install(
     let worker = {
         let sender = sender.clone();
         let update_offered = move || crate::ui::settings_window::update_offered(&offered);
-        match Worker::spawn(controller, update_offered, move |event| {
-            let _ = sender.send_blocking(Message::Worker(event));
-        }) {
+        match Worker::spawn(
+            controller,
+            crate::platform::service_watch,
+            update_offered,
+            move |event| {
+                let _ = sender.send_blocking(Message::Worker(event));
+            },
+        ) {
             Ok(worker) => worker,
             Err(_) => return,
         }

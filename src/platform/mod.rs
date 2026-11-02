@@ -598,6 +598,25 @@ mod linux_ssh_executable;
 mod linux_clock_changes;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
+mod linux_service_watch;
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
+mod macos_service_watch;
+
+/// The watch the status item learns of local service changes through: kqueue on macOS and
+/// inotify with a pidfd on Linux.
+#[cfg(feature = "desktop")]
+pub(crate) fn service_watch(
+    directories: &[std::path::PathBuf],
+    process: Option<u32>,
+) -> Option<Box<dyn crate::status_menu::service_changes::Watch>> {
+    #[cfg(target_os = "macos")]
+    return macos_service_watch::start(directories, process);
+    #[cfg(target_os = "linux")]
+    linux_service_watch::start(directories, process)
+}
+#[cfg(target_os = "linux")]
+#[cfg(feature = "desktop")]
 mod linux_updates;
 
 /// Composes the existing native PTY adapter without opening a graphical session. Its PTYs count
