@@ -586,6 +586,14 @@ mod server {
         pub(crate) fn retire_alias(&self, id: Id) {
             self.pending.borrow_mut().forget_alias(id);
         }
+        /// Retires a Pane alias once every Tab has translated its identities, at the next
+        /// [`Self::retire_deferred_aliases`].
+        pub(crate) fn defer_alias_retirement(&self, id: Id) {
+            self.pending.borrow_mut().defer_alias_retirement(id);
+        }
+        pub(crate) fn retire_deferred_aliases(&self) {
+            self.pending.borrow_mut().retire_deferred_aliases();
+        }
 
         pub(crate) fn has_pending(&self) -> bool {
             self.pending.borrow().has_pending()
@@ -610,6 +618,12 @@ mod server {
         }
         pub(crate) fn closing(&self, pane: Id) -> bool {
             self.pending.borrow().closing(pane)
+        }
+        pub(crate) fn moving(&self, tab: Id, pane: Id) -> bool {
+            self.pending.borrow().moving(tab, pane)
+        }
+        pub(crate) fn merging(&self, tab: Id) -> bool {
+            self.pending.borrow().merging(tab)
         }
         pub(crate) fn take_presentation(&self) -> Option<WorkspaceAcceptance> {
             self.pending.borrow_mut().take_presentation()
@@ -1209,8 +1223,9 @@ mod server {
         workspace: Id,
         tab: Id,
         panes: BTreeMap<PaneId, Id>,
-        /// The opener generation each Pane's subscription came from.
-        opened: BTreeMap<PaneId, u64>,
+        /// The opener generation each Pane's subscription came from, or `None` once another
+        /// presentation of the same server Pane fenced it.
+        opened: BTreeMap<PaneId, Option<u64>>,
         views: BTreeMap<PaneId, ServerPaneView>,
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
         pending_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
@@ -1221,7 +1236,7 @@ mod server {
     impl Drop for WorkspacePanes {
         fn drop(&mut self) {
             for id in self.panes.values() {
-                self.edits.retire_alias(*id);
+                self.edits.defer_alias_retirement(*id);
             }
         }
     }
@@ -1261,7 +1276,7 @@ mod server {
             if let Some(previous) = self.panes.insert(pane_id, server)
                 && previous != server
             {
-                self.edits.retire_alias(previous);
+                self.edits.defer_alias_retirement(previous);
             }
             if self.edits.provisional(server) {
                 self.pending_starts.borrow_mut().insert(pane_id);
@@ -1269,7 +1284,8 @@ mod server {
                 state.start_created();
             }
             state.observe(self.changes.0.clone());
-            self.opened.insert(pane_id, self.sessions.generation());
+            self.opened
+                .insert(pane_id, Some(self.sessions.generation()));
             self.views.insert(pane_id, ServerPaneView::new(state));
             self.screen_focus.insert(pane_id, screen_focus);
         }
@@ -1281,7 +1297,7 @@ mod server {
 
         pub(crate) fn forget(&mut self, pane_id: PaneId) {
             if let Some(previous) = self.panes.remove(&pane_id) {
-                self.edits.retire_alias(previous);
+                self.edits.defer_alias_retirement(previous);
             }
             self.pending_starts.borrow_mut().remove(&pane_id);
             self.opened.remove(&pane_id);
@@ -1320,11 +1336,32 @@ mod server {
                 .is_some_and(|id| self.edits.closing(id))
         }
 
-        /// Whether the Pane's route connected or disconnected since the Pane opened.
+        /// Whether this client's own pending move takes the Pane out of this Tab.
+        pub(crate) fn moving(&self, pane_id: PaneId) -> bool {
+            self.server_pane(pane_id)
+                .is_some_and(|id| self.edits.moving(self.edits.canonical(self.tab), id))
+        }
+
+        /// Whether this client's own pending close or move takes the Pane out of this Tab, so the
+        /// Tab holds the Pane aside until the edit settles.
+        pub(crate) fn leaving(&self, pane_id: PaneId) -> bool {
+            self.closing(pane_id) || self.moving(pane_id)
+        }
+
+        /// Records that another presentation of the Pane fenced its subscription, so the Pane
+        /// opens again if it returns.
+        pub(crate) fn supersede(&mut self, pane_id: PaneId) {
+            if let Some(generation) = self.opened.get_mut(&pane_id) {
+                *generation = None;
+            }
+        }
+
+        /// Whether the Pane must open again because its route connected or disconnected since it
+        /// opened, or another presentation fenced it.
         pub(crate) fn reopened(&self, pane_id: PaneId) -> bool {
             self.opened
                 .get(&pane_id)
-                .is_some_and(|generation| *generation != self.sessions.generation())
+                .is_some_and(|generation| *generation != Some(self.sessions.generation()))
         }
 
         /// Whether the Pane must open again: the server confirmed its provisional identity, or
@@ -1340,6 +1377,15 @@ mod server {
         pub(crate) fn canonicalize(&mut self) {
             self.workspace = self.edits.canonical(self.workspace);
             self.tab = self.edits.canonical(self.tab);
+        }
+
+        /// Translates the identity of every Pane this Tab holds, including those it holds aside,
+        /// so their aliases can retire. Binding compares the identity a Pane opened with, so this
+        /// runs only after every Tab has bound what the server confirmed.
+        pub(crate) fn canonicalize_panes(&mut self) {
+            for id in self.panes.values_mut() {
+                *id = self.edits.canonical(*id);
+            }
         }
 
         pub(crate) fn presentation_tab(&self) -> Option<spaceterm_server::hierarchy::Tab> {
@@ -1469,7 +1515,9 @@ mod server {
         pub(crate) fn workspace(&self) -> Id {
             self.edits.canonical(self.workspace)
         }
-        pub(crate) fn optimistically_closing(&self, tab: TabId) -> bool {
+        /// Whether this client's own pending close or merge takes away every Pane of the Tab,
+        /// so the strip holds the Tab aside until the edit settles.
+        pub(crate) fn optimistically_removing(&self, tab: TabId) -> bool {
             let Some(server) = self.server_tab(tab) else {
                 return false;
             };
@@ -1484,7 +1532,17 @@ mod server {
                         .flat_map(|w| &w.tabs)
                         .find(|t| t.id == server)
                 })
-                .is_some_and(|t| t.panes.iter().all(|p| self.edits.closing(p.id)))
+                .is_some_and(|t| {
+                    t.panes
+                        .iter()
+                        .all(|p| self.edits.closing(p.id) || self.edits.moving(server, p.id))
+                })
+        }
+
+        /// Whether this client's own pending merge moves the Tab's Panes into another Tab.
+        pub(crate) fn merging(&self, tab: TabId) -> bool {
+            self.server_tab(tab)
+                .is_some_and(|server| self.edits.merging(server))
         }
 
         pub(crate) fn presentation_workspace(&self) -> Option<ServerWorkspace> {
@@ -1536,6 +1594,48 @@ mod server {
 
         pub(crate) fn editability(&self) -> WorkspaceEditability {
             self.edits.editability()
+        }
+
+        /// Asks the server to move one of the server Tab `tab`'s Panes to `destination`.
+        pub(crate) fn move_pane(
+            &self,
+            tab: Id,
+            pane: Id,
+            destination: spaceterm_server::hierarchy::PaneDestination,
+        ) -> WorkspaceSubmission {
+            use spaceterm_server::hierarchy::PaneDestination;
+            let destination = match destination {
+                PaneDestination::NewTab => PaneDestination::NewTab,
+                PaneDestination::Beside { tab, pane, side } => PaneDestination::Beside {
+                    tab: self.edits.canonical(tab),
+                    pane: self.edits.canonical(pane),
+                    side,
+                },
+            };
+            self.edits.submit(Mutation::MovePane {
+                workspace: self.workspace(),
+                tab: self.edits.canonical(tab),
+                pane: self.edits.canonical(pane),
+                destination,
+            })
+        }
+
+        /// Asks the server to merge the server Tab `tab` into Tab `into`, on `side` of Pane
+        /// `beside`.
+        pub(crate) fn merge_tab(
+            &self,
+            tab: Id,
+            into: Id,
+            beside: Id,
+            side: spaceterm_server::hierarchy::Side,
+        ) -> WorkspaceSubmission {
+            self.edits.submit(Mutation::MergeTab {
+                workspace: self.workspace(),
+                tab: self.edits.canonical(tab),
+                into: self.edits.canonical(into),
+                beside: self.edits.canonical(beside),
+                side,
+            })
         }
 
         /// Asks the server for another Tab in this Workspace.
@@ -2804,7 +2904,9 @@ mod server {
                 // them with their own identities instead.
                 Mutation::CreateWorkspace { .. }
                 | Mutation::CreateTab { .. }
-                | Mutation::SplitPane { .. } => None,
+                | Mutation::SplitPane { .. }
+                | Mutation::MovePane { .. }
+                | Mutation::MergeTab { .. } => None,
                 // A stale close is answered with its own outcome rather than a field conflict.
                 Mutation::Close { .. } | Mutation::Worktree(_) => None,
                 // Ending Sessions edits no field, and its refusals reach Settings directly.
@@ -3528,6 +3630,16 @@ mod server {
                     .values()
                     .cloned()
                     .collect()
+            }
+
+            /// How many times the server Pane `pane` has been opened.
+            pub(crate) fn opens(&self, pane: super::Id) -> usize {
+                self.order
+                    .lock()
+                    .expect("order")
+                    .iter()
+                    .filter(|opened| **opened == pane)
+                    .count()
             }
 
             /// The server Pane opened `index`th, counting from 0.

@@ -6,8 +6,8 @@ pub(crate) mod worktree;
 
 pub(crate) use crate::close_confirmation::{ClosePaneOutcome, CloseTabOutcome};
 pub(crate) use tab::{
-    FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneSizeError, PaneTreeRef, SplitAxis,
-    SplitId, Tab, TabId, ZoomState,
+    FocusDirection, PaneDrop, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneSizeError, PaneTreeRef,
+    SplitAxis, SplitId, Tab, TabId, ZoomState, placed_minimum_size,
 };
 pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
 #[cfg(test)]

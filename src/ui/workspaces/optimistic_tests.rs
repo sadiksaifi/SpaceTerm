@@ -107,6 +107,20 @@ impl DelayedServer {
         result
     }
 
+    /// The transport definitely refuses the dispatched Original Operation, so the server never
+    /// applies it.
+    fn reject(&self) {
+        let mut delivery = self.0.borrow_mut();
+        let (_, mutation) = delivery
+            .original
+            .take()
+            .expect("an Original Operation was dispatched");
+        delivery.snapshot.rejected = Some(mutation);
+        delivery.snapshot.pending = false;
+        delivery.snapshot.pending_operation = None;
+        self.1.publish();
+    }
+
     /// Another client's accepted close removes `tab`, and the server publishes the result.
     fn remove_tab_elsewhere(&self, tab: Id) {
         let mut delivery = self.0.borrow_mut();
@@ -633,6 +647,137 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
             .panes
             .len(),
         2
+    );
+}
+
+#[test]
+fn optimistic_pane_move_presents_its_tab_at_once_and_keeps_the_pane_identity() {
+    let server = DelayedServer::new();
+    let (source, mut model) = model(&server);
+    let workspace = server.inventory().workspaces[0].id;
+    let tab = server.inventory().workspaces[0].tabs[0].clone();
+    source.submit(Mutation::SplitPane {
+        workspace,
+        tab: tab.id,
+        source: tab.root_pane,
+        axis: Axis::Right,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
+    });
+    server.finish(true, true);
+    model.poll();
+    let moved = server.inventory().workspaces[0].tabs[0].panes[1].id;
+    let mutation = Mutation::MovePane {
+        workspace,
+        tab: tab.id,
+        pane: moved,
+        destination: spaceterm_server::hierarchy::PaneDestination::NewTab,
+    };
+
+    assert_eq!(
+        source.submit(mutation.clone()),
+        WorkspaceSubmission::Submitted
+    );
+    let projected = source.presentation_inventory().unwrap();
+    let pending = projected.workspaces[0].tabs.last().unwrap().clone();
+    source.submit(Mutation::SplitPane {
+        workspace,
+        tab: pending.id,
+        source: moved,
+        axis: Axis::Down,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
+    });
+    assert_eq!(
+        (
+            projected.workspaces[0].tabs[0]
+                .panes
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            pending.panes.iter().map(|p| p.id).collect::<Vec<_>>(),
+            source.provisional(moved),
+            server.dispatched().last(),
+        ),
+        (vec![tab.root_pane], vec![moved], false, Some(&mutation)),
+        "the moved Pane keeps its identity, so the move dispatches at once"
+    );
+
+    let accepted = server.finish(true, true);
+    model.poll();
+    let Outcome::Accepted { target } = accepted.outcome else {
+        panic!("the server must accept the move");
+    };
+    assert_ne!(target, pending.id);
+    assert_eq!(
+        server.dispatched().last(),
+        Some(&Mutation::SplitPane {
+            workspace,
+            tab: target,
+            source: moved,
+            axis: Axis::Down,
+            control: spaceterm_server::hierarchy::CreateControl::Creator,
+        }),
+        "the split in the pending Tab waits for the Tab the server created"
+    );
+}
+
+#[test]
+fn an_accepted_move_or_merge_never_reopens_what_its_interaction_already_opened() {
+    use spaceterm_server::hierarchy::{PaneDestination, Side};
+
+    let server = DelayedServer::new();
+    let (source, mut model) = model(&server);
+    let workspace = server.inventory().workspaces[0].id;
+    let first = server.inventory().workspaces[0].tabs[0].clone();
+    source.submit(Mutation::SplitPane {
+        workspace,
+        tab: first.id,
+        source: first.root_pane,
+        axis: Axis::Right,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
+    });
+    server.finish(true, true);
+    model.poll();
+    source.submit(Mutation::CreateTab {
+        workspace,
+        source: None,
+        control: spaceterm_server::hierarchy::CreateControl::Creator,
+    });
+    server.finish(true, true);
+    model.poll();
+    let inventory = server.inventory();
+    let moved = inventory.workspaces[0].tabs[0].panes[1].id;
+    let second = inventory.workspaces[0].tabs[1].clone();
+
+    let mut accepted = Vec::new();
+    for mutation in [
+        Mutation::MovePane {
+            workspace,
+            tab: first.id,
+            pane: moved,
+            destination: PaneDestination::Beside {
+                tab: second.id,
+                pane: second.root_pane,
+                side: Side::Right,
+            },
+        },
+        Mutation::MergeTab {
+            workspace,
+            tab: first.id,
+            into: second.id,
+            beside: moved,
+            side: Side::Up,
+        },
+    ] {
+        assert_eq!(source.submit(mutation), WorkspaceSubmission::Submitted);
+        server.finish(true, true);
+        accepted.push(model.poll().accepted.is_some());
+    }
+
+    assert_eq!(
+        (accepted, server.inventory().workspaces[0].tabs.len()),
+        (vec![false, false], 1),
+        "the drop opened the destination already, so a later answer must not take the person \
+         back there"
     );
 }
 
@@ -1441,6 +1586,157 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
     assert!(
         cx.debug_bounds(format!("pane-surface-{}", closed_view.1.get()).leak())
             .is_some()
+    );
+}
+
+#[gpui::test]
+fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    let (harness, cx) = window_harness(cx);
+    click("pane-split-down-1", cx);
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    let handle = cx.debug_bounds("split-resize-1-hitbox").unwrap().center();
+    cx.simulate_mouse_move(handle, None, Modifiers::none());
+    cx.simulate_mouse_down(handle, MouseButton::Left, Modifiers::none());
+    let resized = handle + point(px(0.0), px(80.0));
+    cx.simulate_mouse_move(resized, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(resized, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let signature = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            manager.active_tab_view().read(cx).layout_signature()
+        })
+    };
+    let before = signature(cx);
+    assert!(
+        !before.contains(":0.5("),
+        "the Split left its default ratio: {before}"
+    );
+    let moved = harness.server.inventory().workspaces[0].tabs[0].panes[1].id;
+    let opens = harness.panes.opens(moved);
+
+    let caption = cx.debug_bounds("pane-caption-2-focused").unwrap();
+    let bar = cx.debug_bounds("tab-bar").unwrap().center();
+    let press = point(caption.left() + px(24.0), caption.center().y);
+    cx.simulate_mouse_move(press, None, Modifiers::none());
+    cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
+    for position in [bar, bar + point(px(1.0), px(0.0))] {
+        cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(bar, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let pending = harness.manager.read_with(cx, |manager, cx| {
+        (
+            manager.tab_ids().len(),
+            manager.active_tab_view().read(cx).pane_count(),
+        )
+    });
+    harness.server.reject();
+    project_window(&harness, cx);
+
+    assert_eq!(
+        (
+            pending,
+            harness
+                .manager
+                .read_with(cx, |manager, _| manager.tab_ids().len()),
+            signature(cx),
+            cx.debug_bounds("pane-surface-2").is_some(),
+            harness.panes.opens(moved) > opens + 1,
+        ),
+        ((2, 1), 1, before, true, true),
+        "the refused move restores the same Pane in its place and opens it again, because the \
+         new Tab's presentation fenced the old one"
+    );
+}
+
+#[gpui::test]
+fn a_refused_move_of_a_split_accepted_meanwhile_restores_the_same_pane(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    let (harness, cx) = window_harness(cx);
+    click("pane-split-down-1", cx);
+    let signature = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            manager.active_tab_view().read(cx).layout_signature()
+        })
+    };
+    let before = signature(cx);
+    let caption = cx.debug_bounds("pane-caption-2-focused").unwrap();
+    let empty = cx.debug_bounds("create-tab-area").unwrap().center() + point(px(60.0), px(0.0));
+    let press = point(caption.left() + px(24.0), caption.center().y);
+    cx.simulate_mouse_move(press, None, Modifiers::none());
+    cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
+    for position in [empty, empty + point(px(1.0), px(0.0))] {
+        cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(empty, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    // The split settles first, so the pending move now names the Pane's server identity.
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    harness.server.reject();
+    project_window(&harness, cx);
+
+    assert_eq!(
+        (
+            harness
+                .manager
+                .read_with(cx, |manager, _| manager.tab_ids().len()),
+            signature(cx),
+        ),
+        (1, before),
+        "the refused move returns the same local Pane to its place"
+    );
+}
+
+#[gpui::test]
+fn a_refused_tab_merge_restores_the_tab_and_opens_its_pane_again(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    let (harness, cx) = window_harness(cx);
+    click("create-tab-button", cx);
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    let merged = harness.server.inventory().workspaces[0].tabs[0].root_pane;
+    let opens = harness.panes.opens(merged);
+    let tab = cx.debug_bounds("tab-item-1-inactive").unwrap();
+    let pane = cx.debug_bounds("pane-surface-1").unwrap();
+    let left_edge = point(pane.left() + pane.size.width * 0.1, pane.center().y);
+
+    cx.simulate_mouse_move(tab.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(tab.center(), MouseButton::Left, Modifiers::none());
+    for position in [
+        tab.center() + point(px(8.0), px(0.0)),
+        left_edge,
+        left_edge + point(px(1.0), px(0.0)),
+    ] {
+        cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(left_edge, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let counts = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            (
+                manager.tab_ids().len(),
+                manager.active_tab_view().read(cx).pane_count(),
+            )
+        })
+    };
+    let pending = counts(cx);
+    harness.server.reject();
+    project_window(&harness, cx);
+
+    assert_eq!(
+        (pending, counts(cx), harness.panes.opens(merged) > opens + 1),
+        ((1, 2), (2, 1), true),
+        "the refused merge returns Tab 1, whose Pane opens again because Tab 2 fenced it"
     );
 }
 

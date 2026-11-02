@@ -38,6 +38,12 @@ typed_id!(TabId);
 typed_id!(PaneId);
 typed_id!(SplitId);
 
+impl TabId {
+    /// No Tab's identity, for presenting a Tab that does not exist yet, as a Pane about to
+    /// become one. Tab identities start at 1.
+    pub(crate) const NONE: Self = Self(0);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PaneSize {
     width: f32,
@@ -88,6 +94,40 @@ pub(crate) enum SplitAxis {
     Vertical,
 }
 
+/// The smallest room Panes need when the first stands alone and each later one splits the place
+/// of an earlier one, named by its index in `placements` plus one, taking that one's `edge`. A
+/// merge places another Tab's Panes this way, every Pane at `minimum`.
+pub(crate) fn placed_minimum_size(
+    minimum: PaneSize,
+    divider_size: f32,
+    placements: &[(usize, PaneEdge)],
+) -> Result<PaneSize, PaneError> {
+    validate_divider_size(divider_size)?;
+    let mut root = PaneNode::Leaf(PaneId::from_raw(0));
+    for (index, (beside, edge)) in placements.iter().enumerate() {
+        let next = index as u64 + 1;
+        let beside = PaneId::from_raw(*beside as u64);
+        root = root
+            .with_split(
+                beside,
+                PaneId::from_raw(next),
+                SplitId::from_raw(next),
+                *edge,
+            )
+            .ok_or(PaneError::PaneNotFound(beside))?;
+    }
+    root.minimum_size(minimum, divider_size)
+}
+
+/// What a Pane released over another Pane does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneDrop {
+    /// Splits the target so the released Pane takes this edge.
+    Edge(PaneEdge),
+    /// Exchanges the places of the released Pane and the target.
+    Swap,
+}
+
 /// The side of a target Pane that another Pane takes when it splits the target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaneEdge {
@@ -99,6 +139,7 @@ pub(crate) enum PaneEdge {
 
 impl PaneEdge {
     /// The edge a new Pane takes when a Split places it after its target along `axis`.
+    #[cfg(test)]
     const fn trailing(axis: SplitAxis) -> Self {
         match axis {
             SplitAxis::Horizontal => Self::Right,
@@ -510,13 +551,13 @@ impl<T> Tab<T> {
     pub(crate) fn insert_pane(
         &mut self,
         source: PaneId,
-        axis: SplitAxis,
+        edge: PaneEdge,
         create_pane: impl FnOnce(PaneId) -> T,
     ) -> Result<PaneId, PaneError> {
         let (pane_id, split_id, next_pane_id, next_split_id) = self.next_split_ids()?;
         let root = self
             .root
-            .with_split(source, pane_id, split_id, PaneEdge::trailing(axis))
+            .with_split(source, pane_id, split_id, edge)
             .ok_or(PaneError::PaneNotFound(source))?;
         let pane = create_pane(pane_id);
         self.root = root;
@@ -548,21 +589,11 @@ impl<T> Tab<T> {
         if pane_id == target_pane_id {
             return Ok(false);
         }
-        let split_id = SplitId::from_raw(self.next_split_id);
         let next_split_id = self
             .next_split_id
             .checked_add(1)
             .ok_or(PaneError::SplitIdExhausted)?;
-        let Some(PaneRemoval {
-            replacement: Some(remaining),
-            ..
-        }) = self.root.without_pane(pane_id)
-        else {
-            unreachable!("a Pane with a distinct target is never the final Pane")
-        };
-        let Some(new_root) = remaining.with_split(target_pane_id, pane_id, split_id, edge) else {
-            unreachable!("removing another Pane keeps the target in the Pane layout")
-        };
+        let new_root = self.moved_root(pane_id, target_pane_id, edge);
         if new_root.has_arrangement_of(&self.root) {
             return Ok(false);
         }
@@ -574,17 +605,129 @@ impl<T> Tab<T> {
         Ok(true)
     }
 
-    /// Whether a Pane moved onto `edge` of `target_pane_id` fits within the target's
-    /// `target_size`.
-    pub(crate) fn can_receive_pane(
+    /// Exchanges the places of `pane_id` and `target_pane_id`, and reports whether the
+    /// arrangement changed.
+    ///
+    /// Every Split keeps its axis and ratio, so each Pane takes the other's exact place. Both
+    /// Panes keep their Terminal Sessions, the Root Pane stays the same Pane, and the moved Pane
+    /// becomes the Focused Pane.
+    pub(crate) fn swap_panes(
+        &mut self,
+        pane_id: PaneId,
+        target_pane_id: PaneId,
+    ) -> Result<bool, PaneError> {
+        for id in [pane_id, target_pane_id] {
+            if !self.root.contains_pane(id) {
+                return Err(PaneError::PaneNotFound(id));
+            }
+        }
+        if pane_id == target_pane_id {
+            return Ok(false);
+        }
+        self.root.exchange_panes(pane_id, target_pane_id);
+        self.zoom_state = ZoomState::Restored;
+        self.set_focused_pane(pane_id);
+        Ok(true)
+    }
+
+    /// What releasing `pane_id` over `drop` of `target_pane_id` does, when it changes the
+    /// layout.
+    ///
+    /// An edge whose layout matches the swap's is the swap. An edge that rebuilds the current
+    /// layout, or leaves the target less than its minimum size in `target_size`, does nothing.
+    pub(crate) fn resolve_drop(
+        &self,
+        pane_id: PaneId,
+        target_pane_id: PaneId,
+        drop: PaneDrop,
+        target_size: PaneSize,
+        divider_size: f32,
+    ) -> Option<PaneDrop> {
+        if pane_id == target_pane_id
+            || !self.root.contains_pane(pane_id)
+            || !self.root.contains_pane(target_pane_id)
+        {
+            return None;
+        }
+        let PaneDrop::Edge(edge) = drop else {
+            return Some(PaneDrop::Swap);
+        };
+        let moved = self.moved_root(pane_id, target_pane_id, edge);
+        if moved.has_arrangement_of(&self.root) {
+            return None;
+        }
+        let mut swapped = self.root.clone();
+        swapped.exchange_panes(pane_id, target_pane_id);
+        if moved.has_arrangement_of(&swapped) {
+            return Some(PaneDrop::Swap);
+        }
+        self.can_receive(
+            target_pane_id,
+            edge,
+            self.minimum_pane_size,
+            target_size,
+            divider_size,
+        )
+        .then_some(drop)
+    }
+
+    /// Whether `edge` of `target_pane_id` has room in `target_size` for content at least
+    /// `incoming` in size, such as another Tab's Pane Layout.
+    pub(crate) fn can_receive(
         &self,
         target_pane_id: PaneId,
         edge: PaneEdge,
+        incoming: PaneSize,
         target_size: PaneSize,
         divider_size: f32,
     ) -> bool {
-        self.validate_split(target_pane_id, edge.axis(), target_size, divider_size)
-            .is_ok()
+        self.root.contains_pane(target_pane_id)
+            && validate_divider_size(divider_size).is_ok()
+            && combined_minimum(self.minimum_pane_size, incoming, edge.axis(), divider_size)
+                .and_then(|required| ensure_space(target_size, required))
+                .is_ok()
+    }
+
+    /// Whether content at least `incoming` in size, such as one Pane or another Tab's Pane
+    /// Layout, fits on `edge` of `beside` with every Pane keeping its minimum size in
+    /// `available`, once Split ratios fit.
+    pub(crate) fn can_insert(
+        &self,
+        beside: PaneId,
+        edge: PaneEdge,
+        incoming: PaneSize,
+        available: PaneSize,
+        divider_size: f32,
+    ) -> bool {
+        let pane_id = PaneId::from_raw(self.next_pane_id);
+        let split_id = SplitId::from_raw(self.next_split_id);
+        let incoming = PaneSize {
+            width: incoming.width.max(self.minimum_pane_size.width),
+            height: incoming.height.max(self.minimum_pane_size.height),
+        };
+        self.root
+            .with_split(beside, pane_id, split_id, edge)
+            .is_some_and(|root| {
+                root.minimum_size_with(self.minimum_pane_size, (pane_id, incoming), divider_size)
+                    .and_then(|required| ensure_space(available, required))
+                    .is_ok()
+            })
+    }
+
+    /// The layout after moving `pane_id` onto `edge` of another Pane `target_pane_id`.
+    fn moved_root(&self, pane_id: PaneId, target_pane_id: PaneId, edge: PaneEdge) -> PaneNode {
+        let Some(PaneRemoval {
+            replacement: Some(remaining),
+            ..
+        }) = self.root.without_pane(pane_id)
+        else {
+            unreachable!("a Pane with a distinct target is never the final Pane")
+        };
+        let split_id = SplitId::from_raw(self.next_split_id);
+        let Some(moved) = remaining.with_split(target_pane_id, pane_id, split_id, edge) else {
+            unreachable!("removing another Pane keeps the target in the Pane layout")
+        };
+        moved
     }
 
     pub(crate) fn close_pane(&mut self, pane_id: PaneId) -> Result<ClosePaneOutcome<T>, PaneError> {
@@ -640,7 +783,7 @@ impl<T> Tab<T> {
         &mut self,
         parked: ParkedPane<T>,
         source: PaneId,
-        axis: SplitAxis,
+        edge: PaneEdge,
     ) -> Result<PaneId, PaneError> {
         if self.root == parked.remaining {
             self.root = parked.original;
@@ -653,7 +796,7 @@ impl<T> Tab<T> {
                 .ok_or(PaneError::SplitIdExhausted)?;
             self.root = self
                 .root
-                .with_split(source, parked.id, split, PaneEdge::trailing(axis))
+                .with_split(source, parked.id, split, edge)
                 .ok_or(PaneError::PaneNotFound(source))?;
             self.next_split_id = next;
         }
@@ -663,6 +806,16 @@ impl<T> Tab<T> {
         self.panes.insert(parked.id, parked.payload);
         self.focus_history.insert(0, parked.id);
         Ok(parked.id)
+    }
+
+    /// Moves each Split ratio that would leave a Pane below its minimum size in `available` to
+    /// the nearest ratio that fits, outermost Split first. A layout too large for `available`
+    /// keeps the ratios that cannot fit.
+    pub(crate) fn fit_split_ratios(&mut self, available: PaneSize, divider_size: f32) {
+        if validate_divider_size(divider_size).is_ok() {
+            self.root
+                .fit_ratios(available, self.minimum_pane_size, divider_size);
+        }
     }
 
     pub(crate) fn minimum_size(&self, divider_size: f32) -> Result<PaneSize, PaneError> {
@@ -935,6 +1088,62 @@ impl PaneNode {
         }
     }
 
+    fn fit_ratios(&mut self, available: PaneSize, minimum: PaneSize, divider_size: f32) {
+        let Self::Split {
+            axis,
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let (Ok(first_minimum), Ok(second_minimum)) = (
+            first.minimum_size(minimum, divider_size),
+            second.minimum_size(minimum, divider_size),
+        ) else {
+            return;
+        };
+        let content = available.extent(*axis) - divider_size;
+        if content <= 0.0 {
+            return;
+        }
+        let lowest = first_minimum.extent(*axis) / content;
+        let highest = 1.0 - second_minimum.extent(*axis) / content;
+        if lowest <= highest {
+            *ratio = ratio.clamp(lowest, highest);
+        }
+        let child = |share: f32| {
+            let extent = content * share;
+            match axis {
+                SplitAxis::Horizontal => PaneSize::new(extent, available.height()),
+                SplitAxis::Vertical => PaneSize::new(available.width(), extent),
+            }
+        };
+        if let (Ok(first_size), Ok(second_size)) = (child(*ratio), child(1.0 - *ratio)) {
+            first.fit_ratios(first_size, minimum, divider_size);
+            second.fit_ratios(second_size, minimum, divider_size);
+        }
+    }
+
+    /// Puts each of two Panes in the other's leaf.
+    fn exchange_panes(&mut self, first: PaneId, second: PaneId) {
+        match self {
+            Self::Leaf(pane_id) if *pane_id == first => *pane_id = second,
+            Self::Leaf(pane_id) if *pane_id == second => *pane_id = first,
+            Self::Leaf(_) => {}
+            Self::Split {
+                first: first_child,
+                second: second_child,
+                ..
+            } => {
+                first_child.exchange_panes(first, second);
+                second_child.exchange_panes(first, second);
+            }
+        }
+    }
+
     fn with_split(
         &self,
         target: PaneId,
@@ -1071,6 +1280,31 @@ impl PaneNode {
             } => combined_minimum(
                 first.minimum_size(leaf_minimum, divider_size)?,
                 second.minimum_size(leaf_minimum, divider_size)?,
+                *axis,
+                divider_size,
+            ),
+        }
+    }
+
+    /// The minimum size with every leaf at `leaf_minimum`, except the one leaf `exception` names,
+    /// which needs its own size.
+    fn minimum_size_with(
+        &self,
+        leaf_minimum: PaneSize,
+        exception: (PaneId, PaneSize),
+        divider_size: f32,
+    ) -> Result<PaneSize, PaneError> {
+        match self {
+            Self::Leaf(pane_id) if *pane_id == exception.0 => Ok(exception.1),
+            Self::Leaf(_) => Ok(leaf_minimum),
+            Self::Split {
+                axis,
+                first,
+                second,
+                ..
+            } => combined_minimum(
+                first.minimum_size_with(leaf_minimum, exception, divider_size)?,
+                second.minimum_size_with(leaf_minimum, exception, divider_size)?,
                 *axis,
                 divider_size,
             ),
@@ -1296,7 +1530,7 @@ mod tests {
         tab.toggle_zoom();
         let zoom = tab.zoom_state();
         let added = tab
-            .insert_pane(PaneId::new(1), SplitAxis::Horizontal, |_| ())
+            .insert_pane(PaneId::new(1), PaneEdge::Right, |_| ())
             .unwrap();
         assert!(tab.pane(added).is_some());
         assert_eq!(tab.focused_pane_id(), focused);
@@ -1449,6 +1683,60 @@ mod tests {
     }
 
     #[test]
+    fn swap_panes_should_exchange_places_and_keep_every_split_ratio() {
+        let mut tab = four_pane_tab();
+        tab.resize_split(SplitId::new(2), size(250.0, 400.0), DIVIDER_SIZE, 0.7)
+            .unwrap();
+        tab.toggle_zoom();
+
+        let swapped = tab.swap_panes(PaneId::new(4), PaneId::new(1));
+
+        assert_eq!(
+            (
+                swapped,
+                topology(tab.root()),
+                tab.focused_pane_id(),
+                tab.root_pane_id(),
+                tab.zoom_state(),
+            ),
+            (
+                Ok(true),
+                "1:Horizontal:0.50(2:Vertical:0.70(4,3),3:Vertical:0.50(2,1))".to_owned(),
+                PaneId::new(4),
+                PaneId::new(1),
+                ZoomState::Restored,
+            )
+        );
+    }
+
+    #[test]
+    fn swap_panes_should_reject_unknown_panes_and_leave_a_pane_swapped_with_itself_alone() {
+        let mut tab = four_pane_tab();
+        let before = topology(tab.root());
+
+        let unknown_pane = tab.swap_panes(PaneId::new(9), PaneId::new(1));
+        let unknown_target = tab.swap_panes(PaneId::new(1), PaneId::new(9));
+        let itself = tab.swap_panes(PaneId::new(3), PaneId::new(3));
+
+        assert_eq!(
+            (
+                unknown_pane,
+                unknown_target,
+                itself,
+                topology(tab.root()),
+                tab.focused_pane_id()
+            ),
+            (
+                Err(PaneError::PaneNotFound(PaneId::new(9))),
+                Err(PaneError::PaneNotFound(PaneId::new(9))),
+                Ok(false),
+                before,
+                PaneId::new(4)
+            )
+        );
+    }
+
+    #[test]
     fn move_pane_should_reject_unknown_panes_and_insufficient_space_without_mutation() {
         let mut tab = four_pane_tab();
         let before = topology(tab.root());
@@ -1490,18 +1778,195 @@ mod tests {
     }
 
     #[test]
-    fn can_receive_pane_should_require_room_along_the_edge_axis() {
+    fn can_receive_should_require_room_along_the_edge_axis_for_the_incoming_size() {
         let tab = four_pane_tab();
         let cramped = size(150.0, 200.0);
 
         assert_eq!(
-            [PaneEdge::Left, PaneEdge::Top].map(|edge| tab.can_receive_pane(
+            [
+                (PaneEdge::Left, size(100.0, 50.0)),
+                (PaneEdge::Top, size(100.0, 50.0)),
+                (PaneEdge::Top, size(100.0, 150.0)),
+            ]
+            .map(|(edge, incoming)| tab.can_receive(
                 PaneId::new(4),
                 edge,
+                incoming,
                 cramped,
                 DIVIDER_SIZE
             )),
-            [false, true]
+            [false, true, false]
+        );
+    }
+
+    #[test]
+    fn can_insert_should_require_room_for_the_whole_layout_with_one_more_pane() {
+        let mut tab = tab(());
+        tab.insert_pane(PaneId::new(1), PaneEdge::Right, |_| ())
+            .unwrap();
+
+        let pane = size(100.0, 50.0);
+        let two_wide = size(201.0, 50.0);
+        assert_eq!(
+            [
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Right,
+                    pane,
+                    size(302.0, 50.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Right,
+                    pane,
+                    size(301.0, 50.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Bottom,
+                    pane,
+                    size(201.0, 101.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Right,
+                    two_wide,
+                    size(403.0, 50.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Right,
+                    two_wide,
+                    size(402.0, 50.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(9),
+                    PaneEdge::Right,
+                    pane,
+                    size(900.0, 900.0),
+                    DIVIDER_SIZE
+                ),
+            ],
+            [true, false, true, true, false, false],
+            "two 100 wide Panes beside 100 wide content need 302, and beside 201 wide content 403"
+        );
+    }
+
+    #[test]
+    fn placed_minimum_size_should_follow_the_placements_not_an_arrangement() {
+        let minimum = size(100.0, 50.0);
+
+        assert_eq!(
+            [
+                placed_minimum_size(minimum, DIVIDER_SIZE, &[]),
+                placed_minimum_size(minimum, DIVIDER_SIZE, &[(0, PaneEdge::Right)]),
+                placed_minimum_size(
+                    minimum,
+                    DIVIDER_SIZE,
+                    &[(0, PaneEdge::Right), (1, PaneEdge::Bottom)]
+                ),
+                placed_minimum_size(minimum, DIVIDER_SIZE, &[(4, PaneEdge::Right)]),
+            ],
+            [
+                Ok(minimum),
+                Ok(size(201.0, 50.0)),
+                Ok(size(201.0, 101.0)),
+                Err(PaneError::PaneNotFound(PaneId::new(4))),
+            ]
+        );
+    }
+
+    #[test]
+    fn fit_split_ratios_should_give_every_inserted_pane_its_minimum_size() {
+        let mut tab = tab(());
+        let second = tab
+            .insert_pane(PaneId::new(1), PaneEdge::Right, |_| ())
+            .unwrap();
+        tab.insert_pane(second, PaneEdge::Right, |_| ()).unwrap();
+
+        tab.fit_split_ratios(size(320.0, 200.0), DIVIDER_SIZE);
+
+        assert_eq!(
+            topology(tab.root()),
+            "1:Horizontal:0.37(1,2:Horizontal:0.50(2,3))",
+            "the nested Split's two Panes each need 100 of the 320 wide layout"
+        );
+    }
+
+    #[test]
+    fn resolve_drop_should_offer_only_drops_that_change_two_side_by_side_panes() {
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(800.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        let roomy = size(400.0, 400.0);
+
+        assert_eq!(
+            [
+                PaneDrop::Edge(PaneEdge::Left),
+                PaneDrop::Edge(PaneEdge::Right),
+                PaneDrop::Edge(PaneEdge::Top),
+                PaneDrop::Edge(PaneEdge::Bottom),
+                PaneDrop::Swap,
+            ]
+            .map(|drop| tab.resolve_drop(
+                PaneId::new(1),
+                PaneId::new(2),
+                drop,
+                roomy,
+                DIVIDER_SIZE
+            )),
+            [
+                None,
+                Some(PaneDrop::Swap),
+                Some(PaneDrop::Edge(PaneEdge::Top)),
+                Some(PaneDrop::Edge(PaneEdge::Bottom)),
+                Some(PaneDrop::Swap),
+            ],
+            "the edge beside the dragged Pane rebuilds the layout, and the far edge is the swap"
+        );
+    }
+
+    #[test]
+    fn resolve_drop_should_drop_the_edge_that_rebuilds_a_nested_layout_and_cramped_edges() {
+        let tab = four_pane_tab();
+        let roomy = size(250.0, 200.0);
+        let resolve = |pane, target, edge, size| {
+            tab.resolve_drop(
+                PaneId::new(pane),
+                PaneId::new(target),
+                PaneDrop::Edge(edge),
+                size,
+                DIVIDER_SIZE,
+            )
+        };
+
+        assert_eq!(
+            [
+                // Pane 3 already sits below Pane 1.
+                resolve(3, 1, PaneEdge::Bottom, roomy),
+                resolve(3, 1, PaneEdge::Top, roomy),
+                resolve(3, 1, PaneEdge::Right, roomy),
+                resolve(3, 1, PaneEdge::Right, size(150.0, 200.0)),
+                resolve(3, 3, PaneEdge::Top, roomy),
+            ],
+            [
+                None,
+                Some(PaneDrop::Swap),
+                Some(PaneDrop::Edge(PaneEdge::Right)),
+                None,
+                None,
+            ]
         );
     }
 

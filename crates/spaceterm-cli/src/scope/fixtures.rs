@@ -1,5 +1,5 @@
 use super::*;
-use spaceterm_server::hierarchy::{Axis, Pane, Tab, Workspace, WorktreeMembership};
+use spaceterm_server::hierarchy::{Pane, Side, Tab, Workspace, WorktreeMembership};
 use spaceterm_server::repository::{self, WorktreeHead, WorktreeRecord};
 
 pub(crate) fn id(byte: u8) -> Id {
@@ -88,7 +88,7 @@ fn tab(byte: u8, pane: u8, path: &str, activity: &str) -> Tab {
         panes: vec![Pane {
             id: id(pane),
             source: None,
-            axis: Axis::Right,
+            side: Side::Right,
             starting_directory: path.into(),
             current_directory: Some(path.into()),
             confirmed_directory: Some(path.into()),

@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
-use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
 use super::*;
 use crate::server_connection::ServerError;
@@ -42,7 +42,7 @@ fn inventory() -> Inventory {
                 panes: vec![Pane {
                     id: PANE,
                     source: None,
-                    axis: Axis::Right,
+                    side: Side::Right,
                     starting_directory: PathBuf::from("/server/home"),
                     current_directory: None,
                     repository_directory: None,
@@ -1761,7 +1761,7 @@ fn with_hidden_tab(
         panes: vec![Pane {
             id: HIDDEN_PANE,
             source: None,
-            axis: Axis::Right,
+            side: Side::Right,
             starting_directory: PathBuf::from("/server/home"),
             current_directory: None,
             repository_directory: None,
@@ -1897,7 +1897,7 @@ fn with_detached_workspace() -> Inventory {
     let pane = |id, presentation: Option<spaceterm_server::pane::metadata::Snapshot>| Pane {
         id,
         source: None,
-        axis: Axis::Right,
+        side: Side::Right,
         starting_directory: PathBuf::from("/server/home"),
         current_directory: None,
         repository_directory: None,

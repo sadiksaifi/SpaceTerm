@@ -207,6 +207,143 @@ pub struct Workspace {
     pub root_tab: Id,
     pub tabs: Vec<Tab>,
 }
+impl Workspace {
+    /// Moves `pane` out of `tab`, with its Terminal Session, into a new last Tab `id` in the same
+    /// Worktree, where it is the Root Pane.
+    ///
+    /// A refusal changes nothing: `Outcome::Missing` when `tab` does not hold `pane`, and
+    /// `Outcome::Invalid` when `pane` is the only Pane of `tab`.
+    pub fn move_pane_to_new_tab(&mut self, tab: Id, pane: Id, id: Id) -> Result<(), Outcome> {
+        let source = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .ok_or(Outcome::Missing)?;
+        let (worktree, worktree_repository) =
+            (source.worktree.clone(), source.worktree_repository.clone());
+        let moved = self.take_pane(tab, pane)?;
+        self.tabs.push(Tab {
+            worktree_membership: WorktreeMembership::Following,
+            worktree,
+            worktree_repository,
+            id,
+            root_pane: pane,
+            panes: vec![moved],
+        });
+        Ok(())
+    }
+
+    /// Moves `pane` out of `tab`, with its Terminal Session, to the `side` of Pane `beside` in
+    /// another Tab `into`.
+    ///
+    /// A refusal changes nothing: `Outcome::Missing` when either Tab does not hold its Pane, and
+    /// `Outcome::Invalid` when `into` is `tab` or `pane` is the only Pane of `tab`.
+    pub fn move_pane_beside(
+        &mut self,
+        tab: Id,
+        pane: Id,
+        into: Id,
+        beside: Id,
+        side: Side,
+    ) -> Result<(), Outcome> {
+        let target = self.destination(tab, into, beside)?;
+        let mut moved = self.take_pane(tab, pane)?;
+        moved.source = Some(beside);
+        moved.side = side;
+        self.tabs[target].panes.push(moved);
+        Ok(())
+    }
+
+    /// Moves every Pane of `tab`, with their Terminal Sessions, to the `side` of Pane `beside` in
+    /// another Tab `into`, and removes `tab`.
+    ///
+    /// The Panes keep the arrangement their Tab gave them, with its Root Pane beside `beside`.
+    /// Merging the Root Tab promotes the Tab that follows it. A refusal changes nothing:
+    /// `Outcome::Missing` when either Tab is gone or `into` does not hold `beside`, and
+    /// `Outcome::Invalid` when `into` is `tab`.
+    pub fn merge_tab(&mut self, tab: Id, into: Id, beside: Id, side: Side) -> Result<(), Outcome> {
+        self.destination(tab, into, beside)?;
+        let index = self
+            .tabs
+            .iter()
+            .position(|t| t.id == tab)
+            .ok_or(Outcome::Missing)?;
+        let merged = self.tabs.remove(index);
+        let target = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == into)
+            .ok_or(Outcome::Missing)?;
+        for mut pane in merged.panes {
+            if pane.id == merged.root_pane {
+                pane.source = Some(beside);
+                pane.side = side;
+            } else {
+                // A Pane whose own source is gone took its place beside the Root Pane it now
+                // follows into the other Tab.
+                pane.source.get_or_insert(merged.root_pane);
+            }
+            target.panes.push(pane);
+        }
+        self.promote_root_tab();
+        Ok(())
+    }
+
+    /// The index of Tab `into`, which must be another Tab than `tab` and hold Pane `beside`.
+    fn destination(&self, tab: Id, into: Id, beside: Id) -> Result<usize, Outcome> {
+        if tab == into {
+            return Err(Outcome::Invalid);
+        }
+        self.tabs
+            .iter()
+            .position(|t| t.id == into && t.panes.iter().any(|p| p.id == beside))
+            .ok_or(Outcome::Missing)
+    }
+
+    /// Removes one of several Panes from `tab`. The removed Pane starts no default layout of its
+    /// own, the Panes split from it take their places beside the Root Pane, and removing the Root
+    /// Pane promotes the Pane that follows it.
+    fn take_pane(&mut self, tab: Id, pane: Id) -> Result<Pane, Outcome> {
+        let source = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == tab)
+            .ok_or(Outcome::Missing)?;
+        let index = source
+            .panes
+            .iter()
+            .position(|p| p.id == pane)
+            .ok_or(Outcome::Missing)?;
+        if source.panes.len() == 1 {
+            return Err(Outcome::Invalid);
+        }
+        let mut moved = source.panes.remove(index);
+        moved.source = None;
+        moved.side = Side::Right;
+        for p in &mut source.panes {
+            if p.source == Some(pane) {
+                p.source = None;
+            }
+        }
+        if source.root_pane == pane {
+            source.root_pane = source.panes[0].id;
+        }
+        Ok(moved)
+    }
+
+    /// Makes the first Tab the Root Tab once the Root Tab is gone.
+    fn promote_root_tab(&mut self) {
+        if let Some(t) = self.tabs.first_mut()
+            && t.id != self.root_tab
+        {
+            // A promoted Root Tab follows its Root Pane, not the Worktree it opened in.
+            if t.worktree_membership == WorktreeMembership::Opened {
+                t.worktree_membership = WorktreeMembership::Following;
+            }
+            self.root_tab = t.id;
+        }
+    }
+}
 /// Whether directory changes may move a Tab to a different Worktree, and why not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeMembership {
@@ -245,8 +382,11 @@ pub struct PaneObservers {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pane {
     pub id: Id,
+    /// The Pane this Pane was placed beside in the default layout, which every client without a
+    /// saved arrangement derives.
     pub source: Option<Id>,
-    pub axis: Axis,
+    /// The side of `source` this Pane takes in the default layout.
+    pub side: Side,
     pub starting_directory: PathBuf,
     /// Live terminal directory presentation. Never retained as restoration authority.
     pub current_directory: Option<PathBuf>,
@@ -275,10 +415,48 @@ impl Pane {
             .unwrap_or(&self.starting_directory)
     }
 }
+/// How a Split places its second child after its first: to the right, or below.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     Right,
     Down,
+}
+/// The side of another Pane a Pane takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Side {
+    Right,
+    Down,
+    Left,
+    Up,
+}
+impl Side {
+    /// The axis of the Split that places a Pane on this side.
+    pub const fn axis(self) -> Axis {
+        match self {
+            Self::Right | Self::Left => Axis::Right,
+            Self::Down | Self::Up => Axis::Down,
+        }
+    }
+    /// Whether the Pane comes first in that Split, on the left or on top.
+    pub const fn leads(self) -> bool {
+        matches!(self, Self::Left | Self::Up)
+    }
+}
+impl From<Axis> for Side {
+    fn from(axis: Axis) -> Self {
+        match axis {
+            Axis::Right => Self::Right,
+            Axis::Down => Self::Down,
+        }
+    }
+}
+/// Where a moved Pane goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PaneDestination {
+    /// A new last Tab in the source Tab's Worktree, where the Pane is the Root Pane.
+    NewTab,
+    /// The `side` of Pane `pane` in another Tab `tab` of the same Workspace.
+    Beside { tab: Id, pane: Id, side: Side },
 }
 /// Who controls work a mutation creates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,6 +516,23 @@ pub enum Mutation {
         source: Id,
         axis: Axis,
         control: CreateControl,
+    },
+    /// Move one of a Tab's several Panes, with its Terminal Session, to `destination` in the
+    /// same Workspace.
+    MovePane {
+        workspace: Id,
+        tab: Id,
+        pane: Id,
+        destination: PaneDestination,
+    },
+    /// Move every Pane of `tab`, with their Terminal Sessions, to the `side` of Pane `beside` in
+    /// Tab `into`, and remove `tab`.
+    MergeTab {
+        workspace: Id,
+        tab: Id,
+        into: Id,
+        beside: Id,
+        side: Side,
     },
     RenameWorkspace {
         workspace: Id,
@@ -532,7 +727,7 @@ impl State {
                         panes: vec![Pane {
                             id: pane,
                             source: None,
-                            axis: Axis::Right,
+                            side: Side::Right,
                             starting_directory: directory.to_owned(),
                             current_directory: None,
                             repository_directory: None,
@@ -671,7 +866,7 @@ impl State {
             panes: vec![Pane {
                 id: pane,
                 source: None,
-                axis: Axis::Right,
+                side: Side::Right,
                 starting_directory,
                 current_directory: None,
                 repository_directory: None,
@@ -891,7 +1086,7 @@ impl State {
                         panes: vec![Pane {
                             id: pane,
                             source: None,
-                            axis: Axis::Right,
+                            side: Side::Right,
                             starting_directory: pin.clone().unwrap_or_else(|| directory.to_owned()),
                             current_directory: None,
                             repository_directory: None,
@@ -953,7 +1148,7 @@ impl State {
                     panes: vec![Pane {
                         id: pane,
                         source: None,
-                        axis: Axis::Right,
+                        side: Side::Right,
                         starting_directory: start,
                         current_directory: None,
                         repository_directory: None,
@@ -1008,7 +1203,7 @@ impl State {
                 t.panes.push(Pane {
                     id,
                     source: Some(*source),
-                    axis: *axis,
+                    side: (*axis).into(),
                     starting_directory: start,
                     current_directory: None,
                     repository_directory: None,
@@ -1018,6 +1213,61 @@ impl State {
                     creator,
                 });
                 id
+            }
+            Mutation::MovePane {
+                workspace,
+                tab,
+                pane,
+                destination,
+            } => {
+                if *destination == PaneDestination::NewTab && self.tab_count() >= MAX_TABS {
+                    return Ok(Outcome::Limit);
+                }
+                let Some(w) = self
+                    .inventory
+                    .workspaces
+                    .iter_mut()
+                    .find(|w| w.id == *workspace)
+                else {
+                    return Ok(Outcome::Missing);
+                };
+                let moved = match *destination {
+                    PaneDestination::NewTab => {
+                        let id = new_id()?;
+                        w.move_pane_to_new_tab(*tab, *pane, id).map(|()| id)
+                    }
+                    PaneDestination::Beside {
+                        tab: into,
+                        pane: beside,
+                        side,
+                    } => w
+                        .move_pane_beside(*tab, *pane, into, beside, side)
+                        .map(|()| *pane),
+                };
+                match moved {
+                    Ok(target) => target,
+                    Err(refusal) => return Ok(refusal),
+                }
+            }
+            Mutation::MergeTab {
+                workspace,
+                tab,
+                into,
+                beside,
+                side,
+            } => {
+                let Some(w) = self
+                    .inventory
+                    .workspaces
+                    .iter_mut()
+                    .find(|w| w.id == *workspace)
+                else {
+                    return Ok(Outcome::Missing);
+                };
+                if let Err(refusal) = w.merge_tab(*tab, *into, *beside, *side) {
+                    return Ok(refusal);
+                }
+                *into
             }
             Mutation::RenameWorkspace {
                 workspace,
@@ -1116,15 +1366,7 @@ impl State {
                 }
             }
             w.tabs.retain(|t| !t.panes.is_empty());
-            if let Some(t) = w.tabs.first_mut()
-                && t.id != w.root_tab
-            {
-                // A promoted Root Tab follows its Root Pane, not the Worktree it opened in.
-                if t.worktree_membership == WorktreeMembership::Opened {
-                    t.worktree_membership = WorktreeMembership::Following;
-                }
-                w.root_tab = t.id;
-            }
+            w.promote_root_tab();
         }
         self.inventory.workspaces.retain(|w| !w.tabs.is_empty());
         self.names.retain(|name| {
@@ -2827,7 +3069,7 @@ mod tests {
         assert_eq!(tab.root_pane, pane);
         assert_eq!(tab.panes.len(), 1);
         assert_eq!(tab.panes[0].source, None);
-        assert_eq!(tab.panes[0].axis, Axis::Down);
+        assert_eq!(tab.panes[0].side, Side::Down);
         restored.remove_pane(pane);
         assert_eq!(
             restored
@@ -2846,6 +3088,296 @@ mod tests {
             Outcome::Missing
         );
         assert!(restored.inventory.workspaces.is_empty());
+    }
+
+    #[test]
+    fn moving_a_pane_to_a_new_tab_keeps_the_pane_and_its_worktree_and_repairs_the_source_tab() {
+        let mut state = State::empty();
+        let Outcome::Accepted { target: workspace } = state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: None,
+                    control: CreateControl::Creator,
+                },
+                "/tmp".as_ref(),
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        let tab = state.inventory.workspaces[0].root_tab;
+        let root = state.inventory.workspaces[0].tabs[0].root_pane;
+        state.inventory.workspaces[0].tabs[0].worktree = Some("/repo/feature".into());
+        state.inventory.workspaces[0].tabs[0].worktree_repository = Some("/repo/main".into());
+        let split = |state: &mut State, sequence, source| {
+            let Outcome::Accepted { target } = state
+                .apply(
+                    [1; 32],
+                    sequence,
+                    Mutation::SplitPane {
+                        workspace,
+                        tab,
+                        source,
+                        axis: Axis::Down,
+                        control: CreateControl::Creator,
+                    },
+                    "/tmp".as_ref(),
+                    |_| true,
+                )
+                .unwrap()
+            else {
+                panic!()
+            };
+            target
+        };
+        let moved = split(&mut state, 2, root);
+        let beside = split(&mut state, 3, moved);
+        let before = state.pane(moved).unwrap().2.clone();
+        let move_pane = |state: &mut State, sequence, tab, pane| {
+            state
+                .apply(
+                    [1; 32],
+                    sequence,
+                    Mutation::MovePane {
+                        workspace,
+                        tab,
+                        pane,
+                        destination: PaneDestination::NewTab,
+                    },
+                    "/tmp".as_ref(),
+                    |_| true,
+                )
+                .unwrap()
+        };
+
+        let Outcome::Accepted { target: new_tab } = move_pane(&mut state, 4, tab, moved) else {
+            panic!()
+        };
+
+        let w = &state.inventory.workspaces[0];
+        assert_eq!(
+            (
+                w.root_tab,
+                w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                w.tabs[0]
+                    .panes
+                    .iter()
+                    .map(|p| (p.id, p.source))
+                    .collect::<Vec<_>>(),
+                w.tabs[0].root_pane,
+            ),
+            (
+                tab,
+                vec![tab, new_tab],
+                vec![(root, None), (beside, None)],
+                root
+            )
+        );
+        assert_eq!(
+            w.tabs[1],
+            Tab {
+                worktree_membership: WorktreeMembership::Following,
+                worktree: Some("/repo/feature".into()),
+                worktree_repository: Some("/repo/main".into()),
+                id: new_tab,
+                root_pane: moved,
+                panes: vec![Pane {
+                    source: None,
+                    side: Side::Right,
+                    ..before
+                }],
+            }
+        );
+        state.validate().unwrap();
+
+        // Moving the source Tab's Root Pane promotes the Pane that follows it.
+        let Outcome::Accepted { target: third_tab } = move_pane(&mut state, 5, tab, root) else {
+            panic!()
+        };
+        let w = &state.inventory.workspaces[0];
+        assert_eq!(
+            (w.tabs[0].root_pane, w.tabs[2].id, w.tabs[2].root_pane),
+            (beside, third_tab, root)
+        );
+        let revision = state.inventory.revision;
+
+        // A Tab's only Pane already is a Tab, and a Pane moves only from the Tab that holds it.
+        assert_eq!(
+            (
+                move_pane(&mut state, 6, tab, beside),
+                move_pane(&mut state, 7, new_tab, root),
+                move_pane(&mut state, 8, tab, [9; 32]),
+                state.inventory.revision,
+            ),
+            (
+                Outcome::Invalid,
+                Outcome::Missing,
+                Outcome::Missing,
+                revision
+            )
+        );
+    }
+
+    #[test]
+    fn panes_move_into_another_tab_and_a_merged_tab_keeps_its_arrangement_there() {
+        let mut state = State::empty();
+        let mut sequence = 0;
+        let mut apply = |state: &mut State, mutation| {
+            sequence += 1;
+            state
+                .apply([1; 32], sequence, mutation, "/tmp".as_ref(), |_| true)
+                .unwrap()
+        };
+        let Outcome::Accepted { target: workspace } = apply(
+            &mut state,
+            Mutation::CreateWorkspace {
+                name: "Build".into(),
+                directory: None,
+                control: CreateControl::Creator,
+            },
+        ) else {
+            panic!()
+        };
+        let first = state.inventory.workspaces[0].root_tab;
+        let first_root = state.inventory.workspaces[0].tabs[0].root_pane;
+        let mut split = |state: &mut State, source, axis| {
+            let Outcome::Accepted { target } = apply(
+                state,
+                Mutation::SplitPane {
+                    workspace,
+                    tab: first,
+                    source,
+                    axis,
+                    control: CreateControl::Creator,
+                },
+            ) else {
+                panic!()
+            };
+            target
+        };
+        let moved = split(&mut state, first_root, Axis::Down);
+        let follower = split(&mut state, moved, Axis::Right);
+        let Outcome::Accepted { target: second } = apply(
+            &mut state,
+            Mutation::CreateTab {
+                workspace,
+                source: None,
+                control: CreateControl::Creator,
+            },
+        ) else {
+            panic!()
+        };
+        let second_root = state.inventory.workspaces[0].tabs[1].root_pane;
+        let placement = |state: &State, tab: usize| {
+            state.inventory.workspaces[0].tabs[tab]
+                .panes
+                .iter()
+                .map(|p| (p.id, p.source, p.side))
+                .collect::<Vec<_>>()
+        };
+
+        let into_second = apply(
+            &mut state,
+            Mutation::MovePane {
+                workspace,
+                tab: first,
+                pane: moved,
+                destination: PaneDestination::Beside {
+                    tab: second,
+                    pane: second_root,
+                    side: Side::Left,
+                },
+            },
+        );
+        assert_eq!(
+            (into_second, placement(&state, 0), placement(&state, 1)),
+            (
+                Outcome::Accepted { target: moved },
+                vec![
+                    (first_root, None, Side::Right),
+                    (follower, None, Side::Right)
+                ],
+                vec![
+                    (second_root, None, Side::Right),
+                    (moved, Some(second_root), Side::Left)
+                ],
+            )
+        );
+        state.validate().unwrap();
+
+        // Merging the Root Tab keeps its arrangement and promotes the Tab that follows it.
+        let merged = apply(
+            &mut state,
+            Mutation::MergeTab {
+                workspace,
+                tab: first,
+                into: second,
+                beside: moved,
+                side: Side::Up,
+            },
+        );
+        let w = &state.inventory.workspaces[0];
+        assert_eq!(
+            (
+                merged,
+                w.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+                w.root_tab,
+                placement(&state, 0),
+            ),
+            (
+                Outcome::Accepted { target: second },
+                vec![second],
+                second,
+                vec![
+                    (second_root, None, Side::Right),
+                    (moved, Some(second_root), Side::Left),
+                    (first_root, Some(moved), Side::Up),
+                    (follower, Some(first_root), Side::Right),
+                ],
+            )
+        );
+        state.validate().unwrap();
+
+        // A Tab never merges into itself, and a move needs a Pane in another existing Tab.
+        let revision = state.inventory.revision;
+        assert_eq!(
+            [
+                Mutation::MergeTab {
+                    workspace,
+                    tab: second,
+                    into: second,
+                    beside: moved,
+                    side: Side::Up,
+                },
+                Mutation::MovePane {
+                    workspace,
+                    tab: second,
+                    pane: moved,
+                    destination: PaneDestination::Beside {
+                        tab: second,
+                        pane: second_root,
+                        side: Side::Right,
+                    },
+                },
+                Mutation::MovePane {
+                    workspace,
+                    tab: second,
+                    pane: moved,
+                    destination: PaneDestination::Beside {
+                        tab: first,
+                        pane: first_root,
+                        side: Side::Right,
+                    },
+                },
+            ]
+            .map(|mutation| apply(&mut state, mutation)),
+            [Outcome::Invalid, Outcome::Invalid, Outcome::Missing]
+        );
+        assert_eq!(state.inventory.revision, revision);
     }
 
     #[cfg(feature = "client")]

@@ -634,7 +634,7 @@ mod tests {
         use crate::client_view::{
             ClientViewStore, RetainedInventory, RetainedPane, RetainedTab, RetainedWorkspace,
         };
-        use crate::hierarchy::{Axis, MAX_WORKSPACES};
+        use crate::hierarchy::{MAX_WORKSPACES, Side};
         let fixture = Fixture::new();
         let workspace = |id: u8| RetainedWorkspace {
             id: [id; 32],
@@ -646,7 +646,7 @@ mod tests {
                 panes: vec![RetainedPane {
                     id: [id.wrapping_add(200); 32],
                     source: None,
-                    axis: Axis::Right,
+                    side: Side::Right,
                     shell: Some("zsh".into()),
                 }],
             }],
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn detached_attachments_and_unacknowledged_releases_survive_reopen_without_settings() {
         use crate::attachments::Attachments;
-        use crate::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+        use crate::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
         let fixture = Fixture::new();
         // The lock's descriptor is close-on-exec, but a process another test forks holds a copy
         // until it executes, and the copy keeps the lock. A reopen retries that contention
@@ -759,7 +759,7 @@ mod tests {
                     panes: vec![Pane {
                         id: [3; 32],
                         source: None,
-                        axis: Axis::Right,
+                        side: Side::Right,
                         starting_directory: "/tmp".into(),
                         current_directory: None,
                         repository_directory: None,

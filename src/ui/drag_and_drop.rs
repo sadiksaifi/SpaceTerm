@@ -47,6 +47,10 @@ pub(crate) const LIFTED_OPACITY: f32 = 0.95;
 /// The selection rests on one `Row` of an item. A strip whose items are single rows uses `()`.
 pub(crate) struct ReorderableStrip<Id, Row = ()> {
     axis: Axis,
+    /// Whether a dragged item can join another item, so the pointer rather than the lifted
+    /// copy's center decides where it lands. Past either end the copy stays held over the end
+    /// item, where only the pointer still tells joining it from landing beyond it.
+    joinable: bool,
     lift: Option<Lift<Id>>,
     /// Each item's displacement from its laid-out place, as it eases toward its target.
     slides: HashMap<Id, Slide>,
@@ -92,6 +96,16 @@ pub(crate) struct ReorderableStrip<Id, Row = ()> {
     arriving: Option<StripShape>,
     /// This strip moving from the shape of the strip it took the place of.
     arrival: Option<Arrival<Id>>,
+    /// The gap held open for an item arriving from outside the strip.
+    incoming: Option<Incoming>,
+}
+
+/// A gap `extent` long before the item at `position`, or after the last item, where an item
+/// arriving from outside the strip would land.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Incoming {
+    position: usize,
+    extent: Pixels,
 }
 
 /// Where a strip's items and selection stood in the window along its axis, so a strip that takes
@@ -147,6 +161,8 @@ struct Lift<Id> {
     /// When the strip last scrolled under the pointer, while the pointer stays near an end.
     scrolled_at: Option<Instant>,
     landing: Option<Landing>,
+    /// Whether the gap holds still while the lifted item sits over an item it can join.
+    gap_held: bool,
     /// Each item's slot size along the strip when the gap last opened.
     extents: Vec<Pixels>,
 }
@@ -315,6 +331,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
     pub(crate) fn new(axis: Axis) -> Self {
         Self {
             axis,
+            joinable: false,
             lift: None,
             slides: HashMap::new(),
             settling: None,
@@ -336,6 +353,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             visible_end: px(0.0),
             arriving: None,
             arrival: None,
+            incoming: None,
         }
     }
 
@@ -1024,6 +1042,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             pointer: None,
             scrolled_at: None,
             landing: None,
+            gap_held: false,
             extents: Vec::new(),
         });
     }
@@ -1118,6 +1137,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let from = self.arriving.take().or_else(|| self.shape(items, cx));
         *self = Self {
             known: Some(ids.to_vec()),
+            joinable: self.joinable,
             ..Self::new(self.axis)
         };
         if let Some(from) = from {
@@ -1218,6 +1238,29 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         pointer: Point<Pixels>,
         cx: &App,
     ) -> bool {
+        self.follow(items, ids, pointer, false, cx)
+    }
+
+    /// Moves the lifted copy to `pointer` like [`Self::track`], while the gap stays where it is,
+    /// as over an item the lifted one can join.
+    pub(crate) fn track_holding_gap(
+        &mut self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        pointer: Point<Pixels>,
+        cx: &App,
+    ) -> bool {
+        self.follow(items, ids, pointer, true, cx)
+    }
+
+    fn follow(
+        &mut self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        pointer: Point<Pixels>,
+        hold_gap: bool,
+        cx: &App,
+    ) -> bool {
         let axis = self.axis;
         // The lifted copy follows the item's face, and the others move by whole slots, which
         // carry their closing gaps with them.
@@ -1239,14 +1282,24 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let origin = copy.map_or(pointer - lift.grab, |copy| {
             confine(axis, items.bounds(), copy, pointer - lift.grab)
         });
-        let landing = current.zip(copy).map(|(current, copy)| Landing {
-            position: landing_position(
-                &spans(axis, &slots),
-                current,
-                f32::from(origin.along(axis) + copy.size.along(axis) / 2.0),
-            ),
-            len: ids.len(),
-        });
+        // A hold keeps the gap the pointer opened as it reached the item it can join.
+        let landing = if hold_gap && lift.gap_held {
+            lift.landing
+        } else {
+            current.zip(copy).map(|(current, copy)| Landing {
+                position: landing_position(
+                    &spans(axis, &slots),
+                    current,
+                    if self.joinable {
+                        f32::from(pointer.along(axis))
+                    } else {
+                        f32::from(origin.along(axis) + copy.size.along(axis) / 2.0)
+                    },
+                ),
+                len: ids.len(),
+            })
+        };
+        lift.gap_held = hold_gap;
         lift.pointer = Some(pointer);
         let moved = lift.origin != Some(origin);
         lift.origin = Some(origin);
@@ -1265,6 +1318,121 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         moved || relanded
     }
 
+    /// Where the pointer carrying the lifted item last stood, which autoscroll keeps following.
+    pub(crate) fn lifted_pointer(&self) -> Option<Point<Pixels>> {
+        self.lift.as_ref().and_then(|lift| lift.pointer)
+    }
+
+    /// A strip whose dragged item can join another item. Its pointer decides where the item
+    /// lands, and [`Self::covered_item`] names the item it would join.
+    pub(crate) fn joinable(axis: Axis) -> Self {
+        Self {
+            joinable: true,
+            ..Self::new(axis)
+        }
+    }
+
+    /// The item, other than the lifted one, whose drawn face holds `pointer` in its middle
+    /// `share`. A strip whose items can join one another holds its gap still there, so the item
+    /// stays under the pointer.
+    pub(crate) fn covered_item(
+        &self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        pointer: Point<Pixels>,
+        share: f32,
+    ) -> Option<Id> {
+        let axis = self.axis;
+        let lift = self.lift.as_ref()?;
+        // Only an item the strip shows can be joined; the strip clips the rest.
+        if !items.bounds().contains(&pointer) {
+            return None;
+        }
+        let faces = self.item_bounds(items, ids);
+        let slots = painted_item_bounds(items);
+        let current = ids
+            .iter()
+            .position(|candidate| *candidate == lift.id)
+            .filter(|_| faces.len() == ids.len() && slots.len() == ids.len())?;
+        let spans = spans(axis, &slots);
+        let along = f32::from(pointer.along(axis));
+        // A held gap keeps the joined item under the pointer. Otherwise the items stand where
+        // the pointer would land the lifted one, as the next track draws them.
+        let landing = if lift.gap_held {
+            lift.landing.map_or(current, |landing| landing.position)
+        } else {
+            landing_position(&spans, current, along)
+        };
+        covered_position(&spans, current, landing, along, share).map(|position| ids[position])
+    }
+
+    /// Where an item arriving from outside the strip lands if released at `pointer`: before the
+    /// first of `ids` whose place's middle lies past the pointer, or after the last.
+    pub(crate) fn incoming_position(
+        &self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        pointer: Point<Pixels>,
+    ) -> Option<usize> {
+        let slots = painted_item_bounds(items);
+        (slots.len() == ids.len()).then(|| {
+            incoming_position(
+                &spans(self.axis, &slots),
+                f32::from(pointer.along(self.axis)),
+            )
+        })
+    }
+
+    /// Opens a gap `extent` long before the item at `position` among `ids`, or after the last,
+    /// for an item arriving from outside the strip, as a Pane that becomes a Tab. The items
+    /// slide aside as they do for a lifted item. `None` closes the gap.
+    pub(crate) fn hold_incoming(&mut self, ids: &[Id], gap: Option<(usize, Pixels)>, cx: &App) {
+        let gap = gap.map(|(position, extent)| Incoming { position, extent });
+        if self.incoming == gap {
+            return;
+        }
+        self.incoming = gap;
+        let now = now(cx);
+        let motion = super::appearance_runtime::control_motion(cx);
+        for (index, id) in ids.iter().enumerate() {
+            let shift = gap
+                .filter(|gap| index >= gap.position)
+                .map_or(px(0.0), |gap| gap.extent);
+            let to = Point::default().apply_along(self.axis, |_| shift);
+            self.slide(*id, to, SHIFT_DURATION, now, motion);
+        }
+    }
+
+    /// Where the open incoming gap starts along the strip, in window coordinates.
+    pub(crate) fn incoming_start(&self, items: &ScrollHandle) -> Option<Pixels> {
+        let gap = self.incoming?;
+        let axis = self.axis;
+        let slots = painted_item_bounds(items);
+        slots
+            .get(gap.position)
+            .map(|slot| slot.origin.along(axis))
+            .or_else(|| {
+                slots
+                    .last()
+                    .map(|slot| slot.origin.along(axis) + slot.size.along(axis))
+            })
+    }
+
+    /// Lands the arriving item `id`, which its owner just placed at the incoming gap's position.
+    /// The others take their places at once, and the item shows there whole rather than growing
+    /// in.
+    pub(crate) fn land_incoming(&mut self, id: Id) {
+        let Some(gap) = self.incoming.take() else {
+            return;
+        };
+        self.slides.clear();
+        if let Some(known) = self.known.as_mut()
+            && !known.contains(&id)
+        {
+            known.insert(gap.position.min(known.len()), id);
+        }
+    }
+
     /// Scrolls the strip toward the end the pointer holds near, faster the deeper it holds, and
     /// follows the items that pass under the lifted copy or grow beside it while it holds still.
     fn autoscroll(&mut self, items: &ScrollHandle, ids: &[Id], window: &mut Window, cx: &App) {
@@ -1275,6 +1443,8 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let Some(pointer) = lift.pointer else {
             return;
         };
+        // A held gap stays held as the strip follows the pointer.
+        let gap_held = lift.gap_held;
         let viewport = items.bounds();
         let start = f32::from(viewport.origin.along(axis));
         let velocity = autoscroll_velocity(
@@ -1286,7 +1456,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let limit = -f32::from(items.max_offset().along(axis));
         if !((velocity > 0.0 && current < 0.0) || (velocity < 0.0 && current > limit)) {
             lift.scrolled_at = None;
-            self.track(items, ids, pointer, cx);
+            self.follow(items, ids, pointer, gap_held, cx);
             return;
         }
         let now = now(cx);
@@ -1298,7 +1468,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let next = (current + velocity * elapsed.as_secs_f32()).clamp(limit, 0.0);
         items.set_offset(offset.apply_along(axis, |_| px(next)));
         window.request_animation_frame();
-        self.track(items, ids, pointer, cx);
+        self.follow(items, ids, pointer, gap_held, cx);
     }
 
     /// Ends the drag on its release. Returns the dragged item and its new position among the
@@ -1481,6 +1651,37 @@ fn landing_position(spans: &[(f32, f32)], dragged: usize, center: f32) -> usize 
             (*index < dragged && center > midpoint) || (*index > dragged && center >= midpoint)
         })
         .count()
+}
+
+/// The position among items at `spans` where an arriving item lands at `along`: after every item
+/// whose middle lies before it.
+fn incoming_position(spans: &[(f32, f32)], along: f32) -> usize {
+    spans
+        .iter()
+        .filter(|(start, end)| along > (start + end) / 2.0)
+        .count()
+}
+
+/// The item, other than the one lifted from `dragged`, whose span, drawn shifted for the gap at
+/// `landing`, holds `center` within its middle `share`.
+fn covered_position(
+    spans: &[(f32, f32)],
+    dragged: usize,
+    landing: usize,
+    center: f32,
+    share: f32,
+) -> Option<usize> {
+    let shifts = gap_shifts(spans, dragged, landing);
+    spans
+        .iter()
+        .zip(shifts)
+        .enumerate()
+        .filter(|(index, _)| *index != dragged)
+        .find(|(_, ((start, end), shift))| {
+            let inset = (end - start) * (1.0 - share) / 2.0;
+            (start + shift + inset..=end + shift - inset).contains(&center)
+        })
+        .map(|(index, _)| index)
 }
 
 /// How far each item moves along the strip to open a gap at `landing` for the item lifted from
@@ -1753,7 +1954,8 @@ pub(crate) fn finish_slides(cx: &mut gpui::VisualTestContext) {
         SHIFT_DURATION
             .max(SETTLE_DURATION)
             .max(PRESENCE_DURATION)
-            .max(SELECTION_DURATION),
+            .max(SELECTION_DURATION)
+            .max(MORPH_DURATION),
     );
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
@@ -1766,6 +1968,74 @@ fn painted_item_bounds(items: &ScrollHandle) -> Vec<Bounds<Pixels>> {
         .filter_map(|position| items.bounds_for_item(position))
         .map(|bounds| Bounds::new(bounds.origin + offset, bounds.size))
         .collect()
+}
+
+/// How long a drag picture takes to change from one shape to another.
+const MORPH_DURATION: Duration = Duration::from_millis(180);
+
+/// Eases a drag picture's bounds when what it shows changes, as a lifted Tab that turns into the
+/// rectangle a Pane drag carries and back, around the pointer.
+pub(crate) struct FaceMorph<Kind> {
+    /// What the picture showed in the last frame, and where.
+    shown: Option<(Kind, Bounds<Pixels>)>,
+    /// What it shows now is turning from, from where, and since when.
+    from: Option<(Kind, Bounds<Pixels>, Ease)>,
+}
+
+/// One frame of a [`FaceMorph`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Morph<Kind> {
+    pub(crate) bounds: Bounds<Pixels>,
+    /// What the picture is turning from, and how far along the turn is, from 0 to 1.
+    pub(crate) from: Option<(Kind, f32)>,
+}
+
+impl<Kind: Copy + PartialEq> FaceMorph<Kind> {
+    pub(crate) fn new() -> Self {
+        Self {
+            shown: None,
+            from: None,
+        }
+    }
+
+    /// Where to draw `kind` this frame, which rests at `target`.
+    pub(crate) fn frame(&mut self, kind: Kind, target: Bounds<Pixels>, cx: &App) -> Morph<Kind> {
+        let now = now(cx);
+        if let Some((shown, drawn)) = self.shown
+            && shown != kind
+        {
+            let motion = super::appearance_runtime::control_motion(cx);
+            self.from = Some((shown, drawn, Ease::new(MORPH_DURATION, now, motion)));
+        }
+        let morph = match self.from {
+            Some((from, start, ease)) if !ease.finished(now) => {
+                let t = ease.at(now);
+                let lerp = |a: Pixels, b: Pixels| a + (b - a) * t;
+                Morph {
+                    bounds: Bounds::new(
+                        point(
+                            lerp(start.origin.x, target.origin.x),
+                            lerp(start.origin.y, target.origin.y),
+                        ),
+                        Size::new(
+                            lerp(start.size.width, target.size.width),
+                            lerp(start.size.height, target.size.height),
+                        ),
+                    ),
+                    from: Some((from, t)),
+                }
+            }
+            _ => {
+                self.from = None;
+                Morph {
+                    bounds: target,
+                    from: None,
+                }
+            }
+        };
+        self.shown = Some((kind, morph.bounds));
+        morph
+    }
 }
 
 /// The lifted copy of a dragged item that follows the pointer.
@@ -1787,8 +2057,9 @@ struct Placement {
     origin: Box<PreviewOrigin>,
 }
 
-/// The face's origin in the window, while the owner places it.
-type PreviewOrigin = dyn Fn(&App) -> Option<Point<Pixels>>;
+/// The face's origin in the window for the pointer at the given point and the window's current
+/// size, while the owner places it.
+type PreviewOrigin = dyn Fn(Point<Pixels>, Size<Pixels>, &App) -> Option<Point<Pixels>>;
 
 impl DragPreview {
     /// A preview, for the drag GPUI is starting in `window`, that paints `face` at the pointer.
@@ -1811,7 +2082,7 @@ impl DragPreview {
     pub(crate) fn placed(
         mut self,
         cursor_offset: Point<Pixels>,
-        origin: impl Fn(&App) -> Option<Point<Pixels>> + 'static,
+        origin: impl Fn(Point<Pixels>, Size<Pixels>, &App) -> Option<Point<Pixels>> + 'static,
     ) -> Self {
         self.placement = Some(Placement {
             cursor_offset,
@@ -1837,8 +2108,9 @@ impl Render for DragPreview {
             .placement
             .as_ref()
             .and_then(|placement| {
-                let root = window.mouse_position() - placement.cursor_offset;
-                (placement.origin)(cx).map(|origin| origin - root)
+                let pointer = window.mouse_position();
+                let root = pointer - placement.cursor_offset;
+                (placement.origin)(pointer, window.viewport_size(), cx).map(|origin| origin - root)
             })
             .unwrap_or(self.lift);
         div().debug_selector(|| "drag-preview".to_owned()).child(
@@ -1980,6 +2252,18 @@ fn carries(ticket: u64, cx: &App) -> bool {
 mod tests {
     use super::*;
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
+
+    #[gpui::test]
+    fn taking_another_place_should_keep_a_strip_joinable(cx: &mut TestAppContext) {
+        let mut strip = ReorderableStrip::<u64>::joinable(Axis::Horizontal);
+
+        cx.update(|cx| strip.take_place(&ScrollHandle::new(), &[1, 2], cx));
+
+        assert!(
+            strip.joinable,
+            "another Worktree's Tabs still land by pointer and join each other"
+        );
+    }
 
     struct Payload;
 
@@ -2158,6 +2442,25 @@ mod tests {
                 vec![60.0, -100.0, 0.0, 0.0],
                 vec![0.0; 4],
             ]
+        );
+    }
+
+    #[test]
+    fn covered_position_should_find_the_item_whose_drawn_middle_holds_the_center() {
+        let spans = strip(&[100.0, 100.0, 100.0, 100.0]);
+
+        // B is lifted from A B C D. With no gap moved, C is drawn in its own place; once the gap
+        // moves past C, C is drawn in B's place.
+        assert_eq!(
+            [
+                covered_position(&spans, 1, 1, 250.0, 0.5),
+                covered_position(&spans, 1, 1, 230.0, 0.5),
+                covered_position(&spans, 1, 1, 220.0, 0.5),
+                covered_position(&spans, 1, 1, 50.0, 0.5),
+                covered_position(&spans, 1, 1, 150.0, 0.5),
+                covered_position(&spans, 1, 2, 150.0, 0.5),
+            ],
+            [Some(2), Some(2), None, Some(0), None, Some(2)]
         );
     }
 
