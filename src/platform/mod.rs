@@ -44,6 +44,13 @@ pub(crate) mod kqueue_watch;
 mod macos_appearance;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
+#[cfg_attr(
+    all(not(spaceterm_sparkle), not(test)),
+    expect(dead_code, reason = "only the Sparkle adapter observes the clock")
+)]
+pub(crate) mod macos_clock_changes;
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
 mod macos_keyboard_layout;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
@@ -586,6 +593,9 @@ mod linux_session_bus;
 #[cfg(feature = "desktop")]
 mod linux_ssh_executable;
 
+#[cfg(target_os = "linux")]
+#[cfg(feature = "desktop")]
+mod linux_clock_changes;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
 mod linux_updates;

@@ -70,7 +70,7 @@ pub(crate) enum UpdateStage {
 
 /// Cached observations are never installation authority. Sparkle revalidates the signed feed
 /// and archive. These bounded facts retain the pending version, elapsed time, and reminder cadence.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct UpdateHistory {
     version: Option<String>,
@@ -155,6 +155,35 @@ impl UpdateHistory {
             .is_none_or(|last| self.high_water.saturating_sub(last) >= interval)
     }
 
+    /// The first time after `now` at which [`Self::stage`] or [`Self::reminder_due`] changes:
+    /// the release turning one or two days old, or the reminder interval ending. A reminder that
+    /// is already due changes only when the person sees it, so it adds no time.
+    pub(crate) fn next_change(&mut self, now: u64, interval: ReminderInterval) -> Option<u64> {
+        let stage = self.stage(now);
+        self.version.as_ref()?;
+        // Both rules read the high-water time, which follows the clock once it passes the mark.
+        let ahead = |moment: u64| (moment > self.high_water).then_some(moment);
+        let reminder = match self.last_reminder {
+            Some(last) if stage != UpdateStage::Optional && stage == self.reminder_stage => {
+                let gap = if stage == UpdateStage::Warning {
+                    DAY
+                } else {
+                    interval.seconds()
+                };
+                ahead(last.saturating_add(gap))
+            }
+            _ => None,
+        };
+        [
+            ahead(self.published_at.saturating_add(DAY)),
+            ahead(self.published_at.saturating_add(2 * DAY)),
+            reminder,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
     pub(crate) fn reminded(&mut self, now: u64) {
         self.reminder_stage = self.stage(now);
         self.last_reminder = Some(self.high_water);
@@ -187,6 +216,39 @@ mod tests {
         assert_eq!(restored.pending_version("0.1.2"), None);
         restored.observe("0.1.2", "0.1.3", 190_000, 190_000);
         assert_eq!(restored.stage(190_000), UpdateStage::Optional);
+    }
+
+    /// Each moment `next_change` names is the first at which the stage or a due reminder
+    /// differs, so a scheduler that waits for it misses nothing and wakes for nothing.
+    #[test]
+    fn the_next_change_is_the_first_moment_the_stage_or_a_reminder_changes() {
+        let interval = ReminderInterval::TwoHours;
+        let mut history = UpdateHistory::default();
+        assert_eq!(
+            history.next_change(1_000, interval),
+            None,
+            "no release, no change"
+        );
+        history.observe("0.1.0", "0.1.1", 1_000, 1_000);
+        let warning = 1_000 + DAY;
+        assert_eq!(history.next_change(1_001, interval), Some(warning));
+        assert!(!history.clone().reminder_due(warning - 1, interval));
+        assert!(history.clone().reminder_due(warning, interval));
+        assert_eq!(
+            history.next_change(warning, interval),
+            Some(1_000 + 2 * DAY),
+            "a due reminder waits for the person, not for time"
+        );
+        history.reminded(warning);
+        let overdue = 1_000 + 2 * DAY;
+        assert_eq!(history.next_change(warning, interval), Some(overdue));
+        history.reminded(overdue);
+        let again = overdue + interval.seconds();
+        assert_eq!(history.next_change(overdue, interval), Some(again));
+        assert!(!history.clone().reminder_due(again - 1, interval));
+        assert!(history.clone().reminder_due(again, interval));
+        // A clock set back changes nothing until it passes the high-water time again.
+        assert_eq!(history.next_change(10, interval), Some(again));
     }
 
     #[test]

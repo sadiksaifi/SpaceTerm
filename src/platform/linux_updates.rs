@@ -139,6 +139,10 @@ impl UpdateAdapter for LinuxUpdates {
         Ok(())
     }
 
+    fn observe_clock_changes(&self, changed: Box<dyn Fn() + Send + Sync>) {
+        super::linux_clock_changes::observe(changed);
+    }
+
     fn check(&self) -> Result<(), UpdateError> {
         let shared = self.shared()?;
         let generation = shared.begin(Phase::Idle, Phase::Checking, UpdateError::Check)?;
