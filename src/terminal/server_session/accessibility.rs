@@ -431,6 +431,7 @@ impl Staging {
             .sum::<u32>();
         self.len = (self.len - splice.remove)
             .checked_add(inserted)
+            .filter(|len| *len <= wire::MAX_TOPOLOGY_ROWS)
             .ok_or(ServerError::Protocol)?;
         let first = self.split(splice.at);
         let last = self.split(end);
@@ -1457,6 +1458,55 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn a_topology_at_the_wire_bound_applies_and_one_row_more_is_refused() {
+        let generation = PresentationGeneration::default();
+        // Runs of at most 2^15 page rows from successive page nodes, one row of text each.
+        let document = |demand_generation, revision_number, rows: u32| {
+            let runs = (0..rows.div_ceil(1 << 15))
+                .map(|node| wire::Run {
+                    node_serial: u64::from(node) + 1,
+                    page_row: 0,
+                    count: (rows - node * (1 << 15)).min(1 << 15) as u16,
+                })
+                .collect();
+            revision(
+                header(demand_generation, revision_number, None),
+                vec![(0, 0, runs)],
+                (0..rows).map(|line| row(line, 1, "x")).collect(),
+                tail(0..rows.min(24)),
+            )
+        };
+
+        let mut client = Client::demanded();
+        let acks = client
+            .deliver(document(1, 1, wire::MAX_TOPOLOGY_ROWS), generation)
+            .unwrap();
+        assert_eq!(acks.len(), 1, "a document at the bound applies");
+        assert_eq!(
+            client.publish(generation).unwrap().rows().count(),
+            wire::MAX_TOPOLOGY_ROWS as usize
+        );
+
+        // A delta that inserts one row past the bound is refused at its splice.
+        let past = revision(
+            header(1, 2, Some(1)),
+            vec![(0, 0, vec![run(0, 1)])],
+            vec![row(0, 2, "y")],
+            tail(0..24),
+        );
+        assert!(past.iter().all(|message| message.validate().is_ok()));
+        assert_eq!(client.deliver(past, generation), Err(ServerError::Protocol));
+
+        let mut client = Client::demanded();
+        assert_eq!(
+            client.deliver(document(1, 1, wire::MAX_TOPOLOGY_ROWS + 1), generation),
+            Err(ServerError::Protocol),
+            "a complete document past the bound is refused"
+        );
+        assert!(client.publish(generation).is_none(), "nothing was applied");
     }
 
     #[test]

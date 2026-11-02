@@ -13,7 +13,7 @@
 //! a message that starts another revision of the current demand before the worker drained the
 //! first one's tail floods the channel.
 use spaceterm_server::connection::link::{ChannelEvent, ChannelSink};
-use spaceterm_server::pane::accessibility::{Header, Update};
+use spaceterm_server::pane::accessibility::{Header, MAX_REVISION_BYTES, Update};
 use spaceterm_server::protocol::{Frame, PaneEvent};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -97,6 +97,8 @@ struct Admission {
     revision: Option<Header>,
     /// Its tail is queued.
     complete: bool,
+    /// The bytes its messages carried so far, at most `MAX_REVISION_BYTES`.
+    bytes: usize,
 }
 
 enum Admit {
@@ -104,7 +106,8 @@ enum Admit {
     /// Of another demand generation, or while demand is ended: the worker would discard it
     /// unacknowledged.
     Discard,
-    /// Another revision before the worker drained the queued one: the server ignored its credit.
+    /// Another revision before the worker drained the queued one, which the server's one credit
+    /// forbids, or a revision larger than the wire allows.
     Flood,
 }
 
@@ -113,12 +116,18 @@ impl Admission {
         if self.generation != Some(update.header.demand_generation) {
             return Admit::Discard;
         }
-        match self.revision {
+        let queued = match self.revision {
             Some(header) if header != update.header || self.complete => return Admit::Flood,
-            _ => {}
+            Some(_) => self.bytes,
+            None => 0,
+        };
+        let bytes = queued.saturating_add(update.encoded_len());
+        if bytes > MAX_REVISION_BYTES {
+            return Admit::Flood;
         }
         self.revision = Some(update.header);
         self.complete = update.tail.is_some();
+        self.bytes = bytes;
         Admit::Queue
     }
 
@@ -127,6 +136,7 @@ impl Admission {
         if update.tail.is_some() && self.revision == Some(update.header) {
             self.revision = None;
             self.complete = false;
+            self.bytes = 0;
         }
     }
 }
@@ -763,6 +773,70 @@ mod tests {
         let mut applier = Generations::default();
         assert_eq!(drain_all(&channel, &mut applier).0, Ok(Flow::Open));
         assert!(applier.staged.is_empty());
+    }
+
+    #[test]
+    fn a_revision_over_the_wire_byte_bound_floods_however_the_worker_drains_it() {
+        use spaceterm_server::pane::accessibility::{CellSpan, RowUpdate};
+        // One message of a revision, without its tail, holding a row of 512 combined cells.
+        let cell = format!("e{}", "\u{301}".repeat(24));
+        let message = |revision, tail: bool| {
+            let ChannelEvent::Accessibility(mut update) = semantic(revision, tail) else {
+                unreachable!("a semantic message")
+            };
+            update.rows = vec![RowUpdate::new(
+                0,
+                revision,
+                false,
+                cell.repeat(512),
+                (0..512)
+                    .map(|column| CellSpan {
+                        column,
+                        width: 1,
+                        bytes: cell.len() as u16,
+                    })
+                    .collect::<Vec<_>>(),
+            )];
+            update
+        };
+        let bytes = message(1, false).encoded_len();
+        assert!(
+            bytes > 20 * 1024
+                && bytes <= spaceterm_server::protocol::limits::MAX_ACCESSIBILITY_BYTES
+        );
+        let within = MAX_REVISION_BYTES / bytes;
+        // The worker drains as messages arrive, so nothing waits in the queue; the bound counts
+        // the whole revision all the same.
+        let fill = |inbox: &Inbox, revision, count: usize| {
+            for sent in 0..count {
+                inbox.deliver(ChannelEvent::Accessibility(message(revision, false)));
+                if sent % 256 == 255 {
+                    assert_eq!(drain(inbox).0, Ok(Flow::Open), "message {sent} is within");
+                }
+            }
+        };
+
+        let (channel, _) = inbox();
+        fill(&channel, 1, within);
+        assert_eq!(
+            drain(&channel).0,
+            Ok(Flow::Open),
+            "the bound itself is allowed"
+        );
+        channel.deliver(ChannelEvent::Accessibility(message(1, false)));
+        assert_eq!(
+            drain(&channel).0,
+            Err(Overflow),
+            "one message past the bound is a protocol violation"
+        );
+
+        // A revision's tail starts the next revision's count from zero.
+        let (channel, _) = inbox();
+        fill(&channel, 1, within - 1);
+        channel.deliver(ChannelEvent::Accessibility(message(1, true)));
+        assert_eq!(drain(&channel).0, Ok(Flow::Open));
+        fill(&channel, 2, within);
+        assert_eq!(drain(&channel).0, Ok(Flow::Open));
     }
 
     #[test]

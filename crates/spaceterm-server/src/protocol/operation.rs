@@ -20,17 +20,11 @@ pub enum Operation {
         attachment: crate::attachments::Attachment,
     },
     /// Gives up control of the channel's Pane. The channel closes.
-    Release {
-        channel: Channel,
-    },
+    Release { channel: Channel },
     /// Closes the channel's Pane and ends its Terminal Session.
-    Close {
-        channel: Channel,
-    },
+    Close { channel: Channel },
     /// Clears only this Pane's screen and Scrollback.
-    ClearScrollback {
-        channel: Channel,
-    },
+    ClearScrollback { channel: Channel },
     Style {
         channel: Channel,
         style: PresentationStyle,
@@ -45,9 +39,7 @@ pub enum Operation {
     },
     /// The recorded outcome of an Original Operation, without dispatching it. The reply waits
     /// like `Mutate`'s, and refuses `Missing` when the server recorded no such operation.
-    Resolve {
-        sequence: u64,
-    },
+    Resolve { sequence: u64 },
     /// Reads `rows` Scrollback rows from position `start` of history `epoch` (see
     /// [`super::screen::History`]). The page leaves out rows the server already discarded, so it
     /// may start later. An ended epoch, or history hidden by the alternate screen, is refused as
@@ -102,13 +94,9 @@ pub enum Operation {
         session: crate::hierarchy::Id,
     },
     /// The receipt of a run, without resending its input.
-    RunStatus {
-        run: RunId,
-    },
+    RunStatus { run: RunId },
     /// Retires a settled run's receipt.
-    RunAcknowledge {
-        run: RunId,
-    },
+    RunAcknowledge { run: RunId },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,10 +276,7 @@ impl Operation {
 impl ReplyBody {
     /// Bulk replies travel at L2 in chunks of at most [`limits::BULK_CHUNK_BYTES`].
     pub fn bulk(&self) -> bool {
-        matches!(
-            self,
-            Self::Page(_) | Self::Graphics(_)
-        )
+        matches!(self, Self::Page(_) | Self::Graphics(_))
     }
 
     pub fn validate(&self) -> Result<(), Fatal> {

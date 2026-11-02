@@ -17,6 +17,16 @@ pub const UPDATE_TARGET_BYTES: usize = 32 * 1024;
 pub const MAX_CELL_TEXT_BYTES: usize = (1 + 64) * 4;
 /// The most text one row carries across its fragments: every column at the largest cell text.
 pub const MAX_ROW_TEXT_BYTES: usize = super::MAX_COLUMNS as usize * MAX_CELL_TEXT_BYTES;
+/// The most rows a revision's topology holds. A server's document holds the 10,000-row
+/// Scrollback cap, the part of one history page beyond it that Ghostty trims a whole page at a
+/// time (about 15,500 rows at the narrowest Pane, 2 columns), and at most
+/// [`super::MAX_ROWS`] screen rows. This bound is twice that, so a client can refuse more without
+/// refusing a real document.
+pub const MAX_TOPOLOGY_ROWS: u32 = 65_536;
+/// The most bytes a revision's messages carry, channels excluded. A document's text and spans
+/// take at most about 1.25 bytes for each byte of the 50 MB of pages Ghostty keeps for Scrollback,
+/// plus its screen. This bound is twice that.
+pub const MAX_REVISION_BYTES: usize = 128 * 1024 * 1024;
 
 /// Starts or ends a client's semantic demand for one channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,6 +168,12 @@ pub struct Selection {
 }
 
 impl Update {
+    /// The bytes this message takes on the wire without its channel, which
+    /// [`MAX_REVISION_BYTES`] counts.
+    pub fn encoded_len(&self) -> usize {
+        encoded_len(self)
+    }
+
     /// Checks the bounds one message can show on its own. The client checks the header against
     /// its demand generation and applied revision, lines against its topology, fragments across
     /// messages, and the order of messages within a revision.
