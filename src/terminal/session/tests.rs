@@ -749,27 +749,44 @@ fn a_new_subscription_presents_output_received_while_detached() {
     runtime.shutdown_and_join();
 }
 
+/// A subscription builds no semantic model until its client demands one. A replacement
+/// subscription that demands semantics receives the current document without new output.
 #[test]
-fn a_replacement_subscription_receives_accessibility_without_new_output() {
+fn a_replacement_subscription_receives_accessibility_on_demand_without_new_output() {
     fn receive_model(
-        receiver: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
-    ) -> Arc<TerminalAccessibilityModel> {
-        let (reply, result) = mpsc::sync_channel(1);
-        thread::spawn(move || {
-            let _ = reply.send(receiver.recv_blocking());
-        });
-        result
-            .recv_timeout(Duration::from_secs(1))
-            .expect("accessibility seed must arrive without terminal output")
-            .unwrap()
+        receiver: &async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
+        timeout: Duration,
+    ) -> Option<Arc<TerminalAccessibilityModel>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(model) = receiver.try_recv() {
+                return Some(model);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
     }
+    let is_screen = |event: &TerminalSessionEvent| matches!(event, TerminalSessionEvent::Screen(_));
     let (result, _, _) = start_scripted_session(ScriptedPtyOptions::default());
+    // Starting the session already received its first screen.
     let (mut runtime, events, accessibility) = result.unwrap();
-    let first = receive_model(accessibility);
+    assert!(
+        receive_model(&accessibility, Duration::from_millis(300)).is_none(),
+        "a subscription without demand builds no model"
+    );
+    let demand = runtime.accessibility_demand_sender().unwrap();
+    demand.request();
+    let first = receive_model(&accessibility, Duration::from_secs(1))
+        .expect("demand delivers a model without terminal output");
     drop(events);
 
     let subscription = runtime.subscribe();
-    let second = receive_model(subscription.accessibility);
+    receive_event(&subscription.events, "the replacement's screen", is_screen);
+    demand.request();
+    let second = receive_model(&subscription.accessibility, Duration::from_secs(1))
+        .expect("the replacement's demand delivers a model without terminal output");
     assert_eq!(first.text(), second.text());
     runtime.shutdown_and_join();
 }
@@ -2092,9 +2109,8 @@ fn queued_input_runs_before_due_scrollback_compression() {
     worker.finish();
 }
 
-/// A server Pane keeps no model without demand, so it drops the model a subscription publishes
-/// before demand starts. Demand that starts later publishes the current model again, even though
-/// nothing changed since.
+/// Hide ends demand and keeps the store. Demand that starts again publishes the current model
+/// again, even though nothing changed since, because the client side may have dropped it.
 #[test]
 fn new_demand_publishes_the_current_model_again() {
     let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
@@ -2117,15 +2133,21 @@ fn new_demand_publishes_the_current_model_again() {
         }
         panic!("accessibility work must finish within the budget")
     };
-    let seed = model(&mut worker, Command::PublishAccessibility).expect("the seed publishes");
-    assert!(seed.text().contains("unchanged"));
+    let demand = |worker: &mut TerminalWorker| {
+        assert!(input.enqueue_accessibility_demand(Instant::now()));
+        assert!(worker.process_command(Command::AccessibilityDemand));
+        let command = worker.receive_next_command();
+        assert!(matches!(command, Some(Command::PublishAccessibility)));
+        command.unwrap()
+    };
+    let command = demand(&mut worker);
+    let first = model(&mut worker, command).expect("demand publishes a model");
+    assert!(first.text().contains("unchanged"));
 
-    assert!(input.enqueue_accessibility_demand(Instant::now()));
-    assert!(worker.process_command(Command::AccessibilityDemand));
-    let command = worker.receive_next_command();
-    assert!(matches!(command, Some(Command::PublishAccessibility)));
-    let again = model(&mut worker, command.unwrap()).expect("new demand publishes a model");
-    assert_eq!(again.text(), seed.text());
+    assert!(worker.process_command(Command::EndAccessibilityDemand(Instant::now())));
+    let command = demand(&mut worker);
+    let again = model(&mut worker, command).expect("new demand publishes a model");
+    assert_eq!(again.text(), first.text());
     worker.finish();
 }
 
@@ -2162,9 +2184,6 @@ fn accessibility_demand_binds_to_the_last_published_screen_without_flushing_the_
     let TerminalSessionEvent::Screen(published) = receiver.try_recv().unwrap() else {
         panic!("the first screen publishes")
     };
-    worker
-        .schedules
-        .mark_accessibility_presented(Instant::now(), true);
     worker
         .schedules
         .mark_presented(Instant::now() + Duration::from_secs(1));
@@ -2229,8 +2248,6 @@ fn continuous_output(demanded: bool, appending: bool, millis: u64) -> Continuous
     let start = Instant::now();
     let input = ScheduleInput::default();
     worker.schedules = WorkerSchedules::new(start, input.clone());
-    // Ends the seed every new schedule requires, so only demand builds models.
-    worker.schedules.mark_accessibility_presented(start, true);
     if demanded {
         assert!(input.enqueue_accessibility_demand(start));
         worker.schedules.accessibility_demand_received(start);
@@ -2304,6 +2321,138 @@ fn a_semantic_update_completes_while_paced_screens_publish() {
     assert!(first < 100, "the first model completed at {first} ms");
 }
 
+/// Lines appended faster than a capture's steps used to restart the capture after every line, so
+/// a demanded Pane received no model until output paused. The first model now completes within
+/// the budget of 100 ms plus one frame while a line arrives every millisecond.
+#[test]
+fn a_semantic_update_completes_while_lines_are_appended() {
+    let demanded = continuous_output(true, true, 300);
+
+    let first = demanded
+        .first_model
+        .expect("a model completes during appending output");
+    assert!(first < 117, "the first model completed at {first} ms");
+}
+
+/// A capture finishes against what it observed when it began. Output that arrives while it runs
+/// schedules the next capture, so it reaches a model although no output follows it.
+#[test]
+fn output_during_a_capture_reaches_the_next_model_without_more_output() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let history: Vec<u8> = (0..3_000)
+        .flat_map(|line| format!("history {line}\r\n").into_bytes())
+        .collect();
+    assert!(worker.feed_test_output(vec![history]));
+    let (events, _screens) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events.into();
+    let (accessibility, models) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    let start = Instant::now();
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(start, input.clone());
+    assert!(input.enqueue_accessibility_demand(start));
+    worker.schedules.accessibility_demand_received(start);
+    let finish = |worker: &mut TerminalWorker| {
+        for _ in 0..128 {
+            if let Ok(model) = models.try_recv() {
+                return model;
+            }
+            let command = worker
+                .take_accessibility_continuation()
+                .expect("the capture continues until it completes");
+            assert!(worker.process_command(command));
+        }
+        panic!("the capture exceeded 128 steps")
+    };
+
+    assert!(worker.process_command(Command::PublishAccessibility));
+    assert!(
+        worker.schedules.accessibility_pending(),
+        "the history takes several steps"
+    );
+    // A paced screen publishes the new line while the capture runs.
+    worker.emulator.feed(b"\r\nlate line");
+    assert!(worker.publish_screen());
+    let first = finish(&mut worker);
+    assert!(first.text().contains("history 2999"));
+    assert!(
+        !first.text().contains("late line"),
+        "the capture keeps the topology it began with"
+    );
+
+    assert!(
+        worker
+            .schedules
+            .accessibility_presentation_due(Instant::now() + Duration::from_secs(1)),
+        "the late line schedules the next capture"
+    );
+    assert!(worker.process_command(Command::PublishAccessibility));
+    assert!(finish(&mut worker).text().ends_with("late line"));
+    worker.finish();
+}
+
+/// The server keeps a semantic store only while a client requests semantics: a subscription and
+/// its output build none, and releasing demand drops it.
+#[test]
+fn a_terminal_session_holds_no_semantic_store_before_demand_or_after_its_release() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _screens) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events.into();
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(Instant::now(), input.clone());
+    let (accessibility, models) = async_channel::bounded(1);
+    let (clipboard, _clipboard) = async_channel::bounded(1);
+    assert!(worker.process_command(Command::Subscribe {
+        accessibility,
+        clipboard,
+    }));
+    // Runs every command due within the next second, with semantic continuations.
+    let run_due = |worker: &mut TerminalWorker| {
+        for _ in 0..256 {
+            let due = worker
+                .schedules
+                .take_due(Instant::now() + Duration::from_secs(1))
+                .or_else(|| worker.take_accessibility_continuation());
+            let Some(command) = due else {
+                return;
+            };
+            assert!(worker.process_command(command));
+        }
+    };
+    let output = |worker: &mut TerminalWorker, text: &str| {
+        assert!(worker.feed_test_output(vec![text.as_bytes().to_vec()]));
+        assert!(worker.publish_screen());
+    };
+
+    output(&mut worker, "before demand\r\n");
+    run_due(&mut worker);
+    assert!(
+        !worker.emulator.retains_semantics(),
+        "no store before demand"
+    );
+    assert!(models.try_recv().is_err());
+
+    assert!(input.enqueue_accessibility_demand(Instant::now()));
+    assert!(worker.process_command(Command::AccessibilityDemand));
+    run_due(&mut worker);
+    assert!(worker.emulator.retains_semantics());
+    assert!(models.try_recv().unwrap().text().contains("before demand"));
+
+    assert!(worker.process_command(Command::ReleaseAccessibility(Instant::now())));
+    assert!(
+        !worker.emulator.retains_semantics(),
+        "releasing demand drops the store"
+    );
+    output(&mut worker, "after release\r\n");
+    run_due(&mut worker);
+    assert!(
+        !worker.emulator.retains_semantics(),
+        "no store after release"
+    );
+    assert!(models.try_recv().is_err());
+    worker.finish();
+}
+
 #[test]
 fn hidden_output_builds_one_latest_presentation_only_after_restore() {
     let (_command_tx, commands) = mpsc::channel();
@@ -2311,6 +2460,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let schedule_input = ScheduleInput::default();
     let mut worker = TerminalWorker {
         metadata_state: TerminalSessionMetadataState::default(),
         native_pty: direct_native_pty(records),
@@ -2324,7 +2474,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
         terminal_input_focused: true,
         focus_reporting_enabled: false,
         held_keys: HeldKeys::default(),
-        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        schedules: WorkerSchedules::new(Instant::now(), schedule_input.clone()),
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
@@ -2345,6 +2495,9 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
         panic!("restoration must publish the latest hidden state")
     };
     assert!(screen_text(&screen).contains("hidden latest"));
+    // Showing a Pane requests the demand that hiding it ended.
+    assert!(schedule_input.enqueue_accessibility_demand(Instant::now()));
+    assert!(worker.process_command(Command::AccessibilityDemand));
     assert!(matches!(
         worker.receive_next_command(),
         Some(Command::PublishAccessibility)
@@ -2502,12 +2655,13 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
 }
 
 #[test]
-fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
+fn synchronized_output_between_accessibility_chunks_preserves_the_demanded_update() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let schedule_input = ScheduleInput::default();
     let mut worker = TerminalWorker {
         metadata_state: TerminalSessionMetadataState::default(),
         native_pty: direct_native_pty(records),
@@ -2521,12 +2675,15 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
         terminal_input_focused: true,
         focus_reporting_enabled: false,
         held_keys: HeldKeys::default(),
-        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        schedules: WorkerSchedules::new(Instant::now(), schedule_input.clone()),
         osc52_filter: Osc52Filter::default(),
         permission_requests: PermissionRequestFilter::default(),
         clipboard: WorkerClipboard::default(),
         progress: Default::default(),
     };
+    let demanded_at = Instant::now();
+    assert!(schedule_input.enqueue_accessibility_demand(demanded_at));
+    worker.schedules.accessibility_demand_received(demanded_at);
     worker.emulator.feed(b"seed");
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
@@ -2550,7 +2707,7 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
             break;
         }
         let Some(command) = worker.take_accessibility_continuation() else {
-            panic!("the eager accessibility seed must survive synchronized output")
+            panic!("the demanded update must survive synchronized output")
         };
         assert!(worker.process_command(command));
     }

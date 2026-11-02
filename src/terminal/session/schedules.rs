@@ -243,9 +243,8 @@ impl WorkerSchedules {
         self.accessibility_presentation.take_due(now)
     }
 
-    pub(super) fn mark_accessibility_presented(&mut self, now: Instant, complete: bool) {
-        self.accessibility_presentation
-            .mark_presented(now, complete);
+    pub(super) fn mark_accessibility_presented(&mut self, now: Instant) {
+        self.accessibility_presentation.mark_presented(now);
     }
     pub(super) fn update_line(
         &mut self,
@@ -490,9 +489,10 @@ impl WorkerSchedules {
     }
 }
 
+/// Paces semantic captures. Only demand builds a semantic model, so a Terminal Session holds no
+/// semantic store before a client requests one.
 struct AccessibilityPresentationSchedule {
     pending: bool,
-    seed_required: bool,
     not_before: Instant,
     demand_request: Option<Instant>,
 }
@@ -501,14 +501,13 @@ impl AccessibilityPresentationSchedule {
     fn new(now: Instant) -> Self {
         Self {
             pending: false,
-            seed_required: true,
             not_before: now,
             demand_request: None,
         }
     }
 
     fn note_screen_published(&mut self) {
-        if self.seed_required || self.demand_request.is_some() {
+        if self.demand_request.is_some() {
             self.pending = true;
         }
     }
@@ -523,16 +522,13 @@ impl AccessibilityPresentationSchedule {
         was_inactive
     }
 
-    fn mark_presented(&mut self, now: Instant, complete: bool) {
+    fn mark_presented(&mut self, now: Instant) {
         self.pending = false;
-        if complete {
-            self.seed_required = false;
-        }
         self.not_before = now + ACCESSIBILITY_PRESENTATION_INTERVAL;
     }
 
     fn end_demand(&mut self) {
-        self.pending = self.seed_required && self.pending;
+        self.pending = false;
         self.demand_request = None;
     }
 
@@ -543,7 +539,6 @@ impl AccessibilityPresentationSchedule {
 
     fn disable(&mut self) {
         self.pending = false;
-        self.seed_required = false;
         self.demand_request = None;
     }
 
@@ -1129,22 +1124,21 @@ mod tests {
     }
 
     #[test]
-    fn accessibility_presentation_is_seeded_then_paced_only_during_native_demand() {
+    fn accessibility_presentation_is_paced_only_during_native_demand() {
         let start = Instant::now();
         let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
         schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
-
-        schedules.note_screen_published();
-        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
+        assert!(
+            !schedules.accessibility_presentation_due(start + Duration::from_secs(1)),
+            "a subscription without demand builds no model"
+        );
 
         schedules
             .input
             .enqueue_accessibility_demand(start + Duration::from_secs(1));
         schedules.accessibility_demand_received(start + Duration::from_secs(1));
         assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
-        schedules.mark_accessibility_presented(start + Duration::from_secs(1), true);
+        schedules.mark_accessibility_presented(start + Duration::from_secs(1));
 
         schedules.note_screen_published();
         schedules.note_screen_published();
@@ -1163,15 +1157,12 @@ mod tests {
         let input = ScheduleInput::default();
         let mut schedules = WorkerSchedules::new(start, input.clone());
         schedules.update_line(start, Ok(LineMode::UNKNOWN));
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
 
         assert!(input.enqueue_accessibility_demand(start));
         assert!(!input.enqueue_accessibility_demand(start + Duration::from_millis(400)));
         schedules.accessibility_demand_received(start + Duration::from_millis(400));
         assert!(schedules.accessibility_presentation_due(start + Duration::from_millis(400)));
-        schedules.mark_accessibility_presented(start + Duration::from_millis(400), true);
+        schedules.mark_accessibility_presented(start + Duration::from_millis(400));
 
         schedules.note_screen_published();
         assert!(schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
@@ -1179,13 +1170,12 @@ mod tests {
     }
 
     #[test]
-    fn restoring_visibility_reuses_a_complete_accessibility_cache_until_demanded() {
+    fn restoring_visibility_builds_no_model_until_demanded() {
         let start = Instant::now();
         let input = ScheduleInput::default();
         let mut schedules = WorkerSchedules::new(start, input.clone());
         schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
+        assert!(!schedules.accessibility_presentation_due(start));
 
         schedules.set_presentable(false, start + ACCESSIBILITY_PRESENTATION_INTERVAL);
         assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(1)));
@@ -1197,34 +1187,14 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_accessibility_seed_survives_a_new_screen_generation() {
-        let start = Instant::now();
-        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, false);
-
-        schedules.note_screen_published();
-        assert!(!schedules.accessibility_presentation_due(
-            start + ACCESSIBILITY_PRESENTATION_INTERVAL - Duration::from_micros(1)
-        ));
-        assert!(
-            schedules.accessibility_presentation_due(start + ACCESSIBILITY_PRESENTATION_INTERVAL)
-        );
-    }
-
-    #[test]
     fn ending_accessibility_demand_stops_refreshes_until_a_later_demand() {
         let start = Instant::now();
         let input = ScheduleInput::default();
         let mut schedules = WorkerSchedules::new(start, input.clone());
-        schedules.note_screen_published();
-        assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
         assert!(input.enqueue_accessibility_demand(start));
         schedules.accessibility_demand_received(start);
         assert!(schedules.accessibility_presentation_due(start));
-        schedules.mark_accessibility_presented(start, true);
+        schedules.mark_accessibility_presented(start);
 
         schedules.end_accessibility_demand(start + Duration::from_millis(1));
         schedules.note_screen_published();
@@ -1241,8 +1211,6 @@ mod tests {
         let start = Instant::now();
         let input = ScheduleInput::default();
         let mut schedules = WorkerSchedules::new(start, input.clone());
-        schedules.note_screen_published();
-        schedules.mark_accessibility_presented(start, true);
 
         let ended_at = start + Duration::from_millis(1);
         assert!(input.enqueue_accessibility_demand(ended_at + Duration::from_millis(1)));
