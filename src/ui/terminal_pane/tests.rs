@@ -4082,7 +4082,8 @@ fn each_painted_grid_counts_once_as_a_painted_frame(cx: &mut TestAppContext) {
     for generation in 1..=10 {
         let changed = Arc::make_mut(&mut screen);
         changed.generation = crate::terminal::PresentationGeneration::test(10 + generation);
-        Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].text = generation.to_string();
+        Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].text =
+            generation.to_string().into();
         pane.update(cx, |pane, cx| {
             pane.handle_event(TerminalSessionEvent::Screen(screen.clone()), cx);
             cx.notify();

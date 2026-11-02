@@ -1444,7 +1444,7 @@ fn a_short_burst_after_idle_reaches_the_first_frame_after_a_busy_worker() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events: reader_event_rx,
         events: events.into(),
         accessibility,

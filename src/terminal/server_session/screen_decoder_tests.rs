@@ -1062,7 +1062,7 @@ fn a_new_appearance_reaches_the_next_screen() {
         ..ScreenUpdate::default()
     };
     let generation = PresentationGeneration::test;
-    let mut decoder = ScreenDecoder::default();
+    let mut decoder = ScreenDecoder::new(Arc::default());
     let mut presenter = Presenter::default();
     let decoded = decoder.apply(1, None, keyframe, None).unwrap();
     let mut appearance = crate::terminal::test_terminal_appearance_update();
