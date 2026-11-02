@@ -886,7 +886,7 @@ mod tests {
         crate::terminal::accessibility::Probes,
     ) {
         let state = demanded();
-        let fetcher = Fetcher::new(lease());
+        let fetcher = Fetcher::new(lease(), Arc::default());
         let id = |line: usize| wire::RowId {
             screen: wire::Screen::Primary,
             screen_generation: 1,
