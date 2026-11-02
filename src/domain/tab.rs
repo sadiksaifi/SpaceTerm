@@ -88,6 +88,26 @@ pub(crate) enum SplitAxis {
     Vertical,
 }
 
+/// The smallest room Panes need when the first stands alone and each later one splits the place
+/// of an earlier one, named by its index in `placements` plus one, taking that one's `edge`. A
+/// merge places another Tab's Panes this way, every Pane at `minimum`.
+pub(crate) fn placed_minimum_size(
+    minimum: PaneSize,
+    divider_size: f32,
+    placements: &[(usize, PaneEdge)],
+) -> Result<PaneSize, PaneError> {
+    validate_divider_size(divider_size)?;
+    let mut root = PaneNode::Leaf(PaneId::from_raw(0));
+    for (index, (beside, edge)) in placements.iter().enumerate() {
+        let next = index as u64 + 1;
+        let beside = PaneId::from_raw(*beside as u64);
+        root = root
+            .with_split(beside, PaneId::from_raw(next), SplitId::from_raw(next), *edge)
+            .ok_or(PaneError::PaneNotFound(beside))?;
+    }
+    root.minimum_size(minimum, divider_size)
+}
+
 /// What a Pane released over another Pane does.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaneDrop {
@@ -1787,6 +1807,30 @@ mod tests {
             ],
             [true, false, true, true, false, false],
             "two 100 wide Panes beside 100 wide content need 302, and beside 201 wide content 403"
+        );
+    }
+
+    #[test]
+    fn placed_minimum_size_should_follow_the_placements_not_an_arrangement() {
+        let minimum = size(100.0, 50.0);
+
+        assert_eq!(
+            [
+                placed_minimum_size(minimum, DIVIDER_SIZE, &[]),
+                placed_minimum_size(minimum, DIVIDER_SIZE, &[(0, PaneEdge::Right)]),
+                placed_minimum_size(
+                    minimum,
+                    DIVIDER_SIZE,
+                    &[(0, PaneEdge::Right), (1, PaneEdge::Bottom)]
+                ),
+                placed_minimum_size(minimum, DIVIDER_SIZE, &[(4, PaneEdge::Right)]),
+            ],
+            [
+                Ok(minimum),
+                Ok(size(201.0, 50.0)),
+                Ok(size(201.0, 101.0)),
+                Err(PaneError::PaneNotFound(PaneId::new(4))),
+            ]
         );
     }
 

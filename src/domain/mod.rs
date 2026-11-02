@@ -6,6 +6,7 @@ pub(crate) mod worktree;
 
 pub(crate) use crate::close_confirmation::{ClosePaneOutcome, CloseTabOutcome};
 pub(crate) use tab::{
+    placed_minimum_size,
     FocusDirection, PaneDrop, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneSizeError, PaneTreeRef, SplitAxis,
     SplitId, Tab, TabId, ZoomState,
 };

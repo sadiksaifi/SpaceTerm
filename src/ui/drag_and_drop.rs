@@ -1126,6 +1126,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let from = self.arriving.take().or_else(|| self.shape(items, cx));
         *self = Self {
             known: Some(ids.to_vec()),
+            joinable: self.joinable,
             ..Self::new(self.axis)
         };
         if let Some(from) = from {
@@ -1257,7 +1258,6 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let Some(lift) = self.lift.as_mut() else {
             return false;
         };
-        lift.gap_held = hold_gap;
         let current = ids
             .iter()
             .position(|candidate| *candidate == lift.id)
@@ -1271,7 +1271,8 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let origin = copy.map_or(pointer - lift.grab, |copy| {
             confine(axis, items.bounds(), copy, pointer - lift.grab)
         });
-        let landing = if hold_gap {
+        // A hold keeps the gap the pointer opened as it reached the item it can join.
+        let landing = if hold_gap && lift.gap_held {
             lift.landing
         } else {
             current.zip(copy).map(|(current, copy)| Landing {
@@ -1287,6 +1288,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 len: ids.len(),
             })
         };
+        lift.gap_held = hold_gap;
         lift.pointer = Some(pointer);
         let moved = lift.origin != Some(origin);
         lift.origin = Some(origin);
@@ -1303,6 +1305,11 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             self.open_gap(ids, &slots, cx);
         }
         moved || relanded
+    }
+
+    /// Where the pointer carrying the lifted item last stood, which autoscroll keeps following.
+    pub(crate) fn lifted_pointer(&self) -> Option<Point<Pixels>> {
+        self.lift.as_ref().and_then(|lift| lift.pointer)
     }
 
     /// A strip whose dragged item can join another item. Its pointer decides where the item
@@ -1326,6 +1333,10 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
     ) -> Option<Id> {
         let axis = self.axis;
         let lift = self.lift.as_ref()?;
+        // Only an item the strip shows can be joined; the strip clips the rest.
+        if !items.bounds().contains(&pointer) {
+            return None;
+        }
         let faces = self.item_bounds(items, ids);
         let slots = painted_item_bounds(items);
         let current = ids
@@ -2083,6 +2094,18 @@ fn carries(ticket: u64, cx: &App) -> bool {
 mod tests {
     use super::*;
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
+
+    #[gpui::test]
+    fn taking_another_place_should_keep_a_strip_joinable(cx: &mut TestAppContext) {
+        let mut strip = ReorderableStrip::<u64>::joinable(Axis::Horizontal);
+
+        cx.update(|cx| strip.take_place(&ScrollHandle::new(), &[1, 2], cx));
+
+        assert!(
+            strip.joinable,
+            "another Worktree's Tabs still land by pointer and join each other"
+        );
+    }
 
     struct Payload;
 

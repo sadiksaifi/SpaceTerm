@@ -61,7 +61,7 @@ struct WorkspaceCaptionControls {
 }
 
 /// The empty base surface between Split Panes, which every Pane Layout calculation reserves.
-fn pane_gap(cx: &App) -> f32 {
+pub(super) fn pane_gap(cx: &App) -> f32 {
     f32::from(
         super::workspace_frame::WorkspaceFrame::for_appearance(super::appearance::chrome(cx), cx)
             .pane_gap(),
@@ -1355,10 +1355,6 @@ impl TabView {
         self.pane_layout_size
     }
 
-    /// The smallest room this Tab's Pane Layout needs, as another Tab's edge must offer it.
-    pub(crate) fn minimum_layout_size(&self, cx: &App) -> Option<PaneSize> {
-        self.tab.minimum_size(pane_gap(cx)).ok()
-    }
 
     /// The Pane drawn under `pointer` and where it is drawn, while no Pane is zoomed.
     fn pane_under(&self, pointer: Point<Pixels>) -> Option<(PaneId, Bounds<Pixels>)> {
@@ -4648,7 +4644,7 @@ fn render_pane_corner_surface(
 }
 
 /// The edge of its source Pane a Pane on the server's `side` takes.
-fn side_edge(side: spaceterm_server::hierarchy::Side) -> PaneEdge {
+pub(super) fn side_edge(side: spaceterm_server::hierarchy::Side) -> PaneEdge {
     use spaceterm_server::hierarchy::Side;
     match side {
         Side::Right => PaneEdge::Right,
