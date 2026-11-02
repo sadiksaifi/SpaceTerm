@@ -357,6 +357,10 @@ struct Staging {
     segments: Vec<Segment>,
     len: u32,
     spliced: bool,
+    /// The messages and splices staged so far. Each splice costs work linear in `segments`, so
+    /// their count is bounded by the messages, which the inbox bounds.
+    messages: usize,
+    splices: usize,
     /// Set by the first row, after which the topology is final.
     lines: Option<Lines>,
     rows: Vec<AccessibilityRetainedRow>,
@@ -395,6 +399,8 @@ impl Staging {
             base,
             len,
             spliced: false,
+            messages: 0,
+            splices: 0,
             lines: None,
             rows: Vec::new(),
             fragment: None,
@@ -407,6 +413,9 @@ impl Staging {
         splices: Vec<wire::Splice>,
         rows: Vec<wire::RowUpdate>,
     ) -> Result<(), ServerError> {
+        self.messages += 1;
+        self.splices += splices.len();
+        check(self.splices <= wire::MAX_PLANNED_SPLICES + self.messages)?;
         for splice in splices {
             // Every splice of a revision precedes its rows.
             check(self.lines.is_none())?;
@@ -1402,6 +1411,14 @@ mod tests {
                         ..delta(Vec::new(), Vec::new(), tail(0..3))
                     },
                 ],
+            ),
+            (
+                "more splices than the plan and one continuation per message",
+                vec![delta(
+                    vec![splice(0, 1, vec![run(0, 1)]); wire::MAX_PLANNED_SPLICES + 2],
+                    vec![row(0, 2, "z")],
+                    tail(0..3),
+                )],
             ),
             (
                 "a delta that keeps rows of another screen",
