@@ -657,21 +657,27 @@ impl<T> Tab<T> {
                 .is_ok()
     }
 
-    /// Whether one more Pane on `edge` of `beside` leaves every Pane its minimum size in
+    /// Whether content at least `incoming` in size, such as one Pane or another Tab's Pane
+    /// Layout, fits on `edge` of `beside` with every Pane keeping its minimum size in
     /// `available`, once Split ratios fit.
     pub(crate) fn can_insert(
         &self,
         beside: PaneId,
         edge: PaneEdge,
+        incoming: PaneSize,
         available: PaneSize,
         divider_size: f32,
     ) -> bool {
         let pane_id = PaneId::from_raw(self.next_pane_id);
         let split_id = SplitId::from_raw(self.next_split_id);
+        let incoming = PaneSize {
+            width: incoming.width.max(self.minimum_pane_size.width),
+            height: incoming.height.max(self.minimum_pane_size.height),
+        };
         self.root
             .with_split(beside, pane_id, split_id, edge)
             .is_some_and(|root| {
-                root.minimum_size(self.minimum_pane_size, divider_size)
+                root.minimum_size_with(self.minimum_pane_size, (pane_id, incoming), divider_size)
                     .and_then(|required| ensure_space(available, required))
                     .is_ok()
             })
@@ -1249,6 +1255,31 @@ impl PaneNode {
         }
     }
 
+    /// The minimum size with every leaf at `leaf_minimum`, except the one leaf `exception` names,
+    /// which needs its own size.
+    fn minimum_size_with(
+        &self,
+        leaf_minimum: PaneSize,
+        exception: (PaneId, PaneSize),
+        divider_size: f32,
+    ) -> Result<PaneSize, PaneError> {
+        match self {
+            Self::Leaf(pane_id) if *pane_id == exception.0 => Ok(exception.1),
+            Self::Leaf(_) => Ok(leaf_minimum),
+            Self::Split {
+                axis,
+                first,
+                second,
+                ..
+            } => combined_minimum(
+                first.minimum_size_with(leaf_minimum, exception, divider_size)?,
+                second.minimum_size_with(leaf_minimum, exception, divider_size)?,
+                *axis,
+                divider_size,
+            ),
+        }
+    }
+
     fn split(&self, target: SplitId) -> Option<SplitNodeRef<'_>> {
         match self {
             Self::Leaf(_) => None,
@@ -1743,15 +1774,19 @@ mod tests {
         tab.insert_pane(PaneId::new(1), PaneEdge::Right, |_| ())
             .unwrap();
 
+        let pane = size(100.0, 50.0);
+        let two_wide = size(201.0, 50.0);
         assert_eq!(
             [
-                tab.can_insert(PaneId::new(1), PaneEdge::Right, size(302.0, 50.0), DIVIDER_SIZE),
-                tab.can_insert(PaneId::new(1), PaneEdge::Right, size(301.0, 50.0), DIVIDER_SIZE),
-                tab.can_insert(PaneId::new(1), PaneEdge::Bottom, size(201.0, 101.0), DIVIDER_SIZE),
-                tab.can_insert(PaneId::new(9), PaneEdge::Right, size(900.0, 900.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(1), PaneEdge::Right, pane, size(302.0, 50.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(1), PaneEdge::Right, pane, size(301.0, 50.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(1), PaneEdge::Bottom, pane, size(201.0, 101.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(1), PaneEdge::Right, two_wide, size(403.0, 50.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(1), PaneEdge::Right, two_wide, size(402.0, 50.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(9), PaneEdge::Right, pane, size(900.0, 900.0), DIVIDER_SIZE),
             ],
-            [true, false, true, false],
-            "three 100 wide Panes need 302 with two dividers"
+            [true, false, true, true, false, false],
+            "two 100 wide Panes beside 100 wide content need 302, and beside 201 wide content 403"
         );
     }
 

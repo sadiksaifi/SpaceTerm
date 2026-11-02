@@ -47,6 +47,10 @@ pub(crate) const LIFTED_OPACITY: f32 = 0.95;
 /// The selection rests on one `Row` of an item. A strip whose items are single rows uses `()`.
 pub(crate) struct ReorderableStrip<Id, Row = ()> {
     axis: Axis,
+    /// Whether a dragged item can join another item, so the pointer rather than the lifted
+    /// copy's center decides where it lands. Past either end the copy stays held over the end
+    /// item, where only the pointer still tells joining it from landing beyond it.
+    joinable: bool,
     lift: Option<Lift<Id>>,
     /// Each item's displacement from its laid-out place, as it eases toward its target.
     slides: HashMap<Id, Slide>,
@@ -147,6 +151,8 @@ struct Lift<Id> {
     /// When the strip last scrolled under the pointer, while the pointer stays near an end.
     scrolled_at: Option<Instant>,
     landing: Option<Landing>,
+    /// Whether the gap holds still while the lifted item sits over an item it can join.
+    gap_held: bool,
     /// Each item's slot size along the strip when the gap last opened.
     extents: Vec<Pixels>,
 }
@@ -315,6 +321,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
     pub(crate) fn new(axis: Axis) -> Self {
         Self {
             axis,
+            joinable: false,
             lift: None,
             slides: HashMap::new(),
             settling: None,
@@ -1024,6 +1031,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             pointer: None,
             scrolled_at: None,
             landing: None,
+            gap_held: false,
             extents: Vec::new(),
         });
     }
@@ -1218,6 +1226,29 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         pointer: Point<Pixels>,
         cx: &App,
     ) -> bool {
+        self.follow(items, ids, pointer, false, cx)
+    }
+
+    /// Moves the lifted copy to `pointer` like [`Self::track`], while the gap stays where it is,
+    /// as over an item the lifted one can join.
+    pub(crate) fn track_holding_gap(
+        &mut self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        pointer: Point<Pixels>,
+        cx: &App,
+    ) -> bool {
+        self.follow(items, ids, pointer, true, cx)
+    }
+
+    fn follow(
+        &mut self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        pointer: Point<Pixels>,
+        hold_gap: bool,
+        cx: &App,
+    ) -> bool {
         let axis = self.axis;
         // The lifted copy follows the item's face, and the others move by whole slots, which
         // carry their closing gaps with them.
@@ -1226,6 +1257,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let Some(lift) = self.lift.as_mut() else {
             return false;
         };
+        lift.gap_held = hold_gap;
         let current = ids
             .iter()
             .position(|candidate| *candidate == lift.id)
@@ -1239,14 +1271,22 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let origin = copy.map_or(pointer - lift.grab, |copy| {
             confine(axis, items.bounds(), copy, pointer - lift.grab)
         });
-        let landing = current.zip(copy).map(|(current, copy)| Landing {
-            position: landing_position(
-                &spans(axis, &slots),
-                current,
-                f32::from(origin.along(axis) + copy.size.along(axis) / 2.0),
-            ),
-            len: ids.len(),
-        });
+        let landing = if hold_gap {
+            lift.landing
+        } else {
+            current.zip(copy).map(|(current, copy)| Landing {
+                position: landing_position(
+                    &spans(axis, &slots),
+                    current,
+                    if self.joinable {
+                        f32::from(pointer.along(axis))
+                    } else {
+                        f32::from(origin.along(axis) + copy.size.along(axis) / 2.0)
+                    },
+                ),
+                len: ids.len(),
+            })
+        };
         lift.pointer = Some(pointer);
         let moved = lift.origin != Some(origin);
         lift.origin = Some(origin);
@@ -1265,6 +1305,45 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         moved || relanded
     }
 
+    /// A strip whose dragged item can join another item. Its pointer decides where the item
+    /// lands, and [`Self::covered_item`] names the item it would join.
+    pub(crate) fn joinable(axis: Axis) -> Self {
+        Self {
+            joinable: true,
+            ..Self::new(axis)
+        }
+    }
+
+    /// The item, other than the lifted one, whose drawn face holds `pointer` in its middle
+    /// `share`. A strip whose items can join one another holds its gap still there, so the item
+    /// stays under the pointer.
+    pub(crate) fn covered_item(
+        &self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        pointer: Point<Pixels>,
+        share: f32,
+    ) -> Option<Id> {
+        let axis = self.axis;
+        let lift = self.lift.as_ref()?;
+        let faces = self.item_bounds(items, ids);
+        let slots = painted_item_bounds(items);
+        let current = ids
+            .iter()
+            .position(|candidate| *candidate == lift.id)
+            .filter(|_| faces.len() == ids.len() && slots.len() == ids.len())?;
+        let spans = spans(axis, &slots);
+        let along = f32::from(pointer.along(axis));
+        // A held gap keeps the joined item under the pointer. Otherwise the items stand where
+        // the pointer would land the lifted one, as the next track draws them.
+        let landing = if lift.gap_held {
+            lift.landing.map_or(current, |landing| landing.position)
+        } else {
+            landing_position(&spans, current, along)
+        };
+        covered_position(&spans, current, landing, along, share).map(|position| ids[position])
+    }
+
     /// Scrolls the strip toward the end the pointer holds near, faster the deeper it holds, and
     /// follows the items that pass under the lifted copy or grow beside it while it holds still.
     fn autoscroll(&mut self, items: &ScrollHandle, ids: &[Id], window: &mut Window, cx: &App) {
@@ -1275,6 +1354,8 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let Some(pointer) = lift.pointer else {
             return;
         };
+        // A held gap stays held as the strip follows the pointer.
+        let gap_held = lift.gap_held;
         let viewport = items.bounds();
         let start = f32::from(viewport.origin.along(axis));
         let velocity = autoscroll_velocity(
@@ -1286,7 +1367,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let limit = -f32::from(items.max_offset().along(axis));
         if !((velocity > 0.0 && current < 0.0) || (velocity < 0.0 && current > limit)) {
             lift.scrolled_at = None;
-            self.track(items, ids, pointer, cx);
+            self.follow(items, ids, pointer, gap_held, cx);
             return;
         }
         let now = now(cx);
@@ -1298,7 +1379,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         let next = (current + velocity * elapsed.as_secs_f32()).clamp(limit, 0.0);
         items.set_offset(offset.apply_along(axis, |_| px(next)));
         window.request_animation_frame();
-        self.track(items, ids, pointer, cx);
+        self.follow(items, ids, pointer, gap_held, cx);
     }
 
     /// Ends the drag on its release. Returns the dragged item and its new position among the
@@ -1481,6 +1562,28 @@ fn landing_position(spans: &[(f32, f32)], dragged: usize, center: f32) -> usize 
             (*index < dragged && center > midpoint) || (*index > dragged && center >= midpoint)
         })
         .count()
+}
+
+/// The item, other than the one lifted from `dragged`, whose span, drawn shifted for the gap at
+/// `landing`, holds `center` within its middle `share`.
+fn covered_position(
+    spans: &[(f32, f32)],
+    dragged: usize,
+    landing: usize,
+    center: f32,
+    share: f32,
+) -> Option<usize> {
+    let shifts = gap_shifts(spans, dragged, landing);
+    spans
+        .iter()
+        .zip(shifts)
+        .enumerate()
+        .filter(|(index, _)| *index != dragged)
+        .find(|(_, ((start, end), shift))| {
+            let inset = (end - start) * (1.0 - share) / 2.0;
+            (start + shift + inset..=end + shift - inset).contains(&center)
+        })
+        .map(|(index, _)| index)
 }
 
 /// How far each item moves along the strip to open a gap at `landing` for the item lifted from
@@ -2158,6 +2261,25 @@ mod tests {
                 vec![60.0, -100.0, 0.0, 0.0],
                 vec![0.0; 4],
             ]
+        );
+    }
+
+    #[test]
+    fn covered_position_should_find_the_item_whose_drawn_middle_holds_the_center() {
+        let spans = strip(&[100.0, 100.0, 100.0, 100.0]);
+
+        // B is lifted from A B C D. With no gap moved, C is drawn in its own place; once the gap
+        // moves past C, C is drawn in B's place.
+        assert_eq!(
+            [
+                covered_position(&spans, 1, 1, 250.0, 0.5),
+                covered_position(&spans, 1, 1, 230.0, 0.5),
+                covered_position(&spans, 1, 1, 220.0, 0.5),
+                covered_position(&spans, 1, 1, 50.0, 0.5),
+                covered_position(&spans, 1, 1, 150.0, 0.5),
+                covered_position(&spans, 1, 2, 150.0, 0.5),
+            ],
+            [Some(2), Some(2), None, Some(0), None, Some(2)]
         );
     }
 

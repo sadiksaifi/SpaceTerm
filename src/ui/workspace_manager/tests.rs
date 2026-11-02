@@ -4624,15 +4624,16 @@ fn switching_workspaces_while_a_dropped_tab_settles_should_move_the_selection_fr
     let third = cx.debug_bounds("tab-item-3-active").unwrap();
     cx.simulate_mouse_move(third.center(), None, Modifiers::none());
     cx.simulate_mouse_down(third.center(), MouseButton::Left, Modifiers::none());
+    // Past the middle of Tab 1, where a release lands beside it rather than joining it.
     for position in [
         third.center() - point(px(8.0), px(0.0)),
-        first.center() + point(px(30.0), px(0.0)),
+        first.center() + point(px(60.0), px(0.0)),
     ] {
         cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
     }
     finish_slides(cx);
-    let release = first.center() + point(px(30.0), px(0.0));
+    let release = first.center() + point(px(60.0), px(0.0));
     cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
     let drawn = cx.debug_bounds("tab-item-3-chip").unwrap().origin;

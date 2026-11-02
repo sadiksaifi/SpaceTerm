@@ -372,6 +372,8 @@ enum TabMenuCommand {
 const TAB_DROP_TARGET_INSET: f32 = 4.0;
 /// The corner radius of the Tab bar's drop targets, before interface scaling.
 const TAB_DROP_TARGET_RADIUS: f32 = 6.0;
+/// The middle share of another Tab where a dragged Tab joins it instead of reordering.
+const TAB_MERGE_SHARE: f32 = 0.5;
 
 /// What a Pane released over the Tab bar does.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -448,6 +450,9 @@ pub(crate) struct TabManager {
     tab_stand_in: Option<Rc<super::tab_view::DragStandIn>>,
     /// Whether the dragged Tab is over the Pane Layout rather than the Tab bar.
     tab_over_layout: bool,
+    /// The Tab whose middle the dragged Tab covers in the Tab bar, which it joins if released
+    /// now.
+    tab_strip_merge: Option<TabId>,
     #[cfg(test)]
     rendered_window_active: bool,
     #[cfg(test)]
@@ -507,7 +512,7 @@ impl TabManager {
             parent_focus_blocker: None,
             tab_selector_pressed: None,
             tab_menu: None,
-            tab_reorder: ReorderableStrip::new(gpui::Axis::Horizontal),
+            tab_reorder: ReorderableStrip::joinable(gpui::Axis::Horizontal),
             presented_scope: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
@@ -519,6 +524,7 @@ impl TabManager {
             pane_strip_drop: None,
             tab_stand_in: None,
             tab_over_layout: false,
+            tab_strip_merge: None,
             #[cfg(test)]
             rendered_window_active: window.is_window_active(),
             #[cfg(test)]
@@ -1111,13 +1117,29 @@ impl TabManager {
             .active_tab()
             .update(cx, |view, cx| view.present_incoming_drop(incoming, cx));
         if !over_bar {
+            self.present_strip_merge(None, cx);
             return;
         }
+        // Over another Tab's middle the dragged Tab joins that Tab, so the gap holds still and the
+        // Tab stays under it.
+        let merge = self.strip_merge_target(tab_id, pointer, cx);
+        self.present_strip_merge(merge, cx);
         let ids = self.visible_tab_ids();
-        if self
-            .tab_reorder
-            .track(&self.tab_bar_scroll_handle, &ids, pointer, cx)
-        {
+        let moved = if merge.is_some() {
+            self.tab_reorder
+                .track_holding_gap(&self.tab_bar_scroll_handle, &ids, pointer, cx)
+        } else {
+            self.tab_reorder
+                .track(&self.tab_bar_scroll_handle, &ids, pointer, cx)
+        };
+        if moved {
+            cx.notify();
+        }
+    }
+
+    fn present_strip_merge(&mut self, target: Option<TabId>, cx: &mut Context<Self>) {
+        if self.tab_strip_merge != target {
+            self.tab_strip_merge = target;
             cx.notify();
         }
     }
@@ -1140,9 +1162,10 @@ impl TabManager {
             .incoming_drop_target(pointer, incoming, cx)
     }
 
-    /// Clears what a Tab drag over the Pane Layout showed.
+    /// Clears what a Tab drag showed over the Pane Layout and the Tab bar.
     fn end_tab_drag_over_layout(&mut self, cx: &mut Context<Self>) {
         self.tab_over_layout = false;
+        self.tab_strip_merge = None;
         self.tab_stand_in = None;
         self.tabs
             .active_tab()
@@ -1168,7 +1191,32 @@ impl TabManager {
             self.end_tab_drag_over_layout(cx);
             cx.notify();
             if let Some((pane_id, edge)) = target {
-                self.merge_tab(tab_id, pane_id, edge, window, cx);
+                let active = self.tabs.active_tab_id();
+                self.merge_tab(tab_id, active, pane_id, edge, window, cx);
+            }
+            return;
+        }
+        // A release does what the lit Tab shows, if the Tab still has room.
+        if let Some(target) = self.tab_strip_merge {
+            let incoming = self
+                .tabs
+                .tab(tab_id)
+                .and_then(|view| view.read(cx).minimum_layout_size(cx));
+            let fits = incoming.is_some_and(|incoming| self.takes(target, incoming, cx));
+            self.tab_reorder
+                .cancel(&self.tab_bar_scroll_handle, &ids, cx);
+            self.end_tab_drag_over_layout(cx);
+            cx.notify();
+            if fits && let Some(view) = self.tabs.tab(target) {
+                let beside = view.read(cx).focused_pane_id();
+                self.merge_tab(
+                    tab_id,
+                    target,
+                    beside,
+                    crate::domain::PaneEdge::Right,
+                    window,
+                    cx,
+                );
             }
             return;
         }
@@ -1183,24 +1231,27 @@ impl TabManager {
         cx.notify();
     }
 
-    /// Asks the server to merge Tab `tab_id` into the Active Tab on `edge` of Pane `pane_id`,
-    /// and shows the merged Panes there at once.
+    /// Asks the server to merge Tab `tab_id` into Tab `into` on `edge` of its Pane `pane_id`, and
+    /// shows the merged Panes there at once, with `into` open.
     fn merge_tab(
         &mut self,
         tab_id: TabId,
+        into: TabId,
         pane_id: PaneId,
         edge: crate::domain::PaneEdge,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let active = self.tabs.active_tab().read(cx);
-        let Some(merged) = self.tabs.tab(tab_id).map(|view| view.read(cx)) else {
+        let (Some(merged), Some(target)) = (
+            self.tabs.tab(tab_id).map(|view| view.read(cx)),
+            self.tabs.tab(into).map(|view| view.read(cx)),
+        ) else {
             return;
         };
         let (Some(tab), Some(into), Some(beside), Some(opened)) = (
             self.binding.server_tab(tab_id),
-            self.binding.server_tab(self.tabs.active_tab_id()),
-            active.server_pane(pane_id),
+            self.binding.server_tab(into),
+            target.server_pane(pane_id),
             merged.server_pane(merged.focused_pane_id()),
         ) else {
             return;
@@ -2034,9 +2085,11 @@ impl TabManager {
                 )
                 .children(separator)
                 .child(fade.tracker())
-                // A Pane dropped on this Tab joins it.
+                // A Pane or Tab dropped on this Tab joins it.
                 .when(
-                    self.pane_strip_drop == Some(StripDrop::Tab(tab_id)) && cx.has_active_drag(),
+                    (self.pane_strip_drop == Some(StripDrop::Tab(tab_id))
+                        || self.tab_strip_merge == Some(tab_id))
+                        && cx.has_active_drag(),
                     |face| {
                         face.child(
                             super::tab_view::pane_drop_overlay(appearance)
@@ -3321,6 +3374,7 @@ impl TabManager {
                 Some(tab_id) => self
                     .takes_pane(tab_id, cx)
                     .then_some(StripDrop::Tab(tab_id)),
+
                 None => Some(StripDrop::NewTab),
             });
         if self.pane_strip_drop != drop {
@@ -3329,14 +3383,41 @@ impl TabManager {
         }
     }
 
-    /// Whether Tab `tab_id` has room for one more Pane beside its Focused Pane on the stage the
-    /// Active Tab measured, which every Tab of this strip shares.
+    /// Whether Tab `tab_id` has room for one more Pane beside its Focused Pane.
     fn takes_pane(&self, tab_id: TabId, cx: &App) -> bool {
+        self.tabs.tab(tab_id).is_some_and(|view| {
+            let incoming = view.read(cx).minimum_pane_size();
+            self.takes(tab_id, incoming, cx)
+        })
+    }
+
+    /// Whether Tab `tab_id` has room beside its Focused Pane for content at least `incoming` in
+    /// size, on the stage the Active Tab measured, which every Tab of this strip shares.
+    fn takes(&self, tab_id: TabId, incoming: crate::domain::PaneSize, cx: &App) -> bool {
         let stage = self.tabs.active_tab().read(cx).pane_layout_size();
         self.tabs
             .tab(tab_id)
             .zip(stage)
-            .is_some_and(|(view, stage)| view.read(cx).can_take_pane(stage, cx))
+            .is_some_and(|(view, stage)| view.read(cx).can_take(incoming, stage, cx))
+    }
+
+    /// The Tab whose middle the dragged Tab `tab_id` covers at `pointer`, when it has room for
+    /// the dragged Tab's Panes.
+    fn strip_merge_target(
+        &self,
+        tab_id: TabId,
+        pointer: gpui::Point<Pixels>,
+        cx: &App,
+    ) -> Option<TabId> {
+        let ids = self.visible_tab_ids();
+        let target = self.tab_reorder.covered_item(
+            &self.tab_bar_scroll_handle,
+            &ids,
+            pointer,
+            TAB_MERGE_SHARE,
+        )?;
+        let incoming = self.tabs.tab(tab_id)?.read(cx).minimum_layout_size(cx)?;
+        self.takes(target, incoming, cx).then_some(target)
     }
 
     /// The Tab whose place in the Tab bar holds `pointer`.
@@ -4803,6 +4884,41 @@ mod tests {
             (offered, pane_counts(&manager, cx)),
             (false, vec![2, 2]),
             "a third Pane beside Tab 1's Focused Pane would be narrower than a Pane can be"
+        );
+    }
+
+    #[gpui::test]
+    fn dropping_a_single_pane_tab_on_another_tabs_middle_should_join_that_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let (_, merged) = active_focus(&manager, cx);
+        let dragged = cx.debug_bounds("tab-item-2-active").unwrap();
+        let target = cx.debug_bounds("tab-item-1-inactive").unwrap();
+
+        drag_tab(
+            dragged.center(),
+            &[
+                dragged.center() - point(px(8.0), px(0.0)),
+                target.center(),
+                target.center() + point(px(1.0), px(0.0)),
+            ],
+            cx,
+        );
+        let offered = cx.debug_bounds("tab-item-1-pane-drop-target").is_some();
+        cx.simulate_mouse_up(target.center(), MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (
+                offered,
+                tab_order(&manager, cx),
+                pane_counts(&manager, cx),
+                active_focus(&manager, cx)
+            ),
+            (true, vec![1], vec![2], (TabId::new(1), merged)),
+            "Tab 2's only Pane joins Tab 1 beside its Focused Pane, and Tab 1 opens on it"
         );
     }
 
@@ -6676,7 +6792,8 @@ mod tests {
         });
         cx.run_until_parked();
         let grabbed = rest[0].center();
-        let release = rest[2].center() + point(px(40.0), px(0.0));
+        // Past the middle of the Tab it passes, where a release reorders rather than joins it.
+        let release = rest[2].center() + point(px(60.0), px(0.0));
         drag_tab(grabbed, &[grabbed + point(px(8.0), px(0.0)), release], cx);
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(60));
@@ -6703,8 +6820,9 @@ mod tests {
         click("create-tab-button", cx);
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
-        let release =
-            cx.debug_bounds("tab-item-3-active").unwrap().center() + point(px(4.0), px(0.0));
+        let third = cx.debug_bounds("tab-item-3-active").unwrap();
+        // Past the middle of the Tab it passes, where a release reorders rather than joins it.
+        let release = point(third.right() - px(4.0), third.center().y);
 
         drag_tab(first.center(), &[release], cx);
         cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
@@ -7170,7 +7288,7 @@ mod tests {
         let lift = first.center() + point(px(8.0), px(0.0));
         // Past the last Tab and below the strip, where the lifted copy stays held at the strip's
         // end, level with the Tabs.
-        let release = third.center() + point(px(4.0), px(10.0));
+        let release = point(third.right() - px(4.0), third.center().y + px(10.0));
 
         drag_tab(first.center(), &[lift, release], cx);
         finish_slides(cx);
@@ -7301,8 +7419,9 @@ mod tests {
             &[third.center() - point(px(8.0), px(0.0))],
             cx,
         );
-        let before_second = move_to(second.center() - point(px(4.0), px(0.0)), cx);
-        let before_first = move_to(first.center() - point(px(4.0), px(0.0)), cx);
+        // Past the middle of each Tab it passes, where the gap follows rather than holds.
+        let before_second = move_to(point(second.left() + px(4.0), second.center().y), cx);
+        let before_first = move_to(point(first.left() + px(4.0), first.center().y), cx);
         let release = third.center() + point(px(4.0), px(0.0));
         let over_itself = move_to(release, cx);
         cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
@@ -7365,7 +7484,8 @@ mod tests {
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
         let third = cx.debug_bounds("tab-item-3-active").unwrap();
-        let release = third.center() + point(px(4.0), px(0.0));
+        // Past the middle of the Tab it passes, where a release reorders rather than joins it.
+        let release = point(third.right() - px(4.0), third.center().y);
 
         drag_tab(
             first.center(),
@@ -7406,7 +7526,8 @@ mod tests {
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
         let second = cx.debug_bounds("tab-item-2-active").unwrap();
-        let release = second.center() + point(px(4.0), px(0.0));
+        // Past the middle of the Tab it passes, where a release reorders rather than joins it.
+        let release = point(second.right() - px(4.0), second.center().y);
 
         drag_tab(
             first.center(),

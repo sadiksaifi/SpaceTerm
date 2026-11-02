@@ -1332,15 +1332,22 @@ impl TabView {
         }
     }
 
-    /// Whether one more Pane beside the Focused Pane, on its right, leaves every Pane its
-    /// minimum size in a Pane Layout of `stage` size.
-    pub(crate) fn can_take_pane(&self, stage: PaneSize, cx: &App) -> bool {
+    /// Whether content at least `incoming` in size, one Pane or another Tab's Pane Layout, fits
+    /// beside the Focused Pane on its right, with every Pane keeping its minimum size in a Pane
+    /// Layout of `stage` size.
+    pub(crate) fn can_take(&self, incoming: PaneSize, stage: PaneSize, cx: &App) -> bool {
         self.tab.can_insert(
             self.tab.focused_pane_id(),
             PaneEdge::Right,
+            incoming,
             stage,
             pane_gap(cx),
         )
+    }
+
+    /// The smallest a Pane can be.
+    pub(crate) fn minimum_pane_size(&self) -> PaneSize {
+        self.tab.minimum_pane_size()
     }
 
     /// The size this Tab last measured its Pane Layout at.
