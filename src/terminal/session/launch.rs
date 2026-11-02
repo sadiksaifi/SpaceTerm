@@ -359,7 +359,9 @@ impl TerminalRuntime {
                         return;
                     }
                 };
-                TerminalWorker::run(
+                // A panic must end the Terminal Session visibly instead of leaving it running
+                // without a worker.
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| TerminalWorker::run(
                     native_pty,
                     TerminalWorkerContext {
                         initial_geometry: geometry,
@@ -380,7 +382,15 @@ impl TerminalRuntime {
                         events: event_tx,
                         accessibility: accessibility_tx,
                     },
-                );
+                )));
+                if run.is_err() {
+                    send_session_event(
+                        &worker_events,
+                        TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
+                            TerminalFailure::emulator("run-terminal-worker"),
+                        )),
+                    );
+                }
             })
             .map_err(TerminalSessionError::from)?;
 

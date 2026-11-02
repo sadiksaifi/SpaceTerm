@@ -133,7 +133,7 @@ impl Service {
     /// The unpacked installation must carry its original artifact.tar.gz and artifact.sig.
     /// This never registers or starts a service, or opens a credential store.
     pub fn retain_cli(&self, installation: &Path) -> Result<bool, ServerError> {
-        let archive = source(&installation.join("artifact.tar.gz"), MAX_ARCHIVE)?;
+        let archive = archive(&installation.join("artifact.tar.gz"))?;
         let signature = source(&installation.join("artifact.sig"), 64)?;
         authenticate(&archive, &signature, &self.identity)?;
         let info = contents(&archive, &self.identity, |_, _, _, _| Ok(()))?;
@@ -988,12 +988,19 @@ fn bounded(file: File, maximum: u64) -> Result<Vec<u8>, ServerError> {
     Ok(bytes)
 }
 fn source(path: &Path, maximum: u64) -> Result<Vec<u8>, ServerError> {
-    let file = std::fs::OpenOptions::new()
+    bounded(open_source(path)?, maximum)
+}
+/// The package archive at `path`, copied once outside the heap. Authentication, parsing and
+/// retention all read this copy, so the bytes installed are the bytes authenticated.
+fn archive(path: &Path) -> Result<files::Snapshot, ServerError> {
+    files::Snapshot::of(open_source(path)?, MAX_ARCHIVE)
+}
+fn open_source(path: &Path) -> Result<File, ServerError> {
+    std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|_| ServerError::RuntimeUnavailable)?;
-    bounded(file, maximum)
+        .map_err(|_| ServerError::RuntimeUnavailable)
 }
 fn provision(
     parent: &Path,
@@ -1004,7 +1011,7 @@ fn provision(
     commit: &str,
     version: &str,
 ) -> Result<RetainedInstallation, ServerError> {
-    let bytes = source(archive, MAX_ARCHIVE)?;
+    let bytes = self::archive(archive)?;
     let signature = source(signature, 64)?;
     authenticate(&bytes, &signature, identity)?;
     let info = contents(&bytes, identity, |_, _, _, _| Ok(()))?;
@@ -1037,8 +1044,8 @@ fn update_candidate(
     archive: &Path,
     signature: &Path,
     expected_sha256: &str,
-) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
-    let bytes = source(archive, MAX_ARCHIVE)?;
+) -> Result<(files::Snapshot, Vec<u8>, Build), ServerError> {
+    let bytes = self::archive(archive)?;
     let signature = source(signature, 64)?;
     authenticate(&bytes, &signature, identity)?;
     if !digest_valid(expected_sha256) || digest(&bytes) != expected_sha256 {
@@ -1054,7 +1061,7 @@ fn candidate(
     signature: &Path,
     expected_sha256: &str,
     required_major: Option<u16>,
-) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
+) -> Result<(files::Snapshot, Vec<u8>, Build), ServerError> {
     candidate_for_target(
         identity,
         archive,
@@ -1071,8 +1078,8 @@ fn candidate_for_target(
     expected_sha256: &str,
     target: &str,
     required_major: Option<u16>,
-) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
-    let bytes = source(archive, MAX_ARCHIVE)?;
+) -> Result<(files::Snapshot, Vec<u8>, Build), ServerError> {
+    let bytes = self::archive(archive)?;
     let signature = source(signature, 64)?;
     let info = verified_candidate_build(
         identity,

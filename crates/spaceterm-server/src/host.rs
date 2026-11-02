@@ -1737,6 +1737,51 @@ mod startup_tests {
     }
 
     #[test]
+    fn owned_development_runs_beside_a_stopped_service_that_is_not_installed() {
+        let fixture = Fixture::new();
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        // The record an uninstalled service leaves behind.
+        data.write_json(
+            c"service.json",
+            &serde_json::json!({
+                "installation": "a".repeat(64),
+                "stopped": true,
+                "automatic_start": true,
+                "installed": false,
+                "removing": false,
+                "run": null,
+            }),
+        )
+        .unwrap();
+        let record = fs::read(fixture.paths.data.join("service.json")).unwrap();
+        let mut child = owned_child(&fixture, false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fixture.root.join("ready").exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "the owned server refused to start"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "owned server did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The Development client's admission check passes, and its link is admitted.
+        assert_eq!(
+            crate::service::check_admission(&fixture.paths, Duration::from_secs(1), None),
+            Ok(())
+        );
+        admitted_link(&fixture, &fixture.device).close();
+        child.0.stdin.take();
+        await_owned_exit(&mut child);
+        assert_eq!(
+            fs::read(fixture.paths.data.join("service.json")).unwrap(),
+            record
+        );
+    }
+
+    #[test]
     #[ignore = "runs only as a child of the server signal test"]
     fn server_signal_child() {
         install_shutdown_signals().unwrap();

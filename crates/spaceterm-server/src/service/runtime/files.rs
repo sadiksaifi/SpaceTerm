@@ -373,7 +373,14 @@ impl Snapshot {
     /// or a file whose length changes while it's read; StorageUnavailable when the file can't be
     /// read or the memory can't be reserved.
     pub fn read(directory: &File, path: &Path, maximum: u64) -> Result<Self, ServerError> {
-        let file = open_relative(directory, path, false)?;
+        Self::of(open_relative(directory, path, false)?, maximum)
+    }
+
+    /// Copy `file` when it's a single-link regular file of between one and `maximum` bytes.
+    ///
+    /// # Errors
+    /// The same as [`Snapshot::read`].
+    pub fn of(file: File, maximum: u64) -> Result<Self, ServerError> {
         let length = regular(&file)?.len();
         if length == 0 || length > maximum {
             return Err(ServerError::RuntimeUnavailable);

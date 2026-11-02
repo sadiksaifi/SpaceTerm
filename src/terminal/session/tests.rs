@@ -159,6 +159,7 @@ struct ScriptedPtyState {
     line_mode: LineMode,
     line_reads: usize,
     take_reader_calls: usize,
+    reads: usize,
     write_attempts: usize,
     write_blocked: bool,
     written: Vec<u8>,
@@ -240,6 +241,7 @@ impl Read for ScriptedReader {
             };
             *destination = byte;
         }
+        self.records.update(|state| state.reads += 1);
         Ok(read)
     }
 }
@@ -253,6 +255,8 @@ impl Drop for ScriptedReader {
 struct ScriptedPtyOptions {
     reader_error: Option<String>,
     resize_error: Option<String>,
+    /// Resize waits for a message here, then panics.
+    resize_panic: Option<mpsc::Receiver<()>>,
     write_error: Option<String>,
     wait_error: Option<String>,
     wait_times_out: bool,
@@ -267,6 +271,7 @@ impl Default for ScriptedPtyOptions {
         Self {
             reader_error: None,
             resize_error: None,
+            resize_panic: None,
             write_error: None,
             wait_error: None,
             wait_times_out: false,
@@ -283,6 +288,7 @@ struct ScriptedPty {
     records: ScriptedPtyRecords,
     reader_error: Option<String>,
     resize_error: Option<String>,
+    resize_panic: Option<mpsc::Receiver<()>>,
     write_error: Option<String>,
     wait_error: Option<String>,
     wait_times_out: bool,
@@ -326,6 +332,10 @@ impl NativePtyAdapter for ScriptedPty {
 
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
         self.records.update(|state| state.resizes.push(size));
+        if let Some(release) = &self.resize_panic {
+            let _ = release.recv();
+            panic!("the scripted PTY resize panics");
+        }
         match &self.resize_error {
             Some(_) => Err(NativePtyOperationFailure::new(ErrorKind::Other)),
             None => Ok(()),
@@ -406,6 +416,7 @@ impl NativePtyAdapterFactory for RecordingSessionAdapterFactory {
                 records: ScriptedPtyRecords::default(),
                 reader_error: None,
                 resize_error: None,
+                resize_panic: None,
                 write_error: None,
                 wait_error: None,
                 wait_times_out: false,
@@ -440,6 +451,7 @@ fn direct_native_pty(records: ScriptedPtyRecords) -> NativePtyOwner {
             records,
             reader_error: None,
             resize_error: None,
+            resize_panic: None,
             write_error: None,
             wait_error: None,
             wait_times_out: false,
@@ -572,6 +584,7 @@ fn start_scripted_session(
     let ScriptedPtyOptions {
         reader_error,
         resize_error,
+        resize_panic,
         write_error,
         wait_error,
         wait_times_out,
@@ -591,6 +604,7 @@ fn start_scripted_session(
             records: records_for_pty,
             reader_error,
             resize_error,
+            resize_panic,
             write_error,
             wait_error,
             wait_times_out,
@@ -1116,6 +1130,7 @@ fn close_before_native_pty_installation_should_terminate_once_after_startup() {
                 records: adapter_records,
                 reader_error: None,
                 resize_error: None,
+                resize_panic: None,
                 write_error: None,
                 wait_error: None,
                 wait_times_out: false,
@@ -3286,6 +3301,45 @@ fn command_debug_never_exposes_paste_or_key_contents() {
         format!("{:?}", Command::Key(text_key(KeyAction::Press))),
         "Key"
     );
+}
+
+#[test]
+fn a_worker_panic_with_a_full_reader_queue_ends_the_session_with_a_typed_failure() {
+    let (release_panic, resize_panic) = mpsc::channel();
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+        resize_panic: Some(resize_panic),
+        ..ScriptedPtyOptions::default()
+    });
+    let (mut session, events, _accessibility) = result.unwrap();
+
+    // The worker is inside resize while the reader fills the queue and waits on one more read.
+    session.resize(geometry(100, 30, 9.0, 21.0));
+    records.wait_for("the worker to enter resize", |state| {
+        state.resizes.len() == 1
+    });
+    let reads_before = records.snapshot().reads;
+    for _ in 0..=PTY_OUTPUT_QUEUE_CAPACITY {
+        reader_steps
+            .send(ReaderStep::Bytes(vec![b'y'; 1024]))
+            .unwrap();
+    }
+    records.wait_for("a read beyond the full queue", |state| {
+        state.reads == reads_before + PTY_OUTPUT_QUEUE_CAPACITY + 1
+    });
+    release_panic.send(()).unwrap();
+
+    let failure = receive_event(&events, "the worker panic's failure", |event| {
+        matches!(event, TerminalSessionEvent::Failed(_))
+    });
+    let TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(failure)) = failure else {
+        panic!("a worker panic must report a runtime failure, got {failure:?}");
+    };
+    assert!(failure.is_fatal());
+    records.wait_for("the reader thread and PTY to end", |state| {
+        state.reader_drops == 1 && state.pty_drops == 1
+    });
+    assert!(events.recv_blocking().is_err());
+    session.shutdown();
 }
 
 #[test]

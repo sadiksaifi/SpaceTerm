@@ -1179,12 +1179,14 @@ impl fmt::Debug for Command {
 }
 
 struct TerminalWorker {
+    /// Fields drop in order, so a worker that unwinds releases a reader waiting on a full queue
+    /// before the Native PTY Owner joins the reader thread.
+    reader_events: ReaderOutputReceiver,
     metadata_state: TerminalSessionMetadataState,
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
     commands: WorkerCommands,
-    reader_events: ReaderOutputReceiver,
     events: TerminalEventPublisher,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
     pending_command: Option<Command>,
