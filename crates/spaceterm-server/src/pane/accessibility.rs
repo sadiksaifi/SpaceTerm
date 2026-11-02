@@ -23,10 +23,20 @@ pub const MAX_ROW_TEXT_BYTES: usize = super::MAX_COLUMNS as usize * MAX_CELL_TEX
 /// 2 columns, where a document peaks at 15,601 rows. This bound is over four times that, so a
 /// client can refuse more without refusing a real document.
 pub const MAX_TOPOLOGY_ROWS: u32 = 65_536;
-/// The most bytes a revision's messages carry, channels excluded. A document's text and spans
+/// The most memory a client holds for one revision's messages once decoded: each message's
+/// queue slot and value, each splice, run and row at its in-memory size, and the text and spans
+/// of each row. No valid message encodes in more bytes than it decodes to. A document's text and spans
 /// take at most about 1.25 bytes for each byte of the 50 MB of pages Ghostty keeps for Scrollback,
-/// plus its screen. This bound is twice that.
+/// plus its screen, and its rows add at most 64 bytes each. This bound is twice that.
 pub const MAX_REVISION_BYTES: usize = 128 * 1024 * 1024;
+/// The most splices a server plans for one revision. [`Packer`] continues a splice that does not
+/// fit in the next message, so a revision carries at most this many splices plus one for each of
+/// its messages.
+pub const MAX_PLANNED_SPLICES: usize = 3;
+/// The most messages a revision takes. Any two consecutive messages of [`Packer`] encode in more
+/// than half of [`UPDATE_TARGET_BYTES`] together, and a revision encodes in at most
+/// [`MAX_REVISION_BYTES`].
+pub const MAX_REVISION_MESSAGES: usize = 4 * MAX_REVISION_BYTES / UPDATE_TARGET_BYTES + 1;
 
 /// Starts or ends a client's semantic demand for one channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -168,8 +178,7 @@ pub struct Selection {
 }
 
 impl Update {
-    /// The bytes this message takes on the wire without its channel, which
-    /// [`MAX_REVISION_BYTES`] counts.
+    /// The bytes this message takes on the wire without its channel.
     pub fn encoded_len(&self) -> usize {
         encoded_len(self)
     }
@@ -184,6 +193,8 @@ impl Update {
                 .base
                 .is_none_or(|base| base < self.header.revision),
         )?;
+        // Only a revision's last message may carry nothing but its tail.
+        check(self.tail.is_some() || !self.splices.is_empty() || !self.rows.is_empty())?;
         for splice in &self.splices {
             check(!splice.insert.is_empty() || splice.remove > 0)?;
             for run in &splice.insert {

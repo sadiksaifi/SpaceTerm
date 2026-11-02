@@ -415,7 +415,12 @@ fn validation_refuses_updates_one_message_shows_are_inconsistent() {
         }),
     };
     assert_eq!(valid.validate(), Ok(()));
-    let cases: [(&str, Break); 16] = [
+    let cases: [(&str, Break); 17] = [
+        ("a message with neither items nor a tail", |u| {
+            u.splices.clear();
+            u.rows.clear();
+            u.tail = None;
+        }),
         ("a base at or after its revision", |u| {
             u.header.base = Some(2)
         }),
