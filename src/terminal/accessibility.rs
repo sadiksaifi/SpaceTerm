@@ -1242,6 +1242,27 @@ impl TerminalAccessibilityModel {
         Arc::ptr_eq(&self.data.document, &other.data.document)
     }
 
+    /// What a native adapter announces when this model replaces `previous`: a value change when
+    /// the screen or the document changed, and a Selection change when the selected or cursor
+    /// range moved.
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "native accessibility adapters consume notification policy"
+        )
+    )]
+    pub(crate) fn notifications_since(&self, previous: &Self) -> AccessibilityNotifications {
+        let mut notifications = AccessibilityNotifications::default();
+        if self.active_screen() != previous.active_screen() || !self.shares_document(previous) {
+            notifications.insert(AccessibilityNotification::Value);
+        }
+        if self.selected_or_cursor_range() != previous.selected_or_cursor_range() {
+            notifications.insert(AccessibilityNotification::Selection);
+        }
+        notifications
+    }
+
     pub fn active_screen(&self) -> AccessibilityScreen {
         self.data.screen
     }

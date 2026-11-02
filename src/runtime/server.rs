@@ -185,6 +185,76 @@ pub(crate) mod testing {
             .map(spaceterm_server::protocol::RequestId)
             .map_err(|_| ())
     }
+
+    /// One channel's semantic path on a server, without a host or a shell: the Pane's semantic
+    /// revisions and the connection's outbox, whose encoder writes them as wire frames.
+    pub(crate) struct ServerSemantics {
+        pane: super::accessibility::Accessibility,
+        outbox: spaceterm_server::connection::outbox::Outbox,
+    }
+
+    impl ServerSemantics {
+        pub(crate) const CHANNEL: spaceterm_server::protocol::Channel =
+            spaceterm_server::protocol::Channel(1);
+
+        /// A new connection with the channel open and visible, and no demand.
+        pub(crate) fn connect() -> Self {
+            let outbox = spaceterm_server::connection::outbox::Outbox::new(Arc::new(|| {}));
+            outbox
+                .open(Self::CHANNEL)
+                .expect("a new connection opens a channel");
+            Self {
+                pane: super::accessibility::Accessibility::default(),
+                outbox,
+            }
+        }
+
+        /// Applies the client's demand as the connection service does.
+        pub(crate) fn demand(&mut self, demand: pane::accessibility::Demand) {
+            match demand {
+                pane::accessibility::Demand::Start { generation } => {
+                    self.pane.start();
+                    self.outbox
+                        .start_semantics(Self::CHANNEL, generation)
+                        .expect("each start names a greater generation");
+                    self.hand();
+                }
+                pane::accessibility::Demand::End => {
+                    self.pane.end();
+                    self.outbox.end_semantics(Self::CHANNEL);
+                }
+            }
+        }
+
+        /// Takes the Terminal Session's newest model and hands its revision to the channel.
+        pub(crate) fn publish(&mut self, model: Arc<TerminalAccessibilityModel>) {
+            self.pane.update(model);
+            self.hand();
+        }
+
+        fn hand(&mut self) {
+            if let Some(model) = self.pane.take_changed() {
+                self.outbox
+                    .semantics(Self::CHANNEL, model)
+                    .expect("the outbox is open");
+            }
+        }
+
+        pub(crate) fn view(&self, visible: bool) {
+            self.outbox.view(Self::CHANNEL, visible);
+        }
+
+        /// The next frame the connection's I/O thread writes.
+        pub(crate) fn next_frame(&self) -> Option<Vec<u8>> {
+            self.outbox.next_frame().map(|(frame, _)| frame)
+        }
+
+        pub(crate) fn acknowledge(&self, demand_generation: u64, revision: u64) {
+            self.outbox
+                .acknowledge_semantics(Self::CHANNEL, demand_generation, revision)
+                .expect("the client acknowledges as ADR 0062 says");
+        }
+    }
 }
 
 #[cfg(test)]

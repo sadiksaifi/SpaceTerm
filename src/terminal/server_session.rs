@@ -17,6 +17,8 @@ mod screen_decoder;
 mod screen_decoder_tests;
 mod scrollback;
 #[cfg(test)]
+mod semantic_equality_tests;
+#[cfg(test)]
 mod tests;
 use super::pointer_input::{PointerInput, WheelInput};
 use super::session::clipboard::ClipboardAuthority;
