@@ -39,7 +39,11 @@ pub(crate) fn start(directories: &[PathBuf], process: Option<u32>) -> Option<Box
             )
         };
         if descriptor < 0 {
-            watch.missing.get_or_insert(index);
+            // A directory that went away is reported, so the next watch looks for it again. One
+            // that cannot be watched for any other reason stays unwatched by this watch.
+            if went_away() {
+                watch.missing.get_or_insert(index);
+            }
             continue;
         }
         // SAFETY: a non-negative result is a descriptor this function now owns.
@@ -70,6 +74,14 @@ pub(crate) fn start(directories: &[PathBuf], process: Option<u32>) -> Option<Box
         register(&watch.queue, &event);
     }
     Some(Box::new(watch))
+}
+
+/// Whether the last failure to watch a directory means it no longer exists there.
+fn went_away() -> bool {
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOENT | libc::ENOTDIR)
+    )
 }
 
 fn register(queue: &OwnedFd, event: &libc::kevent) -> bool {

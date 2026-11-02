@@ -110,6 +110,8 @@ impl Watched {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
 
@@ -127,6 +129,12 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_with(|_| {}, None)
+    }
+
+    /// Follows a service whose `data` directory is first passed to `prepare`, with `server` as the
+    /// running server's process.
+    fn fixture_with(prepare: impl FnOnce(&Path), server: Option<u32>) -> Fixture {
         let root = std::env::temp_dir().join(format!(
             "spaceterm-service-changes-{}-{}",
             std::process::id(),
@@ -137,8 +145,9 @@ mod tests {
         ));
         let data = root.join("data/server");
         std::fs::create_dir_all(&data).unwrap();
+        prepare(&data);
         let runtime = root.join("runtime");
-        let server = Arc::new(Mutex::new(None));
+        let server = Arc::new(Mutex::new(server));
         let (report, reports) = mpsc::channel();
         let process = {
             let server = Arc::clone(&server);
@@ -163,6 +172,7 @@ mod tests {
 
     impl Drop for Fixture {
         fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.data, Permissions::from_mode(0o700));
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
@@ -223,5 +233,32 @@ mod tests {
         .unwrap();
         fixture.reported("a policy write");
         fixture.quiet("an unchanged service");
+    }
+
+    /// A service directory that exists but cannot be watched, such as one without read
+    /// permission, is reported at most once and does not stop the rest of the watch: the
+    /// server's process ending is still reported.
+    #[test]
+    fn an_unwatchable_directory_does_not_repeat_reports_or_hide_later_changes() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let fixture = fixture_with(
+            |data| std::fs::set_permissions(data, Permissions::from_mode(0o000)).unwrap(),
+            Some(child.id()),
+        );
+        let mut reports = 0;
+        while fixture.reports.recv_timeout(QUIET).is_ok() {
+            reports += 1;
+            assert!(
+                reports <= 1,
+                "an unwatchable directory is reported at most once"
+            );
+        }
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        fixture.reported("the server's process ending");
     }
 }

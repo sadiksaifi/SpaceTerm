@@ -45,7 +45,11 @@ pub(crate) fn start(directories: &[PathBuf], process: Option<u32>) -> Option<Box
         let descriptor =
             unsafe { libc::inotify_add_watch(watch.inotify.as_raw_fd(), path.as_ptr(), CHANGES) };
         if descriptor < 0 {
-            watch.missing.get_or_insert(index);
+            // A directory that went away is reported, so the next watch looks for it again. One
+            // that cannot be watched for any other reason stays unwatched by this watch.
+            if went_away() {
+                watch.missing.get_or_insert(index);
+            }
             continue;
         }
         watch.directories.push((descriptor, index));
@@ -60,6 +64,14 @@ pub(crate) fn start(directories: &[PathBuf], process: Option<u32>) -> Option<Box
         }
     }
     Some(Box::new(watch))
+}
+
+/// Whether the last failure to watch a directory means it no longer exists there.
+fn went_away() -> bool {
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOENT | libc::ENOTDIR)
+    )
 }
 
 impl InotifyWatch {
