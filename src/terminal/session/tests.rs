@@ -2406,13 +2406,15 @@ fn a_terminal_session_holds_no_semantic_store_before_demand_or_after_its_release
         accessibility,
         clipboard,
     }));
-    // Runs every command due within the next second, with semantic continuations.
+    // Runs every command due within the next second, semantic continuations first, so the
+    // Line Mode reads that stay due within that second never starve a capture.
     let run_due = |worker: &mut TerminalWorker| {
         for _ in 0..256 {
-            let due = worker
-                .schedules
-                .take_due(Instant::now() + Duration::from_secs(1))
-                .or_else(|| worker.take_accessibility_continuation());
+            let due = worker.take_accessibility_continuation().or_else(|| {
+                worker
+                    .schedules
+                    .take_due(Instant::now() + Duration::from_secs(1))
+            });
             let Some(command) = due else {
                 return;
             };
