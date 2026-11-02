@@ -14,6 +14,8 @@ pub(crate) struct MacosApplicationMenuAdapter {
     identity: ApplicationIdentity,
     /// Follows the commands the person chooses from the menu bar, while the adapter lives.
     chosen: std::cell::RefCell<Option<native::ChosenCommands>>,
+    /// Loads the installed menu bar's symbol images when it first opens, while the adapter lives.
+    symbol_images: std::cell::RefCell<Option<native::SymbolImages>>,
 }
 
 impl MacosApplicationMenuAdapter {
@@ -24,6 +26,7 @@ impl MacosApplicationMenuAdapter {
         Self {
             identity,
             chosen: std::cell::RefCell::default(),
+            symbol_images: std::cell::RefCell::default(),
         }
     }
 }
@@ -371,7 +374,7 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
         let menus = menus(application_name);
         let native_shortcuts = native_menu_shortcuts(&menus, &cx.key_bindings().borrow());
         cx.set_menus(menus);
-        native::decorate(application_name, &native_shortcuts)
+        native::decorate(application_name, &native_shortcuts, &self.symbol_images)
     }
 
     fn perform(
@@ -398,6 +401,117 @@ fn application_menu_item_icons(application_name: &str) -> [(String, &'static str
         ("Show All".to_owned(), "eye"),
         (format!("Quit {application_name}"), "power"),
     ]
+}
+
+/// The installed menu bar's items that show an SF Symbol. Decoding the symbol images takes
+/// megabytes of transient memory, so the items take them when the menu bar first opens instead
+/// of at launch.
+struct DeferredSymbolImages<I> {
+    pending: std::cell::RefCell<Vec<(I, &'static str)>>,
+}
+
+impl<I> Default for DeferredSymbolImages<I> {
+    fn default() -> Self {
+        Self {
+            pending: std::cell::RefCell::default(),
+        }
+    }
+}
+
+impl<I> DeferredSymbolImages<I> {
+    /// Finds every decorated item of a newly installed menu bar through `find`. Items of an
+    /// earlier menu bar that never opened are dropped.
+    ///
+    /// # Errors
+    /// Returns Unavailable when `find` misses an item.
+    fn defer(
+        &self,
+        application_name: &str,
+        find: impl Fn(&MenuItemIcon<'_>) -> Option<I>,
+    ) -> Result<(), ApplicationMenuError> {
+        let mut pending = Vec::new();
+        for (item_title, symbol) in application_menu_item_icons(application_name) {
+            let decoration = MenuItemIcon {
+                menu: application_name,
+                submenu: None,
+                item: &item_title,
+                symbol,
+            };
+            pending.push((
+                find(&decoration).ok_or(ApplicationMenuError::Unavailable)?,
+                symbol,
+            ));
+        }
+        for decoration in MENU_ITEM_ICONS.iter().chain(DEVELOP_MENU_ITEM_ICONS) {
+            pending.push((
+                find(decoration).ok_or(ApplicationMenuError::Unavailable)?,
+                decoration.symbol,
+            ));
+        }
+        *self.pending.borrow_mut() = pending;
+        Ok(())
+    }
+
+    /// Gives each found item its symbol image through `set`. Only the first call after
+    /// [`Self::defer`] has items to set.
+    ///
+    /// # Errors
+    /// Returns the first failure of `set`, after trying every item.
+    fn load(
+        &self,
+        mut set: impl FnMut(&I, &'static str) -> Result<(), ApplicationMenuError>,
+    ) -> Result<(), ApplicationMenuError> {
+        let pending = std::mem::take(&mut *self.pending.borrow_mut());
+        pending
+            .iter()
+            .map(|(item, symbol)| set(item, symbol))
+            .fold(Ok(()), Result::and)
+    }
+}
+
+/// Sets each installed menu bar's symbol images when the menu bar begins tracking. `O` keeps
+/// the tracking observer registered until this value drops.
+struct SymbolImageLoading<I, O> {
+    images: std::rc::Rc<DeferredSymbolImages<I>>,
+    _tracking: O,
+}
+
+impl<I: 'static, O> SymbolImageLoading<I, O> {
+    /// Defers the symbol images of a newly installed menu bar. The first install registers
+    /// one tracking observer through `observe_tracking`; each tracking event sets the pending
+    /// images through `set`.
+    ///
+    /// # Errors
+    /// Returns Unavailable when `find` misses an item.
+    fn install(
+        installed: &std::cell::RefCell<Option<Self>>,
+        application_name: &str,
+        find: impl Fn(&MenuItemIcon<'_>) -> Option<I>,
+        observe_tracking: impl FnOnce(Box<dyn Fn()>) -> O,
+        set: impl Fn(&I, &'static str) -> Result<(), ApplicationMenuError> + 'static,
+    ) -> Result<(), ApplicationMenuError> {
+        let images = std::rc::Rc::clone(
+            &installed
+                .borrow_mut()
+                .get_or_insert_with(|| {
+                    let images = std::rc::Rc::new(DeferredSymbolImages::default());
+                    let loading = std::rc::Rc::clone(&images);
+                    let tracking = observe_tracking(Box::new(move || {
+                        if let Err(error) = loading.load(&set) {
+                            eprintln!(
+                                "failed to show the application menu's symbol images: {error}"
+                            );
+                        }
+                    }));
+                    Self {
+                        images,
+                        _tracking: tracking,
+                    }
+                })
+                .images,
+        );
+        images.defer(application_name, find)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -500,8 +614,8 @@ mod native {
     };
 
     use super::{
-        ApplicationMenuCommand, ApplicationMenuError, DEVELOP_MENU_ITEM_ICONS, MENU_ITEM_ICONS,
-        MenuCommandHandler, MenuItemIcon, NativeMenuShortcut,
+        ApplicationMenuCommand, ApplicationMenuError, MenuCommandHandler, MenuItemIcon,
+        NativeMenuShortcut,
     };
 
     const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
@@ -638,15 +752,59 @@ mod native {
         unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
     }
 
+    /// The installed menu bar's symbol images, set when AppKit begins tracking the menu bar,
+    /// which happens before any of its menus opens.
+    pub(crate) type SymbolImages =
+        super::SymbolImageLoading<objc2::rc::Retained<NSMenuItem>, TrackingObserver>;
+
+    /// Keeps AppKit's menu tracking observer while it lives.
+    pub(crate) struct TrackingObserver {
+        center: objc2::rc::Retained<objc2_foundation::NSNotificationCenter>,
+        observer: objc2::rc::Retained<
+            objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>,
+        >,
+    }
+
+    impl TrackingObserver {
+        fn observe(began_tracking: Box<dyn Fn()>) -> Self {
+            let block = block2::RcBlock::new(
+                move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| began_tracking(),
+            );
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            let name = NSString::from_str("NSMenuDidBeginTrackingNotification");
+            // SAFETY: AppKit posts menu tracking notifications on the main thread. Drop removes
+            // the observer before its main-thread-only block goes.
+            let observer = unsafe {
+                center.addObserverForName_object_queue_usingBlock(Some(&name), None, None, &block)
+            };
+            Self { center, observer }
+        }
+    }
+
+    impl Drop for TrackingObserver {
+        fn drop(&mut self) {
+            // SAFETY: This center returned the token during registration.
+            unsafe { self.center.removeObserver((*self.observer).as_ref()) };
+        }
+    }
+
     pub(super) fn decorate(
         application_name: &str,
         native_shortcuts: &[NativeMenuShortcut],
+        symbol_images: &std::cell::RefCell<Option<SymbolImages>>,
     ) -> Result<(), ApplicationMenuError> {
         let mtm = MainThreadMarker::new().ok_or(ApplicationMenuError::OffMainThread)?;
-        decorate_main_menu(
-            &NSApplication::sharedApplication(mtm),
+        let application = NSApplication::sharedApplication(mtm);
+        decorate_main_menu(&application, native_shortcuts)?;
+        let main_menu = application
+            .mainMenu()
+            .ok_or(ApplicationMenuError::Unavailable)?;
+        SymbolImages::install(
+            symbol_images,
             application_name,
-            native_shortcuts,
+            |decoration| find_menu_item(&main_menu, decoration, application_name),
+            TrackingObserver::observe,
+            |item, symbol| set_symbol_image(item, symbol),
         )
     }
 
@@ -704,7 +862,6 @@ mod native {
 
     fn decorate_main_menu(
         application: &NSApplication,
-        application_name: &str,
         native_shortcuts: &[NativeMenuShortcut],
     ) -> Result<(), ApplicationMenuError> {
         let main_menu = application
@@ -718,22 +875,6 @@ mod native {
         // it installs native menu search and handles the system Help shortcut.
         let _ = NSHelpManager::sharedHelpManager(application.mtm());
         application.setHelpMenu(Some(&help_menu));
-        for (item_title, symbol) in super::application_menu_item_icons(application_name) {
-            let decoration = MenuItemIcon {
-                menu: application_name,
-                submenu: None,
-                item: &item_title,
-                symbol,
-            };
-            let item = find_menu_item(&main_menu, &decoration, application_name)
-                .ok_or(ApplicationMenuError::Unavailable)?;
-            set_symbol_image(&item, decoration.symbol)?;
-        }
-        for decoration in MENU_ITEM_ICONS.iter().chain(DEVELOP_MENU_ITEM_ICONS) {
-            let item = find_menu_item(&main_menu, decoration, application_name)
-                .ok_or(ApplicationMenuError::Unavailable)?;
-            set_symbol_image(&item, decoration.symbol)?;
-        }
         // Complete the named keys omitted by GPUI's native translation.
         for shortcut in native_shortcuts {
             let (title, menu_path) = shortcut
@@ -830,9 +971,12 @@ mod native {
 
     pub(super) const fn register_edit_menu_defaults() {}
 
+    pub(crate) struct SymbolImages;
+
     pub(super) fn decorate(
         _: &str,
         _: &[super::NativeMenuShortcut],
+        _: &std::cell::RefCell<Option<SymbolImages>>,
     ) -> Result<(), ApplicationMenuError> {
         Ok(())
     }
@@ -993,6 +1137,71 @@ mod tests {
         );
 
         assert_eq!(decorated, custom_menu_item_paths("SpaceTerm"));
+    }
+
+    #[test]
+    fn symbol_images_wait_for_the_menu_bar_to_open_and_load_once_per_install() {
+        type Path = (String, Option<String>, String);
+        let path = |icon: &MenuItemIcon<'_>| {
+            Some((
+                icon.menu.to_owned(),
+                icon.submenu.map(str::to_owned),
+                icon.item.to_owned(),
+            ))
+        };
+        let loaded = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(Path, &str)>::new()));
+        let observers = std::cell::RefCell::new(Vec::<std::rc::Rc<dyn Fn()>>::new());
+        let installed = std::cell::RefCell::new(None);
+        let install = |find: &dyn Fn(&MenuItemIcon<'_>) -> Option<Path>| {
+            let loaded = std::rc::Rc::clone(&loaded);
+            SymbolImageLoading::install(
+                &installed,
+                "SpaceTerm",
+                find,
+                |began_tracking| {
+                    observers
+                        .borrow_mut()
+                        .push(std::rc::Rc::from(began_tracking));
+                },
+                move |item: &Path, symbol| {
+                    loaded.borrow_mut().push((item.clone(), symbol));
+                    Ok(())
+                },
+            )
+        };
+        let begin_tracking = || {
+            let observers = observers.borrow().clone();
+            for began_tracking in observers {
+                began_tracking();
+            }
+            std::mem::take(&mut *loaded.borrow_mut())
+        };
+
+        for _install in 0..2 {
+            install(&path).unwrap();
+            assert!(
+                loaded.borrow().is_empty(),
+                "installing the menu bar decodes no symbol image"
+            );
+            let first_open = begin_tracking();
+            assert_eq!(
+                first_open
+                    .iter()
+                    .map(|(item, _)| item.clone())
+                    .collect::<BTreeSet<_>>(),
+                custom_menu_item_paths("SpaceTerm")
+            );
+            assert_eq!(first_open.len(), custom_menu_item_paths("SpaceTerm").len());
+            assert!(first_open.iter().all(|(_, symbol)| !symbol.is_empty()));
+            assert!(begin_tracking().is_empty(), "a later open decodes nothing");
+        }
+        assert_eq!(observers.borrow().len(), 1, "installs share one observer");
+
+        // Install still refuses a menu bar without a decorated item.
+        assert_eq!(
+            install(&|icon| (icon.item != "Copy").then(|| path(icon)).flatten()),
+            Err(ApplicationMenuError::Unavailable)
+        );
     }
 
     #[test]

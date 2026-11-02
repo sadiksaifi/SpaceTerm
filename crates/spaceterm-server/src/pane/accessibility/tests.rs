@@ -47,6 +47,7 @@ fn tail() -> Tail {
             },
             rectangle: false,
         }),
+        origin: None,
     }
 }
 
@@ -215,6 +216,10 @@ fn the_last_message_has_room_for_the_widest_tail_and_channel_however_full_it_is(
             start: widest,
             end: widest,
             rectangle: true,
+        }),
+        origin: Some(Origin {
+            epoch: u64::MAX,
+            first: u64::MAX,
         }),
     };
     let row = |line, length| {
@@ -412,6 +417,7 @@ fn validation_refuses_updates_one_message_shows_are_inconsistent() {
             visible_lines: 0..1,
             cursor: None,
             selection: None,
+            origin: None,
         }),
     };
     assert_eq!(valid.validate(), Ok(()));

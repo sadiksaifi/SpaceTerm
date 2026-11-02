@@ -9,6 +9,7 @@
 //! history rows back onto it: those positions may name other rows once they scroll off again,
 //! and a client that missed the frame with the lower total could keep the old rows.
 use super::*;
+use crate::terminal::accessibility::AccessibilityOrigin;
 use libghostty_vt::screen::GridRef;
 
 /// The primary screen's Scrollback. Rows `oldest..total` are retained, and visible row `r` is
@@ -111,6 +112,24 @@ pub(crate) struct HistoryPage {
 }
 
 impl TerminalEmulator {
+    /// Where line 0 of a semantic capture taken now sits in the history: the oldest retained row
+    /// on the primary screen, or the first screen row on the alternate screen, which has no
+    /// history. A capture and this measurement read the same terminal state when nothing is fed
+    /// between them.
+    pub(crate) fn semantic_origin(&mut self) -> Result<AccessibilityOrigin, TerminalFailure> {
+        let error = |error| TerminalFailure::emulator_error("measure-semantic-origin", error);
+        let history = self.history.update(&mut self.terminal).map_err(error)?;
+        let first = if self.terminal.active_screen().map_err(error)? == Screen::Alternate {
+            history.total
+        } else {
+            history.oldest
+        };
+        Ok(AccessibilityOrigin {
+            epoch: history.epoch,
+            first,
+        })
+    }
+
     /// Reads up to `rows` history rows from position `start` of `epoch`. Returns `None` when the
     /// epoch ended or the alternate screen hides the primary screen's history.
     pub(crate) fn scrollback_page(

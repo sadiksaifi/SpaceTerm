@@ -500,6 +500,7 @@ impl SemanticEncoding for Messages {
                 visible_lines: 0..0,
                 cursor: None,
                 selection: None,
+                origin: None,
             }),
         }
     }

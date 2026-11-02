@@ -1179,12 +1179,14 @@ impl fmt::Debug for Command {
 }
 
 struct TerminalWorker {
+    /// Fields drop in order, so a worker that unwinds releases a reader waiting on a full queue
+    /// before the Native PTY Owner joins the reader thread.
+    reader_events: ReaderOutputReceiver,
     metadata_state: TerminalSessionMetadataState,
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
     commands: WorkerCommands,
-    reader_events: ReaderOutputReceiver,
     events: TerminalEventPublisher,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
     pending_command: Option<Command>,
@@ -2519,11 +2521,20 @@ impl TerminalWorker {
             }
         };
         self.schedules.update_accessibility(more);
-        self.schedules.mark_accessibility_presented(Instant::now());
+        self.schedules
+            .mark_accessibility_presented(self.schedules.now());
         if !more && self.emulator.take_accessibility_capture_outran() {
             self.schedules.note_screen_published();
         }
         if let Some(accessibility) = accessibility {
+            // Nothing was fed since the capture, so the history now is the history it read.
+            let accessibility = match self.emulator.semantic_origin() {
+                Ok(origin) => accessibility.with_origin(origin),
+                Err(error) => {
+                    self.send_runtime_failure(error);
+                    return false;
+                }
+            };
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.
             let _ = self.accessibility.force_send(accessibility);

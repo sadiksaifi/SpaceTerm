@@ -969,6 +969,16 @@ pub struct AccessibilitySelectionRequest {
 #[derive(Clone, Debug)]
 pub struct TerminalAccessibilityModel {
     data: Arc<TerminalAccessibilityData>,
+    /// Where line 0 sat in the history when the Terminal Session captured the model.
+    origin: Option<AccessibilityOrigin>,
+}
+
+/// The history epoch and absolute line of a model's line 0, counted as frames count Scrollback
+/// positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessibilityOrigin {
+    pub epoch: u64,
+    pub first: u64,
 }
 
 /// Read-only projection of a retained terminal row, including its document offsets.
@@ -1227,6 +1237,7 @@ impl TerminalAccessibilityModel {
                 cursor_ref,
                 selection_refs,
             }),
+            origin: None,
         }
     }
 
@@ -1265,6 +1276,19 @@ impl TerminalAccessibilityModel {
 
     pub fn active_screen(&self) -> AccessibilityScreen {
         self.data.screen
+    }
+
+    /// Where line 0 sat in the history at capture, once the Terminal Session measured it.
+    pub(crate) fn origin(&self) -> Option<AccessibilityOrigin> {
+        self.origin
+    }
+
+    /// This model, captured with line 0 at `origin`.
+    pub(crate) fn with_origin(&self, origin: AccessibilityOrigin) -> Arc<Self> {
+        Arc::new(Self {
+            data: Arc::clone(&self.data),
+            origin: Some(origin),
+        })
     }
 
     pub(crate) fn screen_generation(&self) -> usize {
@@ -1893,6 +1917,7 @@ impl TerminalAccessibilityState {
         }
         let model = TerminalAccessibilityModel {
             data: Arc::new(data),
+            origin: None,
         };
         self.latest = Some(model.clone());
         Some(Arc::new(model))

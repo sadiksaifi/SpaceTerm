@@ -389,8 +389,12 @@ fn emit_include_metadata(include_paths: &[PathBuf]) {
 /// `ReleaseSmall`).
 ///
 /// Defaults to `ReleaseFast` for optimized builds. If `DEBUG` is `true` (as cargo sets for the
-/// `dev` profile), `Debug` mode is used. Otherwise, if `OPT_LEVEL` is `s` or `z`, `ReleaseSmall`
-/// is used.
+/// `dev` profile), `ReleaseSafe` mode is used. Otherwise, if `OPT_LEVEL` is `s` or `z`,
+/// `ReleaseSmall` is used.
+///
+/// `ReleaseSafe` keeps Zig's safety checks and assertions. It drops Ghostty's slow runtime
+/// safety, which verifies a whole page after every grapheme it appends: under `Debug`, feeding
+/// 10,400 lines of combining text took 338 s against 9 s for the same lines in ASCII.
 fn zig_optimize_mode() -> &'static str {
     if let Ok(override_mode) = env::var("LIBGHOSTTY_VT_SYS_OPTIMIZE") {
         return match override_mode.as_str() {
@@ -405,7 +409,7 @@ fn zig_optimize_mode() -> &'static str {
     }
 
     if env::var("DEBUG").as_deref() == Ok("true") {
-        return "Debug";
+        return "ReleaseSafe";
     }
 
     match env::var("OPT_LEVEL").as_deref() {

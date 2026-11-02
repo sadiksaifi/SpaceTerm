@@ -53,6 +53,9 @@ struct Staged {
     header: wire::Header,
     document: Client,
     fragment: Option<(u32, Row)>,
+    /// The revision's messages and splices so far.
+    messages: usize,
+    splices: usize,
 }
 
 impl Client {
@@ -75,14 +78,28 @@ impl Client {
                 header: update.header,
                 document: start,
                 fragment: None,
+                messages: 0,
+                splices: 0,
             }));
         }
         let Staged {
             header,
             document,
             fragment,
+            messages,
+            splices,
         } = &mut **self.staged.as_mut().expect("staged above");
         assert_eq!(*header, update.header, "every message repeats the header");
+        *messages += 1;
+        *splices += update.splices.len();
+        assert!(
+            *messages <= wire::MAX_REVISION_MESSAGES,
+            "{messages} messages"
+        );
+        assert!(
+            *splices <= wire::MAX_PLANNED_SPLICES + *messages,
+            "{splices} splices in {messages} messages"
+        );
         let header = *header;
         for splice in update.splices {
             let at = splice.at as usize;
@@ -97,6 +114,11 @@ impl Client {
             document
                 .topology
                 .splice(at..at + splice.remove as usize, ids.collect::<Vec<_>>());
+            assert!(
+                document.topology.len() <= wire::MAX_TOPOLOGY_ROWS as usize,
+                "{} rows after a splice",
+                document.topology.len()
+            );
         }
         for row in update.rows {
             let mut whole = match fragment.take() {
@@ -224,6 +246,10 @@ fn accessibility_tail(model: &TerminalAccessibilityModel) -> wire::Tail {
             start: line_of(refs.start).unwrap(),
             end: line_of(refs.end).unwrap(),
             rectangle: refs.rectangle,
+        }),
+        origin: model.origin().map(|origin| wire::Origin {
+            epoch: origin.epoch,
+            first: origin.first,
         }),
     }
 }
@@ -629,6 +655,84 @@ fn scrolling_history_sends_only_trimmed_and_appended_rows() {
     assert_eq!(lines, [994, 995, 996, 997, 998, 999]);
     client.revision(updates);
     client.assert_presents(&scrolled);
+}
+
+/// Rows that each sit alone in their page node, so every row is its own run.
+fn scattered(lines: Range<usize>, node: u64) -> Vec<AccessibilityRowId> {
+    lines
+        .map(|line| AccessibilityRowId {
+            screen: AccessibilityScreen::Primary,
+            screen_generation: 0,
+            node_serial: node + line as u64,
+            page_row: 0,
+        })
+        .collect()
+}
+
+/// A complete document at the client's topology bound, and deltas whose plans take every kind of
+/// splice the planner makes, each continuing across many messages because every row is its own
+/// run, reach the client within its bounds on splices, messages and topology rows.
+#[test]
+fn revisions_at_the_planner_bounds_stay_within_the_clients_bounds() {
+    let most = wire::MAX_TOPOLOGY_ROWS as usize;
+    let mut terminal = Terminal::new();
+    let mut revisions = Revisions::new();
+    let mut client = Client::default();
+    let mut deliver = |terminal: &mut Terminal,
+                       client: &mut Client,
+                       base: Option<&Arc<dyn Semantics>>,
+                       ids: Vec<AccessibilityRowId>,
+                       changed: Vec<AccessibilityRowUpdate>| {
+        let rows = ids.len();
+        let model = terminal.apply(Some(ids), changed, rows - 1..rows, None, None);
+        let revision = revisions.next(Arc::clone(&model)).unwrap();
+        let updates = encode(&revision, base);
+        let splices = updates
+            .iter()
+            .map(|update| update.splices.len())
+            .sum::<usize>();
+        assert!(
+            splices > 2 * updates.len().min(4),
+            "{splices} splices in {} messages continue across messages",
+            updates.len()
+        );
+        client.revision(updates);
+        client.assert_presents(&model);
+        revision
+    };
+    let row = |id, revision| ascii(id, revision, "x");
+
+    let ids = scattered(0..most, 1);
+    let changed = ids.iter().map(|id| row(*id, 1)).collect();
+    let complete = deliver(&mut terminal, &mut client, None, ids.clone(), changed);
+
+    // Scrollback trims a quarter at the top and new rows replace the rest below a kept stretch.
+    let quarter = most / 4;
+    let mut trimmed = ids[quarter..2 * quarter].to_vec();
+    let fresh = scattered(0..most - trimmed.len(), 1 << 32);
+    trimmed.extend(&fresh);
+    let changed = fresh.iter().map(|id| row(*id, 1)).collect();
+    let trim = deliver(
+        &mut terminal,
+        &mut client,
+        Some(&complete),
+        trimmed.clone(),
+        changed,
+    );
+
+    // Rows join before the first old one, then new rows replace the rest. Inserting the joined
+    // rows before removing the rest would pass the topology bound between the splices.
+    let joined = scattered(0..quarter, 2 << 32);
+    let mut grown = joined.clone();
+    grown.extend(&trimmed[..quarter]);
+    let replaced = scattered(0..most - grown.len(), 3 << 32);
+    grown.extend(&replaced);
+    let changed = joined
+        .iter()
+        .chain(&replaced)
+        .map(|id| row(*id, 1))
+        .collect();
+    deliver(&mut terminal, &mut client, Some(&trim), grown, changed);
 }
 
 /// Each kind of change reaches a client as a delta that reproduces the new model exactly: rows

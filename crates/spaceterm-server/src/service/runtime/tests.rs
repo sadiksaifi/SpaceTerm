@@ -1261,6 +1261,99 @@ fn verification_holds_the_same_transient_memory_for_any_package_size() {
 }
 
 #[test]
+fn installing_and_staging_hold_the_same_transient_memory_for_any_package_size() {
+    const SMALL: usize = 1024 * 1024;
+    const LARGE: usize = 8 * SMALL;
+    const OPERATIONS: [&str; 4] = [
+        "provision",
+        "provision_candidate",
+        "stage_candidate",
+        "retain_cli",
+    ];
+    let main = format!(
+        "server/{}",
+        Layout::host("spaceterm-development")
+            .unwrap()
+            .executable()
+            .display()
+    );
+    let mut peaks = Vec::new();
+    for size in [SMALL, LARGE] {
+        let root = temporary();
+        let executable = incompressible(size);
+        // Each operation has its own account, so each extracts and writes the whole package.
+        let service = |name: &str| {
+            Service::for_paths(crate::host::Paths {
+                identity: "spaceterm-development".into(),
+                data: root
+                    .join(name)
+                    .join(".local/share/spaceterm-development/server"),
+                runtime: root.join(name).join("runtime"),
+            })
+            .unwrap()
+        };
+        let measured = with_artifact(
+            &root.join("source"),
+            "spaceterm-development",
+            |archive, signature| {
+                rewrite(archive, signature, |entries| {
+                    entries
+                        .iter_mut()
+                        .find(|(name, _, _)| *name == main)
+                        .unwrap()
+                        .1 = executable.clone();
+                });
+                let pin = digest(&std::fs::read(archive).unwrap());
+                let package = root.join("package");
+                std::fs::create_dir(&package).unwrap();
+                std::fs::copy(archive, package.join("artifact.tar.gz")).unwrap();
+                std::fs::copy(signature, package.join("artifact.sig")).unwrap();
+                let services = OPERATIONS.map(service);
+                let peak = |result: Result<(), ServerError>, peak| {
+                    assert_eq!(result, Ok(()));
+                    peak
+                };
+                [
+                    peak_transient(|| {
+                        services[0]
+                            .provision(archive, signature, target(), COMMIT, VERSION)
+                            .map(drop)
+                    }),
+                    peak_transient(|| {
+                        services[1]
+                            .provision_candidate(archive, signature, &pin, crate::protocol::MAJOR)
+                            .map(drop)
+                    }),
+                    peak_transient(|| {
+                        services[2]
+                            .stage_candidate(archive, signature, &pin)
+                            .map(drop)
+                    }),
+                    peak_transient(|| services[3].retain_cli(&package).map(drop)),
+                ]
+                .map(|(result, measured)| peak(result, measured))
+            },
+        );
+        peaks.push(measured);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    for (index, operation) in OPERATIONS.iter().enumerate() {
+        let (small, large) = (peaks[0][index], peaks[1][index]);
+        eprintln!(
+            "{operation} held at most {small} heap bytes for {SMALL} and {large} for {LARGE}"
+        );
+        assert!(
+            small < SMALL,
+            "{operation} held {small} bytes, as much as a whole {SMALL}-byte file"
+        );
+        assert!(
+            large <= small + 4096,
+            "{operation} held {large} bytes for an {LARGE}-byte executable and {small} for {SMALL}"
+        );
+    }
+}
+
+#[test]
 fn verification_compares_every_piece_of_an_installed_file() {
     let root = temporary();
     let signed = incompressible(16 * CHUNK + 1);

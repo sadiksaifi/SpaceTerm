@@ -18,11 +18,30 @@ static DECODED_BUDGET: Mutex<DecodedBudget> = Mutex::new(DecodedBudget {
 #[cfg(test)]
 static GRAPHICS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serializes the tests that use the shared graphics budget, and gives the holder the whole
+/// budget. A Terminal Session dropped by an earlier holder releases its pixels when its worker
+/// thread ends, which can be after that holder released this lock, so the lock waits for them.
 #[cfg(test)]
 pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    GRAPHICS_TEST_LOCK
+    const RESIDUE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    let guard = GRAPHICS_TEST_LOCK
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let deadline = std::time::Instant::now() + RESIDUE_WAIT;
+    loop {
+        let held = DECODED_BUDGET
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bytes;
+        if held == 0 {
+            return guard;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the graphics budget still holds {held} bytes from an earlier test"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 pub(crate) struct GraphicsBudgetWake {

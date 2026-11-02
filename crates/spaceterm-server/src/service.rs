@@ -845,7 +845,8 @@ impl Service {
     }
 }
 
-// Retained Stop also fences explicit foreground startup.
+// Retained Stop of an installed service also fences explicit foreground startup. A record whose
+// service is not installed has no server to keep stopped.
 pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
     let data = match Directory::open(&paths.data, false) {
         Ok(data) => data,
@@ -859,7 +860,7 @@ pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
     {
         return Err(ServerError::ActivationUnresolved);
     }
-    if state.is_some_and(|v| v.stopped || !v.installed) {
+    if state.is_some_and(|v| v.installed && v.stopped) {
         return Err(ServerError::Stopped);
     }
     Ok(())
@@ -902,17 +903,19 @@ pub(crate) fn check_admission(
 
 pub(crate) fn check_runtime(paths: &Paths, supervised: bool) -> Result<(), ServerError> {
     check_start(paths)?;
-    if !supervised {
-        let data = match Directory::open(&paths.data, false) {
-            Ok(data) => data,
-            Err(ServerError::NotSetUp) => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        if Service::state(&data)?.is_some_and(|v| v.installed) {
-            return Err(ServerError::RuntimeUnavailable);
-        }
+    let data = match Directory::open(&paths.data, false) {
+        Ok(data) => data,
+        Err(ServerError::NotSetUp) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let installed = Service::state(&data)?.map(|v| v.installed);
+    match (supervised, installed) {
+        // A service runtime whose service was uninstalled while it started stays stopped.
+        (true, Some(false)) => Err(ServerError::Stopped),
+        // A foreground server never runs beside the approved service runtime.
+        (false, Some(true)) => Err(ServerError::RuntimeUnavailable),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Run only the approved artifact. An interrupted same-boot run remains unresolved cleanup.

@@ -464,6 +464,7 @@ mod tests {
                 visible_lines: 0..0,
                 cursor: None,
                 selection: None,
+                origin: None,
             }),
         }))
     }
@@ -725,6 +726,7 @@ mod tests {
             visible_lines: rows - 24..rows,
             cursor: None,
             selection: None,
+            origin: None,
         }));
         assert!(messages.len() > MAX_QUEUED);
         assert!(messages.iter().all(|message| message.validate().is_ok()));

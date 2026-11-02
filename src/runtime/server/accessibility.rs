@@ -97,6 +97,7 @@ impl Accessibility {
                 || old.cursor_cell() != model.cursor_cell()
                 || old.selection_refs() != model.selection_refs()
                 || old.active_screen() != model.active_screen()
+                || old.origin() != model.origin()
         }) {
             self.revision = self.revision.saturating_add(1);
         }
@@ -196,8 +197,8 @@ struct Kept {
     base: usize,
 }
 
-/// How the new topology derives from the base's: at most three splices and the kept stretches
-/// between them, both in line order.
+/// How the new topology derives from the base's: at most [`wire::MAX_PLANNED_SPLICES`] splices
+/// and the kept stretches between them, both in line order.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Plan {
     splices: Vec<Splice>,
@@ -255,7 +256,11 @@ impl Plan {
             return;
         }
         let first = id(base, old.start);
-        if let Some(found) = (new.start + 1..new.end).find(|line| id(new_model, *line) == first) {
+        // Its first splice inserts before the second removes, so the topology between them holds
+        // both, which a client bounds.
+        if let Some(found) = (new.start + 1..new.end).find(|line| id(new_model, *line) == first)
+            && count(base) + found - new.start <= wire::MAX_TOPOLOGY_ROWS as usize
+        {
             // Rows joined the topology before the first old one.
             self.splice(new.start, 0, new.start..found);
             let kept = common(
@@ -274,6 +279,11 @@ impl Plan {
 
     fn splice(&mut self, at: usize, remove: usize, insert: Range<usize>) {
         if remove > 0 || !insert.is_empty() {
+            // A client refuses a revision with more planned splices.
+            assert!(
+                self.splices.len() < wire::MAX_PLANNED_SPLICES,
+                "a plan holds at most the planned splices a client accepts"
+            );
             self.splices.push(Splice { at, remove, insert });
         }
     }
@@ -363,7 +373,8 @@ fn row_update(line: usize, row: &AccessibilityRowView<'_>) -> wire::RowUpdate {
     )
 }
 
-/// The visible lines, cursor and Selection, as lines and columns of the model's topology.
+/// The visible lines, cursor and Selection, as lines and columns of the model's topology, and
+/// where its line 0 sat in the history at capture.
 fn tail(model: &TerminalAccessibilityModel) -> wire::Tail {
     let visible = model.visible_lines();
     wire::Tail {
@@ -377,6 +388,10 @@ fn tail(model: &TerminalAccessibilityModel) -> wire::Tail {
                 column,
             }),
         selection: selection(model),
+        origin: model.origin().map(|origin| wire::Origin {
+            epoch: origin.epoch,
+            first: origin.first,
+        }),
     }
 }
 
@@ -414,10 +429,15 @@ struct Revision {
     kept: usize,
     /// The bytes of the messages written so far, channels excluded.
     bytes: usize,
+    /// The messages and splices written so far, which a client bounds.
+    messages: usize,
+    splices: usize,
 }
 
 impl Revision {
-    /// `None` when the model equals its base: it shares the document and the tail.
+    /// `None` when the model equals its base, sharing the document and the tail, or when its
+    /// topology holds more rows than a client accepts, which no Terminal Emulator document
+    /// reaches.
     fn new(
         model: Arc<Captured>,
         ticket: SemanticTicket,
@@ -437,6 +457,7 @@ impl Revision {
         }
         let (plan, lines) = match &base {
             _ if shared => (Plan::default(), 0),
+            _ if count(new) > wire::MAX_TOPOLOGY_ROWS as usize => return None,
             Some(base) => (Plan::new(&base.model, new), count(new)),
             None => {
                 let lines = count(new);
@@ -462,6 +483,8 @@ impl Revision {
             line: 0,
             kept: 0,
             bytes: 0,
+            messages: 0,
+            splices: 0,
             model,
             base,
         })
@@ -500,6 +523,14 @@ impl SemanticEncoding for Revision {
     /// Counts the revision and the bytes of all its messages once its tail is encoded.
     fn next(&mut self) -> wire::Update {
         let update = self.produce();
+        self.messages += 1;
+        self.splices += update.splices.len();
+        // The bounds a client holds a revision to, which the plan and the packer keep.
+        assert!(
+            self.splices <= wire::MAX_PLANNED_SPLICES + self.messages
+                && self.messages <= wire::MAX_REVISION_MESSAGES,
+            "a revision stays within the splices and messages a client accepts"
+        );
         self.bytes += update.encoded_len();
         if update.tail.is_some() {
             self.model

@@ -159,6 +159,7 @@ struct ScriptedPtyState {
     line_mode: LineMode,
     line_reads: usize,
     take_reader_calls: usize,
+    reads: usize,
     write_attempts: usize,
     write_blocked: bool,
     written: Vec<u8>,
@@ -240,6 +241,7 @@ impl Read for ScriptedReader {
             };
             *destination = byte;
         }
+        self.records.update(|state| state.reads += 1);
         Ok(read)
     }
 }
@@ -253,6 +255,8 @@ impl Drop for ScriptedReader {
 struct ScriptedPtyOptions {
     reader_error: Option<String>,
     resize_error: Option<String>,
+    /// Resize waits for a message here, then panics.
+    resize_panic: Option<mpsc::Receiver<()>>,
     write_error: Option<String>,
     wait_error: Option<String>,
     wait_times_out: bool,
@@ -267,6 +271,7 @@ impl Default for ScriptedPtyOptions {
         Self {
             reader_error: None,
             resize_error: None,
+            resize_panic: None,
             write_error: None,
             wait_error: None,
             wait_times_out: false,
@@ -283,6 +288,7 @@ struct ScriptedPty {
     records: ScriptedPtyRecords,
     reader_error: Option<String>,
     resize_error: Option<String>,
+    resize_panic: Option<mpsc::Receiver<()>>,
     write_error: Option<String>,
     wait_error: Option<String>,
     wait_times_out: bool,
@@ -326,6 +332,10 @@ impl NativePtyAdapter for ScriptedPty {
 
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
         self.records.update(|state| state.resizes.push(size));
+        if let Some(release) = &self.resize_panic {
+            let _ = release.recv();
+            panic!("the scripted PTY resize panics");
+        }
         match &self.resize_error {
             Some(_) => Err(NativePtyOperationFailure::new(ErrorKind::Other)),
             None => Ok(()),
@@ -406,6 +416,7 @@ impl NativePtyAdapterFactory for RecordingSessionAdapterFactory {
                 records: ScriptedPtyRecords::default(),
                 reader_error: None,
                 resize_error: None,
+                resize_panic: None,
                 write_error: None,
                 wait_error: None,
                 wait_times_out: false,
@@ -440,6 +451,7 @@ fn direct_native_pty(records: ScriptedPtyRecords) -> NativePtyOwner {
             records,
             reader_error: None,
             resize_error: None,
+            resize_panic: None,
             write_error: None,
             wait_error: None,
             wait_times_out: false,
@@ -572,6 +584,7 @@ fn start_scripted_session(
     let ScriptedPtyOptions {
         reader_error,
         resize_error,
+        resize_panic,
         write_error,
         wait_error,
         wait_times_out,
@@ -591,6 +604,7 @@ fn start_scripted_session(
             records: records_for_pty,
             reader_error,
             resize_error,
+            resize_panic,
             write_error,
             wait_error,
             wait_times_out,
@@ -1116,6 +1130,7 @@ fn close_before_native_pty_installation_should_terminate_once_after_startup() {
                 records: adapter_records,
                 reader_error: None,
                 resize_error: None,
+                resize_panic: None,
                 write_error: None,
                 wait_error: None,
                 wait_times_out: false,
@@ -2222,22 +2237,33 @@ fn accessibility_demand_binds_to_the_last_published_screen_without_flushing_the_
     worker.finish();
 }
 
-/// What continuous output published: its screens, and the millisecond the first complete
-/// semantic model arrived.
+/// What continuous output published: its screens, and the millisecond each complete semantic
+/// model arrived.
 struct ContinuousOutput {
     screens: usize,
-    first_model: Option<u64>,
+    models: Vec<u64>,
+}
+
+impl ContinuousOutput {
+    fn first_model(&self) -> Option<u64> {
+        self.models.first().copied()
+    }
 }
 
 /// Runs `millis` milliseconds of continuous output on a fixed clock, one write per millisecond,
-/// after 3,000 lines of history. With `appending`, each write is a new line; otherwise it rewrites
+/// after `history` lines of history. With `appending`, each write is a new line; otherwise it rewrites
 /// the last line in place, like a progress bar. After each write the worker runs one more
 /// command, as it interleaves them with output: due work, or else a semantic continuation.
 /// Copying the history into a semantic model takes dozens of bounded steps, so with `demanded`
 /// a model is built while screens keep publishing.
-fn continuous_output(demanded: bool, appending: bool, millis: u64) -> ContinuousOutput {
+fn continuous_output(
+    demanded: bool,
+    appending: bool,
+    history: usize,
+    millis: u64,
+) -> ContinuousOutput {
     let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
-    let history: Vec<u8> = (0..3_000)
+    let history: Vec<u8> = (0..history)
         .flat_map(|line| format!("history {line}\r\n").into_bytes())
         .collect();
     assert!(worker.feed_test_output(vec![history]));
@@ -2254,7 +2280,7 @@ fn continuous_output(demanded: bool, appending: bool, millis: u64) -> Continuous
     }
     let mut published = ContinuousOutput {
         screens: 0,
-        first_model: None,
+        models: Vec::new(),
     };
     for step in 0..millis {
         let now = start + Duration::from_millis(step);
@@ -2277,7 +2303,7 @@ fn continuous_output(demanded: bool, appending: bool, millis: u64) -> Continuous
             published.screens += usize::from(matches!(event, TerminalSessionEvent::Screen(_)));
         }
         if semantics.try_recv().is_ok() {
-            published.first_model.get_or_insert(step);
+            published.models.push(step);
         }
     }
     worker.finish();
@@ -2290,8 +2316,8 @@ fn continuous_output(demanded: bool, appending: bool, millis: u64) -> Continuous
 /// demanding semantics still publishes exactly the paced screens.
 #[test]
 fn demanded_semantics_add_no_screens_during_continuous_output() {
-    let paced = continuous_output(false, true, 500);
-    let demanded = continuous_output(true, true, 500);
+    let paced = continuous_output(false, true, 3_000, 500);
+    let demanded = continuous_output(true, true, 3_000, 500);
 
     assert_eq!(
         demanded.screens, paced.screens,
@@ -2299,7 +2325,7 @@ fn demanded_semantics_add_no_screens_during_continuous_output() {
     );
     // At 60 Hz with output every millisecond, each burst publishes 18 ms after it began.
     assert_eq!(paced.screens, 28);
-    assert_eq!(paced.first_model, None, "no model without demand");
+    assert_eq!(paced.first_model(), None, "no model without demand");
 }
 
 /// Paced screens never cancel the semantic update in progress. While output rewrites a line
@@ -2307,8 +2333,8 @@ fn demanded_semantics_add_no_screens_during_continuous_output() {
 /// capture, 100 ms later, would have to restart it.
 #[test]
 fn a_semantic_update_completes_while_paced_screens_publish() {
-    let paced = continuous_output(false, false, 300);
-    let demanded = continuous_output(true, false, 300);
+    let paced = continuous_output(false, false, 3_000, 300);
+    let demanded = continuous_output(true, false, 3_000, 300);
 
     assert_eq!(
         demanded.screens, paced.screens,
@@ -2316,7 +2342,7 @@ fn a_semantic_update_completes_while_paced_screens_publish() {
     );
     assert!(paced.screens > 5, "{} screens", paced.screens);
     let first = demanded
-        .first_model
+        .first_model()
         .expect("a model completes during output");
     assert!(first < 100, "the first model completed at {first} ms");
 }
@@ -2326,12 +2352,30 @@ fn a_semantic_update_completes_while_paced_screens_publish() {
 /// the budget of 100 ms plus one frame while a line arrives every millisecond.
 #[test]
 fn a_semantic_update_completes_while_lines_are_appended() {
-    let demanded = continuous_output(true, true, 300);
+    let demanded = continuous_output(true, true, 3_000, 300);
 
     let first = demanded
-        .first_model
+        .first_model()
         .expect("a model completes during appending output");
     assert!(first < 117, "the first model completed at {first} ms");
+}
+
+/// Every capture used to resend the whole topology, 40 bounded steps at the 10,000-row
+/// Scrollback cap, so under continuous output a demanding client waited about 140 ms between
+/// models. A capture now sends only the rows output appended and trimmed, so after the first
+/// model each next one arrives within 100 ms plus one 60 Hz frame of the one before.
+#[test]
+fn semantic_models_follow_each_other_within_the_budget_at_the_scrollback_cap() {
+    let demanded = continuous_output(true, true, 10_000, 1_000);
+
+    let models = &demanded.models;
+    assert!(models.len() > 3, "models at {models:?} ms");
+    for pair in models
+        .windows(2)
+        .chain([[models[models.len() - 1], 1_000].as_slice()])
+    {
+        assert!(pair[1] - pair[0] < 117, "models at {models:?} ms");
+    }
 }
 
 /// A capture finishes against what it observed when it began. Output that arrives while it runs
@@ -3286,6 +3330,45 @@ fn command_debug_never_exposes_paste_or_key_contents() {
         format!("{:?}", Command::Key(text_key(KeyAction::Press))),
         "Key"
     );
+}
+
+#[test]
+fn a_worker_panic_with_a_full_reader_queue_ends_the_session_with_a_typed_failure() {
+    let (release_panic, resize_panic) = mpsc::channel();
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions {
+        resize_panic: Some(resize_panic),
+        ..ScriptedPtyOptions::default()
+    });
+    let (mut session, events, _accessibility) = result.unwrap();
+
+    // The worker is inside resize while the reader fills the queue and waits on one more read.
+    session.resize(geometry(100, 30, 9.0, 21.0));
+    records.wait_for("the worker to enter resize", |state| {
+        state.resizes.len() == 1
+    });
+    let reads_before = records.snapshot().reads;
+    for _ in 0..=PTY_OUTPUT_QUEUE_CAPACITY {
+        reader_steps
+            .send(ReaderStep::Bytes(vec![b'y'; 1024]))
+            .unwrap();
+    }
+    records.wait_for("a read beyond the full queue", |state| {
+        state.reads == reads_before + PTY_OUTPUT_QUEUE_CAPACITY + 1
+    });
+    release_panic.send(()).unwrap();
+
+    let failure = receive_event(&events, "the worker panic's failure", |event| {
+        matches!(event, TerminalSessionEvent::Failed(_))
+    });
+    let TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(failure)) = failure else {
+        panic!("a worker panic must report a runtime failure, got {failure:?}");
+    };
+    assert!(failure.is_fatal());
+    records.wait_for("the reader thread and PTY to end", |state| {
+        state.reader_drops == 1 && state.pty_drops == 1
+    });
+    assert!(events.recv_blocking().is_err());
+    session.shutdown();
 }
 
 #[test]

@@ -267,6 +267,10 @@ impl State {
             .then(|| {
                 self.topology[topology_index].push(
                     raw_snapshot.topology_epoch,
+                    raw_snapshot.topology_kept_start
+                        ..raw_snapshot
+                            .topology_kept_start
+                            .saturating_add(raw_snapshot.topology_kept_len),
                     raw_snapshot.topology_complete,
                     context.topology,
                 )
@@ -339,20 +343,37 @@ impl Drop for State {
     }
 }
 
+/// Rebuilds each topology Ghostty sends as a splice of the screen's previous complete one.
 #[derive(Debug, Default)]
 struct TopologyAccumulator {
     epoch: u64,
+    /// The topology published last.
+    committed: Vec<RowId>,
     rows: Vec<RowId>,
 }
 
 impl TopologyAccumulator {
-    fn push(&mut self, epoch: u64, complete: bool, chunk: Vec<RowId>) -> Option<Vec<RowId>> {
+    /// Adds one chunk of the topology `epoch` describes: the `kept` rows of the committed
+    /// topology followed by the rows of its chunks. Returns the topology with the final chunk.
+    fn push(
+        &mut self,
+        epoch: u64,
+        kept: Range<usize>,
+        complete: bool,
+        chunk: Vec<RowId>,
+    ) -> Option<Vec<RowId>> {
         if self.epoch != epoch {
             self.epoch = epoch;
             self.rows.clear();
+            // Ghostty keeps only rows of its committed topology, which is the one published last.
+            let kept = kept.start.min(self.committed.len())..kept.end.min(self.committed.len());
+            self.rows.extend_from_slice(&self.committed[kept]);
         }
         self.rows.extend(chunk);
-        complete.then(|| std::mem::take(&mut self.rows))
+        complete.then(|| {
+            self.committed = std::mem::take(&mut self.rows);
+            self.committed.clone()
+        })
     }
 }
 
@@ -470,9 +491,9 @@ mod tests {
     fn topology_is_published_only_after_the_final_chunk() {
         let mut accumulator = TopologyAccumulator::default();
 
-        assert_eq!(accumulator.push(1, false, vec![row(10, 0)]), None);
+        assert_eq!(accumulator.push(1, 0..0, false, vec![row(10, 0)]), None);
         assert_eq!(
-            accumulator.push(1, true, vec![row(10, 1)]),
+            accumulator.push(1, 0..0, true, vec![row(10, 1)]),
             Some(vec![row(10, 0), row(10, 1)])
         );
     }
@@ -481,9 +502,9 @@ mod tests {
     fn a_new_epoch_discards_an_incomplete_topology() {
         let mut accumulator = TopologyAccumulator::default();
 
-        assert_eq!(accumulator.push(1, false, vec![row(10, 0)]), None);
+        assert_eq!(accumulator.push(1, 0..0, false, vec![row(10, 0)]), None);
         assert_eq!(
-            accumulator.push(2, true, vec![row(20, 0)]),
+            accumulator.push(2, 0..0, true, vec![row(20, 0)]),
             Some(vec![row(20, 0)])
         );
     }

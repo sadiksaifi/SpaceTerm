@@ -222,11 +222,33 @@ fn golden_server_vectors() {
             }
         ))),
         [
-            0, 0, 0, 17, 0x49, // header
+            0, 0, 0, 18, 0x49, // header
             1,    // channel
             1, 5, 1, 4, 0, 2, // demand generation, revision, base, screen, screen generation
             0, 0, // splices, rows
             1, 0, 24, 1, 23, 3, 0, // tail: visible lines, cursor, no Selection
+            0, // no origin
+        ]
+    );
+    let mut update = accessibility_tail();
+    update.tail.as_mut().unwrap().origin = Some(pane::accessibility::Origin {
+        epoch: 300,
+        first: 16_384,
+    });
+    assert_eq!(
+        server_bytes(&ServerMessage::Accessibility(Box::new(
+            AccessibilityMessage {
+                channel: Channel(1),
+                update,
+            }
+        ))),
+        [
+            0, 0, 0, 23, 0x49, // header
+            1,    // channel
+            1, 5, 1, 4, 0, 2, // demand generation, revision, base, screen, screen generation
+            0, 0, // splices, rows
+            1, 0, 24, 1, 23, 3, 0, // tail: visible lines, cursor, no Selection
+            1, 0xac, 0x02, 0x80, 0x80, 0x01, // origin: Some, epoch 300, first 16,384
         ]
     );
 }
@@ -250,6 +272,7 @@ fn accessibility_tail() -> pane::accessibility::Update {
                 column: 3,
             }),
             selection: None,
+            origin: None,
         }),
     }
 }
@@ -785,6 +808,7 @@ fn every_server_message_round_trips() {
                         end: pane::accessibility::Point { line: 1, column: 0 },
                         rectangle: true,
                     }),
+                    origin: None,
                 }),
             },
         },

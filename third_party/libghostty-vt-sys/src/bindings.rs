@@ -422,10 +422,12 @@ pub struct AccessibilitySnapshot {
     pub selection_start: AccessibilityCellRef,
     pub selection_end: AccessibilityCellRef,
     pub selection_rectangle: bool,
+    pub topology_kept_start: usize,
+    pub topology_kept_len: usize,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of AccessibilitySnapshot"][::std::mem::size_of::<AccessibilitySnapshot>() - 240usize];
+    ["Size of AccessibilitySnapshot"][::std::mem::size_of::<AccessibilitySnapshot>() - 256usize];
     ["Alignment of AccessibilitySnapshot"]
         [::std::mem::align_of::<AccessibilitySnapshot>() - 8usize];
     ["Offset of field: AccessibilitySnapshot::size"]
@@ -462,6 +464,10 @@ const _: () = {
         [::std::mem::offset_of!(AccessibilitySnapshot, selection_end) - 184usize];
     ["Offset of field: AccessibilitySnapshot::selection_rectangle"]
         [::std::mem::offset_of!(AccessibilitySnapshot, selection_rectangle) - 232usize];
+    ["Offset of field: AccessibilitySnapshot::topology_kept_start"]
+        [::std::mem::offset_of!(AccessibilitySnapshot, topology_kept_start) - 240usize];
+    ["Offset of field: AccessibilitySnapshot::topology_kept_len"]
+        [::std::mem::offset_of!(AccessibilitySnapshot, topology_kept_len) - 248usize];
 };
 impl Default for AccessibilitySnapshot {
     fn default() -> Self {
@@ -566,7 +572,7 @@ unsafe extern "C" {
     ) -> Result::Type;
 }
 unsafe extern "C" {
-    #[doc = " Observe terminal dirty state and extract a bounded semantic delta.\n\n Call this or state_capture before Ghostty render-state update clears\n page/row dirty bits. max_cells and max_rows are hard-clamped to 16384\n and 256 respectively.\n Compressed pages are decoded into temporary storage and remain compressed.\n Topology callbacks are chunked within max_rows. topology_epoch identifies\n one replacement topology and topology_complete marks its final chunk; row\n extraction begins only on a later call after that topology is complete.\n Callback pointers are borrowed only for the duration of this call."]
+    #[doc = " Observe terminal dirty state and extract a bounded semantic delta.\n\n Call this or state_capture before Ghostty render-state update clears\n page/row dirty bits. max_cells and max_rows are hard-clamped to 16384\n and 256 respectively.\n Compressed pages are decoded into temporary storage and remain compressed.\n topology_epoch identifies one topology change and topology_complete marks\n its final chunk; row extraction begins only on a later call after that\n topology is complete. The new topology is the topology_kept_len rows of the\n screen's previous complete topology from topology_kept_start, followed by\n the rows of the epoch's topology callbacks in order. Output that appends\n rows or trims Scrollback keeps every remaining row, so only new rows are\n sent. Topology callbacks are chunked within max_rows.\n Pages that leave the screen while a capture runs are dropped from its\n topology: the completing call keeps the remaining rows, in a new epoch with\n no topology callbacks. When none remains, the call reports complete and\n more both false and publishes nothing. When output outran the capture and\n its topology lacks the cursor's row, the cursor is placed on the row as far\n from the topology's end as the cursor is from the screen's end.\n Callback pointers are borrowed only for the duration of this call."]
     pub fn ghostty_accessibility_state_update(
         state: *mut AccessibilityState,
         terminal: Terminal,

@@ -1554,6 +1554,18 @@ mod startup_tests {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
+    /// Leaves a private socket entry at `path` that refuses every connection. Its socket binds
+    /// but never listens: on macOS a socket's close-on-exec flag is set after it is created, so a
+    /// child that another test spawns in between keeps a copy, and a listening copy would answer.
+    fn stale_socket(path: &Path) {
+        let socket =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&socket2::SockAddr::unix(path).unwrap())
+            .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     struct ChildGuard(Child);
     impl Drop for ChildGuard {
         fn drop(&mut self) {
@@ -1722,6 +1734,51 @@ mod startup_tests {
             fs::remove_file(fixture.root.join("ready")).unwrap();
             fs::remove_file(fixture.root.join("cleaned")).unwrap();
         }
+    }
+
+    #[test]
+    fn owned_development_runs_beside_a_stopped_service_that_is_not_installed() {
+        let fixture = Fixture::new();
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        // The record an uninstalled service leaves behind.
+        data.write_json(
+            c"service.json",
+            &serde_json::json!({
+                "installation": "a".repeat(64),
+                "stopped": true,
+                "automatic_start": true,
+                "installed": false,
+                "removing": false,
+                "run": null,
+            }),
+        )
+        .unwrap();
+        let record = fs::read(fixture.paths.data.join("service.json")).unwrap();
+        let mut child = owned_child(&fixture, false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fixture.root.join("ready").exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "the owned server refused to start"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "owned server did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The Development client's admission check passes, and its link is admitted.
+        assert_eq!(
+            crate::service::check_admission(&fixture.paths, Duration::from_secs(1), None),
+            Ok(())
+        );
+        admitted_link(&fixture, &fixture.device).close();
+        child.0.stdin.take();
+        await_owned_exit(&mut child);
+        assert_eq!(
+            fs::read(fixture.paths.data.join("service.json")).unwrap(),
+            record
+        );
     }
 
     #[test]
@@ -2283,9 +2340,7 @@ mod startup_tests {
     #[test]
     fn startup_replaces_a_stale_socket_and_authenticates_the_saved_device() {
         let fixture = Fixture::new();
-        let stale = UnixListener::bind(fixture.paths.socket()).unwrap();
-        fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
-        drop(stale);
+        stale_socket(&fixture.paths.socket());
         let _child = fixture.start();
         // Generous, because a loaded test host can take seconds to start the child.
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -2316,10 +2371,8 @@ mod startup_tests {
         let fixture = Fixture::new();
         let runtime = Directory::open(&fixture.paths.runtime, false).unwrap();
         let _lock = runtime.lock("server.lock", true).unwrap();
-        let stale = UnixListener::bind(fixture.paths.socket()).unwrap();
-        fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
+        stale_socket(&fixture.paths.socket());
         let expected = runtime.socket_identity(c"s").unwrap().unwrap();
-        drop(stale);
         fs::rename(fixture.paths.socket(), fixture.paths.runtime.join("old")).unwrap();
         let _replacement = UnixListener::bind(fixture.paths.socket()).unwrap();
         fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
