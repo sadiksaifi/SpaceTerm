@@ -139,14 +139,14 @@ fn golden_client_vectors() {
             channel: Channel(2),
             demand: pane::accessibility::Demand::Start { generation: 300 },
         })),
-        [0, 0, 0, 7, 0x01, 7, 13, 2, 0, 0xac, 0x02]
+        [0, 0, 0, 7, 0x01, 7, 11, 2, 0, 0xac, 0x02]
     );
     assert_eq!(
         client_bytes(&request(Operation::AccessibilityDemand {
             channel: Channel(2),
             demand: pane::accessibility::Demand::End,
         })),
-        [0, 0, 0, 5, 0x01, 7, 13, 2, 1]
+        [0, 0, 0, 5, 0x01, 7, 11, 2, 1]
     );
     assert_eq!(
         client_bytes(&request(Operation::Release {
@@ -390,18 +390,11 @@ fn every_operation_round_trips() {
             },
             offset: 4096,
         },
-        Operation::Accessibility {
-            channel,
-            revision: Some(3),
-            offset: 0,
-            base: None,
-        },
         Operation::AccessibilitySelection {
             channel,
             focus_generation: 2,
             selection: None,
         },
-        Operation::EndAccessibility { channel },
         Operation::AccessibilityDemand {
             channel,
             demand: pane::accessibility::Demand::Start {
@@ -629,7 +622,6 @@ fn every_server_message_round_trips() {
             bytes: vec![0xff; 300 * 1024],
         })),
         ReplyBody::Graphics(Err(pane::graphics::Error::Missing)),
-        ReplyBody::Accessibility(Err(pane::accessibility::Error::Pending)),
         ReplyBody::Directory(Ok(directories::Value::Listing {
             names: vec!["src".into()],
             truncated: false,
@@ -675,7 +667,6 @@ fn every_server_message_round_trips() {
                 pane::PasteRejection::TooLarge { limit: 1 },
             )),
         },
-        PaneEvent::Accessibility { revision: 3 },
         PaneEvent::Line(pane::LineState {
             epoch: 7,
             mode: pane::LineMode {

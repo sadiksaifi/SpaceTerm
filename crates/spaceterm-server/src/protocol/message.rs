@@ -208,8 +208,6 @@ pub enum PaneEvent {
     Effect(effects::Request),
     /// The server discarded the Input message `serial`, or settled the paste it completed.
     Input { serial: u32, outcome: InputOutcome },
-    /// The accessibility revision changed while no frame carried it.
-    Accessibility { revision: u64 },
     /// The PTY's line mode changed. The server sends the current state first on each channel,
     /// then each change it reads after input, after output and after focus changes.
     Line(LineState),

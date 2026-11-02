@@ -1142,10 +1142,6 @@ impl PaneLink {
             }
             // The Workspace client reads pushed inventory and resolves by dispatching.
             Request::Inventory | Request::Resolve { .. } => Err(ServerError::Unsupported),
-            // Semantics are pushed while demand stands (ADR 0062); nothing pulls them.
-            Request::Accessibility { .. } | Request::EndAccessibilityDemand { .. } => {
-                Err(ServerError::Unsupported)
-            }
             Request::Acknowledge { sequence } => {
                 self.link.acknowledge(sequence)?;
                 Ok(Reply::Unchanged)
@@ -1547,12 +1543,10 @@ pub(super) fn present(
                                 }
                                 PaneEvent::Failed => return Err(ServerError::StartupFailed),
                                 // The link settles input outcomes before they reach the inbox.
-                                // Progress and run receipts are for CLI channels only. Semantic
-                                // revisions announce themselves (ADR 0062).
+                                // Progress and run receipts are for CLI channels only.
                                 PaneEvent::Input { .. }
                                 | PaneEvent::Progress { .. }
-                                | PaneEvent::RunFinished(_)
-                                | PaneEvent::Accessibility { .. } => {}
+                                | PaneEvent::RunFinished(_) => {}
                             }
                             continue;
                         }

@@ -1261,8 +1261,6 @@ fn body(reply: Reply) -> Result<ReplyBody, Refusal> {
         }))),
         Reply::Outcome(outcome) => ReplyBody::Outcome(outcome),
         Reply::GraphicsChunk(chunk) => ReplyBody::Graphics(chunk),
-        // Semantics are pushed; no command replies with a chunk of them.
-        Reply::Accessibility(_) => return Err(Refusal::Unsupported),
         Reply::MutationPending | Reply::Inventory { .. } => return Err(Refusal::Failed),
         Reply::Paste(_) => return Err(Refusal::Failed),
     })
@@ -1516,10 +1514,6 @@ impl<H: HostCommands> Served<H> {
                 focus_generation,
                 selection,
             }),
-            // Semantics are pushed while demanded, never read.
-            Operation::Accessibility { .. } | Operation::EndAccessibility { .. } => {
-                Err(Refusal::Unsupported)
-            }
             Operation::DirectoryRead(operation) => {
                 return self.read(peer, id, HostRead::Directory(operation));
             }
@@ -1667,10 +1661,8 @@ fn channel_of(operation: &Operation) -> Option<Channel> {
         | Operation::ClearScrollback { channel }
         | Operation::Style { channel, .. }
         | Operation::Graphics { channel, .. }
-        | Operation::Accessibility { channel, .. }
         | Operation::AccessibilityDemand { channel, .. }
         | Operation::AccessibilitySelection { channel, .. }
-        | Operation::EndAccessibility { channel }
         | Operation::Run { channel, .. } => Some(*channel),
         _ => None,
     }

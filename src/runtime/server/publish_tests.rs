@@ -346,12 +346,6 @@ fn a_semantic_model_is_pushed_only_while_demand_stands() {
     assert_eq!(updates[0].header.base, None);
     assert!(updates[0].rows[0].text.starts_with("two"));
     assert!(updates[0].tail.is_some());
-    assert!(
-        !events(messages)
-            .iter()
-            .any(|event| matches!(event, PaneEvent::Accessibility { .. })),
-        "no Pane event announces a revision"
-    );
 }
 
 #[test]

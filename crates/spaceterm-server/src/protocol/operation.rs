@@ -63,26 +63,17 @@ pub enum Operation {
         image: graphics::ImageKey,
         offset: u64,
     },
-    Accessibility {
-        channel: Channel,
-        revision: Option<u64>,
-        offset: u64,
-        base: Option<u64>,
-    },
     AccessibilitySelection {
         channel: Channel,
         focus_generation: u64,
         selection: Option<accessibility::SelectionRefs>,
-    },
-    EndAccessibility {
-        channel: Channel,
     },
     /// Starts or ends this client's semantic demand for the channel, replied `Done`. Each start
     /// names a new demand generation and begins without a base, so the generation's first update
     /// is a complete document. Refused on an observation channel.
     AccessibilityDemand {
         channel: Channel,
-        demand: crate::pane::accessibility::Demand,
+        demand: accessibility::Demand,
     },
     /// Replied when the read settles. `Cancel` abandons it.
     DirectoryRead(directories::Operation),
@@ -140,7 +131,6 @@ pub enum ReplyBody {
     Outcome(crate::hierarchy::RetainedOutcome),
     Page(Page),
     Graphics(Result<graphics::Chunk, graphics::Error>),
-    Accessibility(Result<accessibility::Chunk, accessibility::Error>),
     Directory(Result<directories::Value, directories::Error>),
     Worktree(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
@@ -288,7 +278,6 @@ impl Operation {
             self,
             Self::ScrollbackPage { .. }
                 | Self::Graphics { .. }
-                | Self::Accessibility { .. }
                 | Self::DirectoryRead(_)
                 | Self::DirectoryCreate(_)
                 | Self::WorktreeRead(_)
@@ -301,7 +290,7 @@ impl ReplyBody {
     pub fn bulk(&self) -> bool {
         matches!(
             self,
-            Self::Page(_) | Self::Graphics(_) | Self::Accessibility(_)
+            Self::Page(_) | Self::Graphics(_)
         )
     }
 
