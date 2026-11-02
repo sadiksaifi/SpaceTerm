@@ -258,7 +258,7 @@ pub(crate) fn workspace_directory(workspace: &Workspace) -> Option<&Path> {
 mod tests {
     use std::time::Duration;
 
-    use spaceterm_server::hierarchy::{Axis, Tab};
+    use spaceterm_server::hierarchy::{Side, Tab};
     use spaceterm_server::repository::{
         ChangeSummary, ChangeTotal, GitHubRepository, GitToolStatus, PullRequestQuery, Repository,
         RepositoryHead, RepositoryReadError, WorktreeHead, WorktreeRecord,
@@ -686,7 +686,7 @@ mod tests {
             panes: vec![Pane {
                 id: [id; 32],
                 source: None,
-                axis: Axis::Right,
+                side: Side::Right,
                 starting_directory: worktree.into(),
                 current_directory: None,
                 repository_directory: None,

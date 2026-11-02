@@ -368,6 +368,20 @@ enum TabMenuCommand {
     Close,
 }
 
+/// How far the New Tab drop target stays inside the Tab bar, before interface scaling.
+const TAB_DROP_TARGET_INSET: f32 = 4.0;
+/// The corner radius of the Tab bar's drop targets, before interface scaling.
+const TAB_DROP_TARGET_RADIUS: f32 = 6.0;
+
+/// What a Pane released over the Tab bar does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StripDrop {
+    /// Moves the Pane into a new Tab.
+    NewTab,
+    /// Moves the Pane into this other Tab.
+    Tab(TabId),
+}
+
 /// The value a Tab drag carries, scoped to the Tab bar that owns the Tab.
 struct DraggedTab {
     tab_id: TabId,
@@ -427,9 +441,13 @@ pub(crate) struct TabManager {
     /// The Active Tab this client's just-submitted shared close ends, when the keyboard rested
     /// in this strip as the person asked for it. The next reconciliation takes it.
     close_keyboard: Option<TabId>,
-    /// Whether the pointer carrying one of this strip's Panes is over the Tab bar, where its
-    /// release moves the Pane into a new Tab.
-    pane_drop_over_tab_bar: bool,
+    /// Where a Pane carried out of one of this strip's Tabs lands if released over the Tab bar
+    /// now.
+    pane_strip_drop: Option<StripDrop>,
+    /// The rectangle a Tab drag carries once it leaves the Tab bar for the Pane Layout.
+    tab_stand_in: Option<Rc<super::tab_view::DragStandIn>>,
+    /// Whether the dragged Tab is over the Pane Layout rather than the Tab bar.
+    tab_over_layout: bool,
     #[cfg(test)]
     rendered_window_active: bool,
     #[cfg(test)]
@@ -498,7 +516,9 @@ impl TabManager {
             binding,
             parked_tabs: std::collections::BTreeMap::new(),
             close_keyboard: None,
-            pane_drop_over_tab_bar: false,
+            pane_strip_drop: None,
+            tab_stand_in: None,
+            tab_over_layout: false,
             #[cfg(test)]
             rendered_window_active: window.is_window_active(),
             #[cfg(test)]
@@ -1018,8 +1038,14 @@ impl TabManager {
             manager
                 .tab_reorder
                 .cancel(&manager.tab_bar_scroll_handle, &ids, cx);
+            manager.end_tab_drag_over_layout(cx);
             cx.notify();
         });
+        self.tab_stand_in = self
+            .tabs
+            .tab(tab_id)
+            .map(|view| Rc::new(view.read(cx).tab_stand_in(cx)));
+        self.tab_over_layout = false;
         let ids = self.visible_tab_ids();
         self.tab_reorder.begin(
             tab_id,
@@ -1030,7 +1056,7 @@ impl TabManager {
             window,
             cx,
         );
-        self.drag_tab_to(tab_id, window.mouse_position(), cx);
+        self.drag_tab_to(tab_id, window.mouse_position(), true, cx);
         cx.notify();
         let manager = cx.entity().downgrade();
         let placement = manager.clone();
@@ -1038,21 +1064,53 @@ impl TabManager {
             manager
                 .upgrade()
                 .map(|owner| {
-                    owner
-                        .read(cx)
-                        .render_lifted_tab(tab_id, size, manager.clone(), window, cx)
+                    let owner = owner.read(cx);
+                    // Over the Pane Layout the lifted Tab becomes the rectangle a Pane drag
+                    // carries, because it lands there as Panes.
+                    match owner.tab_stand_in.as_ref().filter(|_| owner.tab_over_layout) {
+                        Some(stand_in) => super::tab_view::render_drag_stand_in(
+                            stand_in,
+                            size.map_or(px(0.0), |size| size.width),
+                            cursor_offset.x,
+                            cx,
+                        ),
+                        None => owner.render_lifted_tab(tab_id, size, manager.clone(), window, cx),
+                    }
                 })
                 .unwrap_or_else(|| div().into_any_element())
         })
         .placed(cursor_offset, move |cx| {
             placement
                 .upgrade()
-                .and_then(|owner| owner.read(cx).tab_reorder.lifted_origin())
+                .map(|owner| owner.read(cx))
+                .filter(|owner| !owner.tab_over_layout)
+                .and_then(|owner| owner.tab_reorder.lifted_origin())
         })
     }
 
-    fn drag_tab_to(&mut self, tab_id: TabId, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+    /// Follows a Tab drag. Along the Tab bar it reorders; over the Pane Layout it shows where
+    /// the Tab merges into the Active Tab.
+    fn drag_tab_to(
+        &mut self,
+        tab_id: TabId,
+        pointer: gpui::Point<Pixels>,
+        over_bar: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.tab_reorder.dragged() != Some(tab_id) {
+            return;
+        }
+        if self.tab_over_layout == over_bar {
+            self.tab_over_layout = !over_bar;
+            cx.notify();
+        }
+        let incoming = (!over_bar)
+            .then(|| self.merge_target(tab_id, pointer, cx))
+            .flatten();
+        self.tabs
+            .active_tab()
+            .update(cx, |view, cx| view.present_incoming_drop(incoming, cx));
+        if !over_bar {
             return;
         }
         let ids = self.visible_tab_ids();
@@ -1064,13 +1122,58 @@ impl TabManager {
         }
     }
 
-    /// Lands the dragged Tab in the slot marked at the release point.
-    fn finish_tab_drag(&mut self, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+    /// The Active Tab's Pane edge under `pointer` where the dragged Tab `tab_id` merges. The
+    /// Active Tab never merges into itself.
+    fn merge_target(
+        &self,
+        tab_id: TabId,
+        pointer: gpui::Point<Pixels>,
+        cx: &App,
+    ) -> Option<(PaneId, crate::domain::PaneEdge)> {
+        if tab_id == self.tabs.active_tab_id() {
+            return None;
+        }
+        let incoming = self.tabs.tab(tab_id)?.read(cx).minimum_layout_size(cx)?;
+        self.tabs
+            .active_tab()
+            .read(cx)
+            .incoming_drop_target(pointer, incoming, cx)
+    }
+
+    /// Clears what a Tab drag over the Pane Layout showed.
+    fn end_tab_drag_over_layout(&mut self, cx: &mut Context<Self>) {
+        self.tab_over_layout = false;
+        self.tab_stand_in = None;
+        self.tabs
+            .active_tab()
+            .update(cx, |view, cx| view.present_incoming_drop(None, cx));
+    }
+
+    /// Lands the dragged Tab: in the slot marked at the release point along the Tab bar, or in the
+    /// Active Tab at the Pane edge marked over the Pane Layout.
+    fn finish_tab_drag(
+        &mut self,
+        pointer: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab_id) = self.tab_reorder.dragged() else {
             return;
         };
-        self.drag_tab_to(tab_id, pointer, cx);
         let ids = self.visible_tab_ids();
+        if self.tab_over_layout {
+            let target = self.merge_target(tab_id, pointer, cx);
+            self.tab_reorder
+                .cancel(&self.tab_bar_scroll_handle, &ids, cx);
+            self.end_tab_drag_over_layout(cx);
+            cx.notify();
+            if let Some((pane_id, edge)) = target {
+                self.merge_tab(tab_id, pane_id, edge, window, cx);
+            }
+            return;
+        }
+        self.end_tab_drag_over_layout(cx);
+        self.drag_tab_to(tab_id, pointer, true, cx);
         let landing = self
             .tab_reorder
             .finish(&self.tab_bar_scroll_handle, &ids, cx);
@@ -1078,6 +1181,43 @@ impl TabManager {
             self.move_tab(tab_id, position, cx);
         }
         cx.notify();
+    }
+
+    /// Asks the server to merge Tab `tab_id` into the Active Tab on `edge` of Pane `pane_id`,
+    /// and shows the merged Panes there at once.
+    fn merge_tab(
+        &mut self,
+        tab_id: TabId,
+        pane_id: PaneId,
+        edge: crate::domain::PaneEdge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self.tabs.active_tab().read(cx);
+        let Some(merged) = self.tabs.tab(tab_id).map(|view| view.read(cx)) else {
+            return;
+        };
+        let (Some(tab), Some(into), Some(beside), Some(opened)) = (
+            self.binding.server_tab(tab_id),
+            self.binding.server_tab(self.tabs.active_tab_id()),
+            active.server_pane(pane_id),
+            merged.server_pane(merged.focused_pane_id()),
+        ) else {
+            return;
+        };
+        let submission = self.binding.merge_tab(
+            tab,
+            into,
+            beside,
+            super::tab_view::edge_side(edge),
+        );
+        self.present_tab_submission(
+            submission,
+            "Couldn\u{2019}t Merge Tab",
+            Some(opened),
+            window,
+            cx,
+        );
     }
 
     #[cfg(test)]
@@ -1802,8 +1942,6 @@ impl TabManager {
         let leading_alignment =
             super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
                 .chip_strip_leading_offset();
-        let reorder_manager = manager.clone();
-        let owner = manager.entity_id();
         let mut items = div()
             .id("tab-items")
             .role(accesskit::Role::TabList)
@@ -1814,18 +1952,7 @@ impl TabManager {
             .flex()
             .flex_row()
             .overflow_x_scroll()
-            .track_scroll(&self.tab_bar_scroll_handle)
-            .on_drag_move::<DraggedTab>(move |event, _, cx| {
-                let dragged = event.drag(cx);
-                if dragged.owner != owner {
-                    return;
-                }
-                let tab_id = dragged.tab_id;
-                let pointer = event.event.position;
-                let _ = reorder_manager.update(cx, |manager, cx| {
-                    manager.drag_tab_to(tab_id, pointer, cx);
-                });
-            });
+            .track_scroll(&self.tab_bar_scroll_handle);
         let last_index = self.visible_len() - 1;
         // The strip's own ends carry the outer marks, so they stay put while Tabs slide or scroll.
         // Each hides only while the active Tab covers its end of the visible strip.
@@ -1906,7 +2033,21 @@ impl TabManager {
                     cx,
                 )
                 .children(separator)
-                .child(fade.tracker());
+                .child(fade.tracker())
+                // A Pane dropped on this Tab joins it.
+                .when(
+                    self.pane_strip_drop == Some(StripDrop::Tab(tab_id)) && cx.has_active_drag(),
+                    |face| {
+                        face.child(
+                            super::tab_view::pane_drop_overlay(appearance)
+                                .debug_selector(move || {
+                                    format!("tab-item-{}-pane-drop-target", tab_id.get())
+                                })
+                                .inset_0()
+                                .rounded(appearance.spacing(TAB_DROP_TARGET_RADIUS)),
+                        )
+                    },
+                );
             let open_manager = manager.clone();
             let lifecycle_manager = manager.clone();
             let activate_manager = manager.clone();
@@ -1970,10 +2111,20 @@ impl TabManager {
         let release_observer = drag_release_observer(move |window, cx| {
             let pointer = window.mouse_position();
             let _ = release_manager.update(cx, |manager, cx| {
-                manager.finish_tab_drag(pointer, cx);
+                manager.finish_tab_drag(pointer, window, cx);
             });
         });
 
+        let pane_strip_drop = self.pane_strip_drop.filter(|_| cx.has_active_drag());
+        let new_tab_drop = (pane_strip_drop == Some(StripDrop::NewTab)).then(|| {
+            super::tab_view::pane_drop_overlay(appearance)
+                .debug_selector(|| "tab-bar-new-tab-drop-target".to_owned())
+                .top(appearance.spacing(TAB_DROP_TARGET_INSET))
+                .bottom(appearance.spacing(TAB_DROP_TARGET_INSET))
+                .left_0()
+                .right(appearance.spacing(TAB_DROP_TARGET_INSET))
+                .rounded(appearance.spacing(TAB_DROP_TARGET_RADIUS))
+        });
         let drag_manager = manager.clone();
         let create_manager = manager.clone();
         // A Workspace's New Tab asks the server, so it waits while this client is offline
@@ -2007,7 +2158,16 @@ impl TabManager {
                     .children(strip_marks),
             )
             .child(release_observer)
+            // The New Tab button and the empty space after it take a Pane dropped there as a new
+            // Tab.
             .child(
+                div()
+                    .relative()
+                    .h_full()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .child(
                 div()
                     .debug_selector(|| "create-tab-area".to_owned())
                     .h_full()
@@ -2051,8 +2211,10 @@ impl TabManager {
                             });
                         }),
                     ),
+                    )
+                    .child(div().flex_1().min_w_0())
+                    .children(new_tab_drop),
             )
-            .child(div().flex_1().min_w_0())
             .when_some(self.trailing_accessory.clone(), |content, accessory| {
                 content.child(
                     div()
@@ -2108,26 +2270,31 @@ impl TabManager {
             });
 
         let pane_drop_manager = manager.clone();
-        // A Pane carried out of its Pane Layout becomes a new Tab where this bar takes it.
-        let pane_drop = (self.pane_drop_over_tab_bar && cx.has_active_drag()).then(|| {
-            super::tab_view::pane_drop_overlay(appearance)
-                .debug_selector(|| "tab-bar-pane-drop-target".to_owned())
-                .inset_0()
-                .rounded(
-                    super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
-                        .pane_radius(),
-                )
-        });
+        let tab_drag_manager = manager.clone();
+        let owner = manager.entity_id();
         div()
             .id("tab-bar")
             .debug_selector(|| "tab-bar".to_owned())
             .relative()
             .on_drag_move::<super::tab_view::DraggedPane>(move |event, _, cx| {
                 let dragged = event.drag(cx);
-                let (owner, pane_id) = (dragged.owner, dragged.pane_id);
-                let over = event.bounds.contains(&event.event.position);
+                let (source, pane_id) = (dragged.owner, dragged.pane_id);
+                let pointer = event.event.position;
+                let over_bar = event.bounds.contains(&pointer);
                 let _ = pane_drop_manager.update(cx, |manager, cx| {
-                    manager.drag_pane_over_tab_bar(owner, pane_id, over, cx);
+                    manager.drag_pane_over_tab_bar(source, pane_id, pointer, over_bar, cx);
+                });
+            })
+            .on_drag_move::<DraggedTab>(move |event, _, cx| {
+                let dragged = event.drag(cx);
+                if dragged.owner != owner {
+                    return;
+                }
+                let tab_id = dragged.tab_id;
+                let pointer = event.event.position;
+                let over_bar = event.bounds.contains(&pointer);
+                let _ = tab_drag_manager.update(cx, |manager, cx| {
+                    manager.drag_tab_to(tab_id, pointer, over_bar, cx);
                 });
             })
             .h(
@@ -2141,7 +2308,6 @@ impl TabManager {
                 appearance.surface(crate::appearance::SurfaceRole::Base, background),
             ))
             .child(drag_region)
-            .children(pane_drop)
             .into_any_element()
     }
 }
@@ -2882,7 +3048,7 @@ impl TabManager {
             .parked_tabs
             .keys()
             .copied()
-            .filter(|id| !self.binding.optimistically_closing(*id))
+            .filter(|id| !self.binding.optimistically_removing(*id))
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_tabs.remove(&id) {
@@ -2954,7 +3120,7 @@ impl TabManager {
         let opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
         let mut removed = false;
         for tab_id in absent {
-            let optimistic = self.binding.optimistically_closing(tab_id);
+            let optimistic = self.binding.optimistically_removing(tab_id);
             let own = removal == super::workspaces::WorkspaceRemoval::OwnClose;
             let held_keyboard = self
                 .tabs
@@ -2962,8 +3128,16 @@ impl TabManager {
                 .is_some_and(|view| view.read(cx).holds_keyboard(window, cx));
             if optimistic {
                 let was_active = self.tabs.active_tab_id() == tab_id;
+                // The Tab its Panes merge into presents them now, which fences this Tab's own
+                // presentation of them, so a refused merge opens them again here.
+                let merging = self.binding.merging(tab_id);
                 if let Ok(Some(parked)) = self.tabs.park_tab(tab_id) {
-                    parked.payload().update(cx, |view, cx| view.deactivate(cx));
+                    parked.payload().update(cx, |view, cx| {
+                        view.deactivate(cx);
+                        if merging {
+                            view.supersede_panes();
+                        }
+                    });
                     self.parked_tabs.insert(tab_id, parked);
                     if was_active && self.active {
                         self.tabs
@@ -3115,29 +3289,54 @@ impl TabManager {
             return;
         };
         let submission = binding.create_tab(source);
-        self.present_tab_submission(submission, "Couldn\u{2019}t Create Tab", window, cx);
+        self.present_tab_submission(submission, "Couldn\u{2019}t Create Tab", None, window, cx);
     }
 
-    /// Records whether the pointer carrying `pane_id` out of the Tab `owner` is over the Tab bar.
+    /// Records where the Pane `pane_id`, carried out of the Tab `source`, lands if released at
+    /// `pointer`: on another Tab, or as a new Tab anywhere else on the Tab bar.
     fn drag_pane_over_tab_bar(
         &mut self,
-        owner: gpui::EntityId,
+        source: gpui::EntityId,
         pane_id: PaneId,
-        over: bool,
+        pointer: gpui::Point<Pixels>,
+        over_bar: bool,
         cx: &mut Context<Self>,
     ) {
-        let carried = self.tabs.iter().any(|(_, view)| {
-            view.entity_id() == owner && view.read(cx).dragged_pane() == Some(pane_id)
-        });
-        let over = over && carried;
-        if self.pane_drop_over_tab_bar != over {
-            self.pane_drop_over_tab_bar = over;
+        let carrier = self
+            .tabs
+            .iter()
+            .find(|(_, view)| {
+                view.entity_id() == source && view.read(cx).dragged_pane() == Some(pane_id)
+            })
+            .map(|(tab_id, _)| tab_id);
+        let drop = carrier
+            .filter(|_| over_bar)
+            .and_then(|carrier| match self.tab_at(pointer) {
+                // A Pane dropped on its own Tab stays where it is.
+                Some(tab_id) if tab_id == carrier => None,
+                Some(tab_id) => Some(StripDrop::Tab(tab_id)),
+                None => Some(StripDrop::NewTab),
+            });
+        if self.pane_strip_drop != drop {
+            self.pane_strip_drop = drop;
             cx.notify();
         }
     }
 
-    /// Ends a Pane drag that no Pane took. A release over the Tab bar moves the Pane into a new
-    /// Tab.
+    /// The Tab whose place in the Tab bar holds `pointer`.
+    fn tab_at(&self, pointer: gpui::Point<Pixels>) -> Option<TabId> {
+        self.visible_tabs()
+            .enumerate()
+            .find(|(position, _)| {
+                self.tab_bar_scroll_handle
+                    .bounds_for_item(*position)
+                    .is_some_and(|bounds| bounds.contains(&pointer))
+            })
+            .map(|(_, (tab_id, _))| tab_id)
+    }
+
+    /// Ends a Pane drag that no Pane took. A release over another Tab moves the Pane into that
+    /// Tab, beside its Focused Pane; a release elsewhere on the Tab bar moves it into a new Tab.
     fn drop_pane(
         &mut self,
         tab_id: TabId,
@@ -3145,9 +3344,11 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !std::mem::take(&mut self.pane_drop_over_tab_bar) {
+        use spaceterm_server::hierarchy::{PaneDestination, Side};
+
+        let Some(drop) = self.pane_strip_drop.take() else {
             return;
-        }
+        };
         cx.notify();
         let Some(view) = self.tabs.tab(tab_id) else {
             return;
@@ -3158,16 +3359,43 @@ impl TabManager {
         ) else {
             return;
         };
-        let submission = self.binding.move_pane_to_new_tab(tab, pane);
-        self.present_tab_submission(submission, "Couldn\u{2019}t Move Pane", window, cx);
+        let destination = match drop {
+            StripDrop::NewTab => PaneDestination::NewTab,
+            StripDrop::Tab(target) => {
+                let Some(view) = self.tabs.tab(target).map(|view| view.read(cx)) else {
+                    return;
+                };
+                let (Some(into), Some(beside)) = (
+                    self.binding.server_tab(target),
+                    view.server_pane(view.focused_pane_id()),
+                ) else {
+                    return;
+                };
+                PaneDestination::Beside {
+                    tab: into,
+                    pane: beside,
+                    side: Side::Right,
+                }
+            }
+        };
+        let submission = self.binding.move_pane(tab, pane, destination);
+        let opened = (drop != StripDrop::NewTab).then_some(pane);
+        self.present_tab_submission(
+            submission,
+            "Couldn\u{2019}t Move Pane",
+            opened,
+            window,
+            cx,
+        );
     }
 
-    /// Opens the Tab a submitted edit creates, or explains under `title` why the edit could not
-    /// be submitted.
+    /// Opens the Tab a submitted edit creates, or else the Pane `opened` it moves, or explains
+    /// under `title` why the edit could not be submitted.
     fn present_tab_submission(
         &mut self,
         submission: super::workspaces::WorkspaceSubmission,
         title: &'static str,
+        opened: Option<spaceterm_server::hierarchy::Id>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3201,7 +3429,10 @@ impl TabManager {
         } else {
             let presentation = edits.take_presentation();
             let workspace = self.binding.presentation_workspace();
-            let target = presentation.map(|event| edits.canonical(event.target));
+            let target = presentation
+                .map(|event| event.target)
+                .or(opened)
+                .map(|target| edits.canonical(target));
             if let Some(workspace) = workspace {
                 self.reconcile(
                     &workspace,
@@ -4418,46 +4649,144 @@ mod tests {
         })
     }
 
-    #[gpui::test]
-    fn dropping_a_pane_on_the_tab_bar_should_move_it_with_its_session_into_a_new_active_tab(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, _records, cx) = tab_manager(cx);
-        cx.dispatch_action(SplitRight);
-        cx.run_until_parked();
-        let (source_tab, moved) = manager.read_with(cx, |manager, cx| {
+    /// Presses Pane `pane`'s focused caption beside its name and carries it along `path`.
+    fn drag_focused_pane(pane: u64, path: &[gpui::Point<Pixels>], cx: &mut VisualTestContext) {
+        let caption = cx
+            .debug_bounds(format!("pane-caption-{pane}-focused").leak())
+            .unwrap();
+        let press = point(caption.left() + px(24.0), caption.center().y);
+        cx.simulate_mouse_move(press, None, Modifiers::none());
+        cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
+        for position in path {
+            cx.simulate_mouse_move(*position, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+        }
+    }
+
+    /// The Active Tab, and the server identity of its Focused Pane.
+    fn active_focus(
+        manager: &Entity<TabManager>,
+        cx: &mut VisualTestContext,
+    ) -> (TabId, Option<spaceterm_server::hierarchy::Id>) {
+        manager.read_with(cx, |manager, cx| {
             let view = manager.tabs.active_tab().read(cx);
             (
                 manager.tabs.active_tab_id(),
                 view.server_pane(view.focused_pane_id()),
             )
-        });
-        let caption = cx.debug_bounds("pane-caption-2-focused").unwrap();
-        let bar = cx.debug_bounds("tab-bar").unwrap().center();
+        })
+    }
 
-        let press = point(caption.left() + px(24.0), caption.center().y);
-        cx.simulate_mouse_move(press, None, Modifiers::none());
-        cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
-        for position in [bar, bar + point(px(1.0), px(0.0))] {
+    #[gpui::test]
+    fn dropping_a_pane_after_the_tabs_should_move_it_with_its_session_into_a_new_active_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let (source_tab, moved) = active_focus(&manager, cx);
+        let empty = cx.debug_bounds("create-tab-area").unwrap().center() + point(px(60.0), px(0.0));
+
+        drag_focused_pane(2, &[empty, empty + point(px(1.0), px(0.0))], cx);
+        let offered = (
+            cx.debug_bounds("tab-bar-new-tab-drop-target").is_some(),
+            cx.debug_bounds("drag-stand-in").is_some(),
+        );
+        cx.simulate_mouse_up(empty, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let (active, focused) = active_focus(&manager, cx);
+        assert_eq!(
+            (offered, pane_counts(&manager, cx), active != source_tab, focused),
+            ((true, true), vec![1, 1], true, moved)
+        );
+        assert!(cx.debug_bounds("tab-bar-new-tab-drop-target").is_none());
+    }
+
+    #[gpui::test]
+    fn dropping_a_pane_on_another_tab_should_move_it_there_and_open_that_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let (_, moved) = active_focus(&manager, cx);
+        let own_tab = cx.debug_bounds("tab-item-2-active").unwrap().center();
+        let other_tab = cx.debug_bounds("tab-item-1-inactive").unwrap().center();
+
+        drag_focused_pane(2, &[own_tab, own_tab + point(px(1.0), px(0.0))], cx);
+        let over_own_tab = cx.debug_bounds("tab-item-2-pane-drop-target").is_some();
+        for position in [other_tab, other_tab + point(px(1.0), px(0.0))] {
             cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
             cx.run_until_parked();
         }
-        let offered = cx.debug_bounds("tab-bar-pane-drop-target").is_some();
-        cx.simulate_mouse_up(bar, MouseButton::Left, Modifiers::none());
+        let over_other_tab = cx.debug_bounds("tab-item-1-pane-drop-target").is_some();
+        cx.simulate_mouse_up(other_tab, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
-        let presented = manager.read_with(cx, |manager, cx| {
-            let view = manager.tabs.active_tab().read(cx);
-            (
-                manager.tabs.active_tab_id() != source_tab,
-                view.server_pane(view.focused_pane_id()),
-            )
-        });
         assert_eq!(
-            (offered, pane_counts(&manager, cx), presented),
-            (true, vec![1, 1], (true, moved))
+            (
+                over_own_tab,
+                over_other_tab,
+                pane_counts(&manager, cx),
+                active_focus(&manager, cx),
+            ),
+            (false, true, vec![2, 1], (TabId::new(1), moved)),
+            "the Pane joins Tab 1 beside its Focused Pane, and Tab 1 opens on it"
         );
-        assert!(cx.debug_bounds("tab-bar-pane-drop-target").is_none());
+    }
+
+    #[gpui::test]
+    fn dropping_a_tab_on_a_pane_edge_should_merge_its_panes_into_the_active_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let merged = manager.read_with(cx, |manager, cx| {
+            let view = manager.tabs.tab(TabId::new(1)).unwrap().read(cx);
+            view.server_pane(view.focused_pane_id())
+        });
+        let tab = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let pane = cx.debug_bounds("pane-surface-1").unwrap();
+        let left_edge = point(pane.left() + pane.size.width * 0.1, pane.center().y);
+
+        drag_tab(
+            tab.center(),
+            &[
+                tab.center() + point(px(8.0), px(0.0)),
+                left_edge,
+                left_edge + point(px(1.0), px(0.0)),
+            ],
+            cx,
+        );
+        let during = (
+            cx.debug_bounds("pane-drop-target-1-left").is_some(),
+            cx.debug_bounds("drag-stand-in").is_some(),
+            cx.debug_bounds("tab-preview-1-inactive").is_some(),
+        );
+        cx.simulate_mouse_up(left_edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let (active, focused) = active_focus(&manager, cx);
+        assert_eq!(
+            (
+                during,
+                tab_order(&manager, cx),
+                pane_counts(&manager, cx),
+                active,
+                focused
+            ),
+            (
+                (true, true, false),
+                vec![2],
+                vec![2],
+                TabId::new(2),
+                merged
+            ),
+            "Tab 1's Pane lands on the left of Tab 2's Pane, keeping its Terminal Session"
+        );
+        assert!(cx.debug_bounds("pane-drop-target-1-left").is_none());
     }
 
     #[gpui::test]
@@ -6928,7 +7257,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_tab_dragged_far_below_the_tab_bar_should_stay_in_the_strip_and_land_there(
+    fn a_tab_released_where_no_pane_takes_it_should_return_to_its_place(
         cx: &mut TestAppContext,
     ) {
         let (manager, _records, cx) = tab_manager(cx);
@@ -6936,27 +7265,27 @@ mod tests {
         click("create-tab-button", cx);
         let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
         let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
-        let third = cx.debug_bounds("tab-item-3-active").unwrap();
-        let below = point(second.center().x, third.bottom() + px(240.0));
+        // The middle of a Pane takes nothing from another Tab.
+        let middle = cx.debug_bounds("pane-surface-1").unwrap().center();
 
         drag_tab(
             first.center(),
-            &[first.center() + point(px(8.0), px(0.0)), below],
+            &[first.center() + point(px(8.0), px(0.0)), second.center(), middle],
             cx,
         );
         finish_slides(cx);
-        let preview = cx.debug_bounds("tab-preview-1-inactive");
-        cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
+        let over_panes = (
+            cx.debug_bounds("drag-stand-in").is_some(),
+            cx.debug_bounds("tab-preview-1-inactive").is_some(),
+        );
+        cx.simulate_mouse_up(middle, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
         assert_eq!(
-            (
-                preview.map(|preview| preview.top()),
-                tab_order(&manager, cx)
-            ),
-            (Some(second.top()), vec![2, 1, 3]),
-            "the lifted copy must stay level with the Tabs, and a release must land the Tab where \
-             its copy shows"
+            (over_panes, tab_order(&manager, cx), pane_counts(&manager, cx)),
+            ((true, false), vec![1, 2, 3], vec![1, 1, 1]),
+            "over the Panes the lifted Tab becomes the drag's rectangle, and a release no Pane \
+             takes leaves every Tab where it was"
         );
     }
 

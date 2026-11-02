@@ -1,7 +1,8 @@
 //! Client-owned arrangements. These records never enter the protocol or server organization.
 use crate::ServerError;
 use crate::hierarchy::{
-    Axis, Id, Inventory, MAX_PANES, MAX_TABS, MAX_WORKSPACES, Tab, Workspace, WorktreeMembership,
+    Axis, Id, Inventory, MAX_PANES, MAX_TABS, MAX_WORKSPACES, Side, Tab, Workspace,
+    WorktreeMembership,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -149,7 +150,7 @@ impl Layout {
                                 tree.first()
                             }
                         });
-                    tree.insert(source, pane.id, pane.axis);
+                    tree.insert(source, pane.id, pane.side);
                 }
                 None => tree = Some(Tree::Pane(pane.id)),
                 _ => {}
@@ -180,19 +181,24 @@ impl Tree {
             Self::Split(_, _, a, _) => a.first(),
         }
     }
-    fn insert(&mut self, source: Id, id: Id, axis: Axis) {
+    fn insert(&mut self, source: Id, id: Id, side: Side) {
         match self {
             Self::Pane(pane) if *pane == source => {
+                let (first, second) = if side.leads() {
+                    (id, source)
+                } else {
+                    (source, id)
+                };
                 *self = Self::Split(
-                    axis,
+                    side.axis(),
                     0.5,
-                    Box::new(Self::Pane(source)),
-                    Box::new(Self::Pane(id)),
+                    Box::new(Self::Pane(first)),
+                    Box::new(Self::Pane(second)),
                 )
             }
             Self::Split(_, _, a, b) => {
-                a.insert(source, id, axis);
-                b.insert(source, id, axis);
+                a.insert(source, id, side);
+                b.insert(source, id, side);
             }
             _ => {}
         }
@@ -280,7 +286,7 @@ pub struct RetainedTab {
 pub struct RetainedPane {
     pub id: Id,
     pub source: Option<Id>,
-    pub axis: Axis,
+    pub side: Side,
     /// The name of the Pane's shell, such as `zsh`. A title a program sets can name hosts,
     /// paths and commands, so it is never kept.
     pub shell: Option<String>,
@@ -322,7 +328,7 @@ impl RetainedInventory {
                                 .map(|pane| RetainedPane {
                                     id: pane.id,
                                     source: pane.source,
-                                    axis: pane.axis,
+                                    side: pane.side,
                                     shell: shell(pane),
                                 })
                                 .collect(),
@@ -411,7 +417,7 @@ impl RetainedInventory {
                                 .map(|pane| Pane {
                                     id: pane.id,
                                     source: pane.source,
-                                    axis: pane.axis,
+                                    side: pane.side,
                                     starting_directory: std::path::PathBuf::new(),
                                     current_directory: None,
                                     repository_directory: None,
@@ -614,11 +620,11 @@ impl ClientViewStore {
 mod tests {
     use super::*;
     use crate::hierarchy::Pane;
-    fn pane(id: u8, source: Option<u8>, axis: Axis) -> Pane {
+    fn pane(id: u8, source: Option<u8>, side: Side) -> Pane {
         Pane {
             id: [id; 32],
             source: source.map(|v| [v; 32]),
-            axis,
+            side,
             starting_directory: "/tmp".into(),
             current_directory: None,
             repository_directory: None,
@@ -678,16 +684,17 @@ mod tests {
             ],
         };
         let current = workspace(vec![
-            tab(2, vec![pane(4, None, Axis::Right)]),
+            tab(2, vec![pane(4, None, Side::Right)]),
             tab(
                 3,
                 vec![
-                    pane(5, None, Axis::Right),
-                    pane(6, Some(5), Axis::Right),
-                    pane(7, Some(5), Axis::Down),
+                    pane(5, None, Side::Right),
+                    pane(6, Some(5), Side::Right),
+                    // A Pane on the leading side of its source comes first in their Split.
+                    pane(7, Some(5), Side::Up),
                 ],
             ),
-            tab(8, vec![pane(9, None, Axis::Right)]),
+            tab(8, vec![pane(9, None, Side::Right)]),
         ]);
         let actual = saved.reconcile(&current);
         assert_eq!(
@@ -710,8 +717,8 @@ mod tests {
                     first: 3,
                     second: 4
                 },
-                LayoutNode::Pane([5; 32]),
-                LayoutNode::Pane([7; 32])
+                LayoutNode::Pane([7; 32]),
+                LayoutNode::Pane([5; 32])
             ]
         );
     }
@@ -745,7 +752,7 @@ mod reconciliation_tests {
                 Pane {
                     id: [2; 32],
                     source: None,
-                    axis: Axis::Right,
+                    side: Side::Right,
                     starting_directory: "/tmp".into(),
                     current_directory: None,
                     repository_directory: None,
@@ -757,7 +764,7 @@ mod reconciliation_tests {
                 Pane {
                     id: [4; 32],
                     source: None,
-                    axis: Axis::Down,
+                    side: Side::Down,
                     starting_directory: "/tmp".into(),
                     current_directory: None,
                     repository_directory: None,
@@ -866,7 +873,7 @@ mod retained_inventory_tests {
         Pane {
             id: [id; 32],
             source: None,
-            axis: Axis::Down,
+            side: Side::Down,
             starting_directory: "/home/tester/project".into(),
             current_directory: Some("/home/tester/project/src".into()),
             repository_directory: Some("/home/tester/project".into()),
@@ -987,7 +994,7 @@ mod retained_inventory_tests {
                     .try_into()
                     .unwrap(),
                 source: None,
-                axis: Axis::Right,
+                side: Side::Right,
                 shell: None,
             })
             .collect();
@@ -1011,7 +1018,7 @@ mod retained_inventory_tests {
         let mut renamed = retained.clone();
         renamed.workspaces[0].name = "Play".into();
         let mut split = retained.clone();
-        split.workspaces[0].tabs[0].panes[1].axis = Axis::Right;
+        split.workspaces[0].tabs[0].panes[1].side = Side::Right;
 
         assert!(retained.same_structure(&named));
         assert!(!retained.same_structure(&renamed));

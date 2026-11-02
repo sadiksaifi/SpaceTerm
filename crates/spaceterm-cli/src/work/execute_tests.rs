@@ -477,7 +477,7 @@ fn tab_and_split_creation_report_server_directories_and_stable_root_sources() {
         pane.creator = Some(id(5));
         let outcome = if split {
             pane.source = Some(id(23));
-            pane.axis = hierarchy::Axis::Down;
+            pane.side = hierarchy::Side::Down;
             updated.workspaces[1].tabs[0].panes.push(pane);
             id(41)
         } else {

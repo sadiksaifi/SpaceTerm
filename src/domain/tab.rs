@@ -88,6 +88,15 @@ pub(crate) enum SplitAxis {
     Vertical,
 }
 
+/// What a Pane released over another Pane does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneDrop {
+    /// Splits the target so the released Pane takes this edge.
+    Edge(PaneEdge),
+    /// Exchanges the places of the released Pane and the target.
+    Swap,
+}
+
 /// The side of a target Pane that another Pane takes when it splits the target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaneEdge {
@@ -99,6 +108,7 @@ pub(crate) enum PaneEdge {
 
 impl PaneEdge {
     /// The edge a new Pane takes when a Split places it after its target along `axis`.
+    #[cfg(test)]
     const fn trailing(axis: SplitAxis) -> Self {
         match axis {
             SplitAxis::Horizontal => Self::Right,
@@ -510,13 +520,13 @@ impl<T> Tab<T> {
     pub(crate) fn insert_pane(
         &mut self,
         source: PaneId,
-        axis: SplitAxis,
+        edge: PaneEdge,
         create_pane: impl FnOnce(PaneId) -> T,
     ) -> Result<PaneId, PaneError> {
         let (pane_id, split_id, next_pane_id, next_split_id) = self.next_split_ids()?;
         let root = self
             .root
-            .with_split(source, pane_id, split_id, PaneEdge::trailing(axis))
+            .with_split(source, pane_id, split_id, edge)
             .ok_or(PaneError::PaneNotFound(source))?;
         let pane = create_pane(pane_id);
         self.root = root;
@@ -548,21 +558,11 @@ impl<T> Tab<T> {
         if pane_id == target_pane_id {
             return Ok(false);
         }
-        let split_id = SplitId::from_raw(self.next_split_id);
         let next_split_id = self
             .next_split_id
             .checked_add(1)
             .ok_or(PaneError::SplitIdExhausted)?;
-        let Some(PaneRemoval {
-            replacement: Some(remaining),
-            ..
-        }) = self.root.without_pane(pane_id)
-        else {
-            unreachable!("a Pane with a distinct target is never the final Pane")
-        };
-        let Some(new_root) = remaining.with_split(target_pane_id, pane_id, split_id, edge) else {
-            unreachable!("removing another Pane keeps the target in the Pane layout")
-        };
+        let new_root = self.moved_root(pane_id, target_pane_id, edge);
         if new_root.has_arrangement_of(&self.root) {
             return Ok(false);
         }
@@ -599,17 +599,78 @@ impl<T> Tab<T> {
         Ok(true)
     }
 
-    /// Whether a Pane moved onto `edge` of `target_pane_id` fits within the target's
-    /// `target_size`.
-    pub(crate) fn can_receive_pane(
+    /// What releasing `pane_id` over `drop` of `target_pane_id` does, when it changes the
+    /// layout.
+    ///
+    /// An edge whose layout matches the swap's is the swap. An edge that rebuilds the current
+    /// layout, or leaves the target less than its minimum size in `target_size`, does nothing.
+    pub(crate) fn resolve_drop(
+        &self,
+        pane_id: PaneId,
+        target_pane_id: PaneId,
+        drop: PaneDrop,
+        target_size: PaneSize,
+        divider_size: f32,
+    ) -> Option<PaneDrop> {
+        if pane_id == target_pane_id
+            || !self.root.contains_pane(pane_id)
+            || !self.root.contains_pane(target_pane_id)
+        {
+            return None;
+        }
+        let PaneDrop::Edge(edge) = drop else {
+            return Some(PaneDrop::Swap);
+        };
+        let moved = self.moved_root(pane_id, target_pane_id, edge);
+        if moved.has_arrangement_of(&self.root) {
+            return None;
+        }
+        let mut swapped = self.root.clone();
+        swapped.exchange_panes(pane_id, target_pane_id);
+        if moved.has_arrangement_of(&swapped) {
+            return Some(PaneDrop::Swap);
+        }
+        self.can_receive(
+            target_pane_id,
+            edge,
+            self.minimum_pane_size,
+            target_size,
+            divider_size,
+        )
+        .then_some(drop)
+    }
+
+    /// Whether `edge` of `target_pane_id` has room in `target_size` for content at least
+    /// `incoming` in size, such as another Tab's Pane Layout.
+    pub(crate) fn can_receive(
         &self,
         target_pane_id: PaneId,
         edge: PaneEdge,
+        incoming: PaneSize,
         target_size: PaneSize,
         divider_size: f32,
     ) -> bool {
-        self.validate_split(target_pane_id, edge.axis(), target_size, divider_size)
-            .is_ok()
+        self.root.contains_pane(target_pane_id)
+            && validate_divider_size(divider_size).is_ok()
+            && combined_minimum(self.minimum_pane_size, incoming, edge.axis(), divider_size)
+                .and_then(|required| ensure_space(target_size, required))
+                .is_ok()
+    }
+
+    /// The layout after moving `pane_id` onto `edge` of another Pane `target_pane_id`.
+    fn moved_root(&self, pane_id: PaneId, target_pane_id: PaneId, edge: PaneEdge) -> PaneNode {
+        let Some(PaneRemoval {
+            replacement: Some(remaining),
+            ..
+        }) = self.root.without_pane(pane_id)
+        else {
+            unreachable!("a Pane with a distinct target is never the final Pane")
+        };
+        let split_id = SplitId::from_raw(self.next_split_id);
+        let Some(moved) = remaining.with_split(target_pane_id, pane_id, split_id, edge) else {
+            unreachable!("removing another Pane keeps the target in the Pane layout")
+        };
+        moved
     }
 
     pub(crate) fn close_pane(&mut self, pane_id: PaneId) -> Result<ClosePaneOutcome<T>, PaneError> {
@@ -665,7 +726,7 @@ impl<T> Tab<T> {
         &mut self,
         parked: ParkedPane<T>,
         source: PaneId,
-        axis: SplitAxis,
+        edge: PaneEdge,
     ) -> Result<PaneId, PaneError> {
         if self.root == parked.remaining {
             self.root = parked.original;
@@ -678,7 +739,7 @@ impl<T> Tab<T> {
                 .ok_or(PaneError::SplitIdExhausted)?;
             self.root = self
                 .root
-                .with_split(source, parked.id, split, PaneEdge::trailing(axis))
+                .with_split(source, parked.id, split, edge)
                 .ok_or(PaneError::PaneNotFound(source))?;
             self.next_split_id = next;
         }
@@ -1338,7 +1399,7 @@ mod tests {
         tab.toggle_zoom();
         let zoom = tab.zoom_state();
         let added = tab
-            .insert_pane(PaneId::new(1), SplitAxis::Horizontal, |_| ())
+            .insert_pane(PaneId::new(1), PaneEdge::Right, |_| ())
             .unwrap();
         assert!(tab.pane(added).is_some());
         assert_eq!(tab.focused_pane_id(), focused);
@@ -1586,18 +1647,90 @@ mod tests {
     }
 
     #[test]
-    fn can_receive_pane_should_require_room_along_the_edge_axis() {
+    fn can_receive_should_require_room_along_the_edge_axis_for_the_incoming_size() {
         let tab = four_pane_tab();
         let cramped = size(150.0, 200.0);
 
         assert_eq!(
-            [PaneEdge::Left, PaneEdge::Top].map(|edge| tab.can_receive_pane(
+            [
+                (PaneEdge::Left, size(100.0, 50.0)),
+                (PaneEdge::Top, size(100.0, 50.0)),
+                (PaneEdge::Top, size(100.0, 150.0)),
+            ]
+            .map(|(edge, incoming)| tab.can_receive(
                 PaneId::new(4),
                 edge,
+                incoming,
                 cramped,
                 DIVIDER_SIZE
             )),
-            [false, true]
+            [false, true, false]
+        );
+    }
+
+    #[test]
+    fn resolve_drop_should_offer_only_drops_that_change_two_side_by_side_panes() {
+        let mut tab = tab(());
+        tab.split_pane(
+            PaneId::new(1),
+            SplitAxis::Horizontal,
+            size(800.0, 400.0),
+            DIVIDER_SIZE,
+            |_| (),
+        )
+        .unwrap();
+        let roomy = size(400.0, 400.0);
+
+        assert_eq!(
+            [
+                PaneDrop::Edge(PaneEdge::Left),
+                PaneDrop::Edge(PaneEdge::Right),
+                PaneDrop::Edge(PaneEdge::Top),
+                PaneDrop::Edge(PaneEdge::Bottom),
+                PaneDrop::Swap,
+            ]
+            .map(|drop| tab.resolve_drop(PaneId::new(1), PaneId::new(2), drop, roomy, DIVIDER_SIZE)),
+            [
+                None,
+                Some(PaneDrop::Swap),
+                Some(PaneDrop::Edge(PaneEdge::Top)),
+                Some(PaneDrop::Edge(PaneEdge::Bottom)),
+                Some(PaneDrop::Swap),
+            ],
+            "the edge beside the dragged Pane rebuilds the layout, and the far edge is the swap"
+        );
+    }
+
+    #[test]
+    fn resolve_drop_should_drop_the_edge_that_rebuilds_a_nested_layout_and_cramped_edges() {
+        let tab = four_pane_tab();
+        let roomy = size(250.0, 200.0);
+        let resolve = |pane, target, edge, size| {
+            tab.resolve_drop(
+                PaneId::new(pane),
+                PaneId::new(target),
+                PaneDrop::Edge(edge),
+                size,
+                DIVIDER_SIZE,
+            )
+        };
+
+        assert_eq!(
+            [
+                // Pane 3 already sits below Pane 1.
+                resolve(3, 1, PaneEdge::Bottom, roomy),
+                resolve(3, 1, PaneEdge::Top, roomy),
+                resolve(3, 1, PaneEdge::Right, roomy),
+                resolve(3, 1, PaneEdge::Right, size(150.0, 200.0)),
+                resolve(3, 3, PaneEdge::Top, roomy),
+            ],
+            [
+                None,
+                Some(PaneDrop::Swap),
+                Some(PaneDrop::Edge(PaneEdge::Right)),
+                None,
+                None,
+            ]
         );
     }
 

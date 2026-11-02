@@ -47,7 +47,7 @@ pub(crate) fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
     Pane {
         id,
         source,
-        axis,
+        side: axis.into(),
         starting_directory: PathBuf::from("/server/work"),
         current_directory: None,
         repository_directory: None,

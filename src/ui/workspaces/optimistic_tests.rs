@@ -666,10 +666,11 @@ fn optimistic_pane_move_presents_its_tab_at_once_and_keeps_the_pane_identity() {
     server.finish(true, true);
     model.poll();
     let moved = server.inventory().workspaces[0].tabs[0].panes[1].id;
-    let mutation = Mutation::MovePaneToNewTab {
+    let mutation = Mutation::MovePane {
         workspace,
         tab: tab.id,
         pane: moved,
+        destination: spaceterm_server::hierarchy::PaneDestination::NewTab,
     };
 
     assert_eq!(
@@ -1589,6 +1590,51 @@ fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mu
         ),
         "the refused move restores the same Pane in its place and opens it again, because the \
          new Tab's presentation fenced the old one"
+    );
+}
+
+#[gpui::test]
+fn a_refused_tab_merge_restores_the_tab_and_opens_its_pane_again(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    let (harness, cx) = window_harness(cx);
+    click("create-tab-button", cx);
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    let merged = harness.server.inventory().workspaces[0].tabs[0].root_pane;
+    let opens = harness.panes.opens(merged);
+    let tab = cx.debug_bounds("tab-item-1-inactive").unwrap();
+    let pane = cx.debug_bounds("pane-surface-1").unwrap();
+    let left_edge = point(pane.left() + pane.size.width * 0.1, pane.center().y);
+
+    cx.simulate_mouse_move(tab.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(tab.center(), MouseButton::Left, Modifiers::none());
+    for position in [
+        tab.center() + point(px(8.0), px(0.0)),
+        left_edge,
+        left_edge + point(px(1.0), px(0.0)),
+    ] {
+        cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(left_edge, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let counts = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            (
+                manager.tab_ids().len(),
+                manager.active_tab_view().read(cx).pane_count(),
+            )
+        })
+    };
+    let pending = counts(cx);
+    harness.server.reject();
+    project_window(&harness, cx);
+
+    assert_eq!(
+        (pending, counts(cx), harness.panes.opens(merged) > opens + 1),
+        ((1, 2), (2, 1), true),
+        "the refused merge returns Tab 1, whose Pane opens again because Tab 2 fenced it"
     );
 }
 

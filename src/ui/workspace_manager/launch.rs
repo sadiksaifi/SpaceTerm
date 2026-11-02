@@ -1087,7 +1087,7 @@ pub(crate) mod testing {
     ) -> LocalServerAdapters {
         use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
         use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-        use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+        use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
 
         struct Presenting(Rc<dyn crate::terminal::TerminalSessionFactory>);
         impl WorkspaceServerConnector for Presenting {
@@ -1118,7 +1118,7 @@ pub(crate) mod testing {
                             panes: vec![Pane {
                                 id: [53; 32],
                                 source: None,
-                                axis: Axis::Right,
+                                side: Side::Right,
                                 starting_directory: std::env::temp_dir(),
                                 current_directory: None,
                                 repository_directory: None,

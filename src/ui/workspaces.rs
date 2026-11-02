@@ -614,6 +614,9 @@ mod server {
         pub(crate) fn moving(&self, tab: Id, pane: Id) -> bool {
             self.pending.borrow().moving(tab, pane)
         }
+        pub(crate) fn merging(&self, tab: Id) -> bool {
+            self.pending.borrow().merging(tab)
+        }
         pub(crate) fn take_presentation(&self) -> Option<WorkspaceAcceptance> {
             self.pending.borrow_mut().take_presentation()
         }
@@ -1495,7 +1498,9 @@ mod server {
         pub(crate) fn workspace(&self) -> Id {
             self.edits.canonical(self.workspace)
         }
-        pub(crate) fn optimistically_closing(&self, tab: TabId) -> bool {
+        /// Whether this client's own pending close or merge takes away every Pane of the Tab,
+        /// so the strip holds the Tab aside until the edit settles.
+        pub(crate) fn optimistically_removing(&self, tab: TabId) -> bool {
             let Some(server) = self.server_tab(tab) else {
                 return false;
             };
@@ -1510,7 +1515,17 @@ mod server {
                         .flat_map(|w| &w.tabs)
                         .find(|t| t.id == server)
                 })
-                .is_some_and(|t| t.panes.iter().all(|p| self.edits.closing(p.id)))
+                .is_some_and(|t| {
+                    t.panes
+                        .iter()
+                        .all(|p| self.edits.closing(p.id) || self.edits.moving(server, p.id))
+                })
+        }
+
+        /// Whether this client's own pending merge moves the Tab's Panes into another Tab.
+        pub(crate) fn merging(&self, tab: TabId) -> bool {
+            self.server_tab(tab)
+                .is_some_and(|server| self.edits.merging(server))
         }
 
         pub(crate) fn presentation_workspace(&self) -> Option<ServerWorkspace> {
@@ -1564,12 +1579,45 @@ mod server {
             self.edits.editability()
         }
 
-        /// Asks the server to move one of the server Tab `tab`'s Panes into a new Tab.
-        pub(crate) fn move_pane_to_new_tab(&self, tab: Id, pane: Id) -> WorkspaceSubmission {
-            self.edits.submit(Mutation::MovePaneToNewTab {
+        /// Asks the server to move one of the server Tab `tab`'s Panes to `destination`.
+        pub(crate) fn move_pane(
+            &self,
+            tab: Id,
+            pane: Id,
+            destination: spaceterm_server::hierarchy::PaneDestination,
+        ) -> WorkspaceSubmission {
+            use spaceterm_server::hierarchy::PaneDestination;
+            let destination = match destination {
+                PaneDestination::NewTab => PaneDestination::NewTab,
+                PaneDestination::Beside { tab, pane, side } => PaneDestination::Beside {
+                    tab: self.edits.canonical(tab),
+                    pane: self.edits.canonical(pane),
+                    side,
+                },
+            };
+            self.edits.submit(Mutation::MovePane {
                 workspace: self.workspace(),
                 tab: self.edits.canonical(tab),
                 pane: self.edits.canonical(pane),
+                destination,
+            })
+        }
+
+        /// Asks the server to merge the server Tab `tab` into Tab `into`, on `side` of Pane
+        /// `beside`.
+        pub(crate) fn merge_tab(
+            &self,
+            tab: Id,
+            into: Id,
+            beside: Id,
+            side: spaceterm_server::hierarchy::Side,
+        ) -> WorkspaceSubmission {
+            self.edits.submit(Mutation::MergeTab {
+                workspace: self.workspace(),
+                tab: self.edits.canonical(tab),
+                into: self.edits.canonical(into),
+                beside: self.edits.canonical(beside),
+                side,
             })
         }
 
@@ -2840,7 +2888,8 @@ mod server {
                 Mutation::CreateWorkspace { .. }
                 | Mutation::CreateTab { .. }
                 | Mutation::SplitPane { .. }
-                | Mutation::MovePaneToNewTab { .. } => None,
+                | Mutation::MovePane { .. }
+                | Mutation::MergeTab { .. } => None,
                 // A stale close is answered with its own outcome rather than a field conflict.
                 Mutation::Close { .. } | Mutation::Worktree(_) => None,
                 // Ending Sessions edits no field, and its refusals reach Settings directly.

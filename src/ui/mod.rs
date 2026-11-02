@@ -23,6 +23,7 @@ mod drag_and_drop;
 pub(crate) mod empty_state;
 pub(crate) mod pane_lifecycle;
 mod pane_motion;
+mod pane_snapshot;
 pub(crate) mod permission_setup;
 pub(crate) mod remembered_view;
 mod render_lifecycle;

@@ -7528,7 +7528,7 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
 ) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Axis, Inventory, Mutation, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Side, Inventory, Mutation, Pane, Tab, Workspace};
 
     const SERVER_WORKSPACE: [u8; 32] = [1; 32];
     const SERVER_TAB: [u8; 32] = [2; 32];
@@ -7555,7 +7555,7 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
                 panes: vec![Pane {
                     id: SERVER_PANE,
                     source: None,
-                    axis: Axis::Right,
+                    side: Side::Right,
                     starting_directory: PathBuf::from("/server/work"),
                     current_directory: None,
                     repository_directory: None,
@@ -7653,7 +7653,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
 ) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Axis, Inventory, Mutation, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Side, Inventory, Mutation, Pane, Tab, Workspace};
 
     // Both servers name their only Workspace, Tab, and Pane with the same identities.
     let published = |name: &str| Inventory {
@@ -7676,7 +7676,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
                 panes: vec![Pane {
                     id: [3; 32],
                     source: None,
-                    axis: Axis::Right,
+                    side: Side::Right,
                     starting_directory: PathBuf::from("/srv/work"),
                     current_directory: None,
                     repository_directory: None,
@@ -7797,7 +7797,7 @@ fn server_inventory(
     revision: u64,
     workspaces: &[(&str, u8)],
 ) -> spaceterm_server::hierarchy::Inventory {
-    use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
 
     Inventory {
         repositories: None,
@@ -7821,7 +7821,7 @@ fn server_inventory(
                     panes: vec![Pane {
                         id: [number + 100; 32],
                         source: None,
-                        axis: Axis::Right,
+                        side: Side::Right,
                         starting_directory: PathBuf::from("/srv/work"),
                         current_directory: None,
                         repository_directory: None,
@@ -8581,7 +8581,7 @@ const WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(1);
 fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTestContext) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
 
     let (manager, _records, cx) = serverless_workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
@@ -8607,7 +8607,7 @@ fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTe
                     panes: vec![Pane {
                         id: FOCUS_PANE,
                         source: None,
-                        axis: Axis::Right,
+                        side: Side::Right,
                         starting_directory: PathBuf::from("/server/work"),
                         current_directory: None,
                         repository_directory: None,
@@ -8851,7 +8851,7 @@ type WorkspaceClosePane = ([u8; 32], Option<[u8; 32]>);
 
 /// The other Workspace the server publishes, whose one Pane runs no shell.
 fn close_other() -> spaceterm_server::hierarchy::Workspace {
-    use spaceterm_server::hierarchy::{Axis, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Side, Pane, Tab, Workspace};
 
     Workspace {
         id: CLOSE_OTHER_WORKSPACE,
@@ -8869,7 +8869,7 @@ fn close_other() -> spaceterm_server::hierarchy::Workspace {
             panes: vec![Pane {
                 id: CLOSE_OTHER_PANE,
                 source: None,
-                axis: Axis::Right,
+                side: Side::Right,
                 starting_directory: PathBuf::from("/server/work"),
                 current_directory: None,
                 repository_directory: None,
@@ -8908,13 +8908,13 @@ fn close_inventory(
     tabs: &[([u8; 32], &[WorkspaceClosePane])],
 ) -> spaceterm_server::hierarchy::Inventory {
     use spaceterm_server::hierarchy::{
-        Axis, CloseInventory, ConfirmedPane, Inventory, Pane, Tab, Workspace,
+        Side, CloseInventory, ConfirmedPane, Inventory, Pane, Tab, Workspace,
     };
 
     let pane = |id: [u8; 32], source: Option<[u8; 32]>| Pane {
         id,
         source,
-        axis: Axis::Right,
+        side: Side::Right,
         starting_directory: PathBuf::from("/server/work"),
         current_directory: None,
         repository_directory: None,
@@ -9805,7 +9805,7 @@ struct AttachmentHarness {
 }
 
 fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
-    use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
 
     let workspace = |id, name: &str, tab, pane| Workspace {
         id,
@@ -9823,7 +9823,7 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
             panes: vec![Pane {
                 id: pane,
                 source: None,
-                axis: Axis::Right,
+                side: Side::Right,
                 starting_directory: PathBuf::from("/server/work"),
                 current_directory: None,
                 repository_directory: None,
@@ -10676,7 +10676,7 @@ mod workspace_repositories {
     use std::rc::Rc;
 
     use gpui::{Entity, TestAppContext, VisualTestContext};
-    use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
     use spaceterm_server::repository::{
         ChangeSummary, ChangeTotal, DirectoryFacts, GitToolStatus, Repository, RepositoryHead,
         RepositoryReadError, Snapshot, ToolVersion, WorktreeHead, WorktreeInventory,
@@ -10701,7 +10701,7 @@ mod workspace_repositories {
         Pane {
             id,
             source: None,
-            axis: Axis::Right,
+            side: Side::Right,
             starting_directory: PathBuf::from(directory),
             current_directory: None,
             repository_directory: None,

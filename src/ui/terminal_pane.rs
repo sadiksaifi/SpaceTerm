@@ -1489,6 +1489,14 @@ impl TerminalPane {
         }
     }
 
+    /// A frozen picture of the screen this Pane presents now, in its own colors and font.
+    pub(crate) fn snapshot(&self) -> super::pane_snapshot::PaneSnapshot {
+        super::pane_snapshot::PaneSnapshot::capture(
+            &ScreenSnapshot::projected_for_renderer(&self.screen, &self.appearance.terminal),
+            self.terminal_fonts.regular.clone(),
+        )
+    }
+
     pub(crate) fn caption(&self) -> PaneCaptionFacts {
         use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
 

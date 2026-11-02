@@ -430,7 +430,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hierarchy::{Axis, Pane, Tab, Workspace};
+    use crate::hierarchy::{Pane, Side, Tab, Workspace};
     pub(super) fn inventory() -> Inventory {
         Inventory {
             repositories: None,
@@ -452,7 +452,7 @@ mod tests {
                     panes: vec![Pane {
                         id: [3; 32],
                         source: None,
-                        axis: Axis::Right,
+                        side: Side::Right,
                         starting_directory: "/tmp".into(),
                         current_directory: None,
                         repository_directory: None,

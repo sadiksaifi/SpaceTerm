@@ -524,7 +524,7 @@ fn inventory() -> hierarchy::Inventory {
     let pane = |current: Option<PathBuf>| hierarchy::Pane {
         id: [3; 32],
         source: None,
-        axis: hierarchy::Axis::Right,
+        side: hierarchy::Side::Right,
         starting_directory: PathBuf::from("/home/a"),
         current_directory: current,
         repository_directory: None,

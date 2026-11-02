@@ -2,7 +2,8 @@
 use super::server::{WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason};
 use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_server::hierarchy::{
-    Axis, CloseTarget, Id, Inventory, Mutation, Outcome, Pane, RetainedOutcome, Tab, Workspace,
+    CloseTarget, Id, Inventory, Mutation, Outcome, Pane, PaneDestination, RetainedOutcome, Side,
+    Tab, Workspace,
 };
 use spaceterm_server::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
@@ -112,7 +113,10 @@ impl PendingEdits {
                 tab: None,
                 pane: Some(new_id()?),
             }),
-            Mutation::MovePaneToNewTab { .. } => Some(Creation {
+            Mutation::MovePane {
+                destination: PaneDestination::NewTab,
+                ..
+            } => Some(Creation {
                 workspace: None,
                 tab: Some(new_id()?),
                 pane: None,
@@ -208,14 +212,23 @@ impl PendingEdits {
         !projected.workspaces.iter().any(|w| w.id == workspace)
     }
 
-    /// Whether a pending move takes `pane` out of `tab` into a new Tab.
+    /// Whether a pending move or merge takes `pane` out of `tab`.
     pub fn moving(&self, tab: Id, pane: Id) -> bool {
+        self.edits.iter().any(|edit| match &edit.mutation {
+            Mutation::MovePane {
+                tab: from,
+                pane: moved,
+                ..
+            } => self.canonical(*from) == tab && self.canonical(*moved) == pane,
+            Mutation::MergeTab { tab: from, .. } => self.canonical(*from) == tab,
+            _ => false,
+        })
+    }
+
+    /// Whether a pending merge moves every Pane of `tab` into another Tab.
+    pub fn merging(&self, tab: Id) -> bool {
         self.edits.iter().any(|edit| {
-            matches!(
-                &edit.mutation,
-                Mutation::MovePaneToNewTab { tab: from, pane: moved, .. }
-                    if self.canonical(*from) == tab && self.canonical(*moved) == pane
-            )
+            matches!(&edit.mutation, Mutation::MergeTab { tab: from, .. } if self.canonical(*from) == tab)
         })
     }
 
@@ -489,11 +502,25 @@ fn references(mutation: &Mutation) -> Vec<Id> {
             source,
             ..
         } => vec![*workspace, *tab, *source],
-        Mutation::MovePaneToNewTab {
+        Mutation::MovePane {
             workspace,
             tab,
             pane,
-        } => vec![*workspace, *tab, *pane],
+            destination,
+        } => {
+            let mut ids = vec![*workspace, *tab, *pane];
+            if let PaneDestination::Beside { tab, pane, .. } = destination {
+                ids.extend([*tab, *pane]);
+            }
+            ids
+        }
+        Mutation::MergeTab {
+            workspace,
+            tab,
+            into,
+            beside,
+            ..
+        } => vec![*workspace, *tab, *into, *beside],
         Mutation::RenameWorkspace { workspace, .. } | Mutation::PinWorkspace { workspace, .. } => {
             vec![*workspace]
         }
@@ -523,15 +550,36 @@ fn remap(mutation: &mut Mutation, id: impl Fn(Id) -> Id) {
             tab,
             source,
             ..
-        }
-        | Mutation::MovePaneToNewTab {
-            workspace,
-            tab,
-            pane: source,
         } => {
             *workspace = id(*workspace);
             *tab = id(*tab);
             *source = id(*source);
+        }
+        Mutation::MovePane {
+            workspace,
+            tab,
+            pane,
+            destination,
+        } => {
+            *workspace = id(*workspace);
+            *tab = id(*tab);
+            *pane = id(*pane);
+            if let PaneDestination::Beside { tab, pane, .. } = destination {
+                *tab = id(*tab);
+                *pane = id(*pane);
+            }
+        }
+        Mutation::MergeTab {
+            workspace,
+            tab,
+            into,
+            beside,
+            ..
+        } => {
+            *workspace = id(*workspace);
+            *tab = id(*tab);
+            *into = id(*into);
+            *beside = id(*beside);
         }
         Mutation::RenameWorkspace { workspace, .. } | Mutation::PinWorkspace { workspace, .. } => {
             *workspace = id(*workspace)
@@ -540,11 +588,11 @@ fn remap(mutation: &mut Mutation, id: impl Fn(Id) -> Id) {
     }
 }
 
-fn new_pane(id: Id, source: Option<Id>, axis: Axis, directory: std::path::PathBuf) -> Pane {
+fn new_pane(id: Id, source: Option<Id>, side: Side, directory: std::path::PathBuf) -> Pane {
     Pane {
         id,
         source,
-        axis,
+        side,
         starting_directory: directory,
         current_directory: None,
         repository_directory: None,
@@ -585,7 +633,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                     panes: vec![new_pane(
                         pane,
                         None,
-                        Axis::Right,
+                        Side::Right,
                         directory.clone().unwrap_or_default(),
                     )],
                 }],
@@ -622,7 +670,8 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         | Mutation::PinWorkspace { workspace, .. }
         | Mutation::CreateTab { workspace, .. }
         | Mutation::SplitPane { workspace, .. }
-        | Mutation::MovePaneToNewTab { workspace, .. }
+        | Mutation::MovePane { workspace, .. }
+        | Mutation::MergeTab { workspace, .. }
         | Mutation::Worktree(Operation::OpenTab { workspace, .. }) => *workspace,
         _ => return,
     };
@@ -665,15 +714,41 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                 worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
                 worktree: source_tab.and_then(|t| t.worktree.clone()),
                 worktree_repository: source_tab.and_then(|t| t.worktree_repository.clone()),
-                panes: vec![new_pane(pane, None, Axis::Right, directory)],
+                panes: vec![new_pane(pane, None, Side::Right, directory)],
             });
         }
-        Mutation::MovePaneToNewTab { tab, pane, .. } => {
-            let Some(id) = creation.and_then(|ids| ids.tab) else {
-                return;
-            };
-            // A refusal leaves the presentation as the server will.
-            let _ = workspace.move_pane_to_new_tab(*tab, *pane, id);
+        // A refusal leaves the presentation as the server will.
+        Mutation::MovePane {
+            tab,
+            pane,
+            destination: PaneDestination::NewTab,
+            ..
+        } => {
+            if let Some(id) = creation.and_then(|ids| ids.tab) {
+                let _ = workspace.move_pane_to_new_tab(*tab, *pane, id);
+            }
+        }
+        Mutation::MovePane {
+            tab,
+            pane,
+            destination:
+                PaneDestination::Beside {
+                    tab: into,
+                    pane: beside,
+                    side,
+                },
+            ..
+        } => {
+            let _ = workspace.move_pane_beside(*tab, *pane, *into, *beside, *side);
+        }
+        Mutation::MergeTab {
+            tab,
+            into,
+            beside,
+            side,
+            ..
+        } => {
+            let _ = workspace.merge_tab(*tab, *into, *beside, *side);
         }
         Mutation::SplitPane {
             tab, source, axis, ..
@@ -689,7 +764,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                     .map(|p| p.presented_directory().to_owned())
                     .unwrap_or_default();
                 tab.panes
-                    .push(new_pane(pane, Some(*source), *axis, directory));
+                    .push(new_pane(pane, Some(*source), (*axis).into(), directory));
             }
         }
         _ => {}
