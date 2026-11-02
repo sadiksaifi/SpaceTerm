@@ -215,7 +215,7 @@ fn accessibility_captures_complete_while_output_appends_lines() {
         emulator.snapshot().unwrap();
         let mut line = 0;
         let mut append = |emulator: &mut TerminalEmulator, step: usize| {
-            if step % every == 0 {
+            if step.is_multiple_of(every) {
                 emulator.feed(format!("y {line}\r\n").as_bytes());
                 line += 1;
             }
