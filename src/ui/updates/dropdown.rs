@@ -57,6 +57,10 @@ impl UpdateControl {
                     control
                         .servers
                         .update(cx, |servers, cx| servers.refresh(cx));
+                    // A due client reminder waits for an active window.
+                    if let Some(updates) = service(cx) {
+                        updates.read(cx).window_activated();
+                    }
                 }
             }),
         ];

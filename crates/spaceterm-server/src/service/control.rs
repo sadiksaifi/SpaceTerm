@@ -322,6 +322,16 @@ impl Controller {
         self.service.status()
     }
 
+    /// The directories a client watches to learn of service changes without reading the service.
+    pub fn state_directories(&self) -> [&std::path::Path; 2] {
+        self.service.state_directories()
+    }
+
+    /// The running server's process, which a client watches to learn that it exited.
+    pub fn server_process(&self) -> Result<Option<u32>, ServerError> {
+        self.service.server_process()
+    }
+
     /// Explicit Start is the only operation that reverses deliberate Stop.
     pub fn start(&self) -> Result<ServiceStatus, ServerError> {
         self.service.start()

@@ -3784,6 +3784,70 @@ fn focused_cursor_blink_uses_the_injected_pane_clock(cx: &mut TestAppContext) {
     );
 }
 
+/// A blinking cursor is the only periodic work a focused idle Pane does. A minimized or
+/// unfocused window keeps no blink timer, so an idle client schedules nothing at all.
+#[gpui::test]
+fn cursor_blink_schedules_no_timer_while_minimized_or_unfocused(cx: &mut TestAppContext) {
+    let (pane, cx, _) = connected_terminal_pane(cx);
+    // One-shot timers, including a cancelled blink's, expire once; a periodic one never runs out.
+    let idle = |cx: &mut gpui::VisualTestContext| {
+        for _ in 0..50 {
+            cx.run_until_parked();
+            if !cx.dispatcher.scheduler().advance_clock_to_next_timer() {
+                return !cx.dispatcher.scheduler().has_pending_tasks();
+            }
+        }
+        false
+    };
+    cx.update(|_window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
+            pane.handle_event(
+                TerminalSessionEvent::Screen(blinking_cursor_screen(true, true)),
+                cx,
+            );
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+
+    pane.update(cx, |pane, cx| {
+        pane.update_runtime_visibility(
+            WindowVisibility {
+                minimized: true,
+                occluded: false,
+                live_resize: false,
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_none()));
+    assert!(idle(cx), "a minimized Pane schedules no work");
+
+    pane.update(cx, |pane, cx| {
+        pane.update_runtime_visibility(WindowVisibility::default(), cx);
+    });
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_some()));
+    assert!(!idle(cx), "a focused blinking cursor keeps its timer");
+
+    cx.deactivate_window();
+    cx.update(|_window, cx| pane.update(cx, |_, cx| cx.notify()));
+    cx.run_until_parked();
+    assert!(pane.read_with(cx, |pane, _| pane._blink_task.is_none()));
+    assert!(idle(cx), "an unfocused Pane schedules no work");
+}
+
 #[gpui::test]
 fn cursor_blink_retains_the_fitted_grid_line_height(cx: &mut TestAppContext) {
     let (pane, cx, _) = connected_terminal_pane(cx);

@@ -601,6 +601,81 @@ mod tests {
         );
     }
 
+    /// The readiness worker runs 8 ms turns only while work remains. Once twelve idle Panes
+    /// have their screens, the window holds no timer or runnable task, focused or not.
+    #[gpui::test]
+    fn twelve_idle_panes_leave_the_window_with_no_scheduled_work(cx: &mut gpui::TestAppContext) {
+        use crate::terminal::TerminalSessionEvent;
+        use crate::terminal::geometry::{
+            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
+        };
+        use crate::terminal::testing::TestTerminalSessionRecords;
+        use crate::ui::workspace_manager::tests::{
+            local_server_manager, server_sessions, workspace_adapters,
+        };
+        cx.update(crate::ui::init).unwrap();
+        let records = TestTerminalSessionRecords::default();
+        let factory = Rc::new(server_sessions(records.clone()));
+        let (window_manager, cx) = cx.add_window_view(|window, cx| {
+            local_server_manager(
+                factory,
+                std::path::PathBuf::from("/tmp/spaceterm-readiness-idle-test"),
+                workspace_adapters(),
+                crate::settings::sidebar::SidebarState::Expanded,
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let manager = window_manager.read_with(cx, |manager, _| {
+            manager
+                .active_tab_manager()
+                .expect("the window presents its server's Workspace")
+        });
+        for _ in 0..11 {
+            cx.update(|window, cx| {
+                manager.update(cx, |manager, cx| manager.create_tab(window, cx))
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(records.starts().len(), 12);
+        let mut emulator =
+            crate::terminal::emulator::TerminalEmulator::new(TerminalGeometry::from_grid(
+                CellGridSize::new(8, 2),
+                LogicalCellSize::new(8.0, 16.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
+        emulator.feed(b"$ ");
+        let screen = emulator.snapshot().unwrap().unwrap();
+        for start in records.starts() {
+            records
+                .event_sender(start.session_id)
+                .unwrap()
+                .try_send(TerminalSessionEvent::Screen(screen.clone()))
+                .unwrap();
+        }
+        // One-shot settle timers expire once; a periodic timer would keep the scheduler busy.
+        let idle = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..50 {
+                cx.run_until_parked();
+                if !cx.dispatcher.scheduler().advance_clock_to_next_timer() {
+                    return !cx.dispatcher.scheduler().has_pending_tasks();
+                }
+            }
+            false
+        };
+        assert!(
+            idle(cx),
+            "a focused window with idle Panes schedules no work"
+        );
+        cx.deactivate_window();
+        assert!(
+            idle(cx),
+            "an unfocused window with idle Panes schedules no work"
+        );
+    }
+
     #[gpui::test]
     fn closing_window_retires_readiness_worker_and_window_registration(
         cx: &mut gpui::TestAppContext,
