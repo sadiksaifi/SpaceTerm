@@ -38,7 +38,7 @@ impl Client {
     /// A new connection epoch: nothing retained from an earlier connection.
     fn connect() -> Self {
         Self {
-            semantics: Semantics::new(),
+            semantics: Semantics::new(Arc::default()),
             retained: Mutex::default(),
             generation: PresentationGeneration::default(),
             published: None,

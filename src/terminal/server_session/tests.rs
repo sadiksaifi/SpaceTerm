@@ -2055,7 +2055,7 @@ impl PushedPane {
             emulator,
             encoder: Default::default(),
             inbox,
-            screens: screen::ScreenReceiver::new(None, None),
+            screens: screen::ScreenReceiver::new(None, None, Arc::default()),
             graphics: Default::default(),
             predictor: Default::default(),
             shown: None,

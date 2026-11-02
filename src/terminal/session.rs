@@ -1104,6 +1104,7 @@ impl Command {
             | Self::FlushInput => PaneWorkerCommand::Input,
             Self::ServerAccessibilitySelection(..)
             | Self::EndAccessibilityDemand(..)
+            | Self::ReleaseAccessibility(..)
             | Self::AccessibilityDemand
             | Self::AccessibilityContinue
             | Self::PublishAccessibility => PaneWorkerCommand::Accessibility,

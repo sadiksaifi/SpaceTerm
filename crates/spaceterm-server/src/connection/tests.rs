@@ -78,17 +78,14 @@ impl PaneService for Toy {
                     Err(Refusal::StorageUnavailable)
                 }))
             }
-            Operation::Accessibility { revision, .. } => {
+            Operation::Graphics { image, offset, .. } => {
                 // Larger than one bulk frame, so the reply continues over several frames.
                 let bytes = vec![b'a'; crate::protocol::limits::BULK_CHUNK_BYTES * 2 + 100];
-                Dispatch::reply(Ok(ReplyBody::Accessibility(Ok(
-                    crate::pane::accessibility::Chunk {
-                        revision: revision.unwrap_or(1),
-                        offset: 0,
-                        total: bytes.len(),
-                        bytes,
-                    },
-                ))))
+                Dispatch::reply(Ok(ReplyBody::Graphics(Ok(crate::pane::graphics::Chunk {
+                    image,
+                    offset: offset as usize,
+                    bytes,
+                }))))
             }
             _ => Dispatch::reply(Ok(ReplyBody::Done)),
         }
@@ -667,31 +664,29 @@ fn the_link_counts_every_byte_the_server_wrote() {
             next_sequence: 2,
         })
         .unwrap();
-    outbox
-        .pane(id, PaneEvent::Accessibility { revision: 1 })
-        .unwrap();
+    outbox.start_semantics(id, 1).unwrap();
+    outbox.semantics(id, Arc::new(Semantic(1))).unwrap();
     let reply = channel
-        .request(Operation::Accessibility {
+        .request(Operation::Graphics {
             channel: id,
-            revision: None,
+            image: crate::pane::graphics::ImageKey {
+                image_id: 1,
+                generation: 1,
+            },
             offset: 0,
-            base: None,
         })
         .unwrap();
     harness.pump().unwrap();
-    assert!(matches!(reply.wait(), Ok(ReplyBody::Accessibility(Ok(_)))));
+    assert!(matches!(reply.wait(), Ok(ReplyBody::Graphics(Ok(_)))));
     assert!(matches!(
         events.lock().unwrap().as_slice(),
-        [
-            ChannelEvent::Frame(_),
-            ChannelEvent::Pane(PaneEvent::Accessibility { .. })
-        ]
+        [ChannelEvent::Frame(_), ChannelEvent::Accessibility(_)]
     ));
     assert!(matches!(
         harness.events.lock().unwrap().as_slice(),
         [LinkEvent::Inventory(_)]
     ));
-    // The claim reply, frame, inventory, Pane event and a bulk reply of three frames.
+    // The claim reply, frame, inventory, semantic revision and a bulk reply of three frames.
     assert!(harness.server_wrote > crate::protocol::limits::BULK_CHUNK_BYTES * 2);
     assert_eq!(harness.link.received_bytes(), harness.server_wrote as u64);
 }

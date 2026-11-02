@@ -11,8 +11,8 @@
 use super::*;
 use crate::terminal::accessibility::AccessibilityRowView;
 use pane::accessibility as wire;
-use spaceterm_server::diagnostics::TerminalCounters;
 use spaceterm_server::connection::outbox::{SemanticEncoding, SemanticTicket, Semantics};
+use spaceterm_server::diagnostics::TerminalCounters;
 use std::collections::VecDeque;
 use std::ops::Range;
 
@@ -502,7 +502,9 @@ impl SemanticEncoding for Revision {
         let update = self.produce();
         self.bytes += update.encoded_len();
         if update.tail.is_some() {
-            self.model.counters.record_accessibility_revision(self.bytes);
+            self.model
+                .counters
+                .record_accessibility_revision(self.bytes);
         }
         update
     }

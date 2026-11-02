@@ -4,8 +4,9 @@
 //!
 //! The client creates a Workspace, claims its Pane at a fixed size, presents it and acknowledges
 //! every pushed frame at once, as a desktop client that keeps up does. With `--accessibility` it
-//! also fetches every accessibility revision the server announces, as a desktop client does while
-//! an assistive application reads the Pane. It never applies what it receives.
+//! also demands semantics and acknowledges every pushed semantic revision at its tail, as a
+//! desktop client does while an assistive application reads the Pane. It never applies what it
+//! receives.
 //!
 //! When the Pane is attached, it prints one JSON line with the Workspace and Pane ids. Then it
 //! reads one command per line on standard input:
@@ -20,7 +21,7 @@ use spaceterm_server::ServerConnection;
 use spaceterm_server::attachments::Attachment;
 use spaceterm_server::connection::link::{ChannelEvent, ChannelHandle, LinkEvent, ServerLink};
 use spaceterm_server::hierarchy::{CloseTarget, CreateControl, Id, Mutation, Outcome};
-use spaceterm_server::pane::accessibility::Error as AccessibilityError;
+use spaceterm_server::pane::accessibility::Demand;
 use spaceterm_server::pane::{AttachmentClaim, FocusTarget, Key, PaneSize};
 use spaceterm_server::protocol::{
     ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody, limits,
@@ -28,7 +29,7 @@ use spaceterm_server::protocol::{
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// A failed stage. Server errors are typed classifications without terminal contents or paths.
 #[derive(Debug)]
@@ -98,13 +99,13 @@ enum Message {
     End,
 }
 
-/// Messages received, and the accessibility payload bytes among them. The byte count the task
-/// compares is the link's: every frame the server wrote on this connection, headers included.
+/// Messages received, and the semantic bytes among them. The byte count the task compares is
+/// the link's: every frame the server wrote on this connection, headers included.
 #[derive(Default)]
 struct Received {
     frames: u64,
     events: u64,
-    accessibility_chunks: u64,
+    accessibility_messages: u64,
     accessibility_revisions: u64,
     accessibility_payload_bytes: u64,
 }
@@ -115,73 +116,11 @@ impl Received {
             "event": "stats",
             "frames": self.frames,
             "events": self.events,
-            "accessibility_chunks": self.accessibility_chunks,
+            "accessibility_messages": self.accessibility_messages,
             "accessibility_revisions": self.accessibility_revisions,
             "accessibility_payload_bytes": self.accessibility_payload_bytes,
             "bytes": link.received_bytes(),
         })
-    }
-}
-
-/// Follows the server's accessibility revisions the way the desktop's fetcher does: one chunk
-/// per step, naming the last complete revision as the base so the server can send a delta.
-#[derive(Default)]
-struct Fetcher {
-    /// The newest revision the server announced.
-    announced: u64,
-    /// The last revision this client received completely.
-    complete: Option<u64>,
-    /// The transfer in progress: its revision once known, and the bytes received.
-    transfer: Option<(Option<u64>, usize)>,
-    /// Pending replies wait for the server; the next attempt follows a pushed message or this.
-    retry_at: Option<Instant>,
-}
-
-impl Fetcher {
-    fn wanted(&self, now: Instant) -> bool {
-        let behind = self
-            .complete
-            .is_none_or(|complete| self.announced > complete);
-        (behind || self.transfer.is_some()) && self.retry_at.is_none_or(|at| now >= at)
-    }
-
-    fn step(&mut self, channel: &ChannelHandle, received: &mut Received) -> Result<()> {
-        let (revision, offset) = self.transfer.unwrap_or((None, 0));
-        let operation = Operation::Accessibility {
-            channel: at("channel", channel.channel())?,
-            revision,
-            offset: offset as u64,
-            base: self.complete,
-        };
-        let reply = at(
-            "accessibility",
-            at("accessibility", channel.request(operation))?.wait(),
-        )?;
-        let ReplyBody::Accessibility(result) = reply else {
-            return fail("accessibility reply");
-        };
-        match result {
-            Ok(chunk) => {
-                received.accessibility_chunks += 1;
-                received.accessibility_payload_bytes += chunk.bytes.len() as u64;
-                let offset = offset + chunk.bytes.len();
-                if offset >= chunk.total {
-                    received.accessibility_revisions += 1;
-                    self.announced = self.announced.max(chunk.revision);
-                    self.complete = Some(chunk.revision);
-                    self.transfer = None;
-                } else {
-                    self.transfer = Some((Some(chunk.revision), offset));
-                }
-                self.retry_at = None;
-            }
-            Err(AccessibilityError::Pending) => {
-                self.retry_at = Some(Instant::now() + Duration::from_millis(16));
-            }
-            Err(AccessibilityError::Stale) => self.transfer = None,
-            Err(AccessibilityError::TooLarge) => return fail("accessibility snapshot too large"),
-        }
-        Ok(())
     }
 }
 
@@ -263,6 +202,16 @@ fn present(
         channel.input(GENERATION, vec![InputEvent::Focus(FocusTarget::Terminal)]),
     )?;
     at("view", channel.view(true, options.max_hz))?;
+    if options.accessibility {
+        let demand = Operation::AccessibilityDemand {
+            channel: at("channel", channel.channel())?,
+            demand: Demand::Start { generation: 1 },
+        };
+        let pending = at("accessibility", channel.request(demand))?;
+        let ReplyBody::Done = at("accessibility", pending.wait())? else {
+            return fail("accessibility demand refused");
+        };
+    }
     let input = sender.clone();
     std::thread::spawn(move || read_commands(&input));
     println!(
@@ -277,23 +226,10 @@ fn present(
     flush();
 
     let mut received = Received::default();
-    let mut fetcher = Fetcher::default();
     loop {
-        let now = Instant::now();
-        let fetch = options.accessibility && fetcher.wanted(now);
-        let timeout = if fetch {
-            Duration::ZERO
-        } else {
-            fetcher
-                .retry_at
-                .filter(|_| options.accessibility)
-                .map_or(Duration::from_secs(1), |at| {
-                    at.saturating_duration_since(now)
-                })
-        };
-        match messages.recv_timeout(timeout) {
+        match messages.recv_timeout(Duration::from_secs(1)) {
             Ok(Message::Channel(event)) => {
-                if !deliver(&channel, event, &mut received, &mut fetcher)? {
+                if !deliver(&channel, event, &mut received)? {
                     return fail("the bench Pane ended");
                 }
             }
@@ -316,35 +252,34 @@ fn present(
             Ok(Message::End) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
-        if options.accessibility && fetcher.wanted(Instant::now()) {
-            fetcher.step(&channel, &mut received)?;
-        }
     }
     channel.detach();
     Ok(())
 }
 
-/// Acknowledges a frame at once and counts what arrived. Returns false when the Pane ended.
-fn deliver(
-    channel: &ChannelHandle,
-    event: ChannelEvent,
-    received: &mut Received,
-    fetcher: &mut Fetcher,
-) -> Result<bool> {
+/// Acknowledges a frame, and a semantic revision at its tail, at once and counts what arrived.
+/// Returns false when the Pane ended.
+fn deliver(channel: &ChannelHandle, event: ChannelEvent, received: &mut Received) -> Result<bool> {
     match event {
         ChannelEvent::Frame(frame) => {
             received.frames += 1;
-            fetcher.announced = fetcher.announced.max(frame.update.accessibility_revision);
-            fetcher.retry_at = None;
             at("acknowledge", channel.acknowledge(frame.frame))?;
+        }
+        ChannelEvent::Accessibility(update) => {
+            received.accessibility_messages += 1;
+            received.accessibility_payload_bytes += update.encoded_len() as u64;
+            if update.tail.is_some() {
+                received.accessibility_revisions += 1;
+                let header = update.header;
+                at(
+                    "acknowledge",
+                    channel.acknowledge_accessibility(header.demand_generation, header.revision),
+                )?;
+            }
         }
         ChannelEvent::Pane(event) => {
             received.events += 1;
             match &event {
-                PaneEvent::Accessibility { revision } => {
-                    fetcher.announced = fetcher.announced.max(*revision);
-                    fetcher.retry_at = None;
-                }
                 PaneEvent::Input {
                     outcome: InputOutcome::Discarded(refusal),
                     ..

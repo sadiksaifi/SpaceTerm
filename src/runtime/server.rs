@@ -204,7 +204,7 @@ pub(crate) mod testing {
                 .open(Self::CHANNEL)
                 .expect("a new connection opens a channel");
             Self {
-                pane: super::accessibility::Accessibility::default(),
+                pane: super::accessibility::Accessibility::new(Arc::default()),
                 outbox,
             }
         }
