@@ -23,6 +23,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
+use super::tab_view::{DragFace, DragPicture, TabFace};
 
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
@@ -368,18 +369,14 @@ enum TabMenuCommand {
     Close,
 }
 
-/// How far the New Tab drop target stays inside the Tab bar, before interface scaling.
-const TAB_DROP_TARGET_INSET: f32 = 4.0;
-/// The corner radius of the Tab bar's drop targets, before interface scaling.
-const TAB_DROP_TARGET_RADIUS: f32 = 6.0;
 /// The middle share of another Tab where a dragged Tab joins it instead of reordering.
 const TAB_MERGE_SHARE: f32 = 0.5;
 
 /// What a Pane released over the Tab bar does.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StripDrop {
-    /// Moves the Pane into a new Tab.
-    NewTab,
+    /// Moves the Pane into a new Tab at this position among the strip's Tabs.
+    NewTab { position: usize },
     /// Moves the Pane into this other Tab.
     Tab(TabId),
 }
@@ -446,8 +443,10 @@ pub(crate) struct TabManager {
     /// Where a Pane carried out of one of this strip's Tabs lands if released over the Tab bar
     /// now.
     pane_strip_drop: Option<StripDrop>,
-    /// The rectangle a Tab drag carries once it leaves the Tab bar for the Pane Layout.
-    tab_stand_in: Option<Rc<super::tab_view::DragStandIn>>,
+    /// The picture a Tab drag carries.
+    tab_picture: Option<Rc<DragPicture>>,
+    /// Where the Tab bar stood when a drag last moved over the window.
+    tab_bar_bounds: Option<gpui::Bounds<Pixels>>,
     /// Whether the dragged Tab is over the Pane Layout rather than the Tab bar.
     tab_over_layout: bool,
     /// The Tab whose middle the dragged Tab covers in the Tab bar, which it joins if released
@@ -522,7 +521,8 @@ impl TabManager {
             parked_tabs: std::collections::BTreeMap::new(),
             close_keyboard: None,
             pane_strip_drop: None,
-            tab_stand_in: None,
+            tab_picture: None,
+            tab_bar_bounds: None,
             tab_over_layout: false,
             tab_strip_merge: None,
             #[cfg(test)]
@@ -1047,10 +1047,47 @@ impl TabManager {
             manager.end_tab_drag_over_layout(cx);
             cx.notify();
         });
-        self.tab_stand_in = self
-            .tabs
-            .tab(tab_id)
-            .map(|view| Rc::new(view.read(cx).tab_stand_in(cx)));
+        let lifted = size.unwrap_or_else(|| {
+            gpui::size(
+                super::appearance::chrome(cx).spacing(TAB_ITEM_MAXIMUM_WIDTH),
+                super::appearance::chrome(cx).top_height(),
+            )
+        });
+        let picture = self.tabs.tab(tab_id).map(|view| {
+            Rc::new(DragPicture::new(
+                view.read(cx).tab_stand_in(cx),
+                (
+                    f32::from(cursor_offset.x) / f32::from(lifted.width).max(1.0),
+                    cursor_offset.y,
+                ),
+                window.viewport_size(),
+            ))
+        });
+        let face_manager = cx.entity().downgrade();
+        let tab_face: Rc<TabFace> = Rc::new(move |size, window, cx| {
+            face_manager
+                .upgrade()
+                .map(|owner| {
+                    owner.read(cx).render_lifted_tab(
+                        tab_id,
+                        Some(size),
+                        face_manager.clone(),
+                        window,
+                        cx,
+                    )
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        });
+        if let Some(picture) = &picture {
+            picture.present(
+                DragFace::Tab {
+                    top: px(0.0),
+                    size: lifted,
+                },
+                Some(tab_face),
+            );
+        }
+        self.tab_picture = picture.clone();
         self.tab_over_layout = false;
         let ids = self.visible_tab_ids();
         self.tab_reorder.begin(
@@ -1064,34 +1101,56 @@ impl TabManager {
         );
         self.drag_tab_to(tab_id, window.mouse_position(), true, cx);
         cx.notify();
-        let manager = cx.entity().downgrade();
-        let placement = manager.clone();
-        DragPreview::new(window, cx, move |window, cx| {
-            manager
-                .upgrade()
-                .map(|owner| {
-                    let owner = owner.read(cx);
-                    // Over the Pane Layout the lifted Tab becomes the rectangle a Pane drag
-                    // carries, because it lands there as Panes.
-                    match owner.tab_stand_in.as_ref().filter(|_| owner.tab_over_layout) {
-                        Some(stand_in) => super::tab_view::render_drag_stand_in(
-                            stand_in,
-                            size.map_or(px(0.0), |size| size.width),
-                            cursor_offset.x,
-                            cx,
-                        ),
-                        None => owner.render_lifted_tab(tab_id, size, manager.clone(), window, cx),
-                    }
-                })
-                .unwrap_or_else(|| div().into_any_element())
-        })
-        .placed(cursor_offset, move |cx| {
-            placement
-                .upgrade()
-                .map(|owner| owner.read(cx))
-                .filter(|owner| !owner.tab_over_layout)
-                .and_then(|owner| owner.tab_reorder.lifted_origin())
-        })
+        let Some(picture) = picture else {
+            return DragPreview::empty();
+        };
+        let placement = cx.entity().downgrade();
+        let placed = Rc::clone(&picture);
+        // The picture shows what the drop makes: a Tab along the strip, Panes over the Pane
+        // Layout, and Panes joining the lit Tab over its middle.
+        DragPreview::new(window, cx, move |window, cx| picture.render(window, cx)).placed(
+            cursor_offset,
+            move |pointer, cx| {
+                let owner = placement.upgrade()?;
+                let owner = owner.read(cx);
+                let face = owner.tab_drag_face(lifted, cx);
+                placed.present(face, None);
+                let held = matches!(face, DragFace::Tab { .. })
+                    .then(|| owner.tab_reorder.lifted_origin())
+                    .flatten();
+                Some(placed.place(pointer, held, cx))
+            },
+        )
+    }
+
+    /// What the picture of a Tab drag shows now. A lifted Tab is `lifted` large.
+    fn tab_drag_face(&self, lifted: gpui::Size<Pixels>, cx: &App) -> DragFace {
+        if self.tab_over_layout {
+            DragFace::Pane
+        } else if self.tab_strip_merge.is_some() {
+            DragFace::Joining {
+                below: self.tab_bar_bottom(cx),
+            }
+        } else {
+            DragFace::Tab {
+                top: px(0.0),
+                size: lifted,
+            }
+        }
+    }
+
+    /// Where the Tab bar ends at the bottom, in window coordinates.
+    fn tab_bar_bottom(&self, cx: &App) -> Pixels {
+        self.tab_bar_bounds.map_or_else(
+            || {
+                super::workspace_frame::WorkspaceFrame::for_appearance(
+                    super::appearance::chrome(cx),
+                    cx,
+                )
+                .top_chrome_height(super::appearance::chrome(cx).top_height())
+            },
+            |bar| bar.bottom(),
+        )
     }
 
     /// Follows a Tab drag. Along the Tab bar it reorders; over the Pane Layout it shows where
@@ -1166,7 +1225,7 @@ impl TabManager {
     fn end_tab_drag_over_layout(&mut self, cx: &mut Context<Self>) {
         self.tab_over_layout = false;
         self.tab_strip_merge = None;
-        self.tab_stand_in = None;
+        self.tab_picture = None;
         self.tabs
             .active_tab()
             .update(cx, |view, cx| view.present_incoming_drop(None, cx));
@@ -1695,6 +1754,27 @@ impl TabManager {
         let Some(view) = self.tabs.tab(tab_id) else {
             return div().into_any_element();
         };
+        let identity = view.read(cx).tab_identity();
+        let active = tab_id == self.tabs.active_tab_id();
+        self.render_lifted_face(tab_id, identity, active, size, manager, window, cx)
+    }
+
+    /// A lifted Tab face showing `identity`, as a lifted Tab, or a Pane about to become a Tab,
+    /// shows it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a lifted face needs the Tab, what it shows, whether it is active, its size, its owner and host"
+    )]
+    fn render_lifted_face(
+        &self,
+        tab_id: TabId,
+        identity: TabIdentity,
+        active: bool,
+        size: Option<gpui::Size<Pixels>>,
+        manager: gpui::WeakEntity<Self>,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
         let presentation = TabChromePresentation::resolve(
             window.is_window_active(),
@@ -1703,8 +1783,8 @@ impl TabManager {
         );
         self.render_tab_item(
             tab_id,
-            view.read(cx).tab_identity(),
-            tab_id == self.tabs.active_tab_id(),
+            identity,
+            active,
             TabItemRole::Lifted,
             TabHover {
                 level: 1.0,
@@ -1982,7 +2062,10 @@ impl TabManager {
         cx: &App,
     ) -> AnyElement {
         let appearance = super::appearance::chrome(cx);
-        let active_tab_id = self.tabs.active_tab_id();
+        // A Tab a drop would join shows the selected chip, as the drop opens it.
+        let active_tab_id = self
+            .join_target(cx)
+            .unwrap_or_else(|| self.tabs.active_tab_id());
         let strip = self.strip_controls();
         let desktop_presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let background = presentation.background;
@@ -2084,21 +2167,10 @@ impl TabManager {
                 )
                 .children(separator)
                 .child(fade.tracker())
-                // A Pane or Tab dropped on this Tab joins it.
+                // A Tab that joins another leaves the strip, so its place shows no landing.
                 .when(
-                    (self.pane_strip_drop == Some(StripDrop::Tab(tab_id))
-                        || self.tab_strip_merge == Some(tab_id))
-                        && cx.has_active_drag(),
-                    |face| {
-                        face.child(
-                            super::tab_view::pane_drop_overlay(appearance)
-                                .debug_selector(move || {
-                                    format!("tab-item-{}-pane-drop-target", tab_id.get())
-                                })
-                                .inset_0()
-                                .rounded(appearance.spacing(TAB_DROP_TARGET_RADIUS)),
-                        )
-                    },
+                    self.tab_strip_merge.is_some() && self.tab_reorder.dragged() == Some(tab_id),
+                    |face| face.opacity(0.0),
                 );
             let open_manager = manager.clone();
             let lifecycle_manager = manager.clone();
@@ -2167,16 +2239,28 @@ impl TabManager {
             });
         });
 
-        let pane_strip_drop = self.pane_strip_drop.filter(|_| cx.has_active_drag());
-        let new_tab_drop = (pane_strip_drop == Some(StripDrop::NewTab)).then(|| {
-            super::tab_view::pane_drop_overlay(appearance)
-                .debug_selector(|| "tab-bar-new-tab-drop-target".to_owned())
-                .top(appearance.spacing(TAB_DROP_TARGET_INSET))
-                .bottom(appearance.spacing(TAB_DROP_TARGET_INSET))
-                .left_0()
-                .right(appearance.spacing(TAB_DROP_TARGET_INSET))
-                .rounded(appearance.spacing(TAB_DROP_TARGET_RADIUS))
-        });
+        // The gap a Pane opens to become a Tab shows where that Tab lands, as a dragged Tab's
+        // faded face does.
+        let incoming_landing = self
+            .tab_bar_bounds
+            .filter(|_| cx.has_active_drag())
+            .zip(self.tab_reorder.incoming_start(&self.tab_bar_scroll_handle))
+            .zip(self.tab_bar_scroll_handle.bounds_for_item(0))
+            .map(|((bar, start), slot)| {
+                div()
+                    .debug_selector(|| "tab-bar-incoming-landing".to_owned())
+                    .absolute()
+                    .left(start - bar.origin.x)
+                    .top(slot.origin.y - bar.origin.y)
+                    .w(slot.size.width)
+                    .h(slot.size.height)
+                    .child(
+                        presentation
+                            .tab_chip(false, appearance, cx)
+                            .landing(presentation.tab_foreground(false))
+                            .render("tab-bar-incoming-landing-chip".to_owned(), 0.0),
+                    )
+            });
         let drag_manager = manager.clone();
         let create_manager = manager.clone();
         // A Workspace's New Tab asks the server, so it waits while this client is offline
@@ -2210,16 +2294,7 @@ impl TabManager {
                     .children(strip_marks),
             )
             .child(release_observer)
-            // The New Tab button and the empty space after it take a Pane dropped there as a new
-            // Tab.
             .child(
-                div()
-                    .relative()
-                    .h_full()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .child(
                 div()
                     .debug_selector(|| "create-tab-area".to_owned())
                     .h_full()
@@ -2263,10 +2338,8 @@ impl TabManager {
                             });
                         }),
                     ),
-                    )
-                    .child(div().flex_1().min_w_0())
-                    .children(new_tab_drop),
             )
+            .child(div().flex_1().min_w_0())
             .when_some(self.trailing_accessory.clone(), |content, accessory| {
                 content.child(
                     div()
@@ -2331,10 +2404,9 @@ impl TabManager {
             .on_drag_move::<super::tab_view::DraggedPane>(move |event, _, cx| {
                 let dragged = event.drag(cx);
                 let (source, pane_id) = (dragged.owner, dragged.pane_id);
-                let pointer = event.event.position;
-                let over_bar = event.bounds.contains(&pointer);
+                let (pointer, bar) = (event.event.position, event.bounds);
                 let _ = pane_drop_manager.update(cx, |manager, cx| {
-                    manager.drag_pane_over_tab_bar(source, pane_id, pointer, over_bar, cx);
+                    manager.drag_pane_over_tab_bar(source, pane_id, pointer, bar, cx);
                 });
             })
             .on_drag_move::<DraggedTab>(move |event, _, cx| {
@@ -2343,10 +2415,10 @@ impl TabManager {
                     return;
                 }
                 let tab_id = dragged.tab_id;
-                let pointer = event.event.position;
-                let over_bar = event.bounds.contains(&pointer);
+                let (pointer, bar) = (event.event.position, event.bounds);
                 let _ = tab_drag_manager.update(cx, |manager, cx| {
-                    manager.drag_tab_to(tab_id, pointer, over_bar, cx);
+                    manager.tab_bar_bounds = Some(bar);
+                    manager.drag_tab_to(tab_id, pointer, bar.contains(&pointer), cx);
                 });
             })
             .h(
@@ -2360,6 +2432,7 @@ impl TabManager {
                 appearance.surface(crate::appearance::SurfaceRole::Base, background),
             ))
             .child(drag_region)
+            .children(incoming_landing)
             .into_any_element()
     }
 }
@@ -2380,6 +2453,10 @@ impl Render for TabManager {
             self.tab_reorder
                 .take_place(&self.tab_bar_scroll_handle, &ids, cx);
         }
+        // A Pane drag that ended without a drop on the Tab bar closes the gap it opened.
+        if !cx.has_active_drag() && self.pane_strip_drop.take().is_some() {
+            self.tab_reorder.hold_incoming(&ids, None, cx);
+        }
         self.tab_reorder
             .refresh(&self.tab_bar_scroll_handle, &ids, window, cx);
         self.refresh_strip_merge(cx);
@@ -2389,7 +2466,14 @@ impl Render for TabManager {
             &ids,
         );
         self.tab_reorder
-            .follow_selection(Some(self.tabs.active_tab_id()), window, cx);
+            .follow_selection(
+                Some(
+                    self.join_target(cx)
+                        .unwrap_or_else(|| self.tabs.active_tab_id()),
+                ),
+                window,
+                cx,
+            );
         #[cfg(test)]
         {
             self.rendered_window_active = window.is_window_active();
@@ -3350,36 +3434,97 @@ impl TabManager {
     }
 
     /// Records where the Pane `pane_id`, carried out of the Tab `source`, lands if released at
-    /// `pointer`: on another Tab, or as a new Tab anywhere else on the Tab bar.
+    /// `pointer` over the Tab bar at `bar`. Over another Tab's middle it joins that Tab, which
+    /// shows the selected chip. Anywhere else on the bar the Tabs open a gap where it becomes a
+    /// new Tab, and its picture becomes a lifted Tab.
     fn drag_pane_over_tab_bar(
         &mut self,
         source: gpui::EntityId,
         pane_id: PaneId,
         pointer: gpui::Point<Pixels>,
-        over_bar: bool,
+        bar: gpui::Bounds<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        let carrier = self
+        self.tab_bar_bounds = Some(bar);
+        let Some((carrier, view)) = self
             .tabs
             .iter()
             .find(|(_, view)| {
                 view.entity_id() == source && view.read(cx).dragged_pane() == Some(pane_id)
             })
-            .map(|(tab_id, _)| tab_id);
-        let drop = carrier
-            .filter(|_| over_bar)
-            .and_then(|carrier| match self.tab_at(pointer) {
+            .map(|(tab_id, view)| (tab_id, view.clone()))
+        else {
+            return;
+        };
+        let ids = self.visible_tab_ids();
+        let drop = if bar.contains(&pointer) {
+            match self.tab_middle_at(pointer, cx) {
                 // A Pane dropped on its own Tab stays where it is.
                 Some(tab_id) if tab_id == carrier => None,
-                Some(tab_id) => self
-                    .takes_pane(tab_id, cx)
-                    .then_some(StripDrop::Tab(tab_id)),
-
-                None => Some(StripDrop::NewTab),
+                Some(tab_id) if self.takes_pane(tab_id, cx) => Some(StripDrop::Tab(tab_id)),
+                // A Tab without room takes nothing, and its middle is no gap either.
+                Some(_) => None,
+                None => self
+                    .tab_reorder
+                    .incoming_position(&self.tab_bar_scroll_handle, &ids, pointer)
+                    .map(|position| StripDrop::NewTab { position }),
+            }
+        } else {
+            None
+        };
+        let slot = self.tab_bar_scroll_handle.bounds_for_item(0);
+        let gap = match drop {
+            Some(StripDrop::NewTab { position }) => slot.map(|slot| (position, slot.size.width)),
+            _ => None,
+        };
+        self.tab_reorder.hold_incoming(&ids, gap, cx);
+        let face = match (drop, slot) {
+            (Some(StripDrop::Tab(_)), _) => DragFace::Joining {
+                below: bar.bottom(),
+            },
+            (Some(StripDrop::NewTab { .. }), Some(slot)) => DragFace::Tab {
+                top: slot.origin.y,
+                size: slot.size,
+            },
+            _ => DragFace::Pane,
+        };
+        let tab_face = matches!(face, DragFace::Tab { .. })
+            .then(|| view.read(cx).dragged_pane_identity())
+            .flatten()
+            .map(|identity| {
+                let manager = cx.entity().downgrade();
+                Rc::new(move |size, window: &mut Window, cx: &mut App| {
+                    manager
+                        .upgrade()
+                        .map(|owner| {
+                            owner.read(cx).render_lifted_face(
+                                TabId::NONE,
+                                identity.clone(),
+                                false,
+                                Some(size),
+                                manager.clone(),
+                                window,
+                                cx,
+                            )
+                        })
+                        .unwrap_or_else(|| div().into_any_element())
+                }) as Rc<TabFace>
             });
+        view.read(cx).present_pane_drag_face(face, tab_face);
         if self.pane_strip_drop != drop {
             self.pane_strip_drop = drop;
             cx.notify();
+        }
+    }
+
+    /// The Tab joined by a drop at this moment, which shows the selected chip.
+    fn join_target(&self, cx: &App) -> Option<TabId> {
+        if !cx.has_active_drag() {
+            return None;
+        }
+        match self.pane_strip_drop {
+            Some(StripDrop::Tab(tab_id)) => Some(tab_id),
+            _ => self.tab_strip_merge,
         }
     }
 
@@ -3467,8 +3612,8 @@ impl TabManager {
         }
     }
 
-    /// The Tab whose place in the Tab bar holds `pointer`.
-    fn tab_at(&self, pointer: gpui::Point<Pixels>) -> Option<TabId> {
+    /// The shown Tab whose drawn middle half holds `pointer`, as where a drop joins that Tab.
+    fn tab_middle_at(&self, pointer: gpui::Point<Pixels>, cx: &App) -> Option<TabId> {
         let items = &self.tab_bar_scroll_handle;
         // The strip clips Tabs scrolled out of view, so only a shown Tab takes a drop.
         if !items.bounds().contains(&pointer) {
@@ -3477,9 +3622,11 @@ impl TabManager {
         let offset = items.offset();
         self.visible_tabs()
             .enumerate()
-            .find(|(position, _)| {
-                items.bounds_for_item(*position).is_some_and(|bounds| {
-                    gpui::Bounds::new(bounds.origin + offset, bounds.size).contains(&pointer)
+            .find(|(position, (tab_id, _))| {
+                items.bounds_for_item(*position).is_some_and(|slot| {
+                    let start = slot.origin.x + offset.x + self.tab_reorder.motion(*tab_id, cx).offset.x;
+                    let inset = slot.size.width * (1.0 - TAB_MERGE_SHARE) / 2.0;
+                    pointer.x >= start + inset && pointer.x <= start + slot.size.width - inset
                 })
             })
             .map(|(_, (tab_id, _))| tab_id)
@@ -3496,10 +3643,16 @@ impl TabManager {
     ) {
         use spaceterm_server::hierarchy::{PaneDestination, Side};
 
-        let Some(drop) = self.pane_strip_drop.take() else {
+        let ids = self.visible_tab_ids();
+        let drop = self.pane_strip_drop.take();
+        let Some(drop) = drop else {
+            self.tab_reorder.hold_incoming(&ids, None, cx);
             return;
         };
         cx.notify();
+        if !matches!(drop, StripDrop::NewTab { .. }) {
+            self.tab_reorder.hold_incoming(&ids, None, cx);
+        }
         let Some(view) = self.tabs.tab(tab_id) else {
             return;
         };
@@ -3510,7 +3663,7 @@ impl TabManager {
             return;
         };
         let destination = match drop {
-            StripDrop::NewTab => PaneDestination::NewTab,
+            StripDrop::NewTab { .. } => PaneDestination::NewTab,
             StripDrop::Tab(target) => {
                 // The stage or the Tab can have changed since the drop target appeared.
                 if !self.takes_pane(target, cx) {
@@ -3533,14 +3686,19 @@ impl TabManager {
             }
         };
         let submission = self.binding.move_pane(tab, pane, destination);
-        let opened = (drop != StripDrop::NewTab).then_some(pane);
-        self.present_tab_submission(
-            submission,
-            "Couldn\u{2019}t Move Pane",
-            opened,
-            window,
-            cx,
-        );
+        let opened = (!matches!(drop, StripDrop::NewTab { .. })).then_some(pane);
+        let created =
+            self.present_tab_submission(submission, "Couldn\u{2019}t Move Pane", opened, window, cx);
+        // The new Tab takes the gap the strip held open for it, without growing in again.
+        if let StripDrop::NewTab { position } = drop {
+            match created.and_then(|target| self.binding.local_tab(target)) {
+                Some(new_tab) => {
+                    self.move_tab(new_tab, position, cx);
+                    self.tab_reorder.land_incoming(new_tab);
+                }
+                None => self.tab_reorder.hold_incoming(&ids, None, cx),
+            }
+        }
     }
 
     /// Opens the Tab a submitted edit creates, or else the Pane `opened` it moves, or explains
@@ -3552,10 +3710,11 @@ impl TabManager {
         opened: Option<spaceterm_server::hierarchy::Id>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<spaceterm_server::hierarchy::Id> {
         use super::workspaces::WorkspaceSubmission;
 
         let edits = self.binding.edits();
+        let mut created = None;
         if let WorkspaceSubmission::Refused(reason) = submission {
             let detail = match reason {
                 super::workspaces::WorkspaceRefusalReason::Offline => "Reconnect, then try again.",
@@ -3598,8 +3757,10 @@ impl TabManager {
             if let Some(target) = target {
                 self.open_accepted(target, window, cx);
             }
+            created = target;
         }
         cx.notify();
+        created
     }
 
     fn forget_tab(&mut self, tab_id: TabId) {
@@ -4842,9 +5003,10 @@ mod tests {
         let empty = cx.debug_bounds("create-tab-area").unwrap().center() + point(px(60.0), px(0.0));
 
         drag_focused_pane(2, &[empty, empty + point(px(1.0), px(0.0))], cx);
+        // The Tabs open a gap with a landing chip, and the Pane's picture becomes a lifted Tab.
         let offered = (
-            cx.debug_bounds("tab-bar-new-tab-drop-target").is_some(),
-            cx.debug_bounds("drag-stand-in").is_some(),
+            cx.debug_bounds("tab-bar-incoming-landing").is_some(),
+            cx.debug_bounds("tab-preview-0-inactive").is_some(),
         );
         cx.simulate_mouse_up(empty, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
@@ -4854,7 +5016,43 @@ mod tests {
             (offered, pane_counts(&manager, cx), active != source_tab, focused),
             ((true, true), vec![1, 1], true, moved)
         );
-        assert!(cx.debug_bounds("tab-bar-new-tab-drop-target").is_none());
+        assert!(cx.debug_bounds("tab-bar-incoming-landing").is_none());
+    }
+
+    #[gpui::test]
+    fn dropping_a_pane_between_two_tabs_should_make_its_new_tab_there(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let (_, moved) = active_focus(&manager, cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
+        // Between Tabs 1 and 2, away from either middle.
+        let between = point(first.right(), first.center().y);
+
+        drag_focused_pane(2, &[between, between + point(px(1.0), px(0.0))], cx);
+        finish_slides(cx);
+        let held = (
+            lit_tab(&manager, cx),
+            cx.debug_bounds("tab-bar-incoming-landing")
+                .map(|landing| landing.left()),
+            cx.debug_bounds("tab-item-2-inactive")
+                .map(|tab| tab.left() > second.left()),
+        );
+        cx.simulate_mouse_up(between, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (held, tab_order(&manager, cx), active_focus(&manager, cx)),
+            (
+                (None, Some(second.left()), Some(true)),
+                vec![1, 4, 2, 3],
+                (TabId::new(4), moved)
+            ),
+            "Tab 2 slides aside, the landing chip takes its place, and the new Tab lands there"
+        );
     }
 
     #[gpui::test]
@@ -4870,12 +5068,19 @@ mod tests {
         let other_tab = cx.debug_bounds("tab-item-1-inactive").unwrap().center();
 
         drag_focused_pane(2, &[own_tab, own_tab + point(px(1.0), px(0.0))], cx);
-        let over_own_tab = cx.debug_bounds("tab-item-2-pane-drop-target").is_some();
+        let over_own_tab = lit_tab(&manager, cx);
         for position in [other_tab, other_tab + point(px(1.0), px(0.0))] {
             cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
             cx.run_until_parked();
         }
-        let over_other_tab = cx.debug_bounds("tab-item-1-pane-drop-target").is_some();
+        finish_slides(cx);
+        let bar = cx.debug_bounds("tab-bar").unwrap();
+        let over_other_tab = (
+            lit_tab(&manager, cx),
+            cx.debug_bounds("tab-item-2-inactive").is_some(),
+            cx.debug_bounds("drag-stand-in")
+                .is_some_and(|picture| picture.top() >= bar.bottom()),
+        );
         cx.simulate_mouse_up(other_tab, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
@@ -4886,8 +5091,9 @@ mod tests {
                 pane_counts(&manager, cx),
                 active_focus(&manager, cx),
             ),
-            (false, true, vec![2, 1], (TabId::new(1), moved)),
-            "the Pane joins Tab 1 beside its Focused Pane, and Tab 1 opens on it"
+            (None, (Some(1), true, true), vec![2, 1], (TabId::new(1), moved)),
+            "Tab 1 takes the selected chip from Tab 2 while the drop would join it, and the Pane \
+             joins Tab 1 beside its Focused Pane"
         );
     }
 
@@ -4921,7 +5127,7 @@ mod tests {
         let other_tab = cx.debug_bounds("tab-item-1-inactive").unwrap().center();
 
         drag_focused_pane(2, &[other_tab, other_tab + point(px(1.0), px(0.0))], cx);
-        let offered = cx.debug_bounds("tab-item-1-pane-drop-target").is_some();
+        let offered = lit_tab(&manager, cx) == Some(1);
         cx.simulate_mouse_up(other_tab, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
@@ -4951,7 +5157,14 @@ mod tests {
             ],
             cx,
         );
-        let offered = cx.debug_bounds("tab-item-1-pane-drop-target").is_some();
+        finish_slides(cx);
+        let bar = cx.debug_bounds("tab-bar").unwrap();
+        // The lit Tab keeps its label readable: the picture hangs below the Tab bar as the Panes
+        // the merge makes.
+        let offered = lit_tab(&manager, cx) == Some(1)
+            && cx
+                .debug_bounds("drag-stand-in")
+                .is_some_and(|picture| picture.top() >= bar.bottom());
         cx.simulate_mouse_up(target.center(), MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
@@ -4975,12 +5188,16 @@ mod tests {
         finish_slides(cx);
     }
 
-    /// The Tab the Tab bar lights up for a drop, if any.
-    fn lit_tab(cx: &mut VisualTestContext) -> Option<u64> {
-        (1..=13).find(|tab| {
-            cx.debug_bounds(format!("tab-item-{tab}-pane-drop-target").leak())
-                .is_some()
-        })
+    /// The Tab a drop would join, which the strip draws with the selected chip in place of the
+    /// Active Tab, if any.
+    fn lit_tab(manager: &Entity<TabManager>, cx: &mut VisualTestContext) -> Option<u64> {
+        let active = manager.read_with(cx, |manager, _| manager.tabs.active_tab_id().get());
+        (1..=13)
+            .find(|tab| {
+                cx.debug_bounds(format!("tab-item-{tab}-active").leak())
+                    .is_some()
+            })
+            .filter(|tab| *tab != active)
     }
 
     #[gpui::test]
@@ -4998,7 +5215,7 @@ mod tests {
         let target = cx.debug_bounds("tab-item-12-inactive").unwrap().center();
 
         drag_focused_pane(2, &[target, target + point(px(1.0), px(0.0))], cx);
-        let lit = lit_tab(cx);
+        let lit = lit_tab(&manager, cx);
         cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
@@ -5024,7 +5241,7 @@ mod tests {
             ],
             cx,
         );
-        let lit = lit_tab(cx);
+        let lit = lit_tab(&manager, cx);
         // The strip moves beneath the still pointer, as autoscroll moves it.
         manager.update(cx, |manager, cx| {
             let offset = manager.tab_bar_scroll_handle.offset();
@@ -5124,7 +5341,7 @@ mod tests {
             ],
             cx,
         );
-        let lit = lit_tab(cx);
+        let lit = lit_tab(&manager, cx);
         cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
 
@@ -5158,6 +5375,8 @@ mod tests {
             ],
             cx,
         );
+        // The lifted Tab has turned into the Pane rectangle.
+        finish_slides(cx);
         let during = (
             cx.debug_bounds("pane-drop-target-1-left").is_some(),
             cx.debug_bounds("drag-stand-in").is_some(),

@@ -96,6 +96,16 @@ pub(crate) struct ReorderableStrip<Id, Row = ()> {
     arriving: Option<StripShape>,
     /// This strip moving from the shape of the strip it took the place of.
     arrival: Option<Arrival<Id>>,
+    /// The gap held open for an item arriving from outside the strip.
+    incoming: Option<Incoming>,
+}
+
+/// A gap `extent` long before the item at `position`, or after the last item, where an item
+/// arriving from outside the strip would land.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Incoming {
+    position: usize,
+    extent: Pixels,
 }
 
 /// Where a strip's items and selection stood in the window along its axis, so a strip that takes
@@ -343,6 +353,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             visible_end: px(0.0),
             arriving: None,
             arrival: None,
+            incoming: None,
         }
     }
 
@@ -1355,6 +1366,75 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         covered_position(&spans, current, landing, along, share).map(|position| ids[position])
     }
 
+    /// Where an item arriving from outside the strip lands if released at `pointer`: before the
+    /// first of `ids` whose place's middle lies past the pointer, or after the last.
+    pub(crate) fn incoming_position(
+        &self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        pointer: Point<Pixels>,
+    ) -> Option<usize> {
+        let slots = painted_item_bounds(items);
+        (slots.len() == ids.len()).then(|| {
+            incoming_position(&spans(self.axis, &slots), f32::from(pointer.along(self.axis)))
+        })
+    }
+
+    /// Opens a gap `extent` long before the item at `position` among `ids`, or after the last,
+    /// for an item arriving from outside the strip, as a Pane that becomes a Tab. The items
+    /// slide aside as they do for a lifted item. `None` closes the gap.
+    pub(crate) fn hold_incoming(
+        &mut self,
+        ids: &[Id],
+        gap: Option<(usize, Pixels)>,
+        cx: &App,
+    ) {
+        let gap = gap.map(|(position, extent)| Incoming { position, extent });
+        if self.incoming == gap {
+            return;
+        }
+        self.incoming = gap;
+        let now = now(cx);
+        let motion = super::appearance_runtime::control_motion(cx);
+        for (index, id) in ids.iter().enumerate() {
+            let shift = gap
+                .filter(|gap| index >= gap.position)
+                .map_or(px(0.0), |gap| gap.extent);
+            let to = Point::default().apply_along(self.axis, |_| shift);
+            self.slide(*id, to, SHIFT_DURATION, now, motion);
+        }
+    }
+
+    /// Where the open incoming gap starts along the strip, in window coordinates.
+    pub(crate) fn incoming_start(&self, items: &ScrollHandle) -> Option<Pixels> {
+        let gap = self.incoming?;
+        let axis = self.axis;
+        let slots = painted_item_bounds(items);
+        slots
+            .get(gap.position)
+            .map(|slot| slot.origin.along(axis))
+            .or_else(|| {
+                slots
+                    .last()
+                    .map(|slot| slot.origin.along(axis) + slot.size.along(axis))
+            })
+    }
+
+    /// Lands the arriving item `id`, which its owner just placed at the incoming gap's position.
+    /// The others take their places at once, and the item shows there whole rather than growing
+    /// in.
+    pub(crate) fn land_incoming(&mut self, id: Id) {
+        let Some(gap) = self.incoming.take() else {
+            return;
+        };
+        self.slides.clear();
+        if let Some(known) = self.known.as_mut()
+            && !known.contains(&id)
+        {
+            known.insert(gap.position.min(known.len()), id);
+        }
+    }
+
     /// Scrolls the strip toward the end the pointer holds near, faster the deeper it holds, and
     /// follows the items that pass under the lifted copy or grow beside it while it holds still.
     fn autoscroll(&mut self, items: &ScrollHandle, ids: &[Id], window: &mut Window, cx: &App) {
@@ -1572,6 +1652,15 @@ fn landing_position(spans: &[(f32, f32)], dragged: usize, center: f32) -> usize 
             let midpoint = (start + end) / 2.0;
             (*index < dragged && center > midpoint) || (*index > dragged && center >= midpoint)
         })
+        .count()
+}
+
+/// The position among items at `spans` where an arriving item lands at `along`: after every item
+/// whose middle lies before it.
+fn incoming_position(spans: &[(f32, f32)], along: f32) -> usize {
+    spans
+        .iter()
+        .filter(|(start, end)| along > (start + end) / 2.0)
         .count()
 }
 
@@ -1867,7 +1956,8 @@ pub(crate) fn finish_slides(cx: &mut gpui::VisualTestContext) {
         SHIFT_DURATION
             .max(SETTLE_DURATION)
             .max(PRESENCE_DURATION)
-            .max(SELECTION_DURATION),
+            .max(SELECTION_DURATION)
+            .max(MORPH_DURATION),
     );
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
@@ -1880,6 +1970,74 @@ fn painted_item_bounds(items: &ScrollHandle) -> Vec<Bounds<Pixels>> {
         .filter_map(|position| items.bounds_for_item(position))
         .map(|bounds| Bounds::new(bounds.origin + offset, bounds.size))
         .collect()
+}
+
+/// How long a drag picture takes to change from one shape to another.
+const MORPH_DURATION: Duration = Duration::from_millis(180);
+
+/// Eases a drag picture's bounds when what it shows changes, as a lifted Tab that turns into the
+/// rectangle a Pane drag carries and back, around the pointer.
+pub(crate) struct FaceMorph<Kind> {
+    /// What the picture showed in the last frame, and where.
+    shown: Option<(Kind, Bounds<Pixels>)>,
+    /// What it shows now is turning from, from where, and since when.
+    from: Option<(Kind, Bounds<Pixels>, Ease)>,
+}
+
+/// One frame of a [`FaceMorph`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Morph<Kind> {
+    pub(crate) bounds: Bounds<Pixels>,
+    /// What the picture is turning from, and how far along the turn is, from 0 to 1.
+    pub(crate) from: Option<(Kind, f32)>,
+}
+
+impl<Kind: Copy + PartialEq> FaceMorph<Kind> {
+    pub(crate) fn new() -> Self {
+        Self {
+            shown: None,
+            from: None,
+        }
+    }
+
+    /// Where to draw `kind` this frame, which rests at `target`.
+    pub(crate) fn frame(&mut self, kind: Kind, target: Bounds<Pixels>, cx: &App) -> Morph<Kind> {
+        let now = now(cx);
+        if let Some((shown, drawn)) = self.shown
+            && shown != kind
+        {
+            let motion = super::appearance_runtime::control_motion(cx);
+            self.from = Some((shown, drawn, Ease::new(MORPH_DURATION, now, motion)));
+        }
+        let morph = match self.from {
+            Some((from, start, ease)) if !ease.finished(now) => {
+                let t = ease.at(now);
+                let lerp = |a: Pixels, b: Pixels| a + (b - a) * t;
+                Morph {
+                    bounds: Bounds::new(
+                        point(
+                            lerp(start.origin.x, target.origin.x),
+                            lerp(start.origin.y, target.origin.y),
+                        ),
+                        Size::new(
+                            lerp(start.size.width, target.size.width),
+                            lerp(start.size.height, target.size.height),
+                        ),
+                    ),
+                    from: Some((from, t)),
+                }
+            }
+            _ => {
+                self.from = None;
+                Morph {
+                    bounds: target,
+                    from: None,
+                }
+            }
+        };
+        self.shown = Some((kind, morph.bounds));
+        morph
+    }
 }
 
 /// The lifted copy of a dragged item that follows the pointer.
@@ -1901,8 +2059,9 @@ struct Placement {
     origin: Box<PreviewOrigin>,
 }
 
-/// The face's origin in the window, while the owner places it.
-type PreviewOrigin = dyn Fn(&App) -> Option<Point<Pixels>>;
+/// The face's origin in the window for the pointer at the given point, while the owner places
+/// it.
+type PreviewOrigin = dyn Fn(Point<Pixels>, &App) -> Option<Point<Pixels>>;
 
 impl DragPreview {
     /// A preview, for the drag GPUI is starting in `window`, that paints `face` at the pointer.
@@ -1925,7 +2084,7 @@ impl DragPreview {
     pub(crate) fn placed(
         mut self,
         cursor_offset: Point<Pixels>,
-        origin: impl Fn(&App) -> Option<Point<Pixels>> + 'static,
+        origin: impl Fn(Point<Pixels>, &App) -> Option<Point<Pixels>> + 'static,
     ) -> Self {
         self.placement = Some(Placement {
             cursor_offset,
@@ -1951,8 +2110,9 @@ impl Render for DragPreview {
             .placement
             .as_ref()
             .and_then(|placement| {
-                let root = window.mouse_position() - placement.cursor_offset;
-                (placement.origin)(cx).map(|origin| origin - root)
+                let pointer = window.mouse_position();
+                let root = pointer - placement.cursor_offset;
+                (placement.origin)(pointer, cx).map(|origin| origin - root)
             })
             .unwrap_or(self.lift);
         div().debug_selector(|| "drag-preview".to_owned()).child(

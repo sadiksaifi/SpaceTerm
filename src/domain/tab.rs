@@ -38,6 +38,12 @@ typed_id!(TabId);
 typed_id!(PaneId);
 typed_id!(SplitId);
 
+impl TabId {
+    /// No Tab's identity, for presenting a Tab that does not exist yet, as a Pane about to
+    /// become one. Tab identities start at 1.
+    pub(crate) const NONE: Self = Self(0);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PaneSize {
     width: f32,

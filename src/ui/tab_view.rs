@@ -5,7 +5,9 @@ mod linux_adapter_tests;
 use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
-use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer, grab_point};
+use super::drag_and_drop::{
+    DragPreview, DragSession, FaceMorph, Morph, drag_release_observer, grab_point,
+};
 use super::pane_lifecycle::PaneConstruction;
 use super::pane_motion::{PaneFrames, PaneMotion};
 use super::terminal_status::{
@@ -14,6 +16,7 @@ use super::terminal_status::{
 use crate::repository_status::presentation::{HeadGlyph, RepositoryCaption, RepositoryMark};
 use crate::ui::appearance::gpui_color;
 use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{Cell, RefCell};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
@@ -474,6 +477,7 @@ struct PaneDrag {
     pane_id: PaneId,
     drop_target: Option<(PaneId, PaneDrop)>,
     session: DragSession,
+    picture: Rc<DragPicture>,
 }
 
 /// The rectangle a Pane or Tab drag carries: the short label and a frozen picture of the Pane it
@@ -482,6 +486,168 @@ pub(super) struct DragStandIn {
     identity: TabIdentity,
     snapshot: Option<super::pane_snapshot::PaneSnapshot>,
 }
+
+/// What a drag picture shows. Each shows what the drop would make of the dragged Pane or Tab.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum DragFace {
+    /// The rectangle, at the pointer and inside the window: the drop makes or keeps a Pane.
+    Pane,
+    /// The rectangle hanging below the Tab bar, whose bottom edge is `below`, so the label of the
+    /// Tab the drop joins stays readable.
+    Joining { below: Pixels },
+    /// A lifted Tab `size` large, whose top edge is `top`: the drop makes a Tab there.
+    Tab { top: Pixels, size: gpui::Size<Pixels> },
+}
+
+/// Paints a lifted Tab face of a given size. The Tab strip owns that face.
+pub(super) type TabFace = dyn Fn(gpui::Size<Pixels>, &mut Window, &mut App) -> AnyElement;
+
+/// The picture a Pane or Tab drag carries: what it shows, eased between its faces around the
+/// point where the pointer took it.
+pub(super) struct DragPicture {
+    face: Cell<DragFace>,
+    tab_face: RefCell<Option<Rc<TabFace>>>,
+    stand_in: DragStandIn,
+    /// Where the pointer holds the picture: a share of its width, and a distance below its top.
+    grab: (f32, Pixels),
+    /// The window's size when the drag started, which keeps the rectangle inside it.
+    viewport: gpui::Size<Pixels>,
+    morph: RefCell<FaceMorph<DragFace>>,
+    drawn: Cell<Option<Morph<DragFace>>>,
+}
+
+impl DragPicture {
+    pub(super) fn new(
+        stand_in: DragStandIn,
+        grab: (f32, Pixels),
+        viewport: gpui::Size<Pixels>,
+    ) -> Self {
+        Self {
+            face: Cell::new(DragFace::Pane),
+            tab_face: RefCell::new(None),
+            stand_in,
+            grab: (grab.0.clamp(0.0, 1.0), grab.1),
+            viewport,
+            morph: RefCell::new(FaceMorph::new()),
+            drawn: Cell::new(None),
+        }
+    }
+
+    /// Shows `face`, with `tab_face` painting it when it is a Tab.
+    pub(super) fn present(&self, face: DragFace, tab_face: Option<Rc<TabFace>>) {
+        self.face.set(face);
+        if tab_face.is_some() {
+            self.tab_face.replace(tab_face);
+        }
+    }
+
+    pub(super) fn identity(&self) -> &TabIdentity {
+        &self.stand_in.identity
+    }
+
+    /// Where the picture stands for the pointer at `pointer`, eased toward where its face rests.
+    /// A lifted Tab rests at `tab_origin` when its strip holds it, and follows the pointer
+    /// otherwise.
+    pub(super) fn place(
+        &self,
+        pointer: Point<Pixels>,
+        tab_origin: Option<Point<Pixels>>,
+        cx: &App,
+    ) -> Point<Pixels> {
+        let appearance = super::appearance::chrome(cx);
+        let card = gpui::size(
+            appearance.spacing(STAND_IN_WIDTH),
+            appearance.spacing(STAND_IN_HEIGHT),
+        );
+        let (share, below_top) = self.grab;
+        let inside = |origin: Point<Pixels>, size: gpui::Size<Pixels>| {
+            point(
+                origin
+                    .x
+                    .min(self.viewport.width - size.width)
+                    .max(px(0.0)),
+                origin
+                    .y
+                    .min(self.viewport.height - size.height)
+                    .max(px(0.0)),
+            )
+        };
+        let face = self.face.get();
+        let target = match face {
+            DragFace::Pane => Bounds::new(
+                inside(
+                    point(
+                        pointer.x - card.width * share,
+                        pointer.y - below_top.min(appearance.caption_height()),
+                    ),
+                    card,
+                ),
+                card,
+            ),
+            DragFace::Joining { below } => Bounds::new(
+                inside(
+                    point(
+                        pointer.x - card.width * share,
+                        below + appearance.spacing(STAND_IN_BELOW_STRIP),
+                    ),
+                    card,
+                ),
+                card,
+            ),
+            DragFace::Tab { top, size } => Bounds::new(
+                tab_origin.unwrap_or_else(|| point(pointer.x - size.width * share, top)),
+                size,
+            ),
+        };
+        let morph = self.morph.borrow_mut().frame(face, target, cx);
+        self.drawn.set(Some(morph));
+        morph.bounds.origin
+    }
+
+    /// The picture as [`Self::place`] last placed it. A changing face fades from the old face
+    /// to the new one while its bounds ease between theirs.
+    pub(super) fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let Some(morph) = self.drawn.get() else {
+            return div().into_any_element();
+        };
+        if morph.from.is_some() {
+            window.request_animation_frame();
+        }
+        let size = morph.bounds.size;
+        let layer = |face: DragFace, opacity: f32, window: &mut Window, cx: &mut App| {
+            let tab_face = self.tab_face.borrow().clone();
+            let content = match (face, tab_face) {
+                (DragFace::Tab { .. }, Some(tab_face)) => tab_face(size, window, cx),
+                _ => render_stand_in_card(&self.stand_in, size, cx),
+            };
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(size.width)
+                .h(size.height)
+                .opacity(opacity)
+                .child(content)
+                .into_any_element()
+        };
+        let current = self.face.get();
+        let (previous, progress) = match morph.from {
+            Some((from, progress)) => (Some(from), progress),
+            None => (None, 1.0),
+        };
+        let mut picture = div().relative().w(size.width).h(size.height);
+        if let Some(previous) = previous {
+            picture = picture.child(layer(previous, 1.0 - progress, window, cx));
+        }
+        picture
+            .child(layer(current, progress, window, cx))
+            .into_any_element()
+    }
+}
+
+/// How far below the Tab bar the rectangle hangs while a drop would join a Tab, before
+/// interface scaling.
+const STAND_IN_BELOW_STRIP: f32 = 6.0;
 
 /// The size of a drag's rectangle before interface scaling. It shows the top-left of the Pane
 /// rather than squeezing the whole Pane into it.
@@ -1155,6 +1321,7 @@ impl TabView {
     fn begin_pane_drag(
         &mut self,
         pane_id: PaneId,
+        cursor_offset: Point<Pixels>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
@@ -1163,23 +1330,48 @@ impl TabView {
                 cx.notify();
             }
         });
-        let stand_in = Rc::new(self.stand_in(pane_id, cx));
+        let pane = self.pane_surfaces.get(&pane_id).copied();
+        // The pointer keeps holding the picture where it took the Pane's caption.
+        let grab = grab_point(window, cx);
+        let held = pane.map_or((0.5, px(0.0)), |pane| {
+            (
+                f32::from(grab.x - pane.origin.x) / f32::from(pane.size.width).max(1.0),
+                grab.y - pane.origin.y,
+            )
+        });
+        let picture = Rc::new(DragPicture::new(
+            self.stand_in(pane_id, cx),
+            held,
+            window.viewport_size(),
+        ));
         self.pane_drag = Some(PaneDrag {
             pane_id,
             drop_target: None,
             session,
+            picture: Rc::clone(&picture),
         });
         let pointer = window.mouse_position();
         self.drag_pane_to(pane_id, pointer, cx);
         cx.notify();
-        let Some(pane) = self.pane_surfaces.get(&pane_id).copied() else {
-            return DragPreview::empty();
-        };
-        // The caption that was pressed starts at the Pane's top left, where the preview starts.
-        let grab = grab_point(window, cx).x - pane.origin.x;
-        DragPreview::new(window, cx, move |_, cx| {
-            render_drag_stand_in(&stand_in, pane.size.width, grab, cx)
-        })
+        let placement = Rc::clone(&picture);
+        DragPreview::new(window, cx, move |window, cx| picture.render(window, cx))
+            .placed(cursor_offset, move |pointer, cx| {
+                Some(placement.place(pointer, None, cx))
+            })
+    }
+
+    /// Shows `face` on the picture of the Pane this Tab's drag carries.
+    pub(super) fn present_pane_drag_face(&self, face: DragFace, tab_face: Option<Rc<TabFace>>) {
+        if let Some(drag) = &self.pane_drag {
+            drag.picture.present(face, tab_face);
+        }
+    }
+
+    /// The short label of the Pane this Tab's drag carries.
+    pub(super) fn dragged_pane_identity(&self) -> Option<TabIdentity> {
+        self.pane_drag
+            .as_ref()
+            .map(|drag| drag.picture.identity().clone())
     }
 
     /// The rectangle a drag of `pane_id` carries: its short label and its screen as it is now.
@@ -4248,9 +4440,11 @@ fn render_pane_caption_content(
         // visible.
         .when(has_multiple_panes && !zoomed, |row| {
             let owner = drag_view.entity_id();
-            row.on_drag(DraggedPane { pane_id, owner }, move |_, _, window, cx| {
+            row.on_drag(DraggedPane { pane_id, owner }, move |_, cursor_offset, window, cx| {
                 let preview = drag_view
-                    .update(cx, |view, cx| view.begin_pane_drag(pane_id, window, cx))
+                    .update(cx, |view, cx| {
+                        view.begin_pane_drag(pane_id, cursor_offset, window, cx)
+                    })
                     .unwrap_or_else(|_| DragPreview::empty());
                 cx.new(|_| preview)
             })
@@ -4665,23 +4859,14 @@ pub(super) fn edge_side(edge: PaneEdge) -> spaceterm_server::hierarchy::Side {
     }
 }
 
-/// The rectangle that follows the pointer during a Pane or Tab drag.
-///
-/// The preview starts where the pressed element, `lifted_width` wide, starts. The rectangle keeps
-/// the point `grab` from that start under the pointer, in proportion when the rectangle is
-/// narrower. It wears the floating surface material, its header is the Pane Caption's size, and
-/// its body is the frozen screen.
-pub(super) fn render_drag_stand_in(
+/// The rectangle a Pane or Tab drag carries, `size` large. It wears the floating surface
+/// material, its header is the Pane Caption's size, and its body is the frozen screen.
+fn render_stand_in_card(
     stand_in: &DragStandIn,
-    lifted_width: Pixels,
-    grab: Pixels,
+    size: gpui::Size<Pixels>,
     cx: &App,
 ) -> AnyElement {
     let appearance = super::appearance::chrome(cx);
-    let width = appearance.spacing(STAND_IN_WIDTH);
-    let height = appearance.spacing(STAND_IN_HEIGHT);
-    let lifted_width = lifted_width.max(width);
-    let left = grab.clamp(px(0.0), lifted_width) * (1.0 - width / lifted_width);
     let identity = &stand_in.identity;
     let muted = gpui_color(appearance.colors.text_muted);
     let mut header = caption_row(appearance, appearance.colors.text_secondary)
@@ -4736,31 +4921,23 @@ pub(super) fn render_drag_stand_in(
                 appearance.spacing(STAND_IN_LINE_HEIGHT),
             )
         }));
-    let card = spaceterm_ui::floating_surface_theme(cx)
+    spaceterm_ui::floating_surface_theme(cx)
         .shell(spaceterm_ui::FloatingRole::Popover)
         .frame(
             div()
                 .flex()
                 .flex_col()
-                .w(width)
-                .h(height)
+                .w(size.width)
+                .h(size.height)
                 .child(header)
                 .child(body),
         )
         .debug_selector(|| "drag-stand-in".to_owned())
-        .absolute()
-        .top_0()
-        .left(left);
-    div()
-        .relative()
-        .w(lifted_width)
-        .h(height)
-        .child(card)
         .into_any_element()
 }
 
 /// The accent fill and outline marking where a dragged Pane goes if released now.
-pub(super) fn pane_drop_overlay(appearance: &super::appearance::ChromeAppearance) -> gpui::Div {
+fn pane_drop_overlay(appearance: &super::appearance::ChromeAppearance) -> gpui::Div {
     let accent = appearance.colors.primary_background;
     div()
         .absolute()
@@ -6212,6 +6389,27 @@ mod tests {
                 "split:1:Horizontal:0.5(pane:2,pane:1)".to_owned()
             ),
             "the edge beside Pane 1 would rebuild the layout, and the far edge is the swap"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_drag_near_the_window_edge_should_keep_its_picture_inside_the_window(
+        cx: &mut TestAppContext,
+    ) {
+        let (_view, cx) = four_pane_view(cx);
+        let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+        let window = cx.update(|window, _| window.viewport_size());
+        let edge = point(window.width - px(2.0), window.height - px(2.0));
+
+        drag_pane_caption(caption, &[edge, edge - point(px(1.0), px(0.0))], cx);
+        let picture = cx.debug_bounds("drag-stand-in").unwrap();
+        cx.simulate_keystrokes("escape");
+        cx.simulate_mouse_up(edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            picture.right() <= window.width && picture.bottom() <= window.height,
+            "the picture {picture:?} must stay inside the {window:?} window"
         );
     }
 
