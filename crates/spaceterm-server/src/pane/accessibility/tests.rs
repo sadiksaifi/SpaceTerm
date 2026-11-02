@@ -217,7 +217,10 @@ fn the_last_message_has_room_for_the_widest_tail_and_channel_however_full_it_is(
             end: widest,
             rectangle: true,
         }),
-        origin: None,
+        origin: Some(Origin {
+            epoch: u64::MAX,
+            first: u64::MAX,
+        }),
     };
     let row = |line, length| {
         let text = "a".repeat(length);
