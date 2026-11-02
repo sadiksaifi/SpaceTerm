@@ -439,7 +439,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
             predicate() or self.smoke.require(False, classification)
         )
         switch = Accessible("button", name="Choose Workspace")
-        local = Accessible("menu item", name="Local Workspace")
+        local = Accessible("menu item", name="New Local Workspace")
         field = Accessible("entry", name="Workspace name")
         query = ""
         field.queryText.side_effect = lambda: SimpleNamespace(getText=lambda start, end: query)
