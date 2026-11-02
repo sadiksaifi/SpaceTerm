@@ -611,6 +611,9 @@ mod server {
         pub(crate) fn closing(&self, pane: Id) -> bool {
             self.pending.borrow().closing(pane)
         }
+        pub(crate) fn moving(&self, tab: Id, pane: Id) -> bool {
+            self.pending.borrow().moving(tab, pane)
+        }
         pub(crate) fn take_presentation(&self) -> Option<WorkspaceAcceptance> {
             self.pending.borrow_mut().take_presentation()
         }
@@ -1209,8 +1212,9 @@ mod server {
         workspace: Id,
         tab: Id,
         panes: BTreeMap<PaneId, Id>,
-        /// The opener generation each Pane's subscription came from.
-        opened: BTreeMap<PaneId, u64>,
+        /// The opener generation each Pane's subscription came from, or `None` once another
+        /// presentation of the same server Pane fenced it.
+        opened: BTreeMap<PaneId, Option<u64>>,
         views: BTreeMap<PaneId, ServerPaneView>,
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
         pending_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
@@ -1269,7 +1273,8 @@ mod server {
                 state.start_created();
             }
             state.observe(self.changes.0.clone());
-            self.opened.insert(pane_id, self.sessions.generation());
+            self.opened
+                .insert(pane_id, Some(self.sessions.generation()));
             self.views.insert(pane_id, ServerPaneView::new(state));
             self.screen_focus.insert(pane_id, screen_focus);
         }
@@ -1320,11 +1325,32 @@ mod server {
                 .is_some_and(|id| self.edits.closing(id))
         }
 
-        /// Whether the Pane's route connected or disconnected since the Pane opened.
+        /// Whether this client's own pending move takes the Pane out of this Tab.
+        pub(crate) fn moving(&self, pane_id: PaneId) -> bool {
+            self.server_pane(pane_id)
+                .is_some_and(|id| self.edits.moving(self.edits.canonical(self.tab), id))
+        }
+
+        /// Whether this client's own pending close or move takes the Pane out of this Tab, so the
+        /// Tab holds the Pane aside until the edit settles.
+        pub(crate) fn leaving(&self, pane_id: PaneId) -> bool {
+            self.closing(pane_id) || self.moving(pane_id)
+        }
+
+        /// Records that another presentation of the Pane fenced its subscription, so the Pane
+        /// opens again if it returns.
+        pub(crate) fn supersede(&mut self, pane_id: PaneId) {
+            if let Some(generation) = self.opened.get_mut(&pane_id) {
+                *generation = None;
+            }
+        }
+
+        /// Whether the Pane must open again because its route connected or disconnected since it
+        /// opened, or another presentation fenced it.
         pub(crate) fn reopened(&self, pane_id: PaneId) -> bool {
             self.opened
                 .get(&pane_id)
-                .is_some_and(|generation| *generation != self.sessions.generation())
+                .is_some_and(|generation| *generation != Some(self.sessions.generation()))
         }
 
         /// Whether the Pane must open again: the server confirmed its provisional identity, or
@@ -3538,6 +3564,16 @@ mod server {
                     .values()
                     .cloned()
                     .collect()
+            }
+
+            /// How many times the server Pane `pane` has been opened.
+            pub(crate) fn opens(&self, pane: super::Id) -> usize {
+                self.order
+                    .lock()
+                    .expect("order")
+                    .iter()
+                    .filter(|opened| **opened == pane)
+                    .count()
             }
 
             /// The server Pane opened `index`th, counting from 0.

@@ -1565,7 +1565,7 @@ impl TabView {
         size: gpui::Size<Pixels>,
         cx: &App,
     ) -> Option<Bounds<Pixels>> {
-        if self.binding.closing(pane_id) {
+        if self.binding.leaving(pane_id) {
             return None;
         }
         let appearance = super::appearance::chrome(cx);
@@ -2479,7 +2479,7 @@ impl TabView {
             .parked_panes
             .keys()
             .copied()
-            .filter(|id| !self.binding.closing(*id))
+            .filter(|id| !self.binding.leaving(*id))
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_panes.remove(&id) {
@@ -2524,7 +2524,12 @@ impl TabView {
                 .tab
                 .pane(pane_id)
                 .is_some_and(|terminal| self.pane_holds_focus(pane_id, terminal, window, cx));
-            if self.binding.closing(pane_id) {
+            if self.binding.leaving(pane_id) {
+                // The new Tab's presentation of a moving Pane fences this one, so a refused move
+                // opens the Pane again where it was.
+                if self.binding.moving(pane_id) {
+                    self.binding.supersede(pane_id);
+                }
                 if let Ok(Some(parked)) = self.tab.park_pane(pane_id) {
                     parked.payload().update(cx, |terminal, cx| {
                         terminal.set_product_focus(
@@ -2846,7 +2851,7 @@ impl TabView {
         let pane_ids = self.binding.pane_ids();
         let mut changed = false;
         for pane_id in pane_ids {
-            if self.binding.closing(pane_id) {
+            if self.binding.leaving(pane_id) {
                 continue;
             }
             let Some(sync) = self

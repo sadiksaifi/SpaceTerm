@@ -107,6 +107,20 @@ impl DelayedServer {
         result
     }
 
+    /// The transport definitely refuses the dispatched Original Operation, so the server never
+    /// applies it.
+    fn reject(&self) {
+        let mut delivery = self.0.borrow_mut();
+        let (_, mutation) = delivery
+            .original
+            .take()
+            .expect("an Original Operation was dispatched");
+        delivery.snapshot.rejected = Some(mutation);
+        delivery.snapshot.pending = false;
+        delivery.snapshot.pending_operation = None;
+        self.1.publish();
+    }
+
     /// Another client's accepted close removes `tab`, and the server publishes the result.
     fn remove_tab_elsewhere(&self, tab: Id) {
         let mut delivery = self.0.borrow_mut();
@@ -1510,6 +1524,71 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
     assert!(
         cx.debug_bounds(format!("pane-surface-{}", closed_view.1.get()).leak())
             .is_some()
+    );
+}
+
+#[gpui::test]
+fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    let (harness, cx) = window_harness(cx);
+    click("pane-split-down-1", cx);
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    let handle = cx.debug_bounds("split-resize-1-hitbox").unwrap().center();
+    cx.simulate_mouse_move(handle, None, Modifiers::none());
+    cx.simulate_mouse_down(handle, MouseButton::Left, Modifiers::none());
+    let resized = handle + point(px(0.0), px(80.0));
+    cx.simulate_mouse_move(resized, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(resized, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let signature = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            manager.active_tab_view().read(cx).layout_signature()
+        })
+    };
+    let before = signature(cx);
+    assert!(!before.contains(":0.5("), "the Split left its default ratio: {before}");
+    let moved = harness.server.inventory().workspaces[0].tabs[0].panes[1].id;
+    let opens = harness.panes.opens(moved);
+
+    let caption = cx.debug_bounds("pane-caption-2-focused").unwrap();
+    let bar = cx.debug_bounds("tab-bar").unwrap().center();
+    let press = point(caption.left() + px(24.0), caption.center().y);
+    cx.simulate_mouse_move(press, None, Modifiers::none());
+    cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
+    for position in [bar, bar + point(px(1.0), px(0.0))] {
+        cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(bar, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let pending = harness.manager.read_with(cx, |manager, cx| {
+        (
+            manager.tab_ids().len(),
+            manager.active_tab_view().read(cx).pane_count(),
+        )
+    });
+    harness.server.reject();
+    project_window(&harness, cx);
+
+    assert_eq!(
+        (
+            pending,
+            harness.manager.read_with(cx, |manager, _| manager.tab_ids().len()),
+            signature(cx),
+            cx.debug_bounds("pane-surface-2").is_some(),
+            harness.panes.opens(moved) > opens + 1,
+        ),
+        (
+            (2, 1),
+            1,
+            before,
+            true,
+            true
+        ),
+        "the refused move restores the same Pane in its place and opens it again, because the \
+         new Tab's presentation fenced the old one"
     );
 }
 

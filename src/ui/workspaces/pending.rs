@@ -208,6 +208,17 @@ impl PendingEdits {
         !projected.workspaces.iter().any(|w| w.id == workspace)
     }
 
+    /// Whether a pending move takes `pane` out of `tab` into a new Tab.
+    pub fn moving(&self, tab: Id, pane: Id) -> bool {
+        self.edits.iter().any(|edit| {
+            matches!(
+                &edit.mutation,
+                Mutation::MovePaneToNewTab { tab: from, pane: moved, .. }
+                    if self.canonical(*from) == tab && self.canonical(*moved) == pane
+            )
+        })
+    }
+
     pub fn closing(&self, pane: Id) -> bool {
         self.edits.iter().any(|edit| matches!(&edit.mutation, Mutation::Close { confirmation, .. } if confirmation.panes.iter().any(|p| p.id == pane)))
     }
