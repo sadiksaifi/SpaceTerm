@@ -1997,8 +1997,11 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
     worker.finish();
 }
 
+/// A semantic continuation due after a queued command never publishes the pending screen ahead
+/// of its paced deadline (ADR 0062). It used to take the presentation barrier, so every
+/// continuation flushed a screen.
 #[test]
-fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
+fn a_semantic_continuation_leaves_the_pending_screen_to_its_paced_deadline() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
@@ -2035,16 +2038,13 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
     ));
     assert!(matches!(
         worker.receive_next_command(),
-        Some(Command::PublishPendingScreen)
+        Some(Command::AccessibilityContinue)
     ));
-    assert!(matches!(
-        worker.pending_command,
-        Some(Command::PublishAccessibility)
-    ));
-    assert!(matches!(
-        worker.receive_next_command(),
-        Some(Command::PublishAccessibility)
-    ));
+    assert!(worker.pending_command.is_none());
+    assert!(
+        worker.schedules.take_presentation_barrier(),
+        "the screen still waits for its paced publication"
+    );
     worker.finish();
 }
 
@@ -2092,8 +2092,47 @@ fn queued_input_runs_before_due_scrollback_compression() {
     worker.finish();
 }
 
+/// A server Pane keeps no model without demand, so it drops the model a subscription publishes
+/// before demand starts. Demand that starts later publishes the current model again, even though
+/// nothing changed since.
 #[test]
-fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
+fn new_demand_publishes_the_current_model_again() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events.into();
+    let (accessibility, models) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(Instant::now(), input.clone());
+    worker.emulator.feed(b"unchanged");
+    assert!(worker.publish_screen());
+    let model = |worker: &mut TerminalWorker, first: Command| {
+        assert!(worker.process_command(first));
+        for _ in 0..128 {
+            if let Ok(model) = models.try_recv() {
+                return Some(model);
+            }
+            let command = worker.take_accessibility_continuation()?;
+            assert!(worker.process_command(command));
+        }
+        panic!("accessibility work must finish within the budget")
+    };
+    let seed = model(&mut worker, Command::PublishAccessibility).expect("the seed publishes");
+    assert!(seed.text().contains("unchanged"));
+
+    assert!(input.enqueue_accessibility_demand(Instant::now()));
+    assert!(worker.process_command(Command::AccessibilityDemand));
+    let command = worker.receive_next_command();
+    assert!(matches!(command, Some(Command::PublishAccessibility)));
+    let again = model(&mut worker, command.unwrap()).expect("new demand publishes a model");
+    assert_eq!(again.text(), seed.text());
+    worker.finish();
+}
+
+/// Demand that arrives while a screen waits for its paced deadline builds the model at once and
+/// binds it to the screen published last. It publishes no screen.
+#[test]
+fn accessibility_demand_binds_to_the_last_published_screen_without_flushing_the_pending_one() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
@@ -2120,7 +2159,9 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         progress: Default::default(),
     };
     assert!(worker.publish_screen());
-    let _ = receiver.try_recv().unwrap();
+    let TerminalSessionEvent::Screen(published) = receiver.try_recv().unwrap() else {
+        panic!("the first screen publishes")
+    };
     worker
         .schedules
         .mark_accessibility_presented(Instant::now(), true);
@@ -2135,31 +2176,132 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
 
     assert!(matches!(
         worker.receive_next_command(),
-        Some(Command::PublishPendingScreen)
-    ));
-    assert!(worker.process_command(Command::PublishPendingScreen));
-    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
-        panic!("the visual presentation must precede its accessibility model")
-    };
-    assert!(matches!(
-        worker.receive_next_command(),
         Some(Command::PublishAccessibility)
     ));
     assert!(worker.process_command(Command::PublishAccessibility));
-    while accessibility_receiver.is_empty() {
-        assert!(worker.process_command(Command::AccessibilityContinue));
+    for _ in 0..128 {
+        if !accessibility_receiver.is_empty() {
+            break;
+        }
+        let command = worker
+            .take_accessibility_continuation()
+            .expect("accessibility work must finish within the budget");
+        assert!(matches!(command, Command::AccessibilityContinue));
+        assert!(worker.process_command(command));
     }
     let model = accessibility_receiver.try_recv().unwrap();
-    assert_eq!(
-        model.selection_request(0..0).unwrap().generation,
-        screen.generation
+    assert!(model.text().contains("new generation"));
+    assert_eq!(model.generation(), published.generation);
+    assert!(
+        receiver.try_recv().is_err(),
+        "semantic work published no screen"
     );
     assert!(
-        !worker
-            .schedules
-            .accessibility_presentation_due(Instant::now())
+        worker.schedules.take_presentation_barrier(),
+        "the changed screen still waits for its paced publication"
     );
     worker.finish();
+}
+
+/// What continuous output published: its screens, and the millisecond the first complete
+/// semantic model arrived.
+struct ContinuousOutput {
+    screens: usize,
+    first_model: Option<u64>,
+}
+
+/// Runs `millis` milliseconds of continuous output on a fixed clock, one write per millisecond,
+/// after 3,000 lines of history. With `appending`, each write is a new line; otherwise it rewrites
+/// the last line in place, like a progress bar. After each write the worker runs one more
+/// command, as it interleaves them with output: due work, or else a semantic continuation.
+/// Copying the history into a semantic model takes dozens of bounded steps, so with `demanded`
+/// a model is built while screens keep publishing.
+fn continuous_output(demanded: bool, appending: bool, millis: u64) -> ContinuousOutput {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let history: Vec<u8> = (0..3_000)
+        .flat_map(|line| format!("history {line}\r\n").into_bytes())
+        .collect();
+    assert!(worker.feed_test_output(vec![history]));
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events.into();
+    let (accessibility, semantics) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    let start = Instant::now();
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(start, input.clone());
+    // Ends the seed every new schedule requires, so only demand builds models.
+    worker.schedules.mark_accessibility_presented(start, true);
+    if demanded {
+        assert!(input.enqueue_accessibility_demand(start));
+        worker.schedules.accessibility_demand_received(start);
+    }
+    let mut published = ContinuousOutput {
+        screens: 0,
+        first_model: None,
+    };
+    for step in 0..millis {
+        let now = start + Duration::from_millis(step);
+        worker.schedules.fix_clock(now);
+        let output = if appending {
+            format!("y {step}\r\n")
+        } else {
+            format!("\rprogress {step}")
+        };
+        assert!(worker.feed_test_output(vec![output.into_bytes()]));
+        let command = match worker.schedules.take_due(now) {
+            Some(command) => Some(worker.order_presentation_barrier(command)),
+            None => worker.take_accessibility_continuation(),
+        };
+        // The barrier leaves the command it ordered in the pending slot.
+        for command in command.into_iter().chain(worker.pending_command.take()) {
+            assert!(worker.process_command(command));
+        }
+        while let Ok(event) = receiver.try_recv() {
+            published.screens += usize::from(matches!(event, TerminalSessionEvent::Screen(_)));
+        }
+        if semantics.try_recv().is_ok() {
+            published.first_model.get_or_insert(step);
+        }
+    }
+    worker.finish();
+    published
+}
+
+/// With an accessibility client attached, `yes` published about 44,000 frames in 23 s against
+/// about 1,100 without, because every semantic step flushed the pending screen. Lines appended
+/// every millisecond keep the semantic update unfinished, so it continues after every line;
+/// demanding semantics still publishes exactly the paced screens.
+#[test]
+fn demanded_semantics_add_no_screens_during_continuous_output() {
+    let paced = continuous_output(false, true, 500);
+    let demanded = continuous_output(true, true, 500);
+
+    assert_eq!(
+        demanded.screens, paced.screens,
+        "demanded semantics publish only paced screens"
+    );
+    // At 60 Hz with output every millisecond, each burst publishes 18 ms after it began.
+    assert_eq!(paced.screens, 28);
+    assert_eq!(paced.first_model, None, "no model without demand");
+}
+
+/// Paced screens never cancel the semantic update in progress. While output rewrites a line
+/// every millisecond, the update that copies the history completes before the next semantic
+/// capture, 100 ms later, would have to restart it.
+#[test]
+fn a_semantic_update_completes_while_paced_screens_publish() {
+    let paced = continuous_output(false, false, 300);
+    let demanded = continuous_output(true, false, 300);
+
+    assert_eq!(
+        demanded.screens, paced.screens,
+        "demanded semantics publish only paced screens"
+    );
+    assert!(paced.screens > 5, "{} screens", paced.screens);
+    let first = demanded
+        .first_model
+        .expect("a model completes during output");
+    assert!(first < 100, "the first model completed at {first} ms");
 }
 
 #[test]

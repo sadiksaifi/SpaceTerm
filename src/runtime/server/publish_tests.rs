@@ -37,7 +37,8 @@ fn live(screen: Option<ScreenCapture>) -> Observed {
     })
 }
 
-/// Writes everything the outbox holds, acknowledging each frame as a client does.
+/// Writes everything the outbox holds, acknowledging each frame and semantic revision as a
+/// client does.
 fn drain(outbox: &Outbox) -> Vec<ServerMessage> {
     let mut assembler = Assembler::default();
     let mut messages = Vec::new();
@@ -47,6 +48,14 @@ fn drain(outbox: &Outbox) -> Vec<ServerMessage> {
         };
         if let ServerMessage::Frame(frame) = &message {
             outbox.acknowledge(CHANNEL, frame.frame).unwrap();
+        }
+        if let ServerMessage::Accessibility(semantic) = &message
+            && semantic.update.tail.is_some()
+        {
+            let header = semantic.update.header;
+            outbox
+                .acknowledge_semantics(semantic.channel, header.demand_generation, header.revision)
+                .unwrap();
         }
         messages.push(message);
     }
@@ -294,31 +303,55 @@ fn line_states_and_effects_are_sent_as_they_change() {
     assert_eq!((*first, *second), (prompt, password));
 }
 
+/// A changed semantic model reaches the channel's outbox, which sends it only while the client
+/// demands semantics. No Pane event announces a revision any more.
 #[test]
-fn an_accessibility_revision_travels_as_an_event_only_without_a_new_screen() {
+fn a_semantic_model_is_pushed_only_while_demand_stands() {
     let outbox = outbox();
     let mut publication = bound(&outbox);
-    let observed = |screen, revision| {
+    let observed = |text: &str| {
+        let screen = capture(1, text, 0);
+        let mut semantics = accessibility::Accessibility::new(Arc::default());
+        semantics.start();
+        semantics.update(Arc::new(TerminalAccessibilityModel::from_screen(
+            &screen.screen,
+        )));
         Observed::Live(Observation {
-            screen,
+            screen: Some(screen),
             effects: Vec::new(),
             line: pane::LineState::default(),
-            accessibility: Some(revision),
+            accessibility: semantics.take_changed(),
             progress: Default::default(),
         })
     };
+    let semantic = |messages: &[ServerMessage]| {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                ServerMessage::Accessibility(semantic) => Some(semantic.update.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
 
-    publication.publish(observed(Some(capture(1, "one", 0)), 1));
-    publication.publish(observed(Some(capture(1, "one", 0)), 2));
+    assert!(publication.publish(observed("one")));
+    let messages = drain(&outbox);
+    assert!(semantic(&messages).is_empty(), "no demand, no semantics");
 
-    let accessibility: Vec<_> = events(drain(&outbox))
-        .into_iter()
-        .filter_map(|event| match event {
-            PaneEvent::Accessibility { revision } => Some(revision),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(accessibility, [2]);
+    outbox.start_semantics(CHANNEL, 1).unwrap();
+    assert!(publication.publish(observed("two")));
+    let messages = drain(&outbox);
+    let updates = semantic(&messages);
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].header.base, None);
+    assert!(updates[0].rows[0].text.starts_with("two"));
+    assert!(updates[0].tail.is_some());
+    assert!(
+        !events(messages)
+            .iter()
+            .any(|event| matches!(event, PaneEvent::Accessibility { .. })),
+        "no Pane event announces a revision"
+    );
 }
 
 #[test]
@@ -841,44 +874,56 @@ mod wakes {
     /// The accessibility revision `message` carries, if any.
     fn accessibility_revision(message: &ServerMessage) -> Option<u64> {
         match message {
-            ServerMessage::Pane(pane) => match pane.event {
-                PaneEvent::Accessibility { revision } => Some(revision),
-                _ => None,
-            },
+            ServerMessage::Accessibility(semantic) => Some(semantic.update.header.revision),
             ServerMessage::Frame(frame) => Some(frame.update.accessibility_revision),
             _ => None,
         }
     }
 
-    /// A client's accessibility request makes the Terminal Session publish a model of its
-    /// current screen, behind its presentation barrier. The model reaches the connection without
-    /// the host.
+    /// A client's demand makes the Terminal Session publish models of its current screen. The
+    /// first reaches the connection as a complete document and later ones as deltas against the
+    /// acknowledged revision, all without the host.
     #[test]
-    fn an_accessibility_model_reaches_the_connection_without_the_host() {
+    fn semantic_updates_reach_the_connection_without_the_host() {
         let mut fixture = Fixture::new();
-        let request = |fixture: &mut Fixture, id| {
-            let operation = Operation::Accessibility {
+        fixture.outbox.begin(RequestId(2)).unwrap();
+        let _ = fixture.served.request(
+            &FIRST,
+            RequestId(2),
+            Operation::AccessibilityDemand {
                 channel: CHANNEL,
-                revision: None,
-                offset: 0,
-                base: None,
-            };
-            let _ = fixture.served.request(&FIRST, RequestId(id), operation);
+                demand: pane::accessibility::Demand::Start { generation: 1 },
+            },
+        );
+        let complete = |message: &ServerMessage, _: &Rows| {
+            matches!(message, ServerMessage::Accessibility(semantic)
+                if semantic.update.header.base.is_none() && semantic.update.tail.is_some())
         };
-        // The first request's model, or the seed model the session publishes on its own.
-        request(&mut fixture, 2);
-        fixture.await_message(Serve::Connection, |message, _| {
-            accessibility_revision(message).is_some_and(|revision| revision > 0)
-        });
-        let modeled = fixture.accessibility;
-        // New text makes the current screen's model differ from every model published so far,
-        // so the next request publishes a newer one.
+        fixture.await_message(Serve::Connection, complete);
         fixture.command(2, "printf 'READ%s\\n' ABLE");
         fixture.await_output("READABLE");
-        request(&mut fixture, 3);
         fixture.await_message(Serve::Connection, |message, _| {
-            accessibility_revision(message).is_some_and(|revision| revision > modeled)
+            matches!(message, ServerMessage::Accessibility(semantic)
+                if semantic.update.header.base.is_some()
+                    && semantic.update.rows.iter().any(|row| row.text.contains("READABLE")))
         });
+
+        // A start must name a generation above the channel's last.
+        fixture.outbox.begin(RequestId(3)).unwrap();
+        let _ = fixture.served.request(
+            &FIRST,
+            RequestId(3),
+            Operation::AccessibilityDemand {
+                channel: CHANNEL,
+                demand: pane::accessibility::Demand::Start { generation: 1 },
+            },
+        );
+        assert!(fixture.outbox.is_closing());
+        assert!(
+            drain(&fixture.outbox)
+                .iter()
+                .any(|message| matches!(message, ServerMessage::Goodbye(Fatal::ProtocolViolation)))
+        );
     }
 
     /// A Scrollback page is read behind the commands before it on the Pane's terminal worker,

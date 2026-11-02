@@ -1,9 +1,9 @@
 //! The server's half of one admitted connection: protocol rules that need no `PaneService`.
 //!
 //! The I/O thread passes each received frame to [`AdmittedConnection::receive`]. It handles
-//! continuation frames, bounds, request ids, channel and serial order, frame acknowledgements,
-//! pings, the account-administration refusal for paired peers, and `Operation::Direct`, which it
-//! hands to the host's [`DirectManagement`] on the sync worker. What remains is an [`Inbound`]
+//! continuation frames, bounds, request ids, channel and serial order, frame and semantic
+//! acknowledgements, pings, the account-administration refusal for paired peers, and
+//! `Operation::Direct`, which it hands to the host's [`DirectManagement`] on the sync worker. What remains is an [`Inbound`]
 //! message for the service. The I/O thread locks the service, calls
 //! [`AdmittedConnection::dispatch`], and unlocks it. `Dispatch::After` work is submitted to the
 //! sync worker inside `dispatch`, under the lock, so syncs keep lock order. The I/O thread never
@@ -136,9 +136,15 @@ impl AdmittedConnection {
                 self.outbox.acknowledge(ack.channel, ack.frame)?;
                 None
             }
-            // This server sends no semantic updates yet, so every acknowledgement names a revision
-            // it never sent.
-            ClientMessage::AccessibilityAck(_) => return Err(Fatal::ProtocolViolation),
+            ClientMessage::AccessibilityAck(ack) => {
+                self.claimed(ack.channel)?;
+                self.outbox.acknowledge_semantics(
+                    ack.channel,
+                    ack.demand_generation,
+                    ack.revision,
+                )?;
+                None
+            }
             ClientMessage::View(view) => {
                 self.claimed(view.channel)?;
                 self.outbox.view(view.channel, view.visible);

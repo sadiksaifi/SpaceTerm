@@ -229,12 +229,13 @@ impl WorkerSchedules {
         self.accessibility_presentation.note_screen_published();
     }
 
-    pub(super) fn accessibility_demand_received(&mut self, now: Instant) {
+    /// Activates a demand request. Returns whether demand was inactive before it.
+    pub(super) fn accessibility_demand_received(&mut self, now: Instant) -> bool {
         let Some(requested_at) = self.input.accessibility_demand.latest_request() else {
-            return;
+            return false;
         };
         self.accessibility_presentation
-            .activate_demand(requested_at, now);
+            .activate_demand(requested_at, now)
     }
 
     #[cfg(test)]
@@ -363,6 +364,17 @@ impl WorkerSchedules {
         }
         self.accessibility_continuation.update(false);
         self.accessibility_presentation.end_demand();
+    }
+
+    /// Ends demand after the semantic store was dropped. A demand requested after `ended_at`
+    /// survives, and its complete model from the new store is due at once.
+    pub(super) fn release_accessibility(&mut self, ended_at: Instant, now: Instant) {
+        self.accessibility_continuation.update(false);
+        if self.input.accessibility_demand.clear_through(ended_at) {
+            self.accessibility_presentation.restart_demand(now);
+        } else {
+            self.accessibility_presentation.end_demand();
+        }
     }
 
     pub(super) fn disable_accessibility(&mut self) {
@@ -501,13 +513,14 @@ impl AccessibilityPresentationSchedule {
         }
     }
 
-    fn activate_demand(&mut self, requested_at: Instant, now: Instant) {
+    fn activate_demand(&mut self, requested_at: Instant, now: Instant) -> bool {
         let was_inactive = self.demand_request.is_none();
         self.demand_request = Some(requested_at);
         if was_inactive {
             self.pending = true;
             self.not_before = now;
         }
+        was_inactive
     }
 
     fn mark_presented(&mut self, now: Instant, complete: bool) {
@@ -521,6 +534,11 @@ impl AccessibilityPresentationSchedule {
     fn end_demand(&mut self) {
         self.pending = self.seed_required && self.pending;
         self.demand_request = None;
+    }
+
+    fn restart_demand(&mut self, now: Instant) {
+        self.pending = true;
+        self.not_before = now;
     }
 
     fn disable(&mut self) {
