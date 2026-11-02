@@ -90,7 +90,7 @@ const PANE_REPOSITORY_LEADING_GAP: f32 = 10.0;
 const PANE_REPOSITORY_PART_GAP: f32 = 4.0;
 /// The narrowest truncated branch worth showing.
 const PANE_REPOSITORY_MINIMUM_BRANCH_WIDTH: f32 = 36.0;
-/// The share of the accent color that fills the half of a Pane a dragged Pane would take.
+/// The share of the accent color that fills the part of a Pane a dragged Pane would take.
 const PANE_DROP_TARGET_FILL_OPACITY: u8 = 56;
 /// The status glyph and its trailing air, which every Pane Caption keeps at every width.
 #[cfg(test)]
@@ -461,11 +461,20 @@ const LIFTED_CAPTION_MAXIMUM_WIDTH: f32 = 320.0;
 /// of a frame.
 type PaneHovers = BTreeMap<PaneId, (HoverFade, f32)>;
 
-/// A Pane lifted by its caption, the edge of another Pane it takes if released now, and the drag
-/// that carries it.
+/// What a dragged Pane does to the Pane it is released over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaneDrop {
+    /// Splits the target so the dragged Pane takes this edge.
+    Edge(PaneEdge),
+    /// Exchanges the places of the dragged Pane and the target.
+    Swap,
+}
+
+/// A Pane lifted by its caption, what it does to another Pane if released now, and the drag that
+/// carries it.
 struct PaneDrag {
     pane_id: PaneId,
-    drop_target: Option<(PaneId, PaneEdge)>,
+    drop_target: Option<(PaneId, PaneDrop)>,
     session: DragSession,
 }
 
@@ -1119,7 +1128,7 @@ impl TabView {
         }
     }
 
-    /// Lifts a Pane by its caption so it can split another Pane in this Tab.
+    /// Lifts a Pane by its caption so it can split another Pane in this Tab or swap places with it.
     fn begin_pane_drag(
         &mut self,
         pane_id: PaneId,
@@ -1259,7 +1268,8 @@ impl TabView {
         }
     }
 
-    /// Ends a Pane drag, moving the Pane onto the edge of the Pane under `pointer`, if any.
+    /// Ends a Pane drag, moving the Pane onto the edge of the Pane under `pointer` or swapping it
+    /// with that Pane, if any.
     fn finish_pane_drag(
         &mut self,
         pointer: Point<Pixels>,
@@ -1274,16 +1284,20 @@ impl TabView {
             return;
         }
         let gap = pane_gap(cx);
-        let Some((target_pane_id, edge)) = self.drop_target(drag.pane_id, pointer, gap) else {
+        let Some((target_pane_id, drop)) = self.drop_target(drag.pane_id, pointer, gap) else {
             return;
         };
-        let Some(target_size) = self.split_target_size(target_pane_id, gap) else {
-            return;
+        let changed = match drop {
+            PaneDrop::Edge(edge) => {
+                let Some(target_size) = self.split_target_size(target_pane_id, gap) else {
+                    return;
+                };
+                self.tab
+                    .move_pane(drag.pane_id, target_pane_id, edge, target_size, gap)
+            }
+            PaneDrop::Swap => self.tab.swap_panes(drag.pane_id, target_pane_id),
         };
-        match self
-            .tab
-            .move_pane(drag.pane_id, target_pane_id, edge, target_size, gap)
-        {
+        match changed {
             Ok(true) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
@@ -1300,13 +1314,13 @@ impl TabView {
         }
     }
 
-    /// The Pane under `pointer` that can take the dragged Pane, and the edge it would take.
+    /// The Pane under `pointer` that can take the dragged Pane, and what the drop would do.
     fn drop_target(
         &self,
         pane_id: PaneId,
         pointer: Point<Pixels>,
         gap: f32,
-    ) -> Option<(PaneId, PaneEdge)> {
+    ) -> Option<(PaneId, PaneDrop)> {
         if matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)) {
             return None;
         }
@@ -1323,11 +1337,16 @@ impl TabView {
         if target_pane_id == pane_id {
             return None;
         }
-        let edge = drop_edge(bounds, pointer);
-        let target_size = self.split_target_size(target_pane_id, gap)?;
-        self.tab
-            .can_receive_pane(target_pane_id, edge, target_size, gap)
-            .then_some((target_pane_id, edge))
+        match drop_zone(bounds, pointer) {
+            // Each Pane takes a place that already holds a Pane, so a swap always fits.
+            PaneDrop::Swap => Some((target_pane_id, PaneDrop::Swap)),
+            PaneDrop::Edge(edge) => {
+                let target_size = self.split_target_size(target_pane_id, gap)?;
+                self.tab
+                    .can_receive_pane(target_pane_id, edge, target_size, gap)
+                    .then_some((target_pane_id, PaneDrop::Edge(edge)))
+            }
+        }
     }
 
     fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
@@ -1926,11 +1945,11 @@ impl TabView {
         };
         let surface = self.pane_surface(pane_id, &view, cx);
         let hover = hovers.get(&pane_id).cloned();
-        let drop_edge = self
+        let drop = self
             .pane_drag
             .as_ref()
             .and_then(|drag| drag.drop_target)
-            .and_then(|(target_pane_id, edge)| (target_pane_id == pane_id).then_some(edge));
+            .and_then(|(target_pane_id, drop)| (target_pane_id == pane_id).then_some(drop));
         let measure_view = view.clone();
         let focus_view = view.clone();
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
@@ -2054,8 +2073,8 @@ impl TabView {
             .child(render_pane_corner_surface(pane_id, frame, appearance))
             // The hairline paints last so the caption, Terminal and corner mask never cover it.
             .child(pane_rim)
-            .when_some(drop_edge, |leaf, edge| {
-                leaf.child(render_pane_drop_target(pane_id, edge, radius, appearance))
+            .when_some(drop, |leaf, drop| {
+                leaf.child(render_pane_drop_target(pane_id, drop, radius, appearance))
             })
             .when_some(hover, |leaf, (fade, _)| leaf.child(fade.tracker()));
 
@@ -4168,7 +4187,8 @@ fn render_pane_caption_content(
             focus_pane(window, cx);
             cx.stop_propagation();
         })
-        // The caption carries its Pane to another Pane's edge whenever another Pane is visible.
+        // The caption carries its Pane to another Pane's edge or center whenever another Pane is
+        // visible.
         .when(has_multiple_panes && !zoomed, |row| {
             let owner = drag_view.entity_id();
             row.on_drag(DraggedPane { pane_id, owner }, move |_, _, window, cx| {
@@ -4566,18 +4586,21 @@ fn render_pane_corner_surface(
         .into_any_element()
 }
 
-/// Shows the half of a target Pane that a dragged Pane takes when it is released.
+/// Shows the part of a target Pane that a dragged Pane takes when it is released: the half at an
+/// edge, or the whole Pane for a swap.
 fn render_pane_drop_target(
     pane_id: PaneId,
-    edge: PaneEdge,
+    drop: PaneDrop,
     radius: Pixels,
     appearance: &super::appearance::ChromeAppearance,
 ) -> AnyElement {
     let accent = appearance.colors.primary_background;
-    let half = div()
-        .debug_selector(move || {
-            format!("pane-drop-target-{}-{edge:?}", pane_id.get()).to_lowercase()
-        })
+    let place = match drop {
+        PaneDrop::Edge(edge) => format!("{edge:?}").to_lowercase(),
+        PaneDrop::Swap => "swap".to_owned(),
+    };
+    let overlay = div()
+        .debug_selector(move || format!("pane-drop-target-{}-{place}", pane_id.get()))
         .absolute()
         .bg(gpui_color(
             accent.multiply_opacity(PANE_DROP_TARGET_FILL_OPACITY),
@@ -4585,11 +4608,12 @@ fn render_pane_drop_target(
         .border_2()
         .border_color(gpui_color(accent))
         .rounded(radius);
-    match edge {
-        PaneEdge::Left => half.top_0().bottom_0().left_0().w(relative(0.5)),
-        PaneEdge::Right => half.top_0().bottom_0().right_0().w(relative(0.5)),
-        PaneEdge::Top => half.left_0().right_0().top_0().h(relative(0.5)),
-        PaneEdge::Bottom => half.left_0().right_0().bottom_0().h(relative(0.5)),
+    match drop {
+        PaneDrop::Edge(PaneEdge::Left) => overlay.top_0().bottom_0().left_0().w(relative(0.5)),
+        PaneDrop::Edge(PaneEdge::Right) => overlay.top_0().bottom_0().right_0().w(relative(0.5)),
+        PaneDrop::Edge(PaneEdge::Top) => overlay.left_0().right_0().top_0().h(relative(0.5)),
+        PaneDrop::Edge(PaneEdge::Bottom) => overlay.left_0().right_0().bottom_0().h(relative(0.5)),
+        PaneDrop::Swap => overlay.inset_0(),
     }
     .into_any_element()
 }
@@ -4803,21 +4827,31 @@ fn restored_leaf_size(
     }
 }
 
-/// The edge of a Pane nearest `point`, by the four triangles its diagonals divide it into.
-fn drop_edge(bounds: Bounds<Pixels>, point: Point<Pixels>) -> PaneEdge {
+/// How far from a Pane's center, as a fraction of its width and of its height, a drop swaps the
+/// dragged Pane with it. The center swap zone is half as wide and half as tall as the Pane.
+const PANE_SWAP_ZONE_REACH: f32 = 0.25;
+
+/// What a drop at `point` does to the Pane at `bounds`: a swap in its center, and otherwise the
+/// edge nearest `point`, by the four triangles its diagonals divide it into.
+fn drop_zone(bounds: Bounds<Pixels>, point: Point<Pixels>) -> PaneDrop {
     let center = bounds.center();
     let horizontal = f32::from(point.x - center.x) / f32::from(bounds.size.width).max(f32::EPSILON);
     let vertical = f32::from(point.y - center.y) / f32::from(bounds.size.height).max(f32::EPSILON);
-    match (
-        horizontal.abs() > vertical.abs(),
-        horizontal < 0.0,
-        vertical < 0.0,
-    ) {
-        (true, true, _) => PaneEdge::Left,
-        (true, false, _) => PaneEdge::Right,
-        (false, _, true) => PaneEdge::Top,
-        (false, _, false) => PaneEdge::Bottom,
+    if horizontal.abs() < PANE_SWAP_ZONE_REACH && vertical.abs() < PANE_SWAP_ZONE_REACH {
+        return PaneDrop::Swap;
     }
+    PaneDrop::Edge(
+        match (
+            horizontal.abs() > vertical.abs(),
+            horizontal < 0.0,
+            vertical < 0.0,
+        ) {
+            (true, true, _) => PaneEdge::Left,
+            (true, false, _) => PaneEdge::Right,
+            (false, _, true) => PaneEdge::Top,
+            (false, _, false) => PaneEdge::Bottom,
+        },
+    )
 }
 
 fn pane_size(bounds: Bounds<Pixels>) -> Result<PaneSize, crate::domain::PaneSizeError> {
@@ -5915,6 +5949,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dropping_a_pane_on_the_center_of_another_should_swap_them(cx: &mut TestAppContext) {
+        let (view, cx) = four_pane_view(cx);
+        let caption = cx.debug_bounds("pane-caption-4-unfocused").unwrap();
+        let target = cx.debug_bounds("pane-surface-1").unwrap();
+        let center = target.center();
+
+        drag_pane_caption(caption, &[center, center + point(px(1.0), px(0.0))], cx);
+        let offered = cx
+            .debug_bounds("pane-drop-target-1-swap")
+            .map(|overlay| overlay.size);
+        cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(offered, Some(target.size));
+        assert_eq!(
+            view.read_with(cx, |view, _| (
+                view.layout_signature(),
+                view.focused_pane_id(),
+                view.pane_count(),
+            )),
+            (
+                "split:1:Horizontal:0.5(split:2:Vertical:0.5(pane:4,pane:3),split:3:Vertical:0.5(pane:2,pane:1))"
+                    .to_owned(),
+                PaneId::new(4),
+                4,
+            )
+        );
+    }
+
+    #[gpui::test]
     fn a_pane_drag_should_start_over_a_terminal_painted_after_its_caption(cx: &mut TestAppContext) {
         let (view, cx) = four_pane_view(cx);
         let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
@@ -6060,7 +6124,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_edge_should_divide_a_pane_along_its_diagonals() {
+    fn drop_zone_should_swap_at_the_center_and_divide_the_rest_along_the_diagonals() {
         let pane = bounds(point(px(0.0), px(0.0)), size(px(400.0), px(100.0)));
 
         assert_eq!(
@@ -6070,14 +6134,18 @@ mod tests {
                 point(px(200.0), px(10.0)),
                 point(px(200.0), px(90.0)),
                 point(px(120.0), px(20.0)),
+                point(px(200.0), px(50.0)),
+                point(px(110.0), px(30.0)),
             ]
-            .map(|pointer| drop_edge(pane, pointer)),
+            .map(|pointer| drop_zone(pane, pointer)),
             [
-                PaneEdge::Left,
-                PaneEdge::Right,
-                PaneEdge::Top,
-                PaneEdge::Bottom,
-                PaneEdge::Top,
+                PaneDrop::Edge(PaneEdge::Left),
+                PaneDrop::Edge(PaneEdge::Right),
+                PaneDrop::Edge(PaneEdge::Top),
+                PaneDrop::Edge(PaneEdge::Bottom),
+                PaneDrop::Edge(PaneEdge::Top),
+                PaneDrop::Swap,
+                PaneDrop::Swap,
             ]
         );
     }

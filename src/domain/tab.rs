@@ -574,6 +574,31 @@ impl<T> Tab<T> {
         Ok(true)
     }
 
+    /// Exchanges the places of `pane_id` and `target_pane_id`, and reports whether the
+    /// arrangement changed.
+    ///
+    /// Every Split keeps its axis and ratio, so each Pane takes the other's exact place. Both
+    /// Panes keep their Terminal Sessions, the Root Pane stays the same Pane, and the moved Pane
+    /// becomes the Focused Pane.
+    pub(crate) fn swap_panes(
+        &mut self,
+        pane_id: PaneId,
+        target_pane_id: PaneId,
+    ) -> Result<bool, PaneError> {
+        for id in [pane_id, target_pane_id] {
+            if !self.root.contains_pane(id) {
+                return Err(PaneError::PaneNotFound(id));
+            }
+        }
+        if pane_id == target_pane_id {
+            return Ok(false);
+        }
+        self.root.exchange_panes(pane_id, target_pane_id);
+        self.zoom_state = ZoomState::Restored;
+        self.set_focused_pane(pane_id);
+        Ok(true)
+    }
+
     /// Whether a Pane moved onto `edge` of `target_pane_id` fits within the target's
     /// `target_size`.
     pub(crate) fn can_receive_pane(
@@ -932,6 +957,23 @@ impl PaneNode {
                     && second.has_arrangement_of(other_second)
             }
             _ => false,
+        }
+    }
+
+    /// Puts each of two Panes in the other's leaf.
+    fn exchange_panes(&mut self, first: PaneId, second: PaneId) {
+        match self {
+            Self::Leaf(pane_id) if *pane_id == first => *pane_id = second,
+            Self::Leaf(pane_id) if *pane_id == second => *pane_id = first,
+            Self::Leaf(_) => {}
+            Self::Split {
+                first: first_child,
+                second: second_child,
+                ..
+            } => {
+                first_child.exchange_panes(first, second);
+                second_child.exchange_panes(first, second);
+            }
         }
     }
 
@@ -1445,6 +1487,60 @@ mod tests {
                 tab.focused_pane_id()
             ),
             (Ok(false), Ok(false), before, PaneId::new(4))
+        );
+    }
+
+    #[test]
+    fn swap_panes_should_exchange_places_and_keep_every_split_ratio() {
+        let mut tab = four_pane_tab();
+        tab.resize_split(SplitId::new(2), size(250.0, 400.0), DIVIDER_SIZE, 0.7)
+            .unwrap();
+        tab.toggle_zoom();
+
+        let swapped = tab.swap_panes(PaneId::new(4), PaneId::new(1));
+
+        assert_eq!(
+            (
+                swapped,
+                topology(tab.root()),
+                tab.focused_pane_id(),
+                tab.root_pane_id(),
+                tab.zoom_state(),
+            ),
+            (
+                Ok(true),
+                "1:Horizontal:0.50(2:Vertical:0.70(4,3),3:Vertical:0.50(2,1))".to_owned(),
+                PaneId::new(4),
+                PaneId::new(1),
+                ZoomState::Restored,
+            )
+        );
+    }
+
+    #[test]
+    fn swap_panes_should_reject_unknown_panes_and_leave_a_pane_swapped_with_itself_alone() {
+        let mut tab = four_pane_tab();
+        let before = topology(tab.root());
+
+        let unknown_pane = tab.swap_panes(PaneId::new(9), PaneId::new(1));
+        let unknown_target = tab.swap_panes(PaneId::new(1), PaneId::new(9));
+        let itself = tab.swap_panes(PaneId::new(3), PaneId::new(3));
+
+        assert_eq!(
+            (
+                unknown_pane,
+                unknown_target,
+                itself,
+                topology(tab.root()),
+                tab.focused_pane_id()
+            ),
+            (
+                Err(PaneError::PaneNotFound(PaneId::new(9))),
+                Err(PaneError::PaneNotFound(PaneId::new(9))),
+                Ok(false),
+                before,
+                PaneId::new(4)
+            )
         );
     }
 
