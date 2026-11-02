@@ -2059,9 +2059,9 @@ struct Placement {
     origin: Box<PreviewOrigin>,
 }
 
-/// The face's origin in the window for the pointer at the given point, while the owner places
-/// it.
-type PreviewOrigin = dyn Fn(Point<Pixels>, &App) -> Option<Point<Pixels>>;
+/// The face's origin in the window for the pointer at the given point and the window's current
+/// size, while the owner places it.
+type PreviewOrigin = dyn Fn(Point<Pixels>, Size<Pixels>, &App) -> Option<Point<Pixels>>;
 
 impl DragPreview {
     /// A preview, for the drag GPUI is starting in `window`, that paints `face` at the pointer.
@@ -2084,7 +2084,7 @@ impl DragPreview {
     pub(crate) fn placed(
         mut self,
         cursor_offset: Point<Pixels>,
-        origin: impl Fn(Point<Pixels>, &App) -> Option<Point<Pixels>> + 'static,
+        origin: impl Fn(Point<Pixels>, Size<Pixels>, &App) -> Option<Point<Pixels>> + 'static,
     ) -> Self {
         self.placement = Some(Placement {
             cursor_offset,
@@ -2112,7 +2112,8 @@ impl Render for DragPreview {
             .and_then(|placement| {
                 let pointer = window.mouse_position();
                 let root = pointer - placement.cursor_offset;
-                (placement.origin)(pointer, cx).map(|origin| origin - root)
+                (placement.origin)(pointer, window.viewport_size(), cx)
+                    .map(|origin| origin - root)
             })
             .unwrap_or(self.lift);
         div().debug_selector(|| "drag-preview".to_owned()).child(

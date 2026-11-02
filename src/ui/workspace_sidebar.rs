@@ -1132,7 +1132,7 @@ impl WorkspaceSidebar {
                 })
                 .unwrap_or_else(|| div().into_any_element())
         })
-        .placed(cursor_offset, move |_, cx| {
+        .placed(cursor_offset, move |_, _, cx| {
             placement
                 .upgrade()
                 .and_then(|owner| owner.read(cx).workspace_reorder.lifted_origin())

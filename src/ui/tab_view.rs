@@ -510,24 +510,17 @@ pub(super) struct DragPicture {
     stand_in: DragStandIn,
     /// Where the pointer holds the picture: a share of its width, and a distance below its top.
     grab: (f32, Pixels),
-    /// The window's size when the drag started, which keeps the rectangle inside it.
-    viewport: gpui::Size<Pixels>,
     morph: RefCell<FaceMorph<DragFace>>,
     drawn: Cell<Option<Morph<DragFace>>>,
 }
 
 impl DragPicture {
-    pub(super) fn new(
-        stand_in: DragStandIn,
-        grab: (f32, Pixels),
-        viewport: gpui::Size<Pixels>,
-    ) -> Self {
+    pub(super) fn new(stand_in: DragStandIn, grab: (f32, Pixels)) -> Self {
         Self {
             face: Cell::new(DragFace::Pane),
             tab_face: RefCell::new(None),
             stand_in,
             grab: (grab.0.clamp(0.0, 1.0), grab.1),
-            viewport,
             morph: RefCell::new(FaceMorph::new()),
             drawn: Cell::new(None),
         }
@@ -545,12 +538,13 @@ impl DragPicture {
         &self.stand_in.identity
     }
 
-    /// Where the picture stands for the pointer at `pointer`, eased toward where its face rests.
-    /// A lifted Tab rests at `tab_origin` when its strip holds it, and follows the pointer
-    /// otherwise.
+    /// Where the picture stands for the pointer at `pointer` in a window `viewport` large, eased
+    /// toward where its face rests, and always inside the window. A lifted Tab rests at
+    /// `tab_origin` when its strip holds it, and follows the pointer otherwise.
     pub(super) fn place(
         &self,
         pointer: Point<Pixels>,
+        viewport: gpui::Size<Pixels>,
         tab_origin: Option<Point<Pixels>>,
         cx: &App,
     ) -> Point<Pixels> {
@@ -562,14 +556,8 @@ impl DragPicture {
         let (share, below_top) = self.grab;
         let inside = |origin: Point<Pixels>, size: gpui::Size<Pixels>| {
             point(
-                origin
-                    .x
-                    .min(self.viewport.width - size.width)
-                    .max(px(0.0)),
-                origin
-                    .y
-                    .min(self.viewport.height - size.height)
-                    .max(px(0.0)),
+                origin.x.min(viewport.width - size.width).max(px(0.0)),
+                origin.y.min(viewport.height - size.height).max(px(0.0)),
             )
         };
         let face = self.face.get();
@@ -599,7 +587,9 @@ impl DragPicture {
                 size,
             ),
         };
-        let morph = self.morph.borrow_mut().frame(face, target, cx);
+        let mut morph = self.morph.borrow_mut().frame(face, target, cx);
+        // A shape between two faces stays inside the window too.
+        morph.bounds.origin = inside(morph.bounds.origin, morph.bounds.size);
         self.drawn.set(Some(morph));
         morph.bounds.origin
     }
@@ -1339,11 +1329,7 @@ impl TabView {
                 grab.y - pane.origin.y,
             )
         });
-        let picture = Rc::new(DragPicture::new(
-            self.stand_in(pane_id, cx),
-            held,
-            window.viewport_size(),
-        ));
+        let picture = Rc::new(DragPicture::new(self.stand_in(pane_id, cx), held));
         self.pane_drag = Some(PaneDrag {
             pane_id,
             drop_target: None,
@@ -1355,8 +1341,8 @@ impl TabView {
         cx.notify();
         let placement = Rc::clone(&picture);
         DragPreview::new(window, cx, move |window, cx| picture.render(window, cx))
-            .placed(cursor_offset, move |pointer, cx| {
-                Some(placement.place(pointer, None, cx))
+            .placed(cursor_offset, move |pointer, viewport, cx| {
+                Some(placement.place(pointer, viewport, None, cx))
             })
     }
 
@@ -6410,6 +6396,35 @@ mod tests {
         assert!(
             picture.right() <= window.width && picture.bottom() <= window.height,
             "the picture {picture:?} must stay inside the {window:?} window"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_drag_should_keep_its_picture_inside_a_window_that_shrinks_mid_drag(
+        cx: &mut TestAppContext,
+    ) {
+        let (_view, cx) = four_pane_view(cx);
+        let caption = cx.debug_bounds("pane-caption-1-focused").unwrap();
+        let window = cx.update(|window, _| window.viewport_size());
+        let start = point(window.width / 2.0, window.height / 2.0);
+
+        drag_pane_caption(caption, &[start, start + point(px(1.0), px(0.0))], cx);
+        let smaller = gpui::size(window.width * 0.6, window.height * 0.6);
+        cx.simulate_resize(smaller);
+        cx.run_until_parked();
+        let edge = point(smaller.width - px(2.0), smaller.height - px(2.0));
+        for position in [edge, edge - point(px(1.0), px(0.0))] {
+            cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+        }
+        let picture = cx.debug_bounds("drag-stand-in").unwrap();
+        cx.simulate_keystrokes("escape");
+        cx.simulate_mouse_up(edge, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            picture.right() <= smaller.width && picture.bottom() <= smaller.height,
+            "the picture {picture:?} must stay inside the {smaller:?} window"
         );
     }
 

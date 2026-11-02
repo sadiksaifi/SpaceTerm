@@ -447,6 +447,9 @@ pub(crate) struct TabManager {
     tab_picture: Option<Rc<DragPicture>>,
     /// Where the Tab bar stood when a drag last moved over the window.
     tab_bar_bounds: Option<gpui::Bounds<Pixels>>,
+    /// The Tab view carrying a Pane drag, the Pane, and where the pointer last stood, so the
+    /// strip's answer follows the strip when it moves beneath a still pointer.
+    pane_strip_drag: Option<(gpui::EntityId, PaneId, gpui::Point<Pixels>)>,
     /// Whether the dragged Tab is over the Pane Layout rather than the Tab bar.
     tab_over_layout: bool,
     /// The Tab whose middle the dragged Tab covers in the Tab bar, which it joins if released
@@ -523,6 +526,7 @@ impl TabManager {
             pane_strip_drop: None,
             tab_picture: None,
             tab_bar_bounds: None,
+            pane_strip_drag: None,
             tab_over_layout: false,
             tab_strip_merge: None,
             #[cfg(test)]
@@ -1060,7 +1064,6 @@ impl TabManager {
                     f32::from(cursor_offset.x) / f32::from(lifted.width).max(1.0),
                     cursor_offset.y,
                 ),
-                window.viewport_size(),
             ))
         });
         let face_manager = cx.entity().downgrade();
@@ -1110,7 +1113,7 @@ impl TabManager {
         // Layout, and Panes joining the lit Tab over its middle.
         DragPreview::new(window, cx, move |window, cx| picture.render(window, cx)).placed(
             cursor_offset,
-            move |pointer, cx| {
+            move |pointer, viewport, cx| {
                 let owner = placement.upgrade()?;
                 let owner = owner.read(cx);
                 let face = owner.tab_drag_face(lifted, cx);
@@ -1118,7 +1121,7 @@ impl TabManager {
                 let held = matches!(face, DragFace::Tab { .. })
                     .then(|| owner.tab_reorder.lifted_origin())
                     .flatten();
-                Some(placed.place(pointer, held, cx))
+                Some(placed.place(pointer, viewport, held, cx))
             },
         )
     }
@@ -2448,9 +2451,17 @@ impl Render for TabManager {
             self.tab_reorder
                 .take_place(&self.tab_bar_scroll_handle, &ids, cx);
         }
-        // A Pane drag that ended without a drop on the Tab bar closes the gap it opened.
-        if !cx.has_active_drag() && self.pane_strip_drop.take().is_some() {
-            self.tab_reorder.hold_incoming(&ids, None, cx);
+        // A Pane drag that ended without a drop on the Tab bar closes the gap it opened. A Pane
+        // drag still in progress follows the strip as it moves beneath a still pointer.
+        if !cx.has_active_drag() {
+            self.pane_strip_drag = None;
+            if self.pane_strip_drop.take().is_some() {
+                self.tab_reorder.hold_incoming(&ids, None, cx);
+            }
+        } else if let (Some((source, pane_id, pointer)), Some(bar)) =
+            (self.pane_strip_drag, self.tab_bar_bounds)
+        {
+            self.drag_pane_over_tab_bar(source, pane_id, pointer, bar, cx);
         }
         self.tab_reorder
             .refresh(&self.tab_bar_scroll_handle, &ids, window, cx);
@@ -3451,22 +3462,9 @@ impl TabManager {
         else {
             return;
         };
+        self.pane_strip_drag = Some((source, pane_id, pointer));
         let ids = self.visible_tab_ids();
-        let drop = if bar.contains(&pointer) {
-            match self.tab_middle_at(pointer, cx) {
-                // A Pane dropped on its own Tab stays where it is.
-                Some(tab_id) if tab_id == carrier => None,
-                Some(tab_id) if self.takes_pane(tab_id, cx) => Some(StripDrop::Tab(tab_id)),
-                // A Tab without room takes nothing, and its middle is no gap either.
-                Some(_) => None,
-                None => self
-                    .tab_reorder
-                    .incoming_position(&self.tab_bar_scroll_handle, &ids, pointer)
-                    .map(|position| StripDrop::NewTab { position }),
-            }
-        } else {
-            None
-        };
+        let drop = self.strip_drop_at(carrier, pointer, bar, cx);
         let slot = self.tab_bar_scroll_handle.bounds_for_item(0);
         let gap = match drop {
             Some(StripDrop::NewTab { position }) => slot.map(|slot| (position, slot.size.width)),
@@ -3509,6 +3507,33 @@ impl TabManager {
         if self.pane_strip_drop != drop {
             self.pane_strip_drop = drop;
             cx.notify();
+        }
+    }
+
+    /// What a Pane carried out of Tab `carrier` does if released at `pointer` over the Tab bar
+    /// at `bar`, as the strip is drawn now.
+    fn strip_drop_at(
+        &self,
+        carrier: TabId,
+        pointer: gpui::Point<Pixels>,
+        bar: gpui::Bounds<Pixels>,
+        cx: &App,
+    ) -> Option<StripDrop> {
+        if !bar.contains(&pointer) {
+            return None;
+        }
+        match self.tab_middle_at(pointer, cx) {
+            // A Pane dropped on its own Tab stays where it is.
+            Some(tab_id) if tab_id == carrier => None,
+            Some(tab_id) if self.takes_pane(tab_id, cx) => Some(StripDrop::Tab(tab_id)),
+            // A Tab without room takes nothing, and its middle is no gap either.
+            Some(_) => None,
+            None => {
+                let ids = self.visible_tab_ids();
+                self.tab_reorder
+                    .incoming_position(&self.tab_bar_scroll_handle, &ids, pointer)
+                    .map(|position| StripDrop::NewTab { position })
+            }
         }
     }
 
@@ -3639,7 +3664,13 @@ impl TabManager {
         use spaceterm_server::hierarchy::{PaneDestination, Side};
 
         let ids = self.visible_tab_ids();
-        let drop = self.pane_strip_drop.take();
+        // A release does what the strip shows under the release pointer now, which a strip
+        // moving beneath a still pointer can have changed.
+        self.pane_strip_drag = None;
+        let drop = self.pane_strip_drop.take().and_then(|_| {
+            let bar = self.tab_bar_bounds?;
+            self.strip_drop_at(tab_id, window.mouse_position(), bar, cx)
+        });
         let Some(drop) = drop else {
             self.tab_reorder.hold_incoming(&ids, None, cx);
             return;
@@ -5216,6 +5247,42 @@ mod tests {
 
         let counts = pane_counts(&manager, cx);
         assert_eq!((lit, counts[11], counts[12]), (Some(12), 2, 1));
+    }
+
+    #[gpui::test]
+    fn a_pane_released_after_the_strip_scrolled_its_lit_tab_away_should_not_join_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        overflowing_strip(cx);
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let target = cx.debug_bounds("tab-item-12-inactive").unwrap().center();
+
+        drag_focused_pane(2, &[target, target + point(px(1.0), px(0.0))], cx);
+        let lit = lit_tab(&manager, cx);
+        // The strip moves beneath the still pointer, as a scroll moves it.
+        manager.update(cx, |manager, cx| {
+            let offset = manager.tab_bar_scroll_handle.offset();
+            manager
+                .tab_bar_scroll_handle
+                .set_offset(offset + point(px(400.0), px(0.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let relit = lit_tab(&manager, cx);
+        cx.simulate_mouse_up(
+            target + point(px(1.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        assert_eq!(
+            (lit, relit == Some(12), pane_counts(&manager, cx)[11]),
+            (Some(12), false, 1),
+            "Tab 12 moved out from under the pointer, so it no longer lights up or takes the Pane"
+        );
     }
 
     #[gpui::test]
