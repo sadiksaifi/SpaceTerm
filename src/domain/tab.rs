@@ -751,6 +751,16 @@ impl<T> Tab<T> {
         Ok(parked.id)
     }
 
+    /// Moves each Split ratio that would leave a Pane below its minimum size in `available` to
+    /// the nearest ratio that fits, outermost Split first. A layout too large for `available`
+    /// keeps the ratios that cannot fit.
+    pub(crate) fn fit_split_ratios(&mut self, available: PaneSize, divider_size: f32) {
+        if validate_divider_size(divider_size).is_ok() {
+            self.root
+                .fit_ratios(available, self.minimum_pane_size, divider_size);
+        }
+    }
+
     pub(crate) fn minimum_size(&self, divider_size: f32) -> Result<PaneSize, PaneError> {
         validate_divider_size(divider_size)?;
         self.root.minimum_size(self.minimum_pane_size, divider_size)
@@ -1018,6 +1028,45 @@ impl PaneNode {
                     && second.has_arrangement_of(other_second)
             }
             _ => false,
+        }
+    }
+
+    fn fit_ratios(&mut self, available: PaneSize, minimum: PaneSize, divider_size: f32) {
+        let Self::Split {
+            axis,
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let (Ok(first_minimum), Ok(second_minimum)) = (
+            first.minimum_size(minimum, divider_size),
+            second.minimum_size(minimum, divider_size),
+        ) else {
+            return;
+        };
+        let content = available.extent(*axis) - divider_size;
+        if content <= 0.0 {
+            return;
+        }
+        let lowest = first_minimum.extent(*axis) / content;
+        let highest = 1.0 - second_minimum.extent(*axis) / content;
+        if lowest <= highest {
+            *ratio = ratio.clamp(lowest, highest);
+        }
+        let child = |share: f32| {
+            let extent = content * share;
+            match axis {
+                SplitAxis::Horizontal => PaneSize::new(extent, available.height()),
+                SplitAxis::Vertical => PaneSize::new(available.width(), extent),
+            }
+        };
+        if let (Ok(first_size), Ok(second_size)) = (child(*ratio), child(1.0 - *ratio)) {
+            first.fit_ratios(first_size, minimum, divider_size);
+            second.fit_ratios(second_size, minimum, divider_size);
         }
     }
 
@@ -1665,6 +1714,23 @@ mod tests {
                 DIVIDER_SIZE
             )),
             [false, true, false]
+        );
+    }
+
+    #[test]
+    fn fit_split_ratios_should_give_every_inserted_pane_its_minimum_size() {
+        let mut tab = tab(());
+        let second = tab
+            .insert_pane(PaneId::new(1), PaneEdge::Right, |_| ())
+            .unwrap();
+        tab.insert_pane(second, PaneEdge::Right, |_| ()).unwrap();
+
+        tab.fit_split_ratios(size(320.0, 200.0), DIVIDER_SIZE);
+
+        assert_eq!(
+            topology(tab.root()),
+            "1:Horizontal:0.37(1,2:Horizontal:0.50(2,3))",
+            "the nested Split's two Panes each need 100 of the 320 wide layout"
         );
     }
 

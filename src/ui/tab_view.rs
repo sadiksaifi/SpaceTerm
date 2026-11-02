@@ -516,6 +516,9 @@ pub(crate) struct TabView {
     pane_drag: Option<PaneDrag>,
     /// Where another Tab dragged over this one merges if released now.
     incoming_drop: Option<(PaneId, PaneEdge)>,
+    /// Whether a Pane joined before this Tab measured its Pane Layout, so its Split ratios still
+    /// need fitting.
+    unfitted_insertion: bool,
     pane_motion: PaneMotion,
     /// Where this frame draws each Pane, from `pane_motion`.
     pane_frames: PaneFrames,
@@ -611,6 +614,7 @@ impl TabView {
             resizing_split_id: None,
             pane_drag: None,
             incoming_drop: None,
+            unfitted_insertion: false,
             pane_motion: PaneMotion::default(),
             pane_frames: PaneFrames::default(),
             stage_stretch: px(0.0),
@@ -2761,6 +2765,8 @@ impl TabView {
     /// The bookkeeping a Pane needs once it joins the layout, without taking focus or zoom from
     /// the Pane a person is working in.
     fn finish_insertion(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        self.unfitted_insertion = true;
+        self.fit_split_ratios(cx);
         self.advance_native_service_hierarchy_generation(cx);
         self.pane_layout_revision += 1;
         self.pane_motion.expect_change();
@@ -2776,6 +2782,15 @@ impl TabView {
             tab_id: self.tab.id(),
         });
         cx.notify();
+    }
+
+    /// Gives every Pane its minimum size in the measured Pane Layout, once a Pane joined. A Pane
+    /// another Tab or client inserts splits its place in half, which can leave it too small.
+    fn fit_split_ratios(&mut self, cx: &App) {
+        if let Some(size) = self.pane_layout_size {
+            self.tab.fit_split_ratios(size, pane_gap(cx));
+            self.unfitted_insertion = false;
+        }
     }
 
     /// Presents a connected split immediately and queues its bounded membership request.
@@ -3585,10 +3600,15 @@ impl Render for TabView {
                         return;
                     };
                     let (resized, pending_split) = view
-                        .update(cx, |view, _| {
+                        .update(cx, |view, cx| {
                             let measured = pane_size(*bounds).ok();
                             let resized = view.pane_layout_size != measured && measured.is_some();
                             view.pane_layout_size = measured;
+                            if view.unfitted_insertion && measured.is_some() {
+                                // This frame drew the old ratios, so the next one draws the fit.
+                                view.fit_split_ratios(cx);
+                                cx.notify();
+                            }
                             if resized {
                                 view.pane_motion.restart_change();
                             }
@@ -6086,6 +6106,47 @@ mod tests {
             )
         );
         assert!(cx.debug_bounds("pane-drop-target-1-left").is_none());
+    }
+
+    #[gpui::test]
+    fn panes_inserted_into_a_narrow_layout_should_each_keep_their_minimum_width(
+        cx: &mut TestAppContext,
+    ) {
+        use spaceterm_server::hierarchy::Axis;
+        let (view, cx) = server_tab_view(
+            vec![layout_pane(2, 0, Axis::Right), layout_pane(3, 2, Axis::Right)],
+            cx,
+        );
+        let minimum = view.read_with(cx, |view, _| view.tab.minimum_pane_size().width());
+        cx.simulate_resize(gpui::size(px(minimum * 3.4 + 40.0), px(600.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.unfitted_insertion = true;
+                cx.notify();
+            });
+            window.refresh();
+        });
+        cx.run_until_parked();
+
+        let narrowest = view.read_with(cx, |view, cx| {
+            let size = view.pane_layout_size.unwrap();
+            let mut places = BTreeMap::new();
+            lay_out_panes(
+                view.tab.root(),
+                Bounds::new(Point::default(), gpui::size(px(size.width()), px(size.height()))),
+                pane_gap(cx),
+                &mut places,
+            );
+            places
+                .values()
+                .map(|place| f32::from(place.size.width))
+                .fold(f32::MAX, f32::min)
+        });
+        assert!(
+            narrowest >= minimum - 0.01,
+            "every Pane keeps its {minimum} minimum width, but one gets {narrowest}"
+        );
     }
 
     #[gpui::test]
