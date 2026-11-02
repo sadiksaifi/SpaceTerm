@@ -13,7 +13,7 @@ diff --git a/include/ghostty/vt/accessibility.h b/include/ghostty/vt/accessibili
 new file mode 100644
 --- /dev/null
 +++ b/include/ghostty/vt/accessibility.h
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,159 @@
 +#ifndef GHOSTTY_VT_ACCESSIBILITY_H
 +#define GHOSTTY_VT_ACCESSIBILITY_H
 +
@@ -74,6 +74,8 @@ new file mode 100644
 +  GhosttyAccessibilityCellRef selection_start;
 +  GhosttyAccessibilityCellRef selection_end;
 +  bool selection_rectangle;
++  size_t topology_kept_start;
++  size_t topology_kept_len;
 +} GhosttyAccessibilitySnapshot;
 +
 +typedef struct {
@@ -131,13 +133,19 @@ new file mode 100644
 + * page/row dirty bits. max_cells and max_rows are hard-clamped to 16384
 + * and 256 respectively.
 + * Compressed pages are decoded into temporary storage and remain compressed.
-+ * Topology callbacks are chunked within max_rows. topology_epoch identifies
-+ * one replacement topology and topology_complete marks its final chunk; row
-+ * extraction begins only on a later call after that topology is complete.
++ * topology_epoch identifies one topology change and topology_complete marks
++ * its final chunk; row extraction begins only on a later call after that
++ * topology is complete. The new topology is the topology_kept_len rows of the
++ * screen's previous complete topology from topology_kept_start, followed by
++ * the rows of the epoch's topology callbacks in order. Output that appends
++ * rows or trims Scrollback keeps every remaining row, so only new rows are
++ * sent. Topology callbacks are chunked within max_rows.
 + * Pages that leave the screen while a capture runs are dropped from its
-+ * topology, never published empty: the completing call sends the remaining
-+ * topology whole, in a new epoch. When none remains, the call reports
-+ * complete and more both false and publishes nothing.
++ * topology: the completing call keeps the remaining rows, in a new epoch with
++ * no topology callbacks. When none remains, the call reports complete and
++ * more both false and publishes nothing. When output outran the capture and
++ * its topology lacks the cursor's row, the cursor is placed on the row as far
++ * from the topology's end as the cursor is from the screen's end.
 + * Callback pointers are borrowed only for the duration of this call.
 + */
 +GHOSTTY_API GhosttyResult ghostty_accessibility_state_update(
@@ -169,7 +177,7 @@ diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
-@@ -0,0 +1,902 @@
+@@ -0,0 +1,981 @@
 +const std = @import("std");
 +const lib = @import("../lib.zig");
 +const PageList = @import("../PageList.zig");
@@ -226,6 +234,8 @@ new file mode 100644
 +    selection_start: CellRef = .{},
 +    selection_end: CellRef = .{},
 +    selection_rectangle: bool = false,
++    topology_kept_start: usize = 0,
++    topology_kept_len: usize = 0,
 +};
 +
 +pub const Row = extern struct {
@@ -292,6 +302,10 @@ new file mode 100644
 +    topology_page_index: usize = 0,
 +    topology_page_row: usize = 0,
 +    topology_active: bool = false,
++    /// The rows of the committed topology that begin the topology in progress, which then walks
++    /// only the rows after them.
++    topology_kept_start: usize = 0,
++    topology_kept_len: usize = 0,
 +    /// A capture has emitted part of its work and not completed. It finishes against the
 +    /// topology and pending rows it began with, so continuous output cannot restart it.
 +    capturing: bool = false,
@@ -339,15 +353,31 @@ new file mode 100644
 +        generation: u64,
 +        epoch: u64,
 +    ) !void {
++        // The new topology keeps the committed rows its pages still hold in order, so output
++        // that appends or trims Scrollback walks only the rows it added.
++        const kept: Kept = if (self.initialized and self.generation == generation)
++            keptRows(self.pages.items, pages)
++        else
++            .{};
 +        self.topology_active = true;
 +        self.topology_epoch = epoch;
 +        self.topology_generation = generation;
++        self.topology_kept_start = kept.start;
++        self.topology_kept_len = kept.len;
 +        self.topology_pages.clearRetainingCapacity();
 +        try self.topology_pages.appendSlice(alloc, pages);
 +        self.topology_rows.clearRetainingCapacity();
 +        self.topology_pending.clearRetainingCapacity();
-+        self.topology_page_index = 0;
-+        self.topology_page_row = if (pages.len == 0) 0 else pages[0].page_row_start;
++        try self.topology_rows.appendSlice(alloc, self.rows.items[kept.start..][0..kept.len]);
++        for (self.topology_rows.items) |*row_state| {
++            row_state.pending = row_state.pending or row_state.revision == 0;
++            if (row_state.pending) try self.topology_pending.append(alloc, row_state.id);
++        }
++        self.topology_page_index = kept.pages;
++        self.topology_page_row = if (kept.pages < pages.len)
++            @as(usize, pages[kept.pages].page_row_start) + kept.partial_rows
++        else
++            0;
 +    }
 +
 +    fn nextTopologyId(self: *ScreenState, screen: Screen) ?RowId {
@@ -404,11 +434,11 @@ new file mode 100644
 +    }
 +
 +    /// Removes the trimmed pages from the start of the committed topology, with their rows.
-+    /// Returns whether a page was removed.
-+    fn dropTrimmedPages(self: *ScreenState) bool {
++    /// Returns the count of rows removed, or null when no page was.
++    fn dropTrimmedPages(self: *ScreenState) ?usize {
 +        const trimmed = @min(self.trimmed_pages, self.pages.items.len);
 +        self.trimmed_pages = 0;
-+        if (trimmed == 0) return false;
++        if (trimmed == 0) return null;
 +        const rows: usize = if (trimmed == self.pages.items.len)
 +            self.rows.items.len
 +        else
@@ -420,7 +450,7 @@ new file mode 100644
 +        std.mem.copyForwards(PageInfo, self.pages.items[0..kept_pages], self.pages.items[trimmed..]);
 +        self.pages.shrinkRetainingCapacity(kept_pages);
 +        for (self.pages.items) |*page| page.first_row -= @intCast(rows);
-+        return true;
++        return rows;
 +    }
 +
 +    /// Ends a complete capture. Rows queued while it ran stay pending for the next one.
@@ -595,6 +625,8 @@ new file mode 100644
 +        .screen = screen_tag,
 +        .screen_generation = screen_generation,
 +        .topology_epoch = current.topology_epoch,
++        .topology_kept_start = current.topology_kept_start,
++        .topology_kept_len = current.topology_kept_len,
 +        .visible_start = scrollbar.offset,
 +        .visible_len = scrollbar.len,
 +    };
@@ -698,7 +730,7 @@ new file mode 100644
 +    out.more = !complete;
 +    if (complete) {
 +        current.finishCapture();
-+        if (current.dropTrimmedPages()) {
++        if (current.dropTrimmedPages()) |removed| {
 +            if (current.rows.items.len == 0) {
 +                // Output removed every row the capture began with, so it describes no
 +                // state the terminal had. It finishes without a model, and the next
@@ -706,27 +738,21 @@ new file mode 100644
 +                out.complete = false;
 +                return .success;
 +            }
-+            // Publish the topology without the removed pages, whole, in this update.
++            // Publish the topology without the removed pages in this update: it keeps every
++            // committed row after them.
 +            state.topology_epoch +%= 1;
 +            if (state.topology_epoch == 0) state.topology_epoch = 1;
 +            current.topology_epoch = state.topology_epoch;
++            current.topology_kept_start = removed;
++            current.topology_kept_len = current.rows.items.len;
 +            out.topology_epoch = state.topology_epoch;
-+            for (current.pages.items) |page| {
-+                for (page.page_row_start..@as(usize, page.page_row_start) + page.rows) |page_row| {
-+                    const id: RowId = .{
-+                        .screen = screen_tag,
-+                        .screen_generation = current.generation,
-+                        .node_serial = page.serial,
-+                        .page_row = @intCast(page_row),
-+                    };
-+                    if (!topology_callback(userdata, &id)) return .invalid_value;
-+                }
-+            }
++            out.topology_kept_start = removed;
++            out.topology_kept_len = current.rows.items.len;
 +            out.topology_changed = true;
 +            out.topology_complete = true;
 +        }
 +        if (current.topology_stale) setStaleVisibleLines(out, current, screen, screen_tag);
-+        setCursorAndSelection(out, current, screen);
++        setCursorAndSelection(out, current, screen, screen_tag);
 +    } else {
 +        current.capturing = true;
 +    }
@@ -802,6 +828,40 @@ new file mode 100644
 +            return null;
 +    }
 +    return trimmed;
++}
++
++const Kept = struct {
++    /// First kept row in the committed topology.
++    start: usize = 0,
++    len: usize = 0,
++    /// Leading live pages whose rows are all kept.
++    pages: usize = 0,
++    /// Rows kept from the live page after them.
++    partial_rows: usize = 0,
++};
++
++/// The committed rows that begin the `live` topology: the `held` pages from the one `live`
++/// begins with, while each names the same rows of the same page, and of the first that differs
++/// in length, the rows both hold. A page that grew keeps its rows and walks only the new ones.
++fn keptRows(held: []const PageInfo, live: []const PageInfo) Kept {
++    if (live.len == 0) return .{};
++    const first = for (held, 0..) |page, index| {
++        if (page.serial == live[0].serial) break index;
++    } else return .{};
++    var kept: Kept = .{ .start = held[first].first_row };
++    const count = @min(held.len - first, live.len);
++    for (held[first..][0..count], live[0..count]) |page, now| {
++        if (page.serial != now.serial or page.page_row_start != now.page_row_start or
++            page.cols != now.cols) break;
++        const rows = @min(page.rows, now.rows);
++        kept.len += rows;
++        if (rows != page.rows or rows != now.rows) {
++            kept.partial_rows = rows;
++            break;
++        }
++        kept.pages += 1;
++    }
++    return kept;
 +}
 +
 +fn rowIdEql(a: RowId, b: RowId) bool {
@@ -1057,9 +1117,36 @@ new file mode 100644
 +    }
 +}
 +
-+fn setCursorAndSelection(out: *Snapshot, state: *ScreenState, screen: anytype) void {
++/// Places a cursor whose row a capture that output outran lacks on the topology row as far from
++/// the topology's end as the cursor is from the live screen's end, the row the visible lines of
++/// that capture show it on. Null when the topology has no such row.
++fn staleCursorRef(state: *ScreenState, screen: anytype, screen_tag: Screen, pin: PageList.Pin) ?CellRef {
++    if (!state.topology_stale) return null;
++    const id: RowId = .{
++        .screen = screen_tag,
++        .screen_generation = state.generation,
++        .node_serial = pin.node.serial,
++        .page_row = pin.y,
++    };
++    const cursor_row = documentRow(&screen.pages, screen_tag, id) orelse return null;
++    var live_rows: usize = 0;
++    var it = screen.pages.pageIterator(.right_down, topPoint(screen_tag), null);
++    while (it.next()) |chunk| live_rows += chunk.end - chunk.start;
++    const below = live_rows - 1 - cursor_row;
++    const rows = state.rows.items.len;
++    if (below >= rows) return null;
++    const row = state.rows.items[rows - 1 - below];
++    if (row.revision == 0) return null;
++    const cols = for (state.pages.items) |page| {
++        if (page.serial == row.id.node_serial) break page.cols;
++    } else return null;
++    return .{ .row = row.id, .row_revision = row.revision, .column = @min(pin.x, cols - 1) };
++}
++
++fn setCursorAndSelection(out: *Snapshot, state: *ScreenState, screen: anytype, screen_tag: Screen) void {
 +    if (state.rows.items.len == 0) return;
-+    if (refForPin(state, screen.cursor.page_pin.*)) |cursor| {
++    const cursor_pin = screen.cursor.page_pin.*;
++    if (refForPin(state, cursor_pin) orelse staleCursorRef(state, screen, screen_tag, cursor_pin)) |cursor| {
 +        out.has_cursor = true;
 +        out.cursor = cursor;
 +    }

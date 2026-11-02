@@ -2237,22 +2237,33 @@ fn accessibility_demand_binds_to_the_last_published_screen_without_flushing_the_
     worker.finish();
 }
 
-/// What continuous output published: its screens, and the millisecond the first complete
-/// semantic model arrived.
+/// What continuous output published: its screens, and the millisecond each complete semantic
+/// model arrived.
 struct ContinuousOutput {
     screens: usize,
-    first_model: Option<u64>,
+    models: Vec<u64>,
+}
+
+impl ContinuousOutput {
+    fn first_model(&self) -> Option<u64> {
+        self.models.first().copied()
+    }
 }
 
 /// Runs `millis` milliseconds of continuous output on a fixed clock, one write per millisecond,
-/// after 3,000 lines of history. With `appending`, each write is a new line; otherwise it rewrites
+/// after `history` lines of history. With `appending`, each write is a new line; otherwise it rewrites
 /// the last line in place, like a progress bar. After each write the worker runs one more
 /// command, as it interleaves them with output: due work, or else a semantic continuation.
 /// Copying the history into a semantic model takes dozens of bounded steps, so with `demanded`
 /// a model is built while screens keep publishing.
-fn continuous_output(demanded: bool, appending: bool, millis: u64) -> ContinuousOutput {
+fn continuous_output(
+    demanded: bool,
+    appending: bool,
+    history: usize,
+    millis: u64,
+) -> ContinuousOutput {
     let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
-    let history: Vec<u8> = (0..3_000)
+    let history: Vec<u8> = (0..history)
         .flat_map(|line| format!("history {line}\r\n").into_bytes())
         .collect();
     assert!(worker.feed_test_output(vec![history]));
@@ -2269,7 +2280,7 @@ fn continuous_output(demanded: bool, appending: bool, millis: u64) -> Continuous
     }
     let mut published = ContinuousOutput {
         screens: 0,
-        first_model: None,
+        models: Vec::new(),
     };
     for step in 0..millis {
         let now = start + Duration::from_millis(step);
@@ -2292,7 +2303,7 @@ fn continuous_output(demanded: bool, appending: bool, millis: u64) -> Continuous
             published.screens += usize::from(matches!(event, TerminalSessionEvent::Screen(_)));
         }
         if semantics.try_recv().is_ok() {
-            published.first_model.get_or_insert(step);
+            published.models.push(step);
         }
     }
     worker.finish();
@@ -2305,8 +2316,8 @@ fn continuous_output(demanded: bool, appending: bool, millis: u64) -> Continuous
 /// demanding semantics still publishes exactly the paced screens.
 #[test]
 fn demanded_semantics_add_no_screens_during_continuous_output() {
-    let paced = continuous_output(false, true, 500);
-    let demanded = continuous_output(true, true, 500);
+    let paced = continuous_output(false, true, 3_000, 500);
+    let demanded = continuous_output(true, true, 3_000, 500);
 
     assert_eq!(
         demanded.screens, paced.screens,
@@ -2314,7 +2325,7 @@ fn demanded_semantics_add_no_screens_during_continuous_output() {
     );
     // At 60 Hz with output every millisecond, each burst publishes 18 ms after it began.
     assert_eq!(paced.screens, 28);
-    assert_eq!(paced.first_model, None, "no model without demand");
+    assert_eq!(paced.first_model(), None, "no model without demand");
 }
 
 /// Paced screens never cancel the semantic update in progress. While output rewrites a line
@@ -2322,8 +2333,8 @@ fn demanded_semantics_add_no_screens_during_continuous_output() {
 /// capture, 100 ms later, would have to restart it.
 #[test]
 fn a_semantic_update_completes_while_paced_screens_publish() {
-    let paced = continuous_output(false, false, 300);
-    let demanded = continuous_output(true, false, 300);
+    let paced = continuous_output(false, false, 3_000, 300);
+    let demanded = continuous_output(true, false, 3_000, 300);
 
     assert_eq!(
         demanded.screens, paced.screens,
@@ -2331,7 +2342,7 @@ fn a_semantic_update_completes_while_paced_screens_publish() {
     );
     assert!(paced.screens > 5, "{} screens", paced.screens);
     let first = demanded
-        .first_model
+        .first_model()
         .expect("a model completes during output");
     assert!(first < 100, "the first model completed at {first} ms");
 }
@@ -2341,12 +2352,30 @@ fn a_semantic_update_completes_while_paced_screens_publish() {
 /// the budget of 100 ms plus one frame while a line arrives every millisecond.
 #[test]
 fn a_semantic_update_completes_while_lines_are_appended() {
-    let demanded = continuous_output(true, true, 300);
+    let demanded = continuous_output(true, true, 3_000, 300);
 
     let first = demanded
-        .first_model
+        .first_model()
         .expect("a model completes during appending output");
     assert!(first < 117, "the first model completed at {first} ms");
+}
+
+/// Every capture used to resend the whole topology, 40 bounded steps at the 10,000-row
+/// Scrollback cap, so under continuous output a demanding client waited about 140 ms between
+/// models. A capture now sends only the rows output appended and trimmed, so after the first
+/// model each next one arrives within 100 ms plus one 60 Hz frame of the one before.
+#[test]
+fn semantic_models_follow_each_other_within_the_budget_at_the_scrollback_cap() {
+    let demanded = continuous_output(true, true, 10_000, 1_000);
+
+    let models = &demanded.models;
+    assert!(models.len() > 3, "models at {models:?} ms");
+    for pair in models
+        .windows(2)
+        .chain([[models[models.len() - 1], 1_000].as_slice()])
+    {
+        assert!(pair[1] - pair[0] < 117, "models at {models:?} ms");
+    }
 }
 
 /// A capture finishes against what it observed when it began. Output that arrives while it runs

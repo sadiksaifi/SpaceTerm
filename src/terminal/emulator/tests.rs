@@ -215,7 +215,8 @@ fn accessibility_captures_complete_while_output_appends_lines() {
         emulator.snapshot().unwrap();
         let mut line = 0;
         let mut append = |emulator: &mut TerminalEmulator, step: usize| {
-            if step.is_multiple_of(every) {
+            // Each capture begins after a new line, so it has rows to add.
+            if (step - 1).is_multiple_of(every) {
                 emulator.feed(format!("y {line}\r\n").as_bytes());
                 line += 1;
             }
@@ -243,6 +244,77 @@ fn accessibility_captures_complete_while_output_appends_lines() {
         }
         assert!(line > 0);
     }
+}
+
+/// Every capture used to walk the whole topology again, 40 bounded steps at the 10,000-row
+/// Scrollback cap. A capture now keeps the rows its last topology still holds, so lines that
+/// append and trim Scrollback cost steps only for the rows they add. The spliced document
+/// matches the one a new store extracts whole.
+#[test]
+fn accessibility_captures_after_appending_output_send_only_the_new_rows() {
+    let mut emulator = emulator(80, 24);
+    let history: String = (0..MAX_SCROLLBACK_ROWS + 100)
+        .map(|line| format!("line {line}\r\n"))
+        .collect();
+    emulator.feed(history.as_bytes());
+    let whole_bound = capture_step_bound(MAX_SCROLLBACK_ROWS + 24, 80);
+    capture_during_output(&mut emulator, whole_bound, |_, _| {}).expect("the first capture");
+    let mut next = MAX_SCROLLBACK_ROWS + 100;
+    for (capture, lines) in [1, 100, 300, 1].into_iter().enumerate() {
+        let appended: String = (next..next + lines)
+            .map(|line| format!("line {line}\r\n"))
+            .collect();
+        emulator.feed(appended.as_bytes());
+        next += lines;
+        // The appended rows' topology, then their cells, two per column, plus the completion.
+        let bound = lines.div_ceil(256) + lines.div_ceil(16_384 / (2 * 80)) + 1;
+        let (model, steps) = capture_during_output(&mut emulator, bound, |_, _| {})
+            .unwrap_or_else(|| panic!("capture {capture} of {lines} lines exceeded {bound} steps"));
+        assert!(model.text().contains(&format!("line {}\n", next - 1)));
+
+        emulator.release_accessibility();
+        let (whole, _) = capture_during_output(&mut emulator, whole_bound, |_, _| {})
+            .expect("a new store extracts the whole terminal");
+        assert_eq!(
+            model.text(),
+            whole.text(),
+            "capture {capture} after {steps} steps"
+        );
+        assert_eq!(model.visible_lines(), whole.visible_lines());
+        assert_eq!(model.cursor_cell(), whole.cursor_cell());
+    }
+}
+
+/// A capture that output outran used to publish no cursor: its topology lacks the row the
+/// cursor moved to. The cursor now stays on the row of the published visible lines that it is
+/// on in the live screen, at its column.
+#[test]
+fn accessibility_captures_that_output_outran_keep_the_cursor_on_its_row() {
+    let mut emulator = emulator(80, 24);
+    let history: String = (0..1_000)
+        .map(|line| format!("history {line}\r\n"))
+        .collect();
+    emulator.feed(history.as_bytes());
+    emulator.feed(b"prompt");
+    drain_accessibility(&mut emulator);
+    let mut line = 0;
+    let (model, _) = capture_during_output(&mut emulator, 64, |emulator, _| {
+        line += 1;
+        emulator.feed(format!("\r\ny {line}").as_bytes());
+    })
+    .expect("the capture completes");
+    assert!(
+        !model.text().ends_with(&format!("\ny {line}")),
+        "output outran the capture"
+    );
+    // The live cursor is on the screen's last row, after the line it wrote; the model's last
+    // visible line is its last row.
+    let visible = model.visible_lines();
+    assert_eq!(visible.end, model.rows().count());
+    assert_eq!(
+        model.cursor_cell(),
+        Some((visible.end - 1, format!("y {line}").len() as u16))
+    );
 }
 
 /// Runs bounded capture steps until one finishes, as [`capture_during_output`] does, and

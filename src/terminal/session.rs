@@ -2521,7 +2521,8 @@ impl TerminalWorker {
             }
         };
         self.schedules.update_accessibility(more);
-        self.schedules.mark_accessibility_presented(Instant::now());
+        self.schedules
+            .mark_accessibility_presented(self.schedules.now());
         if !more && self.emulator.take_accessibility_capture_outran() {
             self.schedules.note_screen_published();
         }
