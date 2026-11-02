@@ -439,7 +439,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
             predicate() or self.smoke.require(False, classification)
         )
         switch = Accessible("button", name="Choose Workspace")
-        local = Accessible("menu item", name="Local Workspace")
+        local = Accessible("menu item", name="New Local Workspace")
         field = Accessible("entry", name="Workspace name")
         query = ""
         field.queryText.side_effect = lambda: SimpleNamespace(getText=lambda start, end: query)
@@ -549,7 +549,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         owned.action = lambda: pressed.append("owned row")
         confirmation = Accessible("button", name="Kill Workspace")
         dialog = Accessible(
-            "dialog", name=f'Kill Workspace "{owned_name}"?', children=[confirmation]
+            "dialog", name=f"Kill Workspace \u201c{owned_name}\u201d?", children=[confirmation]
         )
         menu_item = Accessible("menu item", name="Kill Workspace")
 
