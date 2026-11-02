@@ -476,10 +476,11 @@ impl ApplicationUpdates {
                     let _ = reschedule.try_send(());
                 }));
             }
+            // Sleep moves wall time while the elapsed-time timer stands still.
             let wake = {
-                let reschedule = reschedule.clone();
-                cx.on_system_wake(move |_| {
-                    let _ = reschedule.try_send(());
+                let source = crate::system_wake::source(cx);
+                cx.subscribe(&source, |this, _, _: &crate::system_wake::Woke, _| {
+                    this.reschedule()
                 })
             };
             let history = adapter.load_history();
@@ -889,6 +890,8 @@ pub(crate) mod testing {
         pub(crate) deferred_installs: std::cell::Cell<usize>,
         pub(crate) checks: std::cell::Cell<usize>,
         pub(crate) saves: std::cell::Cell<usize>,
+        /// The history as last written.
+        pub(crate) saved: std::cell::RefCell<Option<UpdateHistory>>,
         pub(crate) history: UpdateHistory,
         /// Replaces the system clock, in seconds since the Unix epoch.
         pub(crate) clock: std::cell::RefCell<Option<Box<dyn Fn() -> u64>>>,
@@ -907,8 +910,9 @@ pub(crate) mod testing {
             self.checks.set(self.checks.get() + 1);
             Ok(())
         }
-        fn save_history(&self, _history: &UpdateHistory) {
+        fn save_history(&self, history: &UpdateHistory) {
             self.saves.set(self.saves.get() + 1);
+            *self.saved.borrow_mut() = Some(history.clone());
         }
         fn now(&self) -> u64 {
             self.clock
@@ -1176,6 +1180,106 @@ mod tests {
             .unwrap();
         service.read_with(cx, |updates, _| updates.window_activated());
         cx.run_until_parked();
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.reminder()),
+            Some(UpdateStage::Overdue)
+        );
+    }
+
+    /// Sleep moves wall time past a due check and reminder while the elapsed-time timer stands
+    /// still. The system's wake brings both at once, a second wake changes nothing, and the next
+    /// timer runs to the next due time measured from the wake.
+    #[gpui::test]
+    fn a_wake_from_sleep_runs_due_work_once_and_times_the_next(cx: &mut gpui::TestAppContext) {
+        use policy::{DAY, ReminderInterval};
+        const START: u64 = 1_000_000;
+        let adapter = Rc::new(RecordingAdapter::available());
+        let executor = cx.executor();
+        let began = executor.now();
+        let slept = Rc::new(std::cell::Cell::new(0u64));
+        {
+            let slept = Rc::clone(&slept);
+            *adapter.clock.borrow_mut() = Some(Box::new(move || {
+                START + slept.get() + (executor.now() - began).as_secs()
+            }));
+        }
+        let window = cx.add_window(|_, _| gpui::EmptyView);
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        let document = crate::settings::SettingsDocument {
+            updates: UpdatePreferences {
+                automatic_downloads: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
+        );
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
+        cx.run_until_parked();
+        let found = |adapter: &RecordingAdapter, cx: &mut gpui::TestAppContext| {
+            adapter.emit(UpdateEvent::ReleaseMetadata {
+                published_at: START,
+                prepared: false,
+            });
+            adapter.emit(UpdateEvent::Available("0.1.1".into()));
+            adapter.emit(UpdateEvent::Finished);
+            cx.run_until_parked();
+        };
+        assert!(cx.dispatcher.scheduler().advance_clock_to_next_timer());
+        cx.run_until_parked();
+        assert_eq!(adapter.checks.get(), 1);
+        found(&adapter, cx);
+
+        // The machine sleeps past the daily check and the release's first day.
+        slept.set(DAY + 600);
+        let woke = adapter.now();
+        cx.run_until_parked();
+        assert_eq!(adapter.checks.get(), 1, "the timer still waits after sleep");
+        assert_eq!(service.read_with(cx, |updates, _| updates.reminder()), None);
+
+        cx.update(crate::system_wake::deliver);
+        cx.run_until_parked();
+        assert_eq!(adapter.checks.get(), 2, "the overdue check runs on wake");
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.reminder()),
+            Some(UpdateStage::Warning),
+            "the due warning appears on wake"
+        );
+        let mut saved = adapter.saved.borrow().clone().unwrap();
+        assert_eq!(
+            saved.last_check,
+            Some(START + 1),
+            "the check has not finished"
+        );
+        assert!(
+            !saved.reminder_due(woke, ReminderInterval::TwoHours),
+            "the history retains the reminder shown on wake"
+        );
+        found(&adapter, cx);
+        assert_eq!(
+            adapter.saved.borrow().as_ref().unwrap().last_check,
+            Some(woke),
+            "the history retains the check finished on wake"
+        );
+
+        let saves = adapter.saves.get();
+        cx.update(crate::system_wake::deliver);
+        cx.run_until_parked();
+        assert_eq!(adapter.checks.get(), 2, "a second wake runs nothing");
+        assert_eq!(adapter.saves.get(), saves, "a second wake writes nothing");
+
+        // The next due time is the release turning two days old, before the next daily check.
+        let before = cx.executor().now();
+        assert!(cx.dispatcher.scheduler().advance_clock_to_next_timer());
+        let waited = (cx.executor().now() - before).as_secs();
+        assert_eq!(woke + waited, START + 2 * DAY);
+        cx.run_until_parked();
+        assert_eq!(adapter.checks.get(), 2);
         assert_eq!(
             service.read_with(cx, |updates, _| updates.reminder()),
             Some(UpdateStage::Overdue)
