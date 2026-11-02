@@ -1984,3 +1984,355 @@ fn selecting_an_ended_pane_queues_no_start() {
     restored.select();
     assert!(restored.selected.load(Ordering::Acquire));
 }
+
+use spaceterm_server::connection::link::{ChannelEvent, ChannelSink as _};
+use spaceterm_server::protocol::PaneEvent;
+
+/// A Pane worker's pushed side for semantic tests: a real terminal, its server encoder, the
+/// worker's inbox, its frame receiver and its semantic state, with the view's one-model channel.
+struct PushedPane {
+    adapter: Adapter,
+    emulator: crate::terminal::emulator::TerminalEmulator,
+    encoder: crate::runtime::screen_encoder::ScreenEncoder,
+    inbox: Arc<super::inbox::Inbox>,
+    screens: screen::ScreenReceiver<'static>,
+    graphics: graphics::Graphics,
+    predictor: prediction::Predictor,
+    shown: Option<screen::Shown>,
+    generation: PresentationGeneration,
+    mapping: Option<ScreenMapping>,
+    semantic: accessibility::Semantics,
+    events: (
+        async_channel::Sender<TerminalSessionEvent>,
+        async_channel::Receiver<TerminalSessionEvent>,
+    ),
+    semantics: (
+        async_channel::Sender<Arc<crate::terminal::accessibility::TerminalAccessibilityModel>>,
+        async_channel::Receiver<Arc<crate::terminal::accessibility::TerminalAccessibilityModel>>,
+    ),
+    frame: u64,
+    screen_generation: u64,
+}
+
+impl PushedPane {
+    /// A demanded Pane whose terminal printed `history + 6` lines on a 20 by 6 grid.
+    fn new(history: u64) -> Self {
+        use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+        let adapter = Adapter::new();
+        adapter
+            .handle
+            .state
+            .reading
+            .lock()
+            .unwrap()
+            .scrollback
+            .attach(adapter.active.lease.session);
+        let mut emulator =
+            crate::terminal::emulator::TerminalEmulator::new(TerminalGeometry::from_grid(
+                CellGridSize::new(20, 6),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
+        for _ in 0..history + 5 {
+            emulator.feed(b"line\r\n");
+        }
+        emulator.feed(b"line");
+        let inbox = super::inbox::Inbox::new(Arc::new(|| {}));
+        let mut semantic = accessibility::Semantics::new(Arc::default());
+        // The link declares each demand to the inbox as it sends it.
+        semantic
+            .follow(true, |demand| {
+                let pane::accessibility::Demand::Start { generation } = demand else {
+                    panic!("demand starts")
+                };
+                inbox.demand(Some(generation));
+                Ok(())
+            })
+            .unwrap();
+        Self {
+            adapter,
+            emulator,
+            encoder: Default::default(),
+            inbox,
+            screens: screen::ScreenReceiver::new(None, None),
+            graphics: Default::default(),
+            predictor: Default::default(),
+            shown: None,
+            generation: PresentationGeneration::default(),
+            mapping: None,
+            semantic,
+            events: async_channel::unbounded(),
+            semantics: async_channel::bounded(1),
+            frame: 0,
+            screen_generation: 0,
+        }
+    }
+
+    /// Pushes the terminal's current screen as the channel's next frame.
+    fn push_frame(&mut self) {
+        let screen = self.emulator.snapshot().unwrap().unwrap();
+        self.screen_generation += 1;
+        let capture = crate::runtime::screen_encoder::ScreenCapture {
+            screen,
+            generation: self.screen_generation,
+            accessibility_revision: 0,
+        };
+        let base = (self.frame > 0).then_some(self.frame);
+        self.frame += 1;
+        let update = self.encoder.encode(&capture, self.frame, base).unwrap();
+        self.inbox.deliver(ChannelEvent::Frame(Box::new(
+            spaceterm_server::protocol::Frame {
+                channel: spaceterm_server::protocol::Channel(1),
+                frame: self.frame,
+                base,
+                input: 0,
+                update,
+            },
+        )));
+    }
+
+    fn push_semantics(&self, messages: Vec<pane::accessibility::Update>) {
+        for message in messages {
+            self.inbox
+                .deliver(ChannelEvent::Accessibility(Box::new(message)));
+        }
+    }
+
+    fn push(&self, event: PaneEvent) {
+        self.inbox.deliver(ChannelEvent::Pane(event));
+    }
+
+    /// One worker turn over everything pushed: the drain applies frames and stages semantics,
+    /// each delivered screen is shown, and the drain's semantics publish after them, as
+    /// `link::present` does. Returns the drain's flow and its Pane events.
+    fn turn(&mut self) -> (super::inbox::Flow, Vec<PaneEvent>) {
+        let state = &self.adapter.handle.state;
+        let mut delivered = Vec::new();
+        let flow = self
+            .inbox
+            .drain(
+                &mut screen::Frames {
+                    state,
+                    screens: &mut self.screens,
+                    epoch: self.adapter.active.epoch,
+                    generation: &mut self.generation,
+                    active_size: *self.adapter.handle.size.lock().unwrap(),
+                    graphics: &mut self.graphics,
+                    appearance: &self.adapter.handle.appearance,
+                    semantic: &mut self.semantic,
+                    shown: &mut self.shown,
+                    predictor: &mut self.predictor,
+                },
+                |_| Ok::<_, ServerError>(()),
+                |delivery| delivered.push(delivery),
+            )
+            .unwrap();
+        let mut events = Vec::new();
+        for delivery in delivered {
+            match delivery {
+                super::inbox::Delivery::Screen((screen, mapping)) => {
+                    self.mapping = Some(
+                        super::link::show(
+                            state,
+                            (&self.events.0, &self.semantics.0),
+                            &mut self.semantic,
+                            Some(screen),
+                            (self.adapter.active.epoch, self.generation, mapping),
+                            false,
+                        )
+                        .unwrap(),
+                    );
+                }
+                super::inbox::Delivery::Pane(event) => events.push(event),
+            }
+        }
+        if let Some(model) = self.semantic.publish(&state.accessibility, self.generation) {
+            self.semantics.0.force_send(model).unwrap();
+        }
+        (flow, events)
+    }
+
+    /// The model the view holds now: the last one the worker sent.
+    fn published(&self) -> Arc<crate::terminal::accessibility::TerminalAccessibilityModel> {
+        self.semantics.1.try_recv().expect("a published model")
+    }
+}
+
+/// A revision of `lines` rows numbered from 0, each holding "line", that inserts the rows from
+/// `from` and shows the last 6.
+fn semantic_lines(
+    revision: u64,
+    base: Option<u64>,
+    from: u32,
+    lines: u32,
+) -> Vec<pane::accessibility::Update> {
+    use pane::accessibility::{CellSpan, Header, Packer, RowUpdate, Run, Screen, Tail};
+    let mut packer = Packer::new(Header {
+        demand_generation: 1,
+        revision,
+        base,
+        screen: Screen::Primary,
+        screen_generation: 1,
+    });
+    let mut messages = packer.splice(
+        from,
+        0,
+        vec![Run {
+            node_serial: 7,
+            page_row: from as u16,
+            count: (lines - from) as u16,
+        }],
+    );
+    for line in from..lines {
+        messages.extend(packer.row(RowUpdate::new(
+            line,
+            revision,
+            false,
+            "line".into(),
+            (0..4).map(|column| CellSpan {
+                column,
+                width: 1,
+                bytes: 1,
+            }),
+        )));
+    }
+    messages.push(packer.finish(Tail {
+        visible_lines: lines - 6..lines,
+        cursor: None,
+        selection: None,
+    }));
+    messages
+}
+
+#[test]
+fn a_frame_then_a_semantic_tail_in_one_drain_publish_the_view_the_frame_moved() {
+    let mut pane = PushedPane::new(40);
+    pane.push_frame();
+    pane.push_semantics(semantic_lines(1, None, 0, 46));
+    pane.turn();
+    pane.adapter
+        .handle
+        .scroll_scrollback(ScrollbackMovement::Top);
+    pane.generation = pane.generation.next();
+    let state = Arc::clone(&pane.adapter.handle.state);
+    pane.mapping = Some(
+        super::link::show(
+            &state,
+            (&pane.events.0, &pane.semantics.0),
+            &mut pane.semantic,
+            None,
+            (
+                pane.adapter.active.epoch,
+                pane.generation,
+                pane.mapping.unwrap(),
+            ),
+            false,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        pane.published().visible_lines(),
+        0..6,
+        "scrolled to the top of 40 history lines, the first 6 rows are shown"
+    );
+
+    // Output adds a history line while the view stays at the top, so the view's scrolled
+    // offset grows from 40 to 41. Its frame and the revision that appends the line arrive
+    // before the worker drains.
+    pane.emulator.feed(b"\r\nline");
+    pane.push_frame();
+    pane.push_semantics(semantic_lines(2, Some(1), 46, 47));
+    pane.turn();
+
+    let model = pane.published();
+    assert_eq!(model.rows().count(), 47, "revision 2 is published");
+    assert_eq!(model.generation(), pane.generation);
+    assert_eq!(
+        model.visible_lines(),
+        0..6,
+        "the published model follows the view the frame moved, not the one before it"
+    );
+}
+
+#[test]
+fn a_semantic_tail_before_the_channels_end_publishes_the_ended_panes_document() {
+    let mut pane = PushedPane::new(0);
+    pane.push_frame();
+    pane.push_semantics(semantic_lines(1, None, 0, 6));
+    pane.turn();
+    assert_eq!(pane.published().rows().count(), 6);
+
+    let mut unfinished = semantic_lines(3, Some(2), 7, 8);
+    unfinished.pop();
+    pane.push_semantics(semantic_lines(2, Some(1), 6, 7));
+    pane.push(PaneEvent::Ended);
+    pane.push_semantics(unfinished);
+    let (flow, events) = pane.turn();
+
+    assert_eq!(flow, super::inbox::Flow::Ended);
+    assert!(matches!(events.as_slice(), [PaneEvent::Ended]));
+    let model = pane.published();
+    assert_eq!(
+        model.rows().count(),
+        7,
+        "the revision completed before the end is the final document"
+    );
+    assert!(pane.semantics.1.try_recv().is_err());
+}
+
+#[test]
+fn hiding_a_pane_keeps_its_semantic_demand_and_document() {
+    let mut pane = PushedPane::new(0);
+    let handle = &pane.adapter.handle;
+    handle
+        .accessibility_demand_sender()
+        .expect("a server Pane accepts semantic demand")
+        .request();
+    pane.push_frame();
+    pane.push_semantics(semantic_lines(1, None, 0, 6));
+    pane.turn();
+    let before = pane.published();
+    let request = before.selection_request(0..2).unwrap();
+    let state = Arc::clone(&pane.adapter.handle.state);
+    let resolved = state
+        .accessibility
+        .lock()
+        .unwrap()
+        .resolve_selection(&request);
+    assert!(matches!(resolved, Some(Some(_))));
+
+    pane.adapter.handle.set_presentable(false);
+    assert!(
+        state.accessibility_demand.load(Ordering::Acquire),
+        "hiding a Pane must not end its semantic demand, or showing it would resend everything"
+    );
+    pane.adapter.handle.set_presentable(true);
+
+    assert!(state.accessibility_demand.load(Ordering::Acquire));
+    assert_eq!(
+        state
+            .accessibility
+            .lock()
+            .unwrap()
+            .resolve_selection(&request),
+        resolved,
+        "native Selection still resolves against the document published before hiding"
+    );
+    let shown = pane
+        .semantic
+        .publish(&state.accessibility, pane.generation.next())
+        .expect("the next presentation binds the kept document");
+    assert!(shown.shares_document(&before));
+    assert_eq!(
+        shown
+            .rows()
+            .map(|row| (row.id, row.revision))
+            .collect::<Vec<_>>(),
+        before
+            .rows()
+            .map(|row| (row.id, row.revision))
+            .collect::<Vec<_>>(),
+        "the kept rows keep their identities"
+    );
+}

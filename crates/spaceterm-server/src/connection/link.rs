@@ -15,9 +15,10 @@ use super::health::{Check, Death, Liveness};
 use crate::pane::{AttachmentClaim, PaneSize, PresentationStyle, accessibility, effects};
 use crate::protocol::frame::{Assembler, encode_client};
 use crate::protocol::{
-    Acknowledge, Cancel, Channel, Claim, ClientMessage, EffectDone, Fatal, Frame, FrameAck, Input,
-    InputEvent, InventoryRevision, Operation, PaneEvent, Ping, Pong, RawFrame, Refusal, Reply,
-    ReplyBody, Request, RequestId, ServerMessage, View, limits,
+    AccessibilityAck, AccessibilityMessage, Acknowledge, Cancel, Channel, Claim, ClientMessage,
+    EffectDone, Fatal, Frame, FrameAck, Input, InputEvent, InventoryRevision, Operation, PaneEvent,
+    Ping, Pong, RawFrame, Refusal, Reply, ReplyBody, Request, RequestId, ServerMessage, View,
+    limits,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
@@ -428,10 +429,13 @@ impl ServerLink {
                     );
                 }
             },
-            // This client requests no pushed semantics yet, so an update is one it never asked for.
-            ServerMessage::Accessibility(_) => {
-                self.fail(LinkError::Violation);
-                return Err(LinkError::Violation);
+            // Nobody holds the channel any more. The server drops its semantic store when it
+            // processes the `Release`, so the message needs no acknowledgement.
+            ServerMessage::Accessibility(message) => {
+                let AccessibilityMessage { channel, update } = *message;
+                if let Some(sink) = self.sink(channel, false) {
+                    sink.deliver(ChannelEvent::Accessibility(Box::new(update)));
+                }
             }
             ServerMessage::Pane(pane) => {
                 let last = pane.event.last();
@@ -885,6 +889,41 @@ impl ChannelHandle {
         )
     }
 
+    /// Acknowledges the semantic revision whose tail the owner applied, returning the channel's
+    /// semantic credit (ADR 0062). The server ends a channel without waiting for that credit, so
+    /// the owner may apply a tail queued before the end after the channel ended. The server
+    /// ignores an acknowledgement on a closed channel, so this one is not sent and succeeds.
+    pub fn acknowledge_accessibility(
+        &self,
+        demand_generation: u64,
+        revision: u64,
+    ) -> Result<(), LinkError> {
+        let sent = self.send_simple(
+            ClientMessage::AccessibilityAck(AccessibilityAck {
+                channel: self.channel()?,
+                demand_generation,
+                revision,
+            }),
+            true,
+        );
+        match sent {
+            // `ended` never clears, so the end the send saw is still recorded.
+            Err(LinkError::Unclaimed) if self.ended()? => Ok(()),
+            sent => sent,
+        }
+    }
+
+    /// Whether the server sent this claimed channel's last event.
+    fn ended(&self) -> Result<bool, LinkError> {
+        let channel = self.channel()?;
+        Ok(self
+            .link
+            .lock()
+            .channels
+            .get(&channel)
+            .is_some_and(|state| state.ended))
+    }
+
     pub fn view(&self, visible: bool, max_hz: u8) -> Result<(), LinkError> {
         self.send_simple(
             ClientMessage::View(View {
@@ -958,5 +997,57 @@ fn chunks(text: &str, limit: usize) -> Vec<&str> {
         let (piece, tail) = rest.split_at(end);
         pieces.push(piece);
         rest = tail;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{PaneMessage, frame::encode_server};
+
+    /// The server may end a channel without waiting for semantic credit (ADR 0062), so its owner
+    /// can apply a revision tail queued before the end after the I/O thread has seen it.
+    #[test]
+    fn a_semantic_acknowledgement_after_the_channels_end_is_harmless_and_unsent() {
+        let now = Instant::now();
+        let link = ServerLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+        let channel = link.open_channel(Arc::new(|_: ChannelEvent| {})).unwrap();
+        let _claim = channel
+            .claim(
+                crate::attachments::Attachment {
+                    workspace: [1; 32],
+                    generation: 1,
+                },
+                [2; 32],
+                AttachmentClaim::Select { explicit: true },
+                PaneSize {
+                    columns: 80,
+                    rows: 24,
+                    cell_width: 8,
+                    cell_height: 16,
+                },
+                None,
+            )
+            .unwrap();
+        while link.next_frame().is_some() {}
+        let ended = encode_server(&ServerMessage::Pane(PaneMessage {
+            channel: channel.channel().unwrap(),
+            event: PaneEvent::Ended,
+        }))
+        .unwrap();
+        for bytes in &ended.frames {
+            link.receive(RawFrame::parse(bytes).unwrap(), now).unwrap();
+        }
+
+        assert_eq!(channel.acknowledge_accessibility(1, 1), Ok(()));
+        assert!(
+            link.next_frame().is_none(),
+            "the server ignores it on a closed channel, so nothing is sent"
+        );
+        assert_eq!(
+            channel.view(true, 60),
+            Err(LinkError::Unclaimed),
+            "every other message still refuses an ended channel"
+        );
     }
 }
