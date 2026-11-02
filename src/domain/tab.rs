@@ -657,6 +657,26 @@ impl<T> Tab<T> {
                 .is_ok()
     }
 
+    /// Whether one more Pane on `edge` of `beside` leaves every Pane its minimum size in
+    /// `available`, once Split ratios fit.
+    pub(crate) fn can_insert(
+        &self,
+        beside: PaneId,
+        edge: PaneEdge,
+        available: PaneSize,
+        divider_size: f32,
+    ) -> bool {
+        let pane_id = PaneId::from_raw(self.next_pane_id);
+        let split_id = SplitId::from_raw(self.next_split_id);
+        self.root
+            .with_split(beside, pane_id, split_id, edge)
+            .is_some_and(|root| {
+                root.minimum_size(self.minimum_pane_size, divider_size)
+                    .and_then(|required| ensure_space(available, required))
+                    .is_ok()
+            })
+    }
+
     /// The layout after moving `pane_id` onto `edge` of another Pane `target_pane_id`.
     fn moved_root(&self, pane_id: PaneId, target_pane_id: PaneId, edge: PaneEdge) -> PaneNode {
         let Some(PaneRemoval {
@@ -1714,6 +1734,24 @@ mod tests {
                 DIVIDER_SIZE
             )),
             [false, true, false]
+        );
+    }
+
+    #[test]
+    fn can_insert_should_require_room_for_the_whole_layout_with_one_more_pane() {
+        let mut tab = tab(());
+        tab.insert_pane(PaneId::new(1), PaneEdge::Right, |_| ())
+            .unwrap();
+
+        assert_eq!(
+            [
+                tab.can_insert(PaneId::new(1), PaneEdge::Right, size(302.0, 50.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(1), PaneEdge::Right, size(301.0, 50.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(1), PaneEdge::Bottom, size(201.0, 101.0), DIVIDER_SIZE),
+                tab.can_insert(PaneId::new(9), PaneEdge::Right, size(900.0, 900.0), DIVIDER_SIZE),
+            ],
+            [true, false, true, false],
+            "three 100 wide Panes need 302 with two dividers"
         );
     }
 

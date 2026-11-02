@@ -3318,13 +3318,25 @@ impl TabManager {
             .and_then(|carrier| match self.tab_at(pointer) {
                 // A Pane dropped on its own Tab stays where it is.
                 Some(tab_id) if tab_id == carrier => None,
-                Some(tab_id) => Some(StripDrop::Tab(tab_id)),
+                Some(tab_id) => self
+                    .takes_pane(tab_id, cx)
+                    .then_some(StripDrop::Tab(tab_id)),
                 None => Some(StripDrop::NewTab),
             });
         if self.pane_strip_drop != drop {
             self.pane_strip_drop = drop;
             cx.notify();
         }
+    }
+
+    /// Whether Tab `tab_id` has room for one more Pane beside its Focused Pane on the stage the
+    /// Active Tab measured, which every Tab of this strip shares.
+    fn takes_pane(&self, tab_id: TabId, cx: &App) -> bool {
+        let stage = self.tabs.active_tab().read(cx).pane_layout_size();
+        self.tabs
+            .tab(tab_id)
+            .zip(stage)
+            .is_some_and(|(view, stage)| view.read(cx).can_take_pane(stage, cx))
     }
 
     /// The Tab whose place in the Tab bar holds `pointer`.
@@ -3366,6 +3378,10 @@ impl TabManager {
         let destination = match drop {
             StripDrop::NewTab => PaneDestination::NewTab,
             StripDrop::Tab(target) => {
+                // The stage or the Tab can have changed since the drop target appeared.
+                if !self.takes_pane(target, cx) {
+                    return;
+                }
                 let Some(view) = self.tabs.tab(target).map(|view| view.read(cx)) else {
                     return;
                 };
@@ -4738,6 +4754,55 @@ mod tests {
             ),
             (false, true, vec![2, 1], (TabId::new(1), moved)),
             "the Pane joins Tab 1 beside its Focused Pane, and Tab 1 opens on it"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_without_room_beside_its_focused_pane_should_not_take_a_dropped_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        click("create-tab-button", cx);
+        cx.dispatch_action(SplitDown);
+        cx.run_until_parked();
+        // Tab 1 holds two Panes side by side. The stage leaves room for two, not three.
+        let (pane_width, two_wide, stage) = manager.read_with(cx, |manager, cx| {
+            let minimum = |tab| {
+                manager
+                    .tabs
+                    .tab(TabId::new(tab))
+                    .unwrap()
+                    .read(cx)
+                    .minimum_layout_size(cx)
+                    .unwrap()
+                    .width()
+            };
+            (
+                minimum(2),
+                minimum(1),
+                manager.tabs.active_tab().read(cx).pane_layout_size().unwrap(),
+            )
+        });
+        let window = cx.update(|window, _| window.viewport_size());
+        let chrome = f32::from(window.width) - stage.width();
+        cx.simulate_resize(gpui::size(
+            px(chrome + two_wide + pane_width / 2.0),
+            window.height,
+        ));
+        cx.run_until_parked();
+        let other_tab = cx.debug_bounds("tab-item-1-inactive").unwrap().center();
+
+        drag_focused_pane(2, &[other_tab, other_tab + point(px(1.0), px(0.0))], cx);
+        let offered = cx.debug_bounds("tab-item-1-pane-drop-target").is_some();
+        cx.simulate_mouse_up(other_tab, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            (offered, pane_counts(&manager, cx)),
+            (false, vec![2, 2]),
+            "a third Pane beside Tab 1's Focused Pane would be narrower than a Pane can be"
         );
     }
 
