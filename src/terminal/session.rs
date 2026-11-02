@@ -1813,16 +1813,14 @@ impl TerminalWorker {
     }
 
     fn read_line_mode(&mut self) {
-        if let Some(state) = self
-            .schedules
-            .update_line(Instant::now(), self.native_pty.line_mode())
-        {
+        let mode = self.native_pty.line_mode();
+        if let Some(state) = self.schedules.update_line(self.schedules.now(), mode) {
             self.events.set_line(state);
         }
     }
 
     fn line_transition(&mut self) {
-        self.schedules.line_transition(Instant::now());
+        self.schedules.line_transition(self.schedules.now());
         self.read_line_mode();
     }
 
@@ -2083,7 +2081,7 @@ impl TerminalWorker {
             if !self.flush_ordered_terminal_replies(&mut focus_reports) {
                 return false;
             }
-            self.line_transition();
+            self.schedules.note_line_output(self.schedules.now());
             // A presentable Terminal Session's next Screen carries the metadata wakeup. A separate
             // event first can evict lossless attention when that Screen replaces an older queue
             // entry. Hidden Terminal Sessions receive no Screens, so they still need the wakeup.
@@ -2366,6 +2364,10 @@ impl TerminalWorker {
     }
 
     fn publish_screen_snapshot(&mut self) -> bool {
+        // The Line Mode a frame's output left goes before that frame.
+        if self.schedules.line_output_unread() {
+            self.read_line_mode();
+        }
         self.metadata_state.publish(self.emulator.metadata());
         let semantic_content_changed = self.emulator.accessibility_content_changed();
         self.emulator.set_input_serial(self.input.written_serial());

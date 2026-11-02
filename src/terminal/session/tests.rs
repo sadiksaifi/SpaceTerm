@@ -3802,6 +3802,216 @@ fn line_mode_changes_are_reported_on_output_and_focus_during_idle_backoff() {
     session.shutdown_and_join();
 }
 
+/// A direct worker with a fixed clock at `start` that has taken its first line mode read, and
+/// the receiver for its Screens.
+fn line_worker(
+    start: Instant,
+) -> (
+    TerminalWorker,
+    ScriptedPtyRecords,
+    async_channel::Receiver<TerminalSessionEvent>,
+) {
+    let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events.into();
+    worker.schedules = WorkerSchedules::new(start, ScheduleInput::default());
+    run_due_commands(&mut worker, start);
+    assert_eq!(records.snapshot().line_reads, 1);
+    (worker, records, receiver)
+}
+
+/// Runs every scheduled command due at `now`, as the worker loop does when it wakes.
+fn run_due_commands(worker: &mut TerminalWorker, now: Instant) {
+    worker.schedules.fix_clock(now);
+    while let Some(command) = worker.schedules.take_due(now) {
+        assert!(worker.process_command(command));
+    }
+}
+
+fn count_screens(receiver: &async_channel::Receiver<TerminalSessionEvent>) -> usize {
+    std::iter::from_fn(|| receiver.try_recv().ok())
+        .filter(|event| matches!(event, TerminalSessionEvent::Screen(_)))
+        .count()
+}
+
+#[test]
+fn an_output_flood_reads_line_mode_only_at_frame_captures_and_one_settle_read() {
+    let start = Instant::now();
+    let (mut worker, records, receiver) = line_worker(start);
+    let mut frames = 0;
+    let mut now = start;
+    for batch in 0..1000 {
+        now += Duration::from_millis(1);
+        worker.schedules.fix_clock(now);
+        assert!(worker.feed_test_output(vec![format!("y {batch}\r\n").into_bytes()]));
+        run_due_commands(&mut worker, now);
+        frames += count_screens(&receiver);
+    }
+    let flood_reads = records.snapshot().line_reads - 1;
+    assert!(frames > 0);
+    assert!(
+        flood_reads <= frames,
+        "{flood_reads} line mode reads for {frames} frames"
+    );
+
+    // The last coalesced frame publishes once output is quiet, and reads first.
+    let settled = now + Duration::from_millis(200);
+    run_due_commands(&mut worker, settled - Duration::from_millis(1));
+    frames += count_screens(&receiver);
+    let reads = records.snapshot().line_reads - 1;
+    assert!(
+        reads <= frames,
+        "{reads} line mode reads for {frames} frames"
+    );
+    run_due_commands(&mut worker, settled);
+    assert_eq!(records.snapshot().line_reads - 1, reads + 1);
+    assert_eq!(worker.schedules.deadline(None), None);
+    worker.finish();
+}
+
+#[test]
+fn a_line_mode_change_goes_before_the_frame_captured_with_it() {
+    let start = Instant::now();
+    let (mut worker, records, _) = line_worker(start);
+    let publisher = worker.events.clone();
+    let queue: Arc<std::sync::OnceLock<async_channel::Receiver<TerminalSessionEvent>>> =
+        Arc::default();
+    let notifications = Arc::new(Mutex::new(Vec::new()));
+    let notifier: SubscriptionNotifier = {
+        let publisher = publisher.clone();
+        let queue = Arc::clone(&queue);
+        let notifications = Arc::clone(&notifications);
+        Arc::new(move || {
+            let queued = queue.get().map_or(0, async_channel::Receiver::len);
+            notifications
+                .lock()
+                .unwrap()
+                .push((queued, publisher.line().mode));
+        })
+    };
+    let (receiver, _sender) = publisher.subscribe(Some(notifier));
+    queue.set(receiver.clone()).unwrap();
+
+    records.update(|state| state.line_mode = PASSWORD);
+    assert!(worker.feed_test_output(vec![b"Password: ".to_vec()]));
+
+    let TerminalSessionEvent::Screen(screen) = receiver.try_recv().unwrap() else {
+        panic!("output after idle must publish a Screen at once");
+    };
+    assert!(screen_text(&screen).contains("Password: "));
+    let notifications = notifications.lock().unwrap();
+    let first_frame = notifications
+        .iter()
+        .find(|(queued, _)| *queued > 0)
+        .expect("the Screen must notify the subscriber");
+    assert_eq!(first_frame.1, PASSWORD, "{notifications:?}");
+    drop(notifications);
+    worker.finish();
+}
+
+#[test]
+fn input_and_focus_read_line_mode_at_once_and_200_ms_later() {
+    let start = Instant::now();
+    let (mut worker, records, _receiver) = line_worker(start);
+    let commands: [fn() -> Command; 2] = [
+        || Command::Key(KeyInput::text_input("a".to_owned())),
+        || Command::Focus(false),
+    ];
+    let mut now = start;
+    let mut reads = 1;
+    for command in commands {
+        now += Duration::from_secs(1);
+        worker.schedules.fix_clock(now);
+        assert!(worker.process_command(command()));
+        reads += 1;
+        assert_eq!(records.snapshot().line_reads, reads);
+        // Nothing else reads until the settle read.
+        run_due_commands(&mut worker, now + Duration::from_millis(199));
+        assert_eq!(records.snapshot().line_reads, reads);
+        run_due_commands(&mut worker, now + Duration::from_millis(200));
+        reads += 1;
+        assert_eq!(records.snapshot().line_reads, reads);
+        assert_eq!(worker.schedules.deadline(None), None);
+    }
+    worker.finish();
+}
+
+#[test]
+fn a_hidden_session_reads_line_mode_for_output_at_the_metadata_pace() {
+    let start = Instant::now();
+    let (mut worker, records, _receiver) = line_worker(start);
+    assert!(worker.process_command(Command::SetPresentable(false)));
+    let mut now = start;
+    let mut read_times = Vec::new();
+    for batch in 0..1000 {
+        now += Duration::from_millis(1);
+        if batch == 500 {
+            records.update(|state| state.line_mode = PASSWORD);
+        }
+        worker.schedules.fix_clock(now);
+        assert!(worker.feed_test_output(vec![format!("y {batch}\r\n").into_bytes()]));
+        let before = records.snapshot().line_reads;
+        run_due_commands(&mut worker, now);
+        if records.snapshot().line_reads > before {
+            read_times.push(now - start);
+        }
+    }
+    let expected: Vec<_> = (1..=10)
+        .map(|step| Duration::from_millis(step * 100))
+        .collect();
+    assert_eq!(read_times, expected);
+    // The change at 501 ms is read at the paced read at 600 ms.
+    assert!(worker.events.line().mode.hidden_input());
+    worker.finish();
+}
+
+#[test]
+fn synchronized_output_publishes_a_line_mode_change_within_100_ms() {
+    let start = Instant::now();
+    let (mut worker, records, receiver) = line_worker(start);
+    assert!(worker.publish_screen());
+    count_screens(&receiver);
+    assert!(worker.feed_test_output(vec![b"\x1b[?2026h".to_vec()]));
+    let mut last_read = None;
+    let mut changed = None;
+    let mut published = None;
+    for tick in 1..=200 {
+        let now = start + Duration::from_millis(tick * 10);
+        // Change the mode one tick after a paced read, so the next paced read must publish it.
+        if changed.is_none()
+            && last_read.is_some_and(|read| read >= start + Duration::from_millis(300))
+        {
+            records.update(|state| state.line_mode = PASSWORD);
+            changed = Some(now);
+        }
+        worker.schedules.fix_clock(now);
+        let reads = records.snapshot().line_reads;
+        assert!(worker.feed_test_output(vec![b"Password: ".to_vec()]));
+        run_due_commands(&mut worker, now);
+        if records.snapshot().line_reads > reads {
+            last_read = Some(now);
+        }
+        if published.is_none() && worker.events.line().mode == PASSWORD {
+            published = Some(now);
+        }
+    }
+    assert_eq!(
+        count_screens(&receiver),
+        0,
+        "synchronized output holds frames"
+    );
+    let changed = changed.expect("a paced read must happen while frames are held");
+    let published = published.expect("the mode change must be published while frames are held");
+    assert!(
+        published - changed <= Duration::from_millis(100),
+        "published {:?} after the change",
+        published - changed
+    );
+    // Held frames read at most once per 100 ms over 2 s.
+    assert!(records.snapshot().line_reads - 1 <= 20);
+    worker.finish();
+}
+
 fn clipboard_worker() -> (
     TerminalWorker,
     ScriptedPtyRecords,
@@ -4386,7 +4596,7 @@ fn a_hidden_session_reports_retitles_at_most_once_per_interval() {
         clipboard: WorkerClipboard::default(),
         progress: Default::default(),
     };
-    worker.schedules.fix_clock(start);
+    run_due_commands(&mut worker, start);
     assert!(worker.process_command(Command::SetPresentable(false)));
     assert!(worker.feed_test_output(vec![b"\x1b]2;first\x07".to_vec()]));
     // The consumer reads the change and drops its wakeup.
