@@ -734,7 +734,9 @@ impl PaneLink {
                     ChannelEvent::Closed(error) => {
                         received.closed.get_or_insert(error.into());
                     }
-                    event @ (ChannelEvent::Frame(_) | ChannelEvent::Pane(_)) => {
+                    event @ (ChannelEvent::Frame(_)
+                    | ChannelEvent::Pane(_)
+                    | ChannelEvent::Accessibility(_)) => {
                         drop(received);
                         // The inbox wakes the worker.
                         pushed.deliver(event);
@@ -951,8 +953,9 @@ impl PaneLink {
         self.pushed = None;
     }
 
-    /// Applies every pushed event in order: each frame is applied, then acknowledged, and
-    /// `deliver` receives the newest visible screen once per drain and every Pane event.
+    /// Applies every pushed event in order: each frame is applied, then acknowledged, each
+    /// semantic revision is acknowledged once its tail applies it, and `deliver` receives the
+    /// newest visible screen once per drain and every Pane event.
     pub(super) fn drain<A>(
         &self,
         applier: &mut A,
@@ -967,7 +970,16 @@ impl PaneLink {
         };
         pushed.drain(
             applier,
-            |frame| channel.acknowledge(frame).map_err(ServerError::from),
+            |ack| {
+                match ack {
+                    super::inbox::Ack::Frame(frame) => channel.acknowledge(frame),
+                    super::inbox::Ack::Semantics {
+                        demand_generation,
+                        revision,
+                    } => channel.acknowledge_accessibility(demand_generation, revision),
+                }
+                .map_err(ServerError::from)
+            },
             deliver,
         )
     }
@@ -1081,20 +1093,6 @@ impl PaneLink {
                 ReplyBody::Graphics(chunk) => Ok(Reply::GraphicsChunk(chunk)),
                 _ => Err(ServerError::Protocol),
             },
-            Request::Accessibility {
-                lease,
-                revision,
-                offset,
-                base,
-            } => match self.request(Operation::Accessibility {
-                channel: channel(lease)?,
-                revision,
-                offset: offset as u64,
-                base,
-            })? {
-                ReplyBody::Accessibility(chunk) => Ok(Reply::Accessibility(chunk)),
-                _ => Err(ServerError::Protocol),
-            },
             Request::AccessibilitySelection {
                 lease,
                 focus_generation,
@@ -1110,11 +1108,20 @@ impl PaneLink {
                     _ => Err(ServerError::Protocol),
                 }
             }
-            Request::EndAccessibilityDemand { lease } => self
-                .request(Operation::EndAccessibility {
-                    channel: channel(lease)?,
-                })
-                .map(|_| Reply::Unchanged),
+            Request::AccessibilityDemand { lease, demand } => {
+                let channel = channel(lease)?;
+                // The inbox admits the demand's messages before the server can send one.
+                if let Some(pushed) = &self.pushed {
+                    pushed.demand(match demand {
+                        pane::accessibility::Demand::Start { generation } => Some(generation),
+                        pane::accessibility::Demand::End => None,
+                    });
+                }
+                match self.request(Operation::AccessibilityDemand { channel, demand })? {
+                    ReplyBody::Done => Ok(Reply::Unchanged),
+                    _ => Err(ServerError::Protocol),
+                }
+            }
             Request::Release { lease } => {
                 self.bound(lease)?;
                 // Dropping the handle sends `Release` in order behind earlier input.
@@ -1419,7 +1426,9 @@ pub(super) fn present(
             let mut active_size = grant_size;
             let mut ready = false;
             let mut graphics = graphics::Graphics::default();
-            let mut semantic = accessibility::Fetcher::new(lease, Arc::clone(&counters));
+            // Channels are never reused on a connection, so each claim numbers its own demand
+            // generations from 1.
+            let mut semantic = accessibility::Semantics::new(Arc::clone(&counters));
             let mut latest_screen = None;
             let mut shown = None;
             let mut screens = ScreenReceiver::new(
@@ -1489,6 +1498,7 @@ pub(super) fn present(
                 let mut delivered = Vec::new();
                 let flow = connection.drain(
                     &mut screen::Frames {
+                        state: &state,
                         screens: &mut screens,
                         epoch,
                         generation: &mut generation,
@@ -1502,6 +1512,7 @@ pub(super) fn present(
                     |delivery| delivered.push(delivery),
                 )?;
                 let mut presented = false;
+                let mut ended = false;
                 for delivery in delivered {
                     // A frame that arrived after a successor claimed the Pane is not published.
                     if !presenter.current() {
@@ -1521,17 +1532,8 @@ pub(super) fn present(
                                     request,
                                 )?,
                                 PaneEvent::Line(line) => effects.line(&state, &events, line)?,
-                                PaneEvent::Accessibility { revision } => {
-                                    semantic.note_revision(revision)
-                                }
-                                PaneEvent::Ended => {
-                                    connection.release();
-                                    state.set(ServerPaneStatus::Ended);
-                                    let _ = events.force_send(TerminalSessionEvent::Exited(
-                                        TerminalSessionExit::Success,
-                                    ));
-                                    return Ok(());
-                                }
+                                // The drain ends with it. Semantics publish first.
+                                PaneEvent::Ended => ended = true,
                                 // Another lease holds the Pane now; a new claim says how.
                                 PaneEvent::SessionEnded | PaneEvent::Takeover(_) => {
                                     return Err(ServerError::StaleControl);
@@ -1593,22 +1595,36 @@ pub(super) fn present(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .predict(predictor.overlay());
-                    let mapping = reading::show(
+                    let mapping = show(
                         &state,
-                        &events,
+                        (&events, &semantics),
+                        &mut semantic,
                         Some(Arc::clone(&screen)),
                         (epoch, generation, mapping),
                         paste_unconfirmed,
                     )?;
                     latest_screen = Some((screen, mapping));
-                    if let Some(model) = semantic.rebind(&state, generation) {
-                        let _ = semantics.force_send(model);
-                    }
                     takeover = false;
                     if paste_unconfirmed {
                         paste_unconfirmed = false;
                         let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
                     }
+                }
+                // A revision whose tail this drain applied after the last screen it presented,
+                // including one that arrived before the channel's end, publishes bound to the
+                // current presentation and view.
+                if let Some(model) = semantic.publish(&state.accessibility, generation) {
+                    if !presenter.current() {
+                        return Err(ServerError::NotRunning);
+                    }
+                    let _ = semantics.force_send(model);
+                }
+                if ended {
+                    connection.release();
+                    state.set(ServerPaneStatus::Ended);
+                    let _ = events
+                        .force_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success));
+                    return Ok(());
                 }
                 if flow == inbox::Flow::Ended {
                     return Err(ServerError::Protocol);
@@ -1621,7 +1637,7 @@ pub(super) fn present(
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                 }
-                // Graphics and semantic transfers continue one chunk per turn without waiting.
+                // Graphics transfers continue one chunk per turn without waiting.
                 let mut busy = more_input;
                 let mut deadline = None;
                 if ready && let Some((_, mapping)) = &mut latest_screen {
@@ -1656,16 +1672,14 @@ pub(super) fn present(
                     // A changed prediction shows without waiting for a frame.
                     if turn.present || predicted {
                         generation = generation.next();
-                        *mapping = reading::show(
+                        *mapping = show(
                             &state,
-                            &events,
+                            (&events, &semantics),
+                            &mut semantic,
                             None,
                             (epoch, generation, *mapping),
                             paste_unconfirmed,
                         )?;
-                        if let Some(model) = semantic.rebind(&state, generation) {
-                            let _ = semantics.force_send(model);
-                        }
                     }
                     deadline = turn.deadline;
                     let requests = state
@@ -1722,35 +1736,33 @@ pub(super) fn present(
                         let next = Arc::make_mut(screen);
                         next.generation = generation;
                         next.graphics = graphics.snapshot();
-                        *mapping = reading::show(
+                        *mapping = show(
                             &state,
-                            &events,
+                            (&events, &semantics),
+                            &mut semantic,
                             Some(Arc::clone(screen)),
                             (epoch, generation, *mapping),
                             paste_unconfirmed,
                         )?;
-                        if let Some(model) = semantic.rebind(&state, generation) {
-                            let _ = semantics.force_send(model);
-                        }
                     }
                     // A failed image waits for the next turn; a finished one goes on at once.
                     busy |= graphics.transferring() || (completed && graphics.wants());
                 }
-                // Semantic transfer follows its own explicit demand, even while hidden, and a
-                // partial document continues one chunk per turn. It sends nothing while the
-                // client holds the server's revision.
+                // Semantic demand follows assistive technology's request, even while hidden. The
+                // server pushes revisions for as long as it stands, so nothing is fetched here.
                 if ready {
-                    let model = semantic.poll(&state, generation, &mut |request| {
-                        send(&presenter, &alive, &mut connection, request)
-                    })?;
-                    if state.epoch.load(Ordering::Acquire) != epoch {
-                        return Err(ServerError::Protocol);
-                    }
-                    if let Some(model) = model {
-                        let _ = semantics.force_send(model);
-                    }
+                    semantic.follow(
+                        state.accessibility_demand.load(Ordering::Acquire),
+                        |demand| {
+                            expect_unchanged(send(
+                                &presenter,
+                                &alive,
+                                &mut connection,
+                                &Request::AccessibilityDemand { lease, demand },
+                            )?)
+                        },
+                    )?;
                 }
-                busy |= semantic.can_continue();
                 // The worker waits for pushed events, input, a view change or a Scrollback page.
                 // A selection drag past an edge, an unechoed prediction and a Development push
                 // delay have deadlines.
@@ -1765,7 +1777,14 @@ pub(super) fn present(
             if alive.load(Ordering::Acquire) {
                 return attached;
             }
-            // Dismissal, even mid-exchange, unfocuses the Pane in order; its control remains.
+            // Dismissal, even mid-exchange, unfocuses the Pane in order; its control remains. The
+            // detached channel keeps no semantic store.
+            if semantic.demanded() {
+                let _ = connection.exchange(&Request::AccessibilityDemand {
+                    lease,
+                    demand: pane::accessibility::Demand::End,
+                });
+            }
             presenter.retire(lease, |request| connection.exchange(request));
             Ok(())
         })();
@@ -1822,6 +1841,26 @@ pub(super) fn present(
             }
         }
     }
+}
+
+/// Presents this client's view as `generation`, of `frame` when one arrived, then publishes the
+/// semantic document bound to that presentation and view. Returns the frame's mapping.
+pub(super) fn show(
+    state: &ServerPaneState,
+    (events, semantics): (
+        &async_channel::Sender<TerminalSessionEvent>,
+        &async_channel::Sender<Arc<super::super::accessibility::TerminalAccessibilityModel>>,
+    ),
+    semantic: &mut accessibility::Semantics,
+    frame: Option<Arc<ScreenSnapshot>>,
+    presentation: (u64, PresentationGeneration, ScreenMapping),
+    paste_unconfirmed: bool,
+) -> Result<ScreenMapping, ServerError> {
+    let mapping = reading::show(state, events, frame, presentation, paste_unconfirmed)?;
+    if let Some(model) = semantic.publish(&state.accessibility, presentation.1) {
+        let _ = semantics.force_send(model);
+    }
+    Ok(mapping)
 }
 
 fn drain_input(state: &ServerPaneState, input: &mpsc::Receiver<SubmittedInput>) {

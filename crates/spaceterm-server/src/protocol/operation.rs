@@ -20,17 +20,11 @@ pub enum Operation {
         attachment: crate::attachments::Attachment,
     },
     /// Gives up control of the channel's Pane. The channel closes.
-    Release {
-        channel: Channel,
-    },
+    Release { channel: Channel },
     /// Closes the channel's Pane and ends its Terminal Session.
-    Close {
-        channel: Channel,
-    },
+    Close { channel: Channel },
     /// Clears only this Pane's screen and Scrollback.
-    ClearScrollback {
-        channel: Channel,
-    },
+    ClearScrollback { channel: Channel },
     Style {
         channel: Channel,
         style: PresentationStyle,
@@ -45,9 +39,7 @@ pub enum Operation {
     },
     /// The recorded outcome of an Original Operation, without dispatching it. The reply waits
     /// like `Mutate`'s, and refuses `Missing` when the server recorded no such operation.
-    Resolve {
-        sequence: u64,
-    },
+    Resolve { sequence: u64 },
     /// Reads `rows` Scrollback rows from position `start` of history `epoch` (see
     /// [`super::screen::History`]). The page leaves out rows the server already discarded, so it
     /// may start later. An ended epoch, or history hidden by the alternate screen, is refused as
@@ -63,19 +55,17 @@ pub enum Operation {
         image: graphics::ImageKey,
         offset: u64,
     },
-    Accessibility {
-        channel: Channel,
-        revision: Option<u64>,
-        offset: u64,
-        base: Option<u64>,
-    },
     AccessibilitySelection {
         channel: Channel,
         focus_generation: u64,
         selection: Option<accessibility::SelectionRefs>,
     },
-    EndAccessibility {
+    /// Starts or ends this client's semantic demand for the channel, replied `Done`. Each start
+    /// names a new demand generation and begins without a base, so the generation's first update
+    /// is a complete document. Refused on an observation channel.
+    AccessibilityDemand {
         channel: Channel,
+        demand: accessibility::Demand,
     },
     /// Replied when the read settles. `Cancel` abandons it.
     DirectoryRead(directories::Operation),
@@ -104,13 +94,9 @@ pub enum Operation {
         session: crate::hierarchy::Id,
     },
     /// The receipt of a run, without resending its input.
-    RunStatus {
-        run: RunId,
-    },
+    RunStatus { run: RunId },
     /// Retires a settled run's receipt.
-    RunAcknowledge {
-        run: RunId,
-    },
+    RunAcknowledge { run: RunId },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,7 +119,6 @@ pub enum ReplyBody {
     Outcome(crate::hierarchy::RetainedOutcome),
     Page(Page),
     Graphics(Result<graphics::Chunk, graphics::Error>),
-    Accessibility(Result<accessibility::Chunk, accessibility::Error>),
     Directory(Result<directories::Value, directories::Error>),
     Worktree(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
@@ -281,7 +266,6 @@ impl Operation {
             self,
             Self::ScrollbackPage { .. }
                 | Self::Graphics { .. }
-                | Self::Accessibility { .. }
                 | Self::DirectoryRead(_)
                 | Self::DirectoryCreate(_)
                 | Self::WorktreeRead(_)
@@ -292,10 +276,7 @@ impl Operation {
 impl ReplyBody {
     /// Bulk replies travel at L2 in chunks of at most [`limits::BULK_CHUNK_BYTES`].
     pub fn bulk(&self) -> bool {
-        matches!(
-            self,
-            Self::Page(_) | Self::Graphics(_) | Self::Accessibility(_)
-        )
+        matches!(self, Self::Page(_) | Self::Graphics(_))
     }
 
     pub fn validate(&self) -> Result<(), Fatal> {

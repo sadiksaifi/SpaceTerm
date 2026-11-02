@@ -602,3 +602,146 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
         "a visible idle Pane sent frames or bytes"
     );
 }
+
+/// Waits for the worker to publish a model whose text holds `marker`, and returns it.
+fn published_with(
+    models: &async_channel::Receiver<
+        Arc<crate::terminal::accessibility::TerminalAccessibilityModel>,
+    >,
+    marker: &str,
+) -> Arc<crate::terminal::accessibility::TerminalAccessibilityModel> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last = None;
+    loop {
+        while let Ok(model) = models.try_recv() {
+            last = Some(model);
+        }
+        if let Some(model) = last.as_ref().filter(|model| model.text().contains(marker)) {
+            return Arc::clone(model);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no published model holds {marker}: {:?}",
+            last.map(|model| model.text().to_owned())
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The identity and revision of the output row that holds `marker`, not the command that
+/// printed it.
+fn row_of(
+    model: &crate::terminal::accessibility::TerminalAccessibilityModel,
+    marker: &str,
+) -> (crate::terminal::accessibility::AccessibilityRowId, u64) {
+    model
+        .rows()
+        .find(|row| row.text.contains(marker) && !row.text.contains("printf"))
+        .map(|row| (row.id, row.revision))
+        .unwrap_or_else(|| {
+            panic!(
+                "no output row holds {marker}: {:?}",
+                model.rows().map(|row| row.text).collect::<Vec<_>>()
+            )
+        })
+}
+
+/// The Pane worker's own loop against a real server that pushes semantics. Demand delivers a
+/// complete document, output arrives as revisions that keep unchanged rows' identities, a
+/// hidden Pane keeps its demand and catches up when shown, and a new connection delivers the
+/// document again.
+#[test]
+fn a_demanding_pane_worker_publishes_pushed_semantics_across_output_hide_and_reconnect() {
+    use spaceterm_server::connection::link::LinkError;
+    use spaceterm_server::direct::{DirectConnection, DirectConnector, DirectError};
+    struct Away;
+    impl DirectConnector for Away {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            Err(DirectError::Transport)
+        }
+    }
+    let server = ConnectedPane::with_connection(paired_connection(Arc::new(Away)));
+    let state = Arc::clone(&server.factory.state);
+    let started = server
+        .factory
+        .start(
+            TerminalGeometry::from_viewport(
+                LogicalSize::new(640.0, 432.0),
+                LogicalCellSize::new(8.0, 18.0),
+                BackingScale::ONE,
+                CellGridSize::new(80, 24),
+            ),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    let handle = &started.handle;
+    handle.set_presentable(true);
+    handle.interactive_focus(true, true);
+    handle
+        .accessibility_demand_sender()
+        .expect("a server Pane accepts semantic demand")
+        .request();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while handle.interactive_input() != InteractiveInput::Accepted {
+        assert!(Instant::now() < deadline, "the server never admitted input");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let run = |command: &str| {
+        handle.key(KeyInput::text_input(command));
+        handle.key(KeyInput {
+            physical_key: PhysicalKey::Enter,
+            logical_key: "enter".into(),
+            text: None,
+            ..KeyInput::text_input("")
+        });
+    };
+
+    run("printf 'SEMANTIC-%s\\n' one");
+    let one = published_with(&started.accessibility, "SEMANTIC-one");
+    let kept = row_of(&one, "SEMANTIC-one");
+
+    run("printf 'SEMANTIC-%s\\n' two");
+    let two = published_with(&started.accessibility, "SEMANTIC-two");
+    assert_eq!(
+        row_of(&two, "SEMANTIC-one"),
+        kept,
+        "a revision keeps an unchanged row's identity and revision"
+    );
+
+    // Output that lands while the Pane is hidden arrives once it is shown again.
+    run("sleep 0.3; printf 'SEMANTIC-%s\\n' three");
+    handle.set_presentable(false);
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(state.accessibility_demand.load(Ordering::Acquire));
+    handle.set_presentable(true);
+    let three = published_with(&started.accessibility, "SEMANTIC-three");
+    assert_eq!(row_of(&three, "SEMANTIC-one"), kept);
+
+    // A new connection has no semantic store; the worker demands again after its claim.
+    let generation = state.connection_generation();
+    server
+        .factory
+        .server
+        .link()
+        .unwrap()
+        .fail(LinkError::Closed);
+    let until = Instant::now() + Duration::from_secs(8);
+    while state.connection_generation() == generation
+        && !matches!(state.status(), ServerPaneStatus::Failed(_))
+    {
+        assert!(Instant::now() < until, "the loss was never noticed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    while started.accessibility.try_recv().is_ok() {}
+    (server.reconnect)();
+    await_status(&state, ServerPaneStatus::Connected);
+    assert!(state.connection_generation() > generation);
+    let again = published_with(&started.accessibility, "SEMANTIC-three");
+    assert!(
+        !again.shares_document(&three),
+        "the new connection's document is built from its own complete document"
+    );
+    // The server rebuilt its store for the new demand, so only row identity carries across.
+    assert_eq!(row_of(&again, "SEMANTIC-one").0, kept.0);
+    drop(started);
+}

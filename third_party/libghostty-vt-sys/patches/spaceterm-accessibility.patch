@@ -165,7 +165,7 @@ diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,834 @@
 +const std = @import("std");
 +const lib = @import("../lib.zig");
 +const PageList = @import("../PageList.zig");
@@ -288,6 +288,15 @@ new file mode 100644
 +    topology_page_index: usize = 0,
 +    topology_page_row: usize = 0,
 +    topology_active: bool = false,
++    /// A capture has emitted part of its work and not completed. It finishes against the
++    /// topology and pending rows it began with, so continuous output cannot restart it.
++    capturing: bool = false,
++    /// End of the pending rows the capture in progress extracts. Rows queued after it began
++    /// wait for the next capture.
++    pending_end: ?usize = null,
++    /// The live screen's pages differ from the topology this state holds. Its next capture
++    /// replaces the topology.
++    topology_stale: bool = false,
 +
 +    fn deinit(self: *ScreenState, alloc: std.mem.Allocator) void {
 +        self.active_rows.deinit(alloc);
@@ -301,6 +310,10 @@ new file mode 100644
 +
 +    fn row(self: *ScreenState, id: RowId) ?*RowState {
 +        return findRow(self.pages.items, self.rows.items, self.generation, id);
++    }
++
++    fn rowIndex(self: *const ScreenState, id: RowId) ?usize {
++        return findRowIndex(self.pages.items, self.rows.items.len, self.generation, id);
 +    }
 +
 +    fn topologyRow(self: *ScreenState, id: RowId) ?*RowState {
@@ -377,9 +390,21 @@ new file mode 100644
 +        self.generation = self.topology_generation;
 +        self.initialized = true;
 +        self.pending_index = 0;
++        self.pending_end = null;
 +        self.topology_page_index = 0;
 +        self.topology_page_row = 0;
 +        self.topology_active = false;
++    }
++
++    /// Ends a complete capture. Rows queued while it ran stay pending for the next one.
++    fn finishCapture(self: *ScreenState) void {
++        const end = self.pending_end orelse self.pending.items.len;
++        const rest = self.pending.items.len - end;
++        std.mem.copyForwards(RowId, self.pending.items[0..rest], self.pending.items[end..]);
++        self.pending.shrinkRetainingCapacity(rest);
++        self.pending_index = 0;
++        self.pending_end = null;
++        self.capturing = false;
 +    }
 +};
 +
@@ -470,10 +495,16 @@ new file mode 100644
 +        current.topology_generation
 +    else
 +        current.generation;
++    const generation_changed = compared_generation != screen_generation;
 +    const topology_changed = (!current.initialized and !current.topology_active) or
-+        compared_generation != screen_generation or
++        generation_changed or
 +        !pagesEql(compared_pages, observed.items);
-+    if (topology_changed) {
++    // A capture in progress keeps the topology it began with: rows appended meanwhile wait
++    // for the next capture, so output arriving faster than a capture's steps cannot restart
++    // it forever. A new screen generation replaces every row identity, so it restarts.
++    const begin = topology_changed and (!current.capturing or generation_changed);
++    current.topology_stale = topology_changed and !begin;
++    if (begin) {
 +        state.topology_epoch +%= 1;
 +        if (state.topology_epoch == 0) state.topology_epoch = 1;
 +        current.beginTopology(
@@ -549,25 +580,45 @@ new file mode 100644
 +            current.finishTopology();
 +            out.topology_complete = true;
 +        }
++        current.capturing = true;
 +        out.complete = false;
 +        out.more = true;
 +        return .success;
 +    }
 +
++    // The rows pending now are this capture's. Rows queued while it runs, including rows it
++    // already extracted and that change again, wait for the next capture.
++    if (current.pending_end == null) current.pending_end = current.pending.items.len;
++    const pending_end = current.pending_end.?;
 +    var cells_used: usize = 0;
 +    var rows_used: usize = 0;
-+    while (current.pending_index < current.pending.items.len and rows_used < max_rows) {
++    while (current.pending_index < pending_end and rows_used < max_rows) {
 +        const first = current.pending.items[current.pending_index];
 +        const node = findNode(&screen.pages, screen_tag, first.node_serial) orelse {
-+            if (current.row(first)) |row_state| row_state.pending = false;
++            if (current.row(first)) |row_state| {
++                // The capture's topology names a row whose page left Scrollback after the
++                // capture began. Never extracted, it publishes empty, so the topology stays
++                // whole; the next capture's topology drops it.
++                if (row_state.revision == 0) {
++                    row_state.revision = state.revision;
++                    const row_value: Row = .{
++                        .id = first,
++                        .revision = row_state.revision,
++                        .soft_wrapped = false,
++                    };
++                    if (!row_callback(userdata, &row_value)) return .invalid_value;
++                }
++                row_state.pending = false;
++            }
 +            current.pending_index += 1;
++            rows_used += 1;
 +            continue;
 +        };
 +        var preserved = node.pagePreservingState(t.gpa()) catch return .out_of_memory;
 +        defer preserved.deinit();
 +        const page = preserved.page();
 +        const pending_before = current.pending_index;
-+        while (current.pending_index < current.pending.items.len and rows_used < max_rows) {
++        while (current.pending_index < pending_end and rows_used < max_rows) {
 +            const id = current.pending.items[current.pending_index];
 +            if (id.node_serial != first.node_serial) break;
 +            const cols: usize = @intCast(node.cols());
@@ -620,13 +671,15 @@ new file mode 100644
 +        if (current.pending_index == pending_before or cells_used >= max_cells) break;
 +    }
 +
-+    const complete = current.pending_index >= current.pending.items.len;
++    const complete = current.pending_index >= pending_end;
 +    out.complete = complete;
 +    out.more = !complete;
 +    if (complete) {
-+        current.pending.clearRetainingCapacity();
-+        current.pending_index = 0;
++        current.finishCapture();
++        if (current.topology_stale) setStaleVisibleLines(out, current, screen, screen_tag);
 +        setCursorAndSelection(out, current, screen);
++    } else {
++        current.capturing = true;
 +    }
 +    return .success;
 +}
@@ -684,21 +737,31 @@ new file mode 100644
 +        a.node_serial == b.node_serial and a.page_row == b.page_row;
 +}
 +
++fn findRowIndex(
++    pages: []const PageInfo,
++    rows_len: usize,
++    generation: u64,
++    id: RowId,
++) ?usize {
++    if (id.screen_generation != generation) return null;
++    for (pages) |page| {
++        if (page.serial != id.node_serial or id.page_row < page.page_row_start or
++            id.page_row - page.page_row_start >= page.rows) continue;
++        const index: usize = @intCast(page.first_row + id.page_row - page.page_row_start);
++        if (index >= rows_len) return null;
++        return index;
++    }
++    return null;
++}
++
 +fn findRow(
 +    pages: []const PageInfo,
 +    rows: []RowState,
 +    generation: u64,
 +    id: RowId,
 +) ?*RowState {
-+    if (id.screen_generation != generation) return null;
-+    for (pages) |page| {
-+        if (page.serial != id.node_serial or id.page_row < page.page_row_start or
-+            id.page_row - page.page_row_start >= page.rows) continue;
-+        const index: usize = @intCast(page.first_row + id.page_row - page.page_row_start);
-+        if (index >= rows.len) return null;
-+        return &rows[index];
-+    }
-+    return null;
++    const index = findRowIndex(pages, rows.len, generation, id) orelse return null;
++    return &rows[index];
 +}
 +
 +fn queueDirtyRow(state: *ScreenState, alloc: std.mem.Allocator, id: RowId) !void {
@@ -897,6 +960,29 @@ new file mode 100644
 +    const row = state.row(id) orelse return null;
 +    if (row.revision == 0) return null;
 +    return .{ .row = id, .row_revision = row.revision, .column = pin.x };
++}
++
++/// Names the visible lines in the topology of a capture that output outran. The live
++/// Scrollbar counts rows this topology lacks or has already lost.
++fn setStaleVisibleLines(out: *Snapshot, state: *const ScreenState, screen: anytype, screen_tag: Screen) void {
++    const rows = state.rows.items.len;
++    const top = screen.pages.getTopLeft(.viewport);
++    const id: RowId = .{
++        .screen = screen_tag,
++        .screen_generation = state.generation,
++        .node_serial = top.node.serial,
++        .page_row = @intCast(top.y),
++    };
++    if (state.rowIndex(id)) |index| {
++        out.visible_start = index;
++        out.visible_len = @min(out.visible_len, rows - index);
++    } else {
++        // The viewport shows rows appended after the capture began; its last rows are the
++        // closest this topology has.
++        const len = @min(out.visible_len, rows);
++        out.visible_start = rows - len;
++        out.visible_len = len;
++    }
 +}
 +
 +fn setCursorAndSelection(out: *Snapshot, state: *ScreenState, screen: anytype) void {

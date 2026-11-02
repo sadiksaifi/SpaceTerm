@@ -2726,16 +2726,12 @@ impl TerminalPane {
     fn handle_accessibility(&mut self, accessibility: Arc<TerminalAccessibilityModel>) {
         self.accessibility_needs_presentation |=
             !accessibility.shares_snapshot(self.accessibility.as_ref());
-        if accessibility.active_screen() != self.accessibility.active_screen()
-            || !accessibility.shares_document(self.accessibility.as_ref())
+        for notification in accessibility
+            .notifications_since(&self.accessibility)
+            .iter()
         {
             self.pending_accessibility_notifications
-                .insert(AccessibilityNotification::Value);
-        }
-        if accessibility.selected_or_cursor_range() != self.accessibility.selected_or_cursor_range()
-        {
-            self.pending_accessibility_notifications
-                .insert(AccessibilityNotification::Selection);
+                .insert(notification);
         }
         self.accessibility = accessibility;
     }

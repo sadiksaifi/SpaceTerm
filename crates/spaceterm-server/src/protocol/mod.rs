@@ -19,9 +19,9 @@ pub use admission::{AgentName, InvalidAgentName, Lane};
 pub use frame::{DecodeError, Kind, RawFrame, WireMessage};
 pub use major::MAJOR;
 pub use message::{
-    Acknowledge, Cancel, Channel, ClientMessage, EffectDone, Fatal, Frame, FrameAck, Input,
-    InputEvent, InputOutcome, InventoryRevision, PaneEvent, PaneMessage, Ping, Pong, Refusal,
-    Reply, Request, RequestId, ServerMessage, View,
+    AccessibilityAck, AccessibilityMessage, Acknowledge, Cancel, Channel, ClientMessage,
+    EffectDone, Fatal, Frame, FrameAck, Input, InputEvent, InputOutcome, InventoryRevision,
+    PaneEvent, PaneMessage, Ping, Pong, Refusal, Reply, Request, RequestId, ServerMessage, View,
 };
 pub use operation::{
     Claim, ClaimReply, HistoryPosition, MAX_RUN_COMMAND_BYTES, ObserveReply, Operation, ReplyBody,

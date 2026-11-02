@@ -688,6 +688,13 @@ impl TerminalRuntime {
             let _ = commands.send(Command::EndAccessibilityDemand(Instant::now()));
         }
     }
+    /// Ends server client accessibility demand and drops the semantic store. The next demand
+    /// builds a complete model again, even when the terminal has not changed.
+    pub(crate) fn release_server_accessibility(&self) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ReleaseAccessibility(Instant::now()));
+        }
+    }
     /// Sends application mouse input without starting a server-owned Selection.
     /// Adapter snapshot numbers fence starts; accepted gestures retain their starting snapshot.
     pub fn application_pointer(&self, input: PointerInput, snapshot: u64, current_snapshot: u64) {
@@ -1007,6 +1014,7 @@ enum Command {
     Run(String, RunReply),
     ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
     EndAccessibilityDemand(Instant),
+    ReleaseAccessibility(Instant),
     Subscribe {
         accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
         clipboard: async_channel::Sender<ClipboardRequest>,
@@ -1068,13 +1076,13 @@ enum Command {
 }
 
 impl Command {
+    /// Whether the command acts on what the client sees, so a pending screen publishes first.
+    /// Semantic construction never does: it binds to the last published presentation, so
+    /// demanding semantics adds no frames ahead of the pacing deadline (ADR 0062).
     fn requires_presentation_barrier(&self) -> bool {
         matches!(
             self,
-            Self::ApplicationPointer(..)
-                | Self::ServerAccessibilitySelection(..)
-                | Self::AccessibilityContinue
-                | Self::PublishAccessibility
+            Self::ApplicationPointer(..) | Self::ServerAccessibilitySelection(..)
         )
     }
 
@@ -1096,6 +1104,7 @@ impl Command {
             | Self::FlushInput => PaneWorkerCommand::Input,
             Self::ServerAccessibilitySelection(..)
             | Self::EndAccessibilityDemand(..)
+            | Self::ReleaseAccessibility(..)
             | Self::AccessibilityDemand
             | Self::AccessibilityContinue
             | Self::PublishAccessibility => PaneWorkerCommand::Accessibility,
@@ -1129,6 +1138,7 @@ impl fmt::Debug for Command {
             Self::Run(..) => "Run",
             Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
+            Self::ReleaseAccessibility(..) => "ReleaseAccessibility",
             Self::Subscribe { .. } => "Subscribe",
             Self::Key(..) => "Key",
             Self::ClearScreenAndScrollback => "ClearScreenAndScrollback",
@@ -1560,20 +1570,8 @@ impl TerminalWorker {
     }
 
     fn order_presentation_barrier(&mut self, command: Command) -> Command {
-        if !self.schedules.is_presentable()
-            && matches!(
-                &command,
-                Command::AccessibilityContinue | Command::PublishAccessibility
-            )
-        {
-            return command;
-        }
         if command.requires_presentation_barrier() && self.schedules.take_presentation_barrier() {
-            self.pending_command = Some(if matches!(&command, Command::AccessibilityContinue) {
-                Command::PublishAccessibility
-            } else {
-                command
-            });
+            self.pending_command = Some(command);
             Command::PublishPendingScreen
         } else {
             command
@@ -1583,7 +1581,7 @@ impl TerminalWorker {
     fn take_accessibility_continuation(&mut self) -> Option<Command> {
         self.schedules
             .take_accessibility_continuation()
-            .then(|| self.order_presentation_barrier(Command::AccessibilityContinue))
+            .then_some(Command::AccessibilityContinue)
     }
 
     fn process_command(&mut self, command: Command) -> bool {
@@ -1605,6 +1603,12 @@ impl TerminalWorker {
             }
             Command::EndAccessibilityDemand(ended_at) => {
                 self.schedules.end_accessibility_demand(ended_at);
+                true
+            }
+            Command::ReleaseAccessibility(ended_at) => {
+                self.emulator.release_accessibility();
+                self.schedules
+                    .release_accessibility(ended_at, self.schedules.now());
                 true
             }
             Command::Subscribe {
@@ -1747,7 +1751,11 @@ impl TerminalWorker {
                 keep_running
             }
             Command::AccessibilityDemand => {
-                self.schedules.accessibility_demand_received(Instant::now());
+                // A server Pane keeps no model without demand, so new demand publishes the
+                // current model even when it equals the one published last.
+                if self.schedules.accessibility_demand_received(Instant::now()) {
+                    self.emulator.reset_accessibility_presentation();
+                }
                 true
             }
             Command::AccessibilityContinue => self.publish_accessibility(false),
@@ -2409,7 +2417,7 @@ impl TerminalWorker {
                     if self.accessibility.is_closed() {
                         self.schedules.disable_accessibility();
                     } else if semantics_changed {
-                        self.schedules.update_accessibility(false);
+                        // A semantic update in progress continues; it never waits for screens.
                         self.schedules.note_screen_published();
                     }
                 }
@@ -2511,8 +2519,10 @@ impl TerminalWorker {
             }
         };
         self.schedules.update_accessibility(more);
-        self.schedules
-            .mark_accessibility_presented(Instant::now(), !more);
+        self.schedules.mark_accessibility_presented(Instant::now());
+        if !more && self.emulator.take_accessibility_capture_outran() {
+            self.schedules.note_screen_published();
+        }
         if let Some(accessibility) = accessibility {
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.
