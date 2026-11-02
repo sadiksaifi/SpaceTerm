@@ -186,7 +186,7 @@ impl Render for KeyPropagationProbe {
 fn blinking_screen() -> Arc<ScreenSnapshot> {
     ScreenSnapshot::from_test_parts(
         Arc::from([Arc::from([crate::terminal::CellSnapshot {
-            text: "x".to_owned(),
+            text: "x".into(),
             foreground_source: crate::terminal::TerminalColor::Default,
             background_source: crate::terminal::TerminalColor::Default,
             inverse: false,
@@ -212,7 +212,7 @@ fn blinking_screen() -> Arc<ScreenSnapshot> {
 fn blinking_cursor_screen(visible: bool, blinking: bool) -> Arc<ScreenSnapshot> {
     let mut screen = ScreenSnapshot::from_test_parts(
         Arc::from([Arc::from([crate::terminal::CellSnapshot {
-            text: "x".to_owned(),
+            text: "x".into(),
             foreground_source: crate::terminal::TerminalColor::Default,
             background_source: crate::terminal::TerminalColor::Default,
             inverse: false,
@@ -252,7 +252,7 @@ fn context_action_screen(
 ) -> Arc<ScreenSnapshot> {
     let mut screen = ScreenSnapshot::from_test_parts_at(
         Arc::from([Arc::from([crate::terminal::CellSnapshot {
-            text: "x".to_owned(),
+            text: "x".into(),
             foreground_source: crate::terminal::TerminalColor::Default,
             background_source: crate::terminal::TerminalColor::Default,
             inverse: false,
@@ -345,7 +345,7 @@ fn text_screen(generation: u64, rows: &[&str]) -> Arc<ScreenSnapshot> {
         .map(|row| {
             row.chars()
                 .map(|character| crate::terminal::CellSnapshot {
-                    text: character.to_string(),
+                    text: character.to_string().into(),
                     foreground_source: crate::terminal::TerminalColor::Default,
                     background_source: crate::terminal::TerminalColor::Default,
                     inverse: false,
@@ -4082,7 +4082,8 @@ fn each_painted_grid_counts_once_as_a_painted_frame(cx: &mut TestAppContext) {
     for generation in 1..=10 {
         let changed = Arc::make_mut(&mut screen);
         changed.generation = crate::terminal::PresentationGeneration::test(10 + generation);
-        Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].text = generation.to_string();
+        Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].text =
+            generation.to_string().into();
         pane.update(cx, |pane, cx| {
             pane.handle_event(TerminalSessionEvent::Screen(screen.clone()), cx);
             cx.notify();
@@ -4161,7 +4162,7 @@ fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
     // Output and Selection change in separate frames so each invalidation is observed.
     let changed = Arc::make_mut(&mut screen);
     changed.generation = crate::terminal::PresentationGeneration::test(11);
-    Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[2])[0].text = "changed".to_owned();
+    Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[2])[0].text = "changed".into();
     pane.update(cx, |pane, cx| {
         pane.blink_phase_visible = !pane.blink_phase_visible;
         pane.handle_event(TerminalSessionEvent::Screen(screen.clone()), cx);
@@ -9733,7 +9734,7 @@ fn blink_frames_reuse_stable_geometry_and_decorations_through_the_pane_clock(
     let marker = Color::rgb(0x11_dd_77);
     let mut screen = blinking_screen();
     let cell = &mut Arc::make_mut(&mut Arc::make_mut(&mut Arc::make_mut(&mut screen).rows)[0])[0];
-    cell.text = "a".to_owned();
+    cell.text = "a".into();
     cell.underline = crate::terminal::TerminalUnderlineSnapshot::Single;
     cell.underline_source = crate::terminal::TerminalColor::Rgb(marker);
     pane.update(cx, |pane, cx| {

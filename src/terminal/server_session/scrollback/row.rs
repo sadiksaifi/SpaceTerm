@@ -3,7 +3,8 @@
 //! A cached row stores its text once and each distinct cell style once, and it omits the blank
 //! cells after its last written cell. Presenting it builds the desktop row again.
 use crate::terminal::{
-    CellSemanticSnapshot, CellSnapshot, RowSnapshot, TerminalColor, TerminalUnderlineSnapshot,
+    CellSemanticSnapshot, CellSnapshot, CellText, RowSnapshot, TerminalColor,
+    TerminalUnderlineSnapshot,
 };
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ pub(super) const BLANK: &str = " ";
 /// A cell that holds nothing, in the default style. It presents a row the cache does not hold yet.
 pub(super) fn blank_cell() -> CellSnapshot {
     CellSnapshot {
-        text: BLANK.to_owned(),
+        text: CellText::new_inline(BLANK),
         foreground_source: TerminalColor::Default,
         background_source: TerminalColor::Default,
         inverse: false,
@@ -57,7 +58,7 @@ struct Packed {
 impl CachedRow {
     pub(crate) fn new(cells: &[CellSnapshot], wrapped: bool) -> Self {
         let template = |cell: &CellSnapshot| CellSnapshot {
-            text: String::new(),
+            text: CellText::default(),
             selected: false,
             spacer_tail: false,
             ..cell.clone()
@@ -106,7 +107,7 @@ impl CachedRow {
         (0..self.columns)
             .map(|column| {
                 let mut cell = self.style(column).clone();
-                cell.text = self.text(column).to_owned();
+                cell.text = self.text(column).into();
                 cell.spacer_tail = self.spacer_tail(column);
                 cell
             })

@@ -18,7 +18,7 @@
 //! discarded key drops every prediction.
 use super::ScreenSnapshot;
 use crate::terminal::emulator::{
-    ActiveScreenSnapshot, CursorPositionSnapshot, RowSnapshot, TerminalUnderlineSnapshot,
+    ActiveScreenSnapshot, CellText, CursorPositionSnapshot, RowSnapshot, TerminalUnderlineSnapshot,
 };
 use spaceterm_server::pane::{InteractiveInput, Key, LineState, Request};
 use std::collections::VecDeque;
@@ -430,7 +430,7 @@ impl Overlay {
             let Some(cell) = edited.get_mut(usize::from(column)) else {
                 continue;
             };
-            cell.text = text.to_string();
+            cell.text = CellText::new(text.encode_utf8(&mut [0; 4]));
             cell.underline = TerminalUnderlineSnapshot::Single;
             cell.invisible = false;
             cell.spacer_tail = false;

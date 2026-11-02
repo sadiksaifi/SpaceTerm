@@ -1,9 +1,10 @@
 //! Round trips from a real emulator through the server encoder, the wire and this decoder.
-use super::screen_decoder::{DecodedScreen, ScreenDecoder, UpdateError, decode_page};
+use super::screen_decoder::{DecodedScreen, Presenter, ScreenDecoder, UpdateError, decode_page};
 use super::*;
 use crate::runtime::screen_encoder::{ScreenCapture, ScreenEncoder, encode_page};
 use crate::terminal::emulator::TerminalEmulator;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
+use crate::terminal::testing::count_allocations;
 use spaceterm_server::protocol::frame::{Assembler, encode_server};
 use spaceterm_server::protocol::screen::{Cells, Row, Run, ScreenUpdate, ScrollShift, StyleRef};
 use spaceterm_server::protocol::{Channel, Frame, RawFrame, ServerMessage, limits};
@@ -16,14 +17,21 @@ fn geometry(columns: u16, rows: u16) -> TerminalGeometry {
     )
 }
 
-/// An emulator on the server, its channel encoder, and the client's decoder.
+/// An emulator on the server, its channel encoder, and the client's decoder and presenter.
 struct Session {
     emulator: TerminalEmulator,
     encoder: ScreenEncoder,
     decoder: ScreenDecoder,
+    presenter: Presenter,
+    appearance: TerminalAppearanceUpdate,
     screen: Option<Arc<ScreenSnapshot>>,
     generation: u64,
     frame: u64,
+    /// Frames that carried a scroll.
+    shifts: usize,
+    /// The last frame's scroll and the indexes of the rows it sent.
+    last_shift: Option<ScrollShift>,
+    last_rows: Vec<u16>,
 }
 
 impl Session {
@@ -32,9 +40,14 @@ impl Session {
             emulator: TerminalEmulator::new(geometry(columns, rows)).unwrap(),
             encoder: ScreenEncoder::default(),
             decoder: ScreenDecoder::new(Arc::default()),
+            presenter: Presenter::default(),
+            appearance: crate::terminal::test_terminal_appearance_update(),
             screen: None,
             generation: 0,
             frame: 0,
+            shifts: 0,
+            last_shift: None,
+            last_rows: Vec::new(),
         }
     }
 
@@ -54,14 +67,22 @@ impl Session {
     /// Presents the emulator's state against `base` through the wire, and checks that the
     /// decoder then holds exactly the server's screen.
     fn sync_against(&mut self, base: Option<u64>) -> Option<&DecodedScreen> {
+        let (capture, frame, update) = self.next_against(base)?;
+        let decoded = self.decoder.apply(frame, base, update, None).unwrap();
+        assert_same(decoded, &capture, &mut self.presenter, &self.appearance);
+        Some(decoded)
+    }
+
+    /// The emulator's state as the next frame against `base`, after the wire.
+    fn next_against(&mut self, base: Option<u64>) -> Option<(ScreenCapture, u64, ScreenUpdate)> {
         let capture = self.capture();
         let frame = self.frame + 1;
         let update = self.encoder.encode(&capture, frame, base)?;
         self.frame = frame;
-        let update = through_wire(frame, base, update);
-        let decoded = self.decoder.apply(frame, base, update, None).unwrap();
-        assert_same(decoded, &capture);
-        Some(decoded)
+        self.shifts += usize::from(update.shift.is_some());
+        self.last_shift = update.shift;
+        self.last_rows = update.rows.iter().map(|row| row.index).collect();
+        Some((capture, frame, through_wire(frame, base, update)))
     }
 
     fn sync(&mut self) -> Option<&DecodedScreen> {
@@ -105,7 +126,7 @@ fn sent(cell: &CellSnapshot) -> SentCell {
     let mut text = if cell.spacer_tail {
         " ".to_owned()
     } else {
-        cell.text.clone()
+        cell.text.to_string()
     };
     if text.len() > limits::MAX_CELL_BYTES {
         let mut end = limits::MAX_CELL_BYTES;
@@ -142,7 +163,12 @@ fn sent(cell: &CellSnapshot) -> SentCell {
     }
 }
 
-fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
+fn assert_same(
+    decoded: &DecodedScreen,
+    capture: &ScreenCapture,
+    presenter: &mut Presenter,
+    appearance: &TerminalAppearanceUpdate,
+) {
     let screen = capture.screen.as_ref();
     assert_eq!(decoded.rows.len(), screen.rows.len());
     for (index, (decoded, expected)) in decoded.rows.iter().zip(screen.rows.iter()).enumerate() {
@@ -179,8 +205,7 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
         decoded.accessibility_revision,
         capture.accessibility_revision
     );
-    let appearance = crate::terminal::test_terminal_appearance_update();
-    let rendered = decoded.snapshot(PresentationGeneration::test(1), &appearance);
+    let rendered = presenter.snapshot(decoded, PresentationGeneration::test(1), appearance);
     assert!(Arc::ptr_eq(&rendered.rows, &decoded.rows));
     assert_eq!(rendered.cursor.position, screen.cursor.position);
     assert_eq!(rendered.cursor.visible, screen.cursor.visible);
@@ -439,6 +464,158 @@ fn random_terminal_output_round_trips_through_every_frame() {
     assert!(selected > 0 && images > 0, "{selected} {images}");
 }
 
+/// A line of up to `columns` cells or more, with styles, links, wide characters, emoji and
+/// combining marks. Words repeat, so different rows often hold equal text. The emulator's debug
+/// build is slow to store links and graphemes, so they stay rare.
+fn rich_line(random: &mut Random, columns: u16) -> String {
+    let mut line = String::new();
+    for _ in 0..random.below(u64::from(columns) / 4 + 2) {
+        line.push_str(match random.below(9) {
+            3..=6 if random.below(8) != 0 => "same",
+            0 => "\x1b[1;31m",
+            1 => "\x1b[0m",
+            2 => "界面",
+            3 => "👨‍👩‍👧",
+            4 => "e\u{301}",
+            5 => "\x1b]8;;https://example.com/a\x1b\\same\x1b]8;;\x1b\\",
+            6 => "\x1b]8;;https://example.com/b\x1b\\same\x1b]8;;\x1b\\",
+            7 => "same",
+            _ => " word",
+        });
+    }
+    line
+}
+
+/// One step of output that mostly scrolls: lines, scroll regions, reverse index, scroll and
+/// line insertion commands, the alternate screen, and resizes that reflow wrapped lines. Lines
+/// end in a cleared Scrollback now and then, because the emulator's debug build checks every
+/// Scrollback cell on each write.
+fn scroll_step(random: &mut Random, session: &mut Session) {
+    let rows = session.emulator.geometry().grid().rows;
+    let columns = session.emulator.geometry().grid().cols;
+    let output = match random.below(12) {
+        0..=2 => {
+            let lines = (0..random.below(u64::from(rows) + 3) + 1)
+                .map(|_| format!("{}\r\n", rich_line(random, columns)))
+                .collect::<String>();
+            if random.below(4) == 0 {
+                lines + "\x1b[3J"
+            } else {
+                lines
+            }
+        }
+        3 => {
+            let top = random.below(u64::from(rows) / 2) + 1;
+            let bottom = top + 1 + random.below(u64::from(rows) - top);
+            let mut output = format!("\x1b[{top};{bottom}r\x1b[{bottom};1H");
+            for _ in 0..random.below(4) + 1 {
+                output.push('\n');
+                output.push_str(&rich_line(random, columns / 2));
+            }
+            output + "\x1b[r"
+        }
+        4 => format!(
+            "\x1b[{}{}",
+            random.below(5) + 1,
+            ["S", "T"][random.below(2) as usize]
+        ),
+        5 => format!(
+            "\x1b[r\x1b[1;1H{}{}",
+            "\x1bM".repeat(random.below(3) as usize + 1),
+            rich_line(random, columns / 2)
+        ),
+        6 => format!(
+            "\x1b[{};1H\x1b[{}{}",
+            random.below(u64::from(rows)) + 1,
+            random.below(3) + 1,
+            ["L", "M"][random.below(2) as usize]
+        ),
+        7 => ["\x1b[?1049h", "\x1b[?1049l"][random.below(2) as usize].to_owned(),
+        8 => {
+            let columns = 4 + random.below(60) as u16;
+            let rows = 3 + random.below(24) as u16;
+            session.emulator.resize(geometry(columns, rows)).unwrap();
+            String::new()
+        }
+        // A row rewritten in place after a scroll, with the same text and another link.
+        9 => format!(
+            "\r\n\x1b[{};1H{}",
+            random.below(u64::from(rows)) + 1,
+            [
+                "\x1b]8;;https://example.com/a\x1b\\same\x1b]8;;\x1b\\",
+                "same"
+            ][random.below(2) as usize]
+        ),
+        _ => {
+            step(random, session);
+            String::new()
+        }
+    };
+    session.emulator.feed(output.as_bytes());
+}
+
+#[test]
+fn scroll_heavy_output_round_trips_through_every_frame() {
+    let _graphics = crate::terminal::graphics::test_lock();
+    let mut shifts = 0;
+    for seed in 1..=8_u64 {
+        let mut random = Random(seed.wrapping_mul(0xd1b5_4a32_d192_ed03) | 1);
+        let mut session = Session::new(4 + random.below(60) as u16, 3 + random.below(24) as u16);
+        session.sync().unwrap();
+        for _ in 0..100 {
+            scroll_step(&mut random, &mut session);
+            if random.below(40) == 0 {
+                session.sync_against(None).unwrap();
+            } else {
+                session.sync();
+            }
+        }
+        shifts += session.shifts;
+    }
+    assert!(shifts > 200, "{shifts} frames scrolled");
+}
+
+/// A row rewritten after a scroll with the text and style of a row that moved, and another
+/// link, is sent with its own link.
+#[test]
+fn a_row_rewritten_with_another_link_after_a_scroll_keeps_its_link() {
+    let mut session = Session::new(20, 5);
+    session.emulator.feed(
+        b"zero\r\n\x1b]8;;https://example.com/a\x1b\\same\x1b]8;;\x1b\\\r\ntwo\r\nthree\r\nfour",
+    );
+    session.sync().unwrap();
+    session
+        .emulator
+        .feed(b"\r\nfive\x1b[1;1H\x1b]8;;https://example.com/b\x1b\\same\x1b]8;;\x1b\\");
+    session.sync().unwrap();
+    assert_eq!(session.shifts, 1);
+}
+
+/// Rows with equal text and distinct links still scroll, so only the row that moved in is
+/// encoded and sent.
+#[test]
+fn rows_that_differ_only_in_their_links_scroll() {
+    let mut session = Session::new(20, 5);
+    let line = |row: usize| format!("\x1b]8;;https://example.com/{row}\x1b\\same\x1b]8;;\x1b\\");
+    for row in 0..5 {
+        let at = format!("\x1b[{};1H", row + 1);
+        session.emulator.feed((at + &line(row)).as_bytes());
+    }
+    session.sync().unwrap();
+    session.emulator.feed(format!("\r\n{}", line(5)).as_bytes());
+    session.sync().unwrap();
+    assert_eq!(
+        session.last_shift,
+        Some(ScrollShift {
+            top: 0,
+            bottom: 5,
+            lines: 1
+        })
+    );
+    assert_eq!(session.last_rows, [4]);
+    assert_eq!(session.encoder.encoded_rows(), 1);
+}
+
 #[test]
 fn each_decoded_frame_counts_once() {
     use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
@@ -693,7 +870,8 @@ fn snapshots_keep_program_colors_and_project_client_defaults() {
         crate::runtime::HyperlinkKind::Url
     );
     assert!(decoded.rows[0][1].hyperlink.is_none());
-    let screen = decoded.snapshot(PresentationGeneration::test(1), &appearance);
+    let screen =
+        Presenter::default().snapshot(decoded, PresentationGeneration::test(1), &appearance);
     assert_eq!(
         screen.colors.foreground,
         crate::appearance::Color::rgb(0x0a141e)
@@ -728,4 +906,207 @@ fn truecolor_beyond_the_style_table_keeps_every_color() {
     }
     session.emulator.feed(b"\x1b[0m\x1b[1;1Hx");
     session.sync().unwrap();
+}
+
+#[test]
+fn a_frame_that_changes_only_metadata_allocates_nothing() {
+    let mut session = Session::new(80, 24);
+    session.emulator.feed(b"\x1b[31mhello\r\n\x1b[5mworld");
+    session.sync().unwrap();
+    session.emulator.feed(b"\x1b[3;5H");
+    let base = session.decoder.frame();
+    let (_, frame, update) = session.next_against(base).unwrap();
+    assert!(update.rows.is_empty() && update.shift.is_none() && update.colors.is_none());
+    let (applied, allocations) = count_allocations(|| {
+        session
+            .decoder
+            .apply(frame, base, update, None)
+            .map(|decoded| decoded.cursor.position)
+    });
+    assert!(applied.unwrap().is_some());
+    assert_eq!(allocations.count, 0);
+}
+
+#[test]
+fn a_changed_row_allocates_nothing_per_cell() {
+    let mut session = Session::new(200, 3);
+    session.emulator.feed(b"warm\r\n");
+    // The renderer still holds the rows of the screen it draws.
+    let _drawn = Arc::clone(&session.sync().unwrap().rows);
+    let line = "ab \u{754c}\u{9762} e\u{301}\u{30d} \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} \u{1f642} ";
+    session.emulator.feed(line.repeat(8).as_bytes());
+    let base = session.decoder.frame();
+    let (_, frame, update) = session.next_against(base).unwrap();
+    assert_eq!(update.rows.len(), 1);
+    let (applied, allocations) = count_allocations(|| {
+        session
+            .decoder
+            .apply(frame, base, update, None)
+            .map(|decoded| decoded.rows[0].len())
+    });
+    assert_eq!(applied, Ok(200));
+    // The row itself, and the copy of the row list the renderer holds.
+    assert!(allocations.count <= 2, "{allocations:?}");
+}
+
+#[test]
+fn consecutive_screens_share_the_projected_palette_until_its_inputs_change() {
+    use spaceterm_server::protocol::screen::{Colors, CursorPosition, Geometry};
+    let colors = Colors {
+        foreground: [10, 20, 30],
+        background: [0, 0, 0],
+        cursor: [0, 0, 0],
+        cursor_text: [0, 0, 0],
+        palette: vec![[40, 50, 60]; 256],
+        foreground_overridden: false,
+        background_overridden: false,
+        cursor_overridden: false,
+        palette_overrides: [0, 0, 0, 0],
+    };
+    let keyframe = ScreenUpdate {
+        geometry: Some(Geometry {
+            columns: 4,
+            rows: 2,
+            cell_pixels: None,
+        }),
+        modes: Some(Default::default()),
+        colors: Some(colors.clone()),
+        ..ScreenUpdate::default()
+    };
+    let moved = |column| ScreenUpdate {
+        cursor: spaceterm_server::protocol::screen::Cursor {
+            position: Some(CursorPosition {
+                row: 1,
+                column,
+                width: 1,
+            }),
+            ..Default::default()
+        },
+        ..ScreenUpdate::default()
+    };
+    let generation = PresentationGeneration::test;
+    let mut appearance = crate::terminal::test_terminal_appearance_update();
+    let mut decoder = ScreenDecoder::new(Arc::default());
+    let mut presenter = Presenter::default();
+    let decoded = decoder.apply(1, None, keyframe, None).unwrap();
+    let first = presenter.snapshot(decoded, generation(1), &appearance);
+    let decoded = decoder.apply(2, Some(1), moved(1), None).unwrap();
+    let (second, allocations) =
+        count_allocations(|| presenter.snapshot(decoded, generation(2), &appearance));
+    assert_eq!(allocations.count, 0);
+    assert!(Arc::ptr_eq(&first.colors.palette, &second.colors.palette));
+    assert_eq!(
+        second.cursor.position.map(|position| position.column),
+        Some(1)
+    );
+    assert_eq!(second.generation, generation(2));
+
+    // A program's palette entry and a new appearance each project a new palette.
+    let decoded = decoder
+        .apply(
+            3,
+            Some(2),
+            ScreenUpdate {
+                colors: Some(Colors {
+                    palette_overrides: [0b100, 0, 0, 0],
+                    ..colors
+                }),
+                ..moved(2)
+            },
+            None,
+        )
+        .unwrap();
+    let third = presenter.snapshot(decoded, generation(3), &appearance);
+    assert_eq!(
+        third.colors.palette[2],
+        crate::appearance::Color::rgb(0x28323c)
+    );
+    assert!(third.colors.palette_overrides[2]);
+    let configured = Arc::make_mut(&mut appearance.appearance);
+    configured.colors.normal[1] = crate::appearance::Color::rgb(0x112233);
+    configured.colors.background = crate::appearance::Color::rgb(0x445566);
+    let decoded = decoder.apply(4, Some(3), moved(3), None).unwrap();
+    let fourth = presenter.snapshot(decoded, generation(4), &appearance);
+    assert_eq!(
+        fourth.colors.palette[1],
+        crate::appearance::Color::rgb(0x112233)
+    );
+    assert_eq!(fourth.background, crate::appearance::Color::rgb(0x445566));
+    assert_eq!(
+        fourth.colors.palette[2],
+        crate::appearance::Color::rgb(0x28323c)
+    );
+}
+
+#[test]
+fn a_new_appearance_reaches_the_next_screen() {
+    use spaceterm_server::protocol::screen::{Colors, Geometry};
+    let keyframe = ScreenUpdate {
+        geometry: Some(Geometry {
+            columns: 4,
+            rows: 2,
+            cell_pixels: None,
+        }),
+        modes: Some(Default::default()),
+        colors: Some(Colors {
+            foreground: [0, 0, 0],
+            background: [0, 0, 0],
+            cursor: [0, 0, 0],
+            cursor_text: [0, 0, 0],
+            palette: vec![[0, 0, 0]; 256],
+            foreground_overridden: false,
+            background_overridden: false,
+            cursor_overridden: false,
+            palette_overrides: [0, 0, 0, 0],
+        }),
+        ..ScreenUpdate::default()
+    };
+    let generation = PresentationGeneration::test;
+    let mut decoder = ScreenDecoder::new(Arc::default());
+    let mut presenter = Presenter::default();
+    let decoded = decoder.apply(1, None, keyframe, None).unwrap();
+    let mut appearance = crate::terminal::test_terminal_appearance_update();
+    let first = presenter.snapshot(decoded, generation(1), &appearance);
+    assert_eq!(first.appearance_generation, appearance.generation);
+
+    // A new generation of the same resolved appearance.
+    appearance.generation = appearance.generation.next().unwrap();
+    let second = presenter.snapshot(decoded, generation(2), &appearance);
+    assert_eq!(second.appearance_generation, appearance.generation);
+
+    // New colors and bold-as-bright under the same generation.
+    let mut resolved = (*appearance.appearance).clone();
+    resolved.colors.foreground = crate::appearance::Color::rgb(0x123456);
+    resolved.bold_as_bright = !resolved.bold_as_bright;
+    appearance.appearance = Arc::new(resolved);
+    let third = presenter.snapshot(decoded, generation(3), &appearance);
+    assert_eq!(third.appearance_generation, appearance.generation);
+    assert_eq!(*third.configured_colors, appearance.appearance.colors);
+    assert_eq!(third.bold_as_bright, appearance.appearance.bold_as_bright);
+}
+
+#[test]
+fn a_program_that_changes_one_palette_entry_again_shows_its_new_color() {
+    let mut session = Session::new(8, 2);
+    let mut palette_entry = |osc: &[u8]| {
+        session.emulator.feed(osc);
+        let base = session.decoder.frame();
+        let (_, frame, update) = session.next_against(base).unwrap();
+        let decoded = session.decoder.apply(frame, base, update, None).unwrap();
+        let rendered = session.presenter.snapshot(
+            decoded,
+            PresentationGeneration::test(frame),
+            &session.appearance,
+        );
+        assert!(rendered.colors.palette_overrides[2]);
+        rendered.colors.palette[2]
+    };
+    assert_eq!(
+        palette_entry(b"\x1b]4;2;rgb:01/02/03\x1b\\"),
+        crate::appearance::Color::rgb(0x010203)
+    );
+    assert_eq!(
+        palette_entry(b"\x1b]4;2;rgb:04/05/06\x1b\\"),
+        crate::appearance::Color::rgb(0x040506)
+    );
 }

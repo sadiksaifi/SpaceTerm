@@ -615,7 +615,7 @@ fn mapping_history(adapter: &Adapter) -> crate::terminal::emulator::HistorySnaps
 /// A cell in the default style holding the first character of `text`.
 fn blank_test_cell(text: &str) -> CellSnapshot {
     CellSnapshot {
-        text: text.chars().next().unwrap().to_string(),
+        text: text.chars().next().unwrap().to_string().into(),
         foreground_source: TerminalColor::Default,
         background_source: TerminalColor::Default,
         inverse: false,

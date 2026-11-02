@@ -1,8 +1,11 @@
 //! Encodes screen snapshots as row style runs against the frame the client holds.
 //!
 //! The emulator keeps an unchanged row's `Arc` across snapshots, so pointer equality with the
-//! baseline is the per-row damage that decides which rows are encoded again. Each encoded row is
-//! hashed, and a scroll is found by matching those hashes against the baseline's.
+//! baseline is the per-row damage. A row that moved is a new `Arc` with the old cells, so each
+//! changed row is scanned once into its runs and a hash of what they send, and a scroll is found
+//! by matching those hashes against the baseline's before any row is encoded. A row is encoded,
+//! from its scan, only when the cells it sends differ from the baseline row the client shows at
+//! its position after the scroll.
 use super::*;
 use spaceterm_server::pane::effects::Hyperlink;
 use spaceterm_server::protocol::limits;
@@ -11,7 +14,7 @@ use spaceterm_server::protocol::screen::{
     Page, Run, ScreenUpdate, ScrollShift, Style, StyleDefinition, StyleRef, flags,
 };
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::ops::Range;
 
 /// A Pane's screen state, captured under the `PaneService` lock and encoded outside it.
 #[derive(Clone)]
@@ -28,6 +31,9 @@ pub struct ScreenCapture {
 pub(crate) struct ScreenEncoder {
     tables: Tables,
     baseline: Option<Baseline>,
+    /// Rows the last `encode` call encoded.
+    #[cfg(test)]
+    encoded_rows: usize,
 }
 
 struct Baseline {
@@ -43,17 +49,49 @@ struct Baseline {
     accessibility_revision: u64,
 }
 
-/// One row as encoded, with the snapshot row it came from.
-#[derive(Clone)]
+/// One row as encoded, with the snapshot row it came from and that row's [`Scan`] hash and end.
 struct Encoded {
     source: RowSnapshot,
+    hash: u64,
+    /// The cells after `end` are blank.
+    end: usize,
     line: Arc<Line>,
+}
+
+/// One snapshot row before encoding.
+struct Pending<'a> {
+    source: &'a RowSnapshot,
+    wrapped: bool,
+    /// The row's [`Scan`] hash.
+    hash: u64,
+    /// The row's [`Scan`] end. The cells after it are blank, and `0` sends no cell.
+    end: usize,
+    /// `None` for the baseline row at the same index, whose hash and end it shares.
+    scan: Option<Scan>,
+}
+
+/// A row's cells up to the last one it sends, split where a style field or the sent link
+/// changes, and a hash of the sent text, styles and links. Cell metadata the client never receives is left
+/// out, so equal hashes only suggest equal rows.
+#[derive(Clone)]
+struct Scan {
+    /// The cells after `end` are blank.
+    end: usize,
+    hash: u64,
+    /// This row's [`RunStart`]s in the frame's list.
+    starts: Range<usize>,
+}
+
+/// The first cell of a run, with the style and link every cell of the run sends.
+struct RunStart<'a> {
+    cell: usize,
+    style: Style,
+    link: Option<&'a HyperlinkTarget>,
 }
 
 /// One row's content without its index. Style and link ids refer to the encoder's tables.
 #[derive(Debug, PartialEq, Eq)]
 struct Line {
-    hash: u64,
     wrapped: bool,
     runs: Vec<Run>,
 }
@@ -69,6 +107,11 @@ enum Mode {
 }
 
 impl ScreenEncoder {
+    #[cfg(test)]
+    pub(crate) fn encoded_rows(&self) -> usize {
+        self.encoded_rows
+    }
+
     /// Encodes `capture` as frame `frame` against the client's frame `base`, or as a keyframe when
     /// `base` is `None`. Returns `None` when the capture equals the baseline; the baseline then
     /// stays as it was. A base other than the last emitted frame receives every row.
@@ -78,6 +121,10 @@ impl ScreenEncoder {
         frame: u64,
         base: Option<u64>,
     ) -> Option<ScreenUpdate> {
+        #[cfg(test)]
+        {
+            self.encoded_rows = 0;
+        }
         let previous = self.baseline.take();
         let mode = match (&previous, base) {
             (_, None) => Mode::Keyframe,
@@ -91,8 +138,8 @@ impl ScreenEncoder {
             None => None,
         };
         match encoded {
-            Some((update, rows)) => {
-                self.baseline = Some(Baseline::new(capture, frame, rows, &update));
+            Some((update, built)) => {
+                self.baseline = Some(Baseline::new(capture, frame, built, &update));
                 Some(update)
             }
             None => {
@@ -108,7 +155,7 @@ impl ScreenEncoder {
         capture: &ScreenCapture,
         previous: Option<&Baseline>,
         mode: Mode,
-    ) -> Option<(ScreenUpdate, Vec<Encoded>)> {
+    ) -> Option<(ScreenUpdate, Built)> {
         if mode != Mode::Delta {
             self.tables = Tables::default();
         }
@@ -118,55 +165,88 @@ impl ScreenEncoder {
         let resized = previous.is_some_and(|previous| {
             (previous.geometry.columns, previous.geometry.rows) != (geometry.columns, geometry.rows)
         });
-        let rows = screen
+        let mut starts = Vec::new();
+        let pending = screen
             .rows
             .iter()
             .enumerate()
-            .map(|(index, row)| {
+            .map(|(index, source)| {
                 let wrapped = screen.row_soft_wrapped.get(index).copied().unwrap_or(false);
-                let reused = previous
+                let same = previous
                     .filter(|_| !resized)
                     .and_then(|previous| previous.rows.get(index))
-                    .filter(|old| old.line.wrapped == wrapped && Arc::ptr_eq(&old.source, row));
-                Encoded {
-                    source: Arc::clone(row),
-                    line: match reused {
-                        Some(old) => Arc::clone(&old.line),
-                        None => Arc::new(Line::encode(row, wrapped, &mut self.tables)),
+                    .filter(|old| Arc::ptr_eq(&old.source, source));
+                match same {
+                    Some(old) => Pending {
+                        source,
+                        wrapped,
+                        hash: old.hash,
+                        end: old.end,
+                        scan: None,
                     },
+                    None => {
+                        let scan = Scan::of(source, &mut starts);
+                        Pending {
+                            source,
+                            wrapped,
+                            hash: scan.hash,
+                            end: scan.end,
+                            scan: Some(scan),
+                        }
+                    }
                 }
             })
             .collect::<Vec<_>>();
+        // The baseline row the client shows at each position once `shift` applies. `None` is a
+        // blank row: a keyframe starts from blank rows, a resize sends every row that is not
+        // blank, and a scroll moves blank rows in.
+        let (shift, shown) = match previous.filter(|_| !resized) {
+            Some(previous) => match find_shift(&previous.rows, &pending) {
+                Some((shift, shown)) => (Some(shift), shown),
+                None => (None, previous.rows.iter().map(Some).collect()),
+            },
+            None => (None, Vec::new()),
+        };
+        let blank = Arc::new(Line::blank());
+        let mut changed = Vec::with_capacity(pending.len());
+        let mut rows = Vec::with_capacity(pending.len());
+        for (index, new) in pending.iter().enumerate() {
+            let shown = shown.get(index).copied().flatten();
+            let shown_line = shown.map_or(&blank, |old| &old.line);
+            let line = match shown {
+                Some(old) if new.shown_by(Some(old)) => Arc::clone(&old.line),
+                // Each blank row gets its own `Arc`: rows sharing one would serialize every
+                // frame's reference counting on one address.
+                None if new.shown_by(None) => Arc::new(Line::blank()),
+                _ => {
+                    #[cfg(test)]
+                    {
+                        self.encoded_rows += 1;
+                    }
+                    let scan = match &new.scan {
+                        Some(scan) => scan.clone(),
+                        None => Scan::of(new.source, &mut starts),
+                    };
+                    Arc::new(Line::build(
+                        new.source,
+                        new.wrapped,
+                        &scan,
+                        &starts,
+                        &mut self.tables,
+                    ))
+                }
+            };
+            changed.push(mode == Mode::Replace || line != *shown_line);
+            rows.push(Encoded {
+                source: Arc::clone(new.source),
+                hash: new.hash,
+                end: new.end,
+                line,
+            });
+        }
         if mode == Mode::Delta && self.tables.overflowed {
             return None;
         }
-        let blank = Arc::new(Line::blank());
-        let mut shift = None;
-        let changed = match previous {
-            Some(previous) => {
-                let mut old = if resized {
-                    vec![Arc::clone(&blank); rows.len()]
-                } else {
-                    previous
-                        .rows
-                        .iter()
-                        .map(|row| Arc::clone(&row.line))
-                        .collect()
-                };
-                if !resized && let Some((found, shifted)) = find_shift(&old, &rows, &blank) {
-                    shift = Some(found);
-                    old = shifted;
-                }
-                rows.iter()
-                    .zip(&old)
-                    .map(|(new, old)| new.line != *old)
-                    .collect::<Vec<_>>()
-            }
-            None => rows
-                .iter()
-                .map(|row| mode == Mode::Replace || *row.line != *blank)
-                .collect(),
-        };
         let changed_rows = rows
             .iter()
             .zip(changed)
@@ -181,6 +261,7 @@ impl ScreenEncoder {
         let (styles, links) = self.tables.take_definitions();
         let modes = modes(screen);
         let colors = colors(screen);
+        let colors_changed = previous.is_none_or(|previous| previous.colors != colors);
         let update = ScreenUpdate {
             cursor: cursor(screen),
             history: History {
@@ -194,9 +275,7 @@ impl ScreenEncoder {
             modes: previous
                 .is_none_or(|previous| previous.modes != modes)
                 .then_some(modes),
-            colors: previous
-                .is_none_or(|previous| previous.colors != colors)
-                .then_some(colors),
+            colors: colors_changed.then(|| colors.clone()),
             shift,
             styles,
             links,
@@ -223,21 +302,27 @@ impl ScreenEncoder {
         {
             return None;
         }
-        Some((update, rows))
+        Some((update, Built { rows, colors }))
     }
 }
 
+/// What a built frame leaves for its [`Baseline`].
+struct Built {
+    rows: Vec<Encoded>,
+    colors: Colors,
+}
+
 impl Baseline {
-    fn new(capture: &ScreenCapture, frame: u64, rows: Vec<Encoded>, update: &ScreenUpdate) -> Self {
+    fn new(capture: &ScreenCapture, frame: u64, built: Built, update: &ScreenUpdate) -> Self {
         let screen = capture.screen.as_ref();
         Self {
             frame,
-            rows,
+            rows: built.rows,
             cursor: update.cursor,
             history: update.history,
             geometry: geometry(screen),
             modes: modes(screen),
-            colors: colors(screen),
+            colors: built.colors,
             graphics: screen.graphics.clone(),
             generation: update.generation,
             accessibility_revision: update.accessibility_revision,
@@ -275,32 +360,32 @@ pub(crate) fn encode_page<'a>(
     }
 }
 
-/// Finds the scroll that leaves the fewest rows to send. It returns the shift and the baseline
-/// rows after it, or `None` when no shift saves a row.
-fn find_shift(
-    old: &[Arc<Line>],
-    new: &[Encoded],
-    blank: &Arc<Line>,
-) -> Option<(ScrollShift, Vec<Arc<Line>>)> {
+/// Finds the scroll that leaves the fewest rows to encode, comparing row hashes. It returns the
+/// shift and the baseline rows the client shows after it, `None` for a row that moved in blank.
+/// It returns `None` when no shift saves a row.
+fn find_shift<'a>(
+    old: &'a [Encoded],
+    new: &[Pending],
+) -> Option<(ScrollShift, Vec<Option<&'a Encoded>>)> {
     let changed = new
         .iter()
         .zip(old)
-        .filter(|(new, old)| new.line != **old)
+        .filter(|(new, old)| !new.resembles(Some(old)))
         .count();
     if changed < 2 {
         return None;
     }
     let mut positions = HashMap::<u64, usize>::with_capacity(old.len());
     for (index, line) in old.iter().enumerate().rev() {
-        if !line.runs.is_empty() {
+        if line.end != 0 {
             positions.insert(line.hash, index);
         }
     }
     let mut votes = HashMap::<isize, usize>::new();
     for (index, (row, old)) in new.iter().zip(old).enumerate() {
-        if *row.line != **old
-            && !row.line.runs.is_empty()
-            && let Some(source) = positions.get(&row.line.hash)
+        if !row.resembles(Some(old))
+            && row.end != 0
+            && let Some(source) = positions.get(&row.hash)
         {
             *votes.entry(*source as isize - index as isize).or_default() += 1;
         }
@@ -310,19 +395,19 @@ fn find_shift(
         b.1.cmp(&a.1)
             .then(a.0.unsigned_abs().cmp(&b.0.unsigned_abs()))
     });
-    let mut best: Option<(usize, ScrollShift, Vec<Arc<Line>>)> = None;
+    let mut best: Option<(usize, ScrollShift, Vec<Option<&Encoded>>)> = None;
     for (lines, _) in candidates.into_iter().take(3) {
         let Some(shift) = shift_region(old, new, lines) else {
             continue;
         };
-        let mut shifted = old.to_vec();
-        if shift.apply(&mut shifted, || Arc::clone(blank)).is_none() {
+        let mut shifted = old.iter().map(Some).collect::<Vec<_>>();
+        if shift.apply(&mut shifted, || None).is_none() {
             continue;
         }
         let remaining = new
             .iter()
             .zip(&shifted)
-            .filter(|(new, old)| new.line != **old)
+            .filter(|(new, old)| !new.resembles(**old))
             .count();
         if best
             .as_ref()
@@ -335,8 +420,8 @@ fn find_shift(
         .map(|(_, shift, shifted)| (shift, shifted))
 }
 
-/// The region of the longest stretch of rows where `new[i]` equals `old[i + lines]`.
-fn shift_region(old: &[Arc<Line>], new: &[Encoded], lines: isize) -> Option<ScrollShift> {
+/// The region of the longest stretch of rows where `new[i]` resembles `old[i + lines]`.
+fn shift_region(old: &[Encoded], new: &[Pending], lines: isize) -> Option<ScrollShift> {
     let mut longest = 0..0;
     let mut start = None;
     for index in 0..=new.len() {
@@ -344,7 +429,7 @@ fn shift_region(old: &[Arc<Line>], new: &[Encoded], lines: isize) -> Option<Scro
             && index
                 .checked_add_signed(lines)
                 .and_then(|source| old.get(source))
-                .is_some_and(|old| *new[index].line == **old);
+                .is_some_and(|old| new[index].resembles(Some(old)));
         match (matched, start) {
             (true, None) => start = Some(index),
             (false, Some(first)) => {
@@ -371,45 +456,256 @@ fn shift_region(old: &[Arc<Line>], new: &[Encoded], lines: isize) -> Option<Scro
     })
 }
 
-impl Line {
-    fn blank() -> Self {
-        Self::hashed(false, Vec::new())
+impl Pending<'_> {
+    /// Whether this row probably equals `old`, a blank row when `None`. Scroll detection uses
+    /// this, so it compares hashes and no cells.
+    fn resembles(&self, old: Option<&Encoded>) -> bool {
+        match old {
+            Some(old) => {
+                old.line.wrapped == self.wrapped
+                    && (Arc::ptr_eq(&old.source, self.source) || old.hash == self.hash)
+            }
+            None => !self.wrapped && self.end == 0,
+        }
     }
 
-    fn hashed(wrapped: bool, runs: Vec<Run>) -> Self {
-        let mut hasher = DefaultHasher::new();
-        wrapped.hash(&mut hasher);
-        runs.hash(&mut hasher);
+    /// Whether the client already shows this row where it shows `old`, a blank row when `None`.
+    /// Rows with equal hashes are compared cell by cell up to their ends. The cells after the end
+    /// are blank on both sides, and blank cells differ only in semantic content, which is not sent.
+    fn shown_by(&self, old: Option<&Encoded>) -> bool {
+        match old {
+            Some(old) => {
+                old.line.wrapped == self.wrapped
+                    && (Arc::ptr_eq(&old.source, self.source)
+                        || (old.hash == self.hash
+                            && same_cells(&old.source[..old.end], &self.source[..self.end])))
+            }
+            None => self.resembles(None),
+        }
+    }
+}
+
+impl Scan {
+    /// Scans `cells`, appending its run starts to `starts`. Trailing blank cells are skipped
+    /// first, as the encoding omits them.
+    fn of<'a>(cells: &'a [CellSnapshot], starts: &mut Vec<RunStart<'a>>) -> Self {
+        let end = cells
+            .iter()
+            .rposition(|cell| !blank(cell))
+            .map_or(0, |last| last + 1);
+        let first = starts.len();
+        let mut hash = RowHasher::default();
+        // Equal fields give equal styles, so styles are made only where the fields change.
+        let mut current: Option<(StyleFields, Option<&HyperlinkTarget>)> = None;
+        for (index, cell) in cells[..end].iter().enumerate() {
+            let fields = StyleFields::of(cell);
+            let link = sent_link(cell);
+            if current.is_none_or(|(last, last_link)| last != fields || !same_link(last_link, link))
+            {
+                let style = fields.style();
+                hash.style(style);
+                hash.link(link);
+                starts.push(RunStart {
+                    cell: index,
+                    style,
+                    link,
+                });
+                current = Some((fields, link));
+            }
+            hash.text(text(cell));
+        }
         Self {
-            hash: hasher.finish(),
-            wrapped,
-            runs,
+            end,
+            hash: hash.0,
+            starts: first..starts.len(),
+        }
+    }
+}
+
+/// Whether every field of every cell is equal, as `==` decides. It compares the inline fields
+/// first, and one-byte text without a call.
+fn same_cells(a: &[CellSnapshot], b: &[CellSnapshot]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_cell(a, b))
+}
+
+fn same_cell(a: &CellSnapshot, b: &CellSnapshot) -> bool {
+    // Naming every field fails the build when a field is added.
+    let CellSnapshot {
+        text,
+        foreground_source,
+        background_source,
+        inverse,
+        bold,
+        faint,
+        italic,
+        blinking,
+        invisible,
+        underline,
+        underline_source,
+        strikethrough,
+        overline,
+        selected,
+        spacer_tail,
+        semantic_content,
+        hyperlink,
+    } = a;
+    let flags = [
+        *inverse,
+        *bold,
+        *faint,
+        *italic,
+        *blinking,
+        *invisible,
+        *strikethrough,
+        *overline,
+        *selected,
+        *spacer_tail,
+    ] == [
+        b.inverse,
+        b.bold,
+        b.faint,
+        b.italic,
+        b.blinking,
+        b.invisible,
+        b.strikethrough,
+        b.overline,
+        b.selected,
+        b.spacer_tail,
+    ];
+    flags
+        && *foreground_source == b.foreground_source
+        && *background_source == b.background_source
+        && *underline_source == b.underline_source
+        && *underline == b.underline
+        && *semantic_content == b.semantic_content
+        && match (text.as_bytes(), b.text.as_bytes()) {
+            ([a], [b]) => a == b,
+            (a, b) => a == b,
+        }
+        && *hyperlink == b.hyperlink
+}
+
+/// The link the client receives for `cell`: none when the target exceeds
+/// [`limits::MAX_LINK_BYTES`].
+fn sent_link(cell: &CellSnapshot) -> Option<&HyperlinkTarget> {
+    cell.hyperlink
+        .as_deref()
+        .filter(|target| target.value.len() <= limits::MAX_LINK_BYTES)
+}
+
+/// Whether two links reach the client as the same table entry.
+fn same_link(a: Option<&HyperlinkTarget>, b: Option<&HyperlinkTarget>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => std::ptr::eq(a, b) || (a.kind == b.kind && a.value == b.value),
+        _ => false,
+    }
+}
+
+/// A fast, non-cryptographic hash of a row's sent content, one multiply per short cell. Collisions
+/// only cost scroll detection a match, because reuse compares cells.
+#[derive(Default)]
+struct RowHasher(u64);
+
+impl RowHasher {
+    const RUN: u64 = u64::MAX;
+
+    fn word(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    /// Mixes `text` with its length, so cell boundaries count.
+    fn text(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        if let [byte] = bytes {
+            self.word(u64::from(*byte) | 1 << 56);
+            return;
+        }
+        let (chunks, rest) = bytes.as_chunks::<7>();
+        for chunk in chunks {
+            let mut word = [0xff; 8];
+            word[..7].copy_from_slice(chunk);
+            self.word(u64::from_le_bytes(word));
+        }
+        let mut word = [0; 8];
+        word[..rest.len()].copy_from_slice(rest);
+        word[7] = rest.len() as u8;
+        self.word(u64::from_le_bytes(word));
+    }
+
+    fn style(&mut self, style: Style) {
+        let color = |color: pane::Color| match color {
+            pane::Color::Default => 0,
+            pane::Color::Palette(index) => 1 << 24 | u64::from(index),
+            pane::Color::Rgb([red, green, blue]) => {
+                2 << 24 | u64::from(red) << 16 | u64::from(green) << 8 | u64::from(blue)
+            }
+        };
+        self.word(Self::RUN);
+        self.word(color(style.foreground) | color(style.background) << 32);
+        self.word(
+            color(style.underline_color)
+                | u64::from(style.flags) << 32
+                | u64::from(style.underline) << 48,
+        );
+    }
+
+    fn link(&mut self, link: Option<&HyperlinkTarget>) {
+        match link {
+            None => self.word(0),
+            Some(target) => {
+                self.word(match target.kind {
+                    HyperlinkKind::Url => 1,
+                    HyperlinkKind::LocalPath => 2,
+                });
+                self.text(&target.value);
+            }
+        }
+    }
+}
+
+impl Line {
+    fn blank() -> Self {
+        Self {
+            wrapped: false,
+            runs: Vec::new(),
         }
     }
 
     /// Encodes `cells` without trailing blank cells. A style that does not fit the table travels
     /// inline. A link that does not fit loses its target and sets `overflowed`.
     fn encode(cells: &[CellSnapshot], wrapped: bool, tables: &mut Tables) -> Self {
-        let end = cells
-            .iter()
-            .rposition(|cell| !blank(cell))
-            .map_or(0, |last| last + 1);
-        let mut runs = Vec::<Run>::new();
-        let mut lengths = Vec::<u16>::new();
+        let mut starts = Vec::new();
+        let scan = Scan::of(cells, &mut starts);
+        Self::build(cells, wrapped, &scan, &starts, tables)
+    }
+
+    /// Encodes `cells` from their `scan`, whose run starts are in `starts`. Runs whose style and
+    /// link ids are equal, because a link lost its target, merge.
+    fn build(
+        cells: &[CellSnapshot],
+        wrapped: bool,
+        scan: &Scan,
+        starts: &[RunStart],
+        tables: &mut Tables,
+    ) -> Self {
+        let starts = &starts[scan.starts.clone()];
+        let mut runs = Vec::<Run>::with_capacity(starts.len());
+        // The first cell of the last run, and whether each of its cells holds one character.
+        let mut first = 0;
         let mut narrow = true;
-        // Neighboring cells usually share a style and a link, so table lookups follow changes.
         let mut last_style: Option<(Style, StyleRef)> = None;
-        let mut last_link: Option<(&Arc<HyperlinkTarget>, Option<u16>)> = None;
-        for cell in &cells[..end] {
-            let style = style(cell);
-            let style_id = match last_style {
-                Some((last, id)) if last == style => id,
-                _ => tables.style(style),
+        let mut last_link: Option<(&HyperlinkTarget, Option<u16>)> = None;
+        for (index, start) in starts.iter().enumerate() {
+            let stop = starts.get(index + 1).map_or(scan.end, |next| next.cell);
+            let style = match last_style {
+                Some((last, id)) if last == start.style => id,
+                _ => tables.style(start.style),
             };
-            last_style = Some((style, style_id));
-            let link = match (&cell.hyperlink, last_link) {
+            last_style = Some((start.style, style));
+            let link = match (start.link, last_link) {
                 (None, _) => None,
-                (Some(target), Some((last, id))) if Arc::ptr_eq(target, last) => id,
+                (Some(target), Some((last, id))) if std::ptr::eq(target, last) => id,
                 (Some(target), _) => {
                     let id = tables.link(target);
                     last_link = Some((target, id));
@@ -418,36 +714,38 @@ impl Line {
             };
             if runs
                 .last()
-                .is_none_or(|run| run.style != style_id || run.link != link)
+                .is_none_or(|run| run.style != style || run.link != link)
             {
-                finish(runs.last_mut(), &mut lengths, narrow);
+                finish(runs.last_mut(), &cells[first..start.cell], narrow);
+                first = start.cell;
                 narrow = true;
                 runs.push(Run {
-                    style: style_id,
+                    style,
                     link,
-                    text: String::new(),
+                    text: String::with_capacity(stop - start.cell),
                     cells: Cells::Narrow,
                 });
             }
-            let text = text(cell);
-            narrow &= text.chars().nth(1).is_none() && !text.is_empty();
-            lengths.push(text.len() as u16);
             if let Some(run) = runs.last_mut() {
-                run.text.push_str(text);
+                for cell in &cells[start.cell..stop] {
+                    let text = text(cell);
+                    narrow &= text.chars().nth(1).is_none() && !text.is_empty();
+                    run.text.push_str(text);
+                }
             }
         }
-        finish(runs.last_mut(), &mut lengths, narrow);
-        Self::hashed(wrapped, runs)
+        finish(runs.last_mut(), &cells[first..scan.end], narrow);
+        Self { wrapped, runs }
     }
 }
 
-fn finish(run: Option<&mut Run>, lengths: &mut Vec<u16>, narrow: bool) {
+/// Gives `run`, made of `cells`, explicit cell lengths unless each cell holds one character.
+fn finish(run: Option<&mut Run>, cells: &[CellSnapshot], narrow: bool) {
     if let Some(run) = run
         && !narrow
     {
-        run.cells = Cells::Explicit(std::mem::take(lengths));
+        run.cells = Cells::Explicit(cells.iter().map(|cell| text(cell).len() as u16).collect());
     }
-    lengths.clear();
 }
 
 /// The cell's text as sent: empty for a wide character's spacer, at most
@@ -472,32 +770,82 @@ fn blank(cell: &CellSnapshot) -> bool {
     cell.text == " "
         && !cell.spacer_tail
         && cell.hyperlink.is_none()
-        && style(cell) == Style::DEFAULT
+        && StyleFields::of(cell) == StyleFields::DEFAULT
 }
 
-fn style(cell: &CellSnapshot) -> Style {
-    let flag = |set: bool, flag: u16| if set { flag } else { 0 };
-    Style {
-        foreground: color(cell.foreground_source),
-        background: color(cell.background_source),
-        underline_color: color(cell.underline_source),
-        flags: flag(cell.inverse, flags::INVERSE)
-            | flag(cell.bold, flags::BOLD)
-            | flag(cell.faint, flags::FAINT)
-            | flag(cell.italic, flags::ITALIC)
-            | flag(cell.blinking, flags::BLINKING)
-            | flag(cell.invisible, flags::INVISIBLE)
-            | flag(cell.strikethrough, flags::STRIKETHROUGH)
-            | flag(cell.overline, flags::OVERLINE)
-            | flag(cell.selected, flags::SELECTED),
-        underline: match cell.underline {
-            TerminalUnderlineSnapshot::None => 0,
-            TerminalUnderlineSnapshot::Single => 1,
-            TerminalUnderlineSnapshot::Double => 2,
-            TerminalUnderlineSnapshot::Curly => 3,
-            TerminalUnderlineSnapshot::Dotted => 4,
-            TerminalUnderlineSnapshot::Dashed => 5,
-        },
+/// The cell fields its sent [`Style`] is made of, cheaper to compare than the style.
+#[derive(Clone, Copy, PartialEq)]
+struct StyleFields {
+    foreground: TerminalColor,
+    background: TerminalColor,
+    underline_color: TerminalColor,
+    /// In the order of `FLAGS`.
+    flags: [bool; 9],
+    underline: TerminalUnderlineSnapshot,
+}
+
+impl StyleFields {
+    const FLAGS: [u16; 9] = [
+        flags::INVERSE,
+        flags::BOLD,
+        flags::FAINT,
+        flags::ITALIC,
+        flags::BLINKING,
+        flags::INVISIBLE,
+        flags::STRIKETHROUGH,
+        flags::OVERLINE,
+        flags::SELECTED,
+    ];
+
+    /// The fields of [`Style::DEFAULT`].
+    const DEFAULT: Self = Self {
+        foreground: TerminalColor::Default,
+        background: TerminalColor::Default,
+        underline_color: TerminalColor::Default,
+        flags: [false; 9],
+        underline: TerminalUnderlineSnapshot::None,
+    };
+
+    fn of(cell: &CellSnapshot) -> Self {
+        Self {
+            foreground: cell.foreground_source,
+            background: cell.background_source,
+            underline_color: cell.underline_source,
+            flags: [
+                cell.inverse,
+                cell.bold,
+                cell.faint,
+                cell.italic,
+                cell.blinking,
+                cell.invisible,
+                cell.strikethrough,
+                cell.overline,
+                cell.selected,
+            ],
+            underline: cell.underline,
+        }
+    }
+
+    fn style(self) -> Style {
+        Style {
+            foreground: color(self.foreground),
+            background: color(self.background),
+            underline_color: color(self.underline_color),
+            flags: self
+                .flags
+                .iter()
+                .zip(Self::FLAGS)
+                .filter(|(set, _)| **set)
+                .fold(0, |flags, (_, flag)| flags | flag),
+            underline: match self.underline {
+                TerminalUnderlineSnapshot::None => 0,
+                TerminalUnderlineSnapshot::Single => 1,
+                TerminalUnderlineSnapshot::Double => 2,
+                TerminalUnderlineSnapshot::Curly => 3,
+                TerminalUnderlineSnapshot::Dotted => 4,
+                TerminalUnderlineSnapshot::Dashed => 5,
+            },
+        }
     }
 }
 

@@ -64,7 +64,7 @@ fn the_maximum_grid_with_maximal_cells_and_metadata_fits_one_terminal_frame() {
     let mut index = 0_usize;
     for row in Arc::make_mut(&mut screen.rows) {
         for cell in Arc::make_mut(row) {
-            cell.text = "\u{10ffff}".repeat(32);
+            cell.text = "\u{10ffff}".repeat(32).into();
             cell.foreground_source = TerminalColor::Rgb(crate::appearance::color::Color::rgb(
                 0xff0000 | (index % 4095) as u32,
             ));

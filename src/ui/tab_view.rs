@@ -7134,7 +7134,7 @@ mod tests {
         let screen = |generation: u64, blinking: bool| {
             let mut screen = ScreenSnapshot::from_test_parts_at(
                 Arc::from([Arc::from([crate::terminal::CellSnapshot {
-                    text: "x".to_owned(),
+                    text: "x".into(),
                     foreground_source: crate::terminal::TerminalColor::Default,
                     background_source: crate::terminal::TerminalColor::Default,
                     inverse: false,
