@@ -5086,35 +5086,35 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (manager, _records, cx) = tab_manager(cx);
-        cx.dispatch_action(SplitRight);
+        cx.dispatch_action(SplitDown);
         cx.run_until_parked();
-        // Tab 1's two Panes were split side by side, then stacked by a drag.
+        // Tab 1's two Panes were split one above the other, then set side by side by a drag.
         let first = cx.debug_bounds("pane-surface-1").unwrap();
-        let bottom = point(first.center().x, first.bottom() - first.size.height * 0.1);
-        drag_focused_pane(2, &[bottom, bottom - point(px(0.0), px(1.0))], cx);
-        cx.simulate_mouse_up(bottom, MouseButton::Left, Modifiers::none());
+        let right = point(first.right() - first.size.width * 0.1, first.center().y);
+        drag_focused_pane(2, &[right, right - point(px(1.0), px(0.0))], cx);
+        cx.simulate_mouse_up(right, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         click("create-tab-button", cx);
-        // The stage holds two Panes side by side, not three.
-        let (pane_width, two_wide, stage) = manager.read_with(cx, |manager, cx| {
+        // The stage holds one Pane's height, not two.
+        let (pane_height, stage) = manager.read_with(cx, |manager, cx| {
             let active = manager.tabs.active_tab().read(cx);
-            let pane_width = active.minimum_pane_size().width();
             (
-                pane_width,
-                2.0 * pane_width + super::super::tab_view::pane_gap(cx),
+                active.minimum_pane_size().height(),
                 active.pane_layout_size().unwrap(),
             )
         });
         let window = cx.update(|window, _| window.viewport_size());
-        let chrome = f32::from(window.width) - stage.width();
+        let chrome = f32::from(window.height) - stage.height();
         cx.simulate_resize(gpui::size(
-            px(chrome + two_wide + pane_width / 2.0),
-            window.height,
+            window.width,
+            px(chrome + pane_height * 1.5),
         ));
         cx.run_until_parked();
         let dragged = cx.debug_bounds("tab-item-1-inactive").unwrap().center();
-        let target = cx.debug_bounds("tab-item-2-active").unwrap().center();
+        let tab = cx.debug_bounds("tab-item-2-active").unwrap();
+        let target = point(tab.left() + tab.size.width * 0.4, tab.center().y);
 
+        // Into Tab 2's middle from its leading side, before the pointer passes its center.
         drag_tab(
             dragged,
             &[
@@ -5131,7 +5131,7 @@ mod tests {
         assert_eq!(
             (lit, pane_counts(&manager, cx)),
             (None, vec![2, 1]),
-            "the merge places Tab 1's Panes side by side again, which leaves no room beside Tab 2's"
+            "the merge stacks Tab 1's Panes again, two Panes tall, where the stage holds one"
         );
     }
 
