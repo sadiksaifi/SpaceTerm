@@ -94,6 +94,7 @@ impl Snapshot {
 pub struct Chunk {
     pub image: ImageKey,
     pub offset: usize,
+    #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
 }
 

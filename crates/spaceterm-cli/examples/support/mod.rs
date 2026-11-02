@@ -1,5 +1,6 @@
 //! The native checks' SpaceTerm Protocol client: requests on one admitted connection, and claimed
-//! Panes with their input, reported input outcomes, and pushed screens and Pane events.
+//! Panes with their input, reported input outcomes, and pushed screens, semantic messages and Pane
+//! events.
 //!
 //! The spaceterm crate's native tests also include this file, so it names physical keys by their
 //! protocol codes instead of through the spaceterm crate.
@@ -9,8 +10,8 @@ use spaceterm_server::{
     connection::link::{ChannelEvent, ChannelHandle, LinkError, LinkEvent, ServerLink},
     hierarchy::{Id, Inventory, Mutation, RetainedOutcome},
     pane::{
-        AttachmentClaim, FocusTarget, Key, Lease, PaneSize, PasteOutcome, Refusal, effects,
-        graphics,
+        AttachmentClaim, FocusTarget, Key, Lease, PaneSize, PasteOutcome, Refusal, accessibility,
+        effects, graphics,
     },
     protocol::{
         Channel, ClaimReply, Frame, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
@@ -374,6 +375,8 @@ struct Received {
     screen: Screen,
     /// Native effect requests not yet taken, oldest first.
     effects: VecDeque<effects::Request>,
+    /// Semantic messages not yet taken, in channel order.
+    semantics: VecDeque<Box<accessibility::Update>>,
     ending: Option<Ending>,
 }
 
@@ -396,13 +399,16 @@ impl Events {
             ChannelEvent::Pane(PaneEvent::Effect(request)) => {
                 received.effects.push_back(request);
             }
+            ChannelEvent::Accessibility(update) => {
+                received.semantics.push_back(update);
+            }
             ChannelEvent::Pane(event) if event.last() => {
                 received.ending.get_or_insert(Ending::Pane(event));
             }
             ChannelEvent::Closed(error) => {
                 received.ending.get_or_insert(Ending::Link(error));
             }
-            // These checks read neither hidden input nor accessibility revisions.
+            // These checks read neither hidden input nor revision announcements.
             ChannelEvent::Pane(_) => return,
         }
         drop(received);
@@ -648,6 +654,33 @@ impl Pane {
     /// Complete it with [`Pane::effect_done`].
     pub fn await_effect(&self, wait: Duration) -> Result<Option<effects::Request>> {
         self.until(wait, |received| received.effects.pop_front())
+    }
+
+    /// Starts or ends the channel's semantic demand (ADR 0062).
+    pub fn demand_accessibility(&self, demand: accessibility::Demand) -> Result<()> {
+        self.reported()?;
+        done(
+            &self.link,
+            Operation::AccessibilityDemand {
+                channel: self.channel(),
+                demand,
+            },
+        )
+    }
+
+    /// Takes the oldest semantic message the server pushed, waiting at most `wait` for one.
+    pub fn await_accessibility(
+        &self,
+        wait: Duration,
+    ) -> Result<Option<Box<accessibility::Update>>> {
+        self.until(wait, |received| received.semantics.pop_front())
+    }
+
+    /// Acknowledges the semantic revision whose tail the caller applied.
+    pub fn acknowledge_accessibility(&self, demand_generation: u64, revision: u64) -> Result<()> {
+        Ok(self
+            .handle()?
+            .acknowledge_accessibility(demand_generation, revision)?)
     }
 
     /// Waits until the channel ends and returns how it ended.

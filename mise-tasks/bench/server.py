@@ -12,8 +12,9 @@
 The task builds the server and a presentation client from this checkout in release mode, starts
 a foreground Development server and creates one Workspace through the client. The client claims
 its Pane at 120 x 40 cells, presents it at 60 Hz and acknowledges every frame. In the
-`accessibility` condition it also fetches every accessibility revision the server announces, as
-the desktop does while an assistive application reads the Pane; in `plain` it fetches none.
+`accessibility` condition it also demands semantics and acknowledges every pushed semantic
+revision, as the desktop does while an assistive application reads the Pane; in `plain` it
+demands none.
 
 Each workload runs in that Pane: `yes | head -n 20000000`, `cat` of a fixed 200 MB file, and
 bench:workload's scroll and partial modes and a vim redraw loop for `--seconds`. The Pane's shell
@@ -356,7 +357,7 @@ def run(args):
                         )
                         values, details = measure(context, client, workload, args)
                         if condition == "accessibility" and not details["accessibility_revisions"]:
-                            raise TaskError("the client fetched no accessibility revisions")
+                            raise TaskError("the client received no accessibility revisions")
                         runs.append(
                             {"workload": workload, "condition": condition, "run": repeat}
                             | {"values": values, "details": details}

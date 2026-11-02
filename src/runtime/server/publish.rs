@@ -6,11 +6,13 @@
 //! lets [`super::dispatch::Served`] observe its channels' Panes under the `PaneService` lock. A
 //! session no channel is bound to rings the host's wake instead, and the host's next tick
 //! observes every bound channel. A screen is captured as an `Arc` and encoded later on the
-//! connection's I/O thread by the channel's own [`ScreenEncoder`]. Nothing here polls.
+//! connection's I/O thread by the channel's own [`ScreenEncoder`]. A semantic model the channel
+//! demands is captured the same way and encoded there against the model the client acknowledged
+//! ([`super::accessibility`]). Nothing here polls.
 use super::screen_encoder::{ScreenCapture, ScreenEncoder};
 use super::*;
 use spaceterm_server::connection::outbox::{
-    FrameTicket, Outbox, OutboxError, Presentation, Presented,
+    FrameTicket, Outbox, OutboxError, Presentation, Presented, Semantics,
 };
 use spaceterm_server::diagnostics::TerminalCounters;
 use spaceterm_server::protocol::{self, Channel, Fatal, PaneEvent};
@@ -32,9 +34,8 @@ pub struct Observation {
     /// Client effects raised under the current focus generation, oldest first.
     pub(crate) effects: Vec<pane::effects::Request>,
     pub(crate) line: pane::LineState,
-    /// A changed accessibility revision. A presented screen carries it; otherwise it travels as
-    /// a Pane event.
-    pub(crate) accessibility: Option<u64>,
+    /// The semantic model at a revision the channel was not handed yet, while it demands one.
+    pub(crate) accessibility: Option<Arc<dyn Semantics>>,
     /// The Input serial the PTY accepted and the output it read. A change travels as a Pane
     /// event when no screen does.
     pub(crate) progress: crate::terminal::session::Progress,
@@ -148,10 +149,8 @@ impl Publication {
             None => Ok(false),
         };
         open &= carried.is_ok();
-        if let Some(revision) = accessibility
-            && carried == Ok(false)
-        {
-            open &= self.event(PaneEvent::Accessibility { revision });
+        if let Some(model) = accessibility {
+            open &= self.deliver(self.outbox.semantics(self.channel, model));
         }
         // A screen can predate the worker's latest input acknowledgement, even when both
         // arrive in one observation. Send newer progress so delivery cannot wait on more output.
@@ -236,6 +235,9 @@ impl OwnedPane {
     /// Drains the Terminal Session for the controlling channel. Client effects are released
     /// only under a focus generation the client sent.
     pub(super) fn observe(&mut self) -> Observation {
+        // The Terminal Session drops demand it receives before its subscription, so each
+        // observation asks again; a request the session already holds costs one lock.
+        self.request_semantics();
         self.drain();
         let mut effects = Vec::new();
         if self.focus_generation != 0 {
@@ -247,22 +249,34 @@ impl OwnedPane {
             screen: self.capture(),
             effects,
             line: self.subscription.line(),
-            accessibility: self.accessibility.take_changed_revision(),
+            accessibility: self.accessibility.take_changed(),
             progress: self.subscription.progress(),
         }
     }
 
     /// Applies a client `View`: the Terminal Session publishes only while visible, at the
-    /// declared frame rate.
+    /// declared frame rate. It builds semantic models only while visible and demanded.
     pub(super) fn view(&mut self, visible: bool, max_hz: u8) {
         if self.presentable != visible {
             self.presentable = visible;
             self.apply_presentable();
-            if !visible {
+            if visible {
+                self.request_semantics();
+            } else {
                 self.runtime.end_server_accessibility_demand();
             }
         }
         self.runtime.set_frame_rate(max_hz);
+    }
+
+    /// Asks the Terminal Session for semantic models, while the visible channel demands them.
+    pub(super) fn request_semantics(&self) {
+        if self.presentable
+            && self.accessibility.demanded()
+            && let Some(demand) = self.runtime.accessibility_demand_sender()
+        {
+            demand.request();
+        }
     }
 }
 

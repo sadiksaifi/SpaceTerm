@@ -201,10 +201,6 @@ fn assert_same(
         (history.epoch, history.oldest, history.total)
     );
     assert_eq!(decoded.generation, capture.generation);
-    assert_eq!(
-        decoded.accessibility_revision,
-        capture.accessibility_revision
-    );
     let rendered = presenter.snapshot(decoded, PresentationGeneration::test(1), appearance);
     assert!(Arc::ptr_eq(&rendered.rows, &decoded.rows));
     assert_eq!(rendered.cursor.position, screen.cursor.position);

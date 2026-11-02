@@ -17,6 +17,8 @@ mod screen_decoder;
 mod screen_decoder_tests;
 mod scrollback;
 #[cfg(test)]
+mod semantic_equality_tests;
+#[cfg(test)]
 mod tests;
 use super::pointer_input::{PointerInput, WheelInput};
 use super::session::clipboard::ClipboardAuthority;
@@ -343,7 +345,7 @@ impl ServerPaneState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .disconnect();
-        // A new connection epoch resolves Selection only against semantics it fetched itself.
+        // A new connection epoch resolves Selection only against semantics it received itself.
         *self.accessibility.lock().unwrap_or_else(|e| e.into_inner()) =
             accessibility::RetainedSemantics::default();
         self.effect_authority.client_focus(None);
@@ -631,7 +633,6 @@ enum Input {
     ),
     Resize(PaneSize),
     Style(pane::PresentationStyle),
-    AccessibilitySelection(super::accessibility::AccessibilitySelectionRequest),
 }
 impl Input {
     fn eligible(&self, target: pane::FocusTarget) -> bool {
@@ -645,11 +646,9 @@ impl Input {
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
             ),
-            Self::Key(_)
-            | Self::CopyOrForward(_)
-            | Self::Pointer(..)
-            | Self::Wheel(..)
-            | Self::AccessibilitySelection(_) => target == pane::FocusTarget::Terminal,
+            Self::Key(_) | Self::CopyOrForward(_) | Self::Pointer(..) | Self::Wheel(..) => {
+                target == pane::FocusTarget::Terminal
+            }
             Self::Paste(_, reply) => target == pane::FocusTarget::Terminal && !reply.is_closed(),
             Self::ResolvePaste(pending, _, _) => {
                 target == pane::FocusTarget::Terminal
@@ -851,12 +850,27 @@ impl TerminalSessionHandle for PresentationHandle {
             self.state.wake.notify();
         }
     }
+    /// Assistive technology selects through this client's own Selection, the one the pointer
+    /// sets and Copy reads, so the Pane never holds a second one.
     fn accessibility_selection_sender(&self) -> Option<super::AccessibilitySelectionSender> {
         let state = Arc::clone(&self.state);
-        let input = self.input.clone();
         Some(super::AccessibilitySelectionSender::server(Arc::new(
             move |request| {
-                submit_input(&state, &input, Input::AccessibilitySelection(request));
+                let Some(selection) = state
+                    .accessibility
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .resolve_selection(&request)
+                else {
+                    return;
+                };
+                let changed = {
+                    let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                    reading.select(selection)
+                };
+                if changed {
+                    state.wake.notify();
+                }
             },
         )))
     }
@@ -870,12 +884,8 @@ impl TerminalSessionHandle for PresentationHandle {
         )))
     }
     fn set_presentable(&self, presentable: bool) {
-        // A hidden Pane keeps its control and Session; only its visual demand ends.
-        if !presentable {
-            self.state
-                .accessibility_demand
-                .store(false, Ordering::Release);
-        }
+        // A hidden Pane keeps its control, its Session, its semantic demand and its document;
+        // only its visual demand ends.
         if self.state.presentable.swap(presentable, Ordering::AcqRel) != presentable {
             if !presentable {
                 // A hidden view continues no drag; the server cancels its own on hidden demand.

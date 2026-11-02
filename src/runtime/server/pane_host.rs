@@ -291,8 +291,8 @@ impl OwnedPane {
         self.presentable = false;
         self.apply_presentable();
         self.graphics_transfer = None;
-        self.accessibility.disconnect();
-        self.runtime.end_server_accessibility_demand();
+        self.accessibility.end();
+        self.runtime.release_server_accessibility();
         self.runtime.client_effect_focus(None);
         self.effects.clear();
         self.focus = FocusTarget::Unfocused;

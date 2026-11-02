@@ -235,11 +235,6 @@ fn api<T, E: 'static>(result: std::result::Result<T, E>) -> Result<T> {
 fn require(condition: bool, error: &'static str) -> Result<()> {
     if condition { Ok(()) } else { Err(error.into()) }
 }
-fn pause(until: Instant) -> Result<()> {
-    require(Instant::now() < until, "terminal exercise deadline elapsed")?;
-    std::thread::sleep(Duration::from_millis(20));
-    Ok(())
-}
 pub fn screen(pane: &Pane, matches: impl Fn(&Screen) -> bool) -> Result<Screen> {
     screen_at("fixture-output", pane, matches)
 }
@@ -251,53 +246,128 @@ fn screen_at(
     stage(label, pane.await_screen(DEADLINE, matches))?
         .ok_or_else(|| Failure::from("terminal exercise deadline elapsed").at(label))
 }
-fn semantics(pane: &Pane, until: Instant) -> Result<accessibility::Snapshot> {
-    let mut revision = None;
-    let mut bytes = Vec::new();
-    let mut total = None;
-    loop {
-        match stage(
-            "accessibility-transfer",
-            pane.request(Operation::Accessibility {
-                channel: pane.channel(),
-                revision,
-                offset: bytes.len() as u64,
-                base: None,
-            }),
-        )? {
-            ReplyBody::Accessibility(Ok(chunk)) => {
+/// The demand generation this fixture starts. Its channel names no earlier one.
+const DEMAND: u64 = 1;
+
+/// The fixture's copy of the semantic document the server pushes: each line's identity, row
+/// revision and text, and what the revision applied last presents.
+#[derive(Clone, Default)]
+struct Document {
+    revision: Option<u64>,
+    ids: Vec<accessibility::RowId>,
+    rows: Vec<Option<(u64, String)>>,
+    tail: Option<accessibility::Tail>,
+}
+
+impl Document {
+    /// Applies one revision's messages, in order, to a copy of this document. Each message
+    /// repeats its revision's header; the last carries the tail.
+    fn apply(&self, messages: &[accessibility::Update]) -> Result<Self> {
+        let header = messages
+            .first()
+            .ok_or("accessibility revision empty")?
+            .header;
+        require(
+            header.base == self.revision.filter(|_| header.base.is_some()),
+            "accessibility delta names another base",
+        )?;
+        let mut next = if header.base.is_some() {
+            self.clone()
+        } else {
+            Self::default()
+        };
+        let mut fragment: Option<(u32, u64, String)> = None;
+        for message in messages {
+            api(message.validate())?;
+            require(
+                message.header == header,
+                "accessibility revision interleaved",
+            )?;
+            for splice in &message.splices {
+                let (at, remove) = (splice.at as usize, splice.remove as usize);
                 require(
-                    chunk.offset == bytes.len()
-                        && revision.is_none_or(|saved| saved == chunk.revision)
-                        && total.is_none_or(|saved| saved == chunk.total)
-                        && chunk.total <= accessibility::MAX_BYTES
-                        && !chunk.bytes.is_empty()
-                        && chunk.bytes.len() <= accessibility::CHUNK_BYTES
-                        && chunk.offset + chunk.bytes.len() <= chunk.total,
-                    "accessibility chunk binding or bounds changed",
+                    at + remove <= next.ids.len(),
+                    "accessibility splice out of range",
                 )?;
-                revision = Some(chunk.revision);
-                total = Some(chunk.total);
-                bytes.extend(chunk.bytes);
-                if bytes.len() == chunk.total {
-                    let snapshot: accessibility::Snapshot = api(serde_json::from_slice(&bytes))?;
-                    require(
-                        Some(snapshot.revision) == revision,
-                        "accessibility revision changed",
-                    )?;
-                    return Ok(snapshot);
+                let ids = splice.insert.iter().flat_map(|run| {
+                    (0..run.count).map(move |offset| accessibility::RowId {
+                        screen: header.screen,
+                        screen_generation: header.screen_generation,
+                        node_serial: run.node_serial,
+                        page_row: run.page_row + offset,
+                    })
+                });
+                let inserted = splice.insert.iter().map(|run| usize::from(run.count)).sum();
+                next.ids.splice(at..at + remove, ids);
+                next.rows
+                    .splice(at..at + remove, std::iter::repeat_n(None, inserted));
+            }
+            for row in &message.rows {
+                let mut text = match fragment.take() {
+                    Some((line, revision, text)) => {
+                        require(
+                            line == row.line && revision == row.revision,
+                            "accessibility fragment broken",
+                        )?;
+                        text
+                    }
+                    None => String::new(),
+                };
+                text.push_str(&row.text);
+                if row.continues {
+                    fragment = Some((row.line, row.revision, text));
+                    continue;
                 }
+                *next
+                    .rows
+                    .get_mut(row.line as usize)
+                    .ok_or("accessibility row out of range")? = Some((row.revision, text));
             }
-            ReplyBody::Accessibility(Err(accessibility::Error::Pending)) => pause(until)?,
-            ReplyBody::Accessibility(Err(accessibility::Error::Stale)) => {
-                revision = None;
-                total = None;
-                bytes.clear();
-                pause(until)?;
-            }
-            _ => return Err("accessibility transfer unavailable".into()),
+        }
+        let tail = messages
+            .last()
+            .and_then(|message| message.tail.clone())
+            .ok_or("accessibility revision has no tail")?;
+        require(
+            fragment.is_none() && next.rows.iter().all(Option::is_some),
+            "accessibility revision left a row without contents",
+        )?;
+        next.revision = Some(header.revision);
+        next.tail = Some(tail);
+        Ok(next)
+    }
+
+    fn text(&self, line: usize) -> &str {
+        self.rows[line]
+            .as_ref()
+            .map_or("", |(_, text)| text.as_str())
+    }
+}
+
+/// Receives the next whole revision, applies it to `document` and acknowledges it.
+fn semantics(pane: &Pane, document: &Document, until: Instant) -> Result<Document> {
+    let mut messages = Vec::new();
+    loop {
+        let wait = until.saturating_duration_since(Instant::now());
+        let message = stage("accessibility-update", pane.await_accessibility(wait))?
+            .ok_or_else(|| Failure::from("terminal exercise deadline elapsed"))?;
+        require(
+            message.header.demand_generation == DEMAND,
+            "accessibility generation changed",
+        )?;
+        let last = message.tail.is_some();
+        messages.push(*message);
+        if last {
+            break;
         }
     }
+    let next = document.apply(&messages)?;
+    let header = messages[0].header;
+    stage(
+        "accessibility-ack",
+        pane.acknowledge_accessibility(header.demand_generation, header.revision),
+    )?;
+    Ok(next)
 }
 /// The caller owns the Pane. Every route carries Scrollback pages,
 /// accessibility and graphics. No terminal content, remote path or native error is returned as evidence.
@@ -367,19 +437,18 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
         "graphics transfer length changed",
     )?;
     let until = Instant::now() + DEADLINE;
-    // Visual and semantic publications are independent. As in the runtime's
-    // server_accessibility_fetches_history_and_rejects_a_disconnected_or_replaced_lease
-    // regression, wait for the fixture's own semantic witness instead of its first snapshot.
-    let (model, first, last) = loop {
-        let model = semantics(pane, until)?;
+    stage(
+        "accessibility-demand",
+        pane.demand_accessibility(accessibility::Demand::Start { generation: DEMAND }),
+    )?;
+    // Visual and semantic publications are independent. As in the runtime's semantic
+    // regressions, wait for the fixture's own semantic witness instead of the first revision.
+    let mut document = Document::default();
+    let (first, last) = loop {
+        document = semantics(pane, &document, until)?;
         let mut fixture_rows = vec![None; ROWS];
-        for row in &model.rows {
-            let text = row
-                .cells
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<String>();
-            let text = text.trim_end();
+        for line in 0..document.ids.len() {
+            let text = document.text(line).trim_end();
             if let Some(index) = text
                 .strip_prefix(PREFIX)
                 .and_then(|n| n.parse::<usize>().ok())
@@ -388,57 +457,51 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
                     index < ROWS && text == expected[index] && fixture_rows[index].is_none(),
                     "accessible fixture row changed or duplicated",
                 )?;
-                fixture_rows[index] = Some(row);
+                fixture_rows[index] = Some(line);
             }
         }
         let matching = fixture_rows.iter().filter(|row| row.is_some()).count();
-        if matching == ROWS && model.visible_lines.start > 0 {
+        let visible = document
+            .tail
+            .as_ref()
+            .map_or(0..0, |tail| tail.visible_lines.clone());
+        if matching == ROWS && visible.start > 0 {
             let first = fixture_rows[0].ok_or("accessible first row missing")?;
             let last = fixture_rows[ROWS - 1].ok_or("accessible last row missing")?;
-            let endpoints = ((first.id, first.revision), (last.id, last.revision));
-            break (model, endpoints.0, endpoints.1);
+            break (first, last);
         }
         if Instant::now() >= until {
             eprintln!(
-                "accessibility fixture deadline: rows={}, matching={}, topology={}, visible={}..{}",
-                model.rows.len(),
+                "accessibility fixture deadline: rows={}, matching={}, visible={}..{}",
+                document.ids.len(),
                 matching,
-                model.topology.len(),
-                model.visible_lines.start,
-                model.visible_lines.end
+                visible.start,
+                visible.end
             );
             return Err(Failure::from(
                 "accessibility did not expose full retained fixture history",
             )
             .at("accessibility-fixture"));
         }
-        pause(until).map_err(|failure| failure.at("accessibility-fixture"))?;
     };
-    let first_index = model
-        .topology
-        .iter()
-        .position(|id| *id == first.0)
-        .ok_or("accessible first row topology missing")?;
-    let last_index = model
-        .topology
-        .iter()
-        .position(|id| *id == last.0)
-        .ok_or("accessible last row topology missing")?;
     require(
-        last_index.checked_sub(first_index) == Some(ROWS - 1),
+        last.checked_sub(first) == Some(ROWS - 1),
         "accessible row order changed",
     )?;
+    let cell = |line: usize, column: u16| {
+        let (revision, _) = document.rows[line]
+            .as_ref()
+            .ok_or("accessible row missing")?;
+        Ok::<_, Failure>(accessibility::CellRef {
+            row: document.ids[line],
+            row_revision: *revision,
+            column,
+        })
+    };
+    let last_column = expected[ROWS - 1].len() as u16 - 1;
     let selection = accessibility::SelectionRefs {
-        start: accessibility::CellRef {
-            row: first.0,
-            row_revision: first.1,
-            column: 0,
-        },
-        end: accessibility::CellRef {
-            row: last.0,
-            row_revision: last.1,
-            column: expected[ROWS - 1].len() as u16 - 1,
-        },
+        start: cell(first, 0)?,
+        end: cell(last, last_column)?,
         rectangle: false,
     };
     stage(
@@ -459,12 +522,21 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
         ),
         "accessible history selection refused",
     )?;
+    // The server pushes the Selection in a later revision's tail, by line and column.
+    let expected_selection = accessibility::Selection {
+        start: accessibility::Point {
+            line: first as u32,
+            column: 0,
+        },
+        end: accessibility::Point {
+            line: last as u32,
+            column: last_column,
+        },
+        rectangle: false,
+    };
     let until = Instant::now() + DEADLINE;
-    loop {
-        if semantics(pane, until)?.selection == Some(selection) {
-            break;
-        }
-        pause(until)?;
+    while document.tail.as_ref().and_then(|tail| tail.selection) != Some(expected_selection) {
+        document = semantics(pane, &document, until)?;
     }
     stage(
         "accessibility-selection",
@@ -476,9 +548,7 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
     )?;
     stage(
         "accessibility-demand-end",
-        pane.request(Operation::EndAccessibility {
-            channel: pane.channel(),
-        }),
+        pane.demand_accessibility(accessibility::Demand::End),
     )?;
     if input_timing_requested() {
         input_timing(pane)?;

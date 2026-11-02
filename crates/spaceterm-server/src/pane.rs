@@ -252,14 +252,10 @@ pub enum AttachmentClaim {
 /// On the desktop, the Pane worker maps them to operations and input on its channel.
 #[derive(Clone, Debug)]
 pub enum Request {
-    EndAccessibilityDemand {
+    /// Starts or ends semantic demand for the lease's channel. Replied `Unchanged`.
+    AccessibilityDemand {
         lease: Lease,
-    },
-    Accessibility {
-        lease: Lease,
-        revision: Option<u64>,
-        offset: usize,
-        base: Option<u64>,
+        demand: accessibility::Demand,
     },
     AccessibilitySelection {
         lease: Lease,
@@ -371,7 +367,6 @@ pub enum Request {
 /// The reply to one [`Request`], in process only.
 #[derive(Clone, Debug)]
 pub enum Reply {
-    Accessibility(Result<accessibility::Chunk, accessibility::Error>),
     MutationPending,
     GraphicsChunk(Result<graphics::Chunk, graphics::Error>),
     Paste(PasteOutcome),

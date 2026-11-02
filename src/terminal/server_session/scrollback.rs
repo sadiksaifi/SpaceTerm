@@ -132,12 +132,24 @@ pub(crate) struct Scrollback {
     shown: view::Shown,
 }
 
-/// What assistive technology sees of this client's view: how far it is scrolled back, and the
-/// Selection, in lines relative to the first row of the screen.
+/// A Selection's ordered endpoints, each an absolute line of history epoch `epoch` and a
+/// column, both included. Line `p` is history position `p`; visible row `r` is line `total + r`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EpochSelection {
+    pub(crate) epoch: u64,
+    pub(crate) start: (u64, u16),
+    pub(crate) end: (u64, u16),
+}
+
+/// What assistive technology sees of this client's view: how far it is scrolled back, the
+/// Selection, and the history of the frame presented last, which places each line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AccessibilityView {
     pub(crate) scrolled: u64,
-    pub(crate) selection: Option<((i64, u16), (i64, u16))>,
+    pub(crate) selection: Option<EpochSelection>,
+    /// `None` before the first frame.
+    pub(crate) history: Option<History>,
+    pub(crate) alternate: bool,
 }
 
 impl Scrollback {
@@ -266,6 +278,30 @@ impl Scrollback {
         self.selection.cancel_gesture();
     }
 
+    /// Sets the Selection assistive technology chose, or clears it. A Selection of another
+    /// history epoch, or with an endpoint outside the readable lines, leaves the Selection
+    /// unchanged. Returns whether it changed.
+    pub(crate) fn select(&mut self, selection: Option<EpochSelection>) -> bool {
+        let Some(screen) = self.screen.clone() else {
+            return false;
+        };
+        let lines = lines(&self.cache, &screen);
+        let readable = lines.range();
+        let range = match selection {
+            None => None,
+            Some(selection) => {
+                let point = |(line, column): (u64, u16)| {
+                    readable.contains(&line).then_some(Point { line, column })
+                };
+                match point(selection.start).zip(point(selection.end)) {
+                    Some(range) if selection.epoch == lines.history.epoch => Some(range),
+                    _ => return false,
+                }
+            }
+        };
+        self.selection.replace(range)
+    }
+
     pub(crate) fn selection_present(&self) -> bool {
         self.selection.range().is_some()
     }
@@ -328,19 +364,15 @@ impl Scrollback {
     /// The view and Selection for assistive technology.
     pub(crate) fn accessibility_view(&self) -> AccessibilityView {
         let history = self.cache.history();
-        let total = i64::try_from(history.total).unwrap_or(i64::MAX);
-        let relative = |point: Point| {
-            (
-                i64::try_from(point.line).unwrap_or(i64::MAX) - total,
-                point.column,
-            )
-        };
         AccessibilityView {
             scrolled: history.total - self.view.top(history),
-            selection: self
-                .selection
-                .range()
-                .map(|(start, end)| (relative(start), relative(end))),
+            selection: self.selection.range().map(|(start, end)| EpochSelection {
+                epoch: history.epoch,
+                start: (start.line, start.column),
+                end: (end.line, end.column),
+            }),
+            history: self.screen.is_some().then_some(history),
+            alternate: self.alternate(),
         }
     }
 

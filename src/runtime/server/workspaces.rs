@@ -1008,8 +1008,7 @@ impl WorkspaceHost {
             request => {
                 let target = match &request {
                     Request::TakeOver { target, .. } => *target,
-                    Request::Accessibility { lease, .. }
-                    | Request::EndAccessibilityDemand { lease }
+                    Request::AccessibilityDemand { lease, .. }
                     | Request::AccessibilitySelection { lease, .. }
                     | Request::GraphicsChunk { lease, .. }
                     | Request::CompleteClipboard { lease, .. }

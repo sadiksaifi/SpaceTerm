@@ -1,46 +1,877 @@
 use super::tests::{attach, command, host, size};
 use super::*;
-use pane::accessibility::{self as wire, Error};
+use crate::terminal::accessibility::{
+    AccessibilityCell, AccessibilityRowUpdate, AccessibilitySelectionRefs, AccessibilityUpdate,
+    TerminalAccessibilityState,
+};
+use pane::accessibility as wire;
+use spaceterm_server::connection::outbox::{Outbox, SemanticEncoding, SemanticTicket, Semantics};
+use spaceterm_server::protocol::frame::Assembler;
+use spaceterm_server::protocol::{AccessibilityMessage, Channel, RawFrame, ServerMessage, limits};
+use std::collections::HashMap;
+use std::ops::Range;
 use std::time::Instant;
 
-fn snapshot(host: &mut ServerPaneHost, lease: Lease, base: Option<u64>) -> wire::Snapshot {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut revision = None;
-    let mut bytes = Vec::new();
-    loop {
-        match host.request(
-            [1; 32],
-            lease.connection,
-            Request::Accessibility {
-                lease,
-                revision,
-                offset: bytes.len(),
-                base,
-            },
-        ) {
-            Reply::Accessibility(Ok(chunk)) => {
-                assert_eq!(chunk.offset, bytes.len());
-                assert!(chunk.bytes.len() <= wire::CHUNK_BYTES);
-                assert!(chunk.total <= wire::MAX_BYTES);
-                revision = Some(chunk.revision);
-                bytes.extend_from_slice(&chunk.bytes);
-                if bytes.len() == chunk.total {
-                    return serde_json::from_slice(&bytes).unwrap();
+/// One row as a client retains it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Row {
+    revision: u64,
+    soft_wrapped: bool,
+    text: String,
+    /// Each cell's columns and byte range in `text`.
+    cells: Vec<(Range<u16>, Range<usize>)>,
+}
+
+/// A row identity as a map key.
+type Key = (bool, u64, u64, u16);
+
+fn key(id: &wire::RowId) -> Key {
+    (
+        id.screen == wire::Screen::Alternate,
+        id.screen_generation,
+        id.node_serial,
+        id.page_row,
+    )
+}
+
+/// A client's view of one channel's semantics, applied from pushed messages as ADR 0062 says a
+/// client applies them, with the checks a client makes.
+#[derive(Clone, Debug, Default)]
+struct Client {
+    applied: Option<u64>,
+    screen: Option<(wire::Screen, u64)>,
+    topology: Vec<wire::RowId>,
+    rows: HashMap<Key, Row>,
+    tail: Option<wire::Tail>,
+    staged: Option<Box<Staged>>,
+}
+
+/// A revision a client stages until its tail: its header, the document it builds and the row
+/// fragment that continues into the next message.
+#[derive(Clone, Debug)]
+struct Staged {
+    header: wire::Header,
+    document: Client,
+    fragment: Option<(u32, Row)>,
+}
+
+impl Client {
+    /// Applies one message. Returns whether it completed a revision.
+    fn apply(&mut self, update: wire::Update) -> bool {
+        update.validate().expect("a message within its bounds");
+        if self.staged.is_none() {
+            let start = match update.header.base {
+                None => Self::default(),
+                Some(base) => {
+                    assert_eq!(
+                        Some(base),
+                        self.applied,
+                        "a delta applies to the applied revision"
+                    );
+                    self.clone()
                 }
+            };
+            self.staged = Some(Box::new(Staged {
+                header: update.header,
+                document: start,
+                fragment: None,
+            }));
+        }
+        let Staged {
+            header,
+            document,
+            fragment,
+        } = &mut **self.staged.as_mut().expect("staged above");
+        assert_eq!(*header, update.header, "every message repeats the header");
+        let header = *header;
+        for splice in update.splices {
+            let at = splice.at as usize;
+            let ids = splice.insert.iter().flat_map(|run| {
+                (0..run.count).map(move |offset| wire::RowId {
+                    screen: header.screen,
+                    screen_generation: header.screen_generation,
+                    node_serial: run.node_serial,
+                    page_row: run.page_row + offset,
+                })
+            });
+            document
+                .topology
+                .splice(at..at + splice.remove as usize, ids.collect::<Vec<_>>());
+        }
+        for row in update.rows {
+            let mut whole = match fragment.take() {
+                Some((line, mut joined)) => {
+                    assert_eq!(line, row.line, "a fragment continues its line");
+                    let offset = joined.text.len();
+                    joined.text.push_str(&row.text);
+                    joined.cells.extend(row.cells().map(|(columns, bytes)| {
+                        (columns, bytes.start + offset..bytes.end + offset)
+                    }));
+                    joined
+                }
+                None => Row {
+                    revision: row.revision,
+                    soft_wrapped: row.soft_wrapped,
+                    text: row.text.clone(),
+                    cells: row.cells().collect(),
+                },
+            };
+            whole.revision = row.revision;
+            if row.continues {
+                *fragment = Some((row.line, whole));
+            } else {
+                let id = key(&document.topology[row.line as usize]);
+                document.rows.insert(id, whole);
             }
-            Reply::Accessibility(Err(Error::Pending)) => {}
-            other => panic!("accessibility unavailable: {other:?}"),
+        }
+        let Some(tail) = update.tail else {
+            return false;
+        };
+        assert!(fragment.is_none(), "no fragment continues past the tail");
+        let mut document = std::mem::take(document);
+        let present: std::collections::HashSet<_> = document.topology.iter().map(key).collect();
+        document.rows.retain(|id, _| present.contains(id));
+        assert_eq!(
+            document.rows.len(),
+            document.topology.len(),
+            "every row of the topology has contents"
+        );
+        let lines = document.topology.len() as u32;
+        assert!(tail.visible_lines.end <= lines);
+        assert!(tail.cursor.is_none_or(|cursor| cursor.line < lines));
+        document.applied = Some(header.revision);
+        document.screen = Some((header.screen, header.screen_generation));
+        document.tail = Some(tail);
+        document.staged = None;
+        *self = document;
+        true
+    }
+
+    /// Applies every message of one revision.
+    fn revision(&mut self, updates: Vec<wire::Update>) {
+        let count = updates.len();
+        for (index, update) in updates.into_iter().enumerate() {
+            assert_eq!(self.apply(update), index + 1 == count);
+        }
+    }
+
+    fn texts(&self) -> impl Iterator<Item = &str> {
+        self.topology
+            .iter()
+            .map(|id| self.rows[&key(id)].text.as_str())
+    }
+
+    fn line(&self, text: &str) -> Option<usize> {
+        self.texts().position(|row| row.contains(text))
+    }
+
+    /// Asserts that this client presents exactly `model`.
+    fn assert_presents(&self, model: &TerminalAccessibilityModel) {
+        let rows: Vec<_> = model.rows().collect();
+        assert_eq!(self.topology.len(), rows.len(), "row count");
+        for (line, (id, row)) in self.topology.iter().zip(&rows).enumerate() {
+            assert_eq!(*id, wire_id(row.id), "row id at line {line}");
+            let held = &self.rows[&key(id)];
+            assert_eq!(held.revision, row.revision, "revision at line {line}");
+            assert_eq!(held.soft_wrapped, row.soft_wrapped, "wrap at line {line}");
+            assert_eq!(held.text, row.text, "text at line {line}");
+            let mut offset = 0;
+            let cells: Vec<_> = row
+                .cells()
+                .map(|cell| {
+                    let start = offset;
+                    offset += cell.text.len();
+                    (cell.columns, start..offset)
+                })
+                .collect();
+            assert_eq!(held.cells, cells, "cells at line {line}");
+        }
+        assert_eq!(self.tail, Some(accessibility_tail(model)));
+    }
+}
+
+fn wire_id(id: AccessibilityRowId) -> wire::RowId {
+    wire::RowId {
+        screen: match id.screen {
+            AccessibilityScreen::Primary => wire::Screen::Primary,
+            AccessibilityScreen::Alternate => wire::Screen::Alternate,
+        },
+        screen_generation: id.screen_generation as u64,
+        node_serial: id.node_serial,
+        page_row: id.page_row,
+    }
+}
+
+/// The tail a client expects for `model`, from the row identities its Selection names.
+fn accessibility_tail(model: &TerminalAccessibilityModel) -> wire::Tail {
+    let line_of = |reference: AccessibilityCellRef| {
+        model
+            .rows()
+            .position(|row| row.id == reference.row)
+            .map(|line| wire::Point {
+                line: line as u32,
+                column: reference.column,
+            })
+    };
+    let visible = model.visible_lines();
+    wire::Tail {
+        visible_lines: visible.start as u32..visible.end as u32,
+        cursor: model.cursor_cell().map(|(line, column)| wire::Point {
+            line: line as u32,
+            column,
+        }),
+        selection: model.selection_refs().map(|refs| wire::Selection {
+            start: line_of(refs.start).unwrap(),
+            end: line_of(refs.end).unwrap(),
+            rectangle: refs.rectangle,
+        }),
+    }
+}
+
+fn ticket(revision: u64, base: Option<u64>) -> SemanticTicket {
+    SemanticTicket {
+        demand_generation: 1,
+        revision,
+        base,
+    }
+}
+
+/// Every message of `model` encoded as one revision against `base`.
+fn encode(model: &Arc<dyn Semantics>, base: Option<&Arc<dyn Semantics>>) -> Vec<wire::Update> {
+    let ticket = ticket(model.revision(), base.map(|base| base.revision()));
+    let Some(mut encoding) = Arc::clone(model).encode(ticket, base.cloned()) else {
+        return Vec::new();
+    };
+    let mut updates = Vec::new();
+    loop {
+        let update = encoding.next();
+        let last = update.tail.is_some();
+        updates.push(update);
+        if last {
+            return updates;
+        }
+    }
+}
+
+/// The wire bytes of a revision's messages on channel `u32::MAX`, the widest.
+fn wire_bytes(updates: &[wire::Update]) -> usize {
+    updates
+        .iter()
+        .map(|update| {
+            let message = ServerMessage::Accessibility(Box::new(AccessibilityMessage {
+                channel: Channel(u32::MAX),
+                update: update.clone(),
+            }));
+            spaceterm_server::protocol::frame::encode_server(&message)
+                .unwrap()
+                .bytes()
+        })
+        .sum()
+}
+
+/// A Pane's revisions as its channel is handed them, one per model.
+struct Revisions(accessibility::Accessibility);
+
+impl Revisions {
+    fn new() -> Self {
+        let mut state = accessibility::Accessibility::new(Arc::default());
+        state.start();
+        Self(state)
+    }
+
+    /// The model as the channel's next revision, or `None` when it did not advance it.
+    fn next(&mut self, model: Arc<TerminalAccessibilityModel>) -> Option<Arc<dyn Semantics>> {
+        self.0.update(model);
+        self.0.take_changed()
+    }
+}
+
+/// Builds models the way the Terminal Session does, from emulator deltas.
+struct Terminal {
+    state: TerminalAccessibilityState,
+    revision: u64,
+}
+
+fn row_id(line: usize) -> AccessibilityRowId {
+    // A page node holds 100 rows, so a topology is a few runs.
+    AccessibilityRowId {
+        screen: AccessibilityScreen::Primary,
+        screen_generation: 0,
+        node_serial: line as u64 / 100 + 1,
+        page_row: (line % 100) as u16,
+    }
+}
+
+fn ascii(id: AccessibilityRowId, revision: u64, text: &str) -> AccessibilityRowUpdate {
+    AccessibilityRowUpdate {
+        id,
+        revision,
+        soft_wrapped: false,
+        cells: text
+            .chars()
+            .enumerate()
+            .map(|(column, character)| {
+                AccessibilityCell::at_column(character.to_string(), column as u16, 1)
+            })
+            .collect(),
+    }
+}
+
+impl Terminal {
+    fn new() -> Self {
+        Self {
+            state: TerminalAccessibilityState::default(),
+            revision: 0,
+        }
+    }
+
+    /// Applies a complete delta and returns the model it publishes.
+    fn apply(
+        &mut self,
+        topology: Option<Vec<AccessibilityRowId>>,
+        changed_rows: Vec<AccessibilityRowUpdate>,
+        visible_lines: Range<usize>,
+        cursor: Option<AccessibilityCellRef>,
+        selection: Option<AccessibilitySelectionRefs>,
+    ) -> Arc<TerminalAccessibilityModel> {
+        self.revision += 1;
+        self.state
+            .apply(
+                AccessibilityUpdate {
+                    revision: self.revision,
+                    screen: AccessibilityScreen::Primary,
+                    screen_generation: 0,
+                    complete: true,
+                    more: false,
+                    topology,
+                    visible_lines,
+                    cursor,
+                    selection,
+                    changed_rows,
+                },
+                PresentationGeneration::default(),
+            )
+            .expect("the delta changes the model")
+    }
+
+    /// `rows` rows of `columns` ASCII characters each.
+    fn history(&mut self, rows: usize, columns: usize) -> Arc<TerminalAccessibilityModel> {
+        let ids: Vec<_> = (0..rows).map(row_id).collect();
+        let changed = ids
+            .iter()
+            .enumerate()
+            .map(|(line, id)| {
+                let text: String = format!("row {line:05} ")
+                    .chars()
+                    .cycle()
+                    .take(columns)
+                    .collect();
+                ascii(*id, 1, &text)
+            })
+            .collect();
+        self.apply(Some(ids), changed, rows - 24..rows, None, None)
+    }
+}
+
+fn cell(id: AccessibilityRowId, column: u16) -> AccessibilityCellRef {
+    AccessibilityCellRef {
+        row: id,
+        row_revision: 1,
+        column,
+    }
+}
+
+/// A cursor move, a Selection or a scroll each advance the revision, and each travels as a tail
+/// alone, under 256 bytes at 10,000 rows on the widest channel.
+#[test]
+fn a_cursor_selection_or_scroll_only_revision_at_ten_thousand_rows_is_a_small_tail() {
+    let mut terminal = Terminal::new();
+    let mut revisions = Revisions::new();
+    let history = terminal.history(10_000, 80);
+    let base = revisions.next(history).unwrap();
+    let mut client = Client::default();
+    client.revision(encode(&base, None));
+
+    let last = row_id(9_999);
+    let moves = [
+        (9_976..10_000, Some(cell(last, 7)), None),
+        (
+            9_976..10_000,
+            Some(cell(last, 7)),
+            Some(AccessibilitySelectionRefs {
+                start: cell(row_id(17), 3),
+                end: cell(row_id(9_998), 40),
+                rectangle: false,
+            }),
+        ),
+        (100..124, Some(cell(last, 7)), None),
+    ];
+    let mut base = base;
+    for (visible, cursor, selection) in moves {
+        let model = terminal.apply(None, Vec::new(), visible, cursor, selection);
+        let revision = revisions
+            .next(Arc::clone(&model))
+            .expect("a tail-only change advances the revision");
+        let updates = encode(&revision, Some(&base));
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].splices.is_empty(), "no topology");
+        assert!(updates[0].rows.is_empty(), "no rows");
+        let bytes = wire_bytes(&updates);
+        assert!(bytes < 256, "{bytes} B");
+        client.revision(updates);
+        client.assert_presents(&model);
+        base = revision;
+    }
+}
+
+/// The threads a model's encoding ran on, against the thread that writes the connection.
+struct Threads {
+    io: std::thread::ThreadId,
+    calls: std::sync::atomic::AtomicUsize,
+    elsewhere: std::sync::atomic::AtomicUsize,
+}
+
+impl Threads {
+    /// Watches encodings for the calling thread, which writes the connection.
+    fn here() -> Arc<Self> {
+        Arc::new(Self {
+            io: std::thread::current().id(),
+            calls: Default::default(),
+            elsewhere: Default::default(),
+        })
+    }
+
+    fn note(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.calls.fetch_add(1, Relaxed);
+        if std::thread::current().id() != self.io {
+            self.elsewhere.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Asserts that at least `steps` encoding steps ran, all on the writing thread.
+    fn ran_on_the_writing_thread(&self, steps: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        assert!(self.calls.load(Relaxed) >= steps);
+        assert_eq!(
+            self.elsewhere.load(Relaxed),
+            0,
+            "every encoding step runs on the writing thread"
+        );
+    }
+
+    /// `model` as the outbox receives it, noting the thread of every encoding step.
+    fn watch(self: &Arc<Self>, model: Arc<dyn Semantics>) -> Arc<dyn Semantics> {
+        Arc::new(Watched {
+            model,
+            threads: Arc::clone(self),
+        })
+    }
+}
+
+struct Watched {
+    model: Arc<dyn Semantics>,
+    threads: Arc<Threads>,
+}
+
+impl Semantics for Watched {
+    fn revision(&self) -> u64 {
+        self.model.revision()
+    }
+
+    fn encode(
+        self: Arc<Self>,
+        ticket: SemanticTicket,
+        base: Option<Arc<dyn Semantics>>,
+    ) -> Option<Box<dyn SemanticEncoding>> {
+        self.threads.note();
+        let encoding = Arc::clone(&self.model).encode(ticket, base)?;
+        Some(Box::new(WatchedEncoding {
+            encoding,
+            threads: Arc::clone(&self.threads),
+        }))
+    }
+}
+
+struct WatchedEncoding {
+    encoding: Box<dyn SemanticEncoding>,
+    threads: Arc<Threads>,
+}
+
+impl SemanticEncoding for WatchedEncoding {
+    fn next(&mut self) -> wire::Update {
+        self.threads.note();
+        self.encoding.next()
+    }
+}
+
+/// A complete 10,000 by 80 document leaves the outbox one bounded message per I/O turn, encoded
+/// on the thread that writes it. The bytes that thread holds from the encoder, net of what it
+/// frees, peak under twice the encoded size and fall back once each message is written, once the
+/// revision is written, and once demand or the channel ends in the middle of a revision.
+#[test]
+fn a_complete_ten_thousand_by_eighty_document_is_written_one_bounded_message_per_turn() {
+    use crate::terminal::testing::LiveBytes;
+    let model = Terminal::new().history(10_000, 80);
+    let mut revisions = Revisions::new();
+    let threads = Threads::here();
+    let channel = Channel(u32::MAX);
+    let outbox = Outbox::new(Arc::new(|| {}));
+    outbox.open(channel).unwrap();
+    let mut io = LiveBytes::default();
+    let mut demand = |io: &mut LiveBytes, generation| {
+        revisions.0.start();
+        let semantics = threads.watch(revisions.next(Arc::clone(&model)).unwrap());
+        io.measure(|| {
+            outbox.start_semantics(channel, generation).unwrap();
+            outbox.semantics(channel, semantics).unwrap();
+        });
+    };
+    // What a turn leaves behind: the revision's position, its packer's unfinished message and
+    // the messages its last item completed, never a written one.
+    let between_turns = 2 * wire::UPDATE_TARGET_BYTES as isize;
+
+    demand(&mut io, 1);
+    let mut assembler = Assembler::default();
+    let mut client = Client::default();
+    let (mut encoded, mut turns) = (0, 0);
+    while let Some((frame, _)) = io.measure(|| outbox.next_frame()) {
+        turns += 1;
+        encoded += frame.len();
+        assert!(frame.len() <= wire::UPDATE_TARGET_BYTES + limits::HEADER_BYTES);
+        let Some(ServerMessage::Accessibility(message)) =
+            assembler.server(RawFrame::parse(&frame).unwrap()).unwrap()
+        else {
+            panic!("one semantic message per frame")
+        };
+        io.measure(|| drop(frame));
+        assert!(
+            io.live() < between_turns,
+            "{} B held after turn {turns}",
+            io.live()
+        );
+        client.apply(message.update);
+    }
+    client.assert_presents(&model);
+    threads.ran_on_the_writing_thread(turns);
+    assert!(encoded < 1_200_000, "{encoded} B");
+    assert!(turns > 20, "{turns} messages");
+    assert!(
+        io.peak() < 2 * encoded as isize,
+        "peak {} B of {encoded} B",
+        io.peak()
+    );
+    assert!(
+        io.peak() < 8 * wire::UPDATE_TARGET_BYTES as isize,
+        "peak {} B, whatever the document's size",
+        io.peak()
+    );
+    // The revision waits for its acknowledgement holding its model, not its messages.
+    let written = io.live();
+    assert!(written < 4096, "{written} B held after the tail");
+
+    // Ending demand, then closing the channel, in the middle of a revision.
+    for (generation, end) in [
+        (2, Outbox::end_semantics as fn(&Outbox, Channel)),
+        (3, Outbox::close),
+    ] {
+        demand(&mut io, generation);
+        for _ in 0..3 {
+            let (frame, _) = io.measure(|| outbox.next_frame()).unwrap();
+            io.measure(|| drop(frame));
         }
         assert!(
-            Instant::now() < deadline,
-            "accessible snapshot did not complete"
+            io.live() > written + 512,
+            "the unfinished revision holds its encoder"
         );
+        io.measure(|| end(&outbox, channel));
+        assert!(
+            io.live() < written + 128,
+            "{} B held after generation {generation} ended",
+            io.live()
+        );
+    }
+
+    threads.ran_on_the_writing_thread(turns);
+}
+
+/// Scrollback that trims at the top while output appends at the bottom sends two small splices
+/// and the new and changed rows, not the history in between.
+#[test]
+fn scrolling_history_sends_only_trimmed_and_appended_rows() {
+    let mut terminal = Terminal::new();
+    let mut revisions = Revisions::new();
+    let history = terminal.history(1_000, 80);
+    let base = revisions.next(Arc::clone(&history)).unwrap();
+    let mut client = Client::default();
+    client.revision(encode(&base, None));
+
+    let ids: Vec<_> = (5..1_005).map(row_id).collect();
+    let mut changed: Vec<_> = (1_000..1_005)
+        .map(|line| ascii(row_id(line), 1, &format!("appended {line}")))
+        .collect();
+    changed.push(ascii(row_id(999), 2, "the old last row, edited"));
+    let scrolled = terminal.apply(Some(ids), changed, 976..1_000, None, None);
+    let revision = revisions.next(Arc::clone(&scrolled)).unwrap();
+    let updates = encode(&revision, Some(&base));
+
+    let splices: Vec<_> = updates
+        .iter()
+        .flat_map(|update| &update.splices)
+        .map(|splice| (splice.at, splice.remove, splice.insert.len()))
+        .collect();
+    assert_eq!(splices, [(0, 5, 0), (995, 0, 1)]);
+    let lines: Vec<_> = updates
+        .iter()
+        .flat_map(|update| &update.rows)
+        .map(|row| row.line)
+        .collect();
+    assert_eq!(lines, [994, 995, 996, 997, 998, 999]);
+    client.revision(updates);
+    client.assert_presents(&scrolled);
+}
+
+/// Each kind of change reaches a client as a delta that reproduces the new model exactly: rows
+/// inserted and removed in the middle, a row edited in place, wide and combining cells, the
+/// longest graphemes, and a switch to another screen generation.
+#[test]
+fn deltas_reproduce_every_kind_of_change() {
+    let mut terminal = Terminal::new();
+    let mut revisions = Revisions::new();
+    let first = terminal.history(300, 40);
+    let mut base = revisions.next(Arc::clone(&first)).unwrap();
+    let mut client = Client::default();
+    client.revision(encode(&base, None));
+
+    let longest = format!("e{}", "\u{0301}".repeat(64));
+    let wide = |id, revision| AccessibilityRowUpdate {
+        id,
+        revision,
+        soft_wrapped: true,
+        cells: vec![
+            AccessibilityCell::at_column("界", 0, 2),
+            AccessibilityCell::at_column("A\u{301}", 2, 1),
+            AccessibilityCell::at_column("😀", 3, 2),
+            AccessibilityCell::at_column(longest.as_str(), 5, 1),
+        ],
+    };
+    let inserted = AccessibilityRowId {
+        node_serial: 900,
+        ..row_id(0)
+    };
+    let mut middle: Vec<_> = (0..300).map(row_id).collect();
+    middle.splice(120..130, [inserted]);
+    let changes: Vec<(Option<Vec<AccessibilityRowId>>, Vec<AccessibilityRowUpdate>)> = vec![
+        (Some(middle.clone()), vec![wide(inserted, 1)]),
+        (None, vec![ascii(row_id(5), 2, "edited in place")]),
+        (None, vec![wide(row_id(6), 2)]),
+        (
+            Some((0..300).map(row_id).collect()),
+            (120..130)
+                .map(|line| ascii(row_id(line), 3, "back again"))
+                .collect(),
+        ),
+    ];
+    for (topology, rows) in changes {
+        let model = terminal.apply(topology, rows, 0..24, Some(cell(row_id(3), 1)), None);
+        let revision = revisions.next(Arc::clone(&model)).unwrap();
+        client.revision(encode(&revision, Some(&base)));
+        client.assert_presents(&model);
+        base = revision;
+    }
+
+    // Empty soft-wrapped rows all start at one UTF-16 offset, so only their identities tell them
+    // apart. A Selection from the first of them keeps both endpoints.
+    let empty = (10..15)
+        .map(|line| AccessibilityRowUpdate {
+            id: row_id(line),
+            revision: 5,
+            soft_wrapped: true,
+            cells: Vec::new(),
+        })
+        .collect();
+    let endpoint = |line, row_revision| AccessibilityCellRef {
+        row: row_id(line),
+        row_revision,
+        column: 0,
+    };
+    let selected = AccessibilitySelectionRefs {
+        start: endpoint(10, 5),
+        end: endpoint(15, 1),
+        rectangle: false,
+    };
+    let model = terminal.apply(None, empty, 0..24, None, Some(selected));
+    assert!(
+        model.selection_refs().is_some(),
+        "the model keeps the Selection"
+    );
+    let revision = revisions.next(Arc::clone(&model)).unwrap();
+    client.revision(encode(&revision, Some(&base)));
+    client.assert_presents(&model);
+    base = revision;
+
+    // Long rows of the longest graphemes travel as fragments across messages, losslessly.
+    let long: Vec<_> = (0..512)
+        .map(|column| AccessibilityCell::at_column(longest.as_str(), column, 1))
+        .collect();
+    let model = terminal.apply(
+        None,
+        vec![AccessibilityRowUpdate {
+            id: row_id(7),
+            revision: 4,
+            soft_wrapped: false,
+            cells: long,
+        }],
+        0..24,
+        None,
+        None,
+    );
+    let revision = revisions.next(Arc::clone(&model)).unwrap();
+    let updates = encode(&revision, Some(&base));
+    assert!(updates.len() > 1, "the row crosses messages");
+    client.revision(updates);
+    client.assert_presents(&model);
+    base = revision;
+
+    // Another screen generation shares no row identity, so its document replaces the old.
+    let mut alternate = TerminalAccessibilityState::default();
+    let ids: Vec<_> = (0..30)
+        .map(|line| AccessibilityRowId {
+            screen: AccessibilityScreen::Alternate,
+            screen_generation: 1,
+            ..row_id(line)
+        })
+        .collect();
+    let model = alternate
+        .apply(
+            AccessibilityUpdate {
+                revision: 1,
+                screen: AccessibilityScreen::Alternate,
+                screen_generation: 1,
+                complete: true,
+                more: false,
+                topology: Some(ids.clone()),
+                visible_lines: 0..24,
+                cursor: None,
+                selection: None,
+                changed_rows: ids.iter().map(|id| ascii(*id, 1, "alternate")).collect(),
+            },
+            PresentationGeneration::default(),
+        )
+        .unwrap();
+    let revision = revisions.next(Arc::clone(&model)).unwrap();
+    client.revision(encode(&revision, Some(&base)));
+    client.assert_presents(&model);
+}
+
+/// A model equal to its base, sharing its document and tail, encodes as nothing, so the
+/// channel's credit stays available.
+#[test]
+fn a_model_equal_to_its_base_encodes_nothing() {
+    let model = Terminal::new().history(50, 10);
+    let mut state = accessibility::Accessibility::new(Arc::default());
+    state.start();
+    state.update(Arc::clone(&model));
+    let first = state.take_changed().unwrap();
+    assert!(state.take_changed().is_none());
+    // A new generation, while demand stands, hands the same revision unchanged.
+    state.start();
+    let again = state.take_changed().unwrap();
+    assert_eq!(again.revision(), first.revision());
+    assert!(encode(&again, Some(&first)).is_empty());
+}
+
+/// Ending demand drops the Pane's model and ignores models published after it, so a later start
+/// hands only a model built after the end.
+#[test]
+fn ending_demand_drops_the_panes_model_and_ignores_late_ones() {
+    let mut terminal = Terminal::new();
+    let mut state = accessibility::Accessibility::new(Arc::default());
+    state.start();
+    let model = terminal.history(10_000, 80);
+    let held = Arc::downgrade(&model);
+    state.update(model);
+    drop(state.take_changed().unwrap());
+    state.end();
+    assert!(held.upgrade().is_none(), "the Pane released its model");
+
+    let late = terminal.history(30, 10);
+    let held = Arc::downgrade(&late);
+    state.update(late);
+    assert!(
+        held.upgrade().is_none(),
+        "a model after the end is not kept"
+    );
+    state.start();
+    assert!(
+        state.take_changed().is_none(),
+        "nothing is handed until a new model"
+    );
+    state.update(terminal.history(40, 10));
+    assert!(state.take_changed().is_some());
+}
+
+#[test]
+fn takeover_semantics_ignore_models_published_before_the_reading_reset() {
+    let old = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
+    let mut reset = (*old).clone();
+    reset.generation = PresentationGeneration::test(2);
+    let mut state = accessibility::Accessibility::new(Arc::default());
+    state.start();
+    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&old)));
+    state.reset();
+    assert!(!state.demanded(), "a reset ends demand");
+    state.start();
+    state.bind_reset_screen(reset.generation);
+    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&old)));
+    assert!(state.take_changed().is_none());
+    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&reset)));
+    assert!(state.take_changed().is_some());
+}
+
+/// Demands semantics for `lease` and returns the first complete document `until` accepts.
+fn document(host: &mut ServerPaneHost, lease: Lease, until: impl Fn(&Client) -> bool) -> Client {
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::AccessibilityDemand {
+                lease,
+                demand: wire::Demand::Start { generation: 1 },
+            },
+        ),
+        Reply::Unchanged
+    ));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let Observed::Live(observation) = host.observe([1; 32], &lease) else {
+            panic!("the Pane is live");
+        };
+        if let Some(model) = observation.accessibility {
+            let mut client = Client::default();
+            client.revision(encode(&model, None));
+            if until(&client) {
+                return client;
+            }
+        }
+        assert!(Instant::now() < deadline, "no matching document");
         std::thread::sleep(Duration::from_millis(5));
     }
 }
 
+fn demand(host: &mut ServerPaneHost, lease: Lease) -> Reply {
+    host.request(
+        [1; 32],
+        lease.connection,
+        Request::AccessibilityDemand {
+            lease,
+            demand: wire::Demand::Start { generation: 1 },
+        },
+    )
+}
+
 #[test]
-fn server_accessibility_fetches_history_and_rejects_a_disconnected_or_replaced_lease() {
+fn server_semantics_push_history_and_refuse_a_disconnected_or_replaced_lease() {
     let mut host = host();
     let lease = attach(&mut host, 1, true);
     command(
@@ -49,53 +880,22 @@ fn server_accessibility_fetches_history_and_rejects_a_disconnected_or_replaced_l
         lease,
         "stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 600 ]; do printf 'accessible-history-%04d\\r\\n' $i; i=$((i+1)); done",
     );
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let first = loop {
-        let model = snapshot(&mut host, lease, None);
-        if model.rows.iter().any(|r| {
-            r.cells
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<String>()
-                .contains("accessible-history-0599")
-        }) {
-            break model;
-        }
-        assert!(Instant::now() < deadline);
-    };
+    let first = document(&mut host, lease, |client| {
+        client.line("accessible-history-0599").is_some()
+    });
     assert!(first.topology.len() > 600);
     assert!(
-        first.visible_lines.start > 0,
+        first.tail.as_ref().unwrap().visible_lines.start > 0,
         "history must extend outside the viewport"
     );
-    let id = first
-        .rows
-        .iter()
-        .find(|r| {
-            r.cells
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<String>()
-                .contains("accessible-history-0001")
-        })
-        .unwrap()
-        .id;
+    let id = first.topology[first.line("accessible-history-0001").unwrap()];
     host.disconnected(lease.connection);
     assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::Accessibility {
-                lease,
-                revision: None,
-                offset: 0,
-                base: None
-            }
-        ),
+        demand(&mut host, lease),
         Reply::Refused(Refusal::Stale)
     ));
     let resumed = attach(&mut host, 2, false);
-    let after = snapshot(&mut host, resumed, None);
+    let after = document(&mut host, resumed, |_| true);
     assert!(
         after.topology.contains(&id),
         "reconnect must preserve retained row identities"
@@ -113,16 +913,7 @@ fn server_accessibility_fetches_history_and_rejects_a_disconnected_or_replaced_l
     };
     assert_ne!(taken.control, resumed.control);
     assert!(matches!(
-        host.request(
-            [1; 32],
-            resumed.connection,
-            Request::Accessibility {
-                lease: resumed,
-                revision: None,
-                offset: 0,
-                base: None
-            }
-        ),
+        demand(&mut host, resumed),
         Reply::Refused(Refusal::Stale)
     ));
     assert!(matches!(
@@ -140,6 +931,168 @@ fn server_accessibility_fetches_history_and_rejects_a_disconnected_or_replaced_l
     host.shutdown().unwrap();
 }
 
+/// The Pane's screen generation once no screen has published for half a second.
+fn idle(host: &mut ServerPaneHost, lease: Lease) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut quiet = None;
+    loop {
+        let Observed::Live(observation) = host.observe([1; 32], &lease) else {
+            panic!("the Pane is live");
+        };
+        let screen = observation.screen.map(|screen| screen.generation);
+        match quiet {
+            Some((generation, since)) if Some(generation) == screen => {
+                if Instant::now().duration_since(since) > Duration::from_millis(500) {
+                    return generation;
+                }
+            }
+            _ => quiet = screen.map(|generation| (generation, Instant::now())),
+        }
+        assert!(Instant::now() < deadline, "the Pane never went idle");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn screen_generation(host: &mut ServerPaneHost, lease: Lease) -> Option<u64> {
+    let Observed::Live(observation) = host.observe([1; 32], &lease) else {
+        panic!("the Pane is live");
+    };
+    observation.screen.map(|screen| screen.generation)
+}
+
+/// An idle Pane's first demand builds its complete document without publishing a screen.
+#[test]
+fn an_idle_panes_first_demand_delivers_a_complete_document_without_a_screen() {
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    command(
+        &mut host,
+        1,
+        lease,
+        "stty -echo; printf 'idle-marker\\r\\n'",
+    );
+    let idle = idle(&mut host, lease);
+    let client = document(&mut host, lease, |client| {
+        client.line("idle-marker").is_some()
+    });
+    assert!(client.applied.is_some());
+    assert_eq!(
+        screen_generation(&mut host, lease),
+        Some(idle),
+        "demand published no screen"
+    );
+    host.shutdown().unwrap();
+}
+
+/// Ending demand releases the semantic store, and a later start on an idle Pane builds its
+/// complete document again from the Terminal Session, without output or a screen.
+#[test]
+fn a_start_after_an_end_rebuilds_an_idle_panes_complete_document() {
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    command(
+        &mut host,
+        1,
+        lease,
+        "stty -echo; printf 'released-marker\\r\\n'",
+    );
+    document(&mut host, lease, |client| {
+        client.line("released-marker").is_some()
+    });
+    let idle = idle(&mut host, lease);
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::AccessibilityDemand {
+                lease,
+                demand: wire::Demand::End,
+            },
+        ),
+        Reply::Unchanged
+    ));
+    let client = document(&mut host, lease, |client| {
+        client.line("released-marker").is_some()
+    });
+    assert!(client.applied.is_some());
+    assert_eq!(
+        screen_generation(&mut host, lease),
+        Some(idle),
+        "the new start published no screen"
+    );
+    host.shutdown().unwrap();
+}
+
+/// A Terminal Session drops demand that reaches it before its subscription does: taking a
+/// subscription clears the request, and so does a screen published to a closed one. The
+/// subscription's own model still arrives, but later output reaches the Pane only because the
+/// Pane asks again when it observes the new subscription. Neither needs another client request.
+/// The worker is held while a closed subscription and the Pane's new one wait behind each other,
+/// as they do when a Terminal Session starts.
+#[test]
+fn demand_that_reaches_the_session_before_its_subscription_still_delivers_a_document() {
+    use std::sync::mpsc;
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    command(
+        &mut host,
+        1,
+        lease,
+        "stty -echo; printf 'subscribed-marker\\r\\n'",
+    );
+    idle(&mut host, lease);
+    let (entered, held) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let (notify, notified) = mpsc::channel();
+    let pane = host.pane.as_mut().unwrap();
+    pane.runtime.read_scrollback(
+        0,
+        0,
+        1,
+        crate::terminal::session::ScrollbackReply::new(move |_| {
+            let _ = entered.send(());
+            let _ = released.recv();
+        }),
+    );
+    held.recv_timeout(Duration::from_secs(10)).unwrap();
+    drop(pane.runtime.subscribe());
+    pane.subscription = pane.runtime.subscribe_notifying(Some(Arc::new(move || {
+        let _ = notify.send(());
+    })));
+    assert!(matches!(demand(&mut host, lease), Reply::Unchanged));
+    release.send(()).unwrap();
+
+    // Every observation follows a notification from the Terminal Session.
+    let next = |host: &mut ServerPaneHost, marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            notified
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no document with {marker}"));
+            let Observed::Live(observation) = host.observe([1; 32], &lease) else {
+                panic!("the Pane is live");
+            };
+            if let Some(model) = observation.accessibility {
+                let mut client = Client::default();
+                client.revision(encode(&model, None));
+                if client.line(marker).is_some() {
+                    return;
+                }
+            }
+        }
+    };
+    next(&mut host, "subscribed-marker");
+    command(
+        &mut host,
+        1,
+        lease,
+        "printf 'after-subscription-marker\\r\\n'",
+    );
+    next(&mut host, "after-subscription-marker");
+    host.shutdown().unwrap();
+}
+
 #[test]
 fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions() {
     let mut host = host();
@@ -151,22 +1104,19 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
         lease,
         "stty -echo; printf '\\033[2J\\033[Hnative-selection-target\\r\\n'",
     );
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let row = loop {
-        let model = snapshot(&mut host, lease, None);
-        if let Some(row) = model.rows.into_iter().find(|row| {
-            row.cells
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<String>()
-                .starts_with("native-selection-target")
-        }) {
-            break row;
-        }
-        assert!(Instant::now() < deadline);
-    };
+    let client = document(&mut host, lease, |client| {
+        client
+            .texts()
+            .any(|text| text.starts_with("native-selection-target"))
+    });
+    let line = client
+        .texts()
+        .position(|text| text.starts_with("native-selection-target"))
+        .unwrap();
+    let id = client.topology[line];
+    let row = client.rows[&key(&id)].clone();
     let reference = |column| wire::CellRef {
-        row: row.id,
+        row: id,
         row_revision: row.revision,
         column,
     };
@@ -175,16 +1125,30 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
         end: reference(5),
         rectangle: false,
     };
-    assert!(matches!(
+    let selected = Some(wire::Selection {
+        start: wire::Point {
+            line: line as u32,
+            column: 0,
+        },
+        end: wire::Point {
+            line: line as u32,
+            column: 5,
+        },
+        rectangle: false,
+    });
+    let select = |host: &mut ServerPaneHost, selection| {
         host.request(
             [1; 32],
             lease.connection,
             Request::AccessibilitySelection {
                 lease,
                 focus_generation: 2,
-                selection: Some(selection)
-            }
-        ),
+                selection,
+            },
+        )
+    };
+    assert!(matches!(
+        select(&mut host, Some(selection)),
         Reply::Refused(Refusal::Stale)
     ));
     assert!(matches!(
@@ -200,57 +1164,24 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
         Reply::Unchanged
     ));
     assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::AccessibilitySelection {
-                lease,
-                focus_generation: 2,
-                selection: Some(selection)
-            }
-        ),
+        select(&mut host, Some(selection)),
         Reply::Unchanged
     ));
-    loop {
-        if snapshot(&mut host, lease, None).selection == Some(selection) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "native history selection not published"
-        );
-    }
+    document(&mut host, lease, |client| {
+        client.tail.as_ref().unwrap().selection == selected
+    });
     let rectangle = wire::SelectionRefs {
         rectangle: true,
         ..selection
     };
     assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::AccessibilitySelection {
-                lease,
-                focus_generation: 2,
-                selection: Some(rectangle)
-            }
-        ),
+        select(&mut host, Some(rectangle)),
         Reply::Refused(Refusal::Unsupported)
     ));
-    host.request(
-        [1; 32],
-        lease.connection,
-        Request::AccessibilitySelection {
-            lease,
-            focus_generation: 2,
-            selection: None,
-        },
-    );
-    loop {
-        if snapshot(&mut host, lease, None).selection.is_none() {
-            break;
-        }
-        assert!(Instant::now() < deadline);
-    }
+    select(&mut host, None);
+    document(&mut host, lease, |client| {
+        client.tail.as_ref().unwrap().selection.is_none()
+    });
     let stale = wire::SelectionRefs {
         start: wire::CellRef {
             row_revision: row.revision.wrapping_add(1),
@@ -258,15 +1189,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
         },
         ..selection
     };
-    host.request(
-        [1; 32],
-        lease.connection,
-        Request::AccessibilitySelection {
-            lease,
-            focus_generation: 2,
-            selection: Some(stale),
-        },
-    );
+    select(&mut host, Some(stale));
     // The worker answers commands in order, so a page read's reply follows the selection.
     let (barrier, passed) = std::sync::mpsc::channel();
     host.pane.as_ref().unwrap().runtime.read_scrollback(
@@ -278,13 +1201,11 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
         }),
     );
     passed.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(snapshot(&mut host, lease, None).selection.is_none());
+    let client = document(&mut host, lease, |_| true);
+    assert!(client.tail.unwrap().selection.is_none());
     host.shutdown().unwrap();
 
     // Shape-only output changes must advance the wire revision, even with the same UTF-16 range.
-    use crate::terminal::accessibility::{
-        AccessibilityCell, AccessibilityRowUpdate, AccessibilityUpdate, TerminalAccessibilityState,
-    };
     let refs = accessibility::decode_selection(selection).unwrap();
     let mut semantics = TerminalAccessibilityState::default();
     let mut update = AccessibilityUpdate {
@@ -303,13 +1224,20 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
             soft_wrapped: row.soft_wrapped,
             cells: row
                 .cells
-                .into_iter()
-                .map(|cell| AccessibilityCell::at_column(cell.text, cell.column, cell.width_cells))
+                .iter()
+                .map(|(columns, bytes)| {
+                    AccessibilityCell::at_column(
+                        &row.text[bytes.clone()],
+                        columns.start,
+                        columns.end - columns.start,
+                    )
+                })
                 .collect(),
         }],
     };
     let generation = PresentationGeneration::default();
     let mut publication = accessibility::Accessibility::new(Arc::default());
+    publication.start();
     let linear = semantics.apply(update.clone(), generation).unwrap();
     let range = linear.selection_range();
     publication.update(linear);
@@ -323,8 +1251,10 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
     assert!(publication.revision() > revision);
 }
 
+/// Output that changes one row of retained history sends that row only, and a captured model
+/// keeps encoding the same revision while the terminal moves on.
 #[test]
-fn accessible_transfers_reuse_unchanged_history_and_finish_during_output() {
+fn unchanged_history_is_not_resent() {
     use crate::terminal::emulator::TerminalEmulator;
     let mut emulator = TerminalEmulator::new(geometry(size())).unwrap();
     emulator.feed(b"retained row\r\nsecond row");
@@ -338,100 +1268,34 @@ fn accessible_transfers_reuse_unchanged_history_and_finish_during_output() {
             }
         }
     }
+    let mut revisions = Revisions::new();
     let original = complete(&mut emulator);
+    let base = revisions.next(Arc::clone(&original)).unwrap();
+    let mut client = Client::default();
+    client.revision(encode(&base, None));
     emulator.feed(b" appended");
     let updated = complete(&mut emulator);
-    let mut state = accessibility::Accessibility::new(Arc::default());
-    state.update(Arc::clone(&original));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut revision = None;
-    let mut bytes = Vec::new();
-    // Change the live model while the first serialization is running. Its captured snapshot
-    // must still finish instead of chasing every subsequent terminal update.
-    loop {
-        let result = state.chunk(revision, bytes.len(), None);
-        state.update(Arc::clone(&updated));
-        match result {
-            Ok(chunk) => {
-                revision = Some(chunk.revision);
-                bytes.extend_from_slice(&chunk.bytes);
-                if bytes.len() == chunk.total {
-                    break;
-                }
-            }
-            Err(Error::Pending) => {}
-            other => panic!("{other:?}"),
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::yield_now();
-    }
-    let first: wire::Snapshot = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(first.revision, 1);
-    bytes.clear();
-    revision = None;
-    loop {
-        match state.chunk(revision, bytes.len(), Some(first.revision)) {
-            Ok(chunk) => {
-                revision = Some(chunk.revision);
-                bytes.extend_from_slice(&chunk.bytes);
-                if bytes.len() == chunk.total {
-                    break;
-                }
-            }
-            Err(Error::Pending) => {}
-            other => panic!("{other:?}"),
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::yield_now();
-    }
-    let delta: wire::Snapshot = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(delta.topology, first.topology);
-    assert_eq!(
-        delta.rows.len(),
-        1,
-        "unchanged history must not be retransmitted"
-    );
-    assert!(
-        delta.rows[0]
-            .cells
-            .iter()
-            .map(|c| c.text.as_str())
-            .collect::<String>()
-            .starts_with("second row appended")
-    );
+    let revision = revisions.next(Arc::clone(&updated)).unwrap();
+    let delta = encode(&revision, Some(&base));
+    assert!(delta.iter().all(|update| update.splices.is_empty()));
+    let rows: Vec<_> = delta.iter().flat_map(|update| &update.rows).collect();
+    assert_eq!(rows.len(), 1, "unchanged history must not be retransmitted");
+    assert!(rows[0].text.starts_with("second row appended"));
+    client.revision(delta);
+    client.assert_presents(&updated);
 }
 
+/// Each encoded revision counts once, with the bytes of all its messages.
 #[test]
-fn takeover_semantics_ignore_models_published_before_the_reading_reset() {
-    let old = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
-    let mut reset = (*old).clone();
-    reset.generation = PresentationGeneration::test(2);
-    let mut state = accessibility::Accessibility::new(Arc::default());
-    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&old)));
-    state.reset();
-    state.bind_reset_screen(reset.generation);
-    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&old)));
-    assert_eq!(state.chunk(None, 0, None).unwrap_err(), Error::Pending);
-    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&reset)));
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match state.chunk(None, 0, None) {
-            Ok(_) => break,
-            Err(Error::Pending) => std::thread::yield_now(),
-            other => panic!("{other:?}"),
-        }
-        assert!(Instant::now() < deadline);
-    }
-}
-
-#[test]
-fn each_serialized_accessibility_revision_counts_once_with_its_bytes() {
+fn each_encoded_accessibility_revision_counts_once_with_its_bytes() {
     use crate::terminal::emulator::TerminalEmulator;
     use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
     let counters = Arc::new(TerminalCounters::default());
     let mut emulator = TerminalEmulator::new(geometry(size())).unwrap();
     let mut state = accessibility::Accessibility::new(Arc::clone(&counters));
-    let mut transferred = 0;
+    state.start();
+    let mut base: Option<Arc<dyn Semantics>> = None;
+    let mut encoded = 0;
     for revision in 1..=4 {
         emulator.feed(format!("revision {revision}\r\n").as_bytes());
         let mut first = true;
@@ -443,32 +1307,20 @@ fn each_serialized_accessibility_revision_counts_once_with_its_bytes() {
             }
         };
         state.update(model);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut offset = 0;
-        let mut current = None;
-        loop {
-            match state.chunk(current, offset, None) {
-                Ok(chunk) => {
-                    current = Some(chunk.revision);
-                    offset += chunk.bytes.len();
-                    if offset == chunk.total {
-                        transferred += chunk.total;
-                        break;
-                    }
-                }
-                Err(Error::Pending) => std::thread::yield_now(),
-                other => panic!("{other:?}"),
-            }
-            assert!(Instant::now() < deadline);
-        }
-        assert_eq!(current, Some(revision));
+        let semantics = state
+            .take_changed()
+            .expect("new output advances the revision");
+        assert_eq!(semantics.revision(), revision);
+        let updates = encode(&semantics, base.as_ref());
+        encoded += updates.iter().map(wire::Update::encoded_len).sum::<usize>();
+        base = Some(semantics);
     }
 
     assert_eq!(
         counters.snapshot(),
         TerminalCounterSnapshot {
             accessibility_revisions: 4,
-            accessibility_revision_bytes: transferred as u64,
+            accessibility_revision_bytes: encoded as u64,
             ..Default::default()
         }
     );
