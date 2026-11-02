@@ -13,7 +13,7 @@ diff --git a/include/ghostty/vt/accessibility.h b/include/ghostty/vt/accessibili
 new file mode 100644
 --- /dev/null
 +++ b/include/ghostty/vt/accessibility.h
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,151 @@
 +#ifndef GHOSTTY_VT_ACCESSIBILITY_H
 +#define GHOSTTY_VT_ACCESSIBILITY_H
 +
@@ -134,6 +134,10 @@ new file mode 100644
 + * Topology callbacks are chunked within max_rows. topology_epoch identifies
 + * one replacement topology and topology_complete marks its final chunk; row
 + * extraction begins only on a later call after that topology is complete.
++ * Pages that leave the screen while a capture runs are dropped from its
++ * topology, never published empty: the completing call sends the remaining
++ * topology whole, in a new epoch. When none remains, the call reports
++ * complete and more both false and publishes nothing.
 + * Callback pointers are borrowed only for the duration of this call.
 + */
 +GHOSTTY_API GhosttyResult ghostty_accessibility_state_update(
@@ -165,7 +169,7 @@ diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
-@@ -0,0 +1,834 @@
+@@ -0,0 +1,879 @@
 +const std = @import("std");
 +const lib = @import("../lib.zig");
 +const PageList = @import("../PageList.zig");
@@ -396,6 +400,36 @@ new file mode 100644
 +        self.topology_active = false;
 +    }
 +
++    /// Removes from the committed topology every page that left the live screen, or that no
++    /// longer holds the rows the topology names, with its rows. Rows of the remaining pages
++    /// keep their order. Returns whether a page was removed.
++    fn dropRemovedPages(self: *ScreenState, live: *const PageList, screen: Screen) bool {
++        var kept_pages: usize = 0;
++        var kept_rows: usize = 0;
++        for (self.pages.items) |page| {
++            const first: usize = page.first_row;
++            const end = @min(first + page.rows, self.rows.items.len);
++            const last: u16 = page.page_row_start + page.rows - 1;
++            const node = findNodeForRow(live, screen, page.serial, page.page_row_start) orelse continue;
++            const last_node = findNodeForRow(live, screen, page.serial, last) orelse continue;
++            if (node != last_node) continue;
++            std.mem.copyForwards(
++                RowState,
++                self.rows.items[kept_rows..],
++                self.rows.items[@min(first, end)..end],
++            );
++            var moved = page;
++            moved.first_row = @intCast(kept_rows);
++            self.pages.items[kept_pages] = moved;
++            kept_pages += 1;
++            kept_rows += end - @min(first, end);
++        }
++        if (kept_pages == self.pages.items.len) return false;
++        self.pages.shrinkRetainingCapacity(kept_pages);
++        self.rows.shrinkRetainingCapacity(kept_rows);
++        return true;
++    }
++
 +    /// Ends a complete capture. Rows queued while it ran stay pending for the next one.
 +    fn finishCapture(self: *ScreenState) void {
 +        const end = self.pending_end orelse self.pending.items.len;
@@ -595,21 +629,9 @@ new file mode 100644
 +    while (current.pending_index < pending_end and rows_used < max_rows) {
 +        const first = current.pending.items[current.pending_index];
 +        const node = findNode(&screen.pages, screen_tag, first.node_serial) orelse {
-+            if (current.row(first)) |row_state| {
-+                // The capture's topology names a row whose page left Scrollback after the
-+                // capture began. Never extracted, it publishes empty, so the topology stays
-+                // whole; the next capture's topology drops it.
-+                if (row_state.revision == 0) {
-+                    row_state.revision = state.revision;
-+                    const row_value: Row = .{
-+                        .id = first,
-+                        .revision = row_state.revision,
-+                        .soft_wrapped = false,
-+                    };
-+                    if (!row_callback(userdata, &row_value)) return .invalid_value;
-+                }
-+                row_state.pending = false;
-+            }
++            // The row's page left Scrollback after the capture began. The capture's
++            // completion drops the page from its topology, so the row is never published.
++            if (current.row(first)) |row_state| row_state.pending = false;
 +            current.pending_index += 1;
 +            rows_used += 1;
 +            continue;
@@ -676,6 +698,33 @@ new file mode 100644
 +    out.more = !complete;
 +    if (complete) {
 +        current.finishCapture();
++        if (current.dropRemovedPages(&screen.pages, screen_tag)) {
++            if (current.rows.items.len == 0) {
++                // Output removed every row the capture began with, so it describes no
++                // state the terminal had. It finishes without a model, and the next
++                // capture begins from the live pages.
++                out.complete = false;
++                return .success;
++            }
++            // Publish the topology without the removed pages, whole, in this update.
++            state.topology_epoch +%= 1;
++            if (state.topology_epoch == 0) state.topology_epoch = 1;
++            current.topology_epoch = state.topology_epoch;
++            out.topology_epoch = state.topology_epoch;
++            for (current.pages.items) |page| {
++                for (page.page_row_start..@as(usize, page.page_row_start) + page.rows) |page_row| {
++                    const id: RowId = .{
++                        .screen = screen_tag,
++                        .screen_generation = current.generation,
++                        .node_serial = page.serial,
++                        .page_row = @intCast(page_row),
++                    };
++                    if (!topology_callback(userdata, &id)) return .invalid_value;
++                }
++            }
++            out.topology_changed = true;
++            out.topology_complete = true;
++        }
 +        if (current.topology_stale) setStaleVisibleLines(out, current, screen, screen_tag);
 +        setCursorAndSelection(out, current, screen);
 +    } else {

@@ -155,7 +155,8 @@ pub struct Snapshot {
     pub screen_generation: u64,
     /// Whether every pending changed row has been extracted.
     pub complete: bool,
-    /// Whether another bounded update is required.
+    /// Whether another bounded update is required. With `complete` also false, the capture
+    /// finished without a snapshot: output removed every row it began with.
     pub more: bool,
     /// Monotonic identity of the topology reduction represented by this snapshot.
     pub topology_epoch: u64,

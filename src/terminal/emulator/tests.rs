@@ -245,30 +245,112 @@ fn accessibility_captures_complete_while_output_appends_lines() {
     }
 }
 
-/// At the Scrollback cap, output trims history while a capture runs. Rows the capture's
-/// topology names but output trimmed before the capture extracted them publish empty, so the
-/// capture still completes; the next topology no longer has them.
-#[test]
-fn accessibility_captures_complete_while_output_trims_rows_they_have_not_extracted() {
-    let mut emulator = emulator(80, 24);
-    let line = |index: usize| format!("line {index}\r\n");
-    let history: String = (0..MAX_SCROLLBACK_ROWS + 100).map(line).collect();
-    emulator.feed(history.as_bytes());
-    emulator.snapshot().unwrap();
-    let mut next = MAX_SCROLLBACK_ROWS + 100;
-    let mut append = |emulator: &mut TerminalEmulator, _| {
-        let lines: String = (next..next + 160).map(line).collect();
-        emulator.feed(lines.as_bytes());
-        next += 160;
+/// Runs bounded capture steps until one finishes, as [`capture_during_output`] does, and
+/// returns what it published, or `None` when no capture finished within `limit` steps.
+fn finish_capture_during_output(
+    emulator: &mut TerminalEmulator,
+    limit: usize,
+    mut output: impl FnMut(&mut TerminalEmulator, usize),
+) -> Option<Option<Arc<TerminalAccessibilityModel>>> {
+    (1..=limit).find_map(|step| {
+        output(emulator, step);
+        emulator.snapshot().unwrap();
+        let (model, more) = emulator.accessibility_snapshot(false).unwrap();
+        (!more).then_some(model)
+    })
+}
+
+/// Asserts that `model` holds rows a terminal that printed only `line 0`, `line 1`, ... had,
+/// in its order: consecutive lines, then at most empty cursor rows. Returns the first line.
+fn assert_real_lines(model: &TerminalAccessibilityModel) -> usize {
+    let text = model.text();
+    let rows: Vec<&str> = text.split('\n').collect();
+    let printed = rows
+        .iter()
+        .rposition(|row| !row.is_empty())
+        .map_or(0, |last| last + 1);
+    assert!(printed > 0, "the model has printed rows");
+    assert!(
+        rows[printed..].len() <= 1,
+        "only the cursor row follows the printed rows"
+    );
+    let number = |row: &str| {
+        row.strip_prefix("line ")
+            .and_then(|number| number.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("{row:?} is not a printed line"))
     };
+    let first = number(rows[0]);
+    for (offset, row) in rows[..printed].iter().enumerate() {
+        assert_eq!(
+            number(row),
+            first + offset,
+            "rows are consecutive printed lines"
+        );
+    }
+    let visible = model.visible_lines();
+    assert!(
+        !visible.is_empty() && visible.end <= rows.len() && visible.start < printed,
+        "{visible:?} shows printed rows"
+    );
+    first
+}
+
+/// At the Scrollback cap, output trims history while a capture runs. The capture used to
+/// publish each trimmed row it had not extracted as an empty row, so assistive technology read
+/// blank lines and blank screens the terminal never showed. A capture now drops the pages output
+/// trimmed and publishes the rest, and finishes without a model when output trimmed every row
+/// it began with.
+#[test]
+fn accessibility_captures_publish_only_rows_the_terminal_had_while_output_trims_them() {
+    let line = |index: usize| format!("line {index}\r\n");
     let bound = capture_step_bound(MAX_SCROLLBACK_ROWS + 24, 80);
-    let (first, _) = capture_during_output(&mut emulator, bound, &mut append)
-        .expect("a capture completes while output trims its rows");
-    assert!(first.text().starts_with('\n'), "trimmed rows publish empty");
-    let trimmed = first.rows().next().unwrap().id;
-    let (second, _) = capture_during_output(&mut emulator, bound, &mut append)
-        .expect("the next capture completes as well");
-    assert!(second.rows().all(|row| row.id != trimmed));
+    let start = |emulator: &mut TerminalEmulator| {
+        let history: String = (0..MAX_SCROLLBACK_ROWS + 100).map(line).collect();
+        emulator.feed(history.as_bytes());
+        emulator.snapshot().unwrap();
+        MAX_SCROLLBACK_ROWS + 100
+    };
+
+    // 80 lines a step trim rows before the capture extracts them and after it did.
+    let mut emulator = emulator(80, 24);
+    let mut next = start(&mut emulator);
+    let mut first = 0;
+    for capture in 0..2 {
+        let model = finish_capture_during_output(&mut emulator, bound, |emulator, _| {
+            let lines: String = (next..next + 80).map(line).collect();
+            emulator.feed(lines.as_bytes());
+            next += 80;
+        })
+        .unwrap_or_else(|| panic!("capture {capture} finishes within {bound} steps"))
+        .unwrap_or_else(|| panic!("capture {capture} keeps rows output did not trim"));
+        let model_first = assert_real_lines(&model);
+        assert!(
+            model_first > first,
+            "capture {capture} dropped the trimmed rows"
+        );
+        first = model_first;
+    }
+
+    // 400 lines a step trim every row the capture began with during its topology walk.
+    let mut emulator = self::emulator(80, 24);
+    let mut next = start(&mut emulator);
+    let finished = finish_capture_during_output(&mut emulator, bound, |emulator, _| {
+        let lines: String = (next..next + 400).map(line).collect();
+        emulator.feed(lines.as_bytes());
+        next += 400;
+    })
+    .expect("a capture finishes while output trims every row");
+    assert!(
+        finished.is_none(),
+        "a capture with no surviving row publishes nothing"
+    );
+    assert!(emulator.take_accessibility_capture_outran());
+    let model = finish_capture_during_output(&mut emulator, bound, |_, _| {})
+        .expect("the next capture finishes")
+        .expect("the next capture publishes the live rows");
+    assert_real_lines(&model);
+    let last = format!("line {}", next - 1);
+    assert!(model.text().trim_end_matches('\n').ends_with(&last));
 }
 
 /// A capture used to extract again every row that changed after it extracted it, so a wide
