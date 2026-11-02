@@ -37,18 +37,24 @@ struct Applied {
 }
 
 impl RetainedSemantics {
-    /// Resolves a native Selection request against the model this client published last.
+    /// Resolves a native Selection request against the model this client published last into
+    /// this client's Selection: its endpoints in lines relative to the first row of the screen,
+    /// as [`super::scrollback::AccessibilityView`] holds them. `Some(None)` clears the Selection.
     /// `None` means the request names content this client no longer presents.
     pub(super) fn resolve_selection(
         &self,
         request: &AccessibilitySelectionRequest,
-    ) -> Option<Option<wire::SelectionRefs>> {
-        let selection = self.rows.resolve_selection(request)?;
-        Some(selection.map(|(start, end)| wire::SelectionRefs {
-            start: encode_ref(start),
-            end: encode_ref(end),
-            rectangle: false,
-        }))
+    ) -> Option<Option<super::scrollback::ViewSelection>> {
+        let Some((start, end)) = self.rows.resolve_selection(request)? else {
+            return Some(None);
+        };
+        let model = self.rows.latest()?;
+        let top = i64::try_from(self.last.as_ref()?.visible_lines.start).ok()?;
+        let point = |reference: AccessibilityCellRef| {
+            let line = i64::try_from(model.line_for_row(reference.row)?).ok()?;
+            Some((line - top, reference.column))
+        };
+        Some(Some((point(start)?, point(end)?)))
     }
 
     /// Applies a whole revision atomically, bound to the presentation `generation`. Returns
@@ -723,26 +729,6 @@ impl Staging {
 
 fn check(condition: bool) -> Result<(), ServerError> {
     condition.then_some(()).ok_or(ServerError::Protocol)
-}
-
-fn encode_screen(screen: AccessibilityScreen) -> wire::Screen {
-    match screen {
-        AccessibilityScreen::Primary => wire::Screen::Primary,
-        AccessibilityScreen::Alternate => wire::Screen::Alternate,
-    }
-}
-
-fn encode_ref(reference: AccessibilityCellRef) -> wire::CellRef {
-    wire::CellRef {
-        row: wire::RowId {
-            screen: encode_screen(reference.row.screen),
-            screen_generation: reference.row.screen_generation as u64,
-            node_serial: reference.row.node_serial,
-            page_row: reference.row.page_row,
-        },
-        row_revision: reference.row_revision,
-        column: reference.column,
-    }
 }
 
 #[cfg(test)]
@@ -1520,23 +1506,10 @@ mod tests {
             .unwrap();
         let model = client.publish(PresentationGeneration::default()).unwrap();
         let request = model.selection_request(0..2).unwrap();
-        let cell = |column| wire::CellRef {
-            row: wire::RowId {
-                screen: wire::Screen::Primary,
-                screen_generation: 1,
-                node_serial: 7,
-                page_row: 0,
-            },
-            row_revision: 1,
-            column,
-        };
         assert_eq!(
             client.retained.lock().unwrap().resolve_selection(&request),
-            Some(Some(wire::SelectionRefs {
-                start: cell(0),
-                end: cell(1),
-                rectangle: false,
-            }))
+            Some(Some(((0, 0), (0, 1)))),
+            "the Selection covers the first two cells of the screen's first line"
         );
 
         *client.state.accessibility.lock().unwrap() =

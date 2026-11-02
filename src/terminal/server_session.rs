@@ -633,7 +633,6 @@ enum Input {
     ),
     Resize(PaneSize),
     Style(pane::PresentationStyle),
-    AccessibilitySelection(super::accessibility::AccessibilitySelectionRequest),
 }
 impl Input {
     fn eligible(&self, target: pane::FocusTarget) -> bool {
@@ -647,11 +646,9 @@ impl Input {
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
             ),
-            Self::Key(_)
-            | Self::CopyOrForward(_)
-            | Self::Pointer(..)
-            | Self::Wheel(..)
-            | Self::AccessibilitySelection(_) => target == pane::FocusTarget::Terminal,
+            Self::Key(_) | Self::CopyOrForward(_) | Self::Pointer(..) | Self::Wheel(..) => {
+                target == pane::FocusTarget::Terminal
+            }
             Self::Paste(_, reply) => target == pane::FocusTarget::Terminal && !reply.is_closed(),
             Self::ResolvePaste(pending, _, _) => {
                 target == pane::FocusTarget::Terminal
@@ -853,12 +850,27 @@ impl TerminalSessionHandle for PresentationHandle {
             self.state.wake.notify();
         }
     }
+    /// Assistive technology selects through this client's own Selection, the one the pointer
+    /// sets and Copy reads, so the Pane never holds a second one.
     fn accessibility_selection_sender(&self) -> Option<super::AccessibilitySelectionSender> {
         let state = Arc::clone(&self.state);
-        let input = self.input.clone();
         Some(super::AccessibilitySelectionSender::server(Arc::new(
             move |request| {
-                submit_input(&state, &input, Input::AccessibilitySelection(request));
+                let Some(selection) = state
+                    .accessibility
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .resolve_selection(&request)
+                else {
+                    return;
+                };
+                let changed = {
+                    let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                    reading.select(selection)
+                };
+                if changed {
+                    state.wake.notify();
+                }
             },
         )))
     }

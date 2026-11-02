@@ -370,25 +370,6 @@ impl ActiveInput {
                 },
                 None,
             ),
-            Input::AccessibilitySelection(request) => {
-                // The server revalidates the refs; this client resolves only its own epoch's rows.
-                let Some(selection) = state
-                    .accessibility
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .resolve_selection(&request)
-                else {
-                    return Ok(());
-                };
-                return match exchange(&Request::AccessibilitySelection {
-                    lease: self.lease,
-                    focus_generation: generation,
-                    selection,
-                })? {
-                    Reply::Unchanged => Ok(()),
-                    _ => Err(ServerError::Protocol),
-                };
-            }
             Input::Paste(text, reply) => (
                 input_request(pane::InteractiveInput::Paste { text }),
                 Some(PasteReply::Request(reply)),

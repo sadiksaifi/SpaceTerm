@@ -2281,6 +2281,81 @@ fn a_semantic_tail_before_the_channels_end_publishes_the_ended_panes_document() 
     assert!(pane.semantics.1.try_recv().is_err());
 }
 
+/// Assistive technology used to send its Selection to the server, which drew it in the Pane's
+/// frames while Copy read only this client's Selection: Copy copied nothing, and a pointer
+/// Selection drew a second one. The accessible Selection is now this client's Selection.
+#[test]
+fn an_accessible_selection_is_the_selection_copy_reads_and_the_pointer_replaces() {
+    use super::super::pointer_input::*;
+    let mut pane = PushedPane::new(40);
+    pane.push_frame();
+    pane.push_semantics(semantic_lines(1, None, 0, 46));
+    pane.turn();
+    let model = pane.published();
+    assert_eq!(model.visible_lines(), 40..46);
+    // From column 2 of the screen's fifth row to column 1 of its sixth.
+    let start = model.range_for_line(44).unwrap().start + 2;
+    let end = model.range_for_line(45).unwrap().start + 2;
+    let request = model.selection_request(start..end).unwrap();
+    pane.adapter
+        .handle
+        .accessibility_selection_sender()
+        .expect("a server Pane accepts an accessible Selection")
+        .request(request);
+
+    let copy = pane
+        .adapter
+        .handle
+        .copy_selection()
+        .unwrap()
+        .expect("Copy reads the accessible Selection");
+    assert_eq!(copy.plain_text.as_ref(), "ne\nli");
+    assert!(
+        pane.adapter.input.try_recv().is_err(),
+        "the Selection stays on this client"
+    );
+    let state = Arc::clone(&pane.adapter.handle.state);
+    let mapping = pane.mapping.unwrap();
+    let show = |pane: &mut PushedPane| {
+        pane.generation = pane.generation.next();
+        pane.mapping = Some(
+            super::link::show(
+                &state,
+                (&pane.events.0, &pane.semantics.0),
+                &mut pane.semantic,
+                None,
+                (pane.adapter.active.epoch, pane.generation, mapping),
+                false,
+            )
+            .unwrap(),
+        );
+        pane.published()
+    };
+    let shown = show(&mut pane);
+    assert_eq!(
+        shown
+            .text_for_range(shown.selection_range().unwrap())
+            .unwrap(),
+        "ne\nli",
+        "assistive technology reads back the Selection it set"
+    );
+
+    // A click replaces it, as it replaces a pointer Selection.
+    let presented = pane.mapping.unwrap().local;
+    let pointer = |phase| PointerInput {
+        generation: presented,
+        phase,
+        button: Some(PointerButton::Left),
+        position: SurfacePosition { x: 1.0, y: 1.0 },
+        modifiers: Default::default(),
+        shift_selection: ShiftSelectionPolicy::ReportToApplication,
+    };
+    pane.adapter.handle.pointer(pointer(PointerPhase::Press));
+    pane.adapter.handle.pointer(pointer(PointerPhase::Release));
+    assert!(pane.adapter.handle.copy_selection().unwrap().is_none());
+    assert!(show(&mut pane).selection_range().is_none());
+}
+
 #[test]
 fn hiding_a_pane_keeps_its_semantic_demand_and_document() {
     let mut pane = PushedPane::new(0);

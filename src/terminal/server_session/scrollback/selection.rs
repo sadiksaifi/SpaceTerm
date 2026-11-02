@@ -93,8 +93,13 @@ impl LocalSelection {
     }
 
     pub(super) fn clear(&mut self) -> bool {
+        self.replace(None)
+    }
+
+    /// Replaces the Selection, ending any gesture, as assistive technology does.
+    pub(super) fn replace(&mut self, range: Option<(Point, Point)>) -> bool {
         self.gesture = Gesture::default();
-        self.set(None)
+        self.set(range)
     }
 
     /// Keeps the Selection on readable lines after the oldest rows were discarded.

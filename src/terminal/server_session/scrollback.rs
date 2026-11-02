@@ -132,12 +132,16 @@ pub(crate) struct Scrollback {
     shown: view::Shown,
 }
 
+/// A Selection's ordered endpoints, each a line relative to the first row of the screen and a
+/// column, both included.
+pub(crate) type ViewSelection = ((i64, u16), (i64, u16));
+
 /// What assistive technology sees of this client's view: how far it is scrolled back, and the
 /// Selection, in lines relative to the first row of the screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AccessibilityView {
     pub(crate) scrolled: u64,
-    pub(crate) selection: Option<((i64, u16), (i64, u16))>,
+    pub(crate) selection: Option<ViewSelection>,
 }
 
 impl Scrollback {
@@ -264,6 +268,30 @@ impl Scrollback {
     /// Another owner took the pointer, such as the program or a hidden view.
     pub(crate) fn pointer_cancel(&mut self) {
         self.selection.cancel_gesture();
+    }
+
+    /// Sets the Selection assistive technology chose, or clears it. Its endpoints are lines
+    /// relative to the first row of the screen, as [`AccessibilityView`] holds them. An endpoint
+    /// outside the readable lines leaves the Selection unchanged. Returns whether it changed.
+    pub(crate) fn select(&mut self, selection: Option<ViewSelection>) -> bool {
+        let Some(screen) = self.screen.clone() else {
+            return false;
+        };
+        let lines = lines(&self.cache, &screen);
+        let readable = lines.range();
+        let total = i64::try_from(lines.total()).unwrap_or(i64::MAX);
+        let point = |(line, column): (i64, u16)| {
+            let line = u64::try_from(total.checked_add(line)?).ok()?;
+            readable.contains(&line).then_some(Point { line, column })
+        };
+        let range = match selection {
+            None => None,
+            Some((start, end)) => match point(start).zip(point(end)) {
+                Some(range) => Some(range),
+                None => return false,
+            },
+        };
+        self.selection.replace(range)
     }
 
     pub(crate) fn selection_present(&self) -> bool {
