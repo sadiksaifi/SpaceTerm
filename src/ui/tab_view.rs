@@ -15,8 +15,8 @@ use super::terminal_status::{
 };
 use crate::repository_status::presentation::{HeadGlyph, RepositoryCaption, RepositoryMark};
 use crate::ui::appearance::gpui_color;
-use std::collections::{BTreeMap, BTreeSet};
 use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
@@ -496,7 +496,10 @@ pub(super) enum DragFace {
     /// Tab the drop joins stays readable.
     Joining { below: Pixels },
     /// A lifted Tab `size` large, whose top edge is `top`: the drop makes a Tab there.
-    Tab { top: Pixels, size: gpui::Size<Pixels> },
+    Tab {
+        top: Pixels,
+        size: gpui::Size<Pixels>,
+    },
 }
 
 /// Paints a lifted Tab face of a given size. The Tab strip owns that face.
@@ -1532,7 +1535,6 @@ impl TabView {
     pub(crate) fn pane_layout_size(&self) -> Option<PaneSize> {
         self.pane_layout_size
     }
-
 
     /// The Pane drawn under `pointer` and where it is drawn, while no Pane is zoomed.
     fn pane_under(&self, pointer: Point<Pixels>) -> Option<(PaneId, Bounds<Pixels>)> {
@@ -2628,9 +2630,11 @@ impl TabView {
                 continue;
             };
             let pane_construction = binding.sessions().panes().clone();
-            let inserted = self.tab.insert_pane(source, side_edge(pane.side), |pane_id| {
-                Self::create_terminal(pane_id, session_factory, pane_construction, window, cx)
-            });
+            let inserted = self
+                .tab
+                .insert_pane(source, side_edge(pane.side), |pane_id| {
+                    Self::create_terminal(pane_id, session_factory, pane_construction, window, cx)
+                });
             match inserted {
                 Ok(pane_id) => {
                     {
@@ -4426,14 +4430,17 @@ fn render_pane_caption_content(
         // visible.
         .when(has_multiple_panes && !zoomed, |row| {
             let owner = drag_view.entity_id();
-            row.on_drag(DraggedPane { pane_id, owner }, move |_, cursor_offset, window, cx| {
-                let preview = drag_view
-                    .update(cx, |view, cx| {
-                        view.begin_pane_drag(pane_id, cursor_offset, window, cx)
-                    })
-                    .unwrap_or_else(|_| DragPreview::empty());
-                cx.new(|_| preview)
-            })
+            row.on_drag(
+                DraggedPane { pane_id, owner },
+                move |_, cursor_offset, window, cx| {
+                    let preview = drag_view
+                        .update(cx, |view, cx| {
+                            view.begin_pane_drag(pane_id, cursor_offset, window, cx)
+                        })
+                        .unwrap_or_else(|_| DragPreview::empty());
+                    cx.new(|_| preview)
+                },
+            )
         })
         .child(caption_content)
         .when_some(
@@ -4847,38 +4854,31 @@ pub(super) fn edge_side(edge: PaneEdge) -> spaceterm_server::hierarchy::Side {
 
 /// The rectangle a Pane or Tab drag carries, `size` large. It wears the floating surface
 /// material, its header is the Pane Caption's size, and its body is the frozen screen.
-fn render_stand_in_card(
-    stand_in: &DragStandIn,
-    size: gpui::Size<Pixels>,
-    cx: &App,
-) -> AnyElement {
+fn render_stand_in_card(stand_in: &DragStandIn, size: gpui::Size<Pixels>, cx: &App) -> AnyElement {
     let appearance = super::appearance::chrome(cx);
     let identity = &stand_in.identity;
     let muted = gpui_color(appearance.colors.text_muted);
-    let mut header = caption_row(appearance, appearance.colors.text_secondary)
-        .h(appearance.caption_height())
-        .flex_none()
-        .child(
-            div()
-                .flex_shrink_0()
-                .mr(appearance.spacing(PANE_STATUS_ICON_GAP))
-                .child(Icon::new(
-                    IconName::Terminal,
-                    appearance.icons.metrics(IconRole::Status).glyph_size,
-                    muted,
-                )),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .min_w_0()
-                .truncate()
-                .child(if identity.activity.is_empty() {
+    let mut header =
+        caption_row(appearance, appearance.colors.text_secondary)
+            .h(appearance.caption_height())
+            .flex_none()
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .mr(appearance.spacing(PANE_STATUS_ICON_GAP))
+                    .child(Icon::new(
+                        IconName::Terminal,
+                        appearance.icons.metrics(IconRole::Status).glyph_size,
+                        muted,
+                    )),
+            )
+            .child(div().flex_shrink_0().min_w_0().truncate().child(
+                if identity.activity.is_empty() {
                     gpui::SharedString::from("Terminal")
                 } else {
                     identity.activity.clone()
-                }),
-        );
+                },
+            ));
     if !identity.place.is_empty() {
         header = header
             .child(
@@ -6296,7 +6296,10 @@ mod tests {
     ) {
         use spaceterm_server::hierarchy::Axis;
         let (view, cx) = server_tab_view(
-            vec![layout_pane(2, 0, Axis::Right), layout_pane(3, 2, Axis::Right)],
+            vec![
+                layout_pane(2, 0, Axis::Right),
+                layout_pane(3, 2, Axis::Right),
+            ],
             cx,
         );
         let minimum = view.read_with(cx, |view, _| view.tab.minimum_pane_size().width());
@@ -6316,7 +6319,10 @@ mod tests {
             let mut places = BTreeMap::new();
             lay_out_panes(
                 view.tab.root(),
-                Bounds::new(Point::default(), gpui::size(px(size.width()), px(size.height()))),
+                Bounds::new(
+                    Point::default(),
+                    gpui::size(px(size.width()), px(size.height())),
+                ),
                 pane_gap(cx),
                 &mut places,
             );

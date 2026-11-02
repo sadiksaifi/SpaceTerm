@@ -7529,7 +7529,7 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
 ) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Side, Inventory, Mutation, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Inventory, Mutation, Pane, Side, Tab, Workspace};
 
     const SERVER_WORKSPACE: [u8; 32] = [1; 32];
     const SERVER_TAB: [u8; 32] = [2; 32];
@@ -7654,7 +7654,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
 ) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Side, Inventory, Mutation, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Inventory, Mutation, Pane, Side, Tab, Workspace};
 
     // Both servers name their only Workspace, Tab, and Pane with the same identities.
     let published = |name: &str| Inventory {
@@ -7798,7 +7798,7 @@ fn server_inventory(
     revision: u64,
     workspaces: &[(&str, u8)],
 ) -> spaceterm_server::hierarchy::Inventory {
-    use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
     Inventory {
         repositories: None,
@@ -8582,7 +8582,7 @@ const WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(1);
 fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTestContext) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
     let (manager, _records, cx) = serverless_workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
@@ -8852,7 +8852,7 @@ type WorkspaceClosePane = ([u8; 32], Option<[u8; 32]>);
 
 /// The other Workspace the server publishes, whose one Pane runs no shell.
 fn close_other() -> spaceterm_server::hierarchy::Workspace {
-    use spaceterm_server::hierarchy::{Side, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Pane, Side, Tab, Workspace};
 
     Workspace {
         id: CLOSE_OTHER_WORKSPACE,
@@ -8909,7 +8909,7 @@ fn close_inventory(
     tabs: &[([u8; 32], &[WorkspaceClosePane])],
 ) -> spaceterm_server::hierarchy::Inventory {
     use spaceterm_server::hierarchy::{
-        Side, CloseInventory, ConfirmedPane, Inventory, Pane, Tab, Workspace,
+        CloseInventory, ConfirmedPane, Inventory, Pane, Side, Tab, Workspace,
     };
 
     let pane = |id: [u8; 32], source: Option<[u8; 32]>| Pane {
@@ -9806,7 +9806,7 @@ struct AttachmentHarness {
 }
 
 fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
-    use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
     let workspace = |id, name: &str, tab, pane| Workspace {
         id,
@@ -10677,7 +10677,7 @@ mod workspace_repositories {
     use std::rc::Rc;
 
     use gpui::{Entity, TestAppContext, VisualTestContext};
-    use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
+    use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
     use spaceterm_server::repository::{
         ChangeSummary, ChangeTotal, DirectoryFacts, GitToolStatus, Repository, RepositoryHead,
         RepositoryReadError, Snapshot, ToolVersion, WorktreeHead, WorktreeInventory,

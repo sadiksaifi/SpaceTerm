@@ -1610,7 +1610,10 @@ fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mu
         })
     };
     let before = signature(cx);
-    assert!(!before.contains(":0.5("), "the Split left its default ratio: {before}");
+    assert!(
+        !before.contains(":0.5("),
+        "the Split left its default ratio: {before}"
+    );
     let moved = harness.server.inventory().workspaces[0].tabs[0].panes[1].id;
     let opens = harness.panes.opens(moved);
 
@@ -1637,18 +1640,14 @@ fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mu
     assert_eq!(
         (
             pending,
-            harness.manager.read_with(cx, |manager, _| manager.tab_ids().len()),
+            harness
+                .manager
+                .read_with(cx, |manager, _| manager.tab_ids().len()),
             signature(cx),
             cx.debug_bounds("pane-surface-2").is_some(),
             harness.panes.opens(moved) > opens + 1,
         ),
-        (
-            (2, 1),
-            1,
-            before,
-            true,
-            true
-        ),
+        ((2, 1), 1, before, true, true),
         "the refused move restores the same Pane in its place and opens it again, because the \
          new Tab's presentation fenced the old one"
     );

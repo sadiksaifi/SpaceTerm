@@ -13,6 +13,7 @@ use super::drag_and_drop::{
     lift_shadow,
 };
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
+use super::tab_view::{DragFace, DragPicture, TabFace};
 use super::terminal_focus::{TabFocusOwners, TerminalFocusBlocker, TerminalFocusCoordinator};
 use super::terminal_status::{StatusColors, StatusGlyph};
 use super::{
@@ -23,7 +24,6 @@ use super::{
 };
 #[cfg(test)]
 use super::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
-use super::tab_view::{DragFace, DragPicture, TabFace};
 
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
@@ -1317,12 +1317,9 @@ impl TabManager {
         ) else {
             return;
         };
-        let submission = self.binding.merge_tab(
-            tab,
-            into,
-            beside,
-            super::tab_view::edge_side(edge),
-        );
+        let submission =
+            self.binding
+                .merge_tab(tab, into, beside, super::tab_view::edge_side(edge));
         self.present_tab_submission(
             submission,
             "Couldn\u{2019}t Merge Tab",
@@ -2471,15 +2468,14 @@ impl Render for TabManager {
             &self.tab_bar_scroll_handle,
             &ids,
         );
-        self.tab_reorder
-            .follow_selection(
-                Some(
-                    self.join_target(cx)
-                        .unwrap_or_else(|| self.tabs.active_tab_id()),
-                ),
-                window,
-                cx,
-            );
+        self.tab_reorder.follow_selection(
+            Some(
+                self.join_target(cx)
+                    .unwrap_or_else(|| self.tabs.active_tab_id()),
+            ),
+            window,
+            cx,
+        );
         #[cfg(test)]
         {
             self.rendered_window_active = window.is_window_active();
@@ -3604,8 +3600,7 @@ impl TabManager {
             })
             .collect();
         let minimum = self.tabs.tab(tab_id)?.read(cx).minimum_pane_size();
-        crate::domain::placed_minimum_size(minimum, super::tab_view::pane_gap(cx), &placements)
-            .ok()
+        crate::domain::placed_minimum_size(minimum, super::tab_view::pane_gap(cx), &placements).ok()
     }
 
     /// Keeps the lit Tab under the pointer while autoscroll moves the strip beneath a held
@@ -3644,7 +3639,8 @@ impl TabManager {
             .enumerate()
             .find(|(position, (tab_id, _))| {
                 items.bounds_for_item(*position).is_some_and(|slot| {
-                    let start = slot.origin.x + offset.x + self.tab_reorder.motion(*tab_id, cx).offset.x;
+                    let start =
+                        slot.origin.x + offset.x + self.tab_reorder.motion(*tab_id, cx).offset.x;
                     let inset = slot.size.width * (1.0 - TAB_MERGE_SHARE) / 2.0;
                     pointer.x >= start + inset && pointer.x <= start + slot.size.width - inset
                 })
@@ -3713,8 +3709,13 @@ impl TabManager {
         };
         let submission = self.binding.move_pane(tab, pane, destination);
         let opened = (!matches!(drop, StripDrop::NewTab { .. })).then_some(pane);
-        let created =
-            self.present_tab_submission(submission, "Couldn\u{2019}t Move Pane", opened, window, cx);
+        let created = self.present_tab_submission(
+            submission,
+            "Couldn\u{2019}t Move Pane",
+            opened,
+            window,
+            cx,
+        );
         // The new Tab takes the gap the strip held open for it, without growing in again.
         if let StripDrop::NewTab { position } = drop {
             match created.and_then(|target| self.binding.local_tab(target)) {
@@ -5039,7 +5040,12 @@ mod tests {
 
         let (active, focused) = active_focus(&manager, cx);
         assert_eq!(
-            (offered, pane_counts(&manager, cx), active != source_tab, focused),
+            (
+                offered,
+                pane_counts(&manager, cx),
+                active != source_tab,
+                focused
+            ),
             ((true, true), vec![1, 1], true, moved)
         );
         assert!(cx.debug_bounds("tab-bar-incoming-landing").is_none());
@@ -5117,7 +5123,12 @@ mod tests {
                 pane_counts(&manager, cx),
                 active_focus(&manager, cx),
             ),
-            (None, (Some(1), true, true), vec![2, 1], (TabId::new(1), moved)),
+            (
+                None,
+                (Some(1), true, true),
+                vec![2, 1],
+                (TabId::new(1), moved)
+            ),
             "Tab 1 takes the selected chip from Tab 2 while the drop would join it, and the Pane \
              joins Tab 1 beside its Focused Pane"
         );
@@ -5384,10 +5395,7 @@ mod tests {
         });
         let window = cx.update(|window, _| window.viewport_size());
         let chrome = f32::from(window.height) - stage.height();
-        cx.simulate_resize(gpui::size(
-            window.width,
-            px(chrome + pane_height * 1.5),
-        ));
+        cx.simulate_resize(gpui::size(window.width, px(chrome + pane_height * 1.5)));
         cx.run_until_parked();
         let dragged = cx.debug_bounds("tab-item-1-inactive").unwrap().center();
         let tab = cx.debug_bounds("tab-item-2-active").unwrap();
@@ -5456,13 +5464,7 @@ mod tests {
                 active,
                 focused
             ),
-            (
-                (true, true, false),
-                vec![2],
-                vec![2],
-                TabId::new(2),
-                merged
-            ),
+            ((true, true, false), vec![2], vec![2], TabId::new(2), merged),
             "Tab 1's Pane lands on the left of Tab 2's Pane, keeping its Terminal Session"
         );
         assert!(cx.debug_bounds("pane-drop-target-1-left").is_none());
@@ -7939,9 +7941,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_tab_released_where_no_pane_takes_it_should_return_to_its_place(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_tab_released_where_no_pane_takes_it_should_return_to_its_place(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
         click("create-tab-button", cx);
@@ -7952,7 +7952,11 @@ mod tests {
 
         drag_tab(
             first.center(),
-            &[first.center() + point(px(8.0), px(0.0)), second.center(), middle],
+            &[
+                first.center() + point(px(8.0), px(0.0)),
+                second.center(),
+                middle,
+            ],
             cx,
         );
         finish_slides(cx);
@@ -7964,7 +7968,11 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            (over_panes, tab_order(&manager, cx), pane_counts(&manager, cx)),
+            (
+                over_panes,
+                tab_order(&manager, cx),
+                pane_counts(&manager, cx)
+            ),
             ((true, false), vec![1, 2, 3], vec![1, 1, 1]),
             "over the Panes the lifted Tab becomes the drag's rectangle, and a release no Pane \
              takes leaves every Tab where it was"

@@ -3345,7 +3345,10 @@ fn text_fragment_visible(blinking: bool, blink_phase_visible: bool) -> bool {
 }
 
 /// A cell's foreground and background as the terminal paints them.
-pub(super) fn effective_colors(cell: &CellSnapshot, colors: &TerminalColorsSnapshot) -> (Color, Color) {
+pub(super) fn effective_colors(
+    cell: &CellSnapshot,
+    colors: &TerminalColorsSnapshot,
+) -> (Color, Color) {
     let foreground_source = match (cell.foreground_source, cell.bold && colors.bold_as_bright) {
         (TerminalColor::Palette(index @ 0..=7), true) => TerminalColor::Palette(index + 8),
         (source, _) => source,

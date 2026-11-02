@@ -108,7 +108,12 @@ pub(crate) fn placed_minimum_size(
         let next = index as u64 + 1;
         let beside = PaneId::from_raw(*beside as u64);
         root = root
-            .with_split(beside, PaneId::from_raw(next), SplitId::from_raw(next), *edge)
+            .with_split(
+                beside,
+                PaneId::from_raw(next),
+                SplitId::from_raw(next),
+                *edge,
+            )
             .ok_or(PaneError::PaneNotFound(beside))?;
     }
     root.minimum_size(minimum, divider_size)
@@ -1804,12 +1809,48 @@ mod tests {
         let two_wide = size(201.0, 50.0);
         assert_eq!(
             [
-                tab.can_insert(PaneId::new(1), PaneEdge::Right, pane, size(302.0, 50.0), DIVIDER_SIZE),
-                tab.can_insert(PaneId::new(1), PaneEdge::Right, pane, size(301.0, 50.0), DIVIDER_SIZE),
-                tab.can_insert(PaneId::new(1), PaneEdge::Bottom, pane, size(201.0, 101.0), DIVIDER_SIZE),
-                tab.can_insert(PaneId::new(1), PaneEdge::Right, two_wide, size(403.0, 50.0), DIVIDER_SIZE),
-                tab.can_insert(PaneId::new(1), PaneEdge::Right, two_wide, size(402.0, 50.0), DIVIDER_SIZE),
-                tab.can_insert(PaneId::new(9), PaneEdge::Right, pane, size(900.0, 900.0), DIVIDER_SIZE),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Right,
+                    pane,
+                    size(302.0, 50.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Right,
+                    pane,
+                    size(301.0, 50.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Bottom,
+                    pane,
+                    size(201.0, 101.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Right,
+                    two_wide,
+                    size(403.0, 50.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(1),
+                    PaneEdge::Right,
+                    two_wide,
+                    size(402.0, 50.0),
+                    DIVIDER_SIZE
+                ),
+                tab.can_insert(
+                    PaneId::new(9),
+                    PaneEdge::Right,
+                    pane,
+                    size(900.0, 900.0),
+                    DIVIDER_SIZE
+                ),
             ],
             [true, false, true, true, false, false],
             "two 100 wide Panes beside 100 wide content need 302, and beside 201 wide content 403"
@@ -1878,7 +1919,13 @@ mod tests {
                 PaneDrop::Edge(PaneEdge::Bottom),
                 PaneDrop::Swap,
             ]
-            .map(|drop| tab.resolve_drop(PaneId::new(1), PaneId::new(2), drop, roomy, DIVIDER_SIZE)),
+            .map(|drop| tab.resolve_drop(
+                PaneId::new(1),
+                PaneId::new(2),
+                drop,
+                roomy,
+                DIVIDER_SIZE
+            )),
             [
                 None,
                 Some(PaneDrop::Swap),

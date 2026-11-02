@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
-use spaceterm_server::hierarchy::{Side, Inventory, Pane, Tab, Workspace};
+use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
 use super::*;
 use crate::server_connection::ServerError;

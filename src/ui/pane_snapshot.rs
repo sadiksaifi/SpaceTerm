@@ -7,8 +7,7 @@
 use std::ops::Range;
 
 use gpui::{
-    Font, HighlightStyle, IntoElement, ParentElement, Pixels, SharedString, Styled, StyledText,
-    div,
+    Font, HighlightStyle, IntoElement, ParentElement, Pixels, SharedString, Styled, StyledText, div,
 };
 
 use crate::appearance::Color;
@@ -88,9 +87,10 @@ impl PaneSnapshot {
             .text_size(size)
             .line_height(line_height)
             .children(self.lines.iter().map(|line| {
-                div().h(line_height).child(
-                    StyledText::new(line.text.clone()).with_highlights(line.runs.iter().map(
-                        |(range, color)| {
+                div()
+                    .h(line_height)
+                    .child(StyledText::new(line.text.clone()).with_highlights(
+                        line.runs.iter().map(|(range, color)| {
                             (
                                 range.clone(),
                                 HighlightStyle {
@@ -98,9 +98,8 @@ impl PaneSnapshot {
                                     ..HighlightStyle::default()
                                 },
                             )
-                        },
-                    )),
-                )
+                        }),
+                    ))
             }))
     }
 }

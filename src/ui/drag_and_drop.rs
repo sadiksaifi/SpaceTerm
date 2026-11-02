@@ -1376,19 +1376,17 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
     ) -> Option<usize> {
         let slots = painted_item_bounds(items);
         (slots.len() == ids.len()).then(|| {
-            incoming_position(&spans(self.axis, &slots), f32::from(pointer.along(self.axis)))
+            incoming_position(
+                &spans(self.axis, &slots),
+                f32::from(pointer.along(self.axis)),
+            )
         })
     }
 
     /// Opens a gap `extent` long before the item at `position` among `ids`, or after the last,
     /// for an item arriving from outside the strip, as a Pane that becomes a Tab. The items
     /// slide aside as they do for a lifted item. `None` closes the gap.
-    pub(crate) fn hold_incoming(
-        &mut self,
-        ids: &[Id],
-        gap: Option<(usize, Pixels)>,
-        cx: &App,
-    ) {
+    pub(crate) fn hold_incoming(&mut self, ids: &[Id], gap: Option<(usize, Pixels)>, cx: &App) {
         let gap = gap.map(|(position, extent)| Incoming { position, extent });
         if self.incoming == gap {
             return;
@@ -2112,8 +2110,7 @@ impl Render for DragPreview {
             .and_then(|placement| {
                 let pointer = window.mouse_position();
                 let root = pointer - placement.cursor_offset;
-                (placement.origin)(pointer, window.viewport_size(), cx)
-                    .map(|origin| origin - root)
+                (placement.origin)(pointer, window.viewport_size(), cx).map(|origin| origin - root)
             })
             .unwrap_or(self.lift);
         div().debug_selector(|| "drag-preview".to_owned()).child(
