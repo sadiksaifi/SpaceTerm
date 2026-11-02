@@ -77,6 +77,8 @@ mod settings;
 mod ssh;
 #[cfg(feature = "desktop")]
 mod status_menu;
+#[cfg(feature = "desktop")]
+mod system_wake;
 mod terminal;
 #[cfg(feature = "desktop")]
 mod theme_registry;

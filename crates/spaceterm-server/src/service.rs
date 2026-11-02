@@ -142,6 +142,10 @@ trait Supervisor: Send + Sync {
     fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError>;
     fn running(&self) -> Result<bool, ServerError>;
+    /// The running server's process identifier, as the service manager reports it.
+    fn process(&self) -> Result<Option<u32>, ServerError> {
+        Ok(None)
+    }
     /// Replace only the admitted old definition or finish its exact already-published replacement.
     fn replace(&self, _previous: &Path, _candidate: &Path) -> Result<(), ServerError> {
         Err(ServerError::Unsupported)
@@ -237,6 +241,15 @@ impl Service {
             return Ok(ServiceStatus::default());
         };
         self.snapshot(&state)
+    }
+    /// The directories whose entries change when the retained policy changes or the server
+    /// publishes or removes its endpoint: the data directory, then the runtime directory.
+    pub fn state_directories(&self) -> [&Path; 2] {
+        [&self.paths.data, &self.paths.runtime]
+    }
+    /// The running server's process identifier, read from the service manager only.
+    pub fn server_process(&self) -> Result<Option<u32>, ServerError> {
+        self.supervisor.process()
     }
     /// Observe service policy and the supervisor without continuing an admitted activation.
     /// This never provisions, starts, stops, stages or recovers a server.

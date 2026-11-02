@@ -6,6 +6,7 @@ use crate::updates::{UpdateAdapter, UpdateError, UpdateEvent};
 #[derive(Default)]
 pub(crate) struct MacosUpdates {
     session: std::cell::RefCell<Option<native::Session>>,
+    clock_changes: std::cell::RefCell<Option<crate::platform::macos_clock_changes::ClockChanges>>,
 }
 
 impl MacosUpdates {
@@ -153,6 +154,11 @@ mod native {
         }
         fn finish_on_quit(&self) -> Result<(), UpdateError> {
             self.command(spt_updater_finish_on_quit, UpdateError::Installation)
+        }
+        fn observe_clock_changes(&self, changed: Box<dyn Fn() + Send + Sync>) {
+            *self.clock_changes.borrow_mut() = Some(
+                crate::platform::macos_clock_changes::ClockChanges::observe(changed),
+            );
         }
         fn load_history(&self) -> crate::updates::policy::UpdateHistory {
             let session = self.session.borrow();
