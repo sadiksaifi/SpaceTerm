@@ -2356,6 +2356,48 @@ fn an_accessible_selection_is_the_selection_copy_reads_and_the_pointer_replaces(
     assert!(show(&mut pane).selection_range().is_none());
 }
 
+/// Semantic endpoints used to be resolved relative to the revision's screen and placed against
+/// the newest frame's screen. Output that scrolled before its revision arrived made Copy read
+/// rows the request never named.
+#[test]
+fn an_accessible_selection_made_while_frames_are_ahead_of_semantics_copies_its_rows() {
+    let mut pane = PushedPane::new(40);
+    pane.push_frame();
+    pane.push_semantics(semantic_lines(1, None, 0, 46));
+    pane.turn();
+    let model = pane.published();
+    let start = model.range_for_line(44).unwrap().start + 2;
+    let end = model.range_for_line(45).unwrap().start + 2;
+
+    // Output scrolls the screen two rows; its frame arrives before its semantic revision.
+    pane.emulator.feed(b"\r\nNEXT\r\nLAST");
+    pane.push_frame();
+    pane.turn();
+    let current = pane.published();
+    assert_eq!(
+        current.visible_lines(),
+        40..46,
+        "the document is still revision 1"
+    );
+    pane.adapter
+        .handle
+        .accessibility_selection_sender()
+        .unwrap()
+        .request(current.selection_request(start..end).unwrap());
+
+    let copy = pane
+        .adapter
+        .handle
+        .copy_selection()
+        .unwrap()
+        .expect("Copy reads the accessible Selection");
+    assert_eq!(
+        copy.plain_text.as_ref(),
+        "ne\nli",
+        "the rows the request named, two rows higher on the screen now"
+    );
+}
+
 #[test]
 fn hiding_a_pane_keeps_its_semantic_demand_and_document() {
     let mut pane = PushedPane::new(0);

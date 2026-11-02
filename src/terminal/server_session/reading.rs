@@ -114,7 +114,7 @@ impl Reading {
 
     /// Sets the Selection assistive technology chose, as [`Scrollback::select`] does, and has
     /// the worker present it. Returns whether it changed.
-    pub(super) fn select(&mut self, selection: Option<super::scrollback::ViewSelection>) -> bool {
+    pub(super) fn select(&mut self, selection: Option<super::scrollback::EpochSelection>) -> bool {
         let changed = self.scrollback.select(selection);
         self.changed |= changed;
         changed

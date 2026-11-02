@@ -34,27 +34,65 @@ struct Applied {
     visible_lines: Range<usize>,
     cursor: Option<AccessibilityCellRef>,
     selection: Option<AccessibilitySelectionRefs>,
+    /// Where the revision's lines sit in this client's Scrollback, once a frame of its screen
+    /// places them.
+    origin: Option<Origin>,
+}
+
+/// The absolute line of a revision's first line within one history epoch, so its lines and
+/// this client's Selection name the same rows however far later frames scrolled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Origin {
+    epoch: u64,
+    first: u64,
+}
+
+impl Origin {
+    /// Places `applied` by the frame `view` presented last. A primary document starts at the
+    /// oldest retained history row, which output scrolling past the screen never moves; the
+    /// alternate screen has no history, so its document starts at the screen. `None` before a
+    /// frame, while the frame shows the other screen, or when the frame retains fewer history
+    /// rows than the document, because Scrollback was cleared or trimmed between them.
+    fn of(applied: &Applied, view: &super::scrollback::AccessibilityView) -> Option<Self> {
+        let history = view.history?;
+        let history_rows = u64::try_from(applied.visible_lines.start).ok()?;
+        let first = match (applied.screen, view.alternate) {
+            (AccessibilityScreen::Primary, false) => {
+                (history.total - history.oldest >= history_rows).then_some(history.oldest)?
+            }
+            (AccessibilityScreen::Alternate, true) => history.total.checked_sub(history_rows)?,
+            _ => return None,
+        };
+        Some(Self {
+            epoch: history.epoch,
+            first,
+        })
+    }
 }
 
 impl RetainedSemantics {
     /// Resolves a native Selection request against the model this client published last into
-    /// this client's Selection: its endpoints in lines relative to the first row of the screen,
-    /// as [`super::scrollback::AccessibilityView`] holds them. `Some(None)` clears the Selection.
-    /// `None` means the request names content this client no longer presents.
+    /// this client's Selection, in the absolute lines of the history epoch that placed the
+    /// model. `Some(None)` clears the Selection. `None` means the request names content this
+    /// client no longer presents or has not placed.
     pub(super) fn resolve_selection(
         &self,
         request: &AccessibilitySelectionRequest,
-    ) -> Option<Option<super::scrollback::ViewSelection>> {
+    ) -> Option<Option<super::scrollback::EpochSelection>> {
         let Some((start, end)) = self.rows.resolve_selection(request)? else {
             return Some(None);
         };
         let model = self.rows.latest()?;
-        let top = i64::try_from(self.last.as_ref()?.visible_lines.start).ok()?;
+        let origin = self.last.as_ref()?.origin?;
         let point = |reference: AccessibilityCellRef| {
-            let line = i64::try_from(model.line_for_row(reference.row)?).ok()?;
-            Some((line - top, reference.column))
+            let line = u64::try_from(model.line_for_row(reference.row)?).ok()?;
+            Some((origin.first.checked_add(line)?, reference.column))
         };
-        Some(Some((point(start)?, point(end)?)))
+        Some(Some(super::scrollback::EpochSelection {
+            epoch: origin.epoch,
+            start: point(start)?,
+            end: point(end)?,
+        }))
     }
 
     /// Applies a whole revision atomically, bound to the presentation `generation`. Returns
@@ -70,6 +108,11 @@ impl RetainedSemantics {
             visible_lines: revision.visible_lines.clone(),
             cursor: revision.cursor,
             selection: revision.selection,
+            origin: None,
+        };
+        let applied = Applied {
+            origin: Origin::of(&applied, &self.view),
+            ..applied
         };
         let model = self
             .rows
@@ -79,8 +122,14 @@ impl RetainedSemantics {
         Ok(model.is_some())
     }
 
-    /// Follows this client's view. Returns whether it changed.
+    /// Follows this client's view, and places the revision applied last by its frame if no
+    /// earlier frame did. Returns whether the view changed.
     pub(super) fn set_view(&mut self, view: super::scrollback::AccessibilityView) -> bool {
+        if let Some(applied) = self.last.as_mut()
+            && applied.origin.is_none()
+        {
+            applied.origin = Origin::of(applied, &view);
+        }
         std::mem::replace(&mut self.view, view) != view
     }
 
@@ -93,12 +142,16 @@ impl RetainedSemantics {
             .unwrap_or(usize::MAX)
             .min(visible.start);
         let shown = visible.start - shift..visible.end - shift;
-        let Some((start, end)) = self.view.selection else {
+        let Some(selection) = self.view.selection else {
             return (shown, applied.selection);
         };
-        // Line 0 of the selection is the first row of the screen.
-        let cell = |(line, column): (i64, u16)| {
-            let line = usize::try_from(i64::try_from(visible.start).ok()? + line).ok()?;
+        // This client's Selection names the document's rows only within the epoch that placed
+        // the document.
+        let origin = applied
+            .origin
+            .filter(|origin| origin.epoch == selection.epoch);
+        let cell = |(line, column): (u64, u16)| {
+            let line = usize::try_from(line.checked_sub(origin?.first)?).ok()?;
             let row = self.rows.latest()?.row(line)?;
             Some(AccessibilityCellRef {
                 row: row.id,
@@ -106,8 +159,8 @@ impl RetainedSemantics {
                 column,
             })
         };
-        let selection = cell(start)
-            .zip(cell(end))
+        let selection = cell(selection.start)
+            .zip(cell(selection.end))
             .map(|(start, end)| AccessibilitySelectionRefs {
                 start,
                 end,
@@ -742,6 +795,7 @@ fn check(condition: bool) -> Result<(), ServerError> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::scrollback::EpochSelection;
     use super::*;
     use spaceterm_server::protocol::{
         AccessibilityMessage, Channel, RawFrame, ServerMessage, frame,
@@ -1512,6 +1566,24 @@ mod tests {
         assert!(client.publish(generation).is_none(), "nothing was applied");
     }
 
+    /// The view of a primary-screen frame in history epoch 2 that retains `oldest..total`.
+    fn view(
+        selection: Option<EpochSelection>,
+        oldest: u64,
+        total: u64,
+    ) -> super::super::scrollback::AccessibilityView {
+        super::super::scrollback::AccessibilityView {
+            scrolled: 0,
+            selection,
+            history: Some(crate::terminal::emulator::HistorySnapshot {
+                epoch: 2,
+                oldest,
+                total,
+            }),
+            alternate: false,
+        }
+    }
+
     #[test]
     fn selection_resolves_only_within_the_epoch_that_received_it() {
         let mut client = Client::demanded();
@@ -1525,8 +1597,26 @@ mod tests {
         let request = model.selection_request(0..2).unwrap();
         assert_eq!(
             client.retained.lock().unwrap().resolve_selection(&request),
-            Some(Some(((0, 0), (0, 1)))),
-            "the Selection covers the first two cells of the screen's first line"
+            None,
+            "no frame has placed the document yet"
+        );
+        // The frame that places the document already scrolled its first line into history.
+        client.retained.lock().unwrap().set_view(view(None, 3, 5));
+        let placed = Some(Some(EpochSelection {
+            epoch: 2,
+            start: (3, 0),
+            end: (3, 1),
+        }));
+        assert_eq!(
+            client.retained.lock().unwrap().resolve_selection(&request),
+            placed,
+            "the Selection covers the first two cells of the document's first line"
+        );
+        client.retained.lock().unwrap().set_view(view(None, 3, 9));
+        assert_eq!(
+            client.retained.lock().unwrap().resolve_selection(&request),
+            placed,
+            "later frames that scroll the screen leave the Selection on its row"
         );
 
         *client.state.accessibility.lock().unwrap() =
@@ -1541,6 +1631,48 @@ mod tests {
                 .unwrap()
                 .resolve_selection(&request),
             None
+        );
+    }
+
+    /// A frame that cannot hold the document's history rows, or that shows the other screen,
+    /// does not place the document, so its Selection names no rows of that frame.
+    #[test]
+    fn a_frame_that_cleared_the_documents_history_or_shows_another_screen_places_nothing() {
+        let mut client = Client::demanded();
+        let mut messages = complete(1, 1, &["old0", "old1", "scr0", "scr1"]);
+        messages.last_mut().unwrap().tail = Some(tail(2..4));
+        client
+            .deliver(messages, PresentationGeneration::default())
+            .unwrap();
+        let model = client.publish(PresentationGeneration::default()).unwrap();
+        let request = model.selection_request(0..2).unwrap();
+        let resolve = |client: &Client| client.retained.lock().unwrap().resolve_selection(&request);
+
+        // Scrollback was cleared after the capture: the frame retains no history rows.
+        client.retained.lock().unwrap().set_view(view(None, 12, 12));
+        assert_eq!(resolve(&client), None);
+        client
+            .retained
+            .lock()
+            .unwrap()
+            .set_view(super::super::scrollback::AccessibilityView {
+                alternate: true,
+                ..view(None, 10, 12)
+            });
+        assert_eq!(
+            resolve(&client),
+            None,
+            "the frame shows the alternate screen"
+        );
+        client.retained.lock().unwrap().set_view(view(None, 10, 12));
+        assert_eq!(
+            resolve(&client),
+            Some(Some(EpochSelection {
+                epoch: 2,
+                start: (10, 0),
+                end: (10, 1),
+            })),
+            "the first frame that holds the document places it"
         );
     }
 
@@ -1562,7 +1694,15 @@ mod tests {
             .unwrap()
             .set_view(super::super::scrollback::AccessibilityView {
                 scrolled: 1,
-                selection: Some(((-1, 1), (0, 2))),
+                ..view(
+                    Some(EpochSelection {
+                        epoch: 2,
+                        start: (11, 1),
+                        end: (12, 2),
+                    }),
+                    10,
+                    12,
+                )
             });
         let next = PresentationGeneration::default().next();
         let scrolled = client.publish(next).unwrap();
@@ -1589,7 +1729,7 @@ mod tests {
             .unwrap()
             .set_view(super::super::scrollback::AccessibilityView {
                 scrolled: 9,
-                selection: None,
+                ..view(None, 10, 12)
             });
         let top = client.publish(next.next()).unwrap();
         assert_eq!(top.visible_lines(), 0..2);
