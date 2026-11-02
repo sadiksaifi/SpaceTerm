@@ -2,9 +2,8 @@
 //! change, for schedules kept in wall-clock time.
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 
-/// A time no schedule reaches, so the timer never expires and only a clock change ends a read.
-const NEVER: libc::time_t = 4_102_444_800;
-/// How far past the clock the timer is armed when the clock is already past [`NEVER`].
+/// How far past the clock the timer is armed. No schedule reaches it, so in practice only a clock
+/// change ends a read.
 const CENTURY: libc::time_t = 100 * 366 * 24 * 60 * 60;
 
 /// Calls `changed` after each change to the system clock, on a thread that sleeps in `read`
@@ -29,10 +28,9 @@ fn timer() -> Option<OwnedFd> {
     (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// The deadline to arm: [`NEVER`], or a century past `now` once the clock is past it, so an armed
-/// timer is never already expired.
+/// The deadline to arm, a century past `now`, so an armed timer is never already expired.
 fn deadline(now: libc::time_t) -> libc::time_t {
-    NEVER.max(now.saturating_add(CENTURY))
+    now.saturating_add(CENTURY)
 }
 
 fn realtime() -> libc::time_t {
@@ -103,7 +101,7 @@ fn wait(timer: &OwnedFd) -> bool {
             Err(error) => return error == libc::ECANCELED,
         }
         match read(timer) {
-            // The far timer expired, which only a clock past it causes. Arm it past the clock.
+            // The far timer expired, which only a clock set past it causes. Arm it past the clock.
             Ok(()) => {}
             Err(libc::ECANCELED) => return true,
             Err(libc::EINTR) => {}
@@ -116,14 +114,16 @@ fn wait(timer: &OwnedFd) -> bool {
 mod tests {
     use super::*;
 
-    fn readable(timer: &OwnedFd) -> bool {
+    /// Whether the timer becomes readable within `milliseconds`. The kernel fires even a past
+    /// deadline from its timer interrupt, so a check without waiting can miss it.
+    fn readable(timer: &OwnedFd, milliseconds: i32) -> bool {
         let mut poll = libc::pollfd {
             fd: timer.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
-        // SAFETY: polls one live descriptor without waiting.
-        unsafe { libc::poll(&mut poll, 1, 0) == 1 }
+        // SAFETY: polls one live descriptor for at most the given time.
+        unsafe { libc::poll(&mut poll, 1, milliseconds) == 1 }
     }
 
     /// An expired timer is armed again past the clock, so the next read blocks instead of
@@ -133,22 +133,17 @@ mod tests {
         let timer = timer().unwrap();
         let now = realtime();
         arm(&timer, now - 1).unwrap();
-        assert!(readable(&timer), "a past deadline expires at once");
+        assert!(readable(&timer, 1000), "a past deadline expires at once");
         read(&timer).unwrap();
 
         arm(&timer, deadline(now)).unwrap();
         assert!(
-            !readable(&timer),
+            !readable(&timer, 200),
             "the next deadline lies ahead of the clock"
         );
 
-        for now in [0, NEVER - 1, NEVER, NEVER + 1, 10 * NEVER] {
+        for now in [0, now, 4_102_444_800, 10 * 4_102_444_800] {
             assert!(deadline(now) > now, "the deadline for {now} is ahead of it");
         }
-        assert_eq!(
-            deadline(now),
-            NEVER,
-            "an ordinary clock arms the fixed far time"
-        );
     }
 }
