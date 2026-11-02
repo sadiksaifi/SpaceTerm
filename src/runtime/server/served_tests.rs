@@ -31,6 +31,9 @@ struct Sessions {
 struct Host(Arc<Mutex<Sessions>>);
 
 impl HostCommands for Host {
+    fn terminal_counters(&self) -> Arc<spaceterm_server::diagnostics::TerminalCounters> {
+        Arc::default()
+    }
     fn request(&mut self, _: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
         if let Request::Input {
             input: InteractiveInput::Paste { text },

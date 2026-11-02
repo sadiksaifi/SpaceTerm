@@ -115,15 +115,26 @@ enum Answer {
 }
 
 impl WorkspaceHost {
-    /// `sync` is the server's one sync worker, shared with its connections.
-    pub fn local(sync: SyncWorker) -> Result<Self, ServerError> {
-        Ok(Self::with_sync(ServerPaneHost::local()?, sync))
+    /// `sync` is the server's one sync worker, shared with its connections. Its Terminal
+    /// Sessions and publications record into `counters`.
+    pub fn local(
+        sync: SyncWorker,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
+    ) -> Result<Self, ServerError> {
+        Ok(Self::with_sync(ServerPaneHost::local(counters)?, sync))
     }
 
-    /// Compose an account service whose new terminals follow the current login agent.
-    pub fn account_service(sync: SyncWorker) -> Result<Self, ServerError> {
+    /// Compose an account service whose new terminals follow the current login agent, recording
+    /// into `counters`.
+    pub fn account_service(
+        sync: SyncWorker,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
+    ) -> Result<Self, ServerError> {
         Ok(Self::with_sync(
-            ServerPaneHost::local_with_pty_factory(crate::platform::service_pty_factory())?,
+            ServerPaneHost::local_with_pty_factory(
+                crate::platform::service_pty_factory(Arc::clone(&counters)),
+                counters,
+            )?,
             sync,
         ))
     }
@@ -1121,6 +1132,9 @@ impl WorkspaceHost {
     }
 }
 impl HostCommands for WorkspaceHost {
+    fn terminal_counters(&self) -> Arc<spaceterm_server::diagnostics::TerminalCounters> {
+        Arc::clone(self.prototype.factory.counters())
+    }
     fn sessions(&self) -> Vec<[u8; 32]> {
         self.panes
             .values()

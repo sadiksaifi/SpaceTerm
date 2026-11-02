@@ -9,6 +9,7 @@
 
 use std::cmp::Ordering;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{App, Context, SharedString, Window};
 
@@ -278,8 +279,12 @@ impl WorkspaceManager {
             (Some(server), Some(direct)) => {
                 let client =
                     crate::ui::server_worktrees::Client::for_direct(*route, server.clone(), cx);
-                let opener =
-                    WorkspacePaneSessions::remote_opener(server, client.controls.clone(), direct);
+                let opener = WorkspacePaneSessions::remote_opener(
+                    server,
+                    client.controls.clone(),
+                    direct,
+                    Arc::clone(self.pane_construction.counters()),
+                );
                 Some((client.transport(), opener))
             }
             _ => {

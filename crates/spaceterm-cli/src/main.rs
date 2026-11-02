@@ -243,9 +243,11 @@ fn resolve_launcher() -> Result<(), ServerError> {
 
 fn run_server(service: bool, owned: bool) -> Result<(), ServerError> {
     check::resources()?;
-    let panes = spaceterm_server::panes(|sync| {
+    // The server's one counter set: its Terminal Sessions record into it and its lane reports it.
+    let counters = std::sync::Arc::new(spaceterm_server::diagnostics::TerminalCounters::default());
+    let panes = spaceterm_server::panes(std::sync::Arc::clone(&counters), |sync| {
         Ok(spaceterm::runtime::Served::new(
-            spaceterm::runtime::WorkspaceHost::account_service(sync)?
+            spaceterm::runtime::WorkspaceHost::account_service(sync, counters)?
                 .with_session_context(spaceterm::runtime::ServerSessionContext::current(IDENTITY)?),
         ))
     });

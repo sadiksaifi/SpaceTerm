@@ -6,6 +6,7 @@ pub mod client_view;
 #[cfg(feature = "client")]
 mod computer_name;
 pub mod connection;
+pub mod diagnostics;
 pub mod direct;
 pub mod hierarchy;
 mod host;
@@ -125,20 +126,30 @@ pub fn local_server_id(identity: &str) -> Result<[u8; 32], ServerError> {
 }
 
 /// Builds the service once the host has its one [`connection::sync::SyncWorker`], which the
-/// service shares for its disk syncs.
-pub type PaneFactory = Box<
+/// service shares for its disk syncs, and carries the Terminal Diagnostics counters the service
+/// records into, which the lane reports.
+pub struct PaneFactory {
+    build: BuildPanes,
+    counters: std::sync::Arc<diagnostics::TerminalCounters>,
+}
+
+type BuildPanes = Box<
     dyn FnOnce(
         connection::sync::SyncWorker,
     ) -> Result<Box<dyn connection::service::PaneService>, ServerError>,
 >;
 
-/// A [`PaneFactory`] for `build`.
+/// A [`PaneFactory`] for `build`, whose service records into `counters`.
 pub fn panes<P: connection::service::PaneService + 'static>(
+    counters: std::sync::Arc<diagnostics::TerminalCounters>,
     build: impl FnOnce(connection::sync::SyncWorker) -> Result<P, ServerError> + 'static,
 ) -> PaneFactory {
-    Box::new(move |sync| {
-        build(sync).map(|panes| Box::new(panes) as Box<dyn connection::service::PaneService>)
-    })
+    PaneFactory {
+        build: Box::new(move |sync| {
+            build(sync).map(|panes| Box::new(panes) as Box<dyn connection::service::PaneService>)
+        }),
+        counters,
+    }
 }
 
 /// Runs an explicitly requested local server. No service registration or listener

@@ -12,6 +12,7 @@ use anyhow::Error as AnyError;
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system,
 };
+use spaceterm_server::diagnostics::TerminalCounters;
 use spaceterm_server::pane::LineMode;
 use thiserror::Error;
 
@@ -525,12 +526,16 @@ struct SpawnedChild {
 struct PtyReader {
     reader: MasterReader,
     readiness: OwnedFd,
+    /// Counts every native read, including each one retried after it would block.
+    counters: Arc<TerminalCounters>,
 }
 
 impl Read for PtyReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         loop {
-            match self.reader.read(buffer) {
+            let read = self.reader.read(buffer);
+            self.counters.record_pty_read(&read);
+            match read {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     let mut poll = libc::pollfd {
                         fd: self.readiness.as_raw_fd(),
@@ -875,11 +880,13 @@ pub(super) enum PtyError {
 #[derive(Clone)]
 pub(crate) struct UnixNativePtyAdapterFactory {
     host: Arc<dyn UnixPtyHost>,
+    counters: Arc<TerminalCounters>,
 }
 
 impl UnixNativePtyAdapterFactory {
-    pub(super) fn new(host: Arc<dyn UnixPtyHost>) -> Self {
-        Self { host }
+    /// Each PTY it makes counts its native reads in `counters`.
+    pub(super) fn new(host: Arc<dyn UnixPtyHost>, counters: Arc<TerminalCounters>) -> Self {
+        Self { host, counters }
     }
 }
 
@@ -889,8 +896,13 @@ impl NativePtyAdapterFactory for UnixNativePtyAdapterFactory {
         launch: PreparedShellLaunch,
         size: NativePtySize,
     ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
-        spawn_native_pty(Arc::clone(&self.host), launch, size)
-            .map_err(classify_pty_construction_failure)
+        spawn_native_pty(
+            Arc::clone(&self.host),
+            launch,
+            size,
+            Arc::clone(&self.counters),
+        )
+        .map_err(classify_pty_construction_failure)
     }
 }
 
@@ -920,9 +932,10 @@ fn spawn_native_pty(
     host: Arc<dyn UnixPtyHost>,
     launch: PreparedShellLaunch,
     size: NativePtySize,
+    counters: Arc<TerminalCounters>,
 ) -> Result<NativePtyAdapterParts, PtyError> {
     let command = command_from_launch(&launch);
-    let (pty, termination) = spawn_command_in_pty(host, portable_size(size), command)?;
+    let (pty, termination) = spawn_command_in_pty(host, portable_size(size), command, counters)?;
     Ok(NativePtyAdapterParts {
         adapter: Box::new(pty),
         termination: Arc::new(termination),
@@ -942,6 +955,7 @@ fn spawn_command_in_pty(
     host: Arc<dyn UnixPtyHost>,
     size: PtySize,
     command: CommandBuilder,
+    counters: Arc<TerminalCounters>,
 ) -> Result<(SpawnedPty, PtyTerminator), PtyError> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(PtyError::Open)?;
@@ -979,7 +993,11 @@ fn spawn_command_in_pty(
             return Err(PtyError::TakeWriter(source.into()));
         }
     };
-    let reader: Box<dyn Read + Send> = Box::new(PtyReader { reader, readiness });
+    let reader: Box<dyn Read + Send> = Box::new(PtyReader {
+        reader,
+        readiness,
+        counters,
+    });
 
     let process_group = child
         .process_id()
@@ -1084,7 +1102,7 @@ fn command_from_launch(launch: &PreparedShellLaunch) -> CommandBuilder {
 
 #[cfg(all(test, feature = "native-tests"))]
 pub(crate) fn test_factory() -> UnixNativePtyAdapterFactory {
-    UnixNativePtyAdapterFactory::new(test_host())
+    UnixNativePtyAdapterFactory::new(test_host(), Arc::default())
 }
 
 /// The host adapter the running Operating System composes, for OS-backed verification.
@@ -1109,6 +1127,85 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
         eprintln!(
             "failed to reap shell after PTY setup failed: {:?}",
             error.kind()
+        );
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::os::unix::net::UnixStream;
+
+    /// Reports `EIO` on the PTY master as a hangup, as both hosts do.
+    struct HangupOnIo;
+    impl UnixPtyHost for HangupOnIo {
+        fn observe_process(&self, _: i32) -> Option<ProcessObservation> {
+            None
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            Ok(Vec::new())
+        }
+        fn master_read_error(&self, error: &io::Error) -> MasterReadError {
+            if error.raw_os_error() == Some(libc::EIO) {
+                MasterReadError::Hangup
+            } else {
+                MasterReadError::Failure
+            }
+        }
+    }
+
+    /// Returns each scripted result once, in order.
+    struct Scripted(VecDeque<io::Result<usize>>);
+    impl Read for Scripted {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let result = self.0.pop_front().expect("a scripted read");
+            if let Ok(read) = &result {
+                buffer[..*read].fill(b'x');
+            }
+            result
+        }
+    }
+
+    #[test]
+    fn every_native_read_counts_as_an_attempt_and_only_data_counts_bytes() {
+        let counters = Arc::new(TerminalCounters::default());
+        // The readiness descriptor always polls readable, so a read that would block retries
+        // at once.
+        let (readiness, mut ready) = UnixStream::pair().unwrap();
+        ready.write_all(&[1]).unwrap();
+        let mut reader = PtyReader {
+            reader: MasterReader {
+                inner: Box::new(Scripted(VecDeque::from([
+                    Err(io::ErrorKind::WouldBlock.into()),
+                    Ok(5),
+                    Err(io::Error::from_raw_os_error(libc::EINTR)),
+                    Ok(3),
+                    Err(io::Error::from_raw_os_error(libc::EIO)),
+                ]))),
+                host: Arc::new(HangupOnIo),
+            },
+            readiness: readiness.into(),
+            counters: Arc::clone(&counters),
+        };
+        let mut buffer = [0; 16];
+
+        assert_eq!(reader.read(&mut buffer).unwrap(), 5);
+        assert_eq!(
+            reader.read(&mut buffer).unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert_eq!(reader.read(&mut buffer).unwrap(), 3);
+        assert_eq!(reader.read(&mut buffer).unwrap(), 0);
+
+        assert_eq!(
+            counters.snapshot(),
+            spaceterm_server::diagnostics::TerminalCounterSnapshot {
+                pty_read_attempts: 5,
+                pty_data_reads: 2,
+                pty_read_bytes: 8,
+                ..Default::default()
+            }
         );
     }
 }
@@ -1263,7 +1360,7 @@ mod tests {
         let mut command = CommandBuilder::new("/bin/sh");
         command.args(["-c", "stty raw -echo; printf 'READY'; exec sleep 30"]);
         let (mut pty, terminator) =
-            spawn_command_in_pty(test_host(), PtySize::default(), command).unwrap();
+            spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default()).unwrap();
         // Unblock an accidentally blocking writer so this regression can fail without hanging.
         let (cancel, rescue) = mpsc::channel();
         let watchdog = thread::spawn(move || {
@@ -1300,7 +1397,7 @@ mod tests {
         ]);
         command.arg(&accepted);
         let (mut pty, terminator) =
-            spawn_command_in_pty(test_host(), PtySize::default(), command).unwrap();
+            spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default()).unwrap();
         let mut reader = pty.take_reader().unwrap();
         read_output_marker(&mut reader, b"READY");
         pty.write_all(b"confirmed\n").unwrap();
@@ -1440,7 +1537,8 @@ mod tests {
         };
         let command = controlled_child_command(&working_directory, "initialized");
 
-        let (mut pty, _terminator) = spawn_command_in_pty(test_host(), size, command).unwrap();
+        let (mut pty, _terminator) =
+            spawn_command_in_pty(test_host(), size, command, Arc::default()).unwrap();
         let report = read_controlled_report(&mut pty);
 
         assert_eq!(
@@ -1494,12 +1592,14 @@ mod tests {
             test_host(),
             size,
             controlled_child_command(&working_directory, "first"),
+            Arc::default(),
         )
         .unwrap();
         let (mut second, _second_terminator) = spawn_command_in_pty(
             test_host(),
             size,
             controlled_child_command(&working_directory, "second"),
+            Arc::default(),
         )
         .unwrap();
 
@@ -1541,6 +1641,7 @@ mod tests {
                 pixel_height: 480,
             },
             command,
+            Arc::default(),
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1597,6 +1698,7 @@ mod tests {
                 pixel_height: 480,
             },
             command,
+            Arc::default(),
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1659,6 +1761,7 @@ mod tests {
                 pixel_height: 480,
             },
             command,
+            Arc::default(),
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1838,6 +1941,7 @@ mod tests {
                 pixel_height: 480,
             },
             command,
+            Arc::default(),
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1916,6 +2020,7 @@ mod tests {
                 pixel_height: 480,
             },
             command,
+            Arc::default(),
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());
@@ -1988,6 +2093,7 @@ mod tests {
                 pixel_height: 480,
             },
             command,
+            Arc::default(),
         )
         .unwrap();
         let mut reader = BufReader::new(pty.take_reader().unwrap());

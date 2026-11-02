@@ -1,0 +1,38 @@
+{
+  "schema": "spaceterm.cli.v1",
+  "command": "diagnostics",
+  "status": "ok",
+  "server": null,
+  "data": {
+    "terminal_counters": {
+      "accessibility_revisions": 0,
+      "accessibility_revision_bytes": 0,
+      "accessibility_rebinds": 0,
+      "line_mode_reads": 0,
+      "pty_read_attempts": 9,
+      "pty_data_reads": 4,
+      "pty_read_bytes": 12000,
+      "frames_published": 0,
+      "frames_decoded": 7,
+      "frames_painted": 5,
+      "pane_worker_waits": {
+        "output": 0,
+        "input": 0,
+        "accessibility": 0,
+        "client": 0,
+        "other": 0,
+        "deadline": 0,
+        "disconnected": 0
+      },
+      "pane_worker_commands_without_wait": {
+        "output": 0,
+        "input": 0,
+        "accessibility": 0,
+        "client": 0,
+        "other": 0
+      }
+    }
+  },
+  "error": null,
+  "warnings": []
+}

@@ -75,6 +75,7 @@ fn paired_pane(
         controls,
         crate::platform::runtime_local_filesystem(),
         [id; 32],
+        Arc::default(),
     );
     // A real retry intent marks when the worker consumes its initial connection request.
     state.retry();
@@ -231,6 +232,7 @@ fn paired_panes_have_no_local_file_authority_even_with_local_composition() {
         &PaneControls::default(),
         crate::platform::runtime_local_filesystem(),
         [8; 32],
+        Arc::default(),
     );
     assert!(!factory.allows_local_file_insertion());
     assert!(factory.local_file_authority().is_none());
@@ -271,6 +273,7 @@ fn a_closed_windows_view_returns_with_the_next_presentation_of_the_same_session(
             &controls,
             crate::platform::runtime_local_filesystem(),
             [8; 32],
+            Arc::default(),
         )
         .1
     };
@@ -924,6 +927,7 @@ fn a_dismissed_window_whose_worker_starts_late_cannot_revoke_its_reopened_succes
         &controls,
         crate::platform::runtime_local_filesystem(),
         [7; 32],
+        Arc::default(),
     );
     // The old window was created first and closed before its worker ran.
     let reservation = old.control.reserve();

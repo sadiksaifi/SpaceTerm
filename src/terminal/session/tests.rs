@@ -23,6 +23,7 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
         test_launch_planner(),
         LocalFilesystemAuthority::testing(),
         crate::terminal::metadata::LocalMachine::new(None, Some("fixture.test"), None),
+        Arc::default(),
     )
 }
 
@@ -258,6 +259,7 @@ struct ScriptedPtyOptions {
     exit_code: u32,
     termination_error: Option<String>,
     termination_releases_reader: bool,
+    counters: Arc<TerminalCounters>,
 }
 
 impl Default for ScriptedPtyOptions {
@@ -271,6 +273,7 @@ impl Default for ScriptedPtyOptions {
             exit_code: 0,
             termination_error: None,
             termination_releases_reader: true,
+            counters: Arc::default(),
         }
     }
 }
@@ -424,6 +427,7 @@ fn recording_native_terminal_session_factory() -> (
             test_launch_planner(),
             LocalFilesystemAuthority::testing(),
             crate::terminal::metadata::LocalMachine::new(None, Some("fixture.test"), None),
+            Arc::default(),
         ),
         observed,
     )
@@ -449,6 +453,7 @@ fn direct_native_pty(records: ScriptedPtyRecords) -> NativePtyOwner {
         pty_size(test_geometry()),
         Arc::new(DiscardNativePtyOutput),
         &NativePtyCloseHandle::default(),
+        Arc::default(),
     )
     .expect("scripted Native PTY Owner should start")
 }
@@ -573,6 +578,7 @@ fn start_scripted_session(
         exit_code,
         termination_error,
         termination_releases_reader,
+        counters,
     } = options;
 
     let adapter_factory = ScriptedSessionAdapterFactory::immediate(NativePtyAdapterParts {
@@ -604,6 +610,7 @@ fn start_scripted_session(
         &std::env::temp_dir(),
         Some("fixture.test"),
         LocalFilesystemAuthority::testing(),
+        counters,
     )
     .unwrap();
     let startup = receive_event(
@@ -1114,6 +1121,7 @@ fn close_before_native_pty_installation_should_terminate_once_after_startup() {
         &std::env::temp_dir(),
         Some("fixture.test"),
         LocalFilesystemAuthority::testing(),
+        Arc::default(),
     )
     .unwrap();
 
@@ -1233,6 +1241,52 @@ fn scripted_output_should_reach_the_terminal_screen() {
         ),
         (1, 1, 1, 1)
     );
+}
+
+#[test]
+fn the_worker_counts_each_queued_command_by_its_kind() {
+    let counters = Arc::new(TerminalCounters::default());
+    let (result, _reader_steps, _records) = start_scripted_session(ScriptedPtyOptions {
+        counters: Arc::clone(&counters),
+        ..ScriptedPtyOptions::default()
+    });
+    let (mut session, _events, _accessibility) = result.unwrap();
+    worker_round_trip(&session);
+    let taken = |counters: &TerminalCounters| {
+        let snapshot = counters.snapshot();
+        let (waits, queued) = (
+            snapshot.pane_worker_waits,
+            snapshot.pane_worker_commands_without_wait,
+        );
+        (
+            waits.input + queued.input,
+            waits.client + queued.client,
+            waits.accessibility + queued.accessibility,
+        )
+    };
+    let before = taken(&counters);
+
+    for key in 0..20 {
+        session.key(text_key(if key % 2 == 0 {
+            KeyAction::Press
+        } else {
+            KeyAction::Release
+        }));
+        worker_round_trip(&session);
+    }
+    for focus in 0..10 {
+        session.focus(focus % 2 == 1);
+        worker_round_trip(&session);
+    }
+
+    let after = taken(&counters);
+    // Each key is one Input command, each focus change one Client command, and each round trip
+    // one Accessibility selection.
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1, after.2 - before.2),
+        (20, 10, 30)
+    );
+    session.shutdown_and_join();
 }
 
 #[test]
@@ -1454,7 +1508,7 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
             native_pty: direct_native_pty(records.clone()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-            commands,
+            commands: WorkerCommands::new(commands, Arc::default()),
             reader_events,
             events: events.into(),
             accessibility,
@@ -1495,7 +1549,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -1561,7 +1615,7 @@ fn permission_request_worker() -> PermissionRequestWorker {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -1672,7 +1726,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events: reader_event_rx,
         events: events.into(),
         accessibility,
@@ -1715,7 +1769,7 @@ fn a_published_screen_reports_the_input_serial_written_before_its_capture() {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -1754,7 +1808,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
         native_pty: direct_native_pty(records.clone()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -1818,7 +1872,7 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -1869,7 +1923,7 @@ fn queued_input_runs_before_due_scrollback_compression() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -1914,7 +1968,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -1983,7 +2037,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2050,7 +2104,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2106,7 +2160,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             native_pty: direct_native_pty(ScriptedPtyRecords::default()),
             input: PtyInput::default(),
             emulator,
-            commands,
+            commands: WorkerCommands::new(commands, Arc::default()),
             reader_events,
             events: events.into(),
             accessibility,
@@ -2180,7 +2234,7 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2244,7 +2298,7 @@ fn closed_screen_lane_skips_snapshot_and_accessibility_without_stopping_runtime(
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2280,7 +2334,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events: reader_event_rx,
         events: events.into(),
         accessibility,
@@ -2342,7 +2396,7 @@ fn queued_reader_commands_should_not_extend_the_prompt_redraw_cap() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2432,7 +2486,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
                 Instant::now(),
             )
             .unwrap(),
-            commands,
+            commands: WorkerCommands::new(commands, Arc::default()),
             reader_events,
             events: events.into(),
             accessibility,
@@ -2517,7 +2571,7 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2557,7 +2611,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2607,7 +2661,7 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2660,7 +2714,7 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,
@@ -2703,7 +2757,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
         native_pty: direct_native_pty(records),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events: reader_event_rx,
         events: events.into(),
         accessibility,
@@ -3641,7 +3695,7 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
                 native_pty: direct_native_pty(records.clone()),
                 input: PtyInput::default(),
                 emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-                commands,
+                commands: WorkerCommands::new(commands, Arc::default()),
                 reader_events,
                 events: events.into(),
                 accessibility,
@@ -3768,7 +3822,7 @@ fn clipboard_worker() -> (
             native_pty: direct_native_pty(records.clone()),
             input: PtyInput::default(),
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-            commands,
+            commands: WorkerCommands::new(commands, Arc::default()),
             reader_events,
             events: events.into(),
             accessibility,
@@ -3808,7 +3862,7 @@ fn clipboard_request_survives_reader_exit_until_output_is_resumed() {
     assert!(worker.clipboard.pending());
     assert!(records.snapshot().written.is_empty());
     drop(requests.try_recv().unwrap());
-    let command = worker.commands.recv().unwrap();
+    let command = worker.commands.receiver.recv().unwrap();
     assert!(!worker.process_command(command));
     assert_eq!(records.snapshot().written, b"\x1b]52;c;\x07\x1b[0n");
     worker.finish();
@@ -3826,7 +3880,7 @@ fn clipboard_wait_keeps_selection_queries_live_and_orders_read_before_later_repl
     let request = requests.try_recv().unwrap();
     // Exercise the portable completion path without accessing the native clipboard.
     drop(request);
-    assert!(worker.process_command(worker.commands.recv().unwrap()));
+    assert!(worker.process_command(worker.commands.receiver.recv().unwrap()));
     assert_eq!(records.snapshot().written, b"\x1b]52;p;\x1b\\\x1b[0n");
     worker.finish();
 }
@@ -3841,7 +3895,7 @@ fn clipboard_reply_backpressure_keeps_selection_live_and_preserves_input_order()
     assert!(worker.feed_test_output(vec![b"\x1b]52;c;?\x07\x1b[5n".to_vec()]));
     let request = requests.try_recv().unwrap();
     drop(request);
-    let Command::CompleteClipboard(id, _) = worker.commands.recv().unwrap() else {
+    let Command::CompleteClipboard(id, _) = worker.commands.receiver.recv().unwrap() else {
         panic!("completion expected")
     };
     records.update(|state| state.write_blocked = true);
@@ -3900,7 +3954,7 @@ fn queued_clipboard_operations_never_acquire_a_later_focus_grant() {
         worker.clipboard.authority.focus(false);
         worker.clipboard.authority.focus(true);
         drop(first);
-        assert!(worker.process_command(worker.commands.recv().unwrap()));
+        assert!(worker.process_command(worker.commands.receiver.recv().unwrap()));
         assert!(requests.try_recv().is_err());
         assert!(!worker.clipboard.pending());
         assert_eq!(
@@ -3923,7 +3977,7 @@ fn deferred_reader_output_never_acquires_a_later_clipboard_focus_grant() {
     worker.clipboard.authority.focus(false);
     worker.clipboard.authority.focus(true);
     drop(first);
-    assert!(worker.process_command(worker.commands.recv().unwrap()));
+    assert!(worker.process_command(worker.commands.receiver.recv().unwrap()));
     let resume = worker.receive_next_command().unwrap();
     assert!(worker.process_command(resume));
     assert!(requests.try_recv().is_err());
@@ -4318,7 +4372,7 @@ fn a_hidden_session_reports_retitles_at_most_once_per_interval() {
         native_pty: direct_native_pty(ScriptedPtyRecords::default()),
         input: PtyInput::default(),
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
-        commands,
+        commands: WorkerCommands::new(commands, Arc::default()),
         reader_events,
         events: events.into(),
         accessibility,

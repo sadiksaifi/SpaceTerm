@@ -535,6 +535,8 @@ pub(crate) struct ServerSessionFactory {
     attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
     control: Arc<control::PaneControl>,
     state: Arc<ServerPaneState>,
+    /// The desktop's counters, which this Pane's screen decoding and semantics record into.
+    counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
 }
 impl ServerSessionFactory {
     /// Presents one server Pane. Construction connects to nothing.
@@ -543,9 +545,10 @@ impl ServerSessionFactory {
         controls: &PaneControls,
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
         pane_id: spaceterm_server::hierarchy::Id,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
     ) -> (Self, Arc<ServerPaneState>) {
         let local_files = server.is_account_local().then_some(local_files);
-        Self::for_origin(server, controls, local_files, None, pane_id)
+        Self::for_origin(server, controls, local_files, None, pane_id, counters)
     }
 
     pub(crate) fn for_remote_pane(
@@ -553,12 +556,13 @@ impl ServerSessionFactory {
         controls: &PaneControls,
         server_display: String,
         pane_id: spaceterm_server::hierarchy::Id,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
     ) -> (Self, Arc<ServerPaneState>) {
         let metadata = super::metadata::RemoteTerminalMetadataContext::new(
             server_display,
             crate::domain::RemoteDirectory::home(),
         );
-        Self::for_origin(server, controls, None, Some(metadata), pane_id)
+        Self::for_origin(server, controls, None, Some(metadata), pane_id, counters)
     }
 
     fn for_origin(
@@ -567,6 +571,7 @@ impl ServerSessionFactory {
         local_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
         remote_metadata: Option<super::metadata::RemoteTerminalMetadataContext>,
         pane_id: spaceterm_server::hierarchy::Id,
+        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
     ) -> (Self, Arc<ServerPaneState>) {
         let control = controls.pane(pane_id);
         // A view a closed window left of this Pane returns with the next window.
@@ -594,6 +599,7 @@ impl ServerSessionFactory {
                 attachment: None,
                 control,
                 state: Arc::clone(&state),
+                counters,
             },
             state,
         )

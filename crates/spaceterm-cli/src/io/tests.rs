@@ -54,7 +54,7 @@ impl Server {
     fn start() -> Self {
         environment();
         let (sync, _) = SyncWorker::spawn().unwrap();
-        let host = WorkspaceHost::local(sync.clone()).unwrap();
+        let host = WorkspaceHost::local(sync.clone(), Arc::default()).unwrap();
         let service: SharedPaneService = Arc::new(Mutex::new(
             Box::new(Served::new(host)) as Box<dyn PaneService>
         ));

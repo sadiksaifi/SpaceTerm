@@ -1,0 +1,83 @@
+{
+  "environment": {
+    "checkout_clean": true,
+    "commit": "f041f73984f204aa01d73e0256d319625345e817",
+    "cpus": 12,
+    "hardware": "AMD Ryzen 5 2600 Six-Core Processor",
+    "host": "penguin",
+    "input_sha256": "f2617e0006744196634338c48ddc52eebc19d6cb025a2b90d4d53f05ec2c8679",
+    "jailed": true,
+    "memory_bytes": 33582411776,
+    "system": "Linux 6.12.113+deb13-amd64",
+    "time": "2026-11-01T23:23:10+0530"
+  },
+  "settings": {
+    "columns": 120,
+    "max_hz": 60,
+    "rows": 40,
+    "runs": 3,
+    "seconds": 20
+  },
+  "summary": {
+    "cat/accessibility": {
+      "after_footprint_bytes": 95444992,
+      "bytes_sent": 28162103,
+      "cpu_s": 8.389999999999986,
+      "peak_footprint_bytes": 104398848
+    },
+    "cat/plain": {
+      "after_footprint_bytes": 4349952,
+      "bytes_sent": 22480,
+      "cpu_s": 7.82,
+      "peak_footprint_bytes": 13852672
+    },
+    "partial/accessibility": {
+      "after_footprint_bytes": 97697792,
+      "bytes_sent": 2042005,
+      "cpu_s": 0.5699999999999932,
+      "peak_footprint_bytes": 97697792
+    },
+    "partial/plain": {
+      "after_footprint_bytes": 4861952,
+      "bytes_sent": 192673,
+      "cpu_s": 0.4399999999999977,
+      "peak_footprint_bytes": 4861952
+    },
+    "scroll/accessibility": {
+      "after_footprint_bytes": 97689600,
+      "bytes_sent": 115303887,
+      "cpu_s": 6.1200000000000045,
+      "peak_footprint_bytes": 106733568
+    },
+    "scroll/plain": {
+      "after_footprint_bytes": 4833280,
+      "bytes_sent": 1143975,
+      "cpu_s": 2.5900000000000034,
+      "peak_footprint_bytes": 13877248
+    },
+    "vim/accessibility": {
+      "after_footprint_bytes": 97882112,
+      "bytes_sent": 3129184,
+      "cpu_s": 2.780000000000001,
+      "peak_footprint_bytes": 97882112
+    },
+    "vim/plain": {
+      "after_footprint_bytes": 5341184,
+      "bytes_sent": 2531746,
+      "cpu_s": 2.700000000000003,
+      "peak_footprint_bytes": 5341184
+    },
+    "yes/accessibility": {
+      "after_footprint_bytes": 19808256,
+      "bytes_sent": 3282381,
+      "cpu_s": 20.189999999999998,
+      "peak_footprint_bytes": 29229056
+    },
+    "yes/plain": {
+      "after_footprint_bytes": 4046848,
+      "bytes_sent": 38471,
+      "cpu_s": 19.86,
+      "peak_footprint_bytes": 13590528
+    }
+  }
+}

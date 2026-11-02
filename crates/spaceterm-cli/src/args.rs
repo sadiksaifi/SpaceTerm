@@ -80,6 +80,9 @@ pub enum Command {
     Open(OpenArgs),
     /// Bring the desktop's own view to a Workspace, Tab or Pane.
     Show(ShowArgs),
+    /// Report the desktop's Terminal Diagnostics counters.
+    #[command(hide = true)]
+    Diagnostics,
     /// Print shell completions.
     #[command(hide = true)]
     Completion {
@@ -648,6 +651,7 @@ impl Command {
             },
             Self::Open(_) => "open",
             Self::Show(_) => "show",
+            Self::Diagnostics => "diagnostics",
             Self::Completion { .. } => "completion",
         }
     }

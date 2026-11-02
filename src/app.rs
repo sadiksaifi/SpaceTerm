@@ -1536,6 +1536,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                                 endpoint,
                                 crate::application_identity::ApplicationIdentity::current()
                                     .directory_name(),
+                                Arc::clone(&host.adapters.lifecycle.counters),
                                 cx,
                             );
                         }

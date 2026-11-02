@@ -185,6 +185,7 @@ pub(crate) fn envelope(
             .collect(),
         held_outcomes,
         lane_major: status.lane_major,
+        terminal_counters: status.terminal_counters,
     };
     let text = text(&server, &data);
     (

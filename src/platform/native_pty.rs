@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use spaceterm_server::diagnostics::TerminalCounters;
 use spaceterm_server::pane::LineMode;
 use thiserror::Error;
 
@@ -334,15 +335,18 @@ pub struct NativePtyOwner {
     reader_thread: Option<JoinHandle<()>>,
     cleanup_probe: Option<Arc<dyn NativePtyTermination>>,
     close_state: Weak<Mutex<NativePtyCloseState>>,
+    counters: Arc<TerminalCounters>,
 }
 
 impl NativePtyOwner {
+    /// Starts a PTY whose Line Mode reads count in `counters`.
     pub fn start(
         adapter_factory: &dyn NativePtyAdapterFactory,
         launch: PreparedShellLaunch,
         size: NativePtySize,
         output: Arc<dyn NativePtyOutputSink>,
         close_handle: &NativePtyCloseHandle,
+        counters: Arc<TerminalCounters>,
     ) -> Result<Self, NativePtyStartupFailure> {
         let parts = adapter_factory
             .create(launch, size)
@@ -352,13 +356,14 @@ impl NativePtyOwner {
                 }
             })
             .map_err(NativePtyStartupFailure::Adapter)?;
-        Self::install_adapter_parts(parts, output, close_handle)
+        Self::install_adapter_parts(parts, output, close_handle, counters)
     }
 
     fn install_adapter_parts(
         mut parts: NativePtyAdapterParts,
         output: Arc<dyn NativePtyOutputSink>,
         close_handle: &NativePtyCloseHandle,
+        counters: Arc<TerminalCounters>,
     ) -> Result<Self, NativePtyStartupFailure> {
         let termination_supervisor = close_handle
             .install(Arc::clone(&parts.termination))
@@ -375,6 +380,7 @@ impl NativePtyOwner {
             reader_thread: Some(reader_thread),
             cleanup_probe: Some(parts.termination),
             close_state: Arc::downgrade(&close_handle.state),
+            counters,
         })
     }
 
@@ -383,6 +389,7 @@ impl NativePtyOwner {
     }
 
     pub fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
+        self.counters.record_line_mode_read();
         self.adapter().line_mode()
     }
 
@@ -645,6 +652,7 @@ mod tests {
             size,
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
+            Arc::default(),
         )
         .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 
@@ -667,6 +675,7 @@ mod tests {
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &close_handle,
+            Arc::default(),
         )
         .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 
@@ -730,6 +739,7 @@ mod tests {
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
+            Arc::default(),
         )
         .err()
         .expect("adapter construction should fail");
@@ -762,6 +772,7 @@ mod tests {
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             close_handle,
+            Arc::default(),
         )
         .expect("fake Native PTY Owner should start");
         (owner, observation)
@@ -815,6 +826,39 @@ mod tests {
             assert_eq!(observation.writes, b"input");
             assert_eq!(termination_count.load(Ordering::Relaxed), 0);
         }
+    }
+
+    #[test]
+    fn each_line_mode_read_counts_once_in_the_owners_counters() {
+        let counters = Arc::new(TerminalCounters::default());
+        let factory = OneShotAdapterFactory(Mutex::new(Some(NativePtyAdapterParts {
+            adapter: Box::new(ObservedAdapter {
+                observation: Arc::default(),
+                exit: NativePtyExit::Success,
+            }),
+            termination: Arc::new(CountingTermination(Arc::new(AtomicUsize::new(0)))),
+        })));
+        let owner = NativePtyOwner::start(
+            &factory,
+            PreparedShellLaunch::for_test(PathBuf::from("/project")),
+            NativePtySize::default(),
+            Arc::new(DiscardOutput),
+            &NativePtyCloseHandle::default(),
+            Arc::clone(&counters),
+        )
+        .unwrap();
+
+        for _ in 0..3 {
+            owner.line_mode().unwrap();
+        }
+
+        assert_eq!(
+            counters.snapshot(),
+            spaceterm_server::diagnostics::TerminalCounterSnapshot {
+                line_mode_reads: 3,
+                ..Default::default()
+            }
+        );
     }
 
     struct BlockingTermination {
@@ -933,6 +977,7 @@ mod tests {
             NativePtySize::default(),
             Arc::new(DiscardOutput),
             &NativePtyCloseHandle::default(),
+            Arc::default(),
         )
         .map_err(|error| format!("step=start field=owner expected=started observed={error}"))?;
 

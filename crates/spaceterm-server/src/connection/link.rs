@@ -187,6 +187,8 @@ struct State {
     closed: Option<LinkError>,
     /// The newest inventory revision, and how many this link received.
     inventory: Option<(u64, Arc<InventoryRevision>)>,
+    /// Bytes of every frame received, headers included.
+    received_bytes: u64,
 }
 
 struct Queued {
@@ -219,6 +221,7 @@ impl ServerLink {
                     liveness: Liveness::new(now),
                     closed: None,
                     inventory: None,
+                    received_bytes: 0,
                 }),
                 revisions: Condvar::new(),
                 wake,
@@ -244,6 +247,12 @@ impl ServerLink {
             Some(error) => Health::Closed(error),
             None => Health::Live,
         }
+    }
+
+    /// Every byte the server wrote on this connection since admission: each frame of every
+    /// message, with its header, as it crossed the carrier.
+    pub fn received_bytes(&self) -> u64 {
+        self.lock().received_bytes
     }
 
     /// The newest Workspace Inventory revision this link received, with how many it received.
@@ -367,6 +376,7 @@ impl ServerLink {
             let mut state = self.lock();
             state.usable()?;
             state.liveness.received(now);
+            state.received_bytes += (limits::HEADER_BYTES + frame.body.len()) as u64;
             state.assembler.server(frame)
         };
         match message {

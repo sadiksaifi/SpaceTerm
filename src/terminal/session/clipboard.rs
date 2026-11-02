@@ -423,7 +423,7 @@ mod tests {
     fn connected() -> (
         WorkerClipboard,
         async_channel::Receiver<ClipboardRequest>,
-        CommandReceiver<Command>,
+        mpsc::Receiver<Command>,
     ) {
         let (sender, commands) = mpsc::channel();
         let (worker, requests) = WorkerClipboard::connect(sender);
@@ -432,7 +432,7 @@ mod tests {
     }
     fn complete(
         worker: &mut WorkerClipboard,
-        commands: &CommandReceiver<Command>,
+        commands: &mpsc::Receiver<Command>,
     ) -> Option<Vec<u8>> {
         let Command::CompleteClipboard(id, completion) = commands.try_recv().unwrap() else {
             panic!("clipboard completion expected");

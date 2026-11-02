@@ -309,7 +309,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
         }],
     };
     let generation = PresentationGeneration::default();
-    let mut publication = accessibility::Accessibility::default();
+    let mut publication = accessibility::Accessibility::new(Arc::default());
     let linear = semantics.apply(update.clone(), generation).unwrap();
     let range = linear.selection_range();
     publication.update(linear);
@@ -341,7 +341,7 @@ fn accessible_transfers_reuse_unchanged_history_and_finish_during_output() {
     let original = complete(&mut emulator);
     emulator.feed(b" appended");
     let updated = complete(&mut emulator);
-    let mut state = accessibility::Accessibility::default();
+    let mut state = accessibility::Accessibility::new(Arc::default());
     state.update(Arc::clone(&original));
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut revision = None;
@@ -406,7 +406,7 @@ fn takeover_semantics_ignore_models_published_before_the_reading_reset() {
     let old = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
     let mut reset = (*old).clone();
     reset.generation = PresentationGeneration::test(2);
-    let mut state = accessibility::Accessibility::default();
+    let mut state = accessibility::Accessibility::new(Arc::default());
     state.update(Arc::new(TerminalAccessibilityModel::from_screen(&old)));
     state.reset();
     state.bind_reset_screen(reset.generation);
@@ -422,4 +422,54 @@ fn takeover_semantics_ignore_models_published_before_the_reading_reset() {
         }
         assert!(Instant::now() < deadline);
     }
+}
+
+#[test]
+fn each_serialized_accessibility_revision_counts_once_with_its_bytes() {
+    use crate::terminal::emulator::TerminalEmulator;
+    use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
+    let counters = Arc::new(TerminalCounters::default());
+    let mut emulator = TerminalEmulator::new(geometry(size())).unwrap();
+    let mut state = accessibility::Accessibility::new(Arc::clone(&counters));
+    let mut transferred = 0;
+    for revision in 1..=4 {
+        emulator.feed(format!("revision {revision}\r\n").as_bytes());
+        let mut first = true;
+        let model = loop {
+            let (model, more) = emulator.accessibility_snapshot(first).unwrap();
+            first = false;
+            if !more {
+                break model.unwrap();
+            }
+        };
+        state.update(model);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut offset = 0;
+        let mut current = None;
+        loop {
+            match state.chunk(current, offset, None) {
+                Ok(chunk) => {
+                    current = Some(chunk.revision);
+                    offset += chunk.bytes.len();
+                    if offset == chunk.total {
+                        transferred += chunk.total;
+                        break;
+                    }
+                }
+                Err(Error::Pending) => std::thread::yield_now(),
+                other => panic!("{other:?}"),
+            }
+            assert!(Instant::now() < deadline);
+        }
+        assert_eq!(current, Some(revision));
+    }
+
+    assert_eq!(
+        counters.snapshot(),
+        TerminalCounterSnapshot {
+            accessibility_revisions: 4,
+            accessibility_revision_bytes: transferred as u64,
+            ..Default::default()
+        }
+    );
 }

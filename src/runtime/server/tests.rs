@@ -25,8 +25,11 @@ fn a_shell_that_never_started_allows_pane_close_and_server_shutdown() {
         Failure::ProcessStartFailed,
     ] {
         for close_pane in [true, false] {
-            let mut host =
-                ServerPaneHost::local_with_pty_factory(Arc::new(Unstarted(failure))).unwrap();
+            let mut host = ServerPaneHost::local_with_pty_factory(
+                Arc::new(Unstarted(failure)),
+                Arc::default(),
+            )
+            .unwrap();
             let lease = attach(&mut host, 1, true);
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
@@ -672,7 +675,7 @@ fn repeated_real_zsh_shutdown_confirms_owned_process_cleanup() {
     ));
     std::fs::create_dir(&zdotdir).unwrap();
     let pty: Arc<dyn NativePtyAdapterFactory> = Arc::new(SystemStartupFiles {
-        pty: native_pty_factory(),
+        pty: native_pty_factory(Arc::default()),
         zdotdir: zdotdir.to_str().unwrap().into(),
     });
     for attempt in 0..64 {
@@ -695,7 +698,7 @@ fn repeated_real_zsh_shutdown_confirms_owned_process_cleanup() {
 }
 
 pub(super) fn host() -> ServerPaneHost {
-    host_with_shell("/bin/sh", native_pty_factory())
+    host_with_shell("/bin/sh", native_pty_factory(Arc::default()))
 }
 
 fn host_with_shell(shell: &str, pty: Arc<dyn NativePtyAdapterFactory>) -> ServerPaneHost {
@@ -719,6 +722,7 @@ fn host_with_shell(shell: &str, pty: Arc<dyn NativePtyAdapterFactory>) -> Server
         ),
         filesystem,
         LocalMachine::default(),
+        Arc::default(),
     );
     ServerPaneHost::new(factory, directory).unwrap()
 }

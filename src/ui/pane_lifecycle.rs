@@ -23,6 +23,9 @@ pub(crate) struct PaneLifecycleDependencies {
     /// The application's Permission Setup, which a Pane offers for a Permission Request. The
     /// application creates it once it runs, so a composition made before then holds none.
     pub(crate) permission_setup: Option<Entity<PermissionSetup>>,
+    /// The desktop's one Terminal Diagnostics counter set, which its Panes record into and the
+    /// Desktop Channel reports.
+    pub(crate) counters: std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters>,
 }
 
 #[cfg(test)]
@@ -39,6 +42,7 @@ impl PaneLifecycleDependencies {
             ),
             wheel: Rc::new(crate::terminal::wheel_phase::NoWheelPhaseEnrichment),
             permission_setup: None,
+            counters: std::sync::Arc::default(),
         }
     }
 }
@@ -65,6 +69,13 @@ impl PaneConstruction {
             native_services,
             lifecycle,
         }
+    }
+
+    /// The counters Panes and their server connections record into.
+    pub(crate) fn counters(
+        &self,
+    ) -> &std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters> {
+        &self.lifecycle.counters
     }
 
     /// The clipboard that application actions such as Copy Path write.

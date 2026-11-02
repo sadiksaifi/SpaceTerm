@@ -1,6 +1,8 @@
-//! `open` and `show`: requests to the desktop on this machine over its account-local channel.
-//! `open` needs no server connection; the desktop checks the Session context against what it
-//! presents. `show` resolves its target in [the work executor](crate::work::execute).
+//! `open`, `show` and `diagnostics`: requests to the desktop on this machine over its
+//! account-local channel. `open` needs no server connection; the desktop checks the Session
+//! context against what it presents. `show` resolves its target in
+//! [the work executor](crate::work::execute). `diagnostics` reads the desktop's Terminal
+//! Diagnostics counters and changes nothing.
 use crate::args::{Cli, Command, OpenArgs};
 use crate::contract::*;
 use crate::work::output::{Output, value};
@@ -28,17 +30,17 @@ impl Desktop for LocalDesktop<'_> {
     }
 }
 
-/// How long `open` waits without `--timeout`.
-pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `open` and `diagnostics` wait without `--timeout`.
+pub const DESKTOP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A desktop that commands other than `open` and `show` never ask.
+/// A desktop that commands other than `open`, `show` and `diagnostics` never ask.
 #[cfg(test)]
 pub(crate) struct NoDesktop;
 
 #[cfg(test)]
 impl Desktop for NoDesktop {
     fn request(&self, _: &Request) -> Result<Reply, ChannelError> {
-        panic!("only open and show ask the desktop")
+        panic!("only open, show and diagnostics ask the desktop")
     }
 }
 
@@ -48,16 +50,32 @@ impl Desktop for NoDesktop {
 /// unconfirmed.
 pub fn ask(desktop: &dyn Desktop, request: &Request) -> Result<(), Failure> {
     crate::interrupt::dispatch()?;
-    match classify(desktop.request(request), crate::interrupt::interrupted()) {
+    // An interrupt during the exchange shortens its wait, so it is read only after the answer.
+    let result = desktop.request(request);
+    let asked = Asked::Effect {
+        interrupted: crate::interrupt::interrupted(),
+    };
+    match classify(result, asked) {
         None => Ok(()),
         Some(code) => Err(Failure::new(code)),
     }
 }
 
+/// What a request asked the desktop for, which decides what a missing answer means.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    /// A read, which changes nothing, so no outcome is ever left to confirm.
+    Read,
+    /// An effect. `interrupted` when an interrupt ended the wait for its answer.
+    Effect { interrupted: bool },
+}
+
 /// The fixed code of one exchange's result, or `None` when the desktop did what was asked.
-fn classify(result: Result<Reply, ChannelError>, interrupted: bool) -> Option<Code> {
+fn classify(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Code> {
     Some(match result {
         Ok(Reply::Done) => return None,
+        // Only a Diagnostics request is answered with counters.
+        Ok(Reply::Diagnostics(_)) => Code::DesktopIncompatible,
         Ok(Reply::Refused(refusal)) => match refusal {
             Refusal::NotShown => Code::NotShown,
             Refusal::RemoteSession => Code::RemoteSession,
@@ -72,8 +90,13 @@ fn classify(result: Result<Reply, ChannelError>, interrupted: bool) -> Option<Co
             ChannelError::AccountMismatch => Code::AuthenticationRefused,
             // The desktop acts on nothing after the deadline its request carried, unless an
             // interrupt ended the wait sooner.
-            ChannelError::Timeout if interrupted => Code::OutcomeUnconfirmed,
+            ChannelError::Timeout if asked == (Asked::Effect { interrupted: true }) => {
+                Code::OutcomeUnconfirmed
+            }
             ChannelError::Timeout => Code::Timeout,
+            // An empty, malformed or other-schema reply. To a read it only means the desktop
+            // does not speak this channel.
+            ChannelError::Unanswered if asked == Asked::Read => Code::DesktopIncompatible,
             ChannelError::Unanswered => Code::OutcomeUnconfirmed,
             ChannelError::Protocol => Code::DesktopIncompatible,
         },
@@ -117,11 +140,20 @@ fn hex(id: &[u8; 32]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Process entry for `open`.
+/// Process entry for `open` and `diagnostics`.
 pub fn start(cli: &Cli) -> Option<Output> {
-    let Command::Open(args) = &cli.command else {
-        return None;
+    let desktop = LocalDesktop {
+        identity: env!("SPACETERM_CLI_IDENTITY"),
+        deadline: Instant::now() + cli.global.timeout.unwrap_or(DESKTOP_TIMEOUT),
     };
+    match &cli.command {
+        Command::Open(args) => Some(start_open(args, &desktop)),
+        Command::Diagnostics => Some(diagnostics(&desktop)),
+        _ => None,
+    }
+}
+
+fn start_open(args: &OpenArgs, desktop: &LocalDesktop<'_>) -> Output {
     let identity = std::env::var("SPACETERM_IDENTITY").ok();
     let server = std::env::var("SPACETERM_SERVER_ID").ok();
     let pane = std::env::var("SPACETERM_PANE").ok();
@@ -132,15 +164,40 @@ pub fn start(cli: &Cli) -> Option<Output> {
         pane: pane.as_deref(),
         session: session.as_deref(),
     };
-    let identity = env!("SPACETERM_CLI_IDENTITY");
-    let desktop = LocalDesktop {
-        identity,
-        deadline: Instant::now() + cli.global.timeout.unwrap_or(OPEN_TIMEOUT),
-    };
-    Some(match std::env::current_dir() {
-        Ok(cwd) => open(args, identity, &session, &cwd, &desktop),
+    match std::env::current_dir() {
+        Ok(cwd) => open(args, desktop.identity, &session, &cwd, desktop),
         Err(_) => failed(Failure::new(Code::DirectoryUnavailable)),
-    })
+    }
+}
+
+/// Reads the desktop's Terminal Diagnostics counters. The request has no effect, so it marks no
+/// dispatch, an interrupt ends it as any read does, and a reply it cannot use, including none,
+/// is `desktop_incompatible`.
+pub fn diagnostics(desktop: &dyn Desktop) -> Output {
+    let counters = match desktop.request(&Request::Diagnostics) {
+        Ok(Reply::Diagnostics(counters)) => counters,
+        result => {
+            let code = classify(result, Asked::Read).unwrap_or(Code::DesktopIncompatible);
+            return Output::failed(
+                "diagnostics",
+                None,
+                Failure::new(code),
+                serde_json::json!({}),
+                String::new(),
+            );
+        }
+    };
+    Output {
+        envelope: Envelope::ok(
+            "diagnostics",
+            None,
+            value(DesktopDiagnostics {
+                terminal_counters: counters,
+            }),
+        ),
+        text: counters.lines(),
+        diagnostics: String::new(),
+    }
 }
 
 /// Opens `args.path`, or its File Preview, in the desktop showing the current Session.
@@ -268,6 +325,60 @@ mod tests {
             .error
             .as_ref()
             .map(|error| error.code.as_str())
+    }
+
+    /// A desktop whose exchange receives a real `SIGINT` and then times out, as the channel does
+    /// when the interrupt brings its deadline forward.
+    struct InterruptedExchange;
+
+    impl Desktop for InterruptedExchange {
+        fn request(&self, _: &Request) -> Result<Reply, ChannelError> {
+            // SAFETY: signals only this test process, whose handler only records the signal.
+            assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
+            assert!(crate::interrupt::interrupted());
+            Err(ChannelError::Timeout)
+        }
+    }
+
+    // The child installs the real signal handler, which is process-wide, so it runs alone.
+    #[test]
+    #[ignore = "child process for an_interrupt_during_the_exchange_leaves_the_outcome_unconfirmed"]
+    fn interrupted_exchange_child() {
+        if std::env::var_os("SPACETERM_TEST_INTERRUPTED_EXCHANGE").is_none() {
+            return;
+        }
+        let mode = Mode {
+            json: true,
+            ..Default::default()
+        };
+        crate::interrupt::install("show", mode).unwrap();
+        let request = Request::Show {
+            server: [1; 32],
+            workspace: [2; 32],
+            tab: None,
+            pane: None,
+        };
+        let code = ask(&InterruptedExchange, &request).unwrap_err().code;
+        println!("code={}", code.as_str());
+    }
+
+    #[test]
+    fn an_interrupt_during_the_exchange_leaves_the_outcome_unconfirmed() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "desktop::tests::interrupted_exchange_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SPACETERM_TEST_INTERRUPTED_EXCHANGE", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains("code=outcome_unconfirmed\n"), "{stdout}");
     }
 
     #[test]
@@ -400,14 +511,105 @@ mod tests {
     #[test]
     fn an_interrupt_that_ends_the_wait_leaves_the_outcome_unconfirmed() {
         assert_eq!(
-            classify(Err(ChannelError::Timeout), true),
+            classify(
+                Err(ChannelError::Timeout),
+                Asked::Effect { interrupted: true }
+            ),
             Some(Code::OutcomeUnconfirmed)
         );
         assert_eq!(
-            classify(Err(ChannelError::Timeout), false),
+            classify(
+                Err(ChannelError::Timeout),
+                Asked::Effect { interrupted: false }
+            ),
             Some(Code::Timeout)
         );
-        assert_eq!(classify(Ok(Reply::Done), true), None);
+        assert_eq!(
+            classify(Ok(Reply::Done), Asked::Effect { interrupted: true }),
+            None
+        );
+    }
+
+    #[test]
+    fn diagnostics_reports_the_desktops_counters() {
+        let counters = spaceterm_server::diagnostics::TerminalCounterSnapshot {
+            pty_read_attempts: 9,
+            pty_data_reads: 4,
+            pty_read_bytes: 12_000,
+            frames_decoded: 7,
+            frames_painted: 5,
+            ..Default::default()
+        };
+        let desktop = Recorded::answering(Ok(Reply::Diagnostics(counters)));
+
+        let output = diagnostics(&desktop);
+
+        assert_eq!(desktop.requests.into_inner(), vec![Request::Diagnostics]);
+        assert_eq!(output.envelope.exit(), 0);
+        assert_eq!(output.text, counters.lines());
+        assert_golden("diagnostics", &output.envelope);
+    }
+
+    #[test]
+    fn diagnostics_without_counters_has_a_fixed_code() {
+        for (answer, expected, exit) in [
+            (Err(ChannelError::Unavailable), "desktop_unavailable", 5),
+            (Err(ChannelError::Timeout), "timeout", 6),
+            (Ok(Reply::Done), "desktop_incompatible", 5),
+            (
+                Ok(Reply::Refused(Refusal::Incompatible)),
+                "desktop_incompatible",
+                5,
+            ),
+        ] {
+            let output = diagnostics(&Recorded::answering(answer));
+            assert_eq!(code(&output), Some(expected));
+            assert_eq!(output.envelope.exit(), exit, "{expected}");
+        }
+        assert_golden(
+            "diagnostics_desktop_unavailable",
+            &diagnostics(&Recorded::answering(Err(ChannelError::Unavailable))).envelope,
+        );
+    }
+
+    /// A desktop at the other end of a real channel connection that reads the whole request,
+    /// then writes `reply` and closes.
+    #[cfg(unix)]
+    struct Replying(&'static [u8]);
+
+    #[cfg(unix)]
+    impl Desktop for Replying {
+        fn request(&self, request: &Request) -> Result<Reply, ChannelError> {
+            use std::io::{Read, Write};
+            let (client, mut desktop) = std::os::unix::net::UnixStream::pair().unwrap();
+            let reply = self.0;
+            let peer = std::thread::spawn(move || {
+                desktop.read_to_end(&mut Vec::new()).unwrap();
+                desktop.write_all(reply).unwrap();
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let answer =
+                spaceterm::desktop_channel::exchange(client, IDENTITY, request, &|| deadline);
+            peer.join().unwrap();
+            answer
+        }
+    }
+
+    /// A Diagnostics request has no effect to confirm, so a reply it cannot use, including
+    /// none, means the desktop does not speak this channel.
+    #[cfg(unix)]
+    #[test]
+    fn diagnostics_reports_an_unusable_reply_as_an_incompatible_desktop() {
+        for reply in [
+            // A desktop of the previous schema refuses the request in its own schema.
+            &br#"{"schema":"spaceterm.desktop.v1","identity":"spaceterm-development","body":{"refused":"incompatible"}}"#[..],
+            b"",
+            b"{\"schema\":",
+        ] {
+            let output = diagnostics(&Replying(reply));
+            assert_eq!(code(&output), Some("desktop_incompatible"));
+            assert_eq!(output.envelope.exit(), 5);
+        }
     }
 
     #[test]

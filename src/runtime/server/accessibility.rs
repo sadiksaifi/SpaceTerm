@@ -2,6 +2,7 @@
 use super::*;
 use pane::accessibility as wire;
 use serde::{Serialize, Serializer, ser::SerializeSeq};
+use spaceterm_server::diagnostics::TerminalCounters;
 use std::{collections::BTreeMap, io::Write, sync::mpsc};
 
 type Encoded = Result<Vec<u8>, wire::Error>;
@@ -19,7 +20,6 @@ struct Job {
     result: mpsc::Receiver<Encoded>,
     obsolete: bool,
 }
-#[derive(Default)]
 pub(super) struct Accessibility {
     latest: Option<Arc<TerminalAccessibilityModel>>,
     requested: bool,
@@ -30,8 +30,24 @@ pub(super) struct Accessibility {
     job: Option<Job>,
     resetting: bool,
     minimum_generation: Option<PresentationGeneration>,
+    /// Counts each serialized revision and its bytes.
+    counters: Arc<TerminalCounters>,
 }
 impl Accessibility {
+    pub(super) fn new(counters: Arc<TerminalCounters>) -> Self {
+        Self {
+            latest: None,
+            requested: false,
+            revision: 0,
+            sent: 0,
+            completed: None,
+            transfer: None,
+            job: None,
+            resetting: false,
+            minimum_generation: None,
+            counters,
+        }
+    }
     pub(super) fn revision(&self) -> u64 {
         self.revision
     }
@@ -131,10 +147,15 @@ impl Accessibility {
                 let model = Arc::clone(model);
                 let serializing = Arc::clone(&model);
                 let revision = self.revision;
+                let counters = Arc::clone(&self.counters);
                 std::thread::Builder::new()
                     .name("terminal-accessibility".into())
                     .spawn(move || {
-                        let _ = sender.send(encode(&serializing, revision, previous.as_deref()));
+                        let encoded = encode(&serializing, revision, previous.as_deref());
+                        if let Ok(bytes) = &encoded {
+                            counters.record_accessibility_revision(bytes.len());
+                        }
+                        let _ = sender.send(encoded);
                     })
                     .map_err(|_| wire::Error::TooLarge)?;
                 self.job = Some(Job {
