@@ -2256,6 +2256,7 @@ impl TabView {
 impl TabView {
     pub(crate) fn canonicalize_ids(&mut self) {
         self.binding.canonicalize();
+        self.binding.canonicalize_panes();
     }
 
     pub(crate) fn layout(&self) -> Option<spaceterm_server::client_view::Layout> {

@@ -60,6 +60,9 @@ pub(super) struct PendingEdits {
     unread_conflicts: usize,
     presentations: VecDeque<WorkspaceAcceptance>,
     aliases: BTreeMap<Id, Id>,
+    /// Pane aliases one holder no longer needs. Another Tab can hold the same Pane while a move
+    /// is pending, so they retire only once every Tab has translated its identities.
+    retiring: Vec<Id>,
     observed: Option<u64>,
     pub disconnected: bool,
 }
@@ -474,6 +477,17 @@ impl PendingEdits {
     }
     pub fn forget_alias(&mut self, id: Id) {
         self.aliases.remove(&id);
+    }
+
+    /// Retires `id` with the next [`Self::retire_deferred_aliases`].
+    pub fn defer_alias_retirement(&mut self, id: Id) {
+        self.retiring.push(id);
+    }
+
+    pub fn retire_deferred_aliases(&mut self) {
+        for id in std::mem::take(&mut self.retiring) {
+            self.aliases.remove(&id);
+        }
     }
 
     pub fn project(&mut self, mut inventory: Inventory) -> Inventory {

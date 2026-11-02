@@ -586,6 +586,14 @@ mod server {
         pub(crate) fn retire_alias(&self, id: Id) {
             self.pending.borrow_mut().forget_alias(id);
         }
+        /// Retires a Pane alias once every Tab has translated its identities, at the next
+        /// [`Self::retire_deferred_aliases`].
+        pub(crate) fn defer_alias_retirement(&self, id: Id) {
+            self.pending.borrow_mut().defer_alias_retirement(id);
+        }
+        pub(crate) fn retire_deferred_aliases(&self) {
+            self.pending.borrow_mut().retire_deferred_aliases();
+        }
 
         pub(crate) fn has_pending(&self) -> bool {
             self.pending.borrow().has_pending()
@@ -1228,7 +1236,7 @@ mod server {
     impl Drop for WorkspacePanes {
         fn drop(&mut self) {
             for id in self.panes.values() {
-                self.edits.retire_alias(*id);
+                self.edits.defer_alias_retirement(*id);
             }
         }
     }
@@ -1268,7 +1276,7 @@ mod server {
             if let Some(previous) = self.panes.insert(pane_id, server)
                 && previous != server
             {
-                self.edits.retire_alias(previous);
+                self.edits.defer_alias_retirement(previous);
             }
             if self.edits.provisional(server) {
                 self.pending_starts.borrow_mut().insert(pane_id);
@@ -1289,7 +1297,7 @@ mod server {
 
         pub(crate) fn forget(&mut self, pane_id: PaneId) {
             if let Some(previous) = self.panes.remove(&pane_id) {
-                self.edits.retire_alias(previous);
+                self.edits.defer_alias_retirement(previous);
             }
             self.pending_starts.borrow_mut().remove(&pane_id);
             self.opened.remove(&pane_id);
@@ -1369,6 +1377,15 @@ mod server {
         pub(crate) fn canonicalize(&mut self) {
             self.workspace = self.edits.canonical(self.workspace);
             self.tab = self.edits.canonical(self.tab);
+        }
+
+        /// Translates the identity of every Pane this Tab holds, including those it holds aside,
+        /// so their aliases can retire. Binding compares the identity a Pane opened with, so this
+        /// runs only after every Tab has bound what the server confirmed.
+        pub(crate) fn canonicalize_panes(&mut self) {
+            for id in self.panes.values_mut() {
+                *id = self.edits.canonical(*id);
+            }
         }
 
         pub(crate) fn presentation_tab(&self) -> Option<spaceterm_server::hierarchy::Tab> {

@@ -3058,16 +3058,20 @@ impl TabManager {
                 self.forget_tab(id);
             }
         }
-        // Every Tab view, including a parked one, must translate its containing identities
-        // before their aliases retire. Pane aliases retire individually when binding succeeds.
-        for parked in self.parked_tabs.values() {
-            parked
-                .payload()
-                .update(cx, |view, _| view.canonicalize_ids());
+        // Every Tab view, including a parked one, must translate its containing identities,
+        // including its Panes', before their aliases retire.
+        for view in self
+            .parked_tabs
+            .values()
+            .map(|parked| parked.payload())
+            .chain(self.tabs.iter().map(|(_, view)| view))
+        {
+            view.update(cx, |view, _| view.canonicalize_ids());
         }
         for id in applied_aliases {
             edits.retire_alias(id);
         }
+        edits.retire_deferred_aliases();
         if changed {
             cx.emit(TabManagerEvent::PresentationChanged);
             cx.notify();

@@ -1655,6 +1655,48 @@ fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mu
 }
 
 #[gpui::test]
+fn a_refused_move_of_a_split_accepted_meanwhile_restores_the_same_pane(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px};
+
+    let (harness, cx) = window_harness(cx);
+    click("pane-split-down-1", cx);
+    let signature = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            manager.active_tab_view().read(cx).layout_signature()
+        })
+    };
+    let before = signature(cx);
+    let caption = cx.debug_bounds("pane-caption-2-focused").unwrap();
+    let empty = cx.debug_bounds("create-tab-area").unwrap().center() + point(px(60.0), px(0.0));
+    let press = point(caption.left() + px(24.0), caption.center().y);
+    cx.simulate_mouse_move(press, None, Modifiers::none());
+    cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
+    for position in [empty, empty + point(px(1.0), px(0.0))] {
+        cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+        cx.run_until_parked();
+    }
+    cx.simulate_mouse_up(empty, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    // The split settles first, so the pending move now names the Pane's server identity.
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    harness.server.reject();
+    project_window(&harness, cx);
+
+    assert_eq!(
+        (
+            harness
+                .manager
+                .read_with(cx, |manager, _| manager.tab_ids().len()),
+            signature(cx),
+        ),
+        (1, before),
+        "the refused move returns the same local Pane to its place"
+    );
+}
+
+#[gpui::test]
 fn a_refused_tab_merge_restores_the_tab_and_opens_its_pane_again(cx: &mut TestAppContext) {
     use gpui::{Modifiers, MouseButton, point, px};
 
