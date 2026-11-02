@@ -2166,12 +2166,7 @@ impl TabManager {
                     cx,
                 )
                 .children(separator)
-                .child(fade.tracker())
-                // A Tab that joins another leaves the strip, so its place shows no landing.
-                .when(
-                    self.tab_strip_merge.is_some() && self.tab_reorder.dragged() == Some(tab_id),
-                    |face| face.opacity(0.0),
-                );
+                .child(fade.tracker());
             let open_manager = manager.clone();
             let lifecycle_manager = manager.clone();
             let activate_manager = manager.clone();
