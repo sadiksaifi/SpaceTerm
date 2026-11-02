@@ -877,6 +877,112 @@ mod tests {
         );
     }
 
+    /// Binds a document of `retained` rows, spread over pages of 100, to one newer Screen and
+    /// returns the allocations and row-identity lookups that re-bind made.
+    fn rebind_cost(
+        retained: usize,
+    ) -> (
+        crate::terminal::testing::Allocations,
+        crate::terminal::accessibility::Probes,
+    ) {
+        let state = demanded();
+        let fetcher = Fetcher::new(lease());
+        let id = |line: usize| wire::RowId {
+            screen: wire::Screen::Primary,
+            screen_generation: 1,
+            node_serial: 1 + (line / 100) as u64,
+            page_row: (line % 100) as u16,
+        };
+        let cell = |line: usize| wire::CellRef {
+            row: id(line),
+            row_revision: 1,
+            column: 0,
+        };
+        let document = wire::Snapshot {
+            revision: 1,
+            screen: wire::Screen::Primary,
+            screen_generation: 1,
+            topology: (0..retained).map(id).collect(),
+            rows: (0..retained)
+                .map(|line| wire::Row {
+                    id: id(line),
+                    revision: 1,
+                    soft_wrapped: false,
+                    cells: vec![wire::Cell {
+                        text: "x".into(),
+                        column: 0,
+                        width_cells: 1,
+                    }],
+                })
+                .collect(),
+            visible_lines: retained - 24..retained,
+            cursor: Some(cell(retained - 1)),
+            selection: Some(wire::SelectionRefs {
+                start: cell(retained - 2),
+                end: cell(retained - 1),
+                rectangle: false,
+            }),
+        };
+        let first = state
+            .accessibility
+            .lock()
+            .unwrap()
+            .apply(document, PresentationGeneration::default())
+            .unwrap()
+            .unwrap();
+        let next = PresentationGeneration::default().next();
+
+        let before = crate::terminal::accessibility::probes();
+        let (rebound, allocations) =
+            crate::terminal::testing::count_allocations(|| fetcher.rebind(&state, next));
+        let after = crate::terminal::accessibility::probes();
+        let probes = crate::terminal::accessibility::Probes {
+            map_lookups: after.map_lookups - before.map_lookups,
+            search_steps: after.search_steps - before.search_steps,
+        };
+
+        let rebound = rebound.expect("a newer Screen republishes the retained document");
+        assert!(rebound.shares_document(&first));
+        assert_eq!(rebound.generation(), next);
+        assert_eq!(rebound.cursor_cell(), Some((retained - 1, 0)));
+        assert_eq!(rebound.selection_range(), first.selection_range());
+        assert!(rebound.selection_range().is_some());
+        (allocations, probes)
+    }
+
+    #[test]
+    fn a_rebind_costs_the_same_at_any_retained_row_count() {
+        let (small_allocations, small_probes) = rebind_cost(100);
+        let (large_allocations, large_probes) = rebind_cost(10_000);
+
+        assert_eq!(
+            small_allocations, large_allocations,
+            "a re-bind with no changed rows allocates nothing per retained row"
+        );
+        assert_eq!(
+            small_probes.map_lookups, large_probes.map_lookups,
+            "a re-bind makes the same retained-row lookups at any retained row count"
+        );
+        assert!(
+            small_probes.search_steps > 0,
+            "the cursor and Selection resolve through identity searches"
+        );
+        // The large document holds 100 pages where the small one holds 1, and every page holds
+        // 100 rows. The cursor and the two Selection endpoints each search the pages once. A
+        // binary search over 100 pages visits at most 7 of them, so this allows twice that per
+        // search. A linear search over pages, or any pass over retained rows, adds at least 99
+        // steps per search.
+        let pages = 100_u32;
+        let per_search = 2 * (u32::BITS - (pages - 1).leading_zeros()) as usize;
+        assert!(
+            large_probes.search_steps <= small_probes.search_steps + 3 * per_search,
+            "a re-bind's identity searches grow logarithmically with the retained row count: \
+             {} steps at 100 rows, {} at 10,000",
+            small_probes.search_steps,
+            large_probes.search_steps
+        );
+    }
+
     #[test]
     fn each_rebind_to_a_newer_screen_counts_once() {
         use spaceterm_server::diagnostics::TerminalCounterSnapshot;
