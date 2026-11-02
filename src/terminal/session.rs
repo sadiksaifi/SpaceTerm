@@ -1550,10 +1550,7 @@ impl TerminalWorker {
                 true
             }
             Command::ReleaseAccessibility(ended_at) => {
-                if let Err(error) = self.emulator.release_accessibility() {
-                    self.send_runtime_failure(error);
-                    return false;
-                }
+                self.emulator.release_accessibility();
                 self.schedules
                     .release_accessibility(ended_at, self.schedules.now());
                 true
@@ -2464,8 +2461,10 @@ impl TerminalWorker {
             }
         };
         self.schedules.update_accessibility(more);
-        self.schedules
-            .mark_accessibility_presented(Instant::now(), !more);
+        self.schedules.mark_accessibility_presented(Instant::now());
+        if !more && self.emulator.take_accessibility_capture_outran() {
+            self.schedules.note_screen_published();
+        }
         if let Some(accessibility) = accessibility {
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.

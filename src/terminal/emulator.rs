@@ -755,12 +755,24 @@ impl PromptRedraw {
     }
 }
 
+/// The semantic store: Ghostty's row observer and the model built from what it extracted.
+struct SemanticStore {
+    observer: ghostty_accessibility::State,
+    model: TerminalAccessibilityState,
+    /// The content change count when the capture in progress took its first step.
+    capture_began_at: Option<u64>,
+    /// Content changed while the capture completed last was running.
+    capture_outran: bool,
+}
+
 pub(crate) struct TerminalEmulator {
     local_file_emissions: Rc<RefCell<LocalFileEmissionRegistry>>,
     terminal: Terminal<'static, 'static>,
-    ghostty_accessibility: ghostty_accessibility::State,
+    /// Present from the first semantic capture step until the store is released.
+    semantics: Option<SemanticStore>,
     accessibility_capture_needed: bool,
-    accessibility: TerminalAccessibilityState,
+    /// Counts the content changes a semantic capture can observe.
+    semantic_changes: u64,
     accessibility_generation: PresentationGeneration,
     render_state: RenderState<'static>,
     rows: RowIterator<'static>,
@@ -1167,9 +1179,9 @@ impl TerminalEmulator {
         Ok(Self {
             local_file_emissions,
             terminal,
-            ghostty_accessibility: ghostty_accessibility::State::new()?,
+            semantics: None,
             accessibility_capture_needed: true,
-            accessibility: TerminalAccessibilityState::default(),
+            semantic_changes: 0,
             accessibility_generation: PresentationGeneration::default(),
             render_state: RenderState::new()?,
             rows: RowIterator::new()?,
@@ -1247,7 +1259,7 @@ impl TerminalEmulator {
     pub(crate) fn feed_at(&mut self, bytes: &[u8], now: Instant) {
         if !bytes.is_empty() {
             self.invalidate_selection_copy();
-            self.accessibility_capture_needed = true;
+            self.note_semantic_change();
         }
         self.xtgettcap
             .feed(bytes, &mut self.pty_responses.borrow_mut());
@@ -1325,7 +1337,7 @@ impl TerminalEmulator {
 
     pub(crate) fn clear_screen_and_scrollback(&mut self) -> EmulatorAction {
         self.invalidate_selection_copy();
-        self.accessibility_capture_needed = true;
+        self.note_semantic_change();
         let redraw_prompt = self.terminal.clear_screen(true);
         EmulatorAction {
             bytes: if redraw_prompt {
@@ -1452,7 +1464,7 @@ impl TerminalEmulator {
         let cell = geometry.backing_cell_size();
         if winsize_changed {
             self.capture_accessibility_if_needed()?;
-            self.accessibility_capture_needed = true;
+            self.note_semantic_change();
             let clears_prompt = self.terminal.resize_with_prompt_redraw(
                 grid.cols,
                 grid.rows,
@@ -2078,8 +2090,12 @@ impl TerminalEmulator {
             };
             (convert(start), convert(end))
         });
-        let changed = self
-            .ghostty_accessibility
+        // Without a store no client holds a snapshot, so every endpoint is stale.
+        let Some(semantics) = self.semantics.as_mut() else {
+            return Ok(false);
+        };
+        let changed = semantics
+            .observer
             .set_selection(&self.terminal, selection)
             .map_err(|error| {
                 TerminalFailure::emulator_error("set-terminal-accessibility-selection", error)
@@ -2153,9 +2169,27 @@ impl TerminalEmulator {
         self.accessibility_capture_needed
     }
 
+    fn note_semantic_change(&mut self) {
+        self.accessibility_capture_needed = true;
+        self.semantic_changes = self.semantic_changes.wrapping_add(1);
+    }
+
+    /// Whether content changed while the capture that completed last was running, and clears
+    /// it. A capture finishes against what it observed when it began, so those changes need the
+    /// next capture.
+    pub(crate) fn take_accessibility_capture_outran(&mut self) -> bool {
+        self.semantics
+            .as_mut()
+            .is_some_and(|semantics| std::mem::take(&mut semantics.capture_outran))
+    }
+
+    /// Retains Ghostty's dirty rows for the semantic store before rendering clears them. Without
+    /// a store there is nothing to retain: the first capture of a new store extracts every row.
     fn capture_accessibility_if_needed(&mut self) -> Result<(), Error> {
         if self.accessibility_capture_needed {
-            self.ghostty_accessibility.capture(&self.terminal)?;
+            if let Some(semantics) = self.semantics.as_mut() {
+                semantics.observer.capture(&self.terminal)?;
+            }
             self.accessibility_capture_needed = false;
         }
         Ok(())
@@ -2173,8 +2207,22 @@ impl TerminalEmulator {
         if bind_next_presentation {
             self.accessibility_generation = self.presentation_generation.next();
         }
-        let snapshot = self
-            .ghostty_accessibility
+        let semantics = match &mut self.semantics {
+            Some(semantics) => semantics,
+            store => store.insert(SemanticStore {
+                observer: ghostty_accessibility::State::new().map_err(|error| {
+                    TerminalFailure::emulator_error("observe-retained-terminal-text", error)
+                })?,
+                model: TerminalAccessibilityState::default(),
+                capture_began_at: None,
+                capture_outran: false,
+            }),
+        };
+        let began_at = *semantics
+            .capture_began_at
+            .get_or_insert(self.semantic_changes);
+        let snapshot = semantics
+            .observer
             .update(
                 &self.terminal,
                 ghostty_accessibility::UpdateOptions {
@@ -2187,24 +2235,31 @@ impl TerminalEmulator {
             })?;
         self.accessibility_capture_needed = false;
         let more = snapshot.more;
+        if !more {
+            semantics.capture_began_at = None;
+            semantics.capture_outran = began_at != self.semantic_changes;
+        }
         let update = accessibility_update(snapshot)?;
-        let model = self
-            .accessibility
-            .apply(update, self.accessibility_generation);
+        let model = semantics.model.apply(update, self.accessibility_generation);
         Ok((model, more))
     }
 
-    /// Drops the retained semantic store, in Ghostty and here. The next snapshot extracts the
-    /// whole terminal again.
-    pub(crate) fn release_accessibility(&mut self) -> Result<(), TerminalFailure> {
-        self.ghostty_accessibility = ghostty_accessibility::State::new()
-            .map_err(|error| TerminalFailure::emulator_error("release-terminal-text", error))?;
-        self.accessibility = TerminalAccessibilityState::default();
-        Ok(())
+    /// Drops the semantic store, in Ghostty and here. The next snapshot creates a new one and
+    /// extracts the whole terminal again.
+    pub(crate) fn release_accessibility(&mut self) {
+        self.semantics = None;
+    }
+
+    /// Whether the emulator holds a semantic store.
+    #[cfg(test)]
+    pub(crate) fn retains_semantics(&self) -> bool {
+        self.semantics.is_some()
     }
 
     pub(crate) fn reset_accessibility_presentation(&mut self) {
-        self.accessibility.reset_presentation();
+        if let Some(semantics) = self.semantics.as_mut() {
+            semantics.model.reset_presentation();
+        }
     }
 
     pub(crate) fn accessibility_snapshot_for_current_presentation(

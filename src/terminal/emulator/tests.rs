@@ -174,6 +174,129 @@ fn drain_accessibility(emulator: &mut TerminalEmulator) -> Arc<TerminalAccessibi
     panic!("bounded native accessibility publication did not converge");
 }
 
+/// The most bounded steps a capture of `rows` rows of `cols` columns takes when every row is
+/// pending: its topology in chunks of 256 rows, then its rows at 16,384 inspected cells (two per
+/// column) per step.
+fn capture_step_bound(rows: usize, cols: usize) -> usize {
+    rows.div_ceil(256) + rows.div_ceil(16_384 / (2 * cols)) + 1
+}
+
+/// Runs bounded capture steps until one completes, rendering a screen before each step as the
+/// Terminal Session does, and calling `output` before each step. Returns the model and the
+/// number of steps, or `None` when no capture completed within `limit` steps.
+fn capture_during_output(
+    emulator: &mut TerminalEmulator,
+    limit: usize,
+    mut output: impl FnMut(&mut TerminalEmulator, usize),
+) -> Option<(Arc<TerminalAccessibilityModel>, usize)> {
+    for step in 1..=limit {
+        output(emulator, step);
+        emulator.snapshot().unwrap();
+        let (model, more) = emulator.accessibility_snapshot(false).unwrap();
+        if !more {
+            return Some((model.expect("a completed capture publishes a model"), step));
+        }
+    }
+    None
+}
+
+/// Lines appended more often than about every 8 capture steps used to restart the capture's
+/// topology after each line, so a demanded Pane received no model until output paused. Each
+/// capture now finishes against the topology it began with, within its step bound, and the
+/// next capture adds the lines that arrived meanwhile.
+#[test]
+fn accessibility_captures_complete_while_output_appends_lines() {
+    for every in [1, 2, 4] {
+        let mut emulator = emulator(80, 24);
+        let history: String = (0..1_000)
+            .map(|line| format!("history {line}\r\n"))
+            .collect();
+        emulator.feed(history.as_bytes());
+        emulator.snapshot().unwrap();
+        let mut line = 0;
+        let mut append = |emulator: &mut TerminalEmulator, step: usize| {
+            if step % every == 0 {
+                emulator.feed(format!("y {line}\r\n").as_bytes());
+                line += 1;
+            }
+        };
+        let mut rows = 0;
+        for capture in 0..3 {
+            let bound = capture_step_bound(1_100, 80);
+            let (model, steps) = capture_during_output(&mut emulator, bound, &mut append)
+                .unwrap_or_else(|| {
+                    panic!("capture {capture} with a line every {every} steps exceeded {bound}")
+                });
+            assert!(steps <= bound);
+            assert!(model.text().starts_with("history 0\nhistory 1\n"));
+            assert!(model.text().contains("history 999\n"));
+            assert!(
+                model.rows().count() > rows,
+                "capture {capture} adds the new lines"
+            );
+            rows = model.rows().count();
+            // The live viewport moved past the capture's topology; the visible lines are the
+            // part of it the topology has.
+            let visible = model.visible_lines();
+            assert_eq!(visible.end, rows, "capture {capture}");
+            assert!(!visible.is_empty() && visible.len() <= 24, "{visible:?}");
+        }
+        assert!(line > 0);
+    }
+}
+
+/// At the Scrollback cap, output trims history while a capture runs. Rows the capture's
+/// topology names but output trimmed before the capture extracted them publish empty, so the
+/// capture still completes; the next topology no longer has them.
+#[test]
+fn accessibility_captures_complete_while_output_trims_rows_they_have_not_extracted() {
+    let mut emulator = emulator(80, 24);
+    let line = |index: usize| format!("line {index}\r\n");
+    let history: String = (0..MAX_SCROLLBACK_ROWS + 100).map(line).collect();
+    emulator.feed(history.as_bytes());
+    emulator.snapshot().unwrap();
+    let mut next = MAX_SCROLLBACK_ROWS + 100;
+    let mut append = |emulator: &mut TerminalEmulator, _| {
+        let lines: String = (next..next + 160).map(line).collect();
+        emulator.feed(lines.as_bytes());
+        next += 160;
+    };
+    let bound = capture_step_bound(MAX_SCROLLBACK_ROWS + 24, 80);
+    let (first, _) = capture_during_output(&mut emulator, bound, &mut append)
+        .expect("a capture completes while output trims its rows");
+    assert!(first.text().starts_with('\n'), "trimmed rows publish empty");
+    let trimmed = first.rows().next().unwrap().id;
+    let (second, _) = capture_during_output(&mut emulator, bound, &mut append)
+        .expect("the next capture completes as well");
+    assert!(second.rows().all(|row| row.id != trimmed));
+}
+
+/// A capture used to extract again every row that changed after it extracted it, so a wide
+/// screen redrawn faster than a capture's steps never completed. Rows that change during a
+/// capture now wait for the next one.
+#[test]
+fn accessibility_captures_complete_while_a_wide_screen_redraws_every_step() {
+    let mut emulator = emulator(512, 50);
+    emulator.feed(b"\x1b[?1049h");
+    let redraw = |emulator: &mut TerminalEmulator, step: usize| {
+        let screen: String = (1..=50)
+            .map(|row| format!("\x1b[{row};1Hframe {step} row {row}"))
+            .collect();
+        emulator.feed(screen.as_bytes());
+    };
+    let bound = capture_step_bound(50, 512);
+    let mut frame = 0;
+    for capture in 0..3 {
+        let (model, _) = capture_during_output(&mut emulator, bound, |emulator, _| {
+            frame += 1;
+            redraw(emulator, frame);
+        })
+        .unwrap_or_else(|| panic!("capture {capture} exceeded {bound} steps"));
+        assert!(model.text().starts_with("frame "));
+        assert_eq!(model.rows().count(), 50);
+    }
+}
+
 #[test]
 fn accessibility_retains_an_edited_row_scrolled_into_history_in_one_feed() {
     let mut emulator = emulator(32, 3);
@@ -276,6 +399,9 @@ fn accessibility_retains_bounded_progress_with_offscreen_dirty_rows_and_new_inpu
     // The viewport is unchanged by this offscreen write. Rendering can return
     // None while capture must still retain the native semantic invalidation.
     emulator.snapshot().unwrap();
+    // A row that changes during a capture waits for the next one.
+    let current = drain_accessibility(&mut emulator);
+    assert!(current.text().ends_with("changed"));
     let current = drain_accessibility(&mut emulator);
     assert!(current.text().ends_with("newest!"));
     assert_eq!(current.rows().count(), 81);
