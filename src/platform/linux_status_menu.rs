@@ -114,6 +114,7 @@ pub(crate) fn install(
         });
     }
     worker.send(Request::Refresh);
+    crate::status_menu::follow_local_server(worker.changes(), cx);
     let item = Rc::new(LinuxStatusItem {
         name,
         controller,

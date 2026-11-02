@@ -90,6 +90,7 @@ pub(crate) fn install(
     let item = StatusItem::new(mtm, name, worker, sender);
     item.render();
     item.worker.send(Request::Refresh);
+    status_menu::follow_local_server(item.worker.changes(), cx);
     cx.spawn(async move |cx| {
         while let Ok(message) = messages.recv().await {
             cx.update(|cx| item.handle(message, cx));

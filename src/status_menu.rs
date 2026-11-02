@@ -105,6 +105,28 @@ pub(crate) fn after_operations(cx: &mut App, work: impl FnOnce(&mut App) + 'stat
     }
 }
 
+/// Subscribes `changes` to this client's link to its local server, now or once the client
+/// creates that link's handle, so the status item learns of a stopped, crashed or restarted server
+/// without reading the service on a timer. Before any Workspace Window or Settings connects, the
+/// item reads the service when its menu opens.
+pub(crate) fn follow_local_server(
+    changes: std::sync::Weak<dyn spaceterm_server::connection::link::LinkSink>,
+    cx: &mut App,
+) {
+    use crate::ui::server_worktrees::Client;
+    if let Some(client) = cx.try_global::<Client>() {
+        client.server.subscribe(changes);
+        return;
+    }
+    let mut pending = Some(changes);
+    cx.observe_global::<Client>(move |cx| {
+        if let Some(changes) = pending.take() {
+            cx.global::<Client>().server.subscribe(changes);
+        }
+    })
+    .detach();
+}
+
 /// A status-surface operation succeeded. A server it left running reaches every Workspace Window
 /// still waiting on it, as a Start from Settings does. Nothing here opens a window.
 pub(crate) fn operation_succeeded(cx: &mut App, status: ServiceStatus) {

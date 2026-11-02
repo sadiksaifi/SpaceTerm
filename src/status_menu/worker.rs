@@ -4,22 +4,20 @@ use super::model::Command;
 use spaceterm_server::service::control::{Action, Confirmation};
 use spaceterm_server::{
     ServerError,
+    connection::link::{Health, LinkEvent, LinkSink},
     service::{ServiceStatus, control::Controller},
 };
-use std::{
-    sync::mpsc::{self, RecvTimeoutError},
-    time::Duration,
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
 };
-
-/// Status reads only observe the service, so the item refreshes on this period and whenever its
-/// menu opens.
-const REFRESH: Duration = Duration::from_secs(10);
 
 pub(crate) enum Request {
     /// Reads the service, and whether a verified server build is offered to update to.
     Refresh,
-    /// Reads the service only, as the periodic refresh does. Verifying the included build is
-    /// left to reads the person causes, such as opening the menu.
+    /// Reads the service only, after the local server's link changed. Verifying the included
+    /// build is left to reads the person causes, such as opening the menu.
     Poll,
     Start,
     /// On Linux the server control window prepares and confirms instead.
@@ -40,8 +38,12 @@ pub(crate) enum Event {
     Finished(Command, Result<ServiceStatus, ServerError>),
 }
 
+/// The worker reads the service only when asked: when the menu opens, after an operation, or when
+/// [`Worker::changes`] reports that the local server's link changed. It never reads on a timer,
+/// so an idle client does no status work.
 pub(crate) struct Worker {
     requests: mpsc::Sender<Request>,
+    changes: Arc<ServerChanges>,
 }
 
 impl Worker {
@@ -57,10 +59,8 @@ impl Worker {
             .name("server-status".into())
             .spawn(move || {
                 loop {
-                    let request = match received.recv_timeout(REFRESH) {
-                        Ok(request) => request,
-                        Err(RecvTimeoutError::Timeout) => Request::Poll,
-                        Err(RecvTimeoutError::Disconnected) => return,
+                    let Ok(request) = received.recv() else {
+                        return;
                     };
                     match request {
                         Request::Refresh => {
@@ -83,11 +83,43 @@ impl Worker {
                     }
                 }
             })?;
-        Ok(Self { requests })
+        let changes = Arc::new(ServerChanges {
+            connected: AtomicBool::new(false),
+            requests: requests.clone(),
+        });
+        Ok(Self { requests, changes })
     }
 
     pub(crate) fn send(&self, request: Request) {
         let _ = self.requests.send(request);
+    }
+
+    /// The sink to subscribe to the local server's shared link. It lives as long as the worker.
+    pub(crate) fn changes(&self) -> Weak<dyn LinkSink> {
+        Arc::downgrade(&self.changes) as Weak<dyn LinkSink>
+    }
+}
+
+/// Asks for a status read when the local server's link ends, and when a later link's first
+/// inventory shows a server admitted the client again. A stopped, crashed, restarted or updated
+/// server changes the link, so these two moments cover every change the item shows while its
+/// menu is closed.
+struct ServerChanges {
+    /// Whether an inventory arrived since the last link ended.
+    connected: AtomicBool,
+    requests: mpsc::Sender<Request>,
+}
+
+impl LinkSink for ServerChanges {
+    fn deliver(&self, event: LinkEvent) {
+        let changed = match event {
+            LinkEvent::Health(Health::Closed(_)) => self.connected.swap(false, Ordering::AcqRel),
+            LinkEvent::Inventory(_) => !self.connected.swap(true, Ordering::AcqRel),
+            LinkEvent::Health(Health::Live) => false,
+        };
+        if changed {
+            let _ = self.requests.send(Request::Poll);
+        }
     }
 }
 
@@ -102,5 +134,61 @@ fn finish(
     deliver(Event::Finished(command, result));
     if refused {
         deliver(Event::Status(controller.status()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spaceterm_server::{
+        connection::link::LinkError, hierarchy::Inventory, protocol::InventoryRevision,
+    };
+
+    fn inventory() -> LinkEvent {
+        LinkEvent::Inventory(Arc::new(InventoryRevision {
+            inventory: Inventory {
+                revision: 1,
+                workspaces: Vec::new(),
+                close: None,
+                repositories: None,
+            },
+            next_sequence: 1,
+        }))
+    }
+
+    fn polls(received: &mpsc::Receiver<Request>) -> usize {
+        received
+            .try_iter()
+            .filter(|request| matches!(request, Request::Poll))
+            .count()
+    }
+
+    /// The status item reads the service once per link change and never because time passed,
+    /// so pushed inventories on a live link and a quiet link cause no service reads.
+    #[test]
+    fn the_status_item_reads_the_service_only_when_the_local_link_changes() {
+        let (requests, received) = mpsc::channel();
+        let changes = ServerChanges {
+            connected: AtomicBool::new(false),
+            requests,
+        };
+
+        changes.deliver(inventory());
+        assert_eq!(polls(&received), 1, "the first admitted link is a change");
+        changes.deliver(inventory());
+        changes.deliver(LinkEvent::Health(Health::Live));
+        assert_eq!(polls(&received), 0, "a live link's pushes are no change");
+
+        changes.deliver(LinkEvent::Health(Health::Closed(LinkError::Closed)));
+        assert_eq!(polls(&received), 1, "an ended link is a change");
+        changes.deliver(LinkEvent::Health(Health::Closed(LinkError::Closed)));
+        assert_eq!(
+            polls(&received),
+            0,
+            "a link that never admitted again is no change"
+        );
+
+        changes.deliver(inventory());
+        assert_eq!(polls(&received), 1, "a later admitted link is a change");
     }
 }
