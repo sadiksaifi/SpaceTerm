@@ -763,8 +763,10 @@ impl PromptRedraw {
 struct SemanticStore {
     observer: ghostty_accessibility::State,
     model: TerminalAccessibilityState,
-    /// The content change count when the capture in progress took its first step.
-    capture_began_at: Option<u64>,
+    /// The content change count when the capture in progress on each screen took its first
+    /// step, primary then alternate. Ghostty keeps a capture in progress per screen, and one
+    /// resumes after a visit to the other screen.
+    capture_began_at: [Option<u64>; 2],
     /// Content changed while the capture completed last was running.
     capture_outran: bool,
 }
@@ -2218,13 +2220,10 @@ impl TerminalEmulator {
                     TerminalFailure::emulator_error("observe-retained-terminal-text", error)
                 })?,
                 model: TerminalAccessibilityState::default(),
-                capture_began_at: None,
+                capture_began_at: [None; 2],
                 capture_outran: false,
             }),
         };
-        let began_at = *semantics
-            .capture_began_at
-            .get_or_insert(self.semantic_changes);
         let snapshot = semantics
             .observer
             .update(
@@ -2239,8 +2238,17 @@ impl TerminalEmulator {
             })?;
         self.accessibility_capture_needed = false;
         let more = snapshot.more;
+        // No content changes during the update, so the count now is the count at its start.
+        let began_at = &mut semantics.capture_began_at[match snapshot.screen {
+            ghostty_accessibility::Screen::Primary => 0,
+            ghostty_accessibility::Screen::Alternate => 1,
+        }];
+        let began_at = if more {
+            *began_at.get_or_insert(self.semantic_changes)
+        } else {
+            began_at.take().unwrap_or(self.semantic_changes)
+        };
         if !more {
-            semantics.capture_began_at = None;
             semantics.capture_outran = began_at != self.semantic_changes;
         }
         let update = accessibility_update(snapshot)?;

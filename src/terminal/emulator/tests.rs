@@ -379,6 +379,46 @@ fn accessibility_captures_complete_while_a_wide_screen_redraws_every_step() {
     }
 }
 
+/// A primary capture that resumes after an alternate-screen visit leaves the rows that changed
+/// after it extracted them for the next capture. The capture used to count content changes from
+/// the alternate capture's start, so it reported nothing outran it and the changed row stayed
+/// stale until more output arrived.
+#[test]
+fn a_primary_capture_resumed_after_the_alternate_screen_reports_the_rows_it_outran() {
+    let mut emulator = emulator(512, 50);
+    let screen: String = (1..=50)
+        .map(|row| format!("\x1b[{row};1Hfirst {row}"))
+        .collect();
+    emulator.feed(screen.as_bytes());
+    emulator.snapshot().unwrap();
+    drain_accessibility(&mut emulator);
+    let screen: String = (1..=50)
+        .map(|row| format!("\x1b[{row};1Hsecond {row}"))
+        .collect();
+    emulator.feed(screen.as_bytes());
+    emulator.snapshot().unwrap();
+    let (_, more) = emulator.accessibility_snapshot(false).unwrap();
+    assert!(more, "the primary capture extracted its first rows only");
+    emulator.feed(b"\x1b[1;1H\x1b[2KCHANGED\x1b[?1049h");
+    emulator.snapshot().unwrap();
+    drain_accessibility(&mut emulator);
+    emulator.take_accessibility_capture_outran();
+    emulator.feed(b"\x1b[?1049l");
+    emulator.snapshot().unwrap();
+    let resumed = drain_accessibility(&mut emulator);
+    assert!(
+        resumed.text().starts_with("second 1\n"),
+        "{:?}",
+        &resumed.text()[..20]
+    );
+    assert!(
+        emulator.take_accessibility_capture_outran(),
+        "the change during the primary capture needs the next capture"
+    );
+    let next = drain_accessibility(&mut emulator);
+    assert!(next.text().starts_with("CHANGED\n"));
+}
+
 #[test]
 fn accessibility_retains_an_edited_row_scrolled_into_history_in_one_feed() {
     let mut emulator = emulator(32, 3);
