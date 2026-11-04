@@ -46,27 +46,6 @@ fn candidate_provenance(packaged: bool) {
     println!("cargo:rustc-env=SPACETERM_CLI_SHA256={digest}");
 }
 
-/// Embeds the notes file the release pipeline names, and the date the notes were released.
-fn embed_release_notes(root: &std::path::Path, release_tag: Option<&str>) {
-    println!("cargo:rerun-if-env-changed={}", release_notes::SOURCE);
-    let source = env::var_os(release_notes::SOURCE)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
-    if let Some(path) = &source {
-        println!("cargo:rerun-if-changed={}", path.display());
-    }
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
-    let embedded =
-        release_notes::embed(source.as_deref(), &out_dir).unwrap_or_else(|error| panic!("{error}"));
-    let released = if embedded {
-        println!("cargo:rustc-cfg=spaceterm_release_notes");
-        release_notes::release_date(root, release_tag).unwrap_or_else(|error| panic!("{error}"))
-    } else {
-        String::new()
-    };
-    println!("cargo:rustc-env=SPACETERM_RELEASE_NOTES_DATE={released}");
-}
-
 fn main() {
     println!("cargo:rerun-if-env-changed=SPACETERM_PACKAGED");
     println!("cargo:rerun-if-env-changed=SPACETERM_CLI_SOURCE_STATE");
@@ -75,7 +54,6 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(spaceterm_sparkle)");
     println!("cargo:rustc-check-cfg=cfg(spaceterm_packaged)");
     println!("cargo:rustc-check-cfg=cfg(spaceterm_release)");
-    println!("cargo:rustc-check-cfg=cfg(spaceterm_release_notes)");
     let root =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies the manifest"));
     // Watch source changes as well as refs so development identity cannot retain a release label.
@@ -98,7 +76,7 @@ fn main() {
         "cargo:rustc-env=SPACETERM_BUNDLE_VERSION={}",
         identity.bundle_version
     );
-    embed_release_notes(&root, release_tag.as_deref());
+    release_notes::emit(&root, release_tag.as_deref()).unwrap_or_else(|error| panic!("{error}"));
     // The application identity follows these inputs.
     let packaged = env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
     // The headless server depends on this library but does not carry a client candidate.

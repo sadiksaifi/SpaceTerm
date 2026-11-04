@@ -3,13 +3,45 @@
 //! build.rs and tests/build_release_notes.rs include this file, so it uses only the standard
 //! library.
 
-use std::{fs, path::Path, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// Names the git-cliff notes file for this build. Unset or empty, the build carries no notes.
 pub const SOURCE: &str = "SPACETERM_RELEASE_NOTES";
 /// The file in `OUT_DIR` that the desktop includes. It is empty when the build carries no notes.
 pub const EMBEDDED: &str = "release-notes.md";
 const MAX_BYTES: u64 = 64 * 1024;
+
+/// Runs in a build script: embeds the notes file [`SOURCE`] names into `OUT_DIR`, tells Cargo to
+/// embed them again when the name or the file changes, and sets `cfg(spaceterm_release_notes)` and
+/// `SPACETERM_RELEASE_NOTES_DATE`. A desktop build for `release_tag` must carry notes.
+pub fn emit(root: &Path, release_tag: Option<&str>) -> Result<(), &'static str> {
+    println!("cargo:rustc-check-cfg=cfg(spaceterm_release_notes)");
+    println!("cargo:rerun-if-env-changed={SOURCE}");
+    let source = env::var_os(SOURCE)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    if let Some(path) = &source {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    if source.is_none() && release_tag.is_some() && env::var_os("CARGO_FEATURE_DESKTOP").is_some() {
+        return Err(
+            "a desktop release build requires the release notes SPACETERM_RELEASE_NOTES names",
+        );
+    }
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("Cargo supplies OUT_DIR")?);
+    let released = if embed(source.as_deref(), &out_dir)? {
+        println!("cargo:rustc-cfg=spaceterm_release_notes");
+        release_date(root, release_tag)?
+    } else {
+        String::new()
+    };
+    println!("cargo:rustc-env=SPACETERM_RELEASE_NOTES_DATE={released}");
+    Ok(())
+}
 
 /// Writes the notes the desktop embeds into `out_dir`: the trimmed contents of `source`, or
 /// nothing without a source. Returns whether the build carries notes.
