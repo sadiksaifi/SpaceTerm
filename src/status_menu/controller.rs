@@ -6,10 +6,11 @@ use std::rc::Rc;
 
 use gpui::App;
 use spaceterm_core::service::ServiceStatus;
+use spaceterm_core::update::facts::Version;
 
 use super::model::{Command, Menu};
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice, Surface};
-use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
+use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
 use crate::updates::presentation::{self, DesktopAction};
 use crate::updates::{UpdateService, UpdateState};
 
@@ -31,8 +32,46 @@ pub(crate) trait StatusHost {
 }
 
 enum Message {
-    /// The person answered an alert with this command to run.
+    /// The person closed an explanation that runs this command next.
     Answered(presentation::Command),
+    /// The person approved a confirmation.
+    Approved(Approval),
+}
+
+/// An approved confirmation and what it described: each affected Machine's sessions and the
+/// version its restart goes to. A change to either before dispatch asks again.
+struct Approval {
+    actions: Vec<(MachineId, MachineAction)>,
+    observed: Vec<Observed>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Observed {
+    machine: MachineId,
+    sessions: u32,
+    target: Option<Version>,
+}
+
+/// What a confirmation of `actions` describes now.
+fn observe(actions: &[(MachineId, MachineAction)], cx: &App) -> Vec<Observed> {
+    let machines: &[MachineUpdate] =
+        MachineUpdates::global(cx).map_or(&[], |store| store.read(cx).machines());
+    actions
+        .iter()
+        .map(|(machine, _)| {
+            let facts = machines
+                .iter()
+                .find(|update| update.machine == *machine)
+                .and_then(|update| update.facts.as_ref());
+            Observed {
+                machine: *machine,
+                sessions: facts.map_or(0, |facts| facts.sessions),
+                target: facts
+                    .and_then(|facts| facts.pending.as_ref())
+                    .map(|pending| pending.version.clone()),
+            }
+        })
+        .collect()
 }
 
 pub(crate) struct StatusMenu {
@@ -98,8 +137,50 @@ impl StatusMenu {
     fn receive(&self, message: Message, cx: &mut App) {
         match message {
             Message::Answered(command) => self.run(command, cx),
+            Message::Approved(approval) => self.approved(approval, cx),
         }
         self.render(cx);
+    }
+
+    /// Performs an approved confirmation while it still describes the Machines. Otherwise the
+    /// menu runs what it offers now, which asks again, or restarts at once at zero sessions.
+    fn approved(&self, approval: Approval, cx: &mut App) {
+        if observe(&approval.actions, cx) == approval.observed {
+            for (machine, action) in approval.actions {
+                act(machine, action, cx);
+            }
+            return;
+        }
+        self.render(cx);
+        let Some((machine, action)) = approval.actions.first() else {
+            return;
+        };
+        let command = if approval.actions.len() == 1 {
+            self.command_for(*machine, action)
+        } else {
+            self.restart_all_for(*machine, action)
+        };
+        if let Some(command) = command {
+            self.run(command, cx);
+        }
+    }
+
+    /// The Restart All the menu now offers that includes `action` on `machine`.
+    fn restart_all_for(
+        &self,
+        machine: MachineId,
+        action: &MachineAction,
+    ) -> Option<presentation::Command> {
+        let menu = self.menu.borrow();
+        menu.as_ref()?.commands().find_map(|command| match command {
+            Command::Update(presentation::Command::Confirm(confirmation))
+                if confirmation.actions.len() > 1
+                    && confirmation.actions.contains(&(machine, action.clone())) =>
+            {
+                Some(presentation::Command::Confirm(confirmation))
+            }
+            _ => None,
+        })
     }
 
     /// An action this menu performed finished.
@@ -178,15 +259,9 @@ impl StatusMenu {
 
     fn render(&self, cx: &App) {
         let update = presentation::current(cx);
-        let (machines, recent) =
-            MachineUpdates::global(cx).map_or_else(Default::default, |store| {
-                let store = store.read(cx);
-                (
-                    store.machines().to_vec(),
-                    store.recent().map(|entry| entry.text.to_string()).collect(),
-                )
-            });
-        let menu = Menu::new(&update, &machines, recent);
+        let machines: &[MachineUpdate] =
+            MachineUpdates::global(cx).map_or(&[], |store| store.read(cx).machines());
+        let menu = Menu::new(&update, machines, crate::updates::recent_lines(cx));
         if self.menu.borrow().as_ref() == Some(&menu) {
             return;
         }
@@ -227,16 +302,15 @@ impl StatusMenu {
                     confirm: Some(confirmation.button.to_string()),
                 };
                 let messages = self.messages.clone();
-                let actions = confirmation.actions;
+                let approval = Approval {
+                    observed: observe(&confirmation.actions, cx),
+                    actions: confirmation.actions,
+                };
                 self.host.alert(
                     alert,
                     Box::new(move |approved| {
-                        if !approved {
-                            return;
-                        }
-                        for (machine, action) in actions {
-                            let command = presentation::Command::Machine(machine, action);
-                            let _ = messages.send_blocking(Message::Answered(command));
+                        if approved {
+                            let _ = messages.send_blocking(Message::Approved(approval));
                         }
                     }),
                     cx,

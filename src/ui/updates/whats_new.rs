@@ -285,7 +285,7 @@ mod tests {
 
         let mut adapter = RecordingAdapter::available();
         let mut history = UpdateHistory::default();
-        history.launched("0.0.1");
+        history.launched("0.0.1", 0);
         adapter.history = history;
         let adapter = std::rc::Rc::new(adapter);
         cx.update(|cx| crate::updates::ApplicationUpdates::install(adapter.clone(), cx));

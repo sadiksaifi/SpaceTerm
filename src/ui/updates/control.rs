@@ -202,21 +202,10 @@ fn menu_entries(presentation: &Presentation, warning: Rgba, cx: &App) -> Vec<Men
         ));
     }
     let restart_all = presentation.restart_all();
-    let recent: Vec<MenuEntry<Choice>> = MachineUpdates::global(cx)
-        .map(|store| {
-            store
-                .read(cx)
-                .recent()
-                .map(|entry| {
-                    MenuEntry::action(
-                        format!("{} · {}", entry.text, recent_time(entry.at, cx)),
-                        Choice::Status,
-                    )
-                    .disabled(true)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let recent: Vec<MenuEntry<Choice>> = crate::updates::recent_lines(cx)
+        .into_iter()
+        .map(|line| MenuEntry::action(line, Choice::Status).disabled(true))
+        .collect();
     if restart_all.is_some() || !recent.is_empty() {
         entries.push(MenuEntry::separator());
     }
@@ -233,41 +222,16 @@ fn menu_entries(presentation: &Presentation, warning: Rgba, cx: &App) -> Vec<Men
     entries
 }
 
-/// "09:41" today, otherwise "Nov 3", in this computer's local time.
-fn recent_time(at: u64, cx: &App) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let calendar = crate::desktop_profile::DesktopPresentation::get(cx);
-    match (
-        calendar.local_time(at),
-        calendar.local_time(crate::updates::now()),
-    ) {
-        (Some(at), Some(now)) if (at.year, at.month, at.day) == (now.year, now.month, now.day) => {
-            format!("{:02}:{:02}", at.hour, at.minute)
-        }
-        (Some(at), _) => format!("{} {}", MONTHS.get(at.month).copied().unwrap_or(""), at.day),
-        (None, _) => "earlier".to_owned(),
-    }
-}
-
-/// Closing the menu retires a "What's new" item to Recent, because the menu showed it.
-fn retire_whats_new(desktop: Option<String>) -> impl Fn(&MenuLifecycleEvent, &mut App) + 'static {
+/// Closing the menu reads a "What's new" item, because the menu showed it. Recent lists the
+/// update from its relaunch.
+fn retire_whats_new(whats_new: bool) -> impl Fn(&MenuLifecycleEvent, &mut App) + 'static {
     move |event, cx| {
-        if !matches!(event, MenuLifecycleEvent::Closed(_)) {
+        if !whats_new || !matches!(event, MenuLifecycleEvent::Closed(_)) {
             return;
         }
-        let Some(version) = desktop.clone() else {
-            return;
-        };
-        cx.defer(move |cx| {
+        cx.defer(|cx| {
             if let Some(updates) = service(cx) {
                 updates.update(cx, |updates, cx| updates.read_release_notes(cx));
-            }
-            if let Some(store) = MachineUpdates::global(cx) {
-                store.update(cx, |store, cx| {
-                    store.record(format!("SpaceTerm updated to {version}"), cx);
-                });
             }
         });
     }
@@ -293,10 +257,7 @@ impl Render for UpdateControl {
                 glyph: mark,
                 sentence: _,
             } => {
-                let whats_new = match &presentation.desktop {
-                    DesktopState::WhatsNew { version } => Some(version.clone()),
-                    _ => None,
-                };
+                let whats_new = matches!(presentation.desktop, DesktopState::WhatsNew { .. });
                 let inherited = tone == Tone::Action;
                 Menu::new(
                     "update-control-menu",

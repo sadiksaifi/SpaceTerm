@@ -61,6 +61,23 @@ pub(crate) struct UpdateHistory {
     /// The newest version whose release notes the person has read. A first install has read its
     /// own.
     notes_read: Option<String>,
+    /// The version the last launch ran, so the next launch can tell it came by an update.
+    launched: Option<String>,
+    /// Finished updates, newest first, at most [`RECENT_LIMIT`].
+    recent: Vec<RecentUpdate>,
+}
+
+/// The most entries Recent Updates keeps.
+pub(crate) const RECENT_LIMIT: usize = 4;
+
+/// One finished update, as Recent Updates lists it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecentUpdate {
+    /// "SpaceTerm updated to 0.9.0" or "penguin updated to 0.9.0".
+    pub(crate) text: String,
+    /// Unix seconds.
+    pub(crate) at: u64,
 }
 impl UpdateHistory {
     pub(crate) fn observe(&mut self, installed: &str, version: &str, published_at: u64, now: u64) {
@@ -159,18 +176,48 @@ impl UpdateHistory {
         self.last_reminder = Some(self.high_water);
     }
 
-    /// Forgets the pending release. The last check and the notes read stay.
+    /// Forgets the pending release. The last check, the notes read, the last launch and Recent
+    /// stay.
     pub(crate) fn clear(&mut self) {
         *self = Self {
             last_check: self.last_check,
             notes_read: self.notes_read.take(),
+            launched: self.launched.take(),
+            recent: std::mem::take(&mut self.recent),
             ..Self::default()
         };
     }
 
-    /// Records that this launch runs `installed`. The first launch ever has nothing new to read.
-    pub(crate) fn launched(&mut self, installed: &str) {
+    /// Records that this launch runs `installed` at `now`. The first launch ever has nothing new
+    /// to read. A launch of a newer version than the last one finished an update, so Recent
+    /// lists it.
+    pub(crate) fn launched(&mut self, installed: &str, now: u64) {
         self.notes_read.get_or_insert_with(|| installed.to_owned());
+        if self
+            .launched
+            .as_deref()
+            .is_some_and(|previous| newer(installed, previous))
+        {
+            self.record(format!("SpaceTerm updated to {installed}"), now);
+        }
+        self.launched = Some(installed.to_owned());
+    }
+
+    /// Adds a finished update to Recent.
+    pub(crate) fn record(&mut self, text: impl Into<String>, at: u64) {
+        self.recent.insert(
+            0,
+            RecentUpdate {
+                text: text.into(),
+                at,
+            },
+        );
+        self.recent.truncate(RECENT_LIMIT);
+    }
+
+    /// Newest first.
+    pub(crate) fn recent(&self) -> &[RecentUpdate] {
+        &self.recent
     }
 
     /// Whether `installed` is newer than every version whose notes the person has opened.
@@ -208,7 +255,7 @@ mod tests {
     #[test]
     fn notes_wait_for_the_person_after_an_update_but_not_after_a_first_install() {
         let mut history = UpdateHistory::default();
-        history.launched("0.8.0");
+        history.launched("0.8.0", 0);
         assert!(
             !history.notes_unread("0.8.0"),
             "a first install has nothing new"
@@ -216,7 +263,7 @@ mod tests {
         history.observe("0.8.0", "0.9.0", 1_000, 1_000);
         let bytes = serde_json::to_vec(&history).unwrap();
         let mut updated: UpdateHistory = serde_json::from_slice(&bytes).unwrap();
-        updated.launched("0.9.0");
+        updated.launched("0.9.0", 0);
         assert!(updated.notes_unread("0.9.0"));
         updated.observe("0.9.0", "0.9.1", 2_000, 2_000);
         updated.clear();
@@ -225,28 +272,70 @@ mod tests {
             "settling or clearing the pending release keeps the notes waiting"
         );
         updated.read_notes("0.9.0");
-        updated.launched("0.9.0");
+        updated.launched("0.9.0", 0);
         assert!(!updated.notes_unread("0.9.0"));
+    }
+
+    #[test]
+    fn recent_keeps_the_newest_finished_updates_across_relaunch() {
+        let mut history = UpdateHistory::default();
+        history.launched("0.8.0", 100);
+        assert!(
+            history.recent().is_empty(),
+            "a first install updated nothing"
+        );
+        history.launched("0.8.0", 200);
+        assert!(
+            history.recent().is_empty(),
+            "relaunching the same version updated nothing"
+        );
+        history.record("penguin updated to 0.9.0", 300);
+        history.launched("0.9.0", 400);
+        let bytes = serde_json::to_vec(&history).unwrap();
+        let mut relaunched: UpdateHistory = serde_json::from_slice(&bytes).unwrap();
+        relaunched.clear();
+        let texts = |history: &UpdateHistory| -> Vec<(String, u64)> {
+            history
+                .recent()
+                .iter()
+                .map(|entry| (entry.text.clone(), entry.at))
+                .collect()
+        };
+        assert_eq!(
+            texts(&relaunched),
+            [
+                ("SpaceTerm updated to 0.9.0".to_owned(), 400),
+                ("penguin updated to 0.9.0".to_owned(), 300),
+            ]
+        );
+        for at in 0..RECENT_LIMIT as u64 {
+            relaunched.record(format!("build-box updated to 0.9.{at}"), 500 + at);
+        }
+        assert_eq!(relaunched.recent().len(), RECENT_LIMIT);
+        assert_eq!(relaunched.recent()[0].text, "build-box updated to 0.9.3");
+        // Going back is no update.
+        relaunched.launched("0.8.0", 600);
+        assert_eq!(relaunched.recent()[0].text, "build-box updated to 0.9.3");
     }
 
     #[test]
     fn going_back_to_an_older_version_revives_no_notes() {
         let mut history = UpdateHistory::default();
-        history.launched("0.8.0");
-        history.launched("0.9.0");
+        history.launched("0.8.0", 0);
+        history.launched("0.9.0", 0);
         history.read_notes("0.9.0");
-        history.launched("0.8.0");
+        history.launched("0.8.0", 0);
         assert!(
             !history.notes_unread("0.8.0"),
             "0.8.0 is older than the notes read"
         );
         history.read_notes("0.8.0");
-        history.launched("0.9.0");
+        history.launched("0.9.0", 0);
         assert!(
             !history.notes_unread("0.9.0"),
             "opening older notes keeps newer ones read"
         );
-        history.launched("0.10.0");
+        history.launched("0.10.0", 0);
         assert!(history.notes_unread("0.10.0"));
     }
 

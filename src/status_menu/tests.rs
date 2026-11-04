@@ -57,6 +57,9 @@ fn waiting(mut update: MachineUpdate) -> MachineUpdate {
     update
 }
 
+/// How an alert hears its answer.
+type Answered = Box<dyn FnOnce(bool) + Send>;
+
 /// A status item that records each render and alert, and answers alerts as told.
 #[derive(Default)]
 struct Host {
@@ -64,6 +67,8 @@ struct Host {
     alerts: RefCell<Vec<Alert>>,
     /// Answers for the next alerts, in order. An alert with no answer left stays open.
     answers: RefCell<Vec<bool>>,
+    /// The open alert's answer, until [`Host::answer`] gives it.
+    open: RefCell<Option<Answered>>,
 }
 
 impl StatusHost for Host {
@@ -71,16 +76,24 @@ impl StatusHost for Host {
         self.menus.borrow_mut().push(menu.clone());
     }
 
-    fn alert(&self, alert: Alert, answered: Box<dyn FnOnce(bool) + Send>, _: &mut App) {
+    fn alert(&self, alert: Alert, answered: Answered, _: &mut App) {
         self.alerts.borrow_mut().push(alert);
         let mut answers = self.answers.borrow_mut();
-        if !answers.is_empty() {
+        if answers.is_empty() {
+            *self.open.borrow_mut() = Some(answered);
+        } else {
             answered(answers.remove(0));
         }
     }
 }
 
 impl Host {
+    /// Answers the alert left open.
+    fn answer(&self, approved: bool) {
+        let answered = self.open.borrow_mut().take().expect("an alert is open");
+        answered(approved);
+    }
+
     fn menu(&self) -> Menu {
         self.menus
             .borrow()
@@ -404,4 +417,190 @@ fn updating_the_desktop_relaunches_without_asking(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(fixture.host.alerts.borrow().is_empty());
     assert_eq!(updater.installations.get(), 1);
+}
+
+/// `update` with its sessions set to `sessions`.
+fn with_sessions(mut update: MachineUpdate, sessions: u32) -> MachineUpdate {
+    update.facts.as_mut().unwrap().sessions = sessions;
+    update
+}
+
+fn changed(fixture: &Fixture, update: MachineUpdate, cx: &mut TestAppContext) {
+    fixture
+        .machines
+        .emit(MachineUpdatesEvent::Changed(Box::new(update)));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn sessions_that_change_while_the_alert_is_open_ask_again(cx: &mut TestAppContext) {
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    cx.update(|cx| fixture.menu.perform(restart, cx));
+    cx.run_until_parked();
+    changed(&fixture, waiting(machine(PENGUIN, "penguin", 4)), cx);
+
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert!(
+        fixture.machines.performed().is_empty(),
+        "the approval covered 3 sessions, not 4"
+    );
+    assert_eq!(
+        fixture.host.alerts.borrow().last().unwrap().message,
+        "This will close your 4 running sessions."
+    );
+
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.performed(),
+        [(PENGUIN, MachineAction::Restart)]
+    );
+}
+
+#[gpui::test]
+fn a_new_pending_version_while_the_alert_is_open_asks_again(cx: &mut TestAppContext) {
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    cx.update(|cx| fixture.menu.perform(restart, cx));
+    cx.run_until_parked();
+    let mut newer = waiting(machine(PENGUIN, "penguin", 3));
+    newer
+        .facts
+        .as_mut()
+        .unwrap()
+        .pending
+        .as_mut()
+        .unwrap()
+        .version = Version::parse("0.9.1").unwrap();
+    changed(&fixture, newer, cx);
+
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert!(fixture.machines.performed().is_empty());
+    assert_eq!(fixture.host.alerts.borrow().len(), 2, "it asks again");
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.performed(),
+        [(PENGUIN, MachineAction::Restart)]
+    );
+}
+
+#[gpui::test]
+fn sessions_that_all_close_while_the_alert_is_open_restart_at_once(cx: &mut TestAppContext) {
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    cx.update(|cx| fixture.menu.perform(restart, cx));
+    cx.run_until_parked();
+    changed(&fixture, waiting(machine(PENGUIN, "penguin", 0)), cx);
+
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert_eq!(fixture.host.alerts.borrow().len(), 1);
+    assert_eq!(
+        fixture.machines.performed(),
+        [(PENGUIN, MachineAction::Restart)]
+    );
+}
+
+#[gpui::test]
+fn restart_all_and_stop_ask_again_after_their_sessions_change(cx: &mut TestAppContext) {
+    let fixture = start(
+        vec![
+            waiting(machine(LOCAL, "This Mac", 3)),
+            waiting(machine(PENGUIN, "penguin", 4)),
+        ],
+        cx,
+    );
+    let restart_all = action_command(&fixture.host.menu(), "Restart All\u{2026}");
+    cx.update(|cx| fixture.menu.perform(restart_all, cx));
+    cx.run_until_parked();
+    changed(
+        &fixture,
+        with_sessions(waiting(machine(PENGUIN, "penguin", 4)), 5),
+        cx,
+    );
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert!(fixture.machines.performed().is_empty());
+    assert_eq!(
+        fixture.host.alerts.borrow().last().unwrap().message,
+        "This will close 8 running sessions."
+    );
+    fixture.host.answer(false);
+    cx.run_until_parked();
+
+    let stop = submenu_command(&fixture.host.menu(), LOCAL, "Stop SpaceTerm Core\u{2026}");
+    cx.update(|cx| fixture.menu.perform(stop, cx));
+    cx.run_until_parked();
+    changed(
+        &fixture,
+        with_sessions(waiting(machine(LOCAL, "This Mac", 3)), 1),
+        cx,
+    );
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert!(fixture.machines.performed().is_empty());
+    assert_eq!(
+        fixture.host.alerts.borrow().last().unwrap().message,
+        "This will close your 1 running session. SpaceTerm Core stays stopped until you start it again."
+    );
+}
+
+#[gpui::test]
+fn a_finished_core_update_reaches_recent_updates(cx: &mut TestAppContext) {
+    use crate::updates::ApplicationUpdates;
+    use crate::updates::testing::RecordingAdapter;
+    let updater = Rc::new(RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
+    assert!(fixture.host.menu().recent.is_empty());
+
+    let mut updated = machine(PENGUIN, "penguin", 0);
+    updated.facts.as_mut().unwrap().running = Version::parse("0.9.0").unwrap();
+    changed(&fixture, updated, cx);
+    let recent = fixture.host.menu().recent;
+    assert_eq!(recent.len(), 1, "{recent:?}");
+    assert!(
+        recent[0].starts_with("penguin updated to 0.9.0 \u{b7} "),
+        "{recent:?}"
+    );
+    let saved = updater
+        .saved
+        .borrow()
+        .clone()
+        .expect("the history was saved");
+    assert_eq!(saved.recent()[0].text, "penguin updated to 0.9.0");
+}
+
+#[gpui::test]
+fn the_flat_menu_offers_start_for_a_stopped_local_core(cx: &mut TestAppContext) {
+    let mut stopped = machine(LOCAL, "This Computer", 0);
+    stopped.link = MachineLink::Stopped;
+    let fixture = start(vec![stopped, machine(PENGUIN, "penguin", 2)], cx);
+    let menu = fixture.host.menu();
+    let actions: Vec<(String, Command)> = menu
+        .flat()
+        .into_iter()
+        .filter_map(|row| match row {
+            FlatRow::Action { title, command } => Some((title, command)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        actions[0],
+        (
+            "Start SpaceTerm Core on This Computer".to_owned(),
+            Command::Update(crate::updates::presentation::Command::Machine(
+                LOCAL,
+                MachineAction::Start
+            ))
+        )
+    );
+    assert!(
+        !actions.iter().any(|(title, _)| title.contains("penguin")),
+        "a running Machine with sessions only reports its status: {actions:?}"
+    );
 }

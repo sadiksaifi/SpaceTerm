@@ -1,10 +1,10 @@
 //! The application's one view of Machine updates: it starts the composed
-//! [`MachineUpdatesAdapter`], keeps the latest [`MachineUpdate`] per Machine, the failure notices
-//! dismissed on this desktop and the Recent history, and performs actions. Observers of
-//! [`MachineUpdatesService`] hear every change. [`MachineUpdatesNotice`] reports how each action
-//! a surface performed finished, so that surface, and only it, can explain a failure.
+//! [`MachineUpdatesAdapter`], keeps the latest [`MachineUpdate`] per Machine and the failure
+//! notices dismissed on this desktop, records each finished update in Recent, and performs
+//! actions. Observers of [`MachineUpdatesService`] hear every change. [`MachineUpdatesNotice`]
+//! reports how each action a surface performed finished, so that surface, and only it, can
+//! explain a failure.
 
-use std::collections::VecDeque;
 use std::rc::Rc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
@@ -15,18 +15,6 @@ use super::{
     MachineUpdatesEvent,
 };
 use crate::updates::presentation::Dismissed;
-
-/// The most entries Recent keeps.
-pub(crate) const RECENT_LIMIT: usize = 4;
-
-/// One finished update in Recent.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RecentUpdate {
-    /// "penguin updated to 0.9.0", "SpaceTerm updated to 0.9.0" or "penguin installed 0.9.0".
-    pub(crate) text: SharedString,
-    /// Unix seconds.
-    pub(crate) at: u64,
-}
 
 /// Where the person asked for an action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +40,6 @@ pub(crate) struct MachineUpdates {
     adapter: Rc<dyn MachineUpdatesAdapter>,
     machines: Vec<MachineUpdate>,
     dismissed: Dismissed,
-    recent: VecDeque<RecentUpdate>,
     /// Actions performed that have not finished, oldest first.
     performed: Vec<(MachineId, MachineAction, Surface)>,
     _events: Task<()>,
@@ -84,7 +71,6 @@ impl MachineUpdates {
                 adapter,
                 machines: Vec::new(),
                 dismissed: Dismissed::new(),
-                recent: VecDeque::new(),
                 performed: Vec::new(),
                 _events: events,
             }
@@ -105,11 +91,6 @@ impl MachineUpdates {
         &self.dismissed
     }
 
-    /// Newest first.
-    pub(crate) fn recent(&self) -> impl Iterator<Item = &RecentUpdate> {
-        self.recent.iter()
-    }
-
     /// Asks the adapter to perform `action` for `surface`. Dismissing a failure retires it here
     /// at once.
     pub(crate) fn perform(
@@ -127,20 +108,6 @@ impl MachineUpdates {
         self.adapter.perform(machine, action);
     }
 
-    /// Adds `text` to Recent, such as "SpaceTerm updated to 0.9.0".
-    pub(crate) fn record(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.push_recent(text.into());
-        cx.notify();
-    }
-
-    fn push_recent(&mut self, text: SharedString) {
-        self.recent.push_front(RecentUpdate {
-            text,
-            at: crate::updates::now(),
-        });
-        self.recent.truncate(RECENT_LIMIT);
-    }
-
     fn receive(&mut self, event: MachineUpdatesEvent, cx: &mut Context<Self>) {
         match event {
             MachineUpdatesEvent::Machines(machines) => self.machines = machines,
@@ -155,7 +122,7 @@ impl MachineUpdates {
                         let finished = finished_update(known, &update);
                         *known = update;
                         if let Some(text) = finished {
-                            self.push_recent(text);
+                            crate::updates::record_recent(text, cx);
                         }
                     }
                     None => self.machines.push(update),
@@ -196,14 +163,14 @@ impl MachineUpdates {
 }
 
 /// What Recent says when `next` finishes an update `previous` was waiting for.
-fn finished_update(previous: &MachineUpdate, next: &MachineUpdate) -> Option<SharedString> {
+fn finished_update(previous: &MachineUpdate, next: &MachineUpdate) -> Option<String> {
     let (before, after) = (previous.facts.as_ref()?, next.facts.as_ref()?);
     let name = &next.name;
     if before.running != after.running && is_newer(&after.running, &before.running) {
-        return Some(format!("{name} updated to {}", after.running).into());
+        return Some(format!("{name} updated to {}", after.running));
     }
     match (&before.pending, &after.pending) {
-        (None, Some(pending)) => Some(format!("{name} installed {}", pending.version).into()),
+        (None, Some(pending)) => Some(format!("{name} installed {}", pending.version)),
         _ => None,
     }
 }
@@ -257,6 +224,8 @@ mod tests {
     fn recent_names_each_install_and_update_and_failures_reach_observers(
         cx: &mut gpui::TestAppContext,
     ) {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
         let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
@@ -296,19 +265,18 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let recent: Vec<SharedString> = cx.read(|cx| {
-            store
+        let recent: Vec<String> = cx.read(|cx| {
+            cx.global::<crate::updates::UpdateService>()
+                .0
                 .read(cx)
                 .recent()
+                .iter()
                 .map(|entry| entry.text.clone())
                 .collect()
         });
         assert_eq!(
             recent,
-            vec![
-                SharedString::from("penguin updated to 0.9.0"),
-                SharedString::from("penguin installed 0.9.0"),
-            ]
+            ["penguin updated to 0.9.0", "penguin installed 0.9.0"]
         );
         assert_eq!(notices.borrow().len(), 1);
         assert_eq!(notices.borrow()[0].surface, Surface::StatusMenu);

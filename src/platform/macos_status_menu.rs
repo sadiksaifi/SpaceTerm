@@ -494,6 +494,96 @@ pub(in crate::platform) mod tests {
         settle_pending_checks,
     };
     use super::*;
+    use crate::updates::UpdateState;
+    use crate::updates::machines::{MachineLink, MachineUpdate};
+    use crate::updates::presentation::{DesktopFacts, Dismissed, Presentation};
+    use spaceterm_core::protocol::capability::{Capabilities, Capability};
+    use spaceterm_core::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+
+    /// Every row title at every depth, and the footer rows' commands and keys.
+    fn titles(menu: &NSMenu, into: &mut Vec<String>) {
+        for item in menu.itemArray().iter() {
+            into.push(item.title().to_string());
+            if let Some(submenu) = item.submenu() {
+                titles(&submenu, into);
+            }
+        }
+    }
+
+    /// Builds the native menu for This Mac and penguin as the status item does, then reads the
+    /// NSMenu back: Settings and Quit end it, Quit answers Command-Q, and no row opens a window.
+    pub(in crate::platform) fn the_native_menu_ends_with_settings_and_quit_and_offers_no_open() {
+        let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
+        let machine = |id: u8, name: &'static str| MachineUpdate {
+            machine: [id; 32],
+            name: name.into(),
+            local: id == 1,
+            link: MachineLink::Connected,
+            facts: Some(UpdateFacts {
+                revision: 1,
+                platform: Platform::LinuxX86_64,
+                running: Version::parse("0.9.0").unwrap(),
+                pending: None,
+                sessions: 2,
+                operation: None,
+                check: UpdateCheck::Never,
+                skipped: None,
+                last_failure: None,
+            }),
+            capabilities: Capabilities::fake(&Capability::ALL),
+            push: None,
+        };
+        let machines = [machine(1, "This Mac"), machine(2, "penguin")];
+        let update = Presentation::new(
+            DesktopFacts {
+                state: &UpdateState::UpToDate,
+                pending: None,
+                stage: Default::default(),
+                notes_unread: false,
+                running: env!("SPACETERM_VERSION"),
+            },
+            &machines,
+            &Dismissed::new(),
+            crate::updates::now(),
+        );
+        let presentation = Menu::new(&update, &machines, Vec::new());
+        let (sender, _commands) = async_channel::unbounded();
+        let target = MenuTarget::new(mtm, sender);
+        let menu = NSMenu::new(mtm);
+        let commands = Builder {
+            mtm,
+            target: &target,
+            commands: Vec::new(),
+        }
+        .build(&menu, &presentation);
+
+        let items = menu.itemArray();
+        let count = items.count();
+        let row = |index: usize| items.objectAtIndex(index);
+        let (settings, quit) = (row(count - 2), row(count - 1));
+        assert_eq!(settings.title().to_string(), "SpaceTerm Settings\u{2026}");
+        assert_eq!(quit.title().to_string(), "Quit SpaceTerm");
+        assert_eq!(quit.keyEquivalent().to_string(), "q");
+        assert_eq!(
+            quit.keyEquivalentModifierMask(),
+            NSEventModifierFlags::Command
+        );
+        let command =
+            |item: &NSMenuItem| commands.get(usize::try_from(item.tag()).unwrap()).cloned();
+        assert_eq!(command(&settings), Some(Command::Settings));
+        assert_eq!(command(&quit), Some(Command::Quit));
+
+        let mut all = Vec::new();
+        titles(&menu, &mut all);
+        assert!(
+            all.iter().any(|title| title.starts_with("This Mac")),
+            "{all:?}"
+        );
+        assert!(
+            !all.iter().any(|title| title.starts_with("Open")),
+            "the menu bar extra never offers Open SpaceTerm: {all:?}"
+        );
+    }
 
     /// Each alert's button keys and focused button, and whether each answer approves it. Return
     /// chooses Cancel or OK, focus rests on it for Space, and Escape cancels a confirmation.

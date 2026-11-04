@@ -3,7 +3,7 @@
 //! that apply now, then Settings and Quit. There is no "Open SpaceTerm". Each row's wording comes
 //! from [`crate::updates::presentation`]; hosts render this tree natively.
 use crate::updates::machines::{MachineId, MachineUpdate};
-use crate::updates::presentation::{self, ExtraHeader, ExtraItem, ExtraRow, Tone};
+use crate::updates::presentation::{self, ExtraHeader, ExtraItem, ExtraRow, MachineState, Tone};
 use spaceterm_core::update::facts::Platform;
 
 pub(crate) const HEADER_TITLE: &str = "SpaceTerm";
@@ -34,7 +34,8 @@ pub(crate) enum MachineKind {
 pub(crate) struct MachineRow {
     pub(crate) row: ExtraRow,
     pub(crate) kind: MachineKind,
-    /// The Machine waits on the person, as the title-bar control counts it.
+    /// The Machine waits on the person, as the title-bar control counts it, or is stopped and
+    /// offers Start. A flat menu lists the first action of these rows only.
     pub(crate) pending: bool,
 }
 
@@ -76,9 +77,9 @@ impl Menu {
             .into_iter()
             .map(|row| MachineRow {
                 kind: kind(row.machine, row.local, machines),
-                pending: update
-                    .machine(row.machine)
-                    .is_some_and(|view| view.state.pending()),
+                pending: update.machine(row.machine).is_some_and(|view| {
+                    view.state.pending() || view.state == MachineState::Stopped
+                }),
                 row,
             })
             .collect();
