@@ -10,6 +10,7 @@
 
 #[cfg(feature = "developer-tools")]
 pub(crate) mod preview;
+pub(crate) mod store;
 #[cfg(test)]
 pub(crate) mod testing;
 

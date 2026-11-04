@@ -1291,6 +1291,8 @@ pub(crate) fn window_application_id() -> Option<String> {
 #[derive(Clone)]
 pub(crate) struct ApplicationCapabilities {
     pub(crate) updates: Rc<dyn crate::updates::UpdateAdapter>,
+    /// Reports each Machine's SpaceTerm Core updates. None installs no Machine updates.
+    pub(crate) machine_updates: Option<Rc<dyn crate::updates::machines::MachineUpdatesAdapter>>,
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
     pub(crate) desktop_events: Rc<dyn crate::platform::desktop_events::DesktopEventAdapter>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
@@ -1553,6 +1555,9 @@ pub(crate) fn initialize_application(
     cx.set_global(host.window_chrome.clone());
     host.window_chrome.install_controls(cx);
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
+    if let Some(machines) = &host.adapters.machine_updates {
+        crate::updates::machines::store::MachineUpdates::install(Rc::clone(machines), cx);
+    }
     cx.set_global(SelectedFileAccess(Arc::clone(
         &host.adapters.selected_files,
     )));
@@ -2428,6 +2433,7 @@ mod runtime_tests {
             home_directory: std::env::temp_dir(),
             adapters: ApplicationCapabilities {
                 updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
+                machine_updates: None,
                 selected_files: Arc::new(NoSelectedFiles),
                 settings_file: Rc::new(
                     crate::platform::settings_file::testing::RecordingSettingsFile::default(),

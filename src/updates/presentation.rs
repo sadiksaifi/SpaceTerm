@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use gpui::SharedString;
+use gpui::{App, SharedString};
 use spaceterm_core::protocol::version::Incompatible;
 use spaceterm_core::update::facts::{
     CheckFailure, FailureKind, InstallFailure, Operation, StartFailure, UpdateCheck, Version,
@@ -19,7 +19,8 @@ use spaceterm_core::update::facts::{
 
 use super::machines::{MachineAction, MachineId, MachineLink, MachineUpdate};
 use super::policy::{DAY, UpdateStage};
-use super::{UpdateError, UpdateState};
+use super::machines::store::MachineUpdates;
+use super::{UpdateError, UpdateService, UpdateState};
 
 /// How long a Machine's update checks fail before it shows "Can't check".
 pub(crate) const CANT_CHECK_AFTER: u64 = DAY;
@@ -1568,6 +1569,38 @@ impl Presentation {
             _ => None,
         });
         desktop.into_iter().chain(machines).collect()
+    }
+}
+
+/// What the installed update services show now. Without a Machine updates service, no Machine
+/// appears; without a desktop update service, the desktop is current.
+pub(crate) fn current(cx: &App) -> Presentation {
+    let unavailable = UpdateState::Unavailable;
+    let running = env!("SPACETERM_VERSION");
+    let desktop = cx.try_global::<UpdateService>().map(|service| service.0.read(cx));
+    let facts = match desktop {
+        Some(updates) => DesktopFacts {
+            state: updates.state(),
+            pending: updates.pending_version(),
+            stage: updates.stage(),
+            notes_unread: updates.release_notes_unread(),
+            running,
+        },
+        None => DesktopFacts {
+            state: &unavailable,
+            pending: None,
+            stage: UpdateStage::Optional,
+            notes_unread: false,
+            running,
+        },
+    };
+    let now = super::now();
+    match MachineUpdates::global(cx) {
+        Some(store) => {
+            let store = store.read(cx);
+            Presentation::new(facts, store.machines(), store.dismissed(), now)
+        }
+        None => Presentation::new(facts, &[], &Dismissed::new(), now),
     }
 }
 

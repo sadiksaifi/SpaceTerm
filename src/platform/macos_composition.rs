@@ -162,6 +162,7 @@ fn compose(
         home_directory: startup.home_directory,
         adapters: crate::app::ApplicationCapabilities {
             updates: update_adapter(identity),
+            machine_updates: machine_updates(),
             selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
             settings_file,
             application_menu: Rc::new(
@@ -283,6 +284,19 @@ fn simulated_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
 #[cfg(not(feature = "developer-tools"))]
 fn simulated_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
     Rc::new(crate::updates::UnavailableUpdates)
+}
+
+/// Machine updates come only from the preview `SPACETERM_MACHINE_PREVIEW` names until a Core
+/// adapter over update facts exists.
+#[cfg(feature = "developer-tools")]
+fn machine_updates() -> Option<Rc<dyn crate::updates::machines::MachineUpdatesAdapter>> {
+    crate::updates::machines::preview::from_environment()
+        .map(|preview| Rc::new(preview) as Rc<dyn crate::updates::machines::MachineUpdatesAdapter>)
+}
+
+#[cfg(not(feature = "developer-tools"))]
+fn machine_updates() -> Option<Rc<dyn crate::updates::machines::MachineUpdatesAdapter>> {
+    None
 }
 
 #[cfg(all(test, feature = "native-tests"))]

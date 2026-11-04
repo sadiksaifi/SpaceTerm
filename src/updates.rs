@@ -588,6 +588,10 @@ impl ApplicationUpdates {
     pub(crate) fn reminder(&self) -> Option<UpdateStage> {
         self.reminder
     }
+    /// How old the pending release is.
+    pub(crate) fn stage(&self) -> UpdateStage {
+        self.stage
+    }
     pub(crate) fn last_check(&self) -> Option<u64> {
         self.history.last_check
     }
