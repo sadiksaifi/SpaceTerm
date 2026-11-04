@@ -10,7 +10,13 @@
 //! Within v1, fields are only added. Removing, renaming or retyping one creates
 //! `spaceterm.cli.v2`.
 use serde::{Serialize, Serializer};
-use spaceterm_core::{CoreError, direct::DirectError, hierarchy, protocol::Fatal, worktree};
+use spaceterm_core::{
+    CoreError,
+    direct::DirectError,
+    hierarchy,
+    protocol::{Fatal, version::Incompatible},
+    worktree,
+};
 
 pub const SCHEMA: &str = "spaceterm.cli.v1";
 /// A broken stdout pipe stops output and exits with this status, without a message.
@@ -415,10 +421,9 @@ pub enum Details {
     Operation(OperationDetails),
     /// `timeout`.
     Timeout(TimeoutDetails),
-    /// `incompatible_protocol`.
-    Protocol(ProtocolDetails),
-    /// `desktop_incompatible` when the two share no Desktop Channel major.
-    Desktop(DesktopDetails),
+    /// `incompatible_protocol`, and `desktop_incompatible` when the two share no Desktop
+    /// Channel major.
+    Incompatible(IncompatibleDetails),
 }
 
 impl Serialize for Details {
@@ -436,8 +441,7 @@ impl Serialize for Details {
             Self::RunUnconfirmed(details) => details.serialize(serializer),
             Self::Operation(details) => details.serialize(serializer),
             Self::Timeout(details) => details.serialize(serializer),
-            Self::Protocol(details) => details.serialize(serializer),
-            Self::Desktop(details) => details.serialize(serializer),
+            Self::Incompatible(details) => details.serialize(serializer),
         }
     }
 }
@@ -654,17 +658,9 @@ pub struct TimeoutDetails {
     pub elapsed_ms: u64,
 }
 
+/// `details` when the CLI and the other side share no protocol major.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct ProtocolDetails {
-    pub client_major: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub core_major: Option<u16>,
-}
-
-/// `details` of `desktop_incompatible` when the CLI and the desktop share no Desktop Channel
-/// major.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct DesktopDetails {
+pub struct IncompatibleDetails {
     /// The older side, which the person updates.
     pub update: Update,
 }
@@ -672,10 +668,12 @@ pub struct DesktopDetails {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Update {
+    /// SpaceTerm Core on the machine the command reached.
+    Core,
     /// The desktop app.
     Desktop,
-    /// SpaceTerm Core, which ships this CLI.
-    Core,
+    /// This CLI, which this machine's SpaceTerm Core ships.
+    Cli,
 }
 
 // Exit classes and codes
@@ -938,7 +936,17 @@ pub fn from_core_error(error: CoreError) -> Failure {
         CoreError::IncompatibleState => Code::IncompatibleState,
         CoreError::UnsafeStorage => Code::UnsafeStorage,
         CoreError::AuthenticationRefused => Code::AuthenticationRefused,
-        CoreError::IncompatibleProtocol(_) => Code::IncompatibleProtocol,
+        CoreError::IncompatibleProtocol(older) => {
+            return Failure::with(
+                Code::IncompatibleProtocol,
+                Details::Incompatible(IncompatibleDetails {
+                    update: match older {
+                        Incompatible::ListenerTooOld => Update::Core,
+                        Incompatible::CallerTooOld => Update::Cli,
+                    },
+                }),
+            );
+        }
         CoreError::CandidateChanged => Code::CandidateChanged,
         CoreError::Protocol => Code::ProtocolError,
         CoreError::StartupFailed => Code::StartupFailed,
@@ -2256,6 +2264,23 @@ mod tests {
                 reason: ControlledReason::Stale
             })
         );
+    }
+
+    #[test]
+    fn an_incompatible_protocol_names_the_side_to_update() {
+        for (older, update) in [
+            (Incompatible::ListenerTooOld, "core"),
+            (Incompatible::CallerTooOld, "cli"),
+        ] {
+            let failure = from_core_error(CoreError::IncompatibleProtocol(older));
+            let envelope =
+                serde_json::to_value(Envelope::error("list", None, failure, ())).unwrap();
+            assert_eq!(envelope["error"]["code"], "incompatible_protocol");
+            assert_eq!(
+                envelope["error"]["details"],
+                serde_json::json!({"update": update})
+            );
+        }
     }
 
     #[test]

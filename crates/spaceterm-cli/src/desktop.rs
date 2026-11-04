@@ -105,16 +105,16 @@ fn classify(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Code> {
 }
 
 /// The failure of one exchange's result. With no shared Desktop Channel major, `details.update`
-/// names what to update: `"desktop"` when the desktop is older, `"core"` when this CLI is.
+/// names what to update: `"desktop"` when the desktop is older, `"cli"` when this CLI is.
 fn failure(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Failure> {
     let update = match &result {
         Err(ChannelError::Incompatible(Incompatible::ListenerTooOld)) => Some(Update::Desktop),
-        Err(ChannelError::Incompatible(Incompatible::CallerTooOld)) => Some(Update::Core),
+        Err(ChannelError::Incompatible(Incompatible::CallerTooOld)) => Some(Update::Cli),
         _ => None,
     };
     let code = classify(result, asked)?;
     Some(match update {
-        Some(update) => Failure::with(code, Details::Desktop(DesktopDetails { update })),
+        Some(update) => Failure::with(code, Details::Incompatible(IncompatibleDetails { update })),
         None => Failure::new(code),
     })
 }
@@ -638,7 +638,7 @@ mod tests {
     fn an_incompatible_desktop_names_the_side_to_update() {
         for (older, update) in [
             (Incompatible::ListenerTooOld, "desktop"),
-            (Incompatible::CallerTooOld, "core"),
+            (Incompatible::CallerTooOld, "cli"),
         ] {
             let answer = || Err(ChannelError::Incompatible(older));
             let output = diagnostics(&Recorded::answering(answer()));
@@ -649,11 +649,11 @@ mod tests {
             let failure = ask(&Recorded::answering(answer()), &Request::Diagnostics).unwrap_err();
             assert_eq!(
                 failure.details,
-                Details::Desktop(DesktopDetails {
+                Details::Incompatible(IncompatibleDetails {
                     update: if update == "desktop" {
                         Update::Desktop
                     } else {
-                        Update::Core
+                        Update::Cli
                     }
                 })
             );
