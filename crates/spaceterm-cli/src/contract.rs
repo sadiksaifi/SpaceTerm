@@ -417,6 +417,8 @@ pub enum Details {
     Timeout(TimeoutDetails),
     /// `incompatible_protocol`.
     Protocol(ProtocolDetails),
+    /// `desktop_incompatible` when the two share no Desktop Channel major.
+    Desktop(DesktopDetails),
 }
 
 impl Serialize for Details {
@@ -435,6 +437,7 @@ impl Serialize for Details {
             Self::Operation(details) => details.serialize(serializer),
             Self::Timeout(details) => details.serialize(serializer),
             Self::Protocol(details) => details.serialize(serializer),
+            Self::Desktop(details) => details.serialize(serializer),
         }
     }
 }
@@ -656,6 +659,23 @@ pub struct ProtocolDetails {
     pub client_major: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub core_major: Option<u16>,
+}
+
+/// `details` of `desktop_incompatible` when the CLI and the desktop share no Desktop Channel
+/// major.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct DesktopDetails {
+    /// The older side, which the person updates.
+    pub update: Update,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Update {
+    /// The desktop app.
+    Desktop,
+    /// SpaceTerm Core, which ships this CLI.
+    Core,
 }
 
 // Exit classes and codes

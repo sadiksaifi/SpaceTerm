@@ -7,6 +7,7 @@ use crate::args::{Cli, Command, OpenArgs};
 use crate::contract::*;
 use crate::work::output::{Output, value};
 use spaceterm::desktop_channel::{ChannelError, Refusal, Reply, Request, SessionContext};
+use spaceterm_core::protocol::version::Incompatible;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -55,9 +56,9 @@ pub fn ask(desktop: &dyn Desktop, request: &Request) -> Result<(), Failure> {
     let asked = Asked::Effect {
         interrupted: crate::interrupt::interrupted(),
     };
-    match classify(result, asked) {
+    match failure(result, asked) {
         None => Ok(()),
-        Some(code) => Err(Failure::new(code)),
+        Some(failure) => Err(failure),
     }
 }
 
@@ -82,7 +83,7 @@ fn classify(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Code> {
             Refusal::FileUnavailable => Code::FileUnavailable,
             Refusal::PreviewUnavailable => Code::PreviewUnavailable,
             Refusal::Busy => Code::DesktopBusy,
-            Refusal::Incompatible => Code::DesktopIncompatible,
+            Refusal::OtherIdentity => Code::DesktopIncompatible,
         },
         Err(error) => match error {
             ChannelError::Unavailable => Code::DesktopUnavailable,
@@ -98,8 +99,23 @@ fn classify(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Code> {
             // does not speak this channel.
             ChannelError::Unanswered if asked == Asked::Read => Code::DesktopIncompatible,
             ChannelError::Unanswered => Code::OutcomeUnconfirmed,
-            ChannelError::Protocol => Code::DesktopIncompatible,
+            ChannelError::Protocol | ChannelError::Incompatible(_) => Code::DesktopIncompatible,
         },
+    })
+}
+
+/// The failure of one exchange's result. With no shared Desktop Channel major, `details.update`
+/// names what to update: `"desktop"` when the desktop is older, `"core"` when this CLI is.
+fn failure(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Failure> {
+    let update = match &result {
+        Err(ChannelError::Incompatible(Incompatible::ListenerTooOld)) => Some(Update::Desktop),
+        Err(ChannelError::Incompatible(Incompatible::CallerTooOld)) => Some(Update::Core),
+        _ => None,
+    };
+    let code = classify(result, asked)?;
+    Some(match update {
+        Some(update) => Failure::with(code, Details::Desktop(DesktopDetails { update })),
+        None => Failure::new(code),
     })
 }
 
@@ -177,11 +193,12 @@ pub fn diagnostics(desktop: &dyn Desktop) -> Output {
     let counters = match desktop.request(&Request::Diagnostics) {
         Ok(Reply::Diagnostics(counters)) => counters,
         result => {
-            let code = classify(result, Asked::Read).unwrap_or(Code::DesktopIncompatible);
+            let failure =
+                failure(result, Asked::Read).unwrap_or(Failure::new(Code::DesktopIncompatible));
             return Output::failed(
                 "diagnostics",
                 None,
-                Failure::new(code),
+                failure,
                 serde_json::json!({}),
                 String::new(),
             );
@@ -482,7 +499,7 @@ mod tests {
                 5,
             ),
             (
-                Ok(Reply::Refused(Refusal::Incompatible)),
+                Ok(Reply::Refused(Refusal::OtherIdentity)),
                 "desktop_incompatible",
                 5,
             ),
@@ -557,7 +574,7 @@ mod tests {
             (Err(ChannelError::Timeout), "timeout", 6),
             (Ok(Reply::Done), "desktop_incompatible", 5),
             (
-                Ok(Reply::Refused(Refusal::Incompatible)),
+                Ok(Reply::Refused(Refusal::OtherIdentity)),
                 "desktop_incompatible",
                 5,
             ),
@@ -572,8 +589,8 @@ mod tests {
         );
     }
 
-    /// A desktop at the other end of a real channel connection that reads the whole request,
-    /// then writes `reply` and closes.
+    /// A desktop at the other end of a real channel connection that reads the client's Hello,
+    /// then writes `reply` in place of its Offer and closes.
     #[cfg(unix)]
     struct Replying(&'static [u8]);
 
@@ -584,7 +601,11 @@ mod tests {
             let (client, mut desktop) = std::os::unix::net::UnixStream::pair().unwrap();
             let reply = self.0;
             let peer = std::thread::spawn(move || {
-                desktop.read_to_end(&mut Vec::new()).unwrap();
+                let mut length = [0; 4];
+                desktop.read_exact(&mut length).unwrap();
+                desktop
+                    .read_exact(&mut vec![0; u32::from_be_bytes(length) as usize])
+                    .unwrap();
                 desktop.write_all(reply).unwrap();
             });
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -601,14 +622,41 @@ mod tests {
     #[test]
     fn diagnostics_reports_an_unusable_reply_as_an_incompatible_desktop() {
         for reply in [
-            // A desktop of the previous schema refuses the request in its own schema.
-            &br#"{"schema":"spaceterm.desktop.v1","identity":"spaceterm-development","body":{"refused":"incompatible"}}"#[..],
+            // A desktop of an earlier format answers without the frozen Offer's framing.
+            &br#"{"schema":"spaceterm.desktop.v2","identity":"spaceterm-development","body":{"refused":"incompatible"}}"#[..],
             b"",
             b"{\"schema\":",
         ] {
             let output = diagnostics(&Replying(reply));
             assert_eq!(code(&output), Some("desktop_incompatible"));
             assert_eq!(output.envelope.exit(), 5);
+        }
+    }
+
+    /// With no shared Desktop Channel major, the failure names the older side to update.
+    #[test]
+    fn an_incompatible_desktop_names_the_side_to_update() {
+        for (older, update) in [
+            (Incompatible::ListenerTooOld, "desktop"),
+            (Incompatible::CallerTooOld, "core"),
+        ] {
+            let answer = || Err(ChannelError::Incompatible(older));
+            let output = diagnostics(&Recorded::answering(answer()));
+            assert_eq!(code(&output), Some("desktop_incompatible"));
+            assert_eq!(output.envelope.exit(), 5);
+            let envelope = serde_json::to_value(&output.envelope).unwrap();
+            assert_eq!(envelope["error"]["details"]["update"], update, "{envelope}");
+            let failure = ask(&Recorded::answering(answer()), &Request::Diagnostics).unwrap_err();
+            assert_eq!(
+                failure.details,
+                Details::Desktop(DesktopDetails {
+                    update: if update == "desktop" {
+                        Update::Desktop
+                    } else {
+                        Update::Core
+                    }
+                })
+            );
         }
     }
 

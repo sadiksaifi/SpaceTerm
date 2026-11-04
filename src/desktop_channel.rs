@@ -1,7 +1,13 @@
 //! The account-local channel from `spaceterm` to the desktop on the same machine and account.
 //!
-//! One connection carries one request. The client half-closes after its request; the desktop
-//! answers once and closes. Both ends require the peer to run as their own account. Requests
+//! One connection carries four length-prefixed JSON messages, each at most 16 KiB with unknown
+//! fields refused. The client sends a [`ChannelHello`] with the Desktop Channel versions it
+//! speaks, its current and previous major, and the desktop answers a [`ChannelOffer`] that
+//! selects one with [`negotiate`] or none. Hello and Offer are frozen: every later major reads
+//! and writes them unchanged, so a client and a desktop that share no major still learn which
+//! one is older. Only after a selected version does the client send its one request, encoded at
+//! that version, and half-close; the desktop answers once and closes. Both ends require the
+//! peer to run as their own account. Requests
 //! carry exact server, Workspace, Tab, Pane and Terminal Session IDs as fences, never authority:
 //! the desktop decides what it presents, and only a Local Pane may open a local file. A
 //! Diagnostics request only reads the desktop's Terminal Diagnostics counters.
@@ -10,14 +16,15 @@
 //! The client's request carries the instant it stops waiting, on the host's monotonic clock that
 //! every process on the machine reads alike. The desktop performs no effect after that instant,
 //! however long the request waited in its queue, so a request the client gave up on never acts.
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use spaceterm_core::protocol::version::{
+    self as versions, Incompatible, ProtocolVersion, negotiate,
+};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// The format of every request and reply. A different schema is refused as incompatible.
-pub const SCHEMA: &str = "spaceterm.desktop.v2";
-/// The largest request or reply, which bounds a local path of 4 KiB with its envelope.
+/// The largest message, which bounds a request's local path of 4 KiB with its envelope.
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 /// How long the desktop gives a connected client to deliver its whole request, and itself to
 /// deliver its whole reply.
@@ -123,8 +130,8 @@ pub enum Refusal {
     PreviewUnavailable,
     /// The desktop is still checking as many earlier files as it checks at once.
     Busy,
-    /// The request's schema or application identity is not this desktop's.
-    Incompatible,
+    /// The desktop belongs to another application identity.
+    OtherIdentity,
 }
 
 /// Why the client reached no answer. Each names a fixed classification only.
@@ -143,13 +150,36 @@ pub enum ChannelError {
     Unanswered,
     /// The exchange failed before the desktop received the whole request.
     Protocol,
+    /// The client and the desktop share no Desktop Channel major. It names the older side: the
+    /// desktop is the listener, `spaceterm` the caller. Nothing was requested.
+    Incompatible(Incompatible),
 }
 
+/// The client's first message. Frozen.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelHello {
+    identity: String,
+    /// The client's current version and, when one exists, its previous major at that major's
+    /// last minor. 1 or 2 entries, highest first.
+    versions: Vec<ProtocolVersion>,
+}
+
+/// The desktop's answer to the Hello. Frozen.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelOffer {
+    identity: String,
+    /// `negotiate(hello.versions, desktop)`. None when no major is shared or the identities
+    /// differ; the desktop then closes the connection.
+    selected: Option<ProtocolVersion>,
+    desktop: ProtocolVersion,
+}
+
+/// The client's request, only after the Offer selected a version, encoded at that version.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestEnvelope<T> {
-    schema: String,
-    identity: String,
     /// When the client stops waiting, in nanoseconds on the host's monotonic clock.
     expires_at: u64,
     body: T,
@@ -158,9 +188,15 @@ struct RequestEnvelope<T> {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplyEnvelope {
-    schema: String,
-    identity: String,
     body: Reply,
+}
+
+/// The Desktop Channel versions this build speaks as a caller: the current one, then the
+/// previous major when one exists.
+fn offered() -> Vec<ProtocolVersion> {
+    std::iter::once(versions::DESKTOP_CHANNEL)
+        .chain(versions::PREVIOUS_DESKTOP_CHANNEL)
+        .collect()
 }
 
 /// A connected stream whose waits the exchange bounds.
@@ -187,36 +223,53 @@ impl<T: ChannelIo + ?Sized> ChannelIo for Box<T> {
 }
 
 /// Sends one request on a connected, authenticated stream and reads the desktop's reply by
-/// `deadline`.
+/// `deadline`. A desktop of another identity answers [`Refusal::OtherIdentity`] before anything
+/// is requested.
 pub fn exchange(
     stream: impl ChannelIo,
     identity: &str,
     request: &Request,
     deadline: Deadline<'_>,
 ) -> Result<Reply, ChannelError> {
-    exchange_on(stream, identity, request, deadline, &HostClock)
+    exchange_on(stream, identity, &offered(), request, deadline, &HostClock)
 }
 
 fn exchange_on(
     mut stream: impl ChannelIo,
     identity: &str,
+    versions: &[ProtocolVersion],
     request: &Request,
     deadline: Deadline<'_>,
     clock: &impl Clock,
 ) -> Result<Reply, ChannelError> {
+    remaining(deadline, clock)?;
+    write_by(
+        &mut stream,
+        &encode(&ChannelHello {
+            identity: identity.to_owned(),
+            versions: versions.to_vec(),
+        })?,
+        deadline,
+        clock,
+    )?;
+    // Nothing was requested yet, so any failure until the request is written is `Protocol`.
+    let offer: ChannelOffer = decode(&read_by(&mut stream, deadline, clock)?)?;
+    if offer.identity != identity {
+        return Ok(Reply::Refused(Refusal::OtherIdentity));
+    }
+    let expected = negotiate(versions, offer.desktop);
+    match (offer.selected, expected) {
+        (Some(selected), Ok(expected)) if selected == expected => {}
+        (None, Err(older)) => return Err(ChannelError::Incompatible(older)),
+        _ => return Err(ChannelError::Protocol),
+    }
     let within = remaining(deadline, clock)?;
-    let message = serde_json::to_vec(&RequestEnvelope {
-        schema: SCHEMA.to_owned(),
-        identity: identity.to_owned(),
+    let message = encode(&RequestEnvelope {
         expires_at: clock
             .host()
             .saturating_add(u64::try_from(within.as_nanos()).unwrap_or(u64::MAX)),
         body: request,
-    })
-    .map_err(|_| ChannelError::Protocol)?;
-    if message.len() > MAX_MESSAGE_BYTES {
-        return Err(ChannelError::Protocol);
-    }
+    })?;
     write_by(&mut stream, &message, deadline, clock)?;
     stream.close_write().map_err(|_| ChannelError::Protocol)?;
     let reply = match read_by(&mut stream, deadline, clock) {
@@ -224,12 +277,7 @@ fn exchange_on(
         Err(ChannelError::Timeout) => return Err(ChannelError::Timeout),
         Err(_) => return Err(ChannelError::Unanswered),
     };
-    let reply: ReplyEnvelope =
-        serde_json::from_slice(&reply).map_err(|_| ChannelError::Unanswered)?;
-    let incompatible = reply.body == Reply::Refused(Refusal::Incompatible);
-    if reply.schema != SCHEMA || (reply.identity != identity && !incompatible) {
-        return Err(ChannelError::Unanswered);
-    }
+    let reply: ReplyEnvelope = decode(&reply).map_err(|_| ChannelError::Unanswered)?;
     Ok(reply.body)
 }
 
@@ -237,53 +285,89 @@ fn exchange_on(
 /// and writes the reply within [`TRANSFER_WINDOW`]. `handle` receives the instant after which
 /// the request must not act, and answers `None` when it gave up, which writes no reply. A
 /// request whose client already stopped waiting never reaches `handle` and gets no answer. A
-/// request in another schema or for another application identity is refused without reaching
-/// `handle`. A malformed, oversized or late request gets no answer.
+/// client of another application identity, or one that shares no major with this desktop, gets
+/// an Offer that selects nothing and never reaches `handle`. A malformed, oversized or late
+/// message gets no answer.
 pub fn serve(
     stream: impl ChannelIo,
     identity: &str,
     request_by: Instant,
     handle: impl FnOnce(Request, Instant) -> Option<Reply>,
 ) -> Result<(), ChannelError> {
-    serve_on(stream, identity, request_by, handle, &HostClock)
+    serve_on(
+        stream,
+        identity,
+        versions::DESKTOP_CHANNEL,
+        request_by,
+        handle,
+        &HostClock,
+    )
 }
 
 fn serve_on(
     mut stream: impl ChannelIo,
     identity: &str,
+    desktop: ProtocolVersion,
     request_by: Instant,
     handle: impl FnOnce(Request, Instant) -> Option<Reply>,
     clock: &impl Clock,
 ) -> Result<(), ChannelError> {
+    let hello: ChannelHello = decode(&read_by(&mut stream, &|| request_by, clock)?)?;
+    match hello.versions.as_slice() {
+        [_] => {}
+        [first, second] if first.major > second.major => {}
+        _ => return Err(ChannelError::Protocol),
+    }
+    let selected = negotiate(&hello.versions, desktop)
+        .ok()
+        .filter(|_| hello.identity == identity);
+    let offer_by = clock.now() + TRANSFER_WINDOW;
+    write_by(
+        &mut stream,
+        &encode(&ChannelOffer {
+            identity: identity.to_owned(),
+            selected,
+            desktop,
+        })?,
+        &|| offer_by,
+        clock,
+    )?;
+    if selected.is_none() {
+        return Ok(());
+    }
     let message = read_by(&mut stream, &|| request_by, clock)?;
     let received = clock.now();
-    let value: serde_json::Value =
-        serde_json::from_slice(&message).map_err(|_| ChannelError::Protocol)?;
-    let reply = if value.get("schema").and_then(|schema| schema.as_str()) != Some(SCHEMA) {
-        Reply::Refused(Refusal::Incompatible)
-    } else {
-        let request: RequestEnvelope<Request> =
-            serde_json::from_value(value).map_err(|_| ChannelError::Protocol)?;
-        if request.identity != identity {
-            Reply::Refused(Refusal::Incompatible)
-        } else {
-            let Some(act_by) = act_by(request.expires_at, received, clock) else {
-                return Ok(());
-            };
-            match handle(request.body, act_by) {
-                Some(reply) => reply,
-                None => return Ok(()),
-            }
-        }
+    let request: RequestEnvelope<Request> = decode(&message)?;
+    let Some(act_by) = act_by(request.expires_at, received, clock) else {
+        return Ok(());
     };
-    let message = serde_json::to_vec(&ReplyEnvelope {
-        schema: SCHEMA.to_owned(),
-        identity: identity.to_owned(),
-        body: reply,
-    })
-    .map_err(|_| ChannelError::Protocol)?;
+    let Some(reply) = handle(request.body, act_by) else {
+        return Ok(());
+    };
     let reply_by = clock.now() + TRANSFER_WINDOW;
-    write_by(&mut stream, &message, &|| reply_by, clock)
+    write_by(
+        &mut stream,
+        &encode(&ReplyEnvelope { body: reply })?,
+        &|| reply_by,
+        clock,
+    )
+}
+
+/// One message: its JSON with a big-endian `u32` length before it, at most
+/// [`MAX_MESSAGE_BYTES`] of JSON.
+fn encode(value: &impl Serialize) -> Result<Vec<u8>, ChannelError> {
+    let json = serde_json::to_vec(value).map_err(|_| ChannelError::Protocol)?;
+    if json.len() > MAX_MESSAGE_BYTES {
+        return Err(ChannelError::Protocol);
+    }
+    let mut message = Vec::with_capacity(4 + json.len());
+    message.extend_from_slice(&(json.len() as u32).to_be_bytes());
+    message.extend_from_slice(&json);
+    Ok(message)
+}
+
+fn decode<T: DeserializeOwned>(json: &[u8]) -> Result<T, ChannelError> {
+    serde_json::from_slice(json).map_err(|_| ChannelError::Protocol)
 }
 
 /// A connection from a peer the desktop authenticated as its own account.
@@ -340,30 +424,42 @@ fn retried(error: &std::io::Error) -> bool {
     )
 }
 
-/// Reads to the end of the stream by `deadline`, refusing more than [`MAX_MESSAGE_BYTES`].
+/// Reads one message by `deadline` and returns its JSON, refusing one longer than
+/// [`MAX_MESSAGE_BYTES`] before reading it.
 fn read_by(
     stream: &mut impl ChannelIo,
     deadline: Deadline<'_>,
     clock: &impl Clock,
 ) -> Result<Vec<u8>, ChannelError> {
-    let mut message = Vec::new();
-    let mut buffer = [0; 4096];
-    loop {
+    let mut length = [0; 4];
+    read_exact_by(stream, &mut length, deadline, clock)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_MESSAGE_BYTES {
+        return Err(ChannelError::Protocol);
+    }
+    let mut message = vec![0; length];
+    read_exact_by(stream, &mut message, deadline, clock)?;
+    Ok(message)
+}
+
+fn read_exact_by(
+    stream: &mut impl ChannelIo,
+    mut buffer: &mut [u8],
+    deadline: Deadline<'_>,
+    clock: &impl Clock,
+) -> Result<(), ChannelError> {
+    while !buffer.is_empty() {
         stream
             .limit_read(wait(deadline, clock)?)
             .map_err(|_| ChannelError::Protocol)?;
-        match stream.read(&mut buffer) {
-            Ok(0) => return Ok(message),
-            Ok(count) => {
-                message.extend_from_slice(&buffer[..count]);
-                if message.len() > MAX_MESSAGE_BYTES {
-                    return Err(ChannelError::Protocol);
-                }
-            }
+        match stream.read(buffer) {
+            Ok(0) => return Err(ChannelError::Protocol),
+            Ok(count) => buffer = &mut buffer[count..],
             Err(error) if retried(&error) => {}
             Err(_) => return Err(ChannelError::Protocol),
         }
     }
+    Ok(())
 }
 
 fn write_by(
@@ -536,20 +632,51 @@ mod tests {
         }
     }
 
+    const fn v(major: u16, minor: u16) -> ProtocolVersion {
+        ProtocolVersion { major, minor }
+    }
+
+    /// The Offer of a desktop of `identity` at `desktop` to a client offering `offered`.
+    fn offer(identity: &str, offered: &[ProtocolVersion], desktop: ProtocolVersion) -> Vec<u8> {
+        encode(&ChannelOffer {
+            identity: identity.into(),
+            selected: negotiate(offered, desktop).ok(),
+            desktop,
+        })
+        .unwrap()
+    }
+
+    /// Splits `bytes` into its messages' JSON values.
+    fn messages(mut bytes: &[u8]) -> Vec<serde_json::Value> {
+        let mut values = Vec::new();
+        while !bytes.is_empty() {
+            let length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+            values.push(serde_json::from_slice(&bytes[4..4 + length]).unwrap());
+            bytes = &bytes[4 + length..];
+        }
+        values
+    }
+
+    /// What a client writes for `open(false)` waiting `duration`: its Hello and its request.
     fn outgoing(clock: &ManualClock, duration: Duration) -> Vec<u8> {
-        let peer = Peer::new(clock, vec![]);
+        let offered = offered();
+        let peer = Peer::new(
+            clock,
+            vec![(
+                Duration::ZERO,
+                offer(IDENTITY, &offered, versions::DESKTOP_CHANNEL),
+            )],
+        );
         let output = peer.output.clone();
         let deadline = clock.now() + duration;
         assert_eq!(
-            exchange_on(peer, IDENTITY, &open(false), &|| deadline, clock),
+            exchange_on(peer, IDENTITY, &offered, &open(false), &|| deadline, clock),
             Err(ChannelError::Unanswered)
         );
         let bytes = output.borrow().clone();
-        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            value["expires_at"],
-            clock.host() + duration.as_nanos() as u64
-        );
+        let sent = messages(&bytes);
+        assert_eq!(sent[0]["versions"], serde_json::json!(offered));
+        assert_eq!(sent[1]["expires_at"], clock.host() + duration.as_nanos() as u64);
         bytes
     }
 
@@ -599,6 +726,7 @@ mod tests {
                 serve_on(
                     peer,
                     IDENTITY,
+                    versions::DESKTOP_CHANNEL,
                     clock.now() + TRANSFER_WINDOW,
                     |request, by| {
                         assert_eq!(request, open(false));
@@ -625,13 +753,15 @@ mod tests {
             serve_on(
                 peer,
                 IDENTITY,
+                versions::DESKTOP_CHANNEL,
                 clock.now() + TRANSFER_WINDOW,
                 |_, _| panic!("an expired request reached its handler"),
                 &clock
             ),
             Ok(())
         );
-        assert!(output.borrow().is_empty());
+        let written = messages(&output.borrow());
+        assert_eq!(written.len(), 1, "only the Offer, no reply: {written:?}");
     }
 
     #[test]
@@ -666,12 +796,29 @@ mod tests {
                 Duration::from_millis(300)
             };
             let deadline = std::cell::Cell::new(clock.now() + initial);
-            let mut peer = Peer::new(&clock, vec![(Duration::from_secs(60), vec![])]);
+            let offered = offered();
+            let mut peer = Peer::new(
+                &clock,
+                vec![
+                    (
+                        Duration::ZERO,
+                        offer(IDENTITY, &offered, versions::DESKTOP_CHANNEL),
+                    ),
+                    (Duration::from_secs(60), vec![]),
+                ],
+            );
             if interrupted {
                 peer.interrupt = Some(&deadline);
             }
             assert_eq!(
-                exchange_on(peer, IDENTITY, &open(false), &|| deadline.get(), &clock),
+                exchange_on(
+                    peer,
+                    IDENTITY,
+                    &offered,
+                    &open(false),
+                    &|| deadline.get(),
+                    &clock
+                ),
                 Err(ChannelError::Timeout)
             );
             assert_eq!(
@@ -688,12 +835,22 @@ mod tests {
     #[test]
     fn a_client_trickling_its_request_holds_the_desktop_only_until_the_request_deadline() {
         let clock = ManualClock::new();
-        let peer = Peer::new(&clock, vec![(Duration::from_millis(100), vec![b' ']); 20]);
+        let hello = encode(&ChannelHello {
+            identity: IDENTITY.into(),
+            versions: offered(),
+        })
+        .unwrap();
+        let trickle = hello
+            .into_iter()
+            .map(|byte| (Duration::from_millis(100), vec![byte]))
+            .collect();
+        let peer = Peer::new(&clock, trickle);
         let by = clock.now() + Duration::from_millis(500);
         assert_eq!(
             serve_on(
                 peer,
                 IDENTITY,
+                versions::DESKTOP_CHANNEL,
                 by,
                 |_, _| panic!("a late request reached its handler"),
                 &clock
@@ -704,32 +861,90 @@ mod tests {
     }
 
     #[test]
-    fn another_identity_or_schema_is_refused_before_the_handler() {
+    fn another_identity_is_refused_before_anything_is_requested() {
         let (reply, received) = answer(
             "spaceterm",
             open(false),
             Some(Reply::Done),
             Duration::from_secs(5),
         );
-        assert_eq!(reply, Ok(Reply::Refused(Refusal::Incompatible)));
+        assert_eq!(reply, Ok(Reply::Refused(Refusal::OtherIdentity)));
         assert!(received.is_none());
+    }
 
-        let (mut client, desktop) = UnixStream::pair().unwrap();
+    /// Exchanges `open(false)` from a client offering `offered` with a desktop at `desktop`.
+    fn negotiated(
+        offered: Vec<ProtocolVersion>,
+        desktop: ProtocolVersion,
+    ) -> (Result<Reply, ChannelError>, Option<Request>) {
+        let (client, peer) = UnixStream::pair().unwrap();
         let served = std::thread::spawn(move || {
-            serve(desktop, IDENTITY, after(TRANSFER_WINDOW), |_, _| {
-                panic!("an old schema reached the handler")
-            })
+            let mut received = None;
+            let _ = serve_on(
+                peer,
+                IDENTITY,
+                desktop,
+                after(TRANSFER_WINDOW),
+                |request, _| {
+                    received = Some(request);
+                    Some(Reply::Done)
+                },
+                &HostClock,
+            );
+            received
         });
-        client
-            .write_all(br#"{"schema":"spaceterm.desktop.v0","identity":"x","body":{}}"#)
-            .unwrap();
-        client.close_write().unwrap();
         let deadline = after(Duration::from_secs(5));
-        let reply: ReplyEnvelope =
-            serde_json::from_slice(&read_by(&mut client, &|| deadline, &HostClock).unwrap())
+        let result = exchange_on(
+            client,
+            IDENTITY,
+            &offered,
+            &open(false),
+            &|| deadline,
+            &HostClock,
+        );
+        (result, served.join().unwrap())
+    }
+
+    /// A `spaceterm` one major ahead still asks a desktop at its previous major.
+    #[test]
+    fn a_client_at_the_next_major_still_asks_a_desktop_at_the_previous_one() {
+        let (reply, received) = negotiated(vec![v(2, 0), v(1, 3)], v(1, 1));
+        assert_eq!(reply, Ok(Reply::Done));
+        assert_eq!(received, Some(open(false)));
+    }
+
+    #[test]
+    fn with_no_shared_major_the_client_learns_which_side_is_older_and_requests_nothing() {
+        for (desktop, older) in [
+            (v(1, 0), Incompatible::ListenerTooOld),
+            (v(4, 0), Incompatible::CallerTooOld),
+        ] {
+            let (reply, received) = negotiated(vec![v(3, 0), v(2, 0)], desktop);
+            assert_eq!(reply, Err(ChannelError::Incompatible(older)));
+            assert_eq!(received, None);
+        }
+    }
+
+    #[test]
+    fn a_hello_must_offer_one_or_two_descending_majors() {
+        for versions in [vec![], vec![v(1, 0), v(2, 0)], vec![v(3, 0), v(2, 0), v(1, 0)]] {
+            let (mut client, desktop) = UnixStream::pair().unwrap();
+            let served = std::thread::spawn(move || {
+                serve(desktop, IDENTITY, after(TRANSFER_WINDOW), |_, _| {
+                    panic!("a malformed Hello reached the handler")
+                })
+            });
+            client
+                .write_all(
+                    &encode(&ChannelHello {
+                        identity: IDENTITY.into(),
+                        versions,
+                    })
+                    .unwrap(),
+                )
                 .unwrap();
-        assert_eq!(reply.body, Reply::Refused(Refusal::Incompatible));
-        served.join().unwrap().unwrap();
+            assert_eq!(served.join().unwrap(), Err(ChannelError::Protocol));
+        }
     }
 
     #[test]
