@@ -105,11 +105,11 @@ fn classify(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Code> {
 }
 
 /// The failure of one exchange's result. With no shared Desktop Channel major, `details.update`
-/// names what to update: `"desktop"` when the desktop is older, `"cli"` when this CLI is.
+/// names what to update: `"desktop"` when the desktop is older, `"core"` when this CLI is.
 fn failure(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Failure> {
     let update = match &result {
         Err(ChannelError::Incompatible(Incompatible::ListenerTooOld)) => Some(Update::Desktop),
-        Err(ChannelError::Incompatible(Incompatible::CallerTooOld)) => Some(Update::Cli),
+        Err(ChannelError::Incompatible(Incompatible::CallerTooOld)) => Some(Update::Core),
         _ => None,
     };
     let code = classify(result, asked)?;
@@ -638,7 +638,7 @@ mod tests {
     fn an_incompatible_desktop_names_the_side_to_update() {
         for (older, update) in [
             (Incompatible::ListenerTooOld, "desktop"),
-            (Incompatible::CallerTooOld, "cli"),
+            (Incompatible::CallerTooOld, "core"),
         ] {
             let answer = || Err(ChannelError::Incompatible(older));
             let output = diagnostics(&Recorded::answering(answer()));
@@ -653,7 +653,7 @@ mod tests {
                     update: if update == "desktop" {
                         Update::Desktop
                     } else {
-                        Update::Cli
+                        Update::Core
                     }
                 })
             );

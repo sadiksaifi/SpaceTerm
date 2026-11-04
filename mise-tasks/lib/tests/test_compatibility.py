@@ -65,8 +65,13 @@ class CompatibilityPlanTests(unittest.TestCase):
         works = {"list": {"ok"}, "status": {"ok"}}
         self.assertEqual(expected("client", 3, current=3), works)
         self.assertEqual(expected("client", 2, current=3), works)
-        self.assertEqual(expected("core", 3, current=3), {"list": {"ok"}, "status": {"ok", "cli"}})
-        self.assertEqual(expected("core", 2, current=3), {"list": {"cli"}, "status": {"ok", "cli"}})
+        self.assertEqual(
+            expected("core", 3, current=3), {"list": {"ok"}, "status": {"ok", "cli_too_old"}}
+        )
+        self.assertEqual(
+            expected("core", 2, current=3),
+            {"list": {"cli_too_old"}, "status": {"ok", "cli_too_old"}},
+        )
         for candidate in ("client", "core"):
             for major in (1, 4):
                 with self.subTest(candidate=candidate, major=major), self.assertRaises(TaskError):

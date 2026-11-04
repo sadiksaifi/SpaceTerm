@@ -669,11 +669,11 @@ pub struct IncompatibleDetails {
 #[serde(rename_all = "snake_case")]
 pub enum Update {
     /// SpaceTerm Core on the machine the command reached.
-    Core,
+    Machine,
     /// The desktop app.
     Desktop,
-    /// This CLI, which this machine's SpaceTerm Core ships.
-    Cli,
+    /// SpaceTerm Core on this machine, which ships this CLI.
+    Core,
 }
 
 // Exit classes and codes
@@ -941,8 +941,8 @@ pub fn from_core_error(error: CoreError) -> Failure {
                 Code::IncompatibleProtocol,
                 Details::Incompatible(IncompatibleDetails {
                     update: match older {
-                        Incompatible::ListenerTooOld => Update::Core,
-                        Incompatible::CallerTooOld => Update::Cli,
+                        Incompatible::ListenerTooOld => Update::Machine,
+                        Incompatible::CallerTooOld => Update::Core,
                     },
                 }),
             );
@@ -2269,8 +2269,8 @@ mod tests {
     #[test]
     fn an_incompatible_protocol_names_the_side_to_update() {
         for (older, update) in [
-            (Incompatible::ListenerTooOld, "core"),
-            (Incompatible::CallerTooOld, "cli"),
+            (Incompatible::ListenerTooOld, "machine"),
+            (Incompatible::CallerTooOld, "core"),
         ] {
             let failure = from_core_error(CoreError::IncompatibleProtocol(older));
             let envelope =

@@ -82,15 +82,18 @@ def expected(candidate, release_major, current=PROTOCOL_MAJOR):
 
     A client speaks its work major and the previous one, and a Core speaks one, so this commit's
     CLI works with a Core one major behind, while that release's CLI is refused as too old. An
-    outcome is `ok`, or `cli` or `core` for an `incompatible_protocol` refusal naming that side
-    as the older one. The service lane has its own major, which no build document records, so
+    outcome is `ok`, or `cli_too_old` for an `incompatible_protocol` refusal that names the CLI's
+    side as the older one. The service lane has its own major, which no build document records, so
     a release CLI's `status` may also be refused as too old.
     """
     if release_major not in (current, current - 1):
         raise TaskError("a listed release's work major is this commit's or the previous one")
     if candidate == "client":
         return {"list": {"ok"}, "status": {"ok"}}
-    return {"list": {"ok"} if release_major == current else {"cli"}, "status": {"ok", "cli"}}
+    return {
+        "list": {"ok"} if release_major == current else {"cli_too_old"},
+        "status": {"ok", "cli_too_old"},
+    }
 
 
 def pair(tag, candidate, path=RELEASES):
@@ -282,7 +285,8 @@ def _serving(core, environment, log):
 
 
 def _outcome(client, arguments, environment):
-    """`ok`, the older side an `incompatible_protocol` refusal names, or another error code."""
+    """`ok`, `cli_too_old` or `core_too_old` for an `incompatible_protocol` refusal by the side
+    it names as older, or another error code."""
     try:
         result = subprocess.run(
             [str(client), "--json", *arguments],
@@ -302,8 +306,8 @@ def _outcome(client, arguments, environment):
     if envelope.get("status") == "ok" and result.returncode == 0:
         return "ok"
     if code == "incompatible_protocol":
-        update = (error.get("details") or {}).get("update")
-        return update if update in ("cli", "core") else "an unnamed incompatible_protocol"
+        older = {"core": "cli_too_old", "machine": "core_too_old"}
+        return older.get((error.get("details") or {}).get("update"), "an unnamed refusal")
     return code if isinstance(code, str) and code.isidentifier() else f"exit {result.returncode}"
 
 
