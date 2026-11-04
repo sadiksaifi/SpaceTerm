@@ -976,8 +976,9 @@ pub(super) struct ServiceState {
     pub(super) authorization: Option<PendingAuthorization>,
     /// Whether the last read found SpaceTerm Core turned off in Login Items.
     pub(super) background_item_off: bool,
-    /// The service refused the person's Start because SpaceTerm Core was off in Login Items, and
-    /// no read has found it on since. The first read that does runs that Start.
+    /// The operation was the person's Start, and the service refused it because SpaceTerm Core
+    /// was off in Login Items. [`super::local_operations::LocalCoreOperations`] keeps it until a
+    /// surface finds the item on.
     pub(super) start_refused: bool,
 }
 
@@ -1898,7 +1899,7 @@ impl SettingsWindow {
                 .update(cx, |owner, cx| owner.run_service(state, result, cx));
         } else {
             row._operation = Some(cx.spawn(async move |settings, cx| {
-                let mut state = result.await;
+                let state = result.await;
                 let _ = settings.update(cx, |settings, cx| {
                     // An answer from before an outside change describes nothing current.
                     if let Some(row) = &mut settings.core_service
@@ -1909,16 +1910,20 @@ impl SettingsWindow {
                         cx.notify();
                         return;
                     }
-                    // A Start refused while the item was off waits for a read that finds it on,
-                    // then runs as the person asked.
-                    if let Some(row) = &mut settings.core_service
-                        && row.state.start_refused
-                    {
-                        if state.background_item_off {
-                            state.start_refused = true;
-                        } else {
-                            row.start_requested = true;
+                    // A Start refused while the item was off runs once a read finds it on, as
+                    // the person asked. A running server needs it no more.
+                    use super::local_operations::LocalCoreOperations;
+                    match state.status {
+                        Some(status) if status.running => LocalCoreOperations::core_running(cx),
+                        Some(_)
+                            if !state.background_item_off
+                                && LocalCoreOperations::take_refused_start(cx) =>
+                        {
+                            if let Some(row) = &mut settings.core_service {
+                                row.start_requested = true;
+                            }
                         }
+                        _ => {}
                     }
                     settings
                         .local_operations

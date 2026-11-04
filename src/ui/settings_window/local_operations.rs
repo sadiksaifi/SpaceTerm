@@ -8,6 +8,8 @@ use super::machines::ServiceState;
 use crate::machine_connection::CoreError;
 use crate::machine_connection::service::ServiceStatus;
 use crate::machine_connection::service::activation::{ActivationPhase, ActivationStatus};
+use crate::updates::machines::MachineAction;
+use crate::updates::machines::store::{MachineUpdates, Surface};
 
 struct InstalledOperations(Entity<LocalCoreOperations>);
 impl Global for InstalledOperations {}
@@ -37,6 +39,10 @@ pub(crate) struct LocalCoreOperations {
     pub(super) update_failure: Option<CoreError>,
     last_update: Option<Result<Option<ActivationStatus>, CoreError>>,
     operation: Option<Task<()>>,
+    /// The service refused the person's Start, from any surface, because SpaceTerm Core was off
+    /// in Login Items. The first surface that finds the item on runs it, once. Any service change
+    /// that finishes first forgets it, so it never reverses a later Stop.
+    refused_start: bool,
 }
 
 impl EventEmitter<CompletedOperation> for LocalCoreOperations {}
@@ -49,6 +55,105 @@ impl LocalCoreOperations {
         let owner = cx.new(|_| Self::default());
         cx.set_global(InstalledOperations(owner.clone()));
         owner
+    }
+
+    /// Records the person's Start the service refused because SpaceTerm Core is off in Login
+    /// Items, made from launch, the menu bar or the title bar.
+    pub(crate) fn start_refused(cx: &mut App) {
+        Self::get(cx).update(cx, |owner, _| owner.refused_start = true);
+    }
+
+    /// Whether a refused Start waits for SpaceTerm Core to be on in Login Items.
+    pub(crate) fn start_waits(cx: &App) -> bool {
+        cx.try_global::<InstalledOperations>()
+            .is_some_and(|installed| installed.0.read(cx).refused_start)
+    }
+
+    /// Takes the refused Start, so the surface that found the item on runs it and no other
+    /// surface does.
+    pub(crate) fn take_refused_start(cx: &mut App) -> bool {
+        Self::start_waits(cx)
+            && Self::get(cx).update(cx, |owner, _| std::mem::take(&mut owner.refused_start))
+    }
+
+    /// Forgets a refused Start because this computer's SpaceTerm Core is running now.
+    pub(crate) fn core_running(cx: &mut App) {
+        if Self::start_waits(cx) {
+            Self::get(cx).update(cx, |owner, _| owner.refused_start = false);
+        }
+    }
+
+    /// Runs a refused Start through `surface` once `off` reads SpaceTerm Core on in Login Items,
+    /// reading for at most [`crate::local_startup::LOGIN_ITEM_WAIT`]. Another surface that runs
+    /// it first, or any service change, leaves nothing to run. Dropping the task ends the wait.
+    pub(crate) fn start_when_login_item_on(
+        off: crate::local_startup::LoginItemRead,
+        surface: Surface,
+        cx: &App,
+    ) -> Task<()> {
+        crate::local_startup::when_login_item_on(off, cx, move |cx| {
+            Self::run_refused_start(surface, cx);
+        })
+    }
+
+    /// Reads SpaceTerm Core's item once, off the event thread, while a refused Start waits, and
+    /// runs that Start through `surface` if the item is on.
+    pub(crate) fn start_if_login_item_on(
+        off: crate::local_startup::LoginItemRead,
+        surface: Surface,
+        cx: &mut App,
+    ) {
+        if !Self::start_waits(cx) {
+            return;
+        }
+        let read = cx.background_spawn(async move { off() });
+        cx.spawn(async move |cx| {
+            if !read.await {
+                cx.update(|cx| Self::run_refused_start(surface, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn run_refused_start(surface: Surface, cx: &mut App) {
+        let Some(store) = MachineUpdates::global(cx) else {
+            return;
+        };
+        let Some(local) = store
+            .read(cx)
+            .machines()
+            .iter()
+            .find(|machine| machine.local)
+            .map(|machine| machine.machine)
+        else {
+            return;
+        };
+        if Self::take_refused_start(cx) {
+            store.update(cx, |store, cx| {
+                store.perform(local, MachineAction::Start, surface, cx);
+            });
+        }
+    }
+
+    /// A Start, Restart or Stop of this computer's Core that the menu bar or the title bar
+    /// performed succeeded. It reaches Settings and every waiting Workspace Window, as the same
+    /// change made in Settings does.
+    pub(crate) fn machine_action_succeeded(action: &MachineAction, cx: &mut App) {
+        let running = match action {
+            MachineAction::Start | MachineAction::Restart => true,
+            MachineAction::Stop => false,
+            _ => return,
+        };
+        // Settings reads the service again; only `running` and `stopped` matter here.
+        Self::changed_elsewhere(
+            cx,
+            ServiceStatus {
+                installed: true,
+                enabled: true,
+                running,
+                stopped: !running,
+            },
+        );
     }
 
     pub(super) fn run_service(
@@ -69,8 +174,12 @@ impl LocalCoreOperations {
                 owner.service_failure = state
                     .failure
                     .filter(|error| *error != CoreError::AuthorizationRequired);
+                let refused = state.start_refused;
                 owner.service = Some(state);
                 owner.finished(CompletedOperation::Service, running, cx);
+                // A Start this operation had refused waits for the item, as one from any other
+                // surface does.
+                owner.refused_start = refused;
             });
         }));
     }
@@ -141,7 +250,10 @@ impl LocalCoreOperations {
         });
     }
 
+    /// Every finished service change forgets a refused Start, so it can't reverse what the
+    /// change did.
     fn finished(&mut self, operation: CompletedOperation, running: bool, cx: &mut Context<Self>) {
+        self.refused_start = false;
         // This notification must reach waiting Workspace launches even with no Settings Window.
         if running {
             crate::ui::workspace_manager::resume_waiting_launches(cx);

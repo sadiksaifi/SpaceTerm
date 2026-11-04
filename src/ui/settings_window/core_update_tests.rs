@@ -755,9 +755,12 @@ fn a_first_version_read_begun_before_a_status_item_uninstall_offers_no_stale_upd
         facts.approved = None;
     });
     harness.service.report(Ok(uninstalled()));
-    harness
-        .cx
-        .update(|_, cx| crate::status_menu::operation_succeeded(cx, uninstalled()));
+    harness.cx.update(|_, cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
+            cx,
+            uninstalled(),
+        )
+    });
     harness.cx.run_until_parked();
 
     let presentation = harness.presentation();

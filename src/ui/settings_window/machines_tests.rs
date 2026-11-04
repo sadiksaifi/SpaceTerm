@@ -1118,7 +1118,12 @@ fn a_start_from_the_status_item_shows_the_machine_running_in_open_settings(
     // The status item started the server, outside Settings.
     service.report(Ok(running()));
     core.answer_refresh(Ok(connected(1)));
-    cx.update(|_, cx| crate::status_menu::operation_succeeded(cx, running()));
+    cx.update(|_, cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
+            cx,
+            running(),
+        )
+    });
     cx.run_until_parked();
 
     assert_eq!(status(&window, cx), "Running");
@@ -1137,7 +1142,12 @@ fn a_read_begun_before_a_status_item_start_doesnt_leave_settings_stopped(cx: &mu
     window.update(cx, |settings, cx| settings.check_core_service(cx));
     // The status item starts the server while that read is still pending.
     service.report(Ok(running()));
-    cx.update(|_, cx| crate::status_menu::operation_succeeded(cx, running()));
+    cx.update(|_, cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
+            cx,
+            running(),
+        )
+    });
     cx.run_until_parked();
 
     assert_eq!(status(&window, cx), "Running");
@@ -1250,6 +1260,43 @@ fn start_after_turning_off_in_login_items_runs_once_turned_on(cx: &mut TestAppCo
         service.changes(),
         vec![ServiceCall::Start, ServiceCall::Start]
     );
+}
+
+/// Settings' Start is refused while SpaceTerm Core is off in Login Items. After the person turns
+/// it on, another surface starts the Core and the menu bar stops it. The refused Start is
+/// forgotten, so coming back to Settings never undoes that Stop.
+#[gpui::test]
+fn a_start_refused_for_login_items_never_undoes_a_later_stop(cx: &mut TestAppContext) {
+    let (window, _core, service, cx) = open_machines_with_service(Ok(stopped()), cx);
+    service.turn_off_in_login_items(true);
+    click(START_SERVICE_SELECTOR, cx);
+    assert_eq!(service.changes(), vec![ServiceCall::Start]);
+    assert_eq!(status(&window, cx), "Off in Login Items");
+
+    // The person turns SpaceTerm Core on and starts it from the Workspace Window, whose launch
+    // finds it running. Settings reads nothing meanwhile. Then the menu bar stops it.
+    service.turn_off_in_login_items(false);
+    cx.update(|_, cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::core_running(cx);
+    });
+    service.report(Ok(stopped()));
+    cx.update(|_, cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
+            cx,
+            stopped(),
+        )
+    });
+    cx.run_until_parked();
+
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert_eq!(
+        service.changes(),
+        vec![ServiceCall::Start],
+        "the Stop stays"
+    );
+    assert_eq!(status(&window, cx), "Stopped");
 }
 
 /// A read that finds a stopped SpaceTerm Core also off in Login Items presents Login Items, not

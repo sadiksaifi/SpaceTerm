@@ -545,6 +545,43 @@ fn start_after_turning_off_in_login_items_runs_once_turned_on(cx: &mut TestAppCo
     );
 }
 
+/// The window's Start is refused while SpaceTerm Core is off in Login Items. After the person
+/// turns it on, the Core runs and the menu bar stops it before they come back. The refused Start
+/// is forgotten, so coming back runs launch alone and the Stop stays.
+#[gpui::test]
+fn a_start_refused_for_login_items_never_undoes_a_later_stop(cx: &mut TestAppContext) {
+    use spaceterm_core::service::ServiceStatus;
+
+    let (harness, cx) = launch_harness(
+        vec![Ok(LaunchOutcome::Stopped), Ok(LaunchOutcome::Stopped)],
+        cx,
+    );
+    cx.run_until_parked();
+    harness.launch.refuse_start(CoreError::LoginItemOff);
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "start"]);
+    cx.deactivate_window();
+
+    // The menu bar stops SpaceTerm Core.
+    cx.cx.update(|cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
+            cx,
+            ServiceStatus {
+                installed: true,
+                enabled: true,
+                running: false,
+                stopped: true,
+            },
+        );
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+}
+
 /// An item macOS blocked when launch installed it and an item the person turned off read the
 /// same to the service, so the window says the same about both on every run. A Retry never turns
 /// a blocked item into one the person "turned off".
@@ -1836,8 +1873,11 @@ fn a_status_menu_start_resumes_a_window_waiting_on_a_stopped_machine(cx: &mut Te
         running: false,
         stopped: true,
     };
-    cx.cx
-        .update(|cx| crate::status_menu::operation_succeeded(cx, stopped));
+    cx.cx.update(|cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
+            cx, stopped,
+        )
+    });
     cx.run_until_parked();
     assert_eq!(
         harness.launch.steps(),
@@ -1851,8 +1891,11 @@ fn a_status_menu_start_resumes_a_window_waiting_on_a_stopped_machine(cx: &mut Te
         stopped: false,
         ..stopped
     };
-    cx.cx
-        .update(|cx| crate::status_menu::operation_succeeded(cx, running));
+    cx.cx.update(|cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
+            cx, running,
+        )
+    });
     cx.run_until_parked();
     assert_eq!(
         harness.launch.steps(),

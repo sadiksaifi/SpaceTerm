@@ -21,6 +21,7 @@ use spaceterm_ui::{
 
 use super::WorkspaceManager;
 use super::settings_window::SettingsWindow;
+use super::settings_window::local_operations::LocalCoreOperations;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice};
 use crate::updates::reminders::{ReminderActivated, UpdateReminders};
@@ -57,6 +58,12 @@ pub(crate) fn init_with(login_items: crate::local_startup::LoginItems, cx: &mut 
     let mut subscriptions = vec![notices, states];
     subscriptions.extend(MachineUpdates::global(cx).map(|machines| {
         cx.subscribe(&machines, |_, notice: &MachineUpdatesNotice, cx| {
+            if notice.surface == crate::updates::machines::store::Surface::Window
+                && notice.local
+                && notice.outcome.is_ok()
+            {
+                LocalCoreOperations::machine_action_succeeded(&notice.action, cx);
+            }
             commands::receive_failure(notice, cx);
         })
     }));
@@ -195,19 +202,13 @@ fn start_when_login_item_on(notice: &MachineUpdatesNotice, cx: &mut App) {
     if notice.action != crate::updates::machines::MachineAction::Start {
         return;
     }
-    let machine = notice.machine;
-    let wait = crate::local_startup::when_login_item_on(login_items.off, cx, move |cx| {
-        if let Some(store) = MachineUpdates::global(cx) {
-            store.update(cx, |store, cx| {
-                store.perform(
-                    machine,
-                    crate::updates::machines::MachineAction::Start,
-                    crate::updates::machines::store::Surface::Window,
-                    cx,
-                );
-            });
-        }
-    });
+    // Any window's activation runs the refused Start too, once this wait ends.
+    LocalCoreOperations::start_refused(cx);
+    let wait = LocalCoreOperations::start_when_login_item_on(
+        login_items.off,
+        crate::updates::machines::store::Surface::Window,
+        cx,
+    );
     cx.update_global::<UpdatePrompts, _>(|prompts, _| prompts.refused_start = Some(wait));
 }
 

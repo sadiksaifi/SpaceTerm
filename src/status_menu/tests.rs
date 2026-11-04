@@ -696,6 +696,58 @@ fn a_start_refused_by_login_items_opens_that_list_and_runs_once_turned_on(cx: &m
     assert_eq!(fixture.host.login_items.get(), 1);
 }
 
+/// The menu reads Login Items for a few minutes only after the service refused its Start. Once
+/// that wait ends, opening the menu reads the item again and runs the Start if it is on.
+#[gpui::test]
+fn a_refused_start_waits_a_few_minutes_then_runs_when_the_menu_opens(cx: &mut TestAppContext) {
+    let mut stopped = machine(LOCAL, "This Computer", 0);
+    stopped.link = MachineLink::Stopped;
+    let fixture = start(vec![stopped], cx);
+    let off = |off: bool| {
+        fixture
+            .host
+            .login_item_off
+            .store(off, std::sync::atomic::Ordering::SeqCst);
+    };
+    let start = (LOCAL, MachineAction::Start);
+    off(true);
+    cx.update(|cx| {
+        fixture.menu.perform(
+            Command::Update(crate::updates::presentation::Command::Machine(
+                LOCAL,
+                MachineAction::Start,
+            )),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    fixture.machines.emit(MachineUpdatesEvent::Finished {
+        machine: LOCAL,
+        action: MachineAction::Start,
+        outcome: Err(ActionFailure::LoginItemOff),
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(crate::local_startup::LOGIN_ITEM_WAIT + std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+
+    // The person turns SpaceTerm Core on after the wait ended, so nothing reads it yet.
+    off(false);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(60));
+    cx.run_until_parked();
+    assert_eq!(fixture.machines.performed(), std::slice::from_ref(&start));
+
+    cx.update(|cx| fixture.menu.opened(cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.machines.performed(), [start.clone(), start.clone()]);
+
+    // The Start ran once: opening the menu again starts nothing.
+    cx.update(|cx| fixture.menu.opened(cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.machines.performed(), [start.clone(), start]);
+}
+
 #[gpui::test]
 fn the_flat_menu_keeps_local_restart_and_stop_and_never_offers_remote_stop(
     cx: &mut TestAppContext,
