@@ -101,8 +101,10 @@ pub(crate) fn serving(paths: &crate::host::Paths) -> Arc<LaneCore> {
 /// [`serving`] with its own view of the running server. It fetches no feed, as Preflight and
 /// Development do.
 pub(crate) fn serving_with(paths: &crate::host::Paths, host: Arc<dyn LaneHost>) -> Arc<LaneCore> {
+    let service = Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running));
     LaneCore::new(
-        Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
+        service.clone(),
+        Updates::open(service),
         host,
         None,
         Box::new(|_| Ok(())),
@@ -146,6 +148,7 @@ impl Lane {
     fn restarted(&self) -> Arc<LaneCore> {
         LaneCore::new(
             self.service.clone(),
+            Updates::open(self.service.clone()),
             self.host.clone(),
             None,
             Box::new(|_| Ok(())),
@@ -187,6 +190,7 @@ fn with_lane(run: impl FnOnce(Lane)) {
             let helper = hook.clone();
             let lane = LaneCore::new(
                 service.clone(),
+                Updates::open(service.clone()),
                 host.clone(),
                 None,
                 Box::new(move |op| {
@@ -308,8 +312,10 @@ fn serving_permissions(
     paths: &crate::host::Paths,
     permissions: Arc<dyn crate::permissions::SystemPermissions>,
 ) -> Arc<LaneCore> {
+    let service = Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running));
     LaneCore::new(
-        Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
+        service.clone(),
+        Updates::open(service),
         Arc::new(Host::default()),
         None,
         Box::new(|_| Ok(())),
@@ -917,6 +923,7 @@ fn a_feed_check_that_fails_answers_its_code_and_ends_its_operation() {
     with_lane(|lane| {
         let served = LaneCore::new(
             lane.service.clone(),
+            Updates::open(lane.service.clone()),
             lane.host.clone(),
             Some(FeedCheck::fixture(
                 lane.service.paths.data.clone(),
@@ -1385,7 +1392,8 @@ mod flow {
                     drop(helper);
                     // The helper ends before the new server starts, so start-up settles it.
                     let new = LaneCore::new(
-                        service,
+                        service.clone(),
+                        Updates::open(service.clone()),
                         host,
                         None,
                         Box::new(|_| Ok(())),

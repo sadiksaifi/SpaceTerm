@@ -649,19 +649,17 @@ fn serve_runtime_ready(
         direct: direct.clone(),
         stop: Arc::clone(&stop),
     });
-    let lane = crate::service::lane::LaneCore::start(paths, Arc::clone(&host_lane) as _).ok();
+    // One update engine per Core: the lane answers from it, and the watcher below drives it.
+    let updates = crate::service::Service::for_paths(paths.clone())
+        .and_then(crate::service::updates::Updates::open);
+    let lane =
+        crate::service::lane::LaneCore::start(paths, Arc::clone(&host_lane) as _, updates.clone())
+            .ok();
+    let feed = lane.as_ref().and_then(|lane| lane.feed_check());
     // The lane holds the pane service, whose shutdown the server waits for, so the update
     // watcher reaches it only weakly.
     let watched = Arc::downgrade(&host_lane);
     drop(host_lane);
-    // A supervised Core owns its updates. A Core that fails to read them still serves.
-    let updates = supervised
-        .then(|| {
-            crate::service::Service::for_paths(paths.clone())
-                .and_then(crate::service::updates::Updates::open)
-                .ok()
-        })
-        .flatten();
     let restarter = lane.as_ref().map(|lane| {
         let restarter: Arc<dyn crate::service::updates::Restarter> = Arc::clone(lane) as _;
         Arc::downgrade(&restarter)
@@ -685,8 +683,20 @@ fn serve_runtime_ready(
     }
     // Once ready, the engine follows the live Terminal Session count, so a Pending Version
     // that is not breaking restarts silently at zero sessions, including right after boot.
+    // A Release Core checks its own feed once ready.
     if readiness.is_ok()
-        && let (Some(updates), Some(restarter)) = (&updates, restarter)
+        && let (Some(feed), Ok(updates)) = (feed, &updates)
+    {
+        let host = watched.clone();
+        feed.spawn(
+            updates.clone(),
+            Arc::new(move || host.upgrade().is_none_or(|host| host.stop.stopping())),
+        );
+    }
+    // A supervised Core restarts itself; a Core that fails to read its updates still serves.
+    if readiness.is_ok()
+        && supervised
+        && let (Ok(updates), Some(restarter)) = (&updates, restarter)
     {
         let host = watched;
         let _ = updates.run(restarter, Arc::new(|_| Vec::new()), move || {

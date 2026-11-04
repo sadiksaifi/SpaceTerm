@@ -676,20 +676,16 @@ impl Shared {
         self.admits_version(live, version)
     }
 
+    /// Every source passes through the one version order in [`crate::update::ordering`].
     fn admits_version(&self, live: &Live, version: &Version) -> Result<(), InstallError> {
-        if live.record.skipped.as_ref() == Some(version) {
-            return Err(InstallError::Skipped);
-        }
-        let newest = [
-            Some(&self.running),
-            live.record.pending.as_ref().map(|p| &p.version),
-        ];
-        for have in newest.into_iter().flatten() {
-            if order(version, have).is_some_and(Ordering::is_le) {
-                return Err(InstallError::NotNewer);
-            }
-        }
-        Ok(())
+        let mut installed = vec![self.running.clone()];
+        installed.extend(live.record.pending.as_ref().map(|p| p.version.clone()));
+        crate::update::ordering::admit(version, &installed, live.record.skipped.as_ref()).map_err(
+            |refusal| match refusal {
+                crate::update::ordering::Refusal::NotNewer => InstallError::NotNewer,
+                crate::update::ordering::Refusal::Skipped => InstallError::Skipped,
+            },
+        )
     }
 
     fn compose(&self, live: &Live, revision: u64, now: u64) -> UpdateFacts {

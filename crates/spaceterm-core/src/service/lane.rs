@@ -377,31 +377,35 @@ struct Prepared {
 }
 
 impl LaneCore {
-    /// Starts the lane of a server that is ready to accept connections.
+    /// Starts the lane of a server that is ready to accept connections. `updates` is the
+    /// server's one update engine, or why it could not open.
     pub(crate) fn start(
         paths: &crate::host::Paths,
         host: Arc<dyn LaneHost>,
+        updates: Result<Updates, CoreError>,
     ) -> Result<Arc<Self>, CoreError> {
         let service = Service::for_paths(paths.clone())?;
         let owned = paths.identity.clone();
         let feed = FeedCheck::for_identity(&paths.identity, paths.data.clone());
-        let lane = Self::new(
+        Self::new(
             service,
+            updates,
             host,
             feed,
             Box::new(move |op| super::helper::launch(&owned, op)),
             crate::permissions::native(&paths.identity),
-        )?;
-        if let (Some(feed), Ok(updates)) = (&lane.feed, &lane.updates) {
-            let host = lane.host.clone();
-            feed.clone()
-                .spawn(updates.clone(), Arc::new(move || host.stopping()));
-        }
-        Ok(lane)
+        )
+    }
+
+    /// This Core's own feed check, which the server runs once it is ready. None for Preflight
+    /// and Development.
+    pub(crate) fn feed_check(&self) -> Option<Arc<FeedCheck>> {
+        self.feed.clone()
     }
 
     fn new(
         service: Service,
+        updates: Result<Updates, CoreError>,
         host: Arc<dyn LaneHost>,
         feed: Option<FeedCheck>,
         launch: Box<Launcher>,
@@ -409,7 +413,7 @@ impl LaneCore {
     ) -> Result<Arc<Self>, CoreError> {
         let core = service.passive_machine_id()?.ok_or(CoreError::NotSetUp)?;
         let lane = Self {
-            updates: Updates::open(service.clone()),
+            updates,
             pushes: Pushes::new(service.paths.data.clone()),
             service,
             core,
