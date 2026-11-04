@@ -3946,6 +3946,14 @@ mod core_workspaces {
                 self.publish(|snapshot| snapshot.error = Some(error));
             }
 
+            /// A connection attempt reached the server again.
+            pub(crate) fn reconnect(&self) {
+                self.publish(|snapshot| {
+                    snapshot.connected = true;
+                    snapshot.error = None;
+                });
+            }
+
             /// Answers the last submitted edit with `outcome`.
             pub(crate) fn answer(&self, outcome: Outcome) {
                 self.answer_publishing(outcome, None);

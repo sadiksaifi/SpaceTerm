@@ -281,12 +281,22 @@ impl WorkspaceManager {
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let reachable = self.local_core_reachable();
+        let reachable = self.local_core_reachable() && !self.local_core_turned_off();
         let place = presentation.wording().this_computer_phrase;
         let local = self.binding.local();
         let stopped = local.and_then(|binding| binding.connection_error())
             == Some(spaceterm_core::CoreError::Stopped);
-        let (title, detail): (&'static str, SharedString) = if reachable {
+        // macOS keeps SpaceTerm Core off until the person turns it on in Login Items, so the
+        // stage says what launch says and offers that list, never a reconnect that can't reach it.
+        let turned_off = self.local_core_turned_off().then(|| {
+            super::launch::present(
+                super::launch::LaunchState::LoginItemOff,
+                presentation.wording().this_computer,
+            )
+        });
+        let (title, detail): (&'static str, SharedString) = if let Some(turned_off) = &turned_off {
+            (turned_off.title, turned_off.detail.clone())
+        } else if reachable {
             // A reachable server ends any reconnect the person asked for.
             self.launch.reconnect_from.set(None);
             (EMPTY_TITLE, EMPTY_DETAIL.into())
@@ -339,7 +349,20 @@ impl WorkspaceManager {
                         });
                     })
             };
-            if stopped {
+            if let Some(turned_off) = turned_off {
+                // Turning SpaceTerm Core off was the person's choice, so nothing warns.
+                let mut state = crate::ui::empty_state::empty_state(title, cx)
+                    .icon(IconName::Pause)
+                    .tone(EmptyStateTone::Quiet);
+                for (index, &launch_action) in turned_off.actions.iter().enumerate() {
+                    state = if index == 0 {
+                        state.primary(action(launch_action))
+                    } else {
+                        state.link(action(launch_action))
+                    };
+                }
+                state
+            } else if stopped {
                 // A stopped server answers no reconnect: only Start reverses Stop. Stopping was the
                 // person's choice, so nothing warns.
                 crate::ui::empty_state::empty_state(title, cx)

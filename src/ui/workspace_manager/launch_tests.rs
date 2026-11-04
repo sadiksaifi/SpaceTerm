@@ -456,6 +456,61 @@ fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &m
     assert_eq!(harness.rows(cx), 1);
 }
 
+/// The person turns SpaceTerm Core off in Login Items while its Workspaces are open. macOS stops
+/// it, so the stage says what launch says and offers that list in place of the Tabs, instead of
+/// reconnecting to a server that can't answer. Once the person turns it on and comes back, launch
+/// runs again and the Tabs and their Panes return without being asked.
+#[gpui::test]
+fn a_core_turned_off_in_login_items_while_open_says_so_until_turned_on(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    const TITLE: &str = "SpaceTerm Core is turned off in Login Items";
+
+    // Launch reads the item on, the connection loss reads it off, and the return reads it on.
+    let (harness, cx) =
+        launch_harness_reading_background_item(vec![ready(), ready()], [false, true, false], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert!(cx.debug_bounds("tab-bar").is_some());
+
+    harness.edits.fail_attempt(CoreError::NotRunning);
+    sync(&harness, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(cx);
+    let stage = tree.node(TITLE).clone();
+    assert_eq!(
+        stage["aria"]["description"],
+        "Workspaces on This Computer open when you turn it on."
+    );
+    assert!(cx.debug_bounds("tab-bar").is_none(), "no Tab reconnects");
+    assert!(cx.debug_bounds(super::empty::RECONNECT_SELECTOR).is_none());
+    assert!(
+        cx.debug_bounds(LAUNCH_START_SELECTOR).is_none(),
+        "Start can't run a service macOS keeps off"
+    );
+    assert!(
+        cx.debug_bounds("server-launch-alert-ok").is_none(),
+        "the stage says it, so no alert repeats it"
+    );
+    assert_eq!(harness.launch.steps(), ["run"], "the read changes nothing");
+
+    harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items"]);
+
+    // The person turns SpaceTerm Core on in System Settings and comes back.
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items", "run"]);
+    harness.edits.reconnect();
+    sync(&harness, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(A11yTree::read(cx).find(TITLE).is_none());
+    assert!(cx.debug_bounds("tab-bar").is_some(), "the Tabs return");
+}
+
 /// The person stopped SpaceTerm Core, then turned it off in Login Items. Start, chosen after
 /// that, starts nothing and says the item is off instead.
 #[gpui::test]

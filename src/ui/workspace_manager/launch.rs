@@ -522,6 +522,14 @@ pub(super) struct LocalLaunchState {
     place: &'static str,
     /// The window went inactive while it said SpaceTerm Core is off in Login Items.
     away: bool,
+    /// The last launch or connection loss found this computer's SpaceTerm Core turned off in
+    /// Login Items. It holds while a launch rechecks, so the presented Workspaces keep saying so
+    /// instead of reconnecting.
+    turned_off: bool,
+    /// The failed connection attempts counted when this computer's connection loss last read
+    /// the background item, so each failed attempt reads it once.
+    background_item_read: Option<u64>,
+    _background_item: Option<Task<()>>,
     cancelled: Arc<AtomicBool>,
     _task: Option<Task<()>>,
     /// The server was started elsewhere while this launch was answering. A launch that then
@@ -558,6 +566,9 @@ impl LocalLaunchState {
             state: LaunchState::Launching,
             place,
             away: false,
+            turned_off: false,
+            background_item_read: None,
+            _background_item: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             _task: None,
             resume: false,
@@ -787,6 +798,10 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        let was_turned_off = std::mem::replace(
+            &mut self.launch.turned_off,
+            state == LaunchState::LoginItemOff,
+        );
         if std::mem::take(&mut self.launch.resume)
             && matches!(
                 state,
@@ -810,8 +825,12 @@ impl WorkspaceManager {
             }
         }
         // While Workspaces are presented the launch screen is hidden, so a step that could not
-        // finish explains itself in an alert instead.
+        // finish explains itself in an alert instead. A Login Items state the window already
+        // said, or says in place of the Active Workspace's Tabs, needs no alert.
+        let said = state == LaunchState::LoginItemOff
+            && (was_turned_off || self.local_core_turned_off_presented());
         if self.launch_presentation().is_none()
+            && !said
             && let Some(presentation) =
                 (state != LaunchState::Ready).then(|| present(state, self.launch.place))
         {
@@ -827,7 +846,7 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    /// Reconnects each Pane the person's stop interrupted, once this computer's server runs
+    /// Reconnects each Pane a stop or Login Items interrupted, once this computer's server runs
     /// again. Another computer's Panes follow their own server.
     fn core_started(&self, cx: &mut App) {
         for workspace in self.workspaces.iter() {
@@ -1133,13 +1152,108 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let waiting = matches!(
-            self.launch.state,
-            LaunchState::LoginItemOff | LaunchState::BackgroundItemBlocked
-        ) && self.launch._task.is_none();
+        let waiting = self.launch.turned_off
+            || matches!(
+                self.launch.state,
+                LaunchState::LoginItemOff | LaunchState::BackgroundItemBlocked
+            );
         if !active {
             self.launch.away = waiting;
         } else if std::mem::take(&mut self.launch.away) && waiting {
+            if self.launch._task.is_none() {
+                self.run_local_launch(None, window, cx);
+            } else {
+                // The running launch may have read the item before the person turned it on.
+                self.launch.resume = true;
+            }
+        }
+    }
+
+    /// Whether the stage says this computer's SpaceTerm Core is turned off in Login Items in
+    /// place of the Active Workspace's Tabs.
+    pub(super) fn local_core_turned_off_presented(&self) -> bool {
+        self.launch.turned_off
+            && self
+                .workspaces
+                .active_workspace_id()
+                .and_then(|workspace_id| self.binding.owner(workspace_id))
+                == Some(super::MachineKey::LOCAL)
+    }
+
+    /// Whether this computer's SpaceTerm Core is turned off in Login Items, as the last launch
+    /// or connection loss read.
+    pub(super) const fn local_core_turned_off(&self) -> bool {
+        self.launch.turned_off
+    }
+
+    /// Reads, off the event thread, the background item launch reads, once for each failed
+    /// attempt of this computer's open connection. macOS stops SpaceTerm Core when the person
+    /// turns it off in Login Items, and reconnecting can't reach it until they turn it on, so
+    /// the window then says what launch says. Once the item is on again, launch runs again and
+    /// the Panes reconnect. The read changes nothing.
+    pub(super) fn read_background_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(binding) = self.binding.local() else {
+            return;
+        };
+        let attempts = binding.failed_attempts();
+        if binding.connection_error().is_none() {
+            self.launch.background_item_read = None;
+            self.launch._background_item = None;
+            // The server answered again, so its Panes reconnect now rather than on their delay.
+            if binding.connected() && std::mem::take(&mut self.launch.turned_off) {
+                if self.launch.state == LaunchState::LoginItemOff {
+                    self.launch.state = LaunchState::Ready;
+                }
+                self.core_started(cx);
+                cx.notify();
+            }
+            return;
+        }
+        // A launch reads the item itself, and a launch screen's own state stays until it reruns.
+        if self.launch._task.is_some()
+            || !matches!(
+                self.launch.state,
+                LaunchState::Ready | LaunchState::LoginItemOff
+            )
+            || self.launch.background_item_read == Some(attempts)
+        {
+            return;
+        }
+        self.launch.background_item_read = Some(attempts);
+        let adapter = Arc::clone(&self.launch.adapters.launch);
+        let read = cx.background_spawn(async move { adapter.background_item_off() });
+        self.launch._background_item = Some(cx.spawn_in(window, async move |manager, cx| {
+            let off = read.await;
+            let _ = manager.update_in(cx, |manager, window, cx| {
+                manager.finish_background_item_read(off, window, cx);
+            });
+        }));
+    }
+
+    fn finish_background_item_read(
+        &mut self,
+        off: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let launch = &mut self.launch;
+        // A launch that began meanwhile answers for itself.
+        if launch._task.is_some()
+            || !matches!(launch.state, LaunchState::Ready | LaunchState::LoginItemOff)
+        {
+            return;
+        }
+        if off {
+            if !launch.turned_off {
+                launch.state = LaunchState::LoginItemOff;
+                launch.turned_off = true;
+                // The person turns it on in System Settings, so coming back runs launch again.
+                launch.away = true;
+                cx.notify();
+            }
+        } else if launch.turned_off {
+            // The person turned it on again. Launch reuses or starts the service, and its Ready
+            // reconnects the Panes.
             self.run_local_launch(None, window, cx);
         }
     }

@@ -563,15 +563,18 @@ impl WorkspaceManager {
         });
     }
 
-    /// Whether the person stopped the server that owns the Active Workspace.
+    /// Whether the person stopped the server that owns the Active Workspace, or turned this
+    /// computer's off in Login Items.
     fn active_core_stopped(&self) -> bool {
-        self.workspaces
-            .active_workspace_id()
-            .and_then(|workspace_id| self.binding.owner(workspace_id))
-            .and_then(|key| self.binding.get(key))
-            .is_some_and(|binding| {
-                binding.connection_error() == Some(spaceterm_core::CoreError::Stopped)
-            })
+        self.local_core_turned_off_presented()
+            || self
+                .workspaces
+                .active_workspace_id()
+                .and_then(|workspace_id| self.binding.owner(workspace_id))
+                .and_then(|key| self.binding.get(key))
+                .is_some_and(|binding| {
+                    binding.connection_error() == Some(spaceterm_core::CoreError::Stopped)
+                })
     }
 
     /// The Active Workspace's Tab manager, absent while this window presents no Workspace.
@@ -2885,6 +2888,7 @@ impl WorkspaceManager {
         self.save_arrangements(cx);
         self.report_client_view_error(window, cx);
         self.read_refusal_offer(cx);
+        self.read_background_item(window, cx);
         // Membership, connection, and Git facts all decide what each view presents, including
         // Workspaces nobody is looking at.
         if poll.changed {
@@ -4803,8 +4807,9 @@ impl WorkspaceManager {
     fn render_chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_terminal_focus_blocker(window, cx);
         let manager = cx.entity().downgrade();
-        // A Workspace whose server the person stopped has no running Tab to show, so the stage
-        // presents the empty Pane that offers Start instead, with no Tab and no New Tab.
+        // A Workspace whose server the person stopped or turned off in Login Items has no running
+        // Tab to show, so the stage presents the empty Pane that says how to run it again, with
+        // no Tab and no New Tab.
         let active_tab_manager = self
             .active_tab_manager()
             .filter(|_| !self.active_core_stopped());

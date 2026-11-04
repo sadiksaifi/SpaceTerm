@@ -1449,11 +1449,12 @@ mod connection {
             self.can_retry() && !self.unknown_shown
         }
 
-        /// Connects again once the person started the server this Pane stopped with. The
-        /// connection keeps its mode, so the server says what became of the Pane; nothing takes
-        /// control or starts a shell. Any other Pane is left alone.
+        /// Connects again once the server behind this Pane runs again, after the person started
+        /// it or turned it on in Login Items. The connection keeps its mode, so the server says
+        /// what became of the Pane; nothing takes control or starts a shell. A connected Pane, or
+        /// one that only a directory repair or the person can recover, is left alone.
         pub(crate) fn core_started(&mut self) -> CorePaneSync {
-            if !self.core_stopped() {
+            if !self.core_stopped() && !self.can_retry() {
                 return CorePaneSync::default();
             }
             self.connection.retry();
