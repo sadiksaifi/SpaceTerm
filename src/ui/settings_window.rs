@@ -1,13 +1,14 @@
 //! The Settings Window: a separate, modeless Operating-System Window for SpaceTerm Settings.
 //! It is application scoped so it stays reachable when no Workspace window exists.
 
-mod add_server;
+mod add_machine;
 mod advanced;
 mod background_image;
 mod capture;
 mod catalog;
 mod clipboard;
 mod command_line_tool;
+pub(crate) mod core_update;
 mod direct_access;
 mod direct_join;
 mod direct_routes;
@@ -17,16 +18,15 @@ mod git;
 mod import;
 mod keybindings;
 pub(crate) mod local_operations;
+mod machine_card;
+mod machine_facts;
+mod machine_list;
+mod machine_location;
+mod machine_selection;
+pub(crate) mod machines;
 mod notices;
 mod permission_access;
 pub(crate) mod remote_admin;
-mod server_card;
-mod server_facts;
-mod server_list;
-mod server_location;
-mod server_selection;
-pub(crate) mod server_update;
-pub(crate) mod servers;
 mod sidebar;
 mod theme_gallery;
 mod theme_store;
@@ -90,13 +90,13 @@ use capture::CaptureAccessRow;
 use catalog::SettingsRowId;
 pub(crate) use catalog::SettingsSectionId;
 pub(crate) use command_line_tool::configure_command_line_tool;
+pub(crate) use core_update::update_offered;
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
-use permission_access::{PermissionAccessChanges, PermissionAccessRows};
-pub(crate) use server_selection::configure_server_context;
-pub(crate) use server_update::update_offered;
+pub(crate) use machine_selection::configure_core_context;
 /// The server control window shares the service row's progress and authorization wording.
-pub(crate) use servers::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
+pub(crate) use machines::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
+use permission_access::{PermissionAccessChanges, PermissionAccessRows};
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
 
@@ -108,7 +108,7 @@ actions!(
         CloseSettingsWindow,
         FocusSettingsSearch,
         ClearSettingsSearch,
-        AddServer
+        AddMachine
     ]
 );
 
@@ -219,7 +219,7 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     let window_drag = composition.window_movement.create();
     let permissions = composition.permissions.clone();
     let theme_registry = composition.theme_registry.clone();
-    let local_server = servers::offered_local_server(command_line_tool::offered(cx));
+    let local_core = machines::offered_local_machine(command_line_tool::offered(cx));
     // Settings returns where it last closed, on the Settings Section it showed, unless the
     // request names one.
     let remembered = super::remembered_view::settings_window(cx);
@@ -235,7 +235,7 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
                 Rc::clone(&window_drag),
                 permissions.clone(),
                 theme_registry.clone(),
-                local_server.clone(),
+                local_core.clone(),
                 window,
                 cx,
             );
@@ -284,17 +284,17 @@ fn reveal(scroll: &ScrollHandle, bounds: Bounds<Pixels>) -> bool {
 
 /// Opens Settings on Servers with `target`'s server selected. Selecting reads nothing from that
 /// server.
-pub(crate) fn open_server_settings(target: crate::ui::ServerTarget, cx: &mut App) {
-    open_or_activate(Some(SettingsSectionId::Servers), cx);
+pub(crate) fn open_machine_settings(target: crate::ui::MachineTarget, cx: &mut App) {
+    open_or_activate(Some(SettingsSectionId::Machines), cx);
     // An existing window selects the section in a deferred update, so the selection follows it.
     cx.defer(move |cx| {
         if let Some(settings) = open_settings_window(cx) {
             let _ = settings.update(cx, |settings, _, cx| {
-                settings.select_server(
+                settings.select_machine(
                     match target {
-                        crate::ui::ServerTarget::Local => server_list::ServerChoice::Local,
-                        crate::ui::ServerTarget::Direct(route) => {
-                            server_list::ServerChoice::Direct(route)
+                        crate::ui::MachineTarget::Local => machine_list::MachineChoice::Local,
+                        crate::ui::MachineTarget::Direct(route) => {
+                            machine_list::MachineChoice::Direct(route)
                         }
                     },
                     cx,
@@ -307,15 +307,15 @@ pub(crate) fn open_server_settings(target: crate::ui::ServerTarget, cx: &mut App
 /// Opens Settings on Servers and starts the one Update Server journey there, for a surface that
 /// offers it elsewhere, such as the incompatible-server screen or the status item. The journey
 /// reads the server first and asks before it changes anything.
-pub(crate) fn open_server_update(cx: &mut App) {
-    open_or_activate(Some(SettingsSectionId::Servers), cx);
+pub(crate) fn open_core_update(cx: &mut App) {
+    open_or_activate(Some(SettingsSectionId::Machines), cx);
     // An existing window selects the section in a deferred update, so the request follows it.
     cx.defer(|cx| {
         if let Some(settings) = open_settings_window(cx) {
             let _ = settings.update(cx, |settings, _, cx| {
                 // The journey updates the local server, so its detail is the one presented.
-                settings.select_server(server_list::ServerChoice::Local, cx);
-                settings.request_server_update(cx);
+                settings.select_machine(machine_list::MachineChoice::Local, cx);
+                settings.request_core_update(cx);
             });
         }
     });
@@ -325,24 +325,24 @@ pub(crate) fn open_server_update(cx: &mut App) {
 /// link, such as one the operating system delivered, and `host` fills in an SSH host. Neither
 /// sets up nor joins: the person reviews the value and confirms first. An invitation wins when
 /// both are given, because the person followed that link most recently.
-pub(crate) fn open_add_server(invitation: Option<String>, host: Option<String>, cx: &mut App) {
-    open_or_activate(Some(SettingsSectionId::Servers), cx);
+pub(crate) fn open_add_machine(invitation: Option<String>, host: Option<String>, cx: &mut App) {
+    open_or_activate(Some(SettingsSectionId::Machines), cx);
     // An existing window selects the section in a deferred update, so the request follows it.
     cx.defer(move |cx| {
         if let Some(settings) = open_settings_window(cx) {
             let _ = settings.update(cx, |settings, window, cx| {
                 let request = match (invitation, host) {
-                    (Some(link), _) => AddServerRequest::Invitation(Some(link.into())),
-                    (None, host) => AddServerRequest::Ssh(host),
+                    (Some(link), _) => AddMachineRequest::Invitation(Some(link.into())),
+                    (None, host) => AddMachineRequest::Ssh(host),
                 };
-                settings.begin_add_server(request, window, cx);
+                settings.begin_add_machine(request, window, cx);
             });
         }
     });
 }
 
 /// Where Add Server starts, and the value it fills in.
-pub(crate) enum AddServerRequest {
+pub(crate) enum AddMachineRequest {
     Ssh(Option<String>),
     /// The invitation text is wiped when the request drops.
     Invitation(Option<zeroize::Zeroizing<String>>),
@@ -388,7 +388,7 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &OpenKeyboardShortcuts, cx| {
         open_or_activate(Some(SettingsSectionId::Keybindings), cx);
     });
-    cx.on_action(|_: &AddServer, cx| open_add_server(None, None, cx));
+    cx.on_action(|_: &AddMachine, cx| open_add_machine(None, None, cx));
     super::application_commands::init(cx);
 }
 
@@ -441,49 +441,49 @@ pub(crate) struct SettingsWindow {
     shortcuts: ShortcutRows,
     /// The read-only settings file in the Advanced section.
     settings_file: advanced::SettingsFileView,
-    server_location: server_location::ServerLocation,
+    machine_location: machine_location::MachineLocation,
     end_all_sessions: end_sessions::EndAllSessions,
     /// The selected server's direct network access and paired devices.
     direct_access: direct_access::DirectAccess,
     /// The local server this window presents. `None` omits the Servers section.
-    local_server: Option<servers::LocalServerRow>,
-    local_operations: Entity<local_operations::LocalServerOperations>,
+    local_core: Option<machines::LocalMachineRow>,
+    local_operations: Entity<local_operations::LocalCoreOperations>,
     /// The service that runs the local server. `None` omits its row.
-    server_service: Option<servers::ServerServiceRow>,
+    core_service: Option<machines::MachineServiceRow>,
     /// The server version and its update journey. `None` omits its row.
-    server_update: Option<server_update::ServerUpdateRow>,
+    core_update: Option<core_update::MachineUpdateRow>,
     /// This computer's command for the local server's identity. `None` omits its row.
     command_line_tool: Option<command_line_tool::CommandLineToolRow>,
     /// The desktop's direct network connections. `None` omits their rows.
     direct_routes: Option<direct_routes::DirectRouteRows>,
     /// The server the person selected in the Servers list. A server no longer listed gives way
     /// to the local server or the first saved one.
-    selected_server: Option<server_list::ServerChoice>,
+    selected_machine: Option<machine_list::MachineChoice>,
     /// The server the current search shows, which stands in for the person's choice only while
     /// the query lasts.
-    search_selected_server: Option<server_list::ServerChoice>,
+    search_selected_machine: Option<machine_list::MachineChoice>,
     /// The All Servers list's one keyboard stop. The arrow keys move its selection.
-    server_list_focus: FocusHandle,
+    machine_list_focus: FocusHandle,
     /// The keyboard stop of All Servers' Add Server row.
-    add_server_focus: FocusHandle,
+    add_machine_focus: FocusHandle,
     /// The servers last reported to the retained selection, so only a change reports again.
-    reconciled_servers: Option<Vec<crate::server_context::ServerKey>>,
+    reconciled_machines: Option<Vec<crate::core_context::MachineKey>>,
     /// The Servers notices the person hid in this window.
     hidden_notices: notices::HiddenNotices,
     /// Follows the presented server's facts, so a server SpaceTerm later disconnects from shows
     /// them.
-    server_facts: server_facts::FactsFollower,
+    machine_facts: machine_facts::FactsFollower,
     /// Check Now underway on the Server row, for the server it was asked for.
-    version_check: Option<server_card::VersionCheck>,
+    version_check: Option<machine_card::VersionCheck>,
     /// A read of the selected server, which the Server row shows as Checking once it runs long.
-    check_progress: server_card::DelayedProgress,
+    check_progress: machine_card::DelayedProgress,
     /// An operation changing the selected server, which the Server row names once it runs long.
-    operation_progress: server_card::DelayedProgress,
+    operation_progress: machine_card::DelayedProgress,
     /// The status last observed for each listed server, which a server SpaceTerm isn't connected
     /// to presents. It grants nothing: what each server offers follows its live connection.
     retained_status: std::collections::BTreeMap<
-        crate::server_context::ServerKey,
-        crate::server_context::ObservedServerStatus,
+        crate::core_context::MachineKey,
+        crate::core_context::ObservedCoreStatus,
     >,
     /// Each paired server's Status, Stop, Restart and Update work, and its last outcome.
     remote_admin: remote_admin::RemoteAdministration,
@@ -560,7 +560,7 @@ fn row_feature(row: SettingsRowId) -> Option<HostFeature> {
 /// How one row returns to its default.
 #[derive(Clone, Debug)]
 enum RowReset {
-    ServerLocation,
+    MachineLocation,
     Appearance(ResetTarget),
     Update,
     Clipboard,
@@ -586,7 +586,7 @@ impl SettingsWindow {
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         permissions: PermissionCapabilities,
         theme_registry: ZedThemeRegistry,
-        local_server: servers::OfferedLocalServer,
+        local_core: machines::OfferedLocalMachine,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -738,7 +738,7 @@ impl SettingsWindow {
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
         let shortcuts = ShortcutRows::new(window, cx);
         let settings_file = advanced::SettingsFileView::new(window, cx);
-        let server_location = server_location::ServerLocation::new(window, cx);
+        let machine_location = machine_location::MachineLocation::new(window, cx);
         let permission_changes =
             PermissionAccessChanges::observe(permissions.system_permissions.as_ref(), cx);
         // A Permission Setup reports its progress and the grant it finds while this window waits
@@ -751,7 +751,7 @@ impl SettingsWindow {
             })
             .detach();
         }
-        let direct_routes = crate::ui::direct_servers::installed(cx)
+        let direct_routes = crate::ui::direct_machines::installed(cx)
             .map(|connections| direct_routes::DirectRouteRows::new(connections, cx));
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let this_computer = presentation.wording().this_computer;
@@ -759,8 +759,8 @@ impl SettingsWindow {
             .into_iter()
             .filter(|section| {
                 section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
-                    && (*section != SettingsSectionId::Servers
-                        || local_server.is_some()
+                    && (*section != SettingsSectionId::Machines
+                        || local_core.is_some()
                         || direct_routes.is_some())
             })
             .collect();
@@ -772,28 +772,28 @@ impl SettingsWindow {
                 row_feature(*row).is_some_and(|feature| !presentation.has_feature(feature))
                     || (*row == SettingsRowId::BackgroundImage && !presents_background_image)
                     // Only this computer's service starts a server on its own.
-                    || (*row == SettingsRowId::ServerAutoStart
-                        && local_server
+                    || (*row == SettingsRowId::CoreAutoStart
+                        && local_core
                             .as_ref()
                             .is_none_or(|offered| offered.service.is_none()))
                     || (*row == SettingsRowId::CommandLineTool
-                        && local_server
+                        && local_core
                             .as_ref()
                             .is_none_or(|offered| offered.command_line_tool.is_none()))
             })
             .collect();
-        let local_operations = local_operations::LocalServerOperations::get(cx);
+        let local_operations = local_operations::LocalCoreOperations::get(cx);
         cx.subscribe(&local_operations, |settings, _, operation, cx| {
             settings.synchronize_local_operations(cx);
-            settings.check_local_server(cx);
+            settings.check_local_core(cx);
             // The operation may have moved the launcher, or failed to.
             settings.reread_command_line_tool(cx);
             match operation {
-                local_operations::CompletedOperation::Service => settings.check_server_update(cx),
-                local_operations::CompletedOperation::Update => settings.check_server_service(cx),
+                local_operations::CompletedOperation::Service => settings.check_core_update(cx),
+                local_operations::CompletedOperation::Update => settings.check_core_service(cx),
                 local_operations::CompletedOperation::Elsewhere => {
-                    settings.reread_server_service(cx);
-                    settings.reread_server_update(cx);
+                    settings.reread_core_service(cx);
+                    settings.reread_core_update(cx);
                 }
             }
             settings.continue_requested_update(cx);
@@ -835,48 +835,46 @@ impl SettingsWindow {
             theme_store,
             shortcuts,
             settings_file,
-            server_location,
+            machine_location,
             end_all_sessions: end_sessions::EndAllSessions::new(),
             direct_access: direct_access::DirectAccess::new(),
             local_operations,
-            server_service: local_server
+            core_service: local_core
                 .as_ref()
                 .and_then(|offered| offered.service.clone())
-                .map(servers::ServerServiceRow::new),
-            server_update: local_server
+                .map(machines::MachineServiceRow::new),
+            core_update: local_core
                 .as_ref()
                 .and_then(|offered| offered.update.clone())
-                .map(|control| {
-                    server_update::ServerUpdateRow::new(control, window.window_handle())
-                }),
-            command_line_tool: local_server
+                .map(|control| core_update::MachineUpdateRow::new(control, window.window_handle())),
+            command_line_tool: local_core
                 .as_ref()
                 .and_then(|offered| offered.command_line_tool.clone())
                 .map(command_line_tool::CommandLineToolRow::new),
-            local_server: local_server
-                .map(|offered| servers::LocalServerRow::new(offered.connection)),
+            local_core: local_core
+                .map(|offered| machines::LocalMachineRow::new(offered.connection)),
             direct_routes,
-            selected_server: None,
-            search_selected_server: None,
-            server_list_focus: cx.focus_handle().tab_stop(true),
-            add_server_focus: cx.focus_handle().tab_stop(true),
-            reconciled_servers: None,
+            selected_machine: None,
+            search_selected_machine: None,
+            machine_list_focus: cx.focus_handle().tab_stop(true),
+            add_machine_focus: cx.focus_handle().tab_stop(true),
+            reconciled_machines: None,
             hidden_notices: notices::HiddenNotices::default(),
-            server_facts: server_facts::FactsFollower::default(),
+            machine_facts: machine_facts::FactsFollower::default(),
             version_check: None,
-            check_progress: server_card::DelayedProgress::default(),
-            operation_progress: server_card::DelayedProgress::default(),
+            check_progress: machine_card::DelayedProgress::default(),
+            operation_progress: machine_card::DelayedProgress::default(),
             retained_status: std::collections::BTreeMap::new(),
             remote_admin: remote_admin::RemoteAdministration::default(),
             this_computer,
         };
         // Servers and Git present the retained selection, which loads after the window opens.
-        cx.observe_global::<server_selection::ServerSelection>(|settings, cx| {
-            settings.follow_server_selection(cx);
+        cx.observe_global::<machine_selection::MachineSelection>(|settings, cx| {
+            settings.follow_machine_selection(cx);
         })
         .detach();
-        settings.follow_server_selection(cx);
-        settings.reconcile_servers(cx);
+        settings.follow_machine_selection(cx);
+        settings.reconcile_machines(cx);
         settings.synchronize_local_operations(cx);
         settings
     }
@@ -885,19 +883,23 @@ impl SettingsWindow {
     /// status is current without opening Settings asking the server anything.
     fn section_presented(&mut self, previous: SettingsSectionId, cx: &mut Context<Self>) {
         // Servers and Git both show the server picker, whose statuses come from these reads.
-        let picker =
-            |section| matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git);
+        let picker = |section| {
+            matches!(
+                section,
+                SettingsSectionId::Machines | SettingsSectionId::Git
+            )
+        };
         if picker(self.active_section) && !picker(previous) {
-            self.check_local_server(cx);
-            self.check_server_service(cx);
-            self.check_server_update(cx);
+            self.check_local_core(cx);
+            self.check_core_service(cx);
+            self.check_core_update(cx);
         }
-        if self.active_section == SettingsSectionId::Servers
-            && previous != SettingsSectionId::Servers
+        if self.active_section == SettingsSectionId::Machines
+            && previous != SettingsSectionId::Machines
         {
             self.check_command_line_tool(cx);
         }
-        self.sync_server_location(cx);
+        self.sync_machine_location(cx);
     }
 
     fn close(&mut self, _: &CloseSettingsWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -908,7 +910,7 @@ impl SettingsWindow {
         // Closing the window is the person's response to what it shows, if it shows the
         // failure. Quitting is not.
         if matches!(intent, CloseIntent::Window(_)) {
-            self.server_location.answered();
+            self.machine_location.answered();
         }
         if !matches!(
             self.close_after_save.as_ref(),
@@ -1020,7 +1022,7 @@ impl SettingsWindow {
 
     /// The rows answering the query for the selected server, best first.
     fn search_matches(&self) -> Vec<SettingsRowId> {
-        self.server_search_matches(self.reachable_rows())
+        self.core_search_matches(self.reachable_rows())
     }
 
     fn matching_rows(&self) -> Vec<SettingsRowId> {
@@ -1036,7 +1038,7 @@ impl SettingsWindow {
 
     fn synchronize_search_results(&mut self) {
         let reachable = self.reachable_rows();
-        self.select_server_for_query(&reachable);
+        self.select_machine_for_query(&reachable);
         let matching = self.search_matches();
         self.revealed = if self.query.trim().is_empty() {
             None
@@ -1069,10 +1071,10 @@ impl SettingsWindow {
 
     /// How this row returns to its default, when it differs from it.
     fn pending_reset(&self, row: SettingsRowId, cx: &App) -> Option<RowReset> {
-        if row == SettingsRowId::ServerWorktreeLocation {
+        if row == SettingsRowId::MachineWorktreeLocation {
             return self
-                .server_location_differs()
-                .then_some(RowReset::ServerLocation);
+                .machine_location_differs()
+                .then_some(RowReset::MachineLocation);
         }
         if let SettingsRowId::Shortcut(command) = row {
             return self
@@ -1129,7 +1131,7 @@ impl SettingsWindow {
                 move |_, cx| {
                     let reset = reset.clone();
                     let _ = owner.update(cx, |settings, cx| match reset {
-                        RowReset::ServerLocation => settings.reset_server_location(cx),
+                        RowReset::MachineLocation => settings.reset_machine_location(cx),
                         RowReset::Appearance(target) => settings.editor.reset(target, cx),
                         RowReset::Update => settings.reset_update_preference(row, cx),
                         RowReset::Clipboard => settings.reset_clipboard_preference(row, cx),
@@ -1181,7 +1183,7 @@ impl SettingsWindow {
         let appearance = &settings.chrome;
         self.sync_scrollbar(cx);
         // Rendering the Location row marks it shown again.
-        self.server_location.render_begins();
+        self.machine_location.render_begins();
         let surface = div()
             .debug_selector(|| "settings-window-surface".to_owned())
             .key_context(SETTINGS_KEY_CONTEXT)
@@ -1212,7 +1214,7 @@ impl SettingsWindow {
                     .child(self.render_footer(&settings)),
             );
         // A failure the person can no longer see goes back to the Workspace Window.
-        self.server_location.release_unless_rendered();
+        self.machine_location.release_unless_rendered();
         ModalLayer::new(super::window_shell::render(content, window, cx)).into_any_element()
     }
 }
@@ -1227,11 +1229,14 @@ impl SettingsWindow {
     ) -> AnyElement {
         let section = self.active_section;
         // Servers and Git act on one server, which the same picker chooses on both.
-        let picker =
-            matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git).then(|| {
-                let flush = DetailHeading::toolbar_on_gutter(window, cx);
-                self.render_server_picker(&settings.chrome, flush, cx)
-            });
+        let picker = matches!(
+            section,
+            SettingsSectionId::Machines | SettingsSectionId::Git
+        )
+        .then(|| {
+            let flush = DetailHeading::toolbar_on_gutter(window, cx);
+            self.render_machine_picker(&settings.chrome, flush, cx)
+        });
         let close_owner = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
             let handle = window.window_handle();
@@ -1299,7 +1304,7 @@ impl SettingsWindow {
                     SettingsSectionId::Keybindings => IconName::Keyboard,
                     SettingsSectionId::Privacy => IconName::Shield,
                     SettingsSectionId::Git => IconName::GitBranch,
-                    SettingsSectionId::Servers => IconName::Terminal,
+                    SettingsSectionId::Machines => IconName::Terminal,
                     SettingsSectionId::Updates => IconName::Download,
                     SettingsSectionId::Advanced => IconName::Cog,
                 },
@@ -1465,9 +1470,9 @@ impl SettingsWindow {
                 }
             }
         }
-        let server_footnote = self.server_card_footnote(cx);
+        let core_footnote = self.machine_card_footnote(cx);
         let network_footnote = self.network_access_footnote(cx);
-        let git_footnote = self.server_git_footnote();
+        let git_footnote = self.core_git_footnote();
         self.row_bounds.borrow_mut().clear();
         let rendered = groups
             .into_iter()
@@ -1476,21 +1481,24 @@ impl SettingsWindow {
                 // mode and, under Auto, with the slot chosen above it. Its selector stays fixed.
                 let heading = if title == SettingsRowId::InstalledThemes.descriptor().group {
                     SharedString::new_static(self.installed_themes_title(cx))
-                } else if matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git) {
+                } else if matches!(
+                    section,
+                    SettingsSectionId::Machines | SettingsSectionId::Git
+                ) {
                     // A group acting on the selected server names it where the picker doesn't.
-                    self.server_group_heading(title)
+                    self.core_group_heading(title)
                 } else {
                     SharedString::new_static(title)
                 };
                 // A card whose rows can't be used now says why, and what to do.
                 let footnote = match (section, title) {
-                    (SettingsSectionId::Servers, server_list::SERVER_GROUP) => {
-                        server_footnote.clone()
+                    (SettingsSectionId::Machines, machine_list::CORE_GROUP) => {
+                        core_footnote.clone()
                     }
-                    (SettingsSectionId::Servers, server_list::NETWORK_GROUP) => {
+                    (SettingsSectionId::Machines, machine_list::NETWORK_GROUP) => {
                         network_footnote.clone()
                     }
-                    (SettingsSectionId::Git, server_list::GIT_SERVER_GROUP) => git_footnote.clone(),
+                    (SettingsSectionId::Git, machine_list::GIT_CORE_GROUP) => git_footnote.clone(),
                     _ => None,
                 };
                 let row_bounds = Rc::clone(&self.row_bounds);
@@ -1518,7 +1526,7 @@ impl SettingsWindow {
             .collect::<Vec<_>>();
         let notice = match section {
             SettingsSectionId::Themes => self.render_diagnostics_notice(appearance, cx),
-            SettingsSectionId::Servers => self.render_server_notices(appearance, cx),
+            SettingsSectionId::Machines => self.render_core_notices(appearance, cx),
             _ => None,
         };
         div()
@@ -1584,8 +1592,8 @@ impl SettingsWindow {
         } else {
             appearance
         };
-        if row == SettingsRowId::ServerStatus {
-            self.track_server_progress(cx);
+        if row == SettingsRowId::CoreStatus {
+            self.track_core_progress(cx);
         }
         let control = self.render_control(row, ends, content_appearance, window, cx);
         let mut rendered = FormRow::new(
@@ -1598,10 +1606,10 @@ impl SettingsWindow {
         .matched_indices(matched_indices)
         .highlighted(highlighted)
         .dimmed(self.row_dimmed(row));
-        if let Some((description, message)) = self.server_row_text(row, cx) {
+        if let Some((description, message)) = self.machine_row_text(row, cx) {
             rendered = rendered.description(description).message(message);
-            if row == SettingsRowId::ServerStatus {
-                rendered = rendered.status_line(self.server_progress_indicator(cx));
+            if row == SettingsRowId::CoreStatus {
+                rendered = rendered.status_line(self.core_progress_indicator(cx));
             }
         } else if row == SettingsRowId::UpdateStatus {
             rendered = rendered.description(self.update_status(cx).summary);
@@ -1668,14 +1676,14 @@ impl SettingsWindow {
             SettingsRowId::GitTool | SettingsRowId::GitHubCli => {
                 self.render_git_tool(row, appearance, cx)
             }
-            SettingsRowId::ServerWorktreeLocation => self.render_server_location(appearance, cx),
-            SettingsRowId::ServerStatus => self.render_server_status(appearance, cx),
-            SettingsRowId::ServerAutoStart => self.render_auto_start(appearance, cx),
+            SettingsRowId::MachineWorktreeLocation => self.render_machine_location(appearance, cx),
+            SettingsRowId::CoreStatus => self.render_core_status(appearance, cx),
+            SettingsRowId::CoreAutoStart => self.render_auto_start(appearance, cx),
             SettingsRowId::EndAllSessions => self.render_end_all_sessions(appearance, cx),
             SettingsRowId::NetworkAccess => self.render_network_access(appearance, cx),
             SettingsRowId::PairedDevices => self.render_paired_devices(appearance, cx),
-            SettingsRowId::AllServers => self.render_all_servers(ends, appearance, window, cx),
-            SettingsRowId::AddServer => self.render_add_server_row(ends, appearance, cx),
+            SettingsRowId::AllMachines => self.render_all_machines(ends, appearance, window, cx),
+            SettingsRowId::AddMachine => self.render_add_machine_row(ends, appearance, cx),
             SettingsRowId::CommandLineTool => self.render_command_line_tool(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
@@ -2482,7 +2490,7 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
-        SettingsRowId::AllServers | SettingsRowId::AddServer => FormRowLayout::Items,
+        SettingsRowId::AllMachines | SettingsRowId::AddMachine => FormRowLayout::Items,
         _ => FormRowLayout::Beside,
     }
 }
@@ -2499,12 +2507,12 @@ impl SettingsWindow {
         match row {
             // This account's service changes automatic start without a connection. Terminal
             // Sessions need the server itself.
-            SettingsRowId::EndAllSessions => !self.selected_server_live(),
+            SettingsRowId::EndAllSessions => !self.selected_machine_live(),
             SettingsRowId::NetworkAccess | SettingsRowId::PairedDevices => {
                 !self.network_access_live()
             }
-            SettingsRowId::GitTool | SettingsRowId::ServerWorktreeLocation => {
-                self.server_git_footnote().is_some()
+            SettingsRowId::GitTool | SettingsRowId::MachineWorktreeLocation => {
+                self.core_git_footnote().is_some()
             }
             _ => false,
         }
@@ -2512,7 +2520,7 @@ impl SettingsWindow {
 
     /// The one-line description of a Servers or Git row that acts on the selected server, and
     /// the error under its control, if any.
-    fn server_row_text(
+    fn machine_row_text(
         &self,
         row: SettingsRowId,
         cx: &App,
@@ -2521,8 +2529,8 @@ impl SettingsWindow {
         Some(match row {
             // The Server row keeps one line under its label; longer explanations go in the card's
             // footnote.
-            SettingsRowId::ServerStatus => (self.server_subtitle(cx), None),
-            SettingsRowId::ServerAutoStart => (
+            SettingsRowId::CoreStatus => (self.core_subtitle(cx), None),
+            SettingsRowId::CoreAutoStart => (
                 self.auto_start_description(),
                 error(self.auto_start_error()),
             ),
@@ -2541,7 +2549,7 @@ impl SettingsWindow {
                 self.no_paired_devices_note()
                     .map(|text| (text, CaptionTone::Guidance)),
             ),
-            SettingsRowId::ServerWorktreeLocation => (self.server_location_caption(cx).0, None),
+            SettingsRowId::MachineWorktreeLocation => (self.machine_location_caption(cx).0, None),
             SettingsRowId::CommandLineTool => {
                 let presentation = self.command_line_tool_presentation(cx)?;
                 (presentation.explanation, presentation.caption)

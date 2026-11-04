@@ -10,10 +10,10 @@ use crate::status_menu::{
     model::{Command, Item, Presentation, State},
     worker::{Event, Request, Worker},
 };
-use crate::ui::server_control_window::{self, Operation, Step};
+use crate::ui::core_control_window::{self, Operation, Step};
 use gpui::{App, AppContext as _};
-use spaceterm_server::{
-    ServerError,
+use spaceterm_core::{
+    CoreError,
     service::{
         Service,
         control::{Action, Controller},
@@ -26,7 +26,7 @@ use std::{
 };
 use zbus::{
     blocking::{Connection, connection::Builder},
-    object_server::SignalEmitter,
+    object_core::SignalEmitter,
     zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value},
 };
 
@@ -119,7 +119,7 @@ pub(crate) fn install(
         });
     }
     worker.send(Request::Refresh);
-    crate::status_menu::follow_local_server(worker.changes(), cx);
+    crate::status_menu::follow_local_core(worker.changes(), cx);
     let item = Rc::new(LinuxStatusItem {
         name,
         controller,
@@ -192,7 +192,7 @@ impl LinuxStatusItem {
                 };
                 match result {
                     Ok(status) => status_menu::operation_succeeded(cx, status),
-                    Err(ServerError::AuthorizationRequired) => {
+                    Err(CoreError::AuthorizationRequired) => {
                         self.open_control(operation, Step::Authorize, cx);
                     }
                     Err(error) => self.open_control(operation, Step::Failed(error), cx),
@@ -224,7 +224,7 @@ impl LinuxStatusItem {
                     // Settings owns the one journey, which reads the server again and asks first.
                     Command::Update => {
                         crate::app::leave_menu_only(cx);
-                        crate::ui::settings_window::open_server_update(cx);
+                        crate::ui::settings_window::open_core_update(cx);
                     }
                     // The client's own quit policy decides, including its confirmation.
                     Command::Quit => cx.dispatch_action(&crate::app::QuitApplication),
@@ -260,7 +260,7 @@ impl LinuxStatusItem {
     fn open_control(self: &Rc<Self>, operation: Operation, step: Step, cx: &mut App) {
         self.set_asking(true);
         let item = Rc::clone(self);
-        let opened = server_control_window::open(
+        let opened = core_control_window::open(
             self.controller.clone(),
             operation,
             step,
@@ -300,11 +300,11 @@ fn publish(connection: &Connection, shared: &Shared, presentation: Presentation)
         published.revision = published.revision.wrapping_add(1);
         published.revision
     };
-    let server = connection.object_server();
-    if let Ok(menu) = server.interface::<_, Menu>(MENU_PATH) {
+    let core = connection.object_core();
+    if let Ok(menu) = core.interface::<_, Menu>(MENU_PATH) {
         let _ = zbus::block_on(Menu::layout_updated(menu.signal_emitter(), revision, 0));
     }
-    if let Ok(item) = server.interface::<_, StatusItem>(ITEM_PATH) {
+    if let Ok(item) = core.interface::<_, StatusItem>(ITEM_PATH) {
         let emitter = item.signal_emitter();
         let _ = zbus::block_on(StatusItem::new_title(emitter));
         let _ = zbus::block_on(StatusItem::new_tool_tip(emitter));
@@ -456,7 +456,7 @@ impl Menu {
         let published = lock(&self.shared);
         let presentation = &published.presentation;
         let mut rows = vec![
-            (HEADER, label(&presentation.server, false)),
+            (HEADER, label(&presentation.core, false)),
             (STATE, label(presentation.state, false)),
         ];
         if let Some(explanation) = &presentation.explanation {

@@ -90,7 +90,7 @@ fn connection_usage_is_validated_before_input_or_native_credentials() {
 }
 
 #[test]
-fn machine_only_commands_reject_remote_routes_before_contacting_a_server() {
+fn machine_only_commands_reject_remote_routes_before_contacting_a_machine() {
     for (args, command) in [
         (&["server", "start"][..], "server.start"),
         (&["server", "permissions"][..], "server.permissions"),

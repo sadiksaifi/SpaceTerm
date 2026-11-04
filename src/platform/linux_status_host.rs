@@ -129,7 +129,7 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
     use std::time::Duration;
-    use zbus::object_server::SignalEmitter;
+    use zbus::object_core::SignalEmitter;
 
     /// A session bus of the test's own, so nothing reaches the person's desktop session.
     struct PrivateBus {
@@ -227,7 +227,7 @@ mod tests {
             self.hosted.store(present, Ordering::SeqCst);
             let watcher = self
                 .connection
-                .object_server()
+                .object_core()
                 .interface::<_, Watcher>(WATCHER_PATH)
                 .unwrap();
             let emitter = watcher.signal_emitter();

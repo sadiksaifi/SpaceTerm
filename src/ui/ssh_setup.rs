@@ -265,7 +265,7 @@ const fn refusal_detail(kind: RefusalKind) -> &'static str {
             "This SpaceTerm installation doesn\u{2019}t include a server package for this computer. Reinstall SpaceTerm, then try again."
         }
         RefusalKind::InvalidArtifact => "The server package failed verification.",
-        RefusalKind::ServerChanged => {
+        RefusalKind::MachineChanged => {
             "The server changed during setup. Try again to set up the server now running there."
         }
         RefusalKind::InvalidEndpoint => "The server didn\u{2019}t accept that network address.",

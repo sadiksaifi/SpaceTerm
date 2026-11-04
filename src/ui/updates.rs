@@ -3,11 +3,11 @@
 
 mod dropdown;
 mod launch;
-pub(crate) mod server_rows;
+pub(crate) mod machine_rows;
 
 pub(super) use dropdown::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
-pub(crate) use server_rows::{LocalUpdateFacts, LocalUpdateObservation, install_local_updates};
+pub(crate) use machine_rows::{LocalUpdateFacts, LocalUpdateObservation, install_local_updates};
 
 use gpui::{
     AnyWindowHandle, App, BorrowAppContext, Context, Entity, Global, SharedString, Subscription,
@@ -23,7 +23,7 @@ use super::settings_window::SettingsWindow;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::updates::policy::UpdateStage;
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
-use server_rows::{ServerNeed, ServerUpdateAction, ServerUpdateRow};
+use machine_rows::{CoreNeed, CoreUpdateAction, MachineUpdateRow};
 
 actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
 
@@ -886,7 +886,7 @@ enum PillCommand {
     /// The client's step, or nothing while the client's update works on its own.
     Client(Option<ControlCommand>),
     /// One server's existing Settings journey.
-    Server(ServerUpdateAction),
+    Core(CoreUpdateAction),
     /// The pill has no leading part, so it opens the Updates menu.
     Menu,
 }
@@ -899,24 +899,24 @@ enum UpdatePill {
     /// records whether one of them offers a verified update.
     Client {
         step: ControlPresentation,
-        servers: usize,
+        machines: usize,
         offered: bool,
     },
     /// One server's update or attention leads.
-    Server {
+    Core {
         name: SharedString,
         detail: SharedString,
-        action: ServerUpdateAction,
+        action: CoreUpdateAction,
     },
     /// Several servers ask for action. Updates happen one server at a time, so the menu chooses.
     /// `offered` records whether one of them offers a verified update.
-    Servers { count: usize, offered: bool },
+    Machines { count: usize, offered: bool },
 }
 
 impl UpdatePill {
     /// Servers ask for action only through typed needs, never through offline or unknown status.
-    fn resolve(client: Option<ControlPresentation>, servers: &[ServerUpdateRow]) -> Option<Self> {
-        let mut asking = servers.iter().filter_map(|row| {
+    fn resolve(client: Option<ControlPresentation>, machines: &[MachineUpdateRow]) -> Option<Self> {
+        let mut asking = machines.iter().filter_map(|row| {
             row.action
                 .as_ref()
                 .filter(|action| action.need().is_some())
@@ -925,49 +925,49 @@ impl UpdatePill {
         let count = asking.clone().count();
         let offered = asking
             .clone()
-            .any(|(_, action)| action.need() == Some(ServerNeed::Update));
+            .any(|(_, action)| action.need() == Some(CoreNeed::Update));
         if let Some(step) = client {
             return Some(Self::Client {
                 step,
-                servers: count,
+                machines: count,
                 offered,
             });
         }
         match count {
             0 => None,
-            1 => asking.next().map(|(row, action)| Self::Server {
+            1 => asking.next().map(|(row, action)| Self::Core {
                 name: row.label.clone(),
                 detail: row.detail.clone(),
                 action: action.clone(),
             }),
-            count => Some(Self::Servers { count, offered }),
+            count => Some(Self::Machines { count, offered }),
         }
     }
 
     fn label(&self) -> SharedString {
         match self {
             Self::Client { step, .. } => step.pill.clone(),
-            Self::Server { action, .. } => match action.need() {
-                Some(ServerNeed::Attention) => "Server Needs Attention".into(),
+            Self::Core { action, .. } => match action.need() {
+                Some(CoreNeed::Attention) => "Server Needs Attention".into(),
                 _ => "Update Server".into(),
             },
-            Self::Servers { count, .. } => format!("Review {count} Servers").into(),
+            Self::Machines { count, .. } => format!("Review {count} Servers").into(),
         }
     }
 
     /// The full sentence behind the compact label, for the tooltip and assistive technology.
     fn description(&self) -> SharedString {
         match self {
-            Self::Client { step, servers, .. } => {
+            Self::Client { step, machines, .. } => {
                 let step = step.status.clone().unwrap_or_else(|| step.label.clone());
-                match servers {
+                match machines {
                     0 => step,
                     1 => format!("{step}. A server needs action in Updates.").into(),
                     count => format!("{step}. {count} servers need action in Updates.").into(),
                 }
             }
-            Self::Server { name, detail, .. } => format!("{name}: {detail}").into(),
-            Self::Servers { count, .. } => format!("{count} servers need action").into(),
+            Self::Core { name, detail, .. } => format!("{name}: {detail}").into(),
+            Self::Machines { count, .. } => format!("{count} servers need action").into(),
         }
     }
 
@@ -979,10 +979,10 @@ impl UpdatePill {
                 PillTone::Warning
             }
             Self::Client { step, offered, .. } if step.prominent || *offered => PillTone::Primary,
-            Self::Server { action, .. } if action.need() == Some(ServerNeed::Attention) => {
+            Self::Core { action, .. } if action.need() == Some(CoreNeed::Attention) => {
                 PillTone::Warning
             }
-            Self::Server { .. } | Self::Servers { offered: true, .. } => PillTone::Primary,
+            Self::Core { .. } | Self::Machines { offered: true, .. } => PillTone::Primary,
             _ => PillTone::Neutral,
         }
     }
@@ -990,7 +990,7 @@ impl UpdatePill {
     fn glyph(&self) -> Option<ControlGlyph> {
         match self {
             Self::Client { step, .. } => Some(step.glyph),
-            Self::Server { action, .. } if action.need() == Some(ServerNeed::Attention) => {
+            Self::Core { action, .. } if action.need() == Some(CoreNeed::Attention) => {
                 Some(ControlGlyph::Warning)
             }
             _ => None,
@@ -1000,14 +1000,14 @@ impl UpdatePill {
     fn command(&self) -> PillCommand {
         match self {
             Self::Client { step, .. } => PillCommand::Client(step.command),
-            Self::Server { action, .. } => PillCommand::Server(action.clone()),
-            Self::Servers { .. } => PillCommand::Menu,
+            Self::Core { action, .. } => PillCommand::Core(action.clone()),
+            Self::Machines { .. } => PillCommand::Menu,
         }
     }
 
     /// Whether the chevron carries a dot for servers waiting behind the client's step.
     fn marked(&self) -> bool {
-        matches!(self, Self::Client { servers, .. } if *servers > 0)
+        matches!(self, Self::Client { machines, .. } if *machines > 0)
     }
 }
 
@@ -1015,7 +1015,7 @@ impl UpdatePill {
 mod tests {
     use super::*;
     use crate::appearance::{Appearance, builtin_chrome_base};
-    use crate::ui::ServerTarget;
+    use crate::ui::MachineTarget;
 
     mod offer_tests;
 
@@ -1175,8 +1175,8 @@ mod tests {
         }
     }
 
-    fn server(name: &str, action: ServerUpdateAction) -> ServerUpdateRow {
-        ServerUpdateRow {
+    fn core(name: &str, action: CoreUpdateAction) -> MachineUpdateRow {
+        MachineUpdateRow {
             label: format!("{name} · account 501").into(),
             detail: "status".into(),
             action: Some(action),
@@ -1184,16 +1184,16 @@ mod tests {
     }
 
     /// Offline, unknown, unauthorized, and up-to-date servers keep their rows in the menu only.
-    fn quiet_servers() -> Vec<ServerUpdateRow> {
+    fn quiet_machines() -> Vec<MachineUpdateRow> {
         vec![
-            server("local", ServerUpdateAction::Settings(ServerTarget::Local)),
-            server(
+            core("local", CoreUpdateAction::Settings(MachineTarget::Local)),
+            core(
                 "offline",
-                ServerUpdateAction::Settings(ServerTarget::Direct([6; 32])),
+                CoreUpdateAction::Settings(MachineTarget::Direct([6; 32])),
             ),
-            server(
+            core(
                 "paired",
-                ServerUpdateAction::Settings(ServerTarget::Direct([7; 32])),
+                CoreUpdateAction::Settings(MachineTarget::Direct([7; 32])),
             ),
         ]
     }
@@ -1201,12 +1201,12 @@ mod tests {
     fn pill(
         client: Option<UpdateState>,
         reminder: Option<UpdateStage>,
-        servers: &[ServerUpdateRow],
+        machines: &[MachineUpdateRow],
     ) -> Option<(String, PillTone, Option<ControlGlyph>, PillCommand)> {
         let client = client
             .and_then(resolve)
             .map(|presentation| presentation.remind(reminder));
-        UpdatePill::resolve(client, servers).map(|pill| {
+        UpdatePill::resolve(client, machines).map(|pill| {
             (
                 pill.label().to_string(),
                 pill.tone(),
@@ -1217,8 +1217,8 @@ mod tests {
     }
 
     #[test]
-    fn pill_should_hide_until_the_client_or_a_server_asks_for_action() {
-        assert_eq!(pill(None, None, &quiet_servers()), None);
+    fn pill_should_hide_until_the_client_or_a_core_asks_for_action() {
+        assert_eq!(pill(None, None, &quiet_machines()), None);
         assert_eq!(pill(Some(UpdateState::UpToDate), None, &[]), None);
     }
 
@@ -1302,7 +1302,7 @@ mod tests {
         ];
         for (state, reminder, label, tone, glyph, command) in cases {
             assert_eq!(
-                pill(Some(state.clone()), reminder, &quiet_servers()),
+                pill(Some(state.clone()), reminder, &quiet_machines()),
                 Some((
                     label.to_owned(),
                     tone,
@@ -1315,16 +1315,16 @@ mod tests {
     }
 
     #[test]
-    fn pill_should_lead_with_one_server_and_open_the_menu_for_several() {
-        let update = server("local", ServerUpdateAction::Local);
-        let attention = server(
+    fn pill_should_lead_with_one_machine_and_open_the_menu_for_several() {
+        let update = core("local", CoreUpdateAction::Local);
+        let attention = core(
             "penguin",
-            ServerUpdateAction::Review(ServerTarget::Direct([3; 32])),
+            CoreUpdateAction::Review(MachineTarget::Direct([3; 32])),
         );
-        let with = |row: &ServerUpdateRow| {
-            let mut servers = quiet_servers();
-            servers.push(row.clone());
-            servers
+        let with = |row: &MachineUpdateRow| {
+            let mut machines = quiet_machines();
+            machines.push(row.clone());
+            machines
         };
 
         assert_eq!(
@@ -1333,7 +1333,7 @@ mod tests {
                 "Update Server".to_owned(),
                 PillTone::Primary,
                 None,
-                PillCommand::Server(ServerUpdateAction::Local)
+                PillCommand::Core(CoreUpdateAction::Local)
             ))
         );
         assert_eq!(
@@ -1342,7 +1342,7 @@ mod tests {
                 "Server Needs Attention".to_owned(),
                 PillTone::Warning,
                 Some(ControlGlyph::Warning),
-                PillCommand::Server(ServerUpdateAction::Review(ServerTarget::Direct([3; 32])))
+                PillCommand::Core(CoreUpdateAction::Review(MachineTarget::Direct([3; 32])))
             ))
         );
         let mut both = with(&update);
@@ -1359,11 +1359,11 @@ mod tests {
 
         // The client's step leads, and the chevron marks the servers waiting in the menu.
         let ready = UpdateState::Ready { version: version() };
-        let client = |servers: &[ServerUpdateRow]| {
-            UpdatePill::resolve(resolve(ready.clone()), servers).map(|pill| pill.marked())
+        let client = |machines: &[MachineUpdateRow]| {
+            UpdatePill::resolve(resolve(ready.clone()), machines).map(|pill| pill.marked())
         };
         assert_eq!(client(&both), Some(true));
-        assert_eq!(client(&quiet_servers()), Some(false));
+        assert_eq!(client(&quiet_machines()), Some(false));
         assert_eq!(
             pill(Some(ready.clone()), None, &both).map(|pill| pill.0),
             Some("Install 0.4.2".to_owned())
@@ -1584,7 +1584,7 @@ mod tests {
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        cx.update(server_rows::testing::install_up_to_date);
+        cx.update(machine_rows::testing::install_up_to_date);
         let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
         updates.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(UpdateEvent::Available(version()));
@@ -1638,7 +1638,7 @@ mod tests {
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        cx.update(server_rows::testing::install_up_to_date);
+        cx.update(machine_rows::testing::install_up_to_date);
         let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
         let mut document = crate::settings::SettingsDocument::default();
         document.updates.automatic_downloads = false;
@@ -1779,7 +1779,7 @@ mod tests {
 
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        cx.update(server_rows::testing::install_up_to_date);
+        cx.update(machine_rows::testing::install_up_to_date);
         let (host, cx) = cx.add_window_view(|_, _| InstallAlertHost);
         let _handle = cx.update(|window, cx| {
             host.update(cx, |_, cx| {

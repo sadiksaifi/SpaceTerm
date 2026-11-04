@@ -12,7 +12,7 @@ use super::sidebar_motion::SidebarFrame;
 use super::workspace_sidebar::SidebarLayout;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use crate::appearance::Color;
-use crate::domain::ServerConnectionPhase;
+use crate::domain::MachineConnectionPhase;
 
 pub(super) const TOGGLE_SIZE: ButtonSize = ButtonSize::Regular;
 
@@ -402,12 +402,12 @@ impl WorkspaceChromeStatus {
         Self::Failed,
     ];
 
-    pub(super) fn resolve(remote_connection_phase: Option<ServerConnectionPhase>) -> Option<Self> {
+    pub(super) fn resolve(remote_connection_phase: Option<MachineConnectionPhase>) -> Option<Self> {
         remote_connection_phase.map(|phase| match phase {
-            ServerConnectionPhase::Connected => Self::Connected,
-            ServerConnectionPhase::Reconnecting => Self::Reconnecting,
-            ServerConnectionPhase::Disconnected => Self::Disconnected,
-            ServerConnectionPhase::Failed => Self::Failed,
+            MachineConnectionPhase::Connected => Self::Connected,
+            MachineConnectionPhase::Reconnecting => Self::Reconnecting,
+            MachineConnectionPhase::Disconnected => Self::Disconnected,
+            MachineConnectionPhase::Failed => Self::Failed,
         })
     }
 
@@ -792,18 +792,21 @@ mod tests {
         assert_eq!(WorkspaceChromeStatus::resolve(None), None);
         for (phase, status) in [
             (
-                ServerConnectionPhase::Connected,
+                MachineConnectionPhase::Connected,
                 WorkspaceChromeStatus::Connected,
             ),
             (
-                ServerConnectionPhase::Reconnecting,
+                MachineConnectionPhase::Reconnecting,
                 WorkspaceChromeStatus::Reconnecting,
             ),
             (
-                ServerConnectionPhase::Disconnected,
+                MachineConnectionPhase::Disconnected,
                 WorkspaceChromeStatus::Disconnected,
             ),
-            (ServerConnectionPhase::Failed, WorkspaceChromeStatus::Failed),
+            (
+                MachineConnectionPhase::Failed,
+                WorkspaceChromeStatus::Failed,
+            ),
         ] {
             assert_eq!(WorkspaceChromeStatus::resolve(Some(phase)), Some(status));
         }

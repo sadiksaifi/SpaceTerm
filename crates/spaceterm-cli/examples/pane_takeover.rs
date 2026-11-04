@@ -8,10 +8,10 @@ mod lifecycle;
 mod support;
 #[path = "support/workspace.rs"]
 mod workspace;
-use spaceterm_server::hierarchy::{CreateControl, Id, Mutation, Outcome};
-use spaceterm_server::{
-    ServerConnection, ServerError,
-    connection::link::ServerLink,
+use spaceterm_core::hierarchy::{CreateControl, Id, Mutation, Outcome};
+use spaceterm_core::{
+    CoreError, MachineConnection,
+    connection::link::CoreLink,
     pane::{control::Controller, *},
     protocol::{Operation, PaneEvent, Takeover},
 };
@@ -25,7 +25,7 @@ fn size(columns: u16) -> PaneSize {
     }
 }
 /// Selects the inventory's first Pane without starting or acquiring it.
-fn select(link: &ServerLink, pane: Id) -> Result<Claimed, ServerError> {
+fn select(link: &CoreLink, pane: Id) -> Result<Claimed, CoreError> {
     support::select(link, pane, false, size(80))
 }
 /// The Takeover offer in `claimed` and the Controlling Client it names.
@@ -48,13 +48,13 @@ fn controlled_by(controller: Controller, development: &str) -> Result<String, Bo
     }
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = spaceterm_server::protocol::MAJOR;
-    let first = ServerConnection::for_development_client("takeover-first")?;
-    let second = ServerConnection::for_development_client("takeover-second")?;
+    let major = spaceterm_core::protocol::MAJOR;
+    let first = MachineConnection::for_development_client("takeover-first")?;
+    let second = MachineConnection::for_development_client("takeover-second")?;
     lifecycle::require_idle(&first)?;
     first.setup()?;
     second.setup()?;
-    let mut server = lifecycle::Server::start()?;
+    let mut core = lifecycle::Core::start()?;
     let a = lifecycle::connect(&first)?;
     let (_, sequence) = support::inventory(&a)?;
     let created = support::mutate(
@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ));
     assert_eq!(
         original.resize(size(70)).err(),
-        Some(ServerError::StaleControl)
+        Some(CoreError::StaleControl)
     );
     assert_eq!(
         original
@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 channel: original.channel(),
             })
             .err(),
-        Some(ServerError::StaleControl)
+        Some(CoreError::StaleControl)
     );
     // The former device reconnects without recovering its former grant.
     a.close();
@@ -138,12 +138,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert!(matches!(select(&b, pane)?, Claimed::Takeover(_)));
     assert_eq!(
         support::request(&b, Operation::ClearScrollback { channel }).err(),
-        Some(ServerError::StaleControl)
+        Some(CoreError::StaleControl)
     );
     reclaimed.close()?;
     cleanup.cleanup()?;
     support::done(&b, Operation::Shutdown)?;
-    let _ = server.kill();
+    let _ = core.kill();
     println!(
         "Protocol {major}: two account-local clients transferred the same running Session, named each other as the Controlling Client, refused stale content/resize/close, preserved takeover on reconnect, and acquired released control."
     );

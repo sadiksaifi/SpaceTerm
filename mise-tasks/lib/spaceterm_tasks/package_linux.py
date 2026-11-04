@@ -114,7 +114,7 @@ def package(release_tag=None):
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
-    from spaceterm_tasks.server_package import prepare_desktop_artifact
+    from spaceterm_tasks.core_package import prepare_desktop_artifact
 
     environment.update(
         prepare_desktop_artifact(
@@ -184,7 +184,7 @@ def verify_tree(tree, name, release_tag):
     verify_application_identity(executable, identity(name)["CFBundleName"], label, version)
     verify_askpass_helper_mode(executable, label)
     verify_resources(tree / "share" / "spaceterm", label)
-    from spaceterm_tasks.server_package import verify_desktop_artifact
+    from spaceterm_tasks.core_package import verify_desktop_artifact
 
     verify_desktop_artifact(
         tree / "share/spaceterm/server-artifact",
@@ -192,7 +192,7 @@ def verify_tree(tree, name, release_tag):
         release_tag,
         executable=executable,
     )
-    from spaceterm_tasks.server_catalog import verify_catalog
+    from spaceterm_tasks.core_catalog import verify_catalog
 
     verify_catalog(
         tree / "share/spaceterm/server-artifacts", DIRECTORIES[name], require_all=bool(release_tag)

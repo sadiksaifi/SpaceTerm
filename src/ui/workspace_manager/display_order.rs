@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use gpui::{Context, Task, Window};
-use spaceterm_server::workspace_order::{WorkspaceOrder, WorkspaceReference};
+use spaceterm_core::workspace_order::{WorkspaceOrder, WorkspaceReference};
 
 use super::WorkspaceManager;
 use crate::domain::WorkspaceId;
@@ -64,11 +64,11 @@ impl WorkspaceManager {
     /// Reads the saved order off the event thread, then arranges the presented Workspaces by it.
     /// A window without retained storage keeps its order for its own life.
     pub(super) fn follow_display_order(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(server) = self.launch.workspace_order_connection() else {
+        let Some(core) = self.launch.workspace_order_connection() else {
             self.display_order.ready = true;
             return;
         };
-        let retained = RetainedWorkspaceOrder::new(server);
+        let retained = RetainedWorkspaceOrder::new(core);
         let read = retained.read();
         self.display_order.retained = Some(retained);
         self.display_order._read = Some(cx.spawn_in(window, async move |manager, cx| {
@@ -155,7 +155,7 @@ impl WorkspaceManager {
     /// longer has leave the order, and the presented Workspaces, including any it just added,
     /// take their retained places. A Workspace an unanswered edit hides from presentation is
     /// still in that inventory, so it keeps its place.
-    pub(super) fn reconcile_display_order(&mut self, key: super::ServerKey) {
+    pub(super) fn reconcile_display_order(&mut self, key: super::MachineKey) {
         if !self.display_order.ready {
             return;
         }
@@ -167,7 +167,7 @@ impl WorkspaceManager {
 
     /// Forgets the Workspaces the server behind `key` no longer has, by the last complete inventory
     /// that binding read. Other bindings' Workspaces keep their places.
-    fn prune_display_order(&mut self, key: super::ServerKey) {
+    fn prune_display_order(&mut self, key: super::MachineKey) {
         if let Some(binding) = self.binding.get(key)
             && let Some(owner) = binding.owner()
             && let Some(inventory) = binding.latest_inventory()
@@ -296,7 +296,7 @@ mod tests {
 
     fn reference(owner: u8, workspace: u8) -> WorkspaceReference {
         WorkspaceReference {
-            owner: spaceterm_server::workspace_order::OwnerId::from_bytes([owner; 32]),
+            owner: spaceterm_core::workspace_order::OwnerId::from_bytes([owner; 32]),
             workspace: [workspace; 32],
         }
     }

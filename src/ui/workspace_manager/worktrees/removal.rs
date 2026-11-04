@@ -41,7 +41,7 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         if self.has_workspace(workspace_id) {
-            self.request_server_worktree_removal(workspace_id, worktree_id, window, cx);
+            self.request_machine_worktree_removal(workspace_id, worktree_id, window, cx);
         }
     }
 }

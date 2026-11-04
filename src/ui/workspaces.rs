@@ -18,9 +18,9 @@
 //! show, so inactive Workspaces stay current too. This client adds its own Git Settings and Pull
 //! Requests from its own GitHub CLI, and never reads git for a Workspace itself.
 //!
-pub(crate) use server::ArrangementUnavailable;
-pub(crate) use server::{
-    DirectServer, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, WorkspaceAcceptance,
+pub(crate) use core_workspaces::ArrangementUnavailable;
+pub(crate) use core_workspaces::{
+    DirectMachine, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, WorkspaceAcceptance,
     WorkspaceAttachmentFailure, WorkspaceCloseApproval, WorkspaceCloseIntent, WorkspaceCloseReview,
     WorkspaceCloseState, WorkspaceCloseUnavailable, WorkspaceConflict, WorkspaceEditSource,
     WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener, WorkspacePaneSessions,
@@ -29,12 +29,12 @@ pub(crate) use server::{
     WorkspaceTabs, Workspaces, close_changed_title, presenting_window,
 };
 #[cfg(test)]
-pub(crate) use server::{WorkspaceOwner, testing};
+pub(crate) use core_workspaces::{WorkspaceOwner, testing};
 
 #[path = "workspaces/repositories.rs"]
 mod repositories;
 pub(crate) use repositories::{
-    LocalPresentation, ServerRepositories, pane_directory, workspace_directory,
+    CoreRepositories, LocalPresentation, pane_directory, workspace_directory,
 };
 
 #[cfg(test)]
@@ -50,30 +50,30 @@ pub(crate) use direct_route::{
     DirectRoutePanes, PresentationRecord, PresentationRetries, UnavailableEdits,
 };
 
-mod server {
+mod core_workspaces {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
 
     use gpui::{App, SharedString};
-    use spaceterm_server::hierarchy::{
-        Axis, CloseConfirmation as ServerCloseConfirmation, CloseTarget as ServerCloseTarget,
+    use spaceterm_core::hierarchy::{
+        Axis, CloseConfirmation as CoreCloseConfirmation, CloseTarget as MachineCloseTarget,
         ConfirmedControl, Id, Inventory, Mutation, Outcome, RetainedOutcome,
-        Workspace as ServerWorkspace,
+        Workspace as CoreWorkspace,
     };
 
-    use spaceterm_server::client_view::RetainedInventory;
-    use spaceterm_server::workspace_order::OwnerId;
+    use spaceterm_core::client_view::RetainedInventory;
+    use spaceterm_core::workspace_order::OwnerId;
 
     use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, WorkspaceId};
-    use crate::server_connection::ServerConnection;
+    use crate::machine_connection::MachineConnection;
     use crate::terminal::WorkspaceTerminalSessionFactory;
-    use crate::terminal::server_session::{PaneControls, ServerSessionFactory};
+    use crate::terminal::core_session::{CoreSessionFactory, PaneControls};
     use crate::terminal::workspace_client::{WorkspaceClient, WorkspaceSnapshot};
+    use crate::ui::core_pane::{CorePaneView, MachinePaneConnection};
     use crate::ui::pane_lifecycle::PaneConstruction;
-    use crate::ui::server_pane::{ServerPaneConnection, ServerPaneView};
 
     /// The one Workspace Window presenting this device's Workspaces.
     ///
@@ -405,7 +405,7 @@ mod server {
             {
                 let mut acknowledged = self.acknowledged.borrow_mut();
                 if !acknowledged.contains(&sequence) {
-                    if acknowledged.len() >= spaceterm_server::hierarchy::UNSEEN_OUTCOMES {
+                    if acknowledged.len() >= spaceterm_core::hierarchy::UNSEEN_OUTCOMES {
                         acknowledged.pop_front();
                     }
                     acknowledged.push_back(sequence);
@@ -831,9 +831,9 @@ mod server {
 
     impl ArrangementUnavailable {
         /// Why reading the saved arrangement failed, from the server's bounded classification.
-        pub(crate) const fn reading(error: spaceterm_server::ServerError) -> Self {
+        pub(crate) const fn reading(error: spaceterm_core::CoreError) -> Self {
             match error {
-                spaceterm_server::ServerError::UnsafeStorage => Self::UnsafeStorage,
+                spaceterm_core::CoreError::UnsafeStorage => Self::UnsafeStorage,
                 _ => Self::Read,
             }
         }
@@ -899,7 +899,7 @@ mod server {
     /// Directory values grant no local filesystem authority.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) struct WorkspaceFacts {
-        pub(crate) server: Id,
+        pub(crate) core: Id,
         /// The server has published this identity. A refused provisional creation removes its
         /// row without dismissing the empty window that must explain the refusal.
         pub(crate) confirmed: bool,
@@ -912,7 +912,7 @@ mod server {
     }
 
     impl WorkspaceFacts {
-        pub(crate) fn from_server(workspace: &ServerWorkspace) -> Self {
+        pub(crate) fn from_core(workspace: &CoreWorkspace) -> Self {
             let directory = workspace
                 .tabs
                 .iter()
@@ -920,7 +920,7 @@ mod server {
                 .and_then(|tab| tab.panes.iter().find(|pane| pane.id == tab.root_pane))
                 .map_or_else(PathBuf::new, |pane| pane.presented_directory().to_owned());
             Self {
-                server: workspace.id,
+                core: workspace.id,
                 confirmed: true,
                 name: workspace.name.clone(),
                 name_version: workspace.name_version,
@@ -945,7 +945,7 @@ mod server {
     /// whose status the Pane reads.
     pub(crate) type WorkspacePaneSubscription = (
         WorkspaceTerminalSessionFactory,
-        Arc<dyn ServerPaneConnection>,
+        Arc<dyn MachinePaneConnection>,
     );
 
     /// Subscribes one Pane to the Terminal Session a SpaceTerm Server owns.
@@ -970,7 +970,7 @@ mod server {
 
         /// The paired route reaching another computer's server, if that is how this client
         /// reaches it.
-        fn direct_route(&self) -> Option<&DirectServer> {
+        fn direct_route(&self) -> Option<&DirectMachine> {
             None
         }
 
@@ -983,13 +983,13 @@ mod server {
 
     /// Another computer's server as a direct network route reaches it.
     #[derive(Clone, Debug, Eq, PartialEq)]
-    pub(crate) struct DirectServer {
+    pub(crate) struct DirectMachine {
         pub(crate) route: crate::direct_connections::DirectRouteId,
         /// The server's name, which labels it and grants nothing.
         pub(crate) name: SharedString,
     }
 
-    impl DirectServer {
+    impl DirectMachine {
         /// The label the Panes' terminal metadata displays for this server. It grants nothing,
         /// and a name that leaves nothing to show reads as a generic server.
         fn display(&self) -> String {
@@ -1003,14 +1003,14 @@ mod server {
     }
 
     /// The local server's own Panes.
-    struct LocalServerPanes {
-        server: ServerConnection,
+    struct LocalCorePanes {
+        core: MachineConnection,
         controls: Arc<PaneControls>,
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
-        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
+        counters: Arc<spaceterm_core::diagnostics::TerminalCounters>,
     }
 
-    impl WorkspacePaneOpener for LocalServerPanes {
+    impl WorkspacePaneOpener for LocalCorePanes {
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
             WorkspaceTerminalSessionFactory::pending()
         }
@@ -1022,51 +1022,49 @@ mod server {
         }
 
         fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription> {
-            let (factory, state) = ServerSessionFactory::for_pane(
-                self.server.clone(),
+            let (factory, state) = CoreSessionFactory::for_pane(
+                self.core.clone(),
                 &self.controls,
                 self.local_files.clone(),
                 pane,
                 Arc::clone(&self.counters),
             );
-            let permit = self.server.attachments().ok()?.permit(pane)?;
-            let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
-                factory.with_attachment(permit),
-            ));
+            let permit = self.core.attachments().ok()?.permit(pane)?;
+            let session_factory =
+                WorkspaceTerminalSessionFactory::new_core(Rc::new(factory.with_attachment(permit)));
             Some((session_factory, state))
         }
     }
 
     /// Another computer's server Panes, reached over a paired route. Nothing here grants local
     /// file authority: the server's paths and links name files on that computer.
-    struct RemoteServerPanes {
-        server: ServerConnection,
+    struct RemoteMachinePanes {
+        core: MachineConnection,
         controls: Arc<PaneControls>,
-        direct: DirectServer,
-        counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
+        direct: DirectMachine,
+        counters: Arc<spaceterm_core::diagnostics::TerminalCounters>,
     }
 
-    impl WorkspacePaneOpener for RemoteServerPanes {
+    impl WorkspacePaneOpener for RemoteMachinePanes {
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
             WorkspaceTerminalSessionFactory::pending()
         }
 
-        fn direct_route(&self) -> Option<&DirectServer> {
+        fn direct_route(&self) -> Option<&DirectMachine> {
             Some(&self.direct)
         }
 
         fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription> {
-            let (factory, state) = ServerSessionFactory::for_remote_pane(
-                self.server.clone(),
+            let (factory, state) = CoreSessionFactory::for_remote_pane(
+                self.core.clone(),
                 &self.controls,
                 self.direct.display(),
                 pane,
                 Arc::clone(&self.counters),
             );
-            let permit = self.server.attachments().ok()?.permit(pane)?;
-            let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
-                factory.with_attachment(permit),
-            ));
+            let permit = self.core.attachments().ok()?.permit(pane)?;
+            let session_factory =
+                WorkspaceTerminalSessionFactory::new_core(Rc::new(factory.with_attachment(permit)));
             Some((session_factory, state))
         }
     }
@@ -1084,14 +1082,14 @@ mod server {
 
     impl WorkspacePaneSessions {
         pub(crate) fn new(
-            server: ServerConnection,
+            core: MachineConnection,
             controls: Arc<PaneControls>,
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             panes: &PaneConstruction,
         ) -> Self {
             Self::with_opener(
-                Rc::new(LocalServerPanes {
-                    server,
+                Rc::new(LocalCorePanes {
+                    core,
                     controls,
                     local_files,
                     counters: Arc::clone(panes.counters()),
@@ -1103,13 +1101,13 @@ mod server {
         /// Opens Panes of another computer's server through one connection of a paired route.
         /// They take no local file authority.
         pub(crate) fn remote_opener(
-            server: ServerConnection,
+            core: MachineConnection,
             controls: Arc<PaneControls>,
-            direct: DirectServer,
-            counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
+            direct: DirectMachine,
+            counters: Arc<spaceterm_core::diagnostics::TerminalCounters>,
         ) -> Rc<dyn WorkspacePaneOpener> {
-            Rc::new(RemoteServerPanes {
-                server,
+            Rc::new(RemoteMachinePanes {
+                core,
                 controls,
                 direct,
                 counters,
@@ -1140,7 +1138,7 @@ mod server {
         }
 
         /// The paired route reaching another computer's server, if any.
-        pub(crate) fn direct_route(&self) -> Option<&DirectServer> {
+        pub(crate) fn direct_route(&self) -> Option<&DirectMachine> {
             self.opener.direct_route()
         }
 
@@ -1177,7 +1175,7 @@ mod server {
         /// label.
         pub(crate) fn metadata(
             &self,
-            published: &spaceterm_server::pane::metadata::Snapshot,
+            published: &spaceterm_core::pane::metadata::Snapshot,
         ) -> Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>> {
             let remote = self.opener.remote_display().map(|display| {
                 crate::terminal::metadata::RemoteTerminalMetadataContext::new(
@@ -1185,7 +1183,7 @@ mod server {
                     crate::domain::RemoteDirectory::home(),
                 )
             });
-            crate::terminal::server_metadata::decode(
+            crate::terminal::core_metadata::decode(
                 published.clone(),
                 self.local_filesystem(),
                 remote.as_ref(),
@@ -1195,11 +1193,11 @@ mod server {
     }
 
     struct PendingPane;
-    impl ServerPaneConnection for PendingPane {
-        fn status(&self) -> crate::terminal::server_session::ServerPaneStatus {
-            crate::terminal::server_session::ServerPaneStatus::Connecting
+    impl MachinePaneConnection for PendingPane {
+        fn status(&self) -> crate::terminal::core_session::CorePaneStatus {
+            crate::terminal::core_session::CorePaneStatus::Connecting
         }
-        fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
+        fn controller(&self) -> Option<spaceterm_core::pane::control::Controller> {
             None
         }
         fn connection_generation(&self) -> u64 {
@@ -1226,7 +1224,7 @@ mod server {
         /// The opener generation each Pane's subscription came from, or `None` once another
         /// presentation of the same server Pane fenced it.
         opened: BTreeMap<PaneId, Option<u64>>,
-        views: BTreeMap<PaneId, ServerPaneView>,
+        views: BTreeMap<PaneId, CorePaneView>,
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
         pending_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
         /// One hint for a change to any registered Pane's connection.
@@ -1269,16 +1267,16 @@ mod server {
         pub(crate) fn register(
             &mut self,
             pane_id: PaneId,
-            server: Id,
-            state: Arc<dyn ServerPaneConnection>,
+            core: Id,
+            state: Arc<dyn MachinePaneConnection>,
             screen_focus: gpui::FocusHandle,
         ) {
-            if let Some(previous) = self.panes.insert(pane_id, server)
-                && previous != server
+            if let Some(previous) = self.panes.insert(pane_id, core)
+                && previous != core
             {
                 self.edits.defer_alias_retirement(previous);
             }
-            if self.edits.provisional(server) {
+            if self.edits.provisional(core) {
                 self.pending_starts.borrow_mut().insert(pane_id);
             } else if self.pending_starts.borrow_mut().remove(&pane_id) {
                 state.start_created();
@@ -1286,7 +1284,7 @@ mod server {
             state.observe(self.changes.0.clone());
             self.opened
                 .insert(pane_id, Some(self.sessions.generation()));
-            self.views.insert(pane_id, ServerPaneView::new(state));
+            self.views.insert(pane_id, CorePaneView::new(state));
             self.screen_focus.insert(pane_id, screen_focus);
         }
 
@@ -1320,7 +1318,7 @@ mod server {
             }
         }
 
-        pub(crate) fn server_pane(&self, pane_id: PaneId) -> Option<Id> {
+        pub(crate) fn core_pane(&self, pane_id: PaneId) -> Option<Id> {
             self.panes.get(&pane_id).map(|id| self.edits.canonical(*id))
         }
 
@@ -1332,13 +1330,13 @@ mod server {
         }
 
         pub(crate) fn closing(&self, pane_id: PaneId) -> bool {
-            self.server_pane(pane_id)
+            self.core_pane(pane_id)
                 .is_some_and(|id| self.edits.closing(id))
         }
 
         /// Whether this client's own pending move takes the Pane out of this Tab.
         pub(crate) fn moving(&self, pane_id: PaneId) -> bool {
-            self.server_pane(pane_id)
+            self.core_pane(pane_id)
                 .is_some_and(|id| self.edits.moving(self.edits.canonical(self.tab), id))
         }
 
@@ -1366,8 +1364,8 @@ mod server {
 
         /// Whether the Pane must open again: the server confirmed its provisional identity, or
         /// its route connected or disconnected since it opened.
-        pub(crate) fn needs_binding(&self, pane_id: PaneId, server: Id) -> bool {
-            self.panes.get(&pane_id).is_some_and(|id| *id != server) || self.reopened(pane_id)
+        pub(crate) fn needs_binding(&self, pane_id: PaneId, core: Id) -> bool {
+            self.panes.get(&pane_id).is_some_and(|id| *id != core) || self.reopened(pane_id)
         }
 
         pub(crate) fn edits(&self) -> WorkspaceEditSource {
@@ -1388,7 +1386,7 @@ mod server {
             }
         }
 
-        pub(crate) fn presentation_tab(&self) -> Option<spaceterm_server::hierarchy::Tab> {
+        pub(crate) fn presentation_tab(&self) -> Option<spaceterm_core::hierarchy::Tab> {
             self.edits
                 .presentation_inventory()?
                 .workspaces
@@ -1399,10 +1397,10 @@ mod server {
                 .find(|t| t.id == self.edits.canonical(self.tab))
         }
 
-        pub(crate) fn local_pane(&self, server: Id) -> Option<PaneId> {
+        pub(crate) fn local_pane(&self, core: Id) -> Option<PaneId> {
             self.panes
                 .iter()
-                .find_map(|(&pane_id, &id)| (self.edits.canonical(id) == server).then_some(pane_id))
+                .find_map(|(&pane_id, &id)| (self.edits.canonical(id) == core).then_some(pane_id))
         }
 
         /// Where the keyboard rests while a screen replaces the Pane.
@@ -1410,10 +1408,10 @@ mod server {
             self.screen_focus.get(&pane_id)
         }
 
-        pub(crate) fn holds(&self, server: Id) -> bool {
+        pub(crate) fn holds(&self, core: Id) -> bool {
             self.panes
                 .values()
-                .any(|&pane| self.edits.canonical(pane) == server)
+                .any(|&pane| self.edits.canonical(pane) == core)
         }
 
         pub(crate) fn missing_worktree_for_directory(&self, directory: &Path) -> bool {
@@ -1446,11 +1444,11 @@ mod server {
             })
         }
 
-        pub(crate) fn view(&self, pane_id: PaneId) -> Option<&ServerPaneView> {
+        pub(crate) fn view(&self, pane_id: PaneId) -> Option<&CorePaneView> {
             self.views.get(&pane_id)
         }
 
-        pub(crate) fn view_mut(&mut self, pane_id: PaneId) -> Option<&mut ServerPaneView> {
+        pub(crate) fn view_mut(&mut self, pane_id: PaneId) -> Option<&mut CorePaneView> {
             self.views.get_mut(&pane_id)
         }
 
@@ -1471,18 +1469,18 @@ mod server {
         /// Requests a shared split. Its provisional Pane is presentation only until the server
         /// supplies its authoritative identity and membership.
         pub(crate) fn split(&self, source: PaneId, axis: Axis) -> WorkspaceSubmission {
-            let Some(source) = self.server_pane(source) else {
+            let Some(source) = self.core_pane(source) else {
                 return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value);
             };
             let Some(inventory) = self.edits.presentation_inventory() else {
                 return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value);
             };
-            match spaceterm_server::organize::split(
+            match spaceterm_core::organize::split(
                 &inventory,
                 self.edits.canonical(self.tab),
                 Some(self.edits.canonical(source)),
                 axis,
-                spaceterm_server::hierarchy::CreateControl::Creator,
+                spaceterm_core::hierarchy::CreateControl::Creator,
             ) {
                 Ok(mutation) => self.edits.submit(mutation),
                 Err(_) => WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value),
@@ -1518,7 +1516,7 @@ mod server {
         /// Whether this client's own pending close or merge takes away every Pane of the Tab,
         /// so the strip holds the Tab aside until the edit settles.
         pub(crate) fn optimistically_removing(&self, tab: TabId) -> bool {
-            let Some(server) = self.server_tab(tab) else {
+            let Some(core) = self.core_tab(tab) else {
                 return false;
             };
             self.edits
@@ -1530,22 +1528,22 @@ mod server {
                     i.workspaces
                         .iter()
                         .flat_map(|w| &w.tabs)
-                        .find(|t| t.id == server)
+                        .find(|t| t.id == core)
                 })
                 .is_some_and(|t| {
                     t.panes
                         .iter()
-                        .all(|p| self.edits.closing(p.id) || self.edits.moving(server, p.id))
+                        .all(|p| self.edits.closing(p.id) || self.edits.moving(core, p.id))
                 })
         }
 
         /// Whether this client's own pending merge moves the Tab's Panes into another Tab.
         pub(crate) fn merging(&self, tab: TabId) -> bool {
-            self.server_tab(tab)
-                .is_some_and(|server| self.edits.merging(server))
+            self.core_tab(tab)
+                .is_some_and(|core| self.edits.merging(core))
         }
 
-        pub(crate) fn presentation_workspace(&self) -> Option<ServerWorkspace> {
+        pub(crate) fn presentation_workspace(&self) -> Option<CoreWorkspace> {
             self.edits
                 .presentation_inventory()?
                 .workspaces
@@ -1574,22 +1572,22 @@ mod server {
             self.edits.clone()
         }
 
-        pub(crate) fn register(&mut self, tab_id: TabId, server: Id) {
-            self.tabs.insert(tab_id, server);
+        pub(crate) fn register(&mut self, tab_id: TabId, core: Id) {
+            self.tabs.insert(tab_id, core);
         }
 
         pub(crate) fn forget(&mut self, tab_id: TabId) {
             self.tabs.remove(&tab_id);
         }
 
-        pub(crate) fn server_tab(&self, tab_id: TabId) -> Option<Id> {
+        pub(crate) fn core_tab(&self, tab_id: TabId) -> Option<Id> {
             self.tabs.get(&tab_id).map(|id| self.edits.canonical(*id))
         }
 
-        pub(crate) fn local_tab(&self, server: Id) -> Option<TabId> {
+        pub(crate) fn local_tab(&self, core: Id) -> Option<TabId> {
             self.tabs
                 .iter()
-                .find_map(|(&tab_id, &id)| (self.edits.canonical(id) == server).then_some(tab_id))
+                .find_map(|(&tab_id, &id)| (self.edits.canonical(id) == core).then_some(tab_id))
         }
 
         pub(crate) fn editability(&self) -> WorkspaceEditability {
@@ -1601,9 +1599,9 @@ mod server {
             &self,
             tab: Id,
             pane: Id,
-            destination: spaceterm_server::hierarchy::PaneDestination,
+            destination: spaceterm_core::hierarchy::PaneDestination,
         ) -> WorkspaceSubmission {
-            use spaceterm_server::hierarchy::PaneDestination;
+            use spaceterm_core::hierarchy::PaneDestination;
             let destination = match destination {
                 PaneDestination::NewTab => PaneDestination::NewTab,
                 PaneDestination::Beside { tab, pane, side } => PaneDestination::Beside {
@@ -1627,7 +1625,7 @@ mod server {
             tab: Id,
             into: Id,
             beside: Id,
-            side: spaceterm_server::hierarchy::Side,
+            side: spaceterm_core::hierarchy::Side,
         ) -> WorkspaceSubmission {
             self.edits.submit(Mutation::MergeTab {
                 workspace: self.workspace(),
@@ -1643,16 +1641,16 @@ mod server {
             let Some(inventory) = self.edits.presentation_inventory() else {
                 return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value);
             };
-            let plan = spaceterm_server::organize::new_tab(
+            let plan = spaceterm_core::organize::new_tab(
                 &inventory,
                 self.workspace(),
                 Some(self.edits.canonical(source)),
                 None,
-                spaceterm_server::hierarchy::CreateControl::Creator,
+                spaceterm_core::hierarchy::CreateControl::Creator,
             );
             let mutation = match plan {
-                Ok(spaceterm_server::organize::NewTab::Mutation(mutation)) => mutation,
-                Ok(spaceterm_server::organize::NewTab::Worktree(operation)) => {
+                Ok(spaceterm_core::organize::NewTab::Mutation(mutation)) => mutation,
+                Ok(spaceterm_core::organize::NewTab::Worktree(operation)) => {
                     Mutation::Worktree(operation)
                 }
                 Err(_) => return WorkspaceSubmission::Refused(WorkspaceRefusalReason::Value),
@@ -1664,7 +1662,7 @@ mod server {
     /// One available server Workspace and its optional presentation in this client.
     #[derive(Clone, Debug)]
     pub(crate) struct AvailableWorkspace {
-        pub(crate) server: Id,
+        pub(crate) core: Id,
         pub(crate) name: String,
         pub(crate) local: Option<WorkspaceId>,
     }
@@ -1680,7 +1678,7 @@ mod server {
         fn owner(&self) -> Option<OwnerId>;
     }
 
-    impl WorkspaceOwner for ServerConnection {
+    impl WorkspaceOwner for MachineConnection {
         fn owner(&self) -> Option<OwnerId> {
             self.workspace_owner().ok()
         }
@@ -1698,7 +1696,7 @@ mod server {
         revision: Option<u64>,
         presentation: Option<Inventory>,
         connected: bool,
-        connection_error: Option<spaceterm_server::ServerError>,
+        connection_error: Option<spaceterm_core::CoreError>,
         failed_attempts: u64,
         pending: bool,
         pending_operation: Option<Mutation>,
@@ -1717,20 +1715,20 @@ mod server {
         /// confirmation reads. Those facts can change without a new membership revision.
         latest: Option<Inventory>,
         /// The Git facts the server read with its latest inventory.
-        repositories: super::ServerRepositories,
+        repositories: super::CoreRepositories,
         /// The close confirmation a person is reviewing now.
         review: Option<WorkspaceCloseReview>,
         /// The close this process submitted, and the local target a fresh review would reopen.
-        submitted_close: Option<(ServerCloseTarget, CloseTarget)>,
+        submitted_close: Option<(MachineCloseTarget, CloseTarget)>,
         /// Closes the server refused because what they would end changed after the
         /// confirmation, each with its outcome's sequence.
-        stale_closes: VecDeque<(ServerCloseTarget, u64)>,
-        attachments: spaceterm_server::attachments::Attachments,
+        stale_closes: VecDeque<(MachineCloseTarget, u64)>,
+        attachments: spaceterm_core::attachments::Attachments,
         retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
-        saved_views: Option<spaceterm_server::client_view::ClientView>,
-        last_saved_view: Option<spaceterm_server::client_view::ClientView>,
+        saved_views: Option<spaceterm_core::client_view::ClientView>,
+        last_saved_view: Option<spaceterm_core::client_view::ClientView>,
         view_error_reported: bool,
-        attachment_error: Option<spaceterm_server::ServerError>,
+        attachment_error: Option<spaceterm_core::CoreError>,
         /// Whether this binding keeps a copy of the inventory it presents, for a paired route.
         retains_copies: bool,
         /// The Workspaces and Tabs the server last confirmed to this client.
@@ -1761,8 +1759,8 @@ mod server {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) struct WorktreeFailure {
         pub(crate) sequence: u64,
-        pub(crate) operation: spaceterm_server::worktree::Operation,
-        pub(crate) error: spaceterm_server::worktree::Error,
+        pub(crate) operation: spaceterm_core::worktree::Operation,
+        pub(crate) error: spaceterm_core::worktree::Error,
     }
 
     impl Drop for Workspaces {
@@ -1816,11 +1814,11 @@ mod server {
                 worktree_failures: VecDeque::new(),
                 handed: Rc::default(),
                 latest: None,
-                repositories: super::ServerRepositories::default(),
+                repositories: super::CoreRepositories::default(),
                 review: None,
                 submitted_close: None,
                 stale_closes: VecDeque::new(),
-                attachments: spaceterm_server::attachments::Attachments::memory(),
+                attachments: spaceterm_core::attachments::Attachments::memory(),
                 retained_views: None,
                 saved_views: None,
                 last_saved_view: None,
@@ -1878,7 +1876,7 @@ mod server {
         /// set, while this process still holds the server's inventory, and otherwise the shell
         /// name this client retained. Program-set titles are never written to storage.
         pub(crate) fn unavailable_titles(&self) -> BTreeMap<Id, String> {
-            use spaceterm_server::pane::metadata::{MAX_TITLE_CHARS, TitleProvenance};
+            use spaceterm_core::pane::metadata::{MAX_TITLE_CHARS, TitleProvenance};
             let mut titles: BTreeMap<Id, String> = self
                 .confirmed
                 .iter()
@@ -1934,8 +1932,7 @@ mod server {
                 .iter()
                 .map(|workspace| workspace.id)
                 .collect();
-            if let Ok(attachments) =
-                spaceterm_server::attachments::Attachments::relaunched(&attached)
+            if let Ok(attachments) = spaceterm_core::attachments::Attachments::relaunched(&attached)
             {
                 self.attachments = attachments;
             }
@@ -1947,8 +1944,7 @@ mod server {
         /// Attaches `attached`, as a window reads this client's attachments from its server.
         #[cfg(test)]
         pub(crate) fn attach_for_test(&mut self, attached: &[Id]) {
-            if let Ok(attachments) =
-                spaceterm_server::attachments::Attachments::relaunched(attached)
+            if let Ok(attachments) = spaceterm_core::attachments::Attachments::relaunched(attached)
             {
                 self.attachments = attachments;
             }
@@ -1978,7 +1974,7 @@ mod server {
                 .filter_map(|workspace| {
                     let local = self.local(workspace.id);
                     (self.connected || local.is_some()).then(|| AvailableWorkspace {
-                        server: workspace.id,
+                        core: workspace.id,
                         name: workspace.name.clone(),
                         local,
                     })
@@ -1991,12 +1987,12 @@ mod server {
             let Some(facts) = self.facts(local) else {
                 return false;
             };
-            let server = self.edits.canonical(facts.server);
+            let core = self.edits.canonical(facts.core);
             if self
                 .edits
                 .pending
                 .borrow()
-                .closing_workspace(server, self.latest.as_ref())
+                .closing_workspace(core, self.latest.as_ref())
             {
                 return true;
             }
@@ -2007,7 +2003,7 @@ mod server {
                 && transport
                     .pending_operation
                     .as_ref()
-                    .is_some_and(|mutation| super::pending::closes_workspace(mutation, server))
+                    .is_some_and(|mutation| super::pending::closes_workspace(mutation, core))
         }
 
         pub(crate) fn latest_inventory(&self) -> Option<&Inventory> {
@@ -2027,7 +2023,7 @@ mod server {
         /// Whether `workspace` presents a creation the server hasn't confirmed yet.
         pub(crate) fn is_provisional(&self, workspace: WorkspaceId) -> bool {
             self.facts(workspace)
-                .is_some_and(|facts| self.edits.provisional(facts.server))
+                .is_some_and(|facts| self.edits.provisional(facts.core))
         }
 
         /// Names `workspace` in this client's Workspace order, once the server has published it.
@@ -2035,22 +2031,22 @@ mod server {
         pub(crate) fn workspace_reference(
             &self,
             workspace: WorkspaceId,
-        ) -> Option<spaceterm_server::workspace_order::WorkspaceReference> {
+        ) -> Option<spaceterm_core::workspace_order::WorkspaceReference> {
             let owner = self.owner()?;
-            let id = self.edits.canonical(self.facts(workspace)?.server);
+            let id = self.edits.canonical(self.facts(workspace)?.core);
             self.latest
                 .as_ref()?
                 .workspaces
                 .iter()
                 .any(|published| published.id == id)
-                .then_some(spaceterm_server::workspace_order::WorkspaceReference {
+                .then_some(spaceterm_core::workspace_order::WorkspaceReference {
                     owner,
                     workspace: id,
                 })
         }
 
         /// The Git facts the server read for the directories its Workspaces show.
-        pub(crate) const fn repositories(&self) -> &super::ServerRepositories {
+        pub(crate) const fn repositories(&self) -> &super::CoreRepositories {
             &self.repositories
         }
 
@@ -2062,23 +2058,23 @@ mod server {
         /// The server Workspace one local Workspace presents, as the server published it last.
         /// Live facts such as a Pane's confirmed directory can change without a membership
         /// revision, so this reads the latest inventory rather than the applied one.
-        pub(crate) fn server_workspace(&self, local: WorkspaceId) -> Option<&ServerWorkspace> {
-            let server = self.facts(local)?.server;
+        pub(crate) fn core_workspace(&self, local: WorkspaceId) -> Option<&CoreWorkspace> {
+            let core = self.facts(local)?.core;
             self.latest
                 .as_ref()?
                 .workspaces
                 .iter()
-                .find(|workspace| workspace.id == server)
+                .find(|workspace| workspace.id == core)
         }
         pub(crate) fn attachments_changeable(&self) -> bool {
             self.attachments.changeable()
                 && (self.retained_views.is_none() || self.saved_views.is_some())
         }
-        pub(crate) fn attach(&mut self, server: Id) -> Result<(), WorkspaceAttachmentFailure> {
+        pub(crate) fn attach(&mut self, core: Id) -> Result<(), WorkspaceAttachmentFailure> {
             if !self.connected || !self.attachments_changeable() {
                 return Err(WorkspaceAttachmentFailure::Unchanged);
             }
-            match self.attachments.attach(server) {
+            match self.attachments.attach(core) {
                 Ok(true) => Ok(()),
                 Ok(false) => Err(WorkspaceAttachmentFailure::Unchanged),
                 Err(_) => Err(if self.attachments.changeable() {
@@ -2095,11 +2091,11 @@ mod server {
             if !self.attachments_changeable() {
                 return Err(WorkspaceAttachmentFailure::Unchanged);
             }
-            let server = self
+            let core = self
                 .facts(local)
                 .ok_or(WorkspaceAttachmentFailure::Unchanged)?
-                .server;
-            self.attachments.detach(server).map_err(|_| {
+                .core;
+            self.attachments.detach(core).map_err(|_| {
                 if self.attachments.changeable() {
                     WorkspaceAttachmentFailure::Unchanged
                 } else {
@@ -2108,10 +2104,9 @@ mod server {
             })
         }
 
-        pub(crate) fn retain_client_views(&mut self, server: ServerConnection) {
-            self.retained_views = Some(crate::ui::client_view_state::RetainedClientViews::new(
-                server,
-            ));
+        pub(crate) fn retain_client_views(&mut self, core: MachineConnection) {
+            self.retained_views =
+                Some(crate::ui::client_view_state::RetainedClientViews::new(core));
         }
 
         /// Completes once the saved arrangement the first inventory waits for has been read,
@@ -2131,7 +2126,7 @@ mod server {
         /// Wait for the saved arrangement before applying the first inventory.
         pub(crate) fn prepare_client_views(
             &mut self,
-        ) -> Result<bool, crate::server_connection::ServerError> {
+        ) -> Result<bool, crate::machine_connection::CoreError> {
             if self.saved_views.is_some() || self.retained_views.is_none() {
                 return Ok(true);
             }
@@ -2161,7 +2156,7 @@ mod server {
         pub(crate) fn saved_arrangement(
             &self,
             workspace: Id,
-        ) -> Option<&spaceterm_server::client_view::WorkspaceView> {
+        ) -> Option<&spaceterm_core::client_view::WorkspaceView> {
             self.saved_views
                 .as_ref()?
                 .workspaces
@@ -2171,7 +2166,7 @@ mod server {
 
         pub(crate) fn save_arrangements(
             &mut self,
-            mut view: spaceterm_server::client_view::ClientView,
+            mut view: spaceterm_core::client_view::ClientView,
         ) {
             // Presentation identities and optimistic removals are never retained as membership.
             if self.edits.has_pending() {
@@ -2241,11 +2236,11 @@ mod server {
                 return None;
             }
             match self.pending_operation.as_ref() {
-                Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Create {
+                Some(Mutation::Worktree(spaceterm_core::worktree::Operation::Create {
                     workspace: target,
                     ..
                 })) if *target == workspace => Some("Creating Worktree…"),
-                Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {
+                Some(Mutation::Worktree(spaceterm_core::worktree::Operation::Remove {
                     root,
                     ..
                 })) if repository == Some(root.as_path()) => Some("Removing Worktree…"),
@@ -2278,7 +2273,7 @@ mod server {
         }
         pub(crate) fn removing_worktree(&self, path: &Path) -> bool {
             self.pending
-                && matches!(self.pending_operation.as_ref(),Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {path:target,..})) if target==path)
+                && matches!(self.pending_operation.as_ref(),Some(Mutation::Worktree(spaceterm_core::worktree::Operation::Remove {path:target,..})) if target==path)
         }
         pub(crate) const fn sessions(&self) -> &WorkspacePaneSessions {
             &self.sessions
@@ -2320,7 +2315,7 @@ mod server {
         /// what a person reviews and what a confirmed close submits; nothing rebuilds it later.
         pub(crate) fn close_approval(
             &self,
-            target: ServerCloseTarget,
+            target: MachineCloseTarget,
         ) -> Result<WorkspaceCloseApproval, WorkspaceCloseUnavailable> {
             let editability = self.editability();
             if !editability.available() {
@@ -2340,10 +2335,10 @@ mod server {
                 .ok_or(WorkspaceCloseUnavailable::Unreported)?;
             let scope = match target {
                 _ if confirmation.removes_workspace => WorkspaceCloseScope::Workspace,
-                ServerCloseTarget::Pane { .. } => WorkspaceCloseScope::Pane,
-                ServerCloseTarget::Tab { .. } => WorkspaceCloseScope::Tab,
-                ServerCloseTarget::KillWorkspace { .. } => WorkspaceCloseScope::Workspace,
-                ServerCloseTarget::Worktree { .. } => WorkspaceCloseScope::Worktree,
+                MachineCloseTarget::Pane { .. } => WorkspaceCloseScope::Pane,
+                MachineCloseTarget::Tab { .. } => WorkspaceCloseScope::Tab,
+                MachineCloseTarget::KillWorkspace { .. } => WorkspaceCloseScope::Workspace,
+                MachineCloseTarget::Worktree { .. } => WorkspaceCloseScope::Worktree,
             };
             Ok(WorkspaceCloseApproval {
                 target,
@@ -2434,7 +2429,7 @@ mod server {
         /// recovered answer names no local target. It stays until [`Self::take_stale_close`].
         pub(crate) fn next_stale_close(
             &self,
-        ) -> Option<(ServerCloseTarget, Option<CloseTarget>, OutcomeNotice)> {
+        ) -> Option<(MachineCloseTarget, Option<CloseTarget>, OutcomeNotice)> {
             let (target, sequence) = *self.stale_closes.front()?;
             let local = self
                 .submitted_close
@@ -2444,7 +2439,7 @@ mod server {
         }
         pub(crate) fn take_stale_close(
             &mut self,
-        ) -> Option<(ServerCloseTarget, Option<CloseTarget>)> {
+        ) -> Option<(MachineCloseTarget, Option<CloseTarget>)> {
             let (target, sequence) = self.stale_closes.pop_front()?;
             self.hand(sequence);
             let local = self
@@ -2477,9 +2472,9 @@ mod server {
             self.workspaces.contains_key(&workspace)
         }
 
-        pub(crate) fn local(&self, server: Id) -> Option<WorkspaceId> {
+        pub(crate) fn local(&self, core: Id) -> Option<WorkspaceId> {
             self.workspaces.iter().find_map(|(&workspace, facts)| {
-                (self.edits.canonical(facts.server) == server).then_some(workspace)
+                (self.edits.canonical(facts.core) == core).then_some(workspace)
             })
         }
 
@@ -2489,7 +2484,7 @@ mod server {
 
         pub(crate) fn forget(&mut self, workspace: WorkspaceId) {
             if let Some(facts) = self.workspaces.remove(&workspace) {
-                self.edits.retire_alias(facts.server);
+                self.edits.retire_alias(facts.core);
             }
         }
 
@@ -2560,7 +2555,7 @@ mod server {
             Some(total)
         }
 
-        pub(crate) const fn connection_error(&self) -> Option<spaceterm_server::ServerError> {
+        pub(crate) const fn connection_error(&self) -> Option<spaceterm_core::CoreError> {
             self.connection_error
         }
 
@@ -2871,11 +2866,11 @@ mod server {
             inventory: &Inventory,
             sequence: u64,
         ) -> Option<PendingConflict> {
-            let authority = |server: Id| {
+            let authority = |core: Id| {
                 inventory
                     .workspaces
                     .iter()
-                    .find(|workspace| workspace.id == server)
+                    .find(|workspace| workspace.id == core)
             };
             match mutation {
                 Mutation::RenameWorkspace {
@@ -2924,7 +2919,7 @@ mod server {
                 {
                     continue;
                 }
-                let mut facts = WorkspaceFacts::from_server(workspace);
+                let mut facts = WorkspaceFacts::from_core(workspace);
                 facts.confirmed = !self.edits.provisional(workspace.id);
                 match self.local(workspace.id) {
                     Some(local) => plan.push(WorkspacePlan::Update { local, facts }),
@@ -2933,7 +2928,7 @@ mod server {
             }
             for (&local, facts) in &self.workspaces {
                 if !inventory.workspaces.iter().any(|workspace| {
-                    workspace.id == self.edits.canonical(facts.server)
+                    workspace.id == self.edits.canonical(facts.core)
                         && (self.attachments.is_attached(workspace.id)
                             || self.edits.provisional(workspace.id))
                 }) {
@@ -2952,7 +2947,7 @@ mod server {
             self.ask(Mutation::CreateWorkspace {
                 name,
                 directory,
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             })
         }
 
@@ -2973,7 +2968,7 @@ mod server {
             };
             let version = observed.unwrap_or(facts.name_version);
             self.ask(Mutation::RenameWorkspace {
-                workspace: facts.server,
+                workspace: facts.core,
                 version,
                 name,
             })
@@ -2994,7 +2989,7 @@ mod server {
             };
             let version = observed.unwrap_or(facts.pin_version);
             self.ask(Mutation::PinWorkspace {
-                workspace: facts.server,
+                workspace: facts.core,
                 version,
                 directory,
             })
@@ -3044,13 +3039,13 @@ mod server {
 
     fn target_workspace(
         inventory: &Inventory,
-        target: ServerCloseTarget,
-    ) -> Option<&ServerWorkspace> {
+        target: MachineCloseTarget,
+    ) -> Option<&CoreWorkspace> {
         let workspace = match target {
-            ServerCloseTarget::Pane { workspace, .. }
-            | ServerCloseTarget::Tab { workspace, .. }
-            | ServerCloseTarget::KillWorkspace { workspace }
-            | ServerCloseTarget::Worktree { workspace, .. } => workspace,
+            MachineCloseTarget::Pane { workspace, .. }
+            | MachineCloseTarget::Tab { workspace, .. }
+            | MachineCloseTarget::KillWorkspace { workspace }
+            | MachineCloseTarget::Worktree { workspace, .. } => workspace,
         };
         inventory
             .workspaces
@@ -3059,20 +3054,20 @@ mod server {
     }
 
     /// Whether the server still has the Workspace, Tab, or Pane a close names.
-    fn target_exists(inventory: &Inventory, target: ServerCloseTarget) -> bool {
+    fn target_exists(inventory: &Inventory, target: MachineCloseTarget) -> bool {
         target_workspace(inventory, target).is_some_and(|workspace| {
             let tab = |id: Id| workspace.tabs.iter().find(|tab| tab.id == id);
             match target {
-                ServerCloseTarget::KillWorkspace { .. } => true,
-                ServerCloseTarget::Tab { tab: id, .. } => tab(id).is_some(),
-                ServerCloseTarget::Worktree { tab: id, .. } => tab(id).is_some_and(|anchor| {
+                MachineCloseTarget::KillWorkspace { .. } => true,
+                MachineCloseTarget::Tab { tab: id, .. } => tab(id).is_some(),
+                MachineCloseTarget::Worktree { tab: id, .. } => tab(id).is_some_and(|anchor| {
                     anchor.worktree.is_some()
                         && workspace.tabs.iter().any(|tab| {
                             tab.worktree != anchor.worktree
                                 || tab.worktree_repository != anchor.worktree_repository
                         })
                 }),
-                ServerCloseTarget::Pane { tab: id, pane, .. } => {
+                MachineCloseTarget::Pane { tab: id, pane, .. } => {
                     tab(id).is_some_and(|tab| tab.panes.iter().any(|p| p.id == pane))
                 }
             }
@@ -3085,8 +3080,8 @@ mod server {
     /// controls them.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) struct WorkspaceCloseApproval {
-        target: ServerCloseTarget,
-        confirmation: ServerCloseConfirmation,
+        target: MachineCloseTarget,
+        confirmation: CoreCloseConfirmation,
         controls: Option<Vec<ConfirmedControl>>,
         scope: WorkspaceCloseScope,
         /// The Tabs that hold the reviewed Panes.
@@ -3175,7 +3170,7 @@ mod server {
             };
             let stops = if sessions == 1 { "its" } else { "their" };
             match self.target {
-                ServerCloseTarget::KillWorkspace { .. } => {
+                MachineCloseTarget::KillWorkspace { .. } => {
                     let tabs = match self.tabs {
                         1 => "1 Tab".to_owned(),
                         count => format!("{count} Tabs"),
@@ -3189,14 +3184,14 @@ mod server {
                         ),
                     }
                 }
-                ServerCloseTarget::Pane { .. }
-                | ServerCloseTarget::Tab { .. }
-                | ServerCloseTarget::Worktree { .. }
+                MachineCloseTarget::Pane { .. }
+                | MachineCloseTarget::Tab { .. }
+                | MachineCloseTarget::Worktree { .. }
                     if self.confirmation.removes_workspace =>
                 {
                     let only = match self.target {
-                        ServerCloseTarget::Pane { .. } => "This is the only Pane",
-                        ServerCloseTarget::Worktree { .. } if self.tabs != 1 => {
+                        MachineCloseTarget::Pane { .. } => "This is the only Pane",
+                        MachineCloseTarget::Worktree { .. } if self.tabs != 1 => {
                             "These are the only Tabs"
                         }
                         _ => "This is the only Tab",
@@ -3210,7 +3205,7 @@ mod server {
                         None => removal,
                     }
                 }
-                ServerCloseTarget::Pane { .. } if self.confirmation.removes_tab => {
+                MachineCloseTarget::Pane { .. } if self.confirmation.removes_tab => {
                     let removal =
                         "This is the only Pane in its Tab, so the Tab closes for every client.";
                     match ends {
@@ -3220,7 +3215,7 @@ mod server {
                         None => format!("{removal} No Terminal Session is running in it."),
                     }
                 }
-                ServerCloseTarget::Pane { .. } => match ends {
+                MachineCloseTarget::Pane { .. } => match ends {
                     Some(ends) => format!(
                         "This ends {ends} and stops {stops} running commands for every client."
                     ),
@@ -3229,7 +3224,7 @@ mod server {
                             .to_owned()
                     }
                 },
-                ServerCloseTarget::Tab { .. } => {
+                MachineCloseTarget::Tab { .. } => {
                     let removal = match self.confirmation.panes.len() {
                         1 => "The Tab and its Pane close for every client.".to_owned(),
                         count => format!("The Tab and its {count} Panes close for every client."),
@@ -3241,7 +3236,7 @@ mod server {
                         None => format!("{removal} No Terminal Session is running in it."),
                     }
                 }
-                ServerCloseTarget::Worktree { .. } => ends
+                MachineCloseTarget::Worktree { .. } => ends
                     .map(|ends| format!("This ends {ends} for every client."))
                     .unwrap_or_default(),
             }
@@ -3250,10 +3245,10 @@ mod server {
         /// What the close keeps, and whether it can be undone.
         pub(crate) fn detail(&self) -> Option<&'static str> {
             match self.target {
-                ServerCloseTarget::Worktree { .. } if !self.confirmation.removes_workspace => {
+                MachineCloseTarget::Worktree { .. } if !self.confirmation.removes_workspace => {
                     Some("The Worktree, its files, and its branch are kept.")
                 }
-                ServerCloseTarget::KillWorkspace { .. } => {
+                MachineCloseTarget::KillWorkspace { .. } => {
                     Some("Repository files and Worktrees stay on disk.")
                 }
                 _ if self.confirmation.removes_workspace => Some(
@@ -3282,12 +3277,12 @@ mod server {
 
     /// The title of the notice that says a close ended nothing because what it would end changed
     /// after the confirmation opened.
-    pub(crate) const fn close_changed_title(target: ServerCloseTarget) -> &'static str {
+    pub(crate) const fn close_changed_title(target: MachineCloseTarget) -> &'static str {
         match target {
-            ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
-            ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
-            ServerCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
-            ServerCloseTarget::KillWorkspace { .. } => "Workspace Changed on Another Client",
+            MachineCloseTarget::Pane { .. } => "Pane Changed on Another Client",
+            MachineCloseTarget::Tab { .. } => "Tab Changed on Another Client",
+            MachineCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
+            MachineCloseTarget::KillWorkspace { .. } => "Workspace Changed on Another Client",
         }
     }
 
@@ -3314,7 +3309,7 @@ mod server {
 
     /// An unapproved close waiting for the exact provisional creation it names.
     pub(crate) struct WorkspaceCloseIntent {
-        pub(crate) server: ServerCloseTarget,
+        pub(crate) core: MachineCloseTarget,
         pub(crate) local: CloseTarget,
         /// The initiating keyboard owner, before any confirmation or later navigation.
         pub(crate) keyboard: Option<gpui::FocusHandle>,
@@ -3380,27 +3375,25 @@ mod server {
         use std::sync::Mutex;
 
         /// A presentation whose owner the test names.
-        pub(crate) struct FixedOwner(pub(crate) spaceterm_server::hierarchy::Id);
+        pub(crate) struct FixedOwner(pub(crate) spaceterm_core::hierarchy::Id);
 
         impl super::WorkspaceOwner for FixedOwner {
-            fn owner(&self) -> Option<spaceterm_server::workspace_order::OwnerId> {
-                Some(spaceterm_server::workspace_order::OwnerId::from_bytes(
-                    self.0,
-                ))
+            fn owner(&self) -> Option<spaceterm_core::workspace_order::OwnerId> {
+                Some(spaceterm_core::workspace_order::OwnerId::from_bytes(self.0))
             }
         }
 
-        use spaceterm_server::hierarchy::{Inventory, Mutation, Outcome, RetainedOutcome};
+        use spaceterm_core::hierarchy::{Inventory, Mutation, Outcome, RetainedOutcome};
 
         use super::WorkspaceEdits;
         use crate::terminal::workspace_client::WorkspaceSnapshot;
 
         /// A scripted Pane whose status a test sets and whose explicit requests it counts.
         pub(crate) struct ScriptedPane {
-            status: Mutex<crate::terminal::server_session::ServerPaneStatus>,
+            status: Mutex<crate::terminal::core_session::CorePaneStatus>,
             startup_pending: std::sync::atomic::AtomicBool,
-            controller: Mutex<Option<spaceterm_server::pane::control::Controller>>,
-            session_end: Mutex<Option<spaceterm_server::pane::SessionEnd>>,
+            controller: Mutex<Option<spaceterm_core::pane::control::Controller>>,
+            session_end: Mutex<Option<spaceterm_core::pane::SessionEnd>>,
             generation: std::sync::atomic::AtomicU64,
             selections: std::sync::atomic::AtomicUsize,
             created_starts: std::sync::atomic::AtomicUsize,
@@ -3416,9 +3409,7 @@ mod server {
         impl ScriptedPane {
             pub(crate) fn new() -> std::sync::Arc<Self> {
                 std::sync::Arc::new(Self {
-                    status: Mutex::new(
-                        crate::terminal::server_session::ServerPaneStatus::Connecting,
-                    ),
+                    status: Mutex::new(crate::terminal::core_session::CorePaneStatus::Connecting),
                     startup_pending: std::sync::atomic::AtomicBool::new(true),
                     controller: Mutex::default(),
                     session_end: Mutex::default(),
@@ -3433,13 +3424,13 @@ mod server {
                 })
             }
 
-            pub(crate) fn set(&self, status: crate::terminal::server_session::ServerPaneStatus) {
+            pub(crate) fn set(&self, status: crate::terminal::core_session::CorePaneStatus) {
                 self.startup_pending.store(
                     matches!(
                         status,
-                        crate::terminal::server_session::ServerPaneStatus::Connecting
-                            | crate::terminal::server_session::ServerPaneStatus::TakingOver
-                            | crate::terminal::server_session::ServerPaneStatus::Reconnecting
+                        crate::terminal::core_session::CorePaneStatus::Connecting
+                            | crate::terminal::core_session::CorePaneStatus::TakingOver
+                            | crate::terminal::core_session::CorePaneStatus::Reconnecting
                     ),
                     std::sync::atomic::Ordering::SeqCst,
                 );
@@ -3457,21 +3448,21 @@ mod server {
             /// The server offers Take Over and says who controls the Pane.
             pub(crate) fn offer_take_over(
                 &self,
-                controller: spaceterm_server::pane::control::Controller,
+                controller: spaceterm_core::pane::control::Controller,
             ) {
                 *self.controller.lock().expect("controller") = Some(controller);
-                self.set(crate::terminal::server_session::ServerPaneStatus::Takeover);
+                self.set(crate::terminal::core_session::CorePaneStatus::Takeover);
             }
 
             /// A new connection reaches the Terminal Session and supplies its screen.
             pub(crate) fn reconnect(&self) {
                 self.generation
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                self.set(crate::terminal::server_session::ServerPaneStatus::Connected);
+                self.set(crate::terminal::core_session::CorePaneStatus::Connected);
             }
 
             /// The server says why the Pane's Session ended, if it did.
-            pub(crate) fn set_session_end(&self, end: Option<spaceterm_server::pane::SessionEnd>) {
+            pub(crate) fn set_session_end(&self, end: Option<spaceterm_core::pane::SessionEnd>) {
                 *self.session_end.lock().expect("session end") = end;
                 self.changes.publish();
             }
@@ -3479,7 +3470,7 @@ mod server {
             /// A new connection reaches the server, which answers with `status`.
             pub(crate) fn reconnect_to(
                 &self,
-                status: crate::terminal::server_session::ServerPaneStatus,
+                status: crate::terminal::core_session::CorePaneStatus,
             ) {
                 self.generation
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3511,8 +3502,8 @@ mod server {
             }
         }
 
-        impl crate::ui::server_pane::ServerPaneConnection for ScriptedPane {
-            fn status(&self) -> crate::terminal::server_session::ServerPaneStatus {
+        impl crate::ui::core_pane::MachinePaneConnection for ScriptedPane {
+            fn status(&self) -> crate::terminal::core_session::CorePaneStatus {
                 *self.status.lock().expect("status")
             }
 
@@ -3521,11 +3512,11 @@ mod server {
                     .load(std::sync::atomic::Ordering::SeqCst)
             }
 
-            fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
+            fn controller(&self) -> Option<spaceterm_core::pane::control::Controller> {
                 self.controller.lock().expect("controller").clone()
             }
 
-            fn session_end(&self) -> Option<spaceterm_server::pane::SessionEnd> {
+            fn session_end(&self) -> Option<spaceterm_core::pane::SessionEnd> {
                 *self.session_end.lock().expect("session end")
             }
 
@@ -3562,8 +3553,8 @@ mod server {
                 self.take_overs
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mut status = self.status.lock().expect("status");
-                if *status == crate::terminal::server_session::ServerPaneStatus::Takeover {
-                    *status = crate::terminal::server_session::ServerPaneStatus::TakingOver;
+                if *status == crate::terminal::core_session::CorePaneStatus::Takeover {
+                    *status = crate::terminal::core_session::CorePaneStatus::TakingOver;
                 }
                 drop(status);
                 self.changes.publish();
@@ -3699,14 +3690,14 @@ mod server {
         }
 
         /// The device every edit an applying server receives comes from.
-        const APPLYING_DEVICE: spaceterm_server::hierarchy::Id = [0xAD; 32];
+        const APPLYING_DEVICE: spaceterm_core::hierarchy::Id = [0xAD; 32];
 
         /// The server boot an applying server's Sessions belong to.
-        const APPLYING_BOOT: spaceterm_server::hierarchy::Id = [0xB0; 32];
+        const APPLYING_BOOT: spaceterm_core::hierarchy::Id = [0xB0; 32];
 
         /// The hierarchy an applying server keeps, and the directory its new Panes start in.
         struct AppliedHierarchy {
-            state: spaceterm_server::hierarchy::State,
+            state: spaceterm_core::hierarchy::State,
             directory: std::path::PathBuf,
             /// Whether a shell runs in every Pane.
             shells: bool,
@@ -3746,12 +3737,12 @@ mod server {
                     .flat_map(|tab| &tab.panes)
                     .map(|pane| (pane.id, self.shells.then_some(pane.id)))
                     .collect();
-                inventory.close = Some(spaceterm_server::hierarchy::CloseInventory {
+                inventory.close = Some(spaceterm_core::hierarchy::CloseInventory {
                     boot: APPLYING_BOOT,
                     controls: panes
                         .iter()
                         .map(
-                            |&(pane, session)| spaceterm_server::hierarchy::ConfirmedControl {
+                            |&(pane, session)| spaceterm_core::hierarchy::ConfirmedControl {
                                 pane,
                                 session,
                                 owner: APPLYING_DEVICE,
@@ -3761,12 +3752,10 @@ mod server {
                         .collect(),
                     sessions: panes
                         .iter()
-                        .map(
-                            |&(id, session)| spaceterm_server::hierarchy::ConfirmedPane {
-                                id,
-                                session,
-                            },
-                        )
+                        .map(|&(id, session)| spaceterm_core::hierarchy::ConfirmedPane {
+                            id,
+                            session,
+                        })
                         .collect(),
                 });
             }
@@ -3778,14 +3767,14 @@ mod server {
             /// with one Workspace, and every new Pane starts in `directory`.
             pub(crate) fn applying(directory: std::path::PathBuf) -> Self {
                 let mut hierarchy = AppliedHierarchy {
-                    state: spaceterm_server::hierarchy::State::empty(),
+                    state: spaceterm_core::hierarchy::State::empty(),
                     directory,
                     shells: false,
                 };
                 let created = hierarchy.apply(Mutation::CreateWorkspace {
                     name: String::new(),
                     directory: None,
-                    control: spaceterm_server::hierarchy::CreateControl::Creator,
+                    control: spaceterm_core::hierarchy::CreateControl::Creator,
                 });
                 assert!(
                     matches!(created, Outcome::Accepted { .. }),
@@ -3832,7 +3821,7 @@ mod server {
 
             /// The applying server ends the Terminal Session of `pane`, whose shell exited, and
             /// removes the Pane as ordinary shell exit does.
-            pub(crate) fn exit_pane(&self, pane: spaceterm_server::hierarchy::Id) {
+            pub(crate) fn exit_pane(&self, pane: spaceterm_core::hierarchy::Id) {
                 let inventory = {
                     let mut hierarchy = self
                         .applying
@@ -3866,8 +3855,8 @@ mod server {
             /// The applying server publishes `snapshot` as the Terminal Metadata of `pane`.
             pub(crate) fn present_metadata(
                 &self,
-                pane: spaceterm_server::hierarchy::Id,
-                snapshot: spaceterm_server::pane::metadata::Snapshot,
+                pane: spaceterm_core::hierarchy::Id,
+                snapshot: spaceterm_core::pane::metadata::Snapshot,
             ) {
                 let inventory = {
                     let mut hierarchy = self
@@ -3924,7 +3913,7 @@ mod server {
             }
 
             /// One connection attempt failed with `error`, as the real client publishes it.
-            pub(crate) fn fail_attempt(&self, error: spaceterm_server::ServerError) {
+            pub(crate) fn fail_attempt(&self, error: spaceterm_core::CoreError) {
                 self.publish(|snapshot| {
                     snapshot.connected = false;
                     snapshot.error = Some(error);
@@ -3946,7 +3935,7 @@ mod server {
                 self.publish(|snapshot| snapshot.connected = connected);
             }
 
-            pub(crate) fn set_error(&self, error: spaceterm_server::ServerError) {
+            pub(crate) fn set_error(&self, error: spaceterm_core::CoreError) {
                 self.publish(|snapshot| snapshot.error = Some(error));
             }
 

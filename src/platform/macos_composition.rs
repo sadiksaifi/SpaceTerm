@@ -140,19 +140,19 @@ fn compose(
         paths,
         Arc::new(super::unix_local_identity::UnixLocalIdentity),
     );
-    let direct_servers = startup.direct_servers();
+    let direct_machines = startup.direct_machines();
     let ssh_setup = startup.ssh_setup_factory(
         Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
             super::launch_host::running_executable(),
         )),
-        super::launch_host::server_artifact_catalog(),
-        direct_servers.clone(),
+        super::launch_host::core_artifact_catalog(),
+        direct_machines.clone(),
     );
-    let server_context_paths = startup.server_context_paths();
+    let core_context_paths = startup.core_context_paths();
     let command_line_tool = command_line_tool(identity);
-    let server_permissions = Rc::new(
-        super::server_permission_access::ServerPermissionAccess::new(identity.directory_name()),
-    );
+    let core_permissions = Rc::new(super::core_permission_access::CorePermissionAccess::new(
+        identity.directory_name(),
+    ));
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
         Arc::new(super::macos_repository_tools::MacosRepositoryToolDiscovery::new()),
@@ -194,19 +194,19 @@ fn compose(
             lifecycle,
             // Programs in Terminal Sessions inherit the grants of this machine's server, so the
             // rows read and set up that server's grants.
-            capture_access: Some(Rc::clone(&server_permissions)
+            capture_access: Some(Rc::clone(&core_permissions)
                 as Rc<dyn crate::platform::capture_access::CaptureAccess>),
-            permission_access: Some(server_permissions
+            permission_access: Some(core_permissions
                 as Rc<dyn crate::platform::permission_access::PermissionAccess>),
             setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)
                 as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),
             theme_registry: Arc::new(super::https_transport::HttpsTransport::new()),
             repository_status: Some(repository_status),
             background_images: Some(background_images),
-            local_server: crate::ui::LocalServerAdapters::account(),
+            local_core: crate::ui::LocalCoreAdapters::account(),
             ssh_setup,
-            direct_servers,
-            server_context_paths,
+            direct_machines,
+            core_context_paths,
             command_line_tool,
             desktop_channel: super::unix_desktop_channel::DesktopChannelListener::bind(
                 identity.directory_name(),

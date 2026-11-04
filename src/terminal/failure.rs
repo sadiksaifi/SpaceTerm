@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 
-use spaceterm_server::diagnostics::TerminalCounterSnapshot;
+use spaceterm_core::diagnostics::TerminalCounterSnapshot;
 
 use super::emulator::PresentationGeneration;
 use super::key::KeyAction;
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn export_writes_every_client_counter_after_the_records() {
-        use spaceterm_server::diagnostics::{PaneWorkerCommands, PaneWorkerWaits};
+        use spaceterm_core::diagnostics::{PaneWorkerCommands, PaneWorkerWaits};
         let mut bundle = DiagnosticBundle::default();
         bundle.record(&TerminalFailure::platform("native-event"));
         let counters = TerminalCounterSnapshot {

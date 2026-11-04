@@ -3,8 +3,8 @@ use super::render;
 use crate::contract::{golden::assert_golden, *};
 use crate::io::{Done, controlled, cursor::Cursor};
 
-fn server() -> ServerRef {
-    ServerRef {
+fn core() -> MachineRef {
+    MachineRef {
         name: "local".into(),
         route: "local".into(),
         id: "09".repeat(32),
@@ -23,7 +23,7 @@ fn target() -> Vec<TargetStep> {
 
 fn rows() -> Rows {
     let cursor = Cursor {
-        server: [9; 16],
+        core: [9; 16],
         pane: [2; 16],
         session: [3; 16],
         epoch: 1,
@@ -62,7 +62,7 @@ fn rows() -> Rows {
 }
 
 fn check<D: serde::Serialize>(name: &str, command: &str, done: Done<D>, exit: u8) {
-    let output = render(command, &server(), done, |_| String::new());
+    let output = render(command, &core(), done, |_| String::new());
     assert_eq!(output.envelope.exit(), exit);
     assert_golden(name, &output.envelope);
 }

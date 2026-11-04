@@ -112,10 +112,10 @@ class Probe:
         self.context = GLib.MainContext.default()
         self.terminal = None
         self.application_pid = None
-        self.server_workspace_before = None
-        self.server_workspace_row = None
-        self.server_workspace_name = None
-        self.server_workspace_named = False
+        self.core_workspace_before = None
+        self.machine_workspace_row = None
+        self.machine_workspace_name = None
+        self.machine_workspace_named = False
         self.phase = None
         self.counts = Counter()
         self.source_counts = Counter()
@@ -152,14 +152,14 @@ class Probe:
     def find_terminal(self):
         # A process-owned terminal can still belong to retained account work.
         # Only the exact newly created and named Workspace is a workload target.
-        if not self.server_workspace_named:
+        if not self.machine_workspace_named:
             return None
         selected = [
             row
             for row in self.workspace_rows()
             if row.getState().contains(self.atspi.STATE_SELECTED)
         ]
-        if len(selected) != 1 or selected[0].name != self.server_workspace_name:
+        if len(selected) != 1 or selected[0].name != self.machine_workspace_name:
             return None
         window = self.find_window(self.application_pid)
         if window is None:
@@ -243,12 +243,12 @@ class Probe:
         return rows
 
     def created_workspace_row(self):
-        if self.server_workspace_before is None:
+        if self.core_workspace_before is None:
             return None
         rows = [
             row
             for row in self.workspace_rows()
-            if row.name == self.server_workspace_name
+            if row.name == self.machine_workspace_name
             and row.getState().contains(self.atspi.STATE_SELECTED)
         ]
         require(len(rows) <= 1, "server_workspace_creation_ambiguous")
@@ -273,8 +273,8 @@ class Probe:
         )
         input_driver.context_menu()
 
-    def retire_server_workspace(self, input_driver):
-        if self.server_workspace_before is None:
+    def retire_core_workspace(self, input_driver):
+        if self.core_workspace_before is None:
             return
         # Native proxies can be replaced. Only the unique name supplied at creation proves
         # fixture ownership; a proxy absent from an earlier tree can still be retained work.
@@ -284,7 +284,7 @@ class Probe:
             "server_workspace_rename_not_dismissed",
         )
         rows = self.workspace_rows()
-        named = [row for row in rows if row.name == self.server_workspace_name]
+        named = [row for row in rows if row.name == self.machine_workspace_name]
         require(len(named) <= 1, "server_workspace_cleanup_ambiguous")
         require(named, "server_workspace_cleanup_identity_missing")
         row = named[0]
@@ -298,19 +298,19 @@ class Probe:
         self.activate_control("Kill Workspace", dialog)
         self.wait(
             lambda: all(
-                current != row and current.name != self.server_workspace_name
+                current != row and current.name != self.machine_workspace_name
                 for current in self.workspace_rows()
             ),
             "server_workspace_cleanup_not_confirmed",
         )
 
-    def open_server_workspace(self, input_driver):
+    def open_core_workspace(self, input_driver):
         # Exercise the native creation controls. The fixture's named client owns its
         # presentation; this source run's foreground Server owns the PTY.
-        self.server_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
+        self.machine_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
         rows = self.workspace_rows()
         require(
-            all(row.name != self.server_workspace_name for row in rows),
+            all(row.name != self.machine_workspace_name for row in rows),
             "server_workspace_fixture_name_in_use",
         )
         # Supply the unique name in the creation request. Native proxy replacement cannot
@@ -319,17 +319,17 @@ class Probe:
         field = self.wait(
             lambda: self.find_named_control("Workspace name"), "server_workspace_query_missing"
         )
-        input_driver.workspace_query(self.server_workspace_name, field)
+        input_driver.workspace_query(self.machine_workspace_name, field)
         self.wait(
-            lambda: field.queryText().getText(0, -1) == self.server_workspace_name,
+            lambda: field.queryText().getText(0, -1) == self.machine_workspace_name,
             "server_workspace_query_not_published",
         )
-        self.server_workspace_before = rows
+        self.core_workspace_before = rows
         self.activate_control("New Local Workspace")
-        self.server_workspace_row = self.wait(
+        self.machine_workspace_row = self.wait(
             self.created_workspace_row, "server_workspace_created_row_missing"
         )
-        self.server_workspace_named = True
+        self.machine_workspace_named = True
 
         # WorkspaceManager::render_chrome derives this selected row and the single presented
         # Tab manager from the same Active Workspace. This fresh client never navigates the
@@ -522,7 +522,7 @@ class Input:
 
     def require_fixture(self):
         require(
-            self.probe.server_workspace_named and self.probe.terminal is not None,
+            self.probe.machine_workspace_named and self.probe.terminal is not None,
             "fixture_terminal_not_selected",
         )
 
@@ -1858,7 +1858,7 @@ def private_session(args):
         if args.private_session == "x11":
             run(["xdotool", "search", "--onlyvisible", "--class", "spaceterm", "windowfocus"])
         input_driver = Input(args.private_session, probe)
-        probe.open_server_workspace(input_driver)
+        probe.open_core_workspace(input_driver)
         readiness.wait(ReadinessStep.TERMINAL_OBJECT, probe.find_terminal, timeout=60)
         report["terminal_accessibility_published"] = True
         window = probe.terminal
@@ -2071,14 +2071,14 @@ def private_session(args):
             report["native_windows"] = native_windows(args.private_session)
         cleanup = {"passed": True, "creation_attempted": False}
         report["server_workspace_cleanup"] = cleanup
-        if "probe" in locals() and probe.server_workspace_before is not None:
-            cleanup.update(passed=False, creation_attempted=True, name=probe.server_workspace_name)
+        if "probe" in locals() and probe.core_workspace_before is not None:
+            cleanup.update(passed=False, creation_attempted=True, name=probe.machine_workspace_name)
             try:
                 require(
                     application is not None and application.poll() is None,
                     "server_workspace_cleanup_application_unavailable",
                 )
-                probe.retire_server_workspace(input_driver)
+                probe.retire_core_workspace(input_driver)
                 cleanup["passed"] = True
             except Exception as error:
                 cleanup["failure"] = (
@@ -2144,7 +2144,7 @@ def prepare_binary(args, output):
             raise
         shutil.copy2(binary, destination)
     try:
-        server = build_executable(
+        core = build_executable(
             "--package",
             "spaceterm-cli",
             "--no-default-features",
@@ -2153,7 +2153,7 @@ def prepare_binary(args, output):
             env=environment,
         )
         # Reuse Development's resource layout, confined to this run's evidence directory.
-        prefix = stage_prefix(destination, server)
+        prefix = stage_prefix(destination, core)
     except TaskError:
         raise SmokeFailure("server_source_build_failed") from None
     destination.unlink()
@@ -2174,19 +2174,17 @@ def prepare_binary(args, output):
     }
     (output / "binary-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
     require(proof["passed"], "source_executable_hash_mismatch")
-    server = prefix / "bin" / "spaceterm"
-    with server.open("rb") as executable:
-        server_digest = hashlib.file_digest(executable, "sha256").hexdigest()
+    core = prefix / "bin" / "spaceterm"
+    with core.open("rb") as executable:
+        core_digest = hashlib.file_digest(executable, "sha256").hexdigest()
     (output / "server-binary-proof.json").write_text(
-        json.dumps({"sha256": server_digest, "size_bytes": server.stat().st_size}) + "\n"
+        json.dumps({"sha256": core_digest, "size_bytes": core.stat().st_size}) + "\n"
     )
     return destination
 
 
 def supervised_session(args):
-    require(
-        args.binary is not None and args.server_binary is not None, "source_executables_missing"
-    )
+    require(args.binary is not None and args.core_binary is not None, "source_executables_missing")
     # supervise removes mise's PYTHONPATH before launching its client. Bootstrap this
     # task explicitly so its library path never reaches the desktop or terminal programs.
     command = [
@@ -2207,7 +2205,7 @@ def supervised_session(args):
     ]
     measurement = args.output_dir / "measurement.json"
     try:
-        status = source_session(args.server_binary, command, os.environ)
+        status = source_session(args.core_binary, command, os.environ)
     except TaskError:
         report = json.loads(measurement.read_text()) if measurement.exists() else {}
         report.update(passed=False, failure="source_session_failed")
@@ -2273,7 +2271,7 @@ def main():
     # A fresh directory keeps stale workload signals from satisfying a later run.
     run_output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     binary = None if args.isolation_only else prepare_binary(args, run_output)
-    server_binary = binary.parent / "spaceterm" if binary is not None else None
+    core_binary = binary.parent / "spaceterm" if binary is not None else None
     backends = ("x11", "wayland") if args.backend == "both" else (args.backend,)
     status = 0
     for backend in backends:
@@ -2356,7 +2354,7 @@ def main():
             environment["SPACETERM_DEVELOPMENT_CLIENT"] = client_name
         environment.update(
             ALSA_CONFIG_PATH=str(null_audio),
-            PULSE_SERVER="unix:" + str(runtime / "private-null-pulse.sock"),
+            PULSE_CORE="unix:" + str(runtime / "private-null-pulse.sock"),
             PIPEWIRE_REMOTE="spaceterm-accessibility-null",
         )
         environment["DISPLAY" if backend == "x11" else "WAYLAND_DISPLAY"] = (
@@ -2372,8 +2370,8 @@ def main():
         ]
         if binary is not None:
             command.extend(("--binary", str(binary)))
-        if server_binary is not None:
-            command.extend(("--server-binary", str(server_binary)))
+        if core_binary is not None:
+            command.extend(("--server-binary", str(core_binary)))
         if args.isolation_only:
             command = ["dbus-run-session", "--", *command]
             command.append("--isolation-only")

@@ -14,22 +14,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use spaceterm_server::hierarchy::{Pane, Workspace};
-use spaceterm_server::repository::{ChangeCounting, DirectoryFacts, Snapshot, WorktreeInventory};
+use spaceterm_core::hierarchy::{Pane, Workspace};
+use spaceterm_core::repository::{ChangeCounting, DirectoryFacts, Snapshot, WorktreeInventory};
 
 use crate::repository_status::{
     ChangeState, Freshness, PullRequest, RemoteMachineKey, RepositoryKey, RepositoryMachine,
     RepositoryRoot, RepositoryStatus, RepositoryStatusPreferences, RepositoryView,
 };
-use crate::ui::repository_status_store::ServerPullRequestKey;
+use crate::ui::repository_status_store::CorePullRequestKey;
 
 /// The machine every server repository is keyed by. Its root is an opaque spelling rather than a
 /// local path, so no local read or file action can start from it.
-const SERVER_MACHINE: &str = "spaceterm-server";
+const CORE_MACHINE: &str = "spaceterm-core";
 
 /// The server's latest Git facts, and when this client first saw each directory's current facts.
 #[derive(Debug, Default)]
-pub(crate) struct ServerRepositories {
+pub(crate) struct CoreRepositories {
     snapshot: Option<Snapshot>,
     /// A status reads this as its update time. It changes only when the facts do, so an unchanged
     /// reading presents an unchanged view.
@@ -43,10 +43,10 @@ pub(crate) struct LocalPresentation<'a> {
     /// presented as last known, because the server may have read newer ones since.
     pub(crate) connected: bool,
     /// The cached Pull Request this client's GitHub CLI found for a server branch.
-    pub(crate) pull_request: &'a dyn Fn(&ServerPullRequestKey) -> Option<PullRequest>,
+    pub(crate) pull_request: &'a dyn Fn(&CorePullRequestKey) -> Option<PullRequest>,
 }
 
-impl ServerRepositories {
+impl CoreRepositories {
     /// Accepts the server's latest reading, and reports whether it differs from the one
     /// presented. A new revision can arrive while the organization revision stays the same, and a
     /// restarted server starts a new revision sequence, so the server boot identifies it too.
@@ -93,7 +93,7 @@ impl ServerRepositories {
             .is_some_and(|snapshot| snapshot.pinned_worktrees.iter().any(|path| path == root))
     }
 
-    pub(crate) fn pin_check_state(&self) -> spaceterm_server::repository::PinCheckState {
+    pub(crate) fn pin_check_state(&self) -> spaceterm_core::repository::PinCheckState {
         self.snapshot
             .as_ref()
             .map(|snapshot| snapshot.pin_check)
@@ -154,7 +154,7 @@ impl ServerRepositories {
     }
 
     /// The Pull Request lookups the presented repositories need, one per branch and upstream.
-    pub(crate) fn pull_request_keys(&self) -> Vec<ServerPullRequestKey> {
+    pub(crate) fn pull_request_keys(&self) -> Vec<CorePullRequestKey> {
         self.snapshot
             .iter()
             .flat_map(|snapshot| &snapshot.directories)
@@ -190,7 +190,7 @@ impl ServerRepositories {
             .and_then(|key| (local.pull_request)(&key));
         RepositoryView::Repository(Arc::new(RepositoryStatus {
             key: RepositoryKey {
-                machine: RepositoryMachine::Remote(RemoteMachineKey::new(SERVER_MACHINE)),
+                machine: RepositoryMachine::Remote(RemoteMachineKey::new(CORE_MACHINE)),
                 root: RepositoryRoot::Remote(repository.root.to_string_lossy().into()),
             },
             head: repository.head.clone(),
@@ -225,9 +225,9 @@ fn find<'a>(snapshot: &'a Snapshot, directory: &Path) -> Option<&'a DirectoryFac
 /// The lookup one repository's branch needs. The server sends only the parsed query; raw remote
 /// URLs and Git configuration stay on the server.
 fn pull_request_key(
-    repository: &spaceterm_server::repository::Repository,
-) -> Option<ServerPullRequestKey> {
-    Some(ServerPullRequestKey {
+    repository: &spaceterm_core::repository::Repository,
+) -> Option<CorePullRequestKey> {
+    Some(CorePullRequestKey {
         query: repository.pull_request.clone()?,
         upstream: repository
             .upstream
@@ -258,8 +258,8 @@ pub(crate) fn workspace_directory(workspace: &Workspace) -> Option<&Path> {
 mod tests {
     use std::time::Duration;
 
-    use spaceterm_server::hierarchy::{Side, Tab};
-    use spaceterm_server::repository::{
+    use spaceterm_core::hierarchy::{Side, Tab};
+    use spaceterm_core::repository::{
         ChangeSummary, ChangeTotal, GitHubRepository, GitToolStatus, PullRequestQuery, Repository,
         RepositoryHead, RepositoryReadError, WorktreeHead, WorktreeRecord,
     };
@@ -298,7 +298,7 @@ mod tests {
             git: GitToolStatus::Unknown,
             directories,
             pinned_worktrees: Vec::new(),
-            pin_check: spaceterm_server::repository::PinCheckState::Ready,
+            pin_check: spaceterm_core::repository::PinCheckState::Ready,
         }
     }
 
@@ -326,11 +326,11 @@ mod tests {
     }
 
     fn present(
-        repositories: &ServerRepositories,
+        repositories: &CoreRepositories,
         preferences: RepositoryStatusPreferences,
         connected: bool,
     ) -> RepositoryView {
-        let lookup = |_: &ServerPullRequestKey| Some(pull_request(7));
+        let lookup = |_: &CorePullRequestKey| Some(pull_request(7));
         repositories.view(
             Path::new("/srv/app/src"),
             &LocalPresentation {
@@ -349,8 +349,8 @@ mod tests {
     }
 
     #[test]
-    fn a_new_revision_or_server_boot_should_present_new_facts_and_a_repeat_should_not() {
-        let mut repositories = ServerRepositories::default();
+    fn a_new_revision_or_machine_boot_should_present_new_facts_and_a_repeat_should_not() {
+        let mut repositories = CoreRepositories::default();
         let now = Instant::now();
         let restarted = Snapshot {
             boot: [2; 32],
@@ -372,7 +372,7 @@ mod tests {
 
         assert_eq!(
             status(&view).head,
-            spaceterm_server::repository::RepositoryHead::Branch("feature".into())
+            spaceterm_core::repository::RepositoryHead::Branch("feature".into())
         );
         assert_eq!(
             present(&repositories, RepositoryStatusPreferences::default(), true),
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn unchanged_facts_should_keep_their_update_time_and_changed_facts_should_take_a_new_one() {
-        let mut repositories = ServerRepositories::default();
+        let mut repositories = CoreRepositories::default();
         let first = Instant::now();
         let later = first + Duration::from_secs(30);
         repositories.accept(
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn a_failed_read_or_a_lost_connection_should_present_the_last_facts_as_last_known() {
-        let mut repositories = ServerRepositories::default();
+        let mut repositories = CoreRepositories::default();
         let now = Instant::now();
         repositories.accept(
             Some(&snapshot(
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn decoded_count_failure_keeps_fresh_facts_and_client_pull_request_lookup() {
         let now = Instant::now();
-        let mut repositories = ServerRepositories::default();
+        let mut repositories = CoreRepositories::default();
         repositories.accept(
             Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
             now,
@@ -457,9 +457,9 @@ mod tests {
         ] {
             let mut current = repository("feature");
             current.changes = Err(error);
-            current.upstream = Some(spaceterm_server::repository::Upstream {
+            current.upstream = Some(spaceterm_core::repository::Upstream {
                 name: "origin/main".into(),
-                divergence: Some(spaceterm_server::repository::Divergence {
+                divergence: Some(spaceterm_core::repository::Divergence {
                     ahead: 2,
                     behind: 1,
                 }),
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn decoded_count_progress_keeps_branch_and_last_known_changes_visible() {
-        let mut repositories = ServerRepositories::default();
+        let mut repositories = CoreRepositories::default();
         let now = Instant::now();
         for (revision, counting, changes, expected) in [
             (
@@ -559,8 +559,8 @@ mod tests {
     }
 
     #[test]
-    fn client_settings_should_decide_what_server_facts_present() {
-        let mut repositories = ServerRepositories::default();
+    fn client_settings_should_decide_what_machine_facts_present() {
+        let mut repositories = CoreRepositories::default();
         repositories.accept(
             Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
             Instant::now(),
@@ -597,8 +597,8 @@ mod tests {
     }
 
     #[test]
-    fn a_server_root_should_never_present_as_a_local_path() {
-        let mut repositories = ServerRepositories::default();
+    fn a_core_root_should_never_present_as_a_local_path() {
+        let mut repositories = CoreRepositories::default();
         repositories.accept(
             Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
             Instant::now(),
@@ -630,7 +630,7 @@ mod tests {
         }
     }
 
-    fn listed(repositories: &ServerRepositories, directory: &str) -> Vec<PathBuf> {
+    fn listed(repositories: &CoreRepositories, directory: &str) -> Vec<PathBuf> {
         repositories
             .worktrees(Path::new(directory))
             .expect("the directory has a listing")
@@ -651,9 +651,9 @@ mod tests {
             listing("/srv/app-a", "/srv/app", &["/srv/app", "/srv/app-a"]),
             listing("/srv/other", "/srv/other", &["/srv/other"]),
         ];
-        let mut forward = ServerRepositories::default();
-        let mut reversed = ServerRepositories::default();
-        let mut alone = ServerRepositories::default();
+        let mut forward = CoreRepositories::default();
+        let mut reversed = CoreRepositories::default();
+        let mut alone = CoreRepositories::default();
         let mut directories = vec![failed.clone()];
         directories.extend(siblings.iter().cloned());
         forward.accept(Some(&snapshot(1, directories.clone())), Instant::now());
@@ -679,7 +679,7 @@ mod tests {
     fn workspace_in_removed_worktree() -> Workspace {
         let tab = |id: u8, worktree: &str, repository: &str| Tab {
             worktree: Some(worktree.into()),
-            worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+            worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
             worktree_repository: Some(repository.into()),
             id: [id; 32],
             root_pane: [id; 32],
@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn server_repository_views_follow_the_protected_source_independently_of_live_display() {
+    fn machine_repository_views_follow_the_protected_source_independently_of_live_display() {
         let mut workspace = workspace_in_removed_worktree();
         let pane = &mut workspace.tabs[0].panes[0];
         pane.current_directory = Some("/srv/nested".into());
@@ -720,7 +720,7 @@ mod tests {
         // Consume the hierarchy as an observer receives it over SpaceTerm Protocol.
         let mut workspace: Workspace =
             serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
-        let mut repositories = ServerRepositories::default();
+        let mut repositories = CoreRepositories::default();
         let mut source = listing("/srv/app/src", "/srv/app", &["/srv/app", "/srv/feature"]);
         source.repository = Some(repository("owner"));
         let mut nested = listing("/srv/nested", "/srv/nested", &["/srv/nested"]);
@@ -769,7 +769,7 @@ mod tests {
         );
     }
 
-    fn workspace_listing(repositories: &ServerRepositories) -> Option<Vec<PathBuf>> {
+    fn workspace_listing(repositories: &CoreRepositories) -> Option<Vec<PathBuf>> {
         let inventory = repositories.workspace_worktrees(&workspace_in_removed_worktree())?;
         Some(
             inventory
@@ -794,9 +794,9 @@ mod tests {
         };
         let main = listing("/srv/app", "/srv/app", &["/srv/app", "/srv/app-extra"]);
         let other = listing("/srv/other", "/srv/other", &["/srv/other"]);
-        let mut restarted = ServerRepositories::default();
-        let mut outside_git = ServerRepositories::default();
-        let mut main_unread = ServerRepositories::default();
+        let mut restarted = CoreRepositories::default();
+        let mut outside_git = CoreRepositories::default();
+        let mut main_unread = CoreRepositories::default();
         restarted.accept(
             Some(&snapshot(
                 1,
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn a_directory_outside_a_repository_or_unreported_should_present_nothing() {
-        let mut repositories = ServerRepositories::default();
+        let mut repositories = CoreRepositories::default();
         repositories.accept(
             Some(&snapshot(
                 1,

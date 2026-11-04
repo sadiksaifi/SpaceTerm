@@ -3,13 +3,13 @@
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 
 use super::SettingsWindow;
-use super::server_update::UpdateState;
-use super::servers::ServiceState;
-use crate::server_connection::ServerError;
-use crate::server_connection::service::ServiceStatus;
-use crate::server_connection::service::activation::{ActivationPhase, ActivationStatus};
+use super::core_update::UpdateState;
+use super::machines::ServiceState;
+use crate::machine_connection::CoreError;
+use crate::machine_connection::service::ServiceStatus;
+use crate::machine_connection::service::activation::{ActivationPhase, ActivationStatus};
 
-struct InstalledOperations(Entity<LocalServerOperations>);
+struct InstalledOperations(Entity<LocalCoreOperations>);
 impl Global for InstalledOperations {}
 
 #[derive(Clone, Copy)]
@@ -23,25 +23,25 @@ pub(crate) enum CompletedOperation {
 
 pub(super) struct UpdateCompletion {
     pub(super) state: UpdateState,
-    pub(super) outcome: Result<Option<ActivationStatus>, ServerError>,
+    pub(super) outcome: Result<Option<ActivationStatus>, CoreError>,
 }
 
 /// Retains admitted progress and typed outcomes across Settings Window replacement. Preparation
 /// and destructive confirmation stay with the window that requested them.
 #[derive(Default)]
-pub(crate) struct LocalServerOperations {
+pub(crate) struct LocalCoreOperations {
     pub(super) service: Option<ServiceState>,
     pub(super) update: Option<UpdateState>,
     /// Admitted failures survive passive reads; a successful read still clears a read failure.
-    pub(super) service_failure: Option<ServerError>,
-    pub(super) update_failure: Option<ServerError>,
-    last_update: Option<Result<Option<ActivationStatus>, ServerError>>,
+    pub(super) service_failure: Option<CoreError>,
+    pub(super) update_failure: Option<CoreError>,
+    last_update: Option<Result<Option<ActivationStatus>, CoreError>>,
     operation: Option<Task<()>>,
 }
 
-impl EventEmitter<CompletedOperation> for LocalServerOperations {}
+impl EventEmitter<CompletedOperation> for LocalCoreOperations {}
 
-impl LocalServerOperations {
+impl LocalCoreOperations {
     pub(crate) fn get(cx: &mut App) -> Entity<Self> {
         if let Some(installed) = cx.try_global::<InstalledOperations>() {
             return installed.0.clone();
@@ -68,7 +68,7 @@ impl LocalServerOperations {
                 // Authorization refusal admits no service change and may clear on a later read.
                 owner.service_failure = state
                     .failure
-                    .filter(|error| *error != ServerError::AuthorizationRequired);
+                    .filter(|error| *error != CoreError::AuthorizationRequired);
                 owner.service = Some(state);
                 owner.finished(CompletedOperation::Service, running, cx);
             });
@@ -153,10 +153,10 @@ impl LocalServerOperations {
 impl SettingsWindow {
     pub(super) fn synchronize_local_operations(&mut self, cx: &App) {
         let owner = self.local_operations.read(cx);
-        if let (Some(row), Some(state)) = (&mut self.server_service, &owner.service) {
+        if let (Some(row), Some(state)) = (&mut self.core_service, &owner.service) {
             row.state = state.clone();
         }
-        if let (Some(row), Some(state)) = (&mut self.server_update, &owner.update) {
+        if let (Some(row), Some(state)) = (&mut self.core_update, &owner.update) {
             row.state = state.clone();
         }
     }

@@ -9,12 +9,12 @@ use super::{Deadline, Done, PaneTarget, controlled, link_failure, session_failur
 use crate::args::SendArgs;
 use crate::contract::{
     Code, ControlledReason, Delivery, Details, Failure, PaneRelease, PaneSend, SessionStateName,
-    UsageDetails, UsageKind, from_server_error,
+    UsageDetails, UsageKind, from_core_error,
 };
-use spaceterm_server::connection::link::ServerLink;
-use spaceterm_server::pane::{AttachmentClaim, FocusTarget, PasteOutcome};
-use spaceterm_server::protocol::limits::MAX_PASTE_BYTES;
-use spaceterm_server::protocol::{InputEvent, InputOutcome, Refusal};
+use spaceterm_core::connection::link::CoreLink;
+use spaceterm_core::pane::{AttachmentClaim, FocusTarget, PasteOutcome};
+use spaceterm_core::protocol::limits::MAX_PASTE_BYTES;
+use spaceterm_core::protocol::{InputEvent, InputOutcome, Refusal};
 use std::io::Read;
 use std::time::Duration;
 
@@ -25,8 +25,8 @@ const GENERATION: u64 = 1;
 
 /// What one `pane send` types.
 enum Typing {
-    Keys(Vec<spaceterm_server::pane::Key>),
-    Paste(String, Vec<spaceterm_server::pane::Key>),
+    Keys(Vec<spaceterm_core::pane::Key>),
+    Paste(String, Vec<spaceterm_core::pane::Key>),
 }
 
 fn usage(argument: &str) -> Failure {
@@ -77,12 +77,12 @@ fn typing(args: &SendArgs, stdin: &mut dyn Read) -> Result<Typing, Failure> {
 
 /// Claims the target's running Session for input on a new channel. It never starts one.
 pub(crate) fn claim_running(
-    link: &ServerLink,
+    link: &CoreLink,
     target: &PaneTarget,
     take_over: bool,
     size: Option<crate::args::TerminalSize>,
     deadline: Deadline,
-) -> Result<(Channel, spaceterm_server::pane::Lease), Failure> {
+) -> Result<(Channel, spaceterm_core::pane::Lease), Failure> {
     let size = size.map(pane_size);
     let channel = Channel::open(link)?;
     let claim = AttachmentClaim::Select { explicit: false };
@@ -120,13 +120,13 @@ pub(crate) fn discarded(refusal: Refusal) -> Failure {
     match refusal {
         Refusal::Stale => controlled(ControlledReason::Stale),
         Refusal::Unsupported => usage("<TEXT>"),
-        refusal => from_server_error(refusal.into()),
+        refusal => from_core_error(refusal.into()),
     }
 }
 
 /// `pane send`.
 pub fn send(
-    link: &ServerLink,
+    link: &CoreLink,
     target: &PaneTarget,
     args: &SendArgs,
     stdin: &mut dyn Read,
@@ -284,7 +284,7 @@ fn unconfirmed_or(failure: Failure) -> Failure {
 /// `pane release`: gives up this identity's control of the Pane. It never takes over. A Pane
 /// another client controls stays as it is, and so does an unclaimed one: both report
 /// `released: false`.
-pub fn release(link: &ServerLink, target: &PaneTarget, deadline: Deadline) -> Done<PaneRelease> {
+pub fn release(link: &CoreLink, target: &PaneTarget, deadline: Deadline) -> Done<PaneRelease> {
     let deadline = deadline.or(DEFAULT_TIMEOUT);
     if let Err(failure) = crate::interrupt::dispatch() {
         return Done::failed(failure);
@@ -296,7 +296,7 @@ pub fn release(link: &ServerLink, target: &PaneTarget, deadline: Deadline) -> Do
     let release = |channel: Channel| {
         let result = super::request(
             link,
-            spaceterm_server::protocol::Operation::Release {
+            spaceterm_core::protocol::Operation::Release {
                 channel: channel.number(),
             },
             deadline,

@@ -13,7 +13,7 @@ pub(crate) struct WorkspaceTerminalSessionFactory {
 }
 
 impl WorkspaceTerminalSessionFactory {
-    pub(crate) fn new_server(session_factory: Rc<dyn TerminalSessionFactory>) -> Self {
+    pub(crate) fn new_core(session_factory: Rc<dyn TerminalSessionFactory>) -> Self {
         Self {
             session_factory: Some(session_factory),
             pending_title: None,

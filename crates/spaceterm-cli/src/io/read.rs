@@ -13,10 +13,10 @@ use crate::contract::{
     HistoryRef, Next, PaneRead, Row, Rows, Screen, ScreenSize, SessionStateName, UsageDetails,
     UsageKind, Wait, Warning, WarningCode, WarningDetails,
 };
-use spaceterm_server::connection::link::RequestError;
-use spaceterm_server::protocol::limits::MAX_PAGE_ROWS;
-use spaceterm_server::protocol::screen::History;
-use spaceterm_server::protocol::{ObserveReply, Operation, Refusal, ReplyBody, SessionState};
+use spaceterm_core::connection::link::RequestError;
+use spaceterm_core::protocol::limits::MAX_PAGE_ROWS;
+use spaceterm_core::protocol::screen::History;
+use spaceterm_core::protocol::{ObserveReply, Operation, Refusal, ReplyBody, SessionState};
 use std::time::{Duration, Instant};
 
 /// `--rows` without a value.
@@ -331,7 +331,7 @@ pub(crate) fn rows(
 ) -> Rows {
     let cursor = |row| {
         Cursor {
-            server: Cursor::short(&target.server),
+            core: Cursor::short(&target.core),
             pane: Cursor::short(&target.pane),
             session: Cursor::short(&session),
             epoch: capture.history.epoch,
@@ -403,7 +403,7 @@ impl Waiting {
 
 /// `pane read`.
 pub fn read(
-    link: &spaceterm_server::connection::link::ServerLink,
+    link: &spaceterm_core::connection::link::CoreLink,
     target: &PaneTarget,
     args: &ReadArgs,
     deadline: Deadline,
@@ -424,7 +424,7 @@ pub fn read(
     };
     let cursor = args.before.or(args.after);
     if let Some(cursor) = cursor
-        && (cursor.server != Cursor::short(&target.server)
+        && (cursor.core != Cursor::short(&target.core)
             || cursor.pane != Cursor::short(&target.pane))
     {
         return Done::failed(Failure::new(Code::CursorMismatch));

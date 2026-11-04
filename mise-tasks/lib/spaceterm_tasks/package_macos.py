@@ -75,7 +75,7 @@ def package_bundle(release_tag=None):
         updater = sparkle.directory()
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]
-    from spaceterm_tasks.server_package import prepare_desktop_artifact
+    from spaceterm_tasks.core_package import prepare_desktop_artifact
 
     environment.update(
         prepare_desktop_artifact(
@@ -218,7 +218,7 @@ def verify_bundle(app, name, release_tag, label):
     ):
         raise TaskError(f"{label} asset catalog has no 1024-pixel {ICON_NAME} icon")
     verify_resources(resources, label)
-    from spaceterm_tasks.server_package import verify_desktop_artifact
+    from spaceterm_tasks.core_package import verify_desktop_artifact
 
     verify_desktop_artifact(
         resources / "server-artifact",
@@ -226,7 +226,7 @@ def verify_bundle(app, name, release_tag, label):
         release_tag,
         executable=executable,
     )
-    from spaceterm_tasks.server_catalog import verify_catalog
+    from spaceterm_tasks.core_catalog import verify_catalog
 
     verify_catalog(
         resources / "server-artifacts",

@@ -12,8 +12,8 @@ use anyhow::Error as AnyError;
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system,
 };
-use spaceterm_server::diagnostics::TerminalCounters;
-use spaceterm_server::pane::LineMode;
+use spaceterm_core::diagnostics::TerminalCounters;
+use spaceterm_core::pane::LineMode;
 use thiserror::Error;
 
 use crate::platform::native_pty::{
@@ -1200,7 +1200,7 @@ mod reader_tests {
 
         assert_eq!(
             counters.snapshot(),
-            spaceterm_server::diagnostics::TerminalCounterSnapshot {
+            spaceterm_core::diagnostics::TerminalCounterSnapshot {
                 pty_read_attempts: 5,
                 pty_data_reads: 2,
                 pty_read_bytes: 8,

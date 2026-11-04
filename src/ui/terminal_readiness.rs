@@ -496,13 +496,13 @@ mod tests {
         };
         use crate::terminal::testing::TestTerminalSessionRecords;
         use crate::ui::workspace_manager::tests::{
-            local_server_manager, server_sessions, workspace_adapters,
+            core_sessions, local_core_manager, workspace_adapters,
         };
         cx.update(crate::ui::init).unwrap();
         let records = TestTerminalSessionRecords::default();
-        let factory = Rc::new(server_sessions(records.clone()));
+        let factory = Rc::new(core_sessions(records.clone()));
         let (window_manager, cx) = cx.add_window_view(|window, cx| {
-            local_server_manager(
+            local_core_manager(
                 factory,
                 std::path::PathBuf::from("/tmp/spaceterm-readiness-test"),
                 workspace_adapters(),
@@ -611,13 +611,13 @@ mod tests {
         };
         use crate::terminal::testing::TestTerminalSessionRecords;
         use crate::ui::workspace_manager::tests::{
-            local_server_manager, server_sessions, workspace_adapters,
+            core_sessions, local_core_manager, workspace_adapters,
         };
         cx.update(crate::ui::init).unwrap();
         let records = TestTerminalSessionRecords::default();
-        let factory = Rc::new(server_sessions(records.clone()));
+        let factory = Rc::new(core_sessions(records.clone()));
         let (window_manager, cx) = cx.add_window_view(|window, cx| {
-            local_server_manager(
+            local_core_manager(
                 factory,
                 std::path::PathBuf::from("/tmp/spaceterm-readiness-idle-test"),
                 workspace_adapters(),

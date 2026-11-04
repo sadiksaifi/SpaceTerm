@@ -17,7 +17,7 @@ use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::direct_servers::UnpairAction;
+use crate::ui::direct_machines::UnpairAction;
 
 pub(super) const NOTICE_SELECTOR: &str = "settings-server-notice";
 
@@ -49,10 +49,10 @@ struct Notice {
 
 /// What one unconfirmed unpair says, in one or two short sentences naming the server.
 pub(super) fn unpair_message(pending: &PendingUnpair) -> String {
-    let server = &pending.server_label;
+    let core = &pending.machine_label;
     match (
         pending.enrollment_cleanup,
-        pending.server_confirmed,
+        pending.core_confirmed,
         pending.state,
     ) {
         (true, _, state) => {
@@ -61,23 +61,23 @@ pub(super) fn unpair_message(pending: &PendingUnpair) -> String {
                 UnpairProgress::Retrying => "It will retry automatically.",
                 UnpairProgress::Unconfirmed => "Choose Try Again to continue cancelling.",
             };
-            format!("SpaceTerm is cancelling the unfinished pairing with {server}. {next}")
+            format!("SpaceTerm is cancelling the unfinished pairing with {core}. {next}")
         }
         (false, true, UnpairProgress::NeedsInteraction) => {
-            format!("Choose Resume to finish unpairing from {server}.")
+            format!("Choose Resume to finish unpairing from {core}.")
         }
-        (false, true, UnpairProgress::Retrying) => format!("Finishing unpairing from {server}…"),
+        (false, true, UnpairProgress::Retrying) => format!("Finishing unpairing from {core}…"),
         (false, true, UnpairProgress::Unconfirmed) => {
-            format!("Choose Try Again to finish unpairing from {server}.")
+            format!("Choose Try Again to finish unpairing from {core}.")
         }
         (false, false, UnpairProgress::NeedsInteraction) => {
-            format!("Unpair from {server} isn\u{2019}t confirmed. Choose Resume.")
+            format!("Unpair from {core} isn\u{2019}t confirmed. Choose Resume.")
         }
         (false, false, UnpairProgress::Retrying) => {
-            format!("Unpair from {server} isn\u{2019}t confirmed yet.")
+            format!("Unpair from {core} isn\u{2019}t confirmed yet.")
         }
         (false, false, UnpairProgress::Unconfirmed) => {
-            format!("Unpair from {server} isn\u{2019}t confirmed. Choose Try Again.")
+            format!("Unpair from {core} isn\u{2019}t confirmed. Choose Try Again.")
         }
     }
 }
@@ -91,7 +91,7 @@ impl SettingsWindow {
             if hidden.contains(&id) {
                 continue;
             }
-            let (_, actions) = crate::ui::direct_servers::present_unpair(&pending);
+            let (_, actions) = crate::ui::direct_machines::present_unpair(&pending);
             let steps = actions
                 .iter()
                 .filter(|action| **action == UnpairAction::Resume)
@@ -154,7 +154,7 @@ impl SettingsWindow {
     }
 
     /// The notices above Servers' cards, or `None` when nothing needs telling.
-    pub(super) fn render_server_notices(
+    pub(super) fn render_core_notices(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
@@ -269,17 +269,17 @@ mod tests {
     fn pending(state: UnpairProgress) -> PendingUnpair {
         PendingUnpair {
             key: [1; 32],
-            server_label: "Studio".to_owned(),
+            machine_label: "Studio".to_owned(),
             state,
             dismissed: false,
             enrollment_cleanup: false,
             self_unpair: true,
-            server_confirmed: false,
+            core_confirmed: false,
         }
     }
 
     #[test]
-    fn an_unconfirmed_unpair_names_the_server_and_keeps_trying() {
+    fn an_unconfirmed_unpair_names_the_machine_and_keeps_trying() {
         assert_eq!(
             unpair_message(&pending(UnpairProgress::Retrying)),
             "Unpair from Studio isn\u{2019}t confirmed yet."
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn a_confirmed_unpair_reports_only_the_key_cleanup_left() {
         let mut confirmed = pending(UnpairProgress::Retrying);
-        confirmed.server_confirmed = true;
+        confirmed.core_confirmed = true;
 
         let message = unpair_message(&confirmed);
 

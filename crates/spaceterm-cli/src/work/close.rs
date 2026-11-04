@@ -4,7 +4,7 @@ use crate::{
     list::PaneFacts,
     scope::Snapshot,
 };
-use spaceterm_server::{
+use spaceterm_core::{
     hierarchy::{CloseConfirmation, CloseTarget, Id, Mutation},
     labels,
     pane::metadata::{CommandState, Freshness, PromptZone},
@@ -68,7 +68,7 @@ pub fn review(
             others.push(OtherController {
                 pane: super::hex(&pane.id),
                 client_name: facts.control.client_name.clone().unwrap_or_else(|| {
-                    spaceterm_server::pane::control::ClientName::from("")
+                    spaceterm_core::pane::control::ClientName::from("")
                         .as_str()
                         .to_owned()
                 }),
@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::contract::{PaneControl, PaneSession, SessionStateLabel};
     use crate::scope::fixtures::{fixture, id};
-    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedControl, ConfirmedPane};
+    use spaceterm_core::hierarchy::{CloseInventory, ConfirmedControl, ConfirmedPane};
 
     fn live(snapshot: &mut Snapshot) -> Vec<PaneFacts> {
         let panes: Vec<_> = snapshot

@@ -143,13 +143,13 @@ impl ClientEffectGrant {
 
 #[derive(Clone, Debug)]
 pub struct ClientEffectRequest {
-    pub effect: spaceterm_server::pane::effects::Effect,
+    pub effect: spaceterm_core::pane::effects::Effect,
     pub grant: ClientEffectGrant,
 }
 
 impl ClientEffectRequest {
     pub(crate) fn new(
-        effect: spaceterm_server::pane::effects::Effect,
+        effect: spaceterm_core::pane::effects::Effect,
         authority: Arc<ClipboardAuthority>,
         epoch: u64,
         remaining: Duration,

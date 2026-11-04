@@ -2,9 +2,9 @@
 use super::model::Command;
 use super::service_changes::{self, StartWatch};
 #[cfg(target_os = "macos")]
-use spaceterm_server::service::control::{Action, Confirmation};
-use spaceterm_server::{
-    ServerError,
+use spaceterm_core::service::control::{Action, Confirmation};
+use spaceterm_core::{
+    CoreError,
     connection::link::{Health, LinkEvent, LinkSink},
     service::{ServiceStatus, control::Controller},
 };
@@ -31,38 +31,38 @@ pub(crate) enum Request {
 }
 
 pub(crate) enum Event {
-    Status(Result<ServiceStatus, ServerError>),
+    Status(Result<ServiceStatus, CoreError>),
     /// Whether the Server version row offers Update Server.
     Update(bool),
     /// A confirmation to present, or why the operation is no longer available.
     #[cfg(target_os = "macos")]
-    Prepared(Action, Result<Confirmation, ServerError>),
-    Finished(Command, Result<ServiceStatus, ServerError>),
+    Prepared(Action, Result<Confirmation, CoreError>),
+    Finished(Command, Result<ServiceStatus, CoreError>),
 }
 
 /// The service operations the worker runs. [`Controller`] is the local service.
 pub(crate) trait StatusService: Send + 'static {
-    fn status(&self) -> Result<ServiceStatus, ServerError>;
-    fn start(&self) -> Result<ServiceStatus, ServerError>;
+    fn status(&self) -> Result<ServiceStatus, CoreError>;
+    fn start(&self) -> Result<ServiceStatus, CoreError>;
     #[cfg(target_os = "macos")]
-    fn prepare(&self, action: Action) -> Result<Confirmation, ServerError>;
+    fn prepare(&self, action: Action) -> Result<Confirmation, CoreError>;
     #[cfg(target_os = "macos")]
-    fn confirm(&self, confirmation: Confirmation) -> Result<ServiceStatus, ServerError>;
+    fn confirm(&self, confirmation: Confirmation) -> Result<ServiceStatus, CoreError>;
 }
 
 impl StatusService for Controller {
-    fn status(&self) -> Result<ServiceStatus, ServerError> {
+    fn status(&self) -> Result<ServiceStatus, CoreError> {
         Controller::status(self)
     }
-    fn start(&self) -> Result<ServiceStatus, ServerError> {
+    fn start(&self) -> Result<ServiceStatus, CoreError> {
         Controller::start(self)
     }
     #[cfg(target_os = "macos")]
-    fn prepare(&self, action: Action) -> Result<Confirmation, ServerError> {
+    fn prepare(&self, action: Action) -> Result<Confirmation, CoreError> {
         Controller::prepare(self, action)
     }
     #[cfg(target_os = "macos")]
-    fn confirm(&self, confirmation: Confirmation) -> Result<ServiceStatus, ServerError> {
+    fn confirm(&self, confirmation: Confirmation) -> Result<ServiceStatus, CoreError> {
         Controller::confirm(self, confirmation)
     }
 }
@@ -101,7 +101,7 @@ impl Requests for mpsc::Receiver<Request> {
 /// status work.
 pub(crate) struct Worker {
     requests: mpsc::Sender<Request>,
-    changes: Arc<ServerChanges>,
+    changes: Arc<CoreChanges>,
 }
 
 impl Worker {
@@ -125,14 +125,14 @@ impl Worker {
             service_changes::follow(
                 watch,
                 directories,
-                move || controller.server_process().ok().flatten(),
+                move || controller.core_process().ok().flatten(),
                 move || requests.send(Request::Poll).is_ok(),
             )?;
         }
         std::thread::Builder::new()
             .name("server-status".into())
             .spawn(move || serve(&mut received, &controller, &update_offered, &deliver))?;
-        let changes = Arc::new(ServerChanges {
+        let changes = Arc::new(CoreChanges {
             link: AtomicU8::new(UNOBSERVED),
             requests: requests.clone(),
         });
@@ -192,13 +192,13 @@ const CLOSED: u8 = 2;
 /// Asks for a status read when the local server's link ends, and when a later link's first
 /// inventory shows a server admitted the client again. A stopped, crashed, restarted or updated
 /// server changes the link. Repeated closes while no server admits the client ask once.
-struct ServerChanges {
+struct CoreChanges {
     /// [`UNOBSERVED`], [`ADMITTED`] or [`CLOSED`].
     link: AtomicU8,
     requests: mpsc::Sender<Request>,
 }
 
-impl LinkSink for ServerChanges {
+impl LinkSink for CoreChanges {
     fn deliver(&self, event: LinkEvent) {
         let changed = match event {
             LinkEvent::Health(Health::Closed(_)) => {
@@ -218,7 +218,7 @@ fn finish(
     service: &impl StatusService,
     deliver: &impl Fn(Event),
     command: Command,
-    result: Result<ServiceStatus, ServerError>,
+    result: Result<ServiceStatus, CoreError>,
 ) {
     let refused = result.is_err();
     deliver(Event::Finished(command, result));
@@ -230,7 +230,7 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spaceterm_server::{
+    use spaceterm_core::{
         connection::link::LinkError, hierarchy::Inventory, protocol::InventoryRevision,
     };
 
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn the_status_item_reads_the_service_only_when_the_local_link_changes() {
         let (requests, received) = mpsc::channel();
-        let changes = ServerChanges {
+        let changes = CoreChanges {
             link: AtomicU8::new(UNOBSERVED),
             requests,
         };
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn the_first_close_asks_for_a_read_when_the_first_inventory_preceded_the_subscription() {
         let (requests, received) = mpsc::channel();
-        let changes = ServerChanges {
+        let changes = CoreChanges {
             link: AtomicU8::new(UNOBSERVED),
             requests,
         };
@@ -344,21 +344,21 @@ mod tests {
     }
 
     impl StatusService for RecordingService {
-        fn status(&self) -> Result<ServiceStatus, ServerError> {
+        fn status(&self) -> Result<ServiceStatus, CoreError> {
             let time = *self.clock.lock().unwrap();
             self.reads.lock().unwrap().push(time);
             Ok(ServiceStatus::default())
         }
-        fn start(&self) -> Result<ServiceStatus, ServerError> {
-            Err(ServerError::Unsupported)
+        fn start(&self) -> Result<ServiceStatus, CoreError> {
+            Err(CoreError::Unsupported)
         }
         #[cfg(target_os = "macos")]
-        fn prepare(&self, _: Action) -> Result<Confirmation, ServerError> {
-            Err(ServerError::Unsupported)
+        fn prepare(&self, _: Action) -> Result<Confirmation, CoreError> {
+            Err(CoreError::Unsupported)
         }
         #[cfg(target_os = "macos")]
-        fn confirm(&self, _: Confirmation) -> Result<ServiceStatus, ServerError> {
-            Err(ServerError::Unsupported)
+        fn confirm(&self, _: Confirmation) -> Result<ServiceStatus, CoreError> {
+            Err(CoreError::Unsupported)
         }
     }
 

@@ -23,8 +23,8 @@ use objc2_app_kit::{
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSString, ns_string};
-use spaceterm_server::{
-    ServerError,
+use spaceterm_core::{
+    CoreError,
     service::{
         Service,
         control::{Action, Confirmation, Controller},
@@ -95,7 +95,7 @@ pub(crate) fn install(
     let item = StatusItem::new(mtm, name, worker, sender);
     item.render();
     item.worker.send(Request::Refresh);
-    status_menu::follow_local_server(item.worker.changes(), cx);
+    status_menu::follow_local_core(item.worker.changes(), cx);
     cx.spawn(async move |cx| {
         while let Ok(message) = messages.recv().await {
             cx.update(|cx| item.handle(message, cx));
@@ -191,7 +191,7 @@ impl StatusItem {
         let presentation = Presentation::of(&self.name, self.state.get());
         let rows = &self.rows;
         rows.header
-            .setTitle(&NSString::from_str(&presentation.server));
+            .setTitle(&NSString::from_str(&presentation.core));
         rows.state.setTitle(&NSString::from_str(presentation.state));
         rows.state.setSubtitle(
             presentation
@@ -302,7 +302,7 @@ impl StatusItem {
             // Settings owns the one journey, which reads the server again and asks first.
             Command::Update => {
                 crate::app::leave_menu_only(cx);
-                crate::ui::settings_window::open_server_update(cx);
+                crate::ui::settings_window::open_core_update(cx);
                 cx.activate(true);
             }
             // The client's own quit policy decides, including its confirmation and saving.
@@ -327,7 +327,7 @@ impl StatusItem {
     /// Cancel, so it never ends Sessions by accident.
     fn confirm(&self, command: Command, confirmation: Confirmation, cx: &App) {
         let sender = self.sender.clone();
-        let alert = server_alert(
+        let alert = core_alert(
             &confirmation.message(),
             &confirmation.detail(),
             Some(confirmation.confirm_label()),
@@ -344,21 +344,21 @@ impl StatusItem {
         );
     }
 
-    fn report(&self, command: Command, error: ServerError, cx: &App) {
+    fn report(&self, command: Command, error: CoreError, cx: &App) {
         let operation = match command {
             Command::Start => "start",
             Command::Stop => "stop",
             _ => "restart",
         };
         let message = format!("The {} server couldn\u{2019}t {operation}.", self.name);
-        let alert = server_alert(&message, &error.to_string(), None, self.mtm);
+        let alert = core_alert(&message, &error.to_string(), None, self.mtm);
         present(alert, self.activation, cx.windows().is_empty(), |_| {});
     }
 }
 
 /// Builds a server alert. A confirmation offers Cancel, then its `destructive` button; a report
 /// offers OK.
-fn server_alert(
+fn core_alert(
     message: &str,
     detail: &str,
     destructive: Option<&str>,
@@ -414,7 +414,7 @@ fn present(
         let confirming = alert.buttons().count() > 1;
         let application = NSApplication::sharedApplication(mtm);
         let escape = confirming.then(cancel_on_escape).flatten();
-        let response = run_modal_alert(alert, activation, bind_server_keys);
+        let response = run_modal_alert(alert, activation, bind_machine_keys);
         if let Some(escape) = escape {
             // SAFETY: The monitor came from addLocalMonitorForEventsMatchingMask and is removed
             // once.
@@ -430,7 +430,7 @@ fn present(
 
 /// Return chooses the first button, Cancel or OK. A confirmation's destructive button has no
 /// key, so it needs a deliberate click or Space.
-fn bind_server_keys(alert: &NSAlert) {
+fn bind_machine_keys(alert: &NSAlert) {
     for (index, button) in alert.buttons().iter().enumerate() {
         button.setKeyEquivalent(if index == 0 {
             ns_string!("\r")
@@ -591,11 +591,11 @@ pub(in crate::platform) mod tests {
     /// instead of activating, so the test process never takes the keyboard. Inside each alert's
     /// modal loop the test answers it by a click or a key. The alert stays transparent, so
     /// nothing appears on screen.
-    pub(in crate::platform) fn server_alerts_take_the_keyboard_and_bind_their_keys() {
+    pub(in crate::platform) fn machine_alerts_take_the_keyboard_and_bind_their_keys() {
         let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
         for (destructive, keys, focused, answers) in ANSWER_CASES {
             for &(answering, expected) in answers {
-                let alert = server_alert(
+                let alert = core_alert(
                     "Stop the server?",
                     "Stopping ends every Terminal Session.",
                     destructive,

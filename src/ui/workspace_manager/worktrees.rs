@@ -9,20 +9,20 @@ use crate::domain::{WorkspaceId, WorktreeId};
 use crate::ui::workspace_sidebar::WorktreeSection;
 use crate::ui::worktree_form::WorktreeForm;
 
+mod core_worktrees;
 mod cycle;
 pub(super) mod fallback;
 mod removal;
-mod server;
 
 #[derive(Default)]
 pub(super) struct SidebarWorktrees {
     form: Option<Entity<WorktreeForm>>,
-    close_fallbacks: std::collections::HashMap<WorkspaceId, spaceterm_server::hierarchy::Mutation>,
+    close_fallbacks: std::collections::HashMap<WorkspaceId, spaceterm_core::hierarchy::Mutation>,
     created: Option<(WorkspaceId, PathBuf, u64)>,
     /// The removal being checked, confirmed, or run. One runs at a time.
     removal: Option<u64>,
     removal_generation: u64,
-    server_review: Option<server::RemovalReview>,
+    core_review: Option<core_worktrees::RemovalReview>,
 }
 
 impl WorkspaceManager {
@@ -57,7 +57,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.open_server_worktree(workspace_id, worktree_id, focus, window, cx)
+        self.open_core_worktree(workspace_id, worktree_id, focus, window, cx)
             .unwrap_or(false)
     }
 
@@ -71,7 +71,7 @@ impl WorkspaceManager {
     ) -> bool {
         // The owning server opens the first Tab.
         self.has_workspace(workspace_id)
-            && self.open_server_worktree_tab(workspace_id, worktree_id, window, cx)
+            && self.open_core_worktree_tab(workspace_id, worktree_id, window, cx)
     }
 
     /// Whether a Workspace's owning server can create Worktrees in it. That server runs Git on its
@@ -84,7 +84,7 @@ impl WorkspaceManager {
     /// Whether this client has a writer for the server that owns a Workspace, which takes its
     /// Worktree writes. Reading it reaches no computer.
     pub(super) fn owner_writes_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> bool {
-        use crate::ui::server_worktrees::Client;
+        use crate::ui::core_worktrees::Client;
 
         let Some(origin) = self
             .binding
@@ -94,8 +94,8 @@ impl WorkspaceManager {
             return false;
         };
         match origin {
-            super::ServerOrigin::Local => cx.has_global::<Client>(),
-            super::ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx).is_some(),
+            super::MachineOrigin::Local => cx.has_global::<Client>(),
+            super::MachineOrigin::Direct(direct) => Client::direct(&direct.route, cx).is_some(),
         }
     }
 
@@ -106,7 +106,7 @@ impl WorkspaceManager {
         &self,
         workspace_id: WorkspaceId,
         cx: &mut App,
-    ) -> Option<crate::ui::server_worktrees::Client> {
+    ) -> Option<crate::ui::core_worktrees::Client> {
         self.owning_client(workspace_id, cx)
     }
 
@@ -116,7 +116,7 @@ impl WorkspaceManager {
         self.binding
             .owner(workspace_id)
             .and_then(|key| self.binding.origin(key))
-            .and_then(super::ServerOrigin::remote_name)
+            .and_then(super::MachineOrigin::remote_name)
     }
 
     /// Presents the New Worktree dialog for a Workspace's repository.
@@ -134,11 +134,11 @@ impl WorkspaceManager {
         {
             return false;
         }
-        self.has_workspace(workspace_id) && self.new_server_worktree(workspace_id, window, cx)
+        self.has_workspace(workspace_id) && self.new_core_worktree(workspace_id, window, cx)
     }
 
     pub(super) fn set_worktrees_expanded(&mut self, workspace_id: WorkspaceId, expanded: bool) {
-        self.set_server_worktrees_expanded(workspace_id, expanded);
+        self.set_core_worktrees_expanded(workspace_id, expanded);
     }
 
     /// The Worktrees a Workspace row discloses, or `None` for a Workspace outside a repository.
@@ -147,7 +147,7 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         cx: &App,
     ) -> Option<WorktreeSection> {
-        self.server_worktree_section(workspace_id, cx)
+        self.core_worktree_section(workspace_id, cx)
     }
 }
 

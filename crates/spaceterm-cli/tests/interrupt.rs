@@ -15,7 +15,7 @@ mod support;
 mod workspace;
 
 use spaceterm_cli::state::{CliState, RouteKey};
-use spaceterm_server::{ServerConnection, protocol::AgentName};
+use spaceterm_core::{MachineConnection, protocol::AgentName};
 use std::{
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
@@ -52,8 +52,8 @@ impl Drop for Process {
 }
 
 struct Fixture {
-    server: lifecycle::Server,
-    link: spaceterm_server::connection::link::ServerLink,
+    core: lifecycle::Core,
+    link: spaceterm_core::connection::link::CoreLink,
     client_name: String,
     agent: AgentName,
 }
@@ -67,10 +67,10 @@ impl Fixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for name in [
-            "SPACETERM_SERVER",
+            "SPACETERM_MACHINE",
             "SPACETERM_AS",
             "SPACETERM_IDENTITY",
-            "SPACETERM_SERVER_ID",
+            "SPACETERM_MACHINE_ID",
             "SPACETERM_PANE",
             "SPACETERM_SESSION",
         ] {
@@ -106,7 +106,7 @@ impl Fixture {
             .map_or((0, 0), |held| (held.operations, held.runs))
     }
     fn assert_no_run_locks(&self) {
-        let root = spaceterm_server::cli_state_root(IDENTITY).unwrap();
+        let root = spaceterm_core::cli_state_root(IDENTITY).unwrap();
         let locks = root
             .join("routes/local/agents")
             .join(self.agent.as_str())
@@ -118,7 +118,7 @@ impl Fixture {
     }
     /// Stops the server's process until the guard drops, so it answers nothing meanwhile.
     fn freeze(&self) -> Frozen {
-        let pid = self.server.0.id() as libc::pid_t;
+        let pid = self.core.0.id() as libc::pid_t;
         // SAFETY: signals only the server this test started.
         assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
         Frozen(pid)
@@ -135,7 +135,7 @@ impl Drop for Frozen {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.link.close();
-        if let Ok(root) = spaceterm_server::cli_state_root(IDENTITY) {
+        if let Ok(root) = spaceterm_core::cli_state_root(IDENTITY) {
             let _ =
                 std::fs::remove_dir_all(root.join("routes/local/agents").join(self.agent.as_str()));
             let _ = std::fs::remove_dir_all(
@@ -350,11 +350,11 @@ fn a_result_rendered_at_the_settlement_instant_is_written_whole() {
 fn paste_wait_child() {
     use clap::Parser;
     use spaceterm_cli::{args, contract, interrupt, io};
-    use spaceterm_server::connection::link::ServerLink;
-    use spaceterm_server::pane::{Lease, PasteConfirmation, PasteOutcome};
-    use spaceterm_server::protocol::{
-        ClaimReply, ClientMessage, InputEvent, InputOutcome, Operation, PaneEvent, PaneMessage,
-        RawFrame, Reply, ReplyBody, ServerMessage, frame,
+    use spaceterm_core::connection::link::CoreLink;
+    use spaceterm_core::pane::{Lease, PasteConfirmation, PasteOutcome};
+    use spaceterm_core::protocol::{
+        ClaimReply, ClientMessage, CoreMessage, InputEvent, InputOutcome, Operation, PaneEvent,
+        PaneMessage, RawFrame, Reply, ReplyBody, frame,
     };
     use std::io::Write;
     use std::sync::{
@@ -375,7 +375,7 @@ fn paste_wait_child() {
     let (wake, ready) = mpsc::channel();
     let notify = wake.clone();
     let finished = Arc::new(AtomicBool::new(false));
-    let link = ServerLink::new(
+    let link = CoreLink::new(
         Arc::new(|_| {}),
         Arc::new(move || {
             let _ = wake.send(());
@@ -384,9 +384,9 @@ fn paste_wait_child() {
     );
     let peer = link.clone();
     let stopped = Arc::clone(&finished);
-    let server = std::thread::spawn(move || {
+    let core = std::thread::spawn(move || {
         let send = |message| {
-            for bytes in frame::encode_server(&message).unwrap().frames {
+            for bytes in frame::encode_core(&message).unwrap().frames {
                 peer.receive(RawFrame::parse(&bytes).unwrap(), Instant::now())
                     .unwrap();
             }
@@ -404,11 +404,11 @@ fn paste_wait_child() {
                 match message {
                     ClientMessage::Request(request) => {
                         assert!(matches!(request.operation, Operation::Claim(_)));
-                        send(ServerMessage::Reply(Box::new(Reply {
+                        send(CoreMessage::Reply(Box::new(Reply {
                             id: request.id,
                             result: Ok(ReplyBody::Claim(ClaimReply::Attached {
                                 lease: Lease {
-                                    server: [1; 32],
+                                    core: [1; 32],
                                     session: [2; 32],
                                     control: [3; 32],
                                     connection: [4; 32],
@@ -418,7 +418,7 @@ fn paste_wait_child() {
                     }
                     ClientMessage::Input(input) => {
                         let event = |event| {
-                            send(ServerMessage::Pane(PaneMessage {
+                            send(CoreMessage::Pane(PaneMessage {
                                 channel: input.channel,
                                 event,
                             }))
@@ -495,7 +495,7 @@ fn paste_wait_child() {
         unreachable!();
     };
     let target = io::PaneTarget {
-        server: [1; 32],
+        core: [1; 32],
         workspace: [5; 32],
         pane: [6; 32],
         running: true,
@@ -512,7 +512,7 @@ fn paste_wait_child() {
     finished.store(true, Ordering::Release);
     // Wake the transport so it drains every message queued before send returned.
     notify.send(()).unwrap();
-    let (keys, resolutions) = server.join().unwrap();
+    let (keys, resolutions) = core.join().unwrap();
     link.close();
     assert_eq!(keys, 0, "SIGINT must prevent Enter");
     assert_eq!(
@@ -606,11 +606,11 @@ fn ctrl_c_during_first_prompt_wait_never_sends_the_command() {
     )
     .unwrap();
     let client_name = format!("cli-startup-interrupt-{}", std::process::id());
-    let client = ServerConnection::for_development_client(&client_name).unwrap();
+    let client = MachineConnection::for_development_client(&client_name).unwrap();
     lifecycle::require_idle(&client).unwrap();
     client.setup().unwrap();
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_spaceterm"));
-    let server = lifecycle::Server(
+    let core = lifecycle::Core(
         Command::new(executable)
             .args(["server", "run", "--identity", IDENTITY])
             .env(
@@ -626,7 +626,7 @@ fn ctrl_c_during_first_prompt_wait_never_sends_the_command() {
     );
     let link = lifecycle::connect(&client).unwrap();
     let fixture = Fixture {
-        server,
+        core,
         link,
         client_name,
         agent: format!("startup-interrupt-{}", std::process::id())
@@ -687,13 +687,13 @@ fn ctrl_c_during_first_prompt_wait_never_sends_the_command() {
 #[ignore = "owns a foreground Development server; run mise run cli:io:test"]
 fn ctrl_c_before_dispatch_exits_130_and_after_dispatch_resolves_first() {
     let client_name = format!("cli-interrupt-{}", std::process::id());
-    let client = ServerConnection::for_development_client(&client_name).unwrap();
+    let client = MachineConnection::for_development_client(&client_name).unwrap();
     lifecycle::require_idle(&client).unwrap();
     client.setup().unwrap();
-    let server = lifecycle::Server::start().unwrap();
+    let core = lifecycle::Core::start().unwrap();
     let link = lifecycle::connect(&client).unwrap();
     let fixture = Fixture {
-        server,
+        core,
         link,
         client_name,
         agent: format!("interrupt-{}", std::process::id()).parse().unwrap(),
@@ -848,12 +848,12 @@ fn ctrl_c_before_dispatch_exits_130_and_after_dispatch_resolves_first() {
 struct FakeDesktop {
     listener: std::os::unix::net::UnixListener,
     socket: std::path::PathBuf,
-    _lock: spaceterm_server::Lock,
+    _lock: spaceterm_core::Lock,
 }
 impl FakeDesktop {
     fn listen() -> Self {
         let directory = spaceterm::desktop_channel::endpoint_directory(IDENTITY).unwrap();
-        let retained = spaceterm_server::Directory::open(&directory, true).unwrap();
+        let retained = spaceterm_core::Directory::open(&directory, true).unwrap();
         let lock = retained
             .try_lock("lock")
             .unwrap()
@@ -882,9 +882,9 @@ fn open_in_session() -> Process {
             "open",
             "/private/tmp/spaceterm-interrupt-fixture.txt",
         ])
-        .env_remove("SPACETERM_SERVER")
+        .env_remove("SPACETERM_MACHINE")
         .env("SPACETERM_IDENTITY", IDENTITY)
-        .env("SPACETERM_SERVER_ID", "01".repeat(32))
+        .env("SPACETERM_MACHINE_ID", "01".repeat(32))
         .env("SPACETERM_PANE", "02".repeat(32))
         .env("SPACETERM_SESSION", "03".repeat(32))
         .stdin(Stdio::null())

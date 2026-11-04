@@ -58,7 +58,7 @@ pub(crate) enum ToolFailure {
     /// Another server operation, such as an update, holds the service.
     Busy,
     /// This build includes no server package, and this account has no approved server build.
-    NoServerPackage,
+    NoCorePackage,
     /// The server package changed after SpaceTerm opened.
     RestartRequired,
     /// The server package or the approved build failed verification.

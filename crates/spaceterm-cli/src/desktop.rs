@@ -106,7 +106,7 @@ fn classify(result: Result<Reply, ChannelError>, asked: Asked) -> Option<Code> {
 /// The Session context `spaceterm` inherited from the Terminal Session it runs in.
 pub struct Session<'a> {
     pub identity: Option<&'a str>,
-    pub server: Option<&'a str>,
+    pub core: Option<&'a str>,
     pub pane: Option<&'a str>,
     pub session: Option<&'a str>,
 }
@@ -118,7 +118,7 @@ impl Session<'_> {
             return None;
         }
         Some(SessionContext {
-            server: full_id(self.server?)?,
+            core: full_id(self.core?)?,
             pane: full_id(self.pane?)?,
             session: full_id(self.session?)?,
         })
@@ -155,12 +155,12 @@ pub fn start(cli: &Cli) -> Option<Output> {
 
 fn start_open(args: &OpenArgs, desktop: &LocalDesktop<'_>) -> Output {
     let identity = std::env::var("SPACETERM_IDENTITY").ok();
-    let server = std::env::var("SPACETERM_SERVER_ID").ok();
+    let core = std::env::var("SPACETERM_MACHINE_ID").ok();
     let pane = std::env::var("SPACETERM_PANE").ok();
     let session = std::env::var("SPACETERM_SESSION").ok();
     let session = Session {
         identity: identity.as_deref(),
-        server: server.as_deref(),
+        core: core.as_deref(),
         pane: pane.as_deref(),
         session: session.as_deref(),
     };
@@ -236,10 +236,10 @@ pub fn open(
     if let Err(failure) = ask(desktop, &request) {
         return failed(failure);
     }
-    let server = ServerRef {
+    let core = MachineRef {
         name: "local".into(),
         route: "local".into(),
-        id: hex(&context.server),
+        id: hex(&context.core),
     };
     let text_output = if args.preview {
         "Showed File Preview in the desktop.\n"
@@ -249,7 +249,7 @@ pub fn open(
     Output {
         envelope: Envelope::ok(
             "open",
-            Some(server),
+            Some(core),
             value(Opened {
                 path: text,
                 preview: args.preview,
@@ -301,7 +301,7 @@ mod tests {
     }
 
     fn run(path: &str, preview: bool, desktop: &Recorded) -> Output {
-        let (server, pane, session) = session();
+        let (core, pane, session) = session();
         open(
             &OpenArgs {
                 path: path.into(),
@@ -310,7 +310,7 @@ mod tests {
             IDENTITY,
             &Session {
                 identity: Some(IDENTITY),
-                server: Some(&server),
+                core: Some(&core),
                 pane: Some(&pane),
                 session: Some(&session),
             },
@@ -353,7 +353,7 @@ mod tests {
         };
         crate::interrupt::install("show", mode).unwrap();
         let request = Request::Show {
-            server: [1; 32],
+            core: [1; 32],
             workspace: [2; 32],
             tab: None,
             pane: None,
@@ -391,7 +391,7 @@ mod tests {
                 desktop.requests.into_inner(),
                 vec![Request::Open {
                     session: SessionContext {
-                        server: [1; 32],
+                        core: [1; 32],
                         pane: [2; 32],
                         session: [3; 32],
                     },
@@ -409,29 +409,29 @@ mod tests {
     #[test]
     fn open_outside_a_session_of_this_identity_asks_no_desktop() {
         let desktop = Recorded::answering(Ok(Reply::Done));
-        let (server, pane, session) = session();
+        let (core, pane, session) = session();
         for context in [
             Session {
                 identity: None,
-                server: Some(&server),
+                core: Some(&core),
                 pane: Some(&pane),
                 session: Some(&session),
             },
             Session {
                 identity: Some("spaceterm"),
-                server: Some(&server),
+                core: Some(&core),
                 pane: Some(&pane),
                 session: Some(&session),
             },
             Session {
                 identity: Some(IDENTITY),
-                server: Some(&server),
+                core: Some(&core),
                 pane: Some(&pane),
                 session: None,
             },
             Session {
                 identity: Some(IDENTITY),
-                server: Some("0102"),
+                core: Some("0102"),
                 pane: Some(&pane),
                 session: Some(&session),
             },
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn diagnostics_reports_the_desktops_counters() {
-        let counters = spaceterm_server::diagnostics::TerminalCounterSnapshot {
+        let counters = spaceterm_core::diagnostics::TerminalCounterSnapshot {
             pty_read_attempts: 9,
             pty_data_reads: 4,
             pty_read_bytes: 12_000,

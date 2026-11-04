@@ -236,15 +236,15 @@ fn compose(
         paths,
         Arc::new(super::unix_local_identity::UnixLocalIdentity),
     );
-    let direct_servers = startup.direct_servers();
+    let direct_machines = startup.direct_machines();
     let ssh_setup = startup.ssh_setup_factory(
         Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
             super::launch_host::running_executable(),
         )),
-        super::launch_host::server_artifact_catalog(),
-        direct_servers.clone(),
+        super::launch_host::core_artifact_catalog(),
+        direct_machines.clone(),
     );
-    let server_context_paths = startup.server_context_paths();
+    let core_context_paths = startup.core_context_paths();
     let command_line_tool = command_line_tool(identity, bus.clone());
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
@@ -301,10 +301,10 @@ fn compose(
             theme_registry: Arc::new(super::https_transport::HttpsTransport::new()),
             repository_status,
             background_images: None,
-            local_server: crate::ui::LocalServerAdapters::account(),
+            local_core: crate::ui::LocalCoreAdapters::account(),
             ssh_setup,
-            direct_servers,
-            server_context_paths,
+            direct_machines,
+            core_context_paths,
             command_line_tool,
             desktop_channel: super::unix_desktop_channel::DesktopChannelListener::bind(
                 identity.directory_name(),
@@ -556,7 +556,7 @@ mod tests {
             install_test_desktop_profile(cx);
         });
         let records = crate::terminal::testing::TestTerminalSessionRecords::default();
-        let factory = crate::terminal::WorkspaceTerminalSessionFactory::new_server(Rc::new(
+        let factory = crate::terminal::WorkspaceTerminalSessionFactory::new_core(Rc::new(
             crate::terminal::testing::TestTerminalSessionFactory::new(records.clone()),
         ));
         use crate::terminal::TerminalKeyInputAdapterFactory;

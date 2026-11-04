@@ -5,13 +5,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
-use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
+use spaceterm_core::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
 use super::*;
-use crate::server_connection::ServerError;
+use crate::machine_connection::CoreError;
 use crate::ui::workspace_manager::launch::{
     LAUNCH_AUTHORIZE_SELECTOR, LAUNCH_RETRY_SELECTOR, LAUNCH_SELECTOR, LAUNCH_START_SELECTOR,
-    LaunchOutcome, WorkspaceServerConnection, WorkspaceServerConnector,
+    LaunchOutcome, WorkspaceCoreConnector, WorkspaceMachineConnection,
 };
 use crate::ui::workspace_manager::launch_testing::ScriptedLaunch;
 use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
@@ -35,7 +35,7 @@ fn inventory() -> Inventory {
             root_tab: TAB,
             tabs: vec![Tab {
                 worktree: None,
-                worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
                 worktree_repository: None,
                 id: TAB,
                 root_pane: PANE,
@@ -62,14 +62,14 @@ struct ScriptedConnector {
     panes: Rc<ScriptedPanes>,
 }
 
-impl WorkspaceServerConnector for ScriptedConnector {
+impl WorkspaceCoreConnector for ScriptedConnector {
     fn connect(
         &self,
         _: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         _: &mut App,
-    ) -> Option<WorkspaceServerConnection> {
-        Some(WorkspaceServerConnection {
+    ) -> Option<WorkspaceMachineConnection> {
+        Some(WorkspaceMachineConnection {
             edits: WorkspaceEditSource::new(Rc::clone(&self.edits) as Rc<_>),
             sessions: WorkspacePaneSessions::with_opener(Rc::clone(&self.panes) as Rc<_>, panes),
             retained: None,
@@ -129,7 +129,7 @@ impl LaunchHarness {
 
 /// A Workspace Window composed with a scripted account server, before launch answers.
 fn launch_harness(
-    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    answers: Vec<Result<LaunchOutcome, CoreError>>,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
     launch_harness_choosing(answers, [], cx)
@@ -137,7 +137,7 @@ fn launch_harness(
 
 /// A launch harness whose System Directory Selection answers `selections` in order.
 fn launch_harness_choosing(
-    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    answers: Vec<Result<LaunchOutcome, CoreError>>,
     selections: impl IntoIterator<
         Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
     >,
@@ -153,7 +153,7 @@ fn launch_harness_choosing(
 
 /// A launch harness presenting `edits`, whose System Directory Selection answers `selections`.
 fn launch_harness_with(
-    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    answers: Vec<Result<LaunchOutcome, CoreError>>,
     edits: ScriptedEdits,
     selections: impl IntoIterator<
         Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
@@ -166,7 +166,7 @@ fn launch_harness_with(
 /// A launch harness whose window presents `remembered` as it opens, as reopening SpaceTerm does
 /// before launch answers.
 fn launch_harness_restoring(
-    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    answers: Vec<Result<LaunchOutcome, CoreError>>,
     edits: ScriptedEdits,
     selections: impl IntoIterator<
         Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
@@ -180,7 +180,7 @@ fn launch_harness_restoring(
     for answer in answers {
         launch.answer(answer);
     }
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
         TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
     ));
     let panes = ScriptedPanes::new(session_factory);
@@ -189,16 +189,16 @@ fn launch_harness_restoring(
         edits: Rc::clone(&edits),
         panes: Rc::clone(&panes),
     });
-    let adapters = LocalServerAdapters {
+    let adapters = LocalCoreAdapters {
         launch: Arc::clone(&launch) as Arc<_>,
         connector,
     };
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+        crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
         let mut manager = WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                local_server: adapters,
+                local_core: adapters,
                 local_filesystem: crate::runtime::local_filesystem(),
                 directory_selection: Rc::new(ScriptedDirectorySelection::new(selections)),
                 ..workspace_adapters()
@@ -230,18 +230,18 @@ fn launch_harness_restoring(
 fn sync(harness: &LaunchHarness, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx)
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx)
         });
     });
     cx.run_until_parked();
 }
 
-fn ready() -> Result<LaunchOutcome, ServerError> {
+fn ready() -> Result<LaunchOutcome, CoreError> {
     Ok(LaunchOutcome::Ready)
 }
 
 #[gpui::test]
-fn launch_presents_the_workspace_and_opens_its_server_pane(cx: &mut TestAppContext) {
+fn launch_presents_the_workspace_and_opens_its_core_pane(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![ready()], cx);
     // The window reads the ready server at once, without waiting for a poll interval.
     cx.run_until_parked();
@@ -258,7 +258,7 @@ fn launch_presents_the_workspace_and_opens_its_server_pane(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn the_window_says_workspaces_are_on_the_way_until_the_server_answers(cx: &mut TestAppContext) {
+fn the_window_says_workspaces_are_on_the_way_until_the_core_answers(cx: &mut TestAppContext) {
     // No answer arrives, as while the server is still starting.
     let (harness, cx) = launch_harness(Vec::new(), cx);
     cx.run_until_parked();
@@ -308,7 +308,7 @@ fn a_launch_that_opens_within_its_quiet_period_never_shows_the_launch_screen(
 
 #[gpui::test]
 fn a_retry_within_the_quiet_period_keeps_saying_what_it_does(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Err(ServerError::NotInstalled)], cx);
+    let (harness, cx) = launch_harness(vec![Err(CoreError::NotInstalled)], cx);
     cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some("Server Not Installed"));
 
@@ -334,7 +334,7 @@ fn a_launch_that_needs_the_person_explains_itself_at_once(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn a_launch_during_a_server_operation_says_so_without_asking_the_person_to_act(
+fn a_launch_during_a_core_operation_says_so_without_asking_the_person_to_act(
     cx: &mut TestAppContext,
 ) {
     // The operation, such as an update, has not finished when the window looks again.
@@ -361,7 +361,7 @@ fn a_launch_during_a_server_operation_says_so_without_asking_the_person_to_act(
 }
 
 #[gpui::test]
-fn a_launch_during_a_server_operation_opens_the_workspaces_once_it_ends(cx: &mut TestAppContext) {
+fn a_launch_during_a_core_operation_opens_the_workspaces_once_it_ends(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::ServiceBusy), ready()], cx);
     cx.run_until_parked();
 
@@ -373,7 +373,7 @@ fn a_launch_during_a_server_operation_opens_the_workspaces_once_it_ends(cx: &mut
 /// An operation that outlasts the server's bounded wait is the one failure the wait reports.
 #[gpui::test]
 fn an_operation_that_outlasts_the_wait_offers_try_again(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Err(ServerError::ServiceBusy), ready()], cx);
+    let (harness, cx) = launch_harness(vec![Err(CoreError::ServiceBusy), ready()], cx);
     cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some("Server Busy"));
 
@@ -384,7 +384,7 @@ fn an_operation_that_outlasts_the_wait_offers_try_again(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn a_stopped_server_stays_stopped_until_start_server(cx: &mut TestAppContext) {
+fn a_stopped_core_stays_stopped_until_start_core(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
     cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
@@ -402,12 +402,12 @@ fn a_stopped_server_stays_stopped_until_start_server(cx: &mut TestAppContext) {
 /// one. Starting the local server afterward still adds its Workspaces here, beside the paired
 /// server's.
 #[gpui::test]
-fn a_local_server_started_after_a_paired_server_joins_the_same_window(cx: &mut TestAppContext) {
+fn a_local_machine_started_after_a_paired_machine_joins_the_same_window(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
     cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
 
-    present_paired_server(&harness, inventory(), cx);
+    present_paired_machine(&harness, inventory(), cx);
     assert_eq!(
         harness.rows(cx),
         1,
@@ -429,7 +429,7 @@ fn a_local_server_started_after_a_paired_server_joins_the_same_window(cx: &mut T
 }
 
 /// Connects a paired server publishing `inventory` to the window, as a saved connection does.
-fn present_paired_server(
+fn present_paired_machine(
     harness: &LaunchHarness,
     inventory: Inventory,
     cx: &mut VisualTestContext,
@@ -437,8 +437,8 @@ fn present_paired_server(
     let remote = Rc::new(ScriptedEdits::new(Some(inventory)));
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            let key = manager.present_server_workspaces(
-                ServerOrigin::Direct(crate::ui::workspaces::DirectServer {
+            let key = manager.present_core_workspaces(
+                MachineOrigin::Direct(crate::ui::workspaces::DirectMachine {
                     route: [9; 32],
                     name: "penguin".into(),
                 }),
@@ -478,10 +478,8 @@ fn creation_available(cx: &mut VisualTestContext) -> bool {
 /// Without usable server state the launch screen takes the whole window beneath its Window
 /// Controls. Nothing offers to create or arrange Workspaces, and Server Settings stays offered.
 #[gpui::test]
-fn startup_without_usable_server_state_presents_recovery_across_the_window(
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = launch_harness(vec![Err(ServerError::RuntimeUnavailable), ready()], cx);
+fn startup_without_usable_core_state_presents_recovery_across_the_window(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(CoreError::RuntimeUnavailable), ready()], cx);
     cx.run_until_parked();
     assert_eq!(
         harness.launch_title(cx),
@@ -515,13 +513,13 @@ fn startup_without_usable_server_state_presents_recovery_across_the_window(
 /// remedies, so each names its own cause. Trying again can't add a missing package, so only a
 /// failed verification offers Try Again.
 #[gpui::test]
-fn a_missing_server_package_and_a_failed_verification_explain_themselves_differently(
+fn a_missing_core_package_and_a_failed_verification_explain_themselves_differently(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = launch_harness(
         vec![
-            Err(ServerError::RuntimeUnavailable),
-            Err(ServerError::CandidateMissing),
+            Err(CoreError::RuntimeUnavailable),
+            Err(CoreError::CandidateMissing),
         ],
         cx,
     );
@@ -561,12 +559,12 @@ fn a_missing_server_package_and_a_failed_verification_explain_themselves_differe
 /// This computer's failed server never hides another server's Workspaces or the controls that
 /// arrange them.
 #[gpui::test]
-fn a_failed_local_server_keeps_another_servers_workspaces_presented(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Err(ServerError::CandidateMissing)], cx);
+fn a_failed_local_machine_keeps_another_machines_workspaces_presented(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(CoreError::CandidateMissing)], cx);
     cx.run_until_parked();
     assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
 
-    present_paired_server(&harness, inventory(), cx);
+    present_paired_machine(&harness, inventory(), cx);
     assert_eq!(harness.rows(cx), 1);
     assert_eq!(
         workspace_controls_presented(cx).len(),
@@ -578,13 +576,13 @@ fn a_failed_local_server_keeps_another_servers_workspaces_presented(cx: &mut Tes
 /// Another server's inventory is usable state even before any of its Workspaces is attached, so
 /// the window keeps the switcher that attaches and creates them beside the local failure.
 #[gpui::test]
-fn another_servers_inventory_without_attached_workspaces_keeps_workspace_controls(
+fn another_machines_inventory_without_attached_workspaces_keeps_workspace_controls(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = launch_harness(vec![Err(ServerError::CandidateMissing)], cx);
+    let (harness, cx) = launch_harness(vec![Err(CoreError::CandidateMissing)], cx);
     cx.run_until_parked();
 
-    present_paired_server(
+    present_paired_machine(
         &harness,
         Inventory {
             workspaces: Vec::new(),
@@ -609,7 +607,7 @@ fn another_servers_inventory_without_attached_workspaces_keeps_workspace_control
 fn a_refused_start_explains_itself_and_retries_launch_only_when_asked(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
     cx.run_until_parked();
-    harness.launch.refuse_start(ServerError::NotInstalled);
+    harness.launch.refuse_start(CoreError::NotInstalled);
     harness.click(LAUNCH_START_SELECTOR, cx);
     assert_eq!(harness.launch.steps(), ["run", "start"]);
     assert_eq!(harness.launch_title(cx), Some("Server Not Installed"));
@@ -640,7 +638,7 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
 
     harness
         .launch
-        .refuse_authorization(ServerError::AuthorizationRequired);
+        .refuse_authorization(CoreError::AuthorizationRequired);
     harness.click(LAUNCH_AUTHORIZE_SELECTOR, cx);
     assert_eq!(
         harness.launch.steps(),
@@ -667,7 +665,7 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
 /// already have changed the account's startup policy, names its failure and claims nothing about
 /// what changed.
 fn assert_authorization_failure_explains_itself(
-    error: ServerError,
+    error: CoreError,
     title: &str,
     cx: &mut TestAppContext,
 ) {
@@ -692,7 +690,7 @@ fn assert_authorization_failure_explains_itself(
 fn an_authorization_whose_result_is_unconfirmed_reports_its_failure(cx: &mut TestAppContext) {
     // The system may have enabled startup before the service could confirm it.
     assert_authorization_failure_explains_itself(
-        ServerError::ServiceUnavailable,
+        CoreError::ServiceUnavailable,
         "Couldn\u{2019}t Open Workspaces",
         cx,
     );
@@ -701,7 +699,7 @@ fn an_authorization_whose_result_is_unconfirmed_reports_its_failure(cx: &mut Tes
 #[gpui::test]
 fn an_authorization_that_fails_before_its_prompt_is_not_a_cancellation(cx: &mut TestAppContext) {
     assert_authorization_failure_explains_itself(
-        ServerError::StorageUnavailable,
+        CoreError::StorageUnavailable,
         "Server Storage Unavailable",
         cx,
     );
@@ -726,13 +724,10 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
     for (error, title) in [
-        (ServerError::IncompatibleProtocol, "Incompatible Server"),
-        (ServerError::IncompatibleState, "Incompatible Server"),
-        (
-            ServerError::StorageUnavailable,
-            "Server Storage Unavailable",
-        ),
-        (ServerError::UnsafeStorage, "Unsafe Server Storage"),
+        (CoreError::IncompatibleProtocol, "Incompatible Server"),
+        (CoreError::IncompatibleState, "Incompatible Server"),
+        (CoreError::StorageUnavailable, "Server Storage Unavailable"),
+        (CoreError::UnsafeStorage, "Unsafe Server Storage"),
     ] {
         harness.edits.set_error(error);
         sync(&harness, cx);
@@ -741,7 +736,7 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
         assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
     }
     // The connection retries an interruption by itself, so the window keeps opening.
-    harness.edits.set_error(ServerError::NotRunning);
+    harness.edits.set_error(CoreError::NotRunning);
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
     // The incompatible refusal only read whether an update is offered.
@@ -756,11 +751,11 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
 /// A refused server keeps running. Launch names the refusal without guessing which side is
 /// older, and offers the update journey only when a verified included build can update it.
 #[gpui::test]
-fn a_refused_server_offers_an_update_only_from_a_verified_build(cx: &mut TestAppContext) {
+fn a_refused_core_offers_an_update_only_from_a_verified_build(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(
         vec![
-            Err(ServerError::IncompatibleProtocol),
-            Err(ServerError::IncompatibleProtocol),
+            Err(CoreError::IncompatibleProtocol),
+            Err(CoreError::IncompatibleProtocol),
         ],
         cx,
     );
@@ -809,7 +804,7 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
     sync(&harness, cx);
     assert_eq!(harness.launch.steps(), ["run"]);
 
-    harness.edits.set_error(ServerError::IncompatibleProtocol);
+    harness.edits.set_error(CoreError::IncompatibleProtocol);
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some("Incompatible Server"));
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
@@ -824,12 +819,12 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
 /// A Stop between admission and the first inventory offers Start Server, which opens the
 /// Workspaces once the server answers.
 #[gpui::test]
-fn a_stop_before_inventory_offers_start_server(cx: &mut TestAppContext) {
+fn a_stop_before_inventory_offers_start_core(cx: &mut TestAppContext) {
     let edits = ScriptedEdits::new(None);
     edits.set_connected(false);
     let (harness, cx) = launch_harness_with(vec![ready(), ready()], edits, [], cx);
     cx.run_until_parked();
-    harness.edits.set_error(ServerError::Stopped);
+    harness.edits.set_error(CoreError::Stopped);
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
 
@@ -844,7 +839,7 @@ fn a_stop_before_inventory_offers_start_server(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn removing_the_final_server_workspace_closes_its_window(cx: &mut TestAppContext) {
+fn removing_the_final_core_workspace_closes_its_window(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
     sync(&harness, cx);
@@ -864,8 +859,8 @@ fn removing_the_final_server_workspace_closes_its_window(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn new_workspace_presents_a_pending_creation_without_server_authority(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+fn new_workspace_presents_a_pending_creation_without_core_authority(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
 
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
@@ -878,7 +873,7 @@ fn new_workspace_presents_a_pending_creation_without_server_authority(cx: &mut T
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }],
         "the server allocates the automatic name"
     );
@@ -887,7 +882,7 @@ fn new_workspace_presents_a_pending_creation_without_server_authority(cx: &mut T
         2,
         "the pending Workspace appears before the server answers"
     );
-    assert_ne!(active_server_workspace(&harness, cx).unwrap(), WORKSPACE);
+    assert_ne!(active_core_workspace(&harness, cx).unwrap(), WORKSPACE);
     assert_eq!(harness.authoritative_inventory(cx), inventory());
     assert_eq!(
         harness.panes.opened().len(),
@@ -899,10 +894,10 @@ fn new_workspace_presents_a_pending_creation_without_server_authority(cx: &mut T
 /// New Workspace chosen with no Workspace Window opens one that has no attached Workspaces yet.
 /// It creates one Workspace once the server presents them, where opening SpaceTerm creates none.
 #[gpui::test]
-fn new_workspace_without_a_window_creates_once_the_server_presents_its_workspaces(
+fn new_workspace_without_a_window_creates_once_the_core_presents_its_workspaces(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_core::hierarchy::Mutation;
 
     let (harness, cx) = launch_harness_with(vec![ready()], ScriptedEdits::new(None), [], cx);
     cx.run_until_parked();
@@ -929,15 +924,15 @@ fn new_workspace_without_a_window_creates_once_the_server_presents_its_workspace
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }],
         "one request creates one Workspace"
     );
 }
 
 #[gpui::test]
-fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+fn open_local_directory_creates_a_core_workspace_rooted_there(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
 
     let chosen = std::env::temp_dir()
         .canonicalize()
@@ -966,7 +961,7 @@ fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestApp
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(chosen.clone()),
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.workspace_count(cx), 2);
@@ -985,7 +980,7 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
     let first = cx.update(|window, _| window.window_handle().window_id());
     let launch = Arc::new(ScriptedLaunch::default());
     launch.answer(ready());
-    let adapters = LocalServerAdapters {
+    let adapters = LocalCoreAdapters {
         launch: Arc::clone(&launch) as Arc<_>,
         connector: Rc::new(ScriptedConnector {
             edits: Rc::clone(&harness.edits),
@@ -993,11 +988,11 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
         }),
     };
     let second = cx.add_window(|window, cx| {
-        crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+        crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
         WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                local_server: adapters,
+                local_core: adapters,
                 ..workspace_adapters()
             },
             SidebarState::Expanded,
@@ -1052,7 +1047,7 @@ fn workspace_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContex
 
 #[gpui::test]
 fn a_tab_creation_leaves_the_workspace_rows_as_they_are(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_core::hierarchy::Mutation;
     let (harness, cx) = ready_harness(cx);
     assert!(!workspace_row_status_drawn(&harness, cx));
 
@@ -1099,13 +1094,13 @@ fn not_connected_appears_only_once_the_connection_is_lost(cx: &mut TestAppContex
         "a connection still being established has not been lost"
     );
 
-    harness.edits.set_error(ServerError::NotRunning);
+    harness.edits.set_error(CoreError::NotRunning);
     sync(&harness, cx);
     assert!(workspace_row_status_drawn(&harness, cx));
 }
 
 fn created_names(harness: &LaunchHarness) -> Vec<String> {
-    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_core::hierarchy::Mutation;
     harness
         .edits
         .submitted()
@@ -1139,8 +1134,8 @@ fn the_creation_shortcut_takes_the_switcher_name_instead_of_the_highlight(cx: &m
 }
 
 #[gpui::test]
-fn blank_and_cancelled_creation_names_stay_automatic_on_the_server(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Outcome;
+fn blank_and_cancelled_creation_names_stay_automatic_on_the_machine(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Outcome;
 
     let (harness, cx) = ready_harness(cx);
     open_workspace_switcher_for_creation(cx);
@@ -1164,7 +1159,7 @@ fn a_named_creation_never_switches_to_an_existing_match(cx: &mut TestAppContext)
 
     assert_eq!(created_names(&harness), ["Default"]);
     assert_eq!(harness.workspace_count(cx), 2);
-    assert_ne!(active_server_workspace(&harness, cx).unwrap(), WORKSPACE);
+    assert_ne!(active_core_workspace(&harness, cx).unwrap(), WORKSPACE);
     assert_eq!(harness.authoritative_inventory(cx), inventory());
 }
 
@@ -1243,7 +1238,7 @@ const CREATED: [u8; 32] = [61; 32];
 
 /// The server accepts this client's creation and publishes the new Workspace beside the first.
 fn accept_creation(harness: &LaunchHarness, pinned: Option<PathBuf>, cx: &mut VisualTestContext) {
-    use spaceterm_server::hierarchy::{Mutation, Outcome};
+    use spaceterm_core::hierarchy::{Mutation, Outcome};
 
     let Some(Mutation::CreateWorkspace { name, .. }) = harness.edits.submitted().pop() else {
         panic!("a creation must have been submitted");
@@ -1289,7 +1284,7 @@ fn a_refused_first_workspace_creation_keeps_the_window_and_its_notice(cx: &mut T
     );
     harness
         .edits
-        .answer(spaceterm_server::hierarchy::Outcome::Limit);
+        .answer(spaceterm_core::hierarchy::Outcome::Limit);
     sync(&harness, cx);
     assert_eq!(
         cx.windows().len(),
@@ -1312,22 +1307,19 @@ fn a_refused_first_workspace_creation_keeps_the_window_and_its_notice(cx: &mut T
     assert_eq!(harness.workspace_count(cx), 1);
 }
 
-fn active_server_workspace(
-    harness: &LaunchHarness,
-    cx: &mut VisualTestContext,
-) -> Option<[u8; 32]> {
+fn active_core_workspace(harness: &LaunchHarness, cx: &mut VisualTestContext) -> Option<[u8; 32]> {
     harness.manager.read_with(cx, |manager, _| {
         let local = manager.workspaces.active_workspace_id()?;
         manager
             .binding
             .local()?
             .facts(local)
-            .map(|facts| facts.server)
+            .map(|facts| facts.core)
     })
 }
 
 #[gpui::test]
-fn the_new_workspace_menu_creates_and_opens_a_server_workspace(cx: &mut TestAppContext) {
+fn the_new_workspace_menu_creates_and_opens_a_machine_workspace(cx: &mut TestAppContext) {
     let (harness, cx) = ready_harness(cx);
     click_new_workspace_menu("new-workspace-menu-create-local", cx);
     assert_eq!(created_names(&harness), [""]);
@@ -1339,7 +1331,7 @@ fn the_new_workspace_menu_creates_and_opens_a_server_workspace(cx: &mut TestAppC
     let pending = harness.manager.read_with(cx, |manager, _| {
         manager.workspaces.active_workspace_id().unwrap()
     });
-    assert_ne!(active_server_workspace(&harness, cx).unwrap(), WORKSPACE);
+    assert_ne!(active_core_workspace(&harness, cx).unwrap(), WORKSPACE);
     assert_eq!(harness.authoritative_inventory(cx), inventory());
     assert_eq!(harness.panes.opened().len(), 1);
 
@@ -1353,7 +1345,7 @@ fn the_new_workspace_menu_creates_and_opens_a_server_workspace(cx: &mut TestAppC
         Some(pending),
         "acceptance binds the pending Workspace without replacing its local identity"
     );
-    assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
+    assert_eq!(active_core_workspace(&harness, cx), Some(CREATED));
     assert_eq!(
         harness.panes.pane([63; 32]).created_starts(),
         1,
@@ -1383,10 +1375,10 @@ fn switcher_keyboard_acceptance_creates_exactly_one_workspace_without_a_picker(
             .read_with(cx, |manager, _| manager.pin_picker.is_none())
     );
     assert_eq!(harness.workspace_count(cx), 2);
-    assert_ne!(active_server_workspace(&harness, cx).unwrap(), WORKSPACE);
+    assert_ne!(active_core_workspace(&harness, cx).unwrap(), WORKSPACE);
     accept_creation(&harness, None, cx);
     assert_eq!(harness.workspace_count(cx), 2);
-    assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
+    assert_eq!(active_core_workspace(&harness, cx), Some(CREATED));
 }
 
 #[gpui::test]
@@ -1413,7 +1405,7 @@ fn the_collapsed_workspace_name_creates_a_named_workspace_and_stays_collapsed(
 fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_core::hierarchy::Mutation;
 
     let project = temporary_directory("launch-open-local-sidebar");
     std::fs::create_dir_all(&project).unwrap();
@@ -1436,7 +1428,7 @@ fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(project.clone()),
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
     assert!(
@@ -1502,8 +1494,8 @@ fn a_service_start_elsewhere_resumes_only_a_waiting_launch(cx: &mut TestAppConte
 /// A Start from the status menu reaches a window that launched while the server was stopped, and
 /// a Stop from there leaves it waiting.
 #[gpui::test]
-fn a_status_menu_start_resumes_a_window_waiting_on_a_stopped_server(cx: &mut TestAppContext) {
-    use spaceterm_server::service::ServiceStatus;
+fn a_status_menu_start_resumes_a_window_waiting_on_a_stopped_machine(cx: &mut TestAppContext) {
+    use spaceterm_core::service::ServiceStatus;
 
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
     cx.run_until_parked();
@@ -1545,14 +1537,14 @@ fn a_status_menu_start_resumes_a_window_waiting_on_a_stopped_server(cx: &mut Tes
 /// with Start Server where retrying could never connect.
 fn stopped_in_session(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestContext) {
     stopped_in_session_as(
-        crate::terminal::server_session::ServerPaneStatus::Failed(ServerError::Stopped),
+        crate::terminal::core_session::CorePaneStatus::Failed(CoreError::Stopped),
         cx,
     )
 }
 
 /// Like `stopped_in_session`, with the Pane left in `status` when the server stopped.
 fn stopped_in_session_as(
-    status: crate::terminal::server_session::ServerPaneStatus,
+    status: crate::terminal::core_session::CorePaneStatus,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
     let (harness, cx) = ready_harness(cx);
@@ -1565,7 +1557,7 @@ fn stopped_in_session_as(
 }
 
 #[gpui::test]
-fn a_pane_stopped_in_session_offers_start_server_instead_of_retry(cx: &mut TestAppContext) {
+fn a_pane_stopped_in_session_offers_start_core_instead_of_retry(cx: &mut TestAppContext) {
     let (harness, cx) = stopped_in_session(cx);
     assert!(cx.debug_bounds("pane-start-server-1").is_some());
     assert!(cx.debug_bounds("pane-retry-1").is_none());
@@ -1578,7 +1570,7 @@ fn a_pane_stopped_in_session_offers_start_server_instead_of_retry(cx: &mut TestA
 /// Once Start Server in a Pane starts the server, a Pane it stopped connects again, so the
 /// server says what became of it. Nothing takes control or starts a shell on the person's behalf.
 fn assert_start_reconnects(
-    status: crate::terminal::server_session::ServerPaneStatus,
+    status: crate::terminal::core_session::CorePaneStatus,
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = stopped_in_session_as(status, cx);
@@ -1593,9 +1585,9 @@ fn assert_start_reconnects(
 }
 
 #[gpui::test]
-fn starting_the_server_from_a_pane_reconnects_its_stopped_pane(cx: &mut TestAppContext) {
+fn starting_the_core_from_a_pane_reconnects_its_stopped_pane(cx: &mut TestAppContext) {
     assert_start_reconnects(
-        crate::terminal::server_session::ServerPaneStatus::Failed(ServerError::Stopped),
+        crate::terminal::core_session::CorePaneStatus::Failed(CoreError::Stopped),
         cx,
     );
 }
@@ -1603,11 +1595,11 @@ fn starting_the_server_from_a_pane_reconnects_its_stopped_pane(cx: &mut TestAppC
 /// A Pane this window did not control offers Take Over again once the server answers, rather
 /// than waiting on a connection that never retries.
 #[gpui::test]
-fn starting_the_server_reconnects_a_stopped_take_over_pane_without_taking_control(
+fn starting_the_core_reconnects_a_stopped_take_over_pane_without_taking_control(
     cx: &mut TestAppContext,
 ) {
     assert_start_reconnects(
-        crate::terminal::server_session::ServerPaneStatus::TakeoverFailed(ServerError::Stopped),
+        crate::terminal::core_session::CorePaneStatus::TakeoverFailed(CoreError::Stopped),
         cx,
     );
 }
@@ -1615,7 +1607,7 @@ fn starting_the_server_reconnects_a_stopped_take_over_pane_without_taking_contro
 #[gpui::test]
 fn a_refused_start_while_presenting_explains_itself(cx: &mut TestAppContext) {
     let (harness, cx) = stopped_in_session(cx);
-    harness.launch.refuse_start(ServerError::NotInstalled);
+    harness.launch.refuse_start(CoreError::NotInstalled);
 
     harness.click("pane-start-server-1", cx);
 
@@ -1650,7 +1642,7 @@ fn a_service_start_elsewhere_reconnects_the_stopped_panes_of_a_presenting_window
 
 /// A launch that runs again but has not answered yet, as when a person retries.
 fn launching_after_stop(
-    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    answers: Vec<Result<LaunchOutcome, CoreError>>,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
     let (harness, cx) = launch_harness(
@@ -1714,8 +1706,8 @@ fn running(
     revision: u64,
     command: &str,
     directory: &str,
-) -> spaceterm_server::pane::metadata::Snapshot {
-    use spaceterm_server::pane::metadata::{
+) -> spaceterm_core::pane::metadata::Snapshot {
+    use spaceterm_core::pane::metadata::{
         Command, CommandState, DirectoryProvenance, Freshness, Progress, PromptZone, Snapshot,
         TitleGlyph, TitleProvenance,
     };
@@ -1747,14 +1739,14 @@ fn running(
 fn with_hidden_tab(
     revision: u64,
     session: Option<[u8; 32]>,
-    presentation: Option<spaceterm_server::pane::metadata::Snapshot>,
+    presentation: Option<spaceterm_core::pane::metadata::Snapshot>,
 ) -> Inventory {
-    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+    use spaceterm_core::hierarchy::{CloseInventory, ConfirmedPane};
     let mut inventory = inventory();
     inventory.revision = revision;
     inventory.workspaces[0].tabs.push(Tab {
         worktree: None,
-        worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+        worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
         worktree_repository: None,
         id: HIDDEN_TAB,
         root_pane: HIDDEN_PANE,
@@ -1806,7 +1798,7 @@ fn tab_identities(cx: &mut VisualTestContext) -> Vec<(String, String)> {
 }
 
 #[gpui::test]
-fn a_tab_this_client_never_opened_names_what_its_server_shell_runs(cx: &mut TestAppContext) {
+fn a_tab_this_client_never_opened_names_what_its_machine_shell_runs(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
     harness.edits.set_inventory(with_hidden_tab(
@@ -1843,7 +1835,7 @@ fn a_tab_this_client_never_opened_names_what_its_server_shell_runs(cx: &mut Test
 
     let mut completed = running(5, "cargo build", "/srv/web");
     completed.command.as_mut().unwrap().state =
-        spaceterm_server::pane::metadata::CommandState::Finished {
+        spaceterm_core::pane::metadata::CommandState::Finished {
             exit_status: Some(0),
             duration_ms: 100,
         };
@@ -1856,7 +1848,7 @@ fn a_tab_this_client_never_opened_names_what_its_server_shell_runs(cx: &mut Test
 }
 
 #[gpui::test]
-fn a_new_server_session_replaces_the_former_sessions_metadata(cx: &mut TestAppContext) {
+fn a_new_core_session_replaces_the_former_sessions_metadata(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
     harness.edits.set_inventory(with_hidden_tab(
@@ -1893,8 +1885,8 @@ const OTHER_HIDDEN_PANE: [u8; 32] = [43; 32];
 /// The server's first Workspace, and a second one a new client does not attach, whose second Tab
 /// runs `cargo test` in `/srv/api`.
 fn with_detached_workspace() -> Inventory {
-    use spaceterm_server::hierarchy::ConfirmedPane;
-    let pane = |id, presentation: Option<spaceterm_server::pane::metadata::Snapshot>| Pane {
+    use spaceterm_core::hierarchy::ConfirmedPane;
+    let pane = |id, presentation: Option<spaceterm_core::pane::metadata::Snapshot>| Pane {
         id,
         source: None,
         side: Side::Right,
@@ -1908,7 +1900,7 @@ fn with_detached_workspace() -> Inventory {
     };
     let tab = |id, root_pane, pane| Tab {
         worktree: None,
-        worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+        worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
         worktree_repository: None,
         id,
         root_pane,
@@ -1957,7 +1949,7 @@ fn a_reattached_workspace_names_what_its_hidden_tab_runs_from_an_unchanged_inven
     let attach = |cx: &mut VisualTestContext| {
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.attach_detached_workspace(ServerKey::LOCAL, OTHER_WORKSPACE, window, cx);
+                manager.attach_detached_workspace(MachineKey::LOCAL, OTHER_WORKSPACE, window, cx);
             });
         });
         cx.run_until_parked();
@@ -1966,7 +1958,7 @@ fn a_reattached_workspace_names_what_its_hidden_tab_runs_from_an_unchanged_inven
     let other = harness.manager.read_with(cx, |manager, _| {
         manager
             .binding
-            .get(ServerKey::LOCAL)
+            .get(MachineKey::LOCAL)
             .and_then(|binding| binding.local(OTHER_WORKSPACE))
             .expect("the attached Workspace is presented")
     });
@@ -1997,11 +1989,11 @@ fn a_reattached_workspace_names_what_its_hidden_tab_runs_from_an_unchanged_inven
 
 /// The root Pane runs a Session that reports `percent` through the inventory.
 fn with_root_progress(revision: u64, metadata_revision: u64, percent: u8) -> Inventory {
-    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+    use spaceterm_core::hierarchy::{CloseInventory, ConfirmedPane};
     let mut inventory = inventory();
     inventory.revision = revision;
     let mut presentation = running(metadata_revision, "cargo build", "/srv/api");
-    presentation.progress = spaceterm_server::pane::metadata::Progress::Normal(percent);
+    presentation.progress = spaceterm_core::pane::metadata::Progress::Normal(percent);
     inventory.workspaces[0].tabs[0].panes[0].presentation = Some(Box::new(presentation));
     inventory.close = Some(CloseInventory {
         controls: Vec::new(),
@@ -2031,13 +2023,13 @@ fn session_statuses(cx: &mut VisualTestContext) -> Vec<String> {
 
 #[gpui::test]
 fn a_pane_another_client_controls_keeps_showing_its_sessions_progress(cx: &mut TestAppContext) {
-    use crate::terminal::server_session::ServerPaneStatus;
+    use crate::terminal::core_session::CorePaneStatus;
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
     harness.edits.set_inventory(with_root_progress(2, 3, 40));
     sync(&harness, cx);
 
-    harness.panes.pane(PANE).set(ServerPaneStatus::Takeover);
+    harness.panes.pane(PANE).set(CorePaneStatus::Takeover);
     cx.run_until_parked();
     harness.edits.set_inventory(with_root_progress(3, 4, 60));
     sync(&harness, cx);

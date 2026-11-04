@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use spaceterm_server::direct::{PairingId, ServerPin};
+use spaceterm_core::direct::{MachinePin, PairingId};
 
 use super::{DirectRoute, UnpairKey};
 const MAX_BYTES: usize = 512 * 1024;
@@ -22,11 +22,11 @@ pub enum Authority {
     Direct(SavedRoute),
     /// The account-local server, expected to still present `pin`.
     Account {
-        pin: ServerPin,
+        pin: MachinePin,
     },
     Enrollment {
         endpoint: String,
-        pin: ServerPin,
+        pin: MachinePin,
         claim: [u8; 32],
         credential: [u8; 32],
     },
@@ -58,7 +58,12 @@ impl PendingRecord {
         }
     }
 
-    pub fn account(operation: UnpairKey, label: String, pin: ServerPin, target: PairingId) -> Self {
+    pub fn account(
+        operation: UnpairKey,
+        label: String,
+        pin: MachinePin,
+        target: PairingId,
+    ) -> Self {
         Self {
             operation,
             label,
@@ -74,7 +79,7 @@ impl PendingRecord {
         operation: UnpairKey,
         label: String,
         endpoint: String,
-        pin: ServerPin,
+        pin: MachinePin,
         claim: [u8; 32],
         credential: [u8; 32],
         cancelled: bool,
@@ -95,11 +100,11 @@ impl PendingRecord {
         }
     }
 
-    pub fn server(&self) -> [u8; 32] {
+    pub fn core(&self) -> [u8; 32] {
         match &self.authority {
-            Authority::Direct(actor) => actor.route.paired.pin.server,
-            Authority::Account { pin } => pin.server,
-            Authority::Enrollment { pin, .. } => pin.server,
+            Authority::Direct(actor) => actor.route.paired.pin.core,
+            Authority::Account { pin } => pin.core,
+            Authority::Enrollment { pin, .. } => pin.core,
         }
     }
 
@@ -131,9 +136,9 @@ impl Default for Document {
 }
 
 impl Document {
-    pub fn ensure_capacity(&self) -> Result<(), spaceterm_server::direct::DirectError> {
+    pub fn ensure_capacity(&self) -> Result<(), spaceterm_core::direct::DirectError> {
         if self.routes.len().saturating_add(self.pending.len()) >= CAPACITY {
-            Err(spaceterm_server::direct::DirectError::Capacity)
+            Err(spaceterm_core::direct::DirectError::Capacity)
         } else {
             Ok(())
         }
@@ -184,8 +189,8 @@ impl Document {
     }
 }
 
-fn validate_pin(pin: &ServerPin) -> Result<(), ()> {
-    if pin.server == [0; 32]
+fn validate_pin(pin: &MachinePin) -> Result<(), ()> {
+    if pin.core == [0; 32]
         || pin.public_key == [0; 32]
         || pin.certificate == [0; 32]
         || pin.build.is_empty()
@@ -217,7 +222,7 @@ fn validate_route(saved: &SavedRoute) -> Result<(), ()> {
 }
 
 pub trait Records: Send + Sync {
-    fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError>;
+    fn load(&self) -> Result<Document, spaceterm_core::direct::DirectError>;
     fn save(&self, document: &Document) -> Result<Durability, SaveError>;
 }
 
@@ -241,8 +246,8 @@ pub trait RecordFile: Send + Sync {
     /// Grant write authority only after `accept` validates the observed bytes.
     fn read(
         &self,
-        accept: &mut dyn FnMut(&[u8]) -> Result<(), spaceterm_server::direct::DirectError>,
-    ) -> Result<(), spaceterm_server::direct::DirectError>;
+        accept: &mut dyn FnMut(&[u8]) -> Result<(), spaceterm_core::direct::DirectError>,
+    ) -> Result<(), spaceterm_core::direct::DirectError>;
     fn commit(&self, bytes: &[u8]) -> Result<Durability, SaveError>;
 }
 
@@ -253,17 +258,17 @@ impl PrivateRecords {
     }
 }
 impl Records for PrivateRecords {
-    fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
+    fn load(&self) -> Result<Document, spaceterm_core::direct::DirectError> {
         let mut document = Document::default();
         self.0.read(&mut |bytes| {
             if bytes.len() > MAX_BYTES {
-                return Err(spaceterm_server::direct::DirectError::StorageUnavailable);
+                return Err(spaceterm_core::direct::DirectError::StorageUnavailable);
             }
             document = serde_json::from_slice(bytes)
-                .map_err(|_| spaceterm_server::direct::DirectError::StorageUnavailable)?;
+                .map_err(|_| spaceterm_core::direct::DirectError::StorageUnavailable)?;
             document
                 .validate()
-                .map_err(|_| spaceterm_server::direct::DirectError::StorageUnavailable)
+                .map_err(|_| spaceterm_core::direct::DirectError::StorageUnavailable)
         })?;
         Ok(document)
     }

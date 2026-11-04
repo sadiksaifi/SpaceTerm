@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::repository_status::RepositoryReadError;
 use crate::repository_status::discovery::SHORT_COMMIT_LENGTH;
 
-pub(crate) use spaceterm_server::repository::{WorktreeHead, WorktreeRecord};
+pub(crate) use spaceterm_core::repository::{WorktreeHead, WorktreeRecord};
 
 /// Parses porcelain records separated by `separator`: NUL with `-z`, else newline.
 ///

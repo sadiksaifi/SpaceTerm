@@ -1,8 +1,8 @@
 //! Golden envelopes and text of `server network`, built by the functions the command uses.
 use super::*;
 use crate::contract::golden::assert_golden;
-use spaceterm_server::service::lane::client::Outcome;
-use spaceterm_server::service::lane::{LaneDevice, LaneOperationState, LaneReceipt};
+use spaceterm_core::service::lane::client::Outcome;
+use spaceterm_core::service::lane::{LaneDevice, LaneOperationState, LaneReceipt};
 
 const EXPIRES: &str = "2026-10-30T12:10:00Z";
 const OPERATION: &str = "0123456789abcdef0123456789abcdef";
@@ -10,8 +10,8 @@ const BOOT: &str = "111111111111111111111111111111111111111111111111111111111111
 const TO: &str = "192.0.2.4:9231";
 const STATUS: &str = "spaceterm --server id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e server status";
 
-fn server() -> ServerRef {
-    ServerRef {
+fn core() -> MachineRef {
+    MachineRef {
         name: "penguin".into(),
         route: format!("id:{}", "4e".repeat(32)),
         id: "5b".repeat(32),
@@ -56,7 +56,7 @@ fn receipt(state: LaneOperationState) -> LaneReceipt {
 fn a_preview_reports_the_callers_reconnect_and_the_devices_that_lose_their_route() {
     let effects = effects(LaneCallerEffect::Reconnects);
     let envelope = preview_envelope(
-        server(),
+        core(),
         format!("c1-{}", "ab".repeat(32)),
         EXPIRES.into(),
         &effects,
@@ -103,7 +103,7 @@ fn a_preview_says_when_the_caller_cannot_reconnect_or_stays_connected() {
 fn a_change_that_disconnects_every_device_is_refused_with_its_own_code() {
     let failure = contract::from_lane_code("disconnects_every_device");
     assert_eq!(failure.code, Code::DisconnectsEveryDevice);
-    let envelope = Envelope::error(COMMAND, Some(server()), failure, contract::Empty {});
+    let envelope = Envelope::error(COMMAND, Some(core()), failure, contract::Empty {});
     assert_eq!(envelope.exit(), 5);
     assert_golden("server_network_disconnects_every_device", &envelope);
 }
@@ -118,7 +118,7 @@ fn a_change_that_cut_and_restored_the_callers_connection_reports_done() {
         },
     );
     assert!(settled.acknowledged);
-    let (envelope, text) = result(server(), settled, Some(on(TO)), STATUS);
+    let (envelope, text) = result(core(), settled, Some(on(TO)), STATUS);
     assert_eq!(envelope.exit(), 0);
     assert_eq!(text, format!("Network Access is now on at {TO}.\n"));
     assert_golden("server_network_done", &envelope);
@@ -135,7 +135,7 @@ fn a_caller_that_lost_its_route_reports_an_unconfirmed_outcome() {
         },
     );
     assert!(!settled.acknowledged);
-    let (envelope, text) = result(server(), settled, None, STATUS);
+    let (envelope, text) = result(core(), settled, None, STATUS);
     assert_eq!(envelope.exit(), 7);
     assert_eq!(
         text,
@@ -150,7 +150,7 @@ fn parsed(text: &str) -> Network {
     use clap::Parser;
     let cli = crate::args::Cli::try_parse_from(["spaceterm", "server", "network", text]).unwrap();
     match cli.command {
-        crate::args::Command::Server(crate::args::ServerCommand::Network { access, .. }) => access,
+        crate::args::Command::Core(crate::args::CoreCommand::Network { access, .. }) => access,
         other => panic!("parsed {other:?}"),
     }
 }
@@ -162,7 +162,7 @@ fn the_access_argument_round_trips_into_the_confirmation_hint() {
     }
     assert_eq!(
         argument(access(&parsed("192.0.2.4"))),
-        format!("192.0.2.4:{}", spaceterm_server::direct::DEFAULT_PORT)
+        format!("192.0.2.4:{}", spaceterm_core::direct::DEFAULT_PORT)
     );
 }
 
@@ -175,7 +175,7 @@ fn context_for(global: &crate::args::Global) -> Context<'_> {
 }
 
 #[test]
-fn the_confirmation_names_the_server_and_actor_it_was_previewed_for() {
+fn the_confirmation_names_the_machine_and_actor_it_was_previewed_for() {
     use clap::Parser;
     let cli = crate::args::Cli::try_parse_from([
         "spaceterm",
@@ -191,7 +191,7 @@ fn the_confirmation_names_the_server_and_actor_it_was_previewed_for() {
     .unwrap();
     let line = confirm_line(
         &context_for(&cli.global),
-        &server(),
+        &core(),
         NetworkAccess::All,
         "c1-ab",
     );
@@ -205,17 +205,14 @@ fn the_confirmation_names_the_server_and_actor_it_was_previewed_for() {
     // The copied line parses back to the same command, target and actor.
     let words: Vec<&str> = line.split(' ').collect();
     let copied = crate::args::Cli::try_parse_from(&words).unwrap();
-    assert_eq!(
-        copied.global.server.as_deref(),
-        Some(server().route.as_str())
-    );
+    assert_eq!(copied.global.core.as_deref(), Some(core().route.as_str()));
     assert_eq!(
         copied.global.agent.as_ref().map(|v| v.as_str()),
         Some("builder")
     );
     assert!(matches!(
         copied.command,
-        crate::args::Command::Server(crate::args::ServerCommand::Network {
+        crate::args::Command::Core(crate::args::CoreCommand::Network {
             confirm: Some(_),
             ..
         })
@@ -253,7 +250,7 @@ fn an_ipv6_confirmation_pastes_into_sh_and_zsh_as_the_same_command() {
     let cli =
         crate::args::Cli::try_parse_from(["spaceterm", "server", "network", "[::1]:9231"]).unwrap();
     let access = NetworkAccess::Address("[::1]:9231".parse().unwrap());
-    let line = confirm_line(&context_for(&cli.global), &server(), access, "c1-ab");
+    let line = confirm_line(&context_for(&cli.global), &core(), access, "c1-ab");
     assert!(line.contains(" '[::1]:9231' "), "{line}");
     // Zsh without its startup files, so its default `nomatch` applies, as in a new shell.
     let mut shells = 0;
@@ -265,11 +262,8 @@ fn an_ipv6_confirmation_pastes_into_sh_and_zsh_as_the_same_command() {
         let copied =
             crate::args::Cli::try_parse_from(std::iter::once("spaceterm".to_owned()).chain(words))
                 .unwrap();
-        assert_eq!(
-            copied.global.server.as_deref(),
-            Some(server().route.as_str())
-        );
-        let crate::args::Command::Server(crate::args::ServerCommand::Network {
+        assert_eq!(copied.global.core.as_deref(), Some(core().route.as_str()));
+        let crate::args::Command::Core(crate::args::CoreCommand::Network {
             access: copied,
             confirm,
         }) = copied.command

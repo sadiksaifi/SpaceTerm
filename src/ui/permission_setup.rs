@@ -71,7 +71,7 @@ pub(crate) const fn permission_copy(
 /// The entry System Settings lists a server's grants under, as running text names it.
 pub(crate) fn holder_name(holder: Option<PermissionHolder>) -> String {
     match holder {
-        Some(PermissionHolder::Server { name }) => name,
+        Some(PermissionHolder::Core { name }) => name,
         Some(PermissionHolder::Launcher) | None => format!(
             "the app that started {}",
             crate::application_identity::ApplicationIdentity::current().display_name()

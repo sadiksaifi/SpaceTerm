@@ -15,9 +15,9 @@ use crate::contract::{
     UnsupportedSessionReason, UsageDetails, UsageKind,
 };
 use crate::state::{PendingRun, Runs};
-use spaceterm_server::connection::link::ServerLink;
-use spaceterm_server::pane::{AttachmentClaim, Lease};
-use spaceterm_server::protocol::{
+use spaceterm_core::connection::link::CoreLink;
+use spaceterm_core::pane::{AttachmentClaim, Lease};
+use spaceterm_core::protocol::{
     HistoryPosition, MAX_RUN_COMMAND_BYTES, Operation, PaneEvent, ReplyBody, RunDoubt, RunId,
     RunReceipt, RunRefusal, RunReply, RunState,
 };
@@ -82,7 +82,7 @@ struct Claim {
 /// as Start Session on a Pane whose Session ended. `directory` repairs a Pane whose directory is
 /// unavailable.
 fn claim(
-    link: &ServerLink,
+    link: &CoreLink,
     target: &PaneTarget,
     args: &RunArgs,
     directory: Option<PathBuf>,
@@ -277,8 +277,8 @@ enum Finish {
 /// `directory` is `--directory`, resolved by the route's path rules.
 #[allow(clippy::too_many_arguments, reason = "one command's whole context")]
 pub fn run(
-    link: &ServerLink,
-    connect: &mut dyn FnMut() -> Result<ServerLink, Failure>,
+    link: &CoreLink,
+    connect: &mut dyn FnMut() -> Result<CoreLink, Failure>,
     target: &PaneTarget,
     args: &RunArgs,
     directory: Option<PathBuf>,
@@ -460,8 +460,8 @@ pub fn run(
 /// Waits on the run's channel for its receipt.
 fn follow(
     channel: &mut Channel,
-    link: &mut ServerLink,
-    connect: &mut dyn FnMut() -> Result<ServerLink, Failure>,
+    link: &mut CoreLink,
+    connect: &mut dyn FnMut() -> Result<CoreLink, Failure>,
     run: RunId,
     deadline: Deadline,
 ) -> Finish {
@@ -498,11 +498,7 @@ fn follow(
 }
 
 /// The server's receipt for `run`, or `None` when it has none.
-fn status(
-    link: &ServerLink,
-    run: RunId,
-    deadline: Deadline,
-) -> Result<Option<RunReceipt>, Failure> {
+fn status(link: &CoreLink, run: RunId, deadline: Deadline) -> Result<Option<RunReceipt>, Failure> {
     match request(
         link,
         Operation::RunStatus { run },
@@ -518,8 +514,8 @@ fn status(
 /// Resolves `run` with `RunStatus` until it settles or the deadline passes, reconnecting when
 /// the link is lost. It never sends the command again.
 fn resolve(
-    link: &mut ServerLink,
-    connect: &mut dyn FnMut() -> Result<ServerLink, Failure>,
+    link: &mut CoreLink,
+    connect: &mut dyn FnMut() -> Result<CoreLink, Failure>,
     run: RunId,
     deadline: Deadline,
 ) -> Finish {

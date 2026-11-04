@@ -110,9 +110,9 @@ impl TerminalGeometry {
         minimum_grid: CellGridSize,
     ) -> Self {
         let cols = grid_dimension(viewport.width, cell.width, minimum_grid.cols)
-            .min(spaceterm_server::pane::MAX_COLUMNS);
+            .min(spaceterm_core::pane::MAX_COLUMNS);
         let rows = grid_dimension(viewport.height, cell.height, minimum_grid.rows)
-            .min(spaceterm_server::pane::MAX_ROWS);
+            .min(spaceterm_core::pane::MAX_ROWS);
         let grid = CellGridSize::new(cols, rows);
         let fitted_cell = Self::fitted_cell_size(viewport, cell, grid);
         Self::from_grid_with_logical_cell(grid, cell, fitted_cell, backing_scale)
@@ -253,7 +253,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn large_desktop_grids_use_the_same_supported_budget_as_the_server() {
+    fn large_desktop_grids_use_the_same_supported_budget_as_the_core() {
         let geometry = |columns, rows| {
             TerminalGeometry::from_viewport(
                 LogicalSize::new(columns as f32 * 8.0, rows as f32 * 16.0),

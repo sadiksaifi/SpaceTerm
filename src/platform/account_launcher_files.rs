@@ -2,8 +2,8 @@
 use std::path::PathBuf;
 
 use crate::command_line_tool::{Launcher, LauncherFiles, LinkOutcome, ToolFailure};
-use crate::server_connection::ServerError;
-use crate::server_connection::service::{CliLauncher, CliLink, Service};
+use crate::machine_connection::CoreError;
+use crate::machine_connection::service::{CliLauncher, CliLink, Service};
 
 pub(crate) struct AccountLauncherFiles {
     service: Service,
@@ -13,7 +13,7 @@ pub(crate) struct AccountLauncherFiles {
 
 impl AccountLauncherFiles {
     /// Resolves the launcher of `identity` from the account record. Reads nothing else.
-    pub(crate) fn new(identity: &str) -> Result<Self, ServerError> {
+    pub(crate) fn new(identity: &str) -> Result<Self, CoreError> {
         let service = Service::for_identity(identity)?;
         let launcher = service.cli_launcher_path()?;
         let temporary = service.cli_temporary_path()?;
@@ -45,7 +45,7 @@ impl LauncherFiles for AccountLauncherFiles {
             .service
             .link_cli(|| {
                 crate::local_startup::discover_candidate()
-                    .map_err(ServerError::from)
+                    .map_err(CoreError::from)
                     .and_then(|candidate| candidate.stage())
                     .map(|installation| installation.directory)
             })
@@ -66,15 +66,13 @@ impl LauncherFiles for AccountLauncherFiles {
     }
 }
 
-fn failure(error: ServerError) -> ToolFailure {
+fn failure(error: CoreError) -> ToolFailure {
     match error {
-        ServerError::ServiceBusy => ToolFailure::Busy,
-        ServerError::CandidateMissing => ToolFailure::NoServerPackage,
-        ServerError::CandidateChanged => ToolFailure::RestartRequired,
-        ServerError::RuntimeUnavailable | ServerError::IncompatibleProtocol => {
-            ToolFailure::Unverified
-        }
-        ServerError::UnsafeStorage => ToolFailure::UnsafeStorage,
+        CoreError::ServiceBusy => ToolFailure::Busy,
+        CoreError::CandidateMissing => ToolFailure::NoCorePackage,
+        CoreError::CandidateChanged => ToolFailure::RestartRequired,
+        CoreError::RuntimeUnavailable | CoreError::IncompatibleProtocol => ToolFailure::Unverified,
+        CoreError::UnsafeStorage => ToolFailure::UnsafeStorage,
         _ => ToolFailure::StorageUnavailable,
     }
 }
@@ -86,15 +84,15 @@ mod tests {
     #[test]
     fn service_errors_become_the_tools_classifications() {
         for (error, expected) in [
-            (ServerError::ServiceBusy, ToolFailure::Busy),
-            (ServerError::CandidateMissing, ToolFailure::NoServerPackage),
-            (ServerError::CandidateChanged, ToolFailure::RestartRequired),
-            (ServerError::RuntimeUnavailable, ToolFailure::Unverified),
-            (ServerError::IncompatibleProtocol, ToolFailure::Unverified),
-            (ServerError::UnsafeStorage, ToolFailure::UnsafeStorage),
-            (ServerError::Changed, ToolFailure::StorageUnavailable),
+            (CoreError::ServiceBusy, ToolFailure::Busy),
+            (CoreError::CandidateMissing, ToolFailure::NoCorePackage),
+            (CoreError::CandidateChanged, ToolFailure::RestartRequired),
+            (CoreError::RuntimeUnavailable, ToolFailure::Unverified),
+            (CoreError::IncompatibleProtocol, ToolFailure::Unverified),
+            (CoreError::UnsafeStorage, ToolFailure::UnsafeStorage),
+            (CoreError::Changed, ToolFailure::StorageUnavailable),
             (
-                ServerError::StorageUnavailable,
+                CoreError::StorageUnavailable,
                 ToolFailure::StorageUnavailable,
             ),
         ] {

@@ -131,8 +131,8 @@ const ACTIVITY_FRAME_FAMILIES: [&str; 6] =
     ["⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", "⣾⣽⣻⢿⡿⣟⣯⣷", "⢹⢺⢼⣸⣇⡧⡗⡏", "◐◓◑◒", "◰◳◲◱", "◴◷◶◵"];
 
 #[cfg(test)]
-pub use spaceterm_server::labels::ReportedTitle;
-pub use spaceterm_server::labels::{is_glyph_mark, reported_title};
+pub use spaceterm_core::labels::ReportedTitle;
+pub use spaceterm_core::labels::{is_glyph_mark, reported_title};
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,481 @@
+//! The server runtime: the Workspace host and the per-Pane hosts that own each live
+//! Terminal Session.
+use crate::appearance::resolution::AppearanceGeneration;
+use crate::appearance::terminal_theme::Appearance;
+use crate::domain::workspace_collection::ValidatedLocalDirectory;
+use crate::platform::local_filesystem::LocalFilesystemError;
+use crate::terminal::accessibility::{
+    AccessibilityCellRef, AccessibilityRowId, AccessibilityScreen, TerminalAccessibilityModel,
+};
+use crate::terminal::emulator::{
+    ActiveScreenSnapshot, CellSnapshot, CursorShapeSnapshot, PresentationGeneration, RowSnapshot,
+    ScreenSnapshot, TerminalColor, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
+};
+use crate::terminal::failure::TerminalFailure;
+use crate::terminal::graphics::GraphicsSnapshot;
+use crate::terminal::key::*;
+use crate::terminal::native_services::hyperlink::{HyperlinkKind, HyperlinkTarget};
+use crate::terminal::native_services::osc52::{Osc52Operation, Osc52Target};
+use crate::terminal::native_services::paste::{
+    PasteConfirmationId, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
+};
+use crate::terminal::pointer_input::*;
+use crate::terminal::session::{
+    ClipboardCompletion, ClipboardRequest, LocalTerminalLaunchPlan, NativeTerminalSessionFactory,
+    TerminalAppearanceUpdate, TerminalRuntime, TerminalSessionEvent, TerminalSessionFailure,
+    TerminalSubscription,
+};
+
+use super::*;
+use crate::terminal::session::TerminalSessionStartupStage;
+use spaceterm_core::organization::OrganizationStore;
+use spaceterm_core::{
+    CoreError,
+    pane::{self, *},
+};
+use std::{sync::Arc, time::Duration};
+
+mod accessibility;
+#[cfg(test)]
+mod accessibility_tests;
+#[cfg(test)]
+mod boundary_tests;
+#[cfg(test)]
+mod clear_tests;
+mod directories;
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) mod testing {
+    use super::*;
+
+    pub(crate) fn terminal_host() -> WorkspaceHost {
+        WorkspaceHost::new(super::tests::host())
+    }
+
+    /// Prepares `host`'s first Workspace and starts its Pane at `size` for the client `[1; 32]`
+    /// over the connection `[1; 32]`.
+    pub(crate) fn started_pane(host: &mut WorkspaceHost, size: PaneSize) -> Lease {
+        host.prepare_initial_organization()
+            .expect("the first Workspace is prepared");
+        let pane = super::tests::workspace_inventory(host).workspaces[0].tabs[0].root_pane;
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size,
+                style: None,
+            },
+        ) else {
+            panic!("the first Pane did not start")
+        };
+        lease
+    }
+
+    /// Types `keys` in `lease`'s Pane as the client `[1; 32]` with the terminal focused.
+    pub(crate) fn type_keys(host: &mut WorkspaceHost, lease: Lease, keys: Vec<Key>) -> Reply {
+        let generation = super::tests::COMMAND_FOCUS;
+        let focused = host.request(
+            [1; 32],
+            lease.connection,
+            Request::Focus {
+                lease,
+                generation,
+                target: FocusTarget::Terminal,
+            },
+        );
+        if !matches!(focused, Reply::Unchanged) {
+            return focused;
+        }
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::Keys {
+                lease,
+                generation,
+                keys,
+            },
+        )
+    }
+
+    /// A server's directory reads and creations, in process, for one client connection.
+    pub(crate) struct DirectoryHost {
+        host: WorkspaceHost,
+        /// Rung when a read settles.
+        woken: std::sync::mpsc::Receiver<()>,
+        settled: Vec<SettledRead>,
+    }
+
+    pub(crate) fn directory_host() -> DirectoryHost {
+        let mut host = terminal_host();
+        let (sender, woken) = std::sync::mpsc::channel();
+        host.ticker(Arc::new(move || {
+            let _ = sender.send(());
+        }));
+        DirectoryHost {
+            host,
+            woken,
+            settled: Vec::new(),
+        }
+    }
+
+    impl DirectoryHost {
+        const DEVICE: [u8; 32] = [3; 32];
+        const CONNECTION: [u8; 32] = [4; 32];
+
+        /// Starts a directory read or creation as request `id`.
+        pub(crate) fn begin(
+            &mut self,
+            id: u64,
+            operation: spaceterm_core::protocol::Operation,
+        ) -> Result<(), ()> {
+            use spaceterm_core::protocol::Operation;
+            let read = match operation {
+                Operation::DirectoryRead(operation) => HostRead::Directory(operation),
+                Operation::DirectoryCreate(creation) => HostRead::Creation(creation),
+                _ => return Err(()),
+            };
+            let id = request_id(id)?;
+            if let Some(reply) = self.host.read(Self::DEVICE, Self::CONNECTION, id, read) {
+                self.settled.push(SettledRead {
+                    connection: Self::CONNECTION,
+                    id,
+                    reply: reply.map_err(|_| ())?,
+                });
+            }
+            Ok(())
+        }
+
+        /// Waits at most `timeout` for request `id` to settle.
+        pub(crate) fn settled(
+            &mut self,
+            id: u64,
+            timeout: Duration,
+        ) -> Result<Option<Result<pane::directories::Value, pane::directories::Error>>, ()>
+        {
+            let id = request_id(id)?;
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                self.settled.extend(self.host.settled_reads());
+                if let Some(index) = self.settled.iter().position(|read| read.id == id) {
+                    return match self.settled.swap_remove(index).reply {
+                        spaceterm_core::protocol::ReplyBody::Directory(result) => Ok(Some(result)),
+                        _ => Err(()),
+                    };
+                }
+                let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
+                else {
+                    return Ok(None);
+                };
+                let _ = self.woken.recv_timeout(remaining);
+            }
+        }
+
+        pub(crate) fn cancel(&mut self, id: u64) {
+            if let Ok(id) = request_id(id) {
+                self.host.cancel_read(Self::CONNECTION, id);
+            }
+        }
+    }
+
+    fn request_id(id: u64) -> Result<spaceterm_core::protocol::RequestId, ()> {
+        u32::try_from(id)
+            .map(spaceterm_core::protocol::RequestId)
+            .map_err(|_| ())
+    }
+
+    /// One channel's semantic path on a server, without a host or a shell: the Pane's semantic
+    /// revisions and the connection's outbox, whose encoder writes them as wire frames.
+    pub(crate) struct CoreSemantics {
+        pane: super::accessibility::Accessibility,
+        outbox: spaceterm_core::connection::outbox::Outbox,
+    }
+
+    impl CoreSemantics {
+        pub(crate) const CHANNEL: spaceterm_core::protocol::Channel =
+            spaceterm_core::protocol::Channel(1);
+
+        /// A new connection with the channel open and visible, and no demand.
+        pub(crate) fn connect() -> Self {
+            let outbox = spaceterm_core::connection::outbox::Outbox::new(Arc::new(|| {}));
+            outbox
+                .open(Self::CHANNEL)
+                .expect("a new connection opens a channel");
+            Self {
+                pane: super::accessibility::Accessibility::new(Arc::default()),
+                outbox,
+            }
+        }
+
+        /// Applies the client's demand as the connection service does.
+        pub(crate) fn demand(&mut self, demand: pane::accessibility::Demand) {
+            match demand {
+                pane::accessibility::Demand::Start { generation } => {
+                    self.pane.start();
+                    self.outbox
+                        .start_semantics(Self::CHANNEL, generation)
+                        .expect("each start names a greater generation");
+                    self.hand();
+                }
+                pane::accessibility::Demand::End => {
+                    self.pane.end();
+                    self.outbox.end_semantics(Self::CHANNEL);
+                }
+            }
+        }
+
+        /// Takes the Terminal Session's newest model and hands its revision to the channel.
+        pub(crate) fn publish(&mut self, model: Arc<TerminalAccessibilityModel>) {
+            self.pane.update(model);
+            self.hand();
+        }
+
+        fn hand(&mut self) {
+            if let Some(model) = self.pane.take_changed() {
+                self.outbox
+                    .semantics(Self::CHANNEL, model)
+                    .expect("the outbox is open");
+            }
+        }
+
+        pub(crate) fn view(&self, visible: bool) {
+            self.outbox.view(Self::CHANNEL, visible);
+        }
+
+        /// The next frame the connection's I/O thread writes.
+        pub(crate) fn next_frame(&self) -> Option<Vec<u8>> {
+            self.outbox.next_frame().map(|(frame, _)| frame)
+        }
+
+        pub(crate) fn acknowledge(&self, demand_generation: u64, revision: u64) {
+            self.outbox
+                .acknowledge_semantics(Self::CHANNEL, demand_generation, revision)
+                .expect("the client acknowledges as ADR 0062 says");
+        }
+    }
+}
+
+#[cfg(test)]
+mod directory_tests;
+mod dispatch;
+pub use dispatch::{HostCommands, HostRead, Observers, RunAnswer, RunRequest, Served, SettledRead};
+
+#[cfg(test)]
+#[path = "core_host/effect_tests.rs"]
+mod effect_tests;
+mod effects;
+use self::effects::NativeEffects;
+#[cfg(test)]
+mod agent_io_tests;
+mod graphics;
+#[cfg(test)]
+mod graphics_tests;
+#[cfg(test)]
+mod input_tests;
+pub(super) mod metadata;
+#[cfg(test)]
+mod metadata_tests;
+mod observe;
+mod pane_host;
+#[cfg(test)]
+mod pane_host_tests;
+mod publish;
+mod repositories;
+#[cfg(test)]
+#[path = "core_host/repository_tests.rs"]
+mod repository_tests;
+mod screen;
+pub(crate) mod screen_encoder;
+#[cfg(test)]
+mod screen_encoder_tests;
+#[cfg(test)]
+mod screen_tests;
+mod scrollback;
+pub use self::scrollback::{PageReply, ScrollbackRead};
+#[cfg(test)]
+mod served_tests;
+mod workspaces;
+pub use workspaces::WorkspaceHost;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use self::pane_host::geometry;
+use self::screen::appearance;
+
+pub struct CorePaneHost {
+    boot: [u8; 32],
+    pane: Option<OwnedPane>,
+    factory: NativeTerminalSessionFactory,
+    directory: std::path::PathBuf,
+    /// The Pane this host runs. `None` on the server's prototype, and once the Pane
+    /// closed.
+    identity: Option<PaneIdentity>,
+    directory_unavailable: bool,
+    failed_directory_session: Option<PaneTarget>,
+    dormant: Option<DormantPane>,
+    /// Shared by every Pane of one server, so each names its Controlling Client the same way.
+    names: Arc<std::sync::Mutex<control::ClientNames>>,
+    /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
+    notifier: Option<dispatch::SessionNotifiers>,
+    /// What each started Terminal Session tells the CLI inside it about this server.
+    session_context: Option<Arc<CoreSessionContext>>,
+}
+
+/// What every Terminal Session of one server tells `spaceterm` inside it: the server's build
+/// identity and ID, and the server's own CLI executable.
+#[derive(Clone)]
+pub struct CoreSessionContext {
+    pub identity: String,
+    pub core: [u8; 32],
+    pub cli: std::path::PathBuf,
+}
+
+impl CoreSessionContext {
+    /// The context of the server `identity` that this process runs, whose executable is its
+    /// own CLI.
+    pub fn current(identity: &str) -> Result<Self, CoreError> {
+        Ok(Self {
+            identity: identity.to_owned(),
+            core: spaceterm_core::local_machine_id(identity)?,
+            cli: std::env::current_exe().map_err(|_| CoreError::StartupFailed)?,
+        })
+    }
+}
+/// Which Pane a per-Pane host runs, and the directories its Sessions start in.
+#[derive(Clone)]
+struct PaneIdentity {
+    workspace: [u8; 32],
+    tab: [u8; 32],
+    pane: [u8; 32],
+    starting_directory: std::path::PathBuf,
+    /// The directory the owning shell last confirmed. A new Session starts there.
+    confirmed_directory: Option<std::path::PathBuf>,
+}
+impl PaneIdentity {
+    fn startup_directory(&self) -> &std::path::Path {
+        self.confirmed_directory
+            .as_deref()
+            .unwrap_or(&self.starting_directory)
+    }
+}
+/// A Pane the running server keeps after its Session ended, with the control grant it had.
+#[derive(Clone, Copy)]
+struct DormantPane {
+    device: Option<[u8; 32]>,
+    attachment_generation: Option<u64>,
+    control_epoch: u64,
+    end: pane::SessionEnd,
+    /// The Session that ended, so its channel learns that the Pane stays.
+    session: Option<PaneTarget>,
+}
+struct OwnedPane {
+    device: Option<[u8; 32]>,
+    attachment_generation: Option<u64>,
+    /// Public grant generation. Unlike lease.control, this grants no terminal authority.
+    control_epoch: u64,
+    lease: Lease,
+    connected: bool,
+    runtime: TerminalRuntime,
+    subscription: TerminalSubscription,
+    screen: Option<Arc<ScreenSnapshot>>,
+    graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
+    /// Whether the controlling client shows this Pane, so its Terminal Session publishes frames.
+    presentable: bool,
+    /// Whether an observer shows this Pane, which also makes its Terminal Session publish.
+    observed: bool,
+    ended: bool,
+    /// Why the shell's exit keeps the Pane. `None` with `ended` closes the Pane.
+    end: Option<pane::SessionEnd>,
+    failed: bool,
+    directory_failed: bool,
+    /// Why the Session this one replaced ended, so a failed start leaves the Pane ended again.
+    ended_restart: Option<pane::SessionEnd>,
+    appearance_generation: u64,
+    focus_generation: u64,
+    focus: FocusTarget,
+    pending_paste: Option<u64>,
+    screen_generation: u64,
+    size: PaneSize,
+    effects: NativeEffects,
+    accessibility: accessibility::Accessibility,
+    /// The Terminal Metadata revision last reported by [`CorePaneHost::metadata_changed`].
+    metadata_revision: u64,
+}
+fn nonce() -> Result<[u8; 32], CoreError> {
+    let mut bytes = [0; 32];
+    getrandom::fill(&mut bytes).map_err(|_| CoreError::StartupFailed)?;
+    Ok(bytes)
+}
+impl CorePaneHost {
+    /// This Pane's running Terminal Session, if one has not ended.
+    pub(crate) fn live_session(&self) -> Option<[u8; 32]> {
+        self.pane
+            .as_ref()
+            .filter(|pane| !pane.ended)
+            .map(|pane| pane.lease.session)
+    }
+    #[cfg(test)]
+    pub fn new(
+        factory: NativeTerminalSessionFactory,
+        directory: ValidatedLocalDirectory,
+    ) -> Result<Self, CoreError> {
+        Ok(Self {
+            boot: nonce()?,
+            pane: None,
+            factory,
+            directory: directory.path().to_owned(),
+            identity: None,
+            directory_unavailable: false,
+            failed_directory_session: None,
+            dormant: None,
+            names: Arc::default(),
+            notifier: None,
+            session_context: None,
+        })
+    }
+    /// Native composition for the explicitly launched local server, recording into `counters`.
+    pub fn local(
+        counters: Arc<spaceterm_core::diagnostics::TerminalCounters>,
+    ) -> Result<Self, CoreError> {
+        Self::local_with_pty_factory(native_pty_factory(Arc::clone(&counters)), counters)
+    }
+
+    fn local_with_pty_factory(
+        pty_factory: Arc<dyn NativePtyAdapterFactory>,
+        counters: Arc<spaceterm_core::diagnostics::TerminalCounters>,
+    ) -> Result<Self, CoreError> {
+        let filesystem = local_filesystem();
+        let directory = crate::platform::app_directories::AppDirectoryEnvironment::capture()
+            .home
+            .map(std::path::PathBuf::from)
+            .ok_or(CoreError::StartupFailed)?;
+        let factory = NativeTerminalSessionFactory::new(
+            pty_factory,
+            crate::platform::launch_host::shell_launch_planner(),
+            filesystem,
+            crate::platform::launch_host::terminal_machine(&directory),
+            counters,
+        );
+        Ok(Self {
+            boot: nonce()?,
+            pane: None,
+            factory,
+            directory,
+            identity: None,
+            directory_unavailable: false,
+            failed_directory_session: None,
+            dormant: None,
+            names: Arc::default(),
+            notifier: None,
+            session_context: None,
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) use publish::Observed;
+#[cfg(test)]
+use screen_encoder::ScreenCapture;
+
+#[cfg(test)]
+use crate::local_path::LocalPathSemantics;

@@ -9,15 +9,15 @@
 //! This window reads no git for a Workspace. A server path is displayed and copied as
 //! text; it grants no local file action. Explicit Worktree writes use the owning server.
 
-pub(super) use server::WorkspaceRepositories;
+pub(super) use core_repositories::WorkspaceRepositories;
 
-mod server {
+mod core_repositories {
     use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
 
     use gpui::{App, Context, Subscription, Window};
-    use spaceterm_server::hierarchy::{Id, Workspace as ServerWorkspace};
-    use spaceterm_server::repository::{PinCheckState, WorktreeInventory};
+    use spaceterm_core::hierarchy::{Id, Workspace as CoreWorkspace};
+    use spaceterm_core::repository::{PinCheckState, WorktreeInventory};
 
     use super::super::WorkspaceManager;
     use super::super::worktrees::directory_name;
@@ -28,14 +28,12 @@ mod server {
     use crate::repository_status::presentation::{
         HeadGlyph, MAXIMUM_NAME_CHARS, SidebarBadge, chip_tooltip_line, sanitize_for_display,
     };
-    use crate::ui::repository_status_store::{
-        InstalledRepositoryStatus, ServerPullRequestsChanged,
-    };
+    use crate::ui::repository_status_store::{CorePullRequestsChanged, InstalledRepositoryStatus};
     use crate::ui::workspace_sidebar::{
         WorktreeGroup, WorktreeRemoval, WorktreeRowViewModel, WorktreeSection,
     };
     use crate::ui::workspaces::{
-        LocalPresentation, ServerRepositories, pane_directory, workspace_directory,
+        CoreRepositories, LocalPresentation, pane_directory, workspace_directory,
     };
     use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 
@@ -69,7 +67,7 @@ mod server {
             };
             self.workspace_repositories._pull_requests = Some(cx.subscribe(
                 &store,
-                |manager, _, _: &ServerPullRequestsChanged, cx| {
+                |manager, _, _: &CorePullRequestsChanged, cx| {
                     manager.present_repositories(cx);
                 },
             ));
@@ -87,7 +85,7 @@ mod server {
                 .flat_map(|(_, binding)| binding.repositories().pull_request_keys())
                 .collect::<Vec<_>>();
             if let Some(store) = InstalledRepositoryStatus::store(cx) {
-                store.update(cx, |store, cx| store.follow_server_pull_requests(keys, cx));
+                store.update(cx, |store, cx| store.follow_core_pull_requests(keys, cx));
             }
             let workspace_ids: Vec<WorkspaceId> = self
                 .workspaces
@@ -136,7 +134,7 @@ mod server {
             };
             let store = InstalledRepositoryStatus::store(cx);
             let store = store.as_ref().map(|store| store.read(cx));
-            let lookup = |key: &_| store.and_then(|store| store.server_pull_request(key));
+            let lookup = |key: &_| store.and_then(|store| store.core_pull_request(key));
             binding.repositories().view(
                 directory,
                 &LocalPresentation {
@@ -159,7 +157,7 @@ mod server {
                     let workspace = self
                         .binding
                         .owning(workspace_id)?
-                        .server_workspace(workspace_id)?;
+                        .core_workspace(workspace_id)?;
                     Some((workspace_id, workspace))
                 })
                 .flat_map(|(workspace_id, workspace)| {
@@ -182,11 +180,11 @@ mod server {
         fn workspace_row_source(
             &self,
             workspace_id: WorkspaceId,
-        ) -> Option<(&ServerWorkspace, &Path)> {
+        ) -> Option<(&CoreWorkspace, &Path)> {
             let workspace = self
                 .binding
                 .owning(workspace_id)?
-                .server_workspace(workspace_id)?;
+                .core_workspace(workspace_id)?;
             Some((workspace, workspace_directory(workspace)?))
         }
 
@@ -219,7 +217,7 @@ mod server {
             let binding = self.binding.owning(workspace_id)?;
             binding
                 .repositories()
-                .workspace_worktrees(binding.server_workspace(workspace_id)?)
+                .workspace_worktrees(binding.core_workspace(workspace_id)?)
         }
 
         /// Names every Worktree the server lists or keeps Tabs in, and tags each Tab with the
@@ -229,7 +227,7 @@ mod server {
             let Some(binding) = self.binding.owning(workspace_id) else {
                 return;
             };
-            let Some(server) = binding.server_workspace(workspace_id) else {
+            let Some(core) = binding.core_workspace(workspace_id) else {
                 return;
             };
             let Some(manager) = self
@@ -240,7 +238,7 @@ mod server {
                 return;
             };
             let repositories = binding.repositories();
-            let inventory = repositories.workspace_worktrees(server);
+            let inventory = repositories.workspace_worktrees(core);
             let state = self
                 .workspace_repositories
                 .worktrees
@@ -264,7 +262,7 @@ mod server {
                 }
             }
             let mut scopes: HashMap<Id, (WorktreeId, PathBuf)> = HashMap::new();
-            for tab in &server.tabs {
+            for tab in &core.tabs {
                 let Some(root) = &tab.worktree else {
                     continue;
                 };
@@ -282,8 +280,7 @@ mod server {
             manager.update(cx, |manager, cx| {
                 manager.apply_worktrees(
                     &|tab| {
-                        server
-                            .tabs
+                        core.tabs
                             .iter()
                             .any(|published| published.id == tab)
                             .then(|| scopes.get(&tab).map(|(id, _)| *id))
@@ -308,12 +305,12 @@ mod server {
         }
 
         /// The Worktrees a Workspace row discloses, or `None` outside a repository.
-        pub(in crate::ui::workspace_manager) fn server_worktree_section(
+        pub(in crate::ui::workspace_manager) fn core_worktree_section(
             &self,
             workspace_id: WorkspaceId,
             cx: &App,
         ) -> Option<WorktreeSection> {
-            let (server, _) = self.workspace_row_source(workspace_id)?;
+            let (core, _) = self.workspace_row_source(workspace_id)?;
             let state = self.workspace_repositories.worktrees.get(&workspace_id)?;
             let manager = self.workspaces.workspace(workspace_id)?.payload().read(cx);
             let counts = manager.worktree_tab_counts();
@@ -338,8 +335,7 @@ mod server {
                 let pane = manager
                     .worktree_pane(id, cx)
                     .and_then(|pane| {
-                        server
-                            .tabs
+                        core.tabs
                             .iter()
                             .flat_map(|tab| &tab.panes)
                             .find(|candidate| candidate.id == pane)
@@ -387,7 +383,7 @@ mod server {
                 {
                     WorktreeRemoval::HoldsPinnedDirectory
                 } else if !worktree_writes || !owning.is_some_and(|s| s.editability().available()) {
-                    WorktreeRemoval::NeedsServer
+                    WorktreeRemoval::NeedsCore
                 } else if matches!(pin_check, Some(PinCheckState::Checking)) {
                     WorktreeRemoval::CheckingPinnedDirectories
                 } else if matches!(pin_check, Some(PinCheckState::Unavailable)) {
@@ -435,7 +431,7 @@ mod server {
                         && (manager.has_tabs_besides(&manager.worktree_tab_ids(id))
                             || (worktree_writes
                                 && inventory.is_some_and(|inventory| {
-                                    spaceterm_server::organize::fallback_destination(
+                                    spaceterm_core::organize::fallback_destination(
                                         inventory,
                                         &record.root,
                                     )
@@ -536,7 +532,7 @@ mod server {
                 .expanded = Some(expanded);
         }
 
-        pub(in crate::ui::workspace_manager) fn set_server_worktrees_expanded(
+        pub(in crate::ui::workspace_manager) fn set_core_worktrees_expanded(
             &mut self,
             workspace_id: WorkspaceId,
             expanded: bool,
@@ -549,7 +545,7 @@ mod server {
         /// Shows a Worktree's Tabs. It reports `None` for a Workspace this window does not present.
         ///
         /// An existing Worktree without Tabs requests its first Tab from the owning server.
-        pub(in crate::ui::workspace_manager) fn open_server_worktree(
+        pub(in crate::ui::workspace_manager) fn open_core_worktree(
             &mut self,
             workspace_id: WorkspaceId,
             worktree_id: WorktreeId,
@@ -567,7 +563,7 @@ mod server {
             let shown = manager.update(cx, |manager, cx| {
                 manager.show_worktree(worktree_id, focus, window, cx)
             });
-            Some(shown || self.open_server_worktree_tab(workspace_id, worktree_id, window, cx))
+            Some(shown || self.open_core_worktree_tab(workspace_id, worktree_id, window, cx))
         }
 
         /// A Worktree's root, as the server reported it.
@@ -596,7 +592,7 @@ mod server {
         saved: Option<&Path>,
         inventory: Option<&WorktreeInventory>,
         state: &PresentedWorktrees,
-        repositories: &ServerRepositories,
+        repositories: &CoreRepositories,
     ) -> WorktreeKey {
         let key = |main_root: &Path| {
             WorktreeKey::new(
@@ -631,7 +627,7 @@ mod server {
     /// read keeps that Worktree, as it keeps the directory's last Repository Status. Only a
     /// directory the server never placed in a Worktree is compared by path, unless a successful
     /// read found it outside every repository.
-    fn within_worktree(directory: &Path, root: &Path, repositories: &ServerRepositories) -> bool {
+    fn within_worktree(directory: &Path, root: &Path, repositories: &CoreRepositories) -> bool {
         let Some(facts) = repositories.facts(directory) else {
             return directory.starts_with(root);
         };
@@ -659,7 +655,7 @@ mod server {
     fn membership_listing<'a>(
         root: &Path,
         saved: Option<&Path>,
-        repositories: &'a ServerRepositories,
+        repositories: &'a CoreRepositories,
     ) -> Option<&'a WorktreeInventory> {
         repositories
             .worktrees(root)
@@ -671,7 +667,7 @@ mod server {
     fn unlisted_record(
         root: &Path,
         saved: Option<&Path>,
-        repositories: &ServerRepositories,
+        repositories: &CoreRepositories,
     ) -> WorktreeRecord {
         membership_listing(root, saved, repositories)
             .and_then(|inventory| {

@@ -133,7 +133,7 @@ pub(crate) fn run() {
         macos_application_quit::tests::windowless_quit_warning_takes_the_keyboard_and_binds_its_keys
     );
     native_test!(
-        super::macos_status_menu::tests::server_alerts_take_the_keyboard_and_bind_their_keys
+        super::macos_status_menu::tests::machine_alerts_take_the_keyboard_and_bind_their_keys
     );
     gpui_test!(macos_services::tests::service_type_classifies_nil_and_empty_nsstring_as_absent);
     gpui_test!(macos_services::tests::nsstring_decode_enforces_the_paste_byte_limit);

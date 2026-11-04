@@ -4,11 +4,11 @@ mod provision;
 
 use clap::{CommandFactory, Parser};
 use spaceterm_cli::{
-    args::{self, Cli, Command, ProvisionCommand, ServerCommand},
+    args::{self, Cli, Command, CoreCommand, ProvisionCommand},
     contract::{self, Code, Details, Empty, Envelope, Failure},
 };
-use spaceterm_server::{
-    ServerError,
+use spaceterm_core::{
+    CoreError,
     service::{CliUninstall, Service},
 };
 use std::{ffi::OsString, io::Write, process::ExitCode};
@@ -25,14 +25,14 @@ fn main() -> ExitCode {
     // The server and its helper keep the default signal handling.
     if !matches!(
         cli.command,
-        Command::Server(ServerCommand::Run { .. } | ServerCommand::Provision(_))
+        Command::Core(CoreCommand::Run { .. } | CoreCommand::Provision(_))
     ) && let Err(failure) = spaceterm_cli::interrupt::install(command, (&cli.global).into())
     {
         return finish(command, cli.global.json, failure);
     }
     #[cfg(target_os = "macos")]
     if let Err(error) = resolve_launcher() {
-        return finish(command, cli.global.json, contract::from_server_error(error));
+        return finish(command, cli.global.json, contract::from_core_error(error));
     }
     if let args::Command::Connection(command) = &cli.command {
         let result = spaceterm_cli::connection::execute(
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
                 Err(error) => output_failed(&error),
             };
         }
-        Command::Server(ServerCommand::Run {
+        Command::Core(CoreCommand::Run {
             service,
             owned,
             identity,
@@ -75,12 +75,12 @@ fn main() -> ExitCode {
             if remote(&cli) {
                 return finish(command, cli.global.json, Failure::new(Code::LocalOnly));
             }
-            return match run_server(*service, *owned) {
+            return match run_core(*service, *owned) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(error) => finish(command, cli.global.json, contract::from_server_error(error)),
+                Err(error) => finish(command, cli.global.json, contract::from_core_error(error)),
             };
         }
-        Command::Server(ServerCommand::Provision(provision)) => {
+        Command::Core(CoreCommand::Provision(provision)) => {
             if remote(&cli) {
                 return finish(command, cli.global.json, Failure::new(Code::LocalOnly));
             }
@@ -103,7 +103,7 @@ fn main() -> ExitCode {
                             },
                         ),
                         Err(error) => {
-                            finish(command, cli.global.json, contract::from_server_error(error))
+                            finish(command, cli.global.json, contract::from_core_error(error))
                         }
                     };
                 }
@@ -160,7 +160,7 @@ fn main() -> ExitCode {
                             )
                         }
                         Err(error) => {
-                            finish(command, cli.global.json, contract::from_server_error(error))
+                            finish(command, cli.global.json, contract::from_core_error(error))
                         }
                     };
                 }
@@ -177,10 +177,10 @@ fn main() -> ExitCode {
         }
         _ => {}
     }
-    if let args::Command::Server(command) = &cli.command
+    if let args::Command::Core(command) = &cli.command
         && !matches!(
             command,
-            args::ServerCommand::Run { .. } | args::ServerCommand::Provision(_)
+            args::CoreCommand::Run { .. } | args::CoreCommand::Provision(_)
         )
     {
         let reply =
@@ -217,52 +217,52 @@ fn main() -> ExitCode {
 
 fn remote(cli: &Cli) -> bool {
     cli.global
-        .server
+        .core
         .clone()
-        .or_else(|| std::env::var("SPACETERM_SERVER").ok())
+        .or_else(|| std::env::var("SPACETERM_MACHINE").ok())
         .is_some_and(|value| value != "local")
 }
 
 #[cfg(target_os = "macos")]
-fn resolve_launcher() -> Result<(), ServerError> {
+fn resolve_launcher() -> Result<(), CoreError> {
     use std::os::unix::process::CommandExt;
-    let executable = std::env::current_exe().map_err(|_| ServerError::StartupFailed)?;
+    let executable = std::env::current_exe().map_err(|_| CoreError::StartupFailed)?;
     let resolved = executable
         .canonicalize()
-        .map_err(|_| ServerError::StartupFailed)?;
+        .map_err(|_| CoreError::StartupFailed)?;
     if resolved != executable {
         // macOS reports the symlink used to launch the image. Re-execution makes resource
         // lookup and Session context use the retained executable's installation directory.
         let _ = std::process::Command::new(resolved)
             .args(std::env::args_os().skip(1))
             .exec();
-        return Err(ServerError::StartupFailed);
+        return Err(CoreError::StartupFailed);
     }
     Ok(())
 }
 
-fn run_server(service: bool, owned: bool) -> Result<(), ServerError> {
+fn run_core(service: bool, owned: bool) -> Result<(), CoreError> {
     check::resources()?;
     // The server's one counter set: its Terminal Sessions record into it and its lane reports it.
-    let counters = std::sync::Arc::new(spaceterm_server::diagnostics::TerminalCounters::default());
-    let panes = spaceterm_server::panes(std::sync::Arc::clone(&counters), |sync| {
+    let counters = std::sync::Arc::new(spaceterm_core::diagnostics::TerminalCounters::default());
+    let panes = spaceterm_core::panes(std::sync::Arc::clone(&counters), |sync| {
         Ok(spaceterm::runtime::Served::new(
             spaceterm::runtime::WorkspaceHost::account_service(sync, counters)?
-                .with_session_context(spaceterm::runtime::ServerSessionContext::current(IDENTITY)?),
+                .with_session_context(spaceterm::runtime::CoreSessionContext::current(IDENTITY)?),
         ))
     });
     if service {
-        spaceterm_server::service::run(IDENTITY, panes)
+        spaceterm_core::service::run(IDENTITY, panes)
     } else if owned {
-        spaceterm_server::run_owned_development(panes, std::io::stdin(), || {
+        spaceterm_core::run_owned_development(panes, std::io::stdin(), || {
             let mut output = std::io::stdout().lock();
             output
                 .write_all(b"spaceterm-development-ready-v1\n")
                 .and_then(|()| output.flush())
-                .map_err(|_| ServerError::StartupFailed)
+                .map_err(|_| CoreError::StartupFailed)
         })
     } else {
-        spaceterm_server::run_local_with_panes(IDENTITY, panes)
+        spaceterm_core::run_local_with_panes(IDENTITY, panes)
     }
 }
 
@@ -279,8 +279,8 @@ fn complete<D: serde::Serialize>(cli: &Cli, envelope: Envelope<D>, text: &str) -
 }
 
 fn validate_route(cli: &Cli) -> Result<(), Failure> {
-    let environment = if cli.global.server.is_none() {
-        std::env::var_os("SPACETERM_SERVER")
+    let environment = if cli.global.core.is_none() {
+        std::env::var_os("SPACETERM_MACHINE")
     } else {
         None
     };
@@ -299,7 +299,7 @@ fn validate_route(cli: &Cli) -> Result<(), Failure> {
         })
         .transpose()?;
     let selector =
-        spaceterm_cli::connection::route::selected(cli.global.server.as_deref(), environment)?;
+        spaceterm_cli::connection::route::selected(cli.global.core.as_deref(), environment)?;
     spaceterm_cli::connection::route::validate_command(&cli.command, selector)
 }
 

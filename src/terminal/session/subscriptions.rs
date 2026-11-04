@@ -1,6 +1,6 @@
 //! Bounded presentation delivery, independent of worker and PTY ownership.
 use super::*;
-use spaceterm_server::pane::{LineMode, LineState};
+use spaceterm_core::pane::{LineMode, LineState};
 
 /// A stopped Terminal Session reads no mode: it hides no input and has no line editor.
 fn stop(line: &mut LineState) {
@@ -53,8 +53,7 @@ pub(super) struct EventState {
     line: LineState,
     client_effects: std::collections::VecDeque<ClientEffectRequest>,
     pub(super) progress: super::run::Progress,
-    pub(super) run_observations:
-        std::collections::VecDeque<spaceterm_server::pane::run::Observation>,
+    pub(super) run_observations: std::collections::VecDeque<spaceterm_core::pane::run::Observation>,
 }
 
 impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublisher {

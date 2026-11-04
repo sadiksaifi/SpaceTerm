@@ -290,33 +290,33 @@ def create_linux_assets(tag):
     print("Linux release archive, signed feed, and checksums verified.")
 
 
-def server_platform(target):
+def core_platform(target):
     return {"aarch64-apple-darwin": "darwin-arm64", "x86_64-unknown-linux-gnu": "linux-x86_64"}[
         target
     ]
 
 
-def server_archive_name(version, target):
-    return f"spaceterm-{version}-{server_platform(target)}.tar.gz"
+def machine_archive_name(version, target):
+    return f"spaceterm-{version}-{core_platform(target)}.tar.gz"
 
 
-def server_feed_name(target):
-    return f"spaceterm-{server_platform(target)}.json"
+def machine_feed_name(target):
+    return f"spaceterm-{core_platform(target)}.json"
 
 
-def server_release_directory(target):
-    return DIST / f"release-server-{server_platform(target)}"
+def core_release_directory(target):
+    return DIST / f"release-server-{core_platform(target)}"
 
 
-def sign_server_release(seed, archive, signature, build, published_at, directory):
+def sign_core_release(seed, archive, signature, build, published_at, directory):
     """Publish the same signed CLI bytes with a separately authenticated per-target feed."""
     public = derived_public_key(seed)
     verify_ed25519(public, archive, signature)
-    selected = directory / server_archive_name(build["version"], build["target"])
+    selected = directory / machine_archive_name(build["version"], build["target"])
     shutil.copyfile(archive, selected)
     detached = directory / f"{selected.name}.sig"
     shutil.copyfile(signature, detached)
-    feed = directory / server_feed_name(build["target"])
+    feed = directory / machine_feed_name(build["target"])
     feed.write_bytes(
         json.dumps(
             {
@@ -343,9 +343,9 @@ def sign_server_release(seed, archive, signature, build, published_at, directory
     return [selected, detached, feed, feed_signature]
 
 
-def create_server_assets(tag, archive, signature):
+def create_core_assets(tag, archive, signature):
     """Retain verified native CLI assets alongside the desktop's release assets."""
-    from spaceterm_tasks.server_package import artifact_signing_seed, document, verified_copy
+    from spaceterm_tasks.core_package import artifact_signing_seed, document, verified_copy
 
     version = release_version(tag)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".server-release-") as temporary:
@@ -356,11 +356,11 @@ def create_server_assets(tag, archive, signature):
         build = document((tree / "build.json").read_bytes())
         if build["version"] != version:
             raise TaskError("the CLI version must match the release tag")
-        assets = sign_server_release(
+        assets = sign_core_release(
             artifact_signing_seed("spaceterm"), private, raw, build, int(time.time()), directory
         )
         (directory / "SHA256SUMS").write_text(checksums(assets))
-        destination = server_release_directory(build["target"])
+        destination = core_release_directory(build["target"])
         shutil.rmtree(destination, ignore_errors=True)
         destination.mkdir()
         for path in [*assets, directory / "SHA256SUMS"]:
@@ -410,10 +410,10 @@ def publish(tag):
         ),
     ]
     for target in ("aarch64-apple-darwin", "x86_64-unknown-linux-gnu"):
-        archive = server_archive_name(version, target)
-        feed = server_feed_name(target)
+        archive = machine_archive_name(version, target)
+        feed = machine_feed_name(target)
         platforms.append(
-            (server_release_directory(target), (archive, f"{archive}.sig", feed, f"{feed}.sig"))
+            (core_release_directory(target), (archive, f"{archive}.sig", feed, f"{feed}.sig"))
         )
     assets = [directory / name for directory, names in platforms for name in names]
     if not all(path.is_file() for path in assets):

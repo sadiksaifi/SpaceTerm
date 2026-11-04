@@ -4,7 +4,7 @@ use crate::contract::{Code, Details, Failure, UsageDetails, UsageKind};
 use crate::io::cursor::Cursor;
 use crate::scope::{IdPrefix, ScopeArgs, Selector};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
-use spaceterm_server::protocol::AgentName;
+use spaceterm_core::protocol::AgentName;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -26,10 +26,10 @@ pub struct Cli {
 /// Flags every command accepts.
 #[derive(Debug, Args)]
 pub struct Global {
-    /// `local`, a Saved Connection name, or `id:ROUTE`. Defaults to SPACETERM_SERVER, then
+    /// `local`, a Saved Connection name, or `id:ROUTE`. Defaults to SPACETERM_MACHINE, then
     /// `local`.
     #[arg(long, global = true, value_name = "NAME|id:ROUTE")]
-    pub server: Option<String>,
+    pub core: Option<String>,
     /// Act as this agent identity. Defaults to SPACETERM_AS.
     #[arg(long = "as", global = true, value_name = "AGENT")]
     pub agent: Option<AgentName>,
@@ -58,7 +58,7 @@ pub enum Command {
         subcommand,
         after_help = "Uninstall:\n  curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall"
     )]
-    Server(ServerCommand),
+    Core(CoreCommand),
     /// Join servers, and list or remove Saved Connections.
     #[command(subcommand)]
     Connection(ConnectionCommand),
@@ -92,7 +92,7 @@ pub enum Command {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ServerCommand {
+pub enum CoreCommand {
     /// Make this machine a server.
     Setup {
         /// `all`, `off`, an IP, or an address with a port.
@@ -191,8 +191,8 @@ pub enum PermissionName {
 }
 
 impl PermissionName {
-    pub const fn permission(self) -> spaceterm_server::permissions::SystemPermission {
-        use spaceterm_server::permissions::SystemPermission;
+    pub const fn permission(self) -> spaceterm_core::permissions::SystemPermission {
+        use spaceterm_core::permissions::SystemPermission;
         match self {
             Self::Microphone => SystemPermission::Microphone,
             Self::Camera => SystemPermission::Camera,
@@ -201,8 +201,8 @@ impl PermissionName {
         }
     }
 
-    pub const fn of(permission: spaceterm_server::permissions::SystemPermission) -> Self {
-        use spaceterm_server::permissions::SystemPermission;
+    pub const fn of(permission: spaceterm_core::permissions::SystemPermission) -> Self {
+        use spaceterm_core::permissions::SystemPermission;
         match permission {
             SystemPermission::Microphone => Self::Microphone,
             SystemPermission::Camera => Self::Camera,
@@ -587,7 +587,7 @@ pub enum Network {
     All,
     Off,
     /// An IP, or an address with a port.
-    Address(spaceterm_server::direct::NetworkPolicy),
+    Address(spaceterm_core::direct::NetworkPolicy),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -600,24 +600,24 @@ impl Command {
     /// The dotted command path the envelope reports, such as `pane.run`.
     pub fn path(&self) -> &'static str {
         match self {
-            Self::Server(command) => match command {
-                ServerCommand::Setup { .. } => "server.setup",
-                ServerCommand::Pair { .. } => "server.pair",
-                ServerCommand::Status => "server.status",
-                ServerCommand::Start => "server.start",
-                ServerCommand::Stop(_) => "server.stop",
-                ServerCommand::Restart(_) => "server.restart",
-                ServerCommand::Update { .. } => "server.update",
-                ServerCommand::Network { .. } => "server.network",
-                ServerCommand::Permissions { action } => match action {
+            Self::Core(command) => match command {
+                CoreCommand::Setup { .. } => "server.setup",
+                CoreCommand::Pair { .. } => "server.pair",
+                CoreCommand::Status => "server.status",
+                CoreCommand::Start => "server.start",
+                CoreCommand::Stop(_) => "server.stop",
+                CoreCommand::Restart(_) => "server.restart",
+                CoreCommand::Update { .. } => "server.update",
+                CoreCommand::Network { .. } => "server.network",
+                CoreCommand::Permissions { action } => match action {
                     None => "server.permissions",
                     Some(PermissionsCommand::Request { .. }) => "server.permissions.request",
                     Some(PermissionsCommand::Settings { .. }) => "server.permissions.settings",
                 },
-                ServerCommand::EndAllSessions(_) => "server.end-all-sessions",
-                ServerCommand::Unpair { .. } => "server.unpair",
-                ServerCommand::Run { .. } => "server.run",
-                ServerCommand::Provision(_) => "server.provision",
+                CoreCommand::EndAllSessions(_) => "server.end-all-sessions",
+                CoreCommand::Unpair { .. } => "server.unpair",
+                CoreCommand::Run { .. } => "server.run",
+                CoreCommand::Provision(_) => "server.provision",
             },
             Self::Connection(command) => match command {
                 ConnectionCommand::Add { .. } => "connection.add",
@@ -692,7 +692,7 @@ fn network(text: &str) -> Result<Network, String> {
     match text {
         "all" => Ok(Network::All),
         "off" => Ok(Network::Off),
-        address => spaceterm_server::direct::NetworkPolicy::parse(address)
+        address => spaceterm_core::direct::NetworkPolicy::parse(address)
             .map(Network::Address)
             .map_err(|_| String::new()),
     }
@@ -702,8 +702,8 @@ fn size(text: &str) -> Result<TerminalSize, String> {
     let (columns, rows) = text.split_once('x').ok_or_else(String::new)?;
     let columns: u16 = columns.parse().map_err(|_| String::new())?;
     let rows: u16 = rows.parse().map_err(|_| String::new())?;
-    if !(2..=spaceterm_server::pane::MAX_COLUMNS).contains(&columns)
-        || !(2..=spaceterm_server::pane::MAX_ROWS).contains(&rows)
+    if !(2..=spaceterm_core::pane::MAX_COLUMNS).contains(&columns)
+        || !(2..=spaceterm_core::pane::MAX_ROWS).contains(&rows)
     {
         return Err(String::new());
     }
@@ -713,7 +713,7 @@ fn size(text: &str) -> Result<TerminalSize, String> {
 /// One command line: no newline, no C0 or C1 control character, within the protocol bound.
 fn command_text(text: &str) -> Result<String, String> {
     if text.is_empty()
-        || text.len() > spaceterm_server::protocol::MAX_RUN_COMMAND_BYTES
+        || text.len() > spaceterm_core::protocol::MAX_RUN_COMMAND_BYTES
         || text.chars().any(char::is_control)
     {
         return Err(String::new());
@@ -929,8 +929,8 @@ mod tests {
             assert!(help.contains(visible), "{visible}");
         }
         assert!(!help.contains("completion"));
-        let server = command.find_subcommand_mut("server").unwrap();
-        let help = server.render_long_help().to_string();
+        let core = command.find_subcommand_mut("server").unwrap();
+        let help = core.render_long_help().to_string();
         assert!(help.contains("setup") && help.contains("unpair"));
         assert!(!help.contains("provision") && !help.contains("  run"));
     }

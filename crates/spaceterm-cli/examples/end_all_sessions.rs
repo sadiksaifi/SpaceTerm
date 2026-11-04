@@ -10,9 +10,9 @@ mod support;
 
 mod exercise {
     use super::support::{self, Claimed, Ending, Pane};
-    use spaceterm_server::{
-        ServerConnection, ServerError,
-        connection::link::ServerLink,
+    use spaceterm_core::{
+        CoreError, MachineConnection,
+        connection::link::CoreLink,
         hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
         pane::{control::Controller, *},
         protocol::PaneEvent,
@@ -37,11 +37,11 @@ mod exercise {
         }
     }
 
-    fn inventory(link: &ServerLink) -> Result<(Inventory, u64)> {
+    fn inventory(link: &CoreLink) -> Result<(Inventory, u64)> {
         Ok(support::inventory(link)?)
     }
 
-    fn select(link: &ServerLink, pane: Id, explicit: bool) -> Result<Claimed> {
+    fn select(link: &CoreLink, pane: Id, explicit: bool) -> Result<Claimed> {
         Ok(support::select(link, pane, explicit, size())?)
     }
 
@@ -51,8 +51,8 @@ mod exercise {
             .ok_or_else(|| "expected an explicitly started Terminal Session".into())
     }
 
-    fn mutate(server: &ServerConnection, link: &ServerLink, mutation: Mutation) -> Result<Id> {
-        let mut journal = server.operation_journal()?;
+    fn mutate(core: &MachineConnection, link: &CoreLink, mutation: Mutation) -> Result<Id> {
+        let mut journal = core.operation_journal()?;
         if journal.pending().is_some() {
             return Err("resolve the original fixture operation before continuing".into());
         }
@@ -103,15 +103,15 @@ mod exercise {
         Ok(())
     }
 
-    fn named_clients(first: &str, second: &str) -> Result<(ServerConnection, ServerConnection)> {
+    fn named_clients(first: &str, second: &str) -> Result<(MachineConnection, MachineConnection)> {
         let previous = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT");
         // SAFETY: single-threaded startup, before connections or native PTY workers exist.
-        // ServerConnection construction only resolves paths and captures this nonsecret name.
+        // MachineConnection construction only resolves paths and captures this nonsecret name.
         unsafe { std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", first) };
-        let a = ServerConnection::for_identity(IDENTITY);
+        let a = MachineConnection::for_identity(IDENTITY);
         // SAFETY: the same single-threaded startup boundary still holds.
         unsafe { std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", second) };
-        let b = ServerConnection::for_identity(IDENTITY);
+        let b = MachineConnection::for_identity(IDENTITY);
         // SAFETY: restore the launch environment before any worker is created.
         unsafe {
             match previous {
@@ -122,7 +122,7 @@ mod exercise {
         Ok((a?, b?))
     }
 
-    fn organization(inventory: &Inventory) -> Vec<spaceterm_server::hierarchy::Workspace> {
+    fn organization(inventory: &Inventory) -> Vec<spaceterm_core::hierarchy::Workspace> {
         let mut workspaces = inventory.workspaces.clone();
         for pane in workspaces
             .iter_mut()
@@ -168,7 +168,7 @@ mod exercise {
     /// no more input.
     fn stale(pane: &Pane) -> Result<()> {
         if !matches!(pane.ending()?, Ending::Pane(PaneEvent::SessionEnded))
-            || !matches!(pane.paste(1, "STALE_557"), Err(ServerError::StaleControl))
+            || !matches!(pane.paste(1, "STALE_557"), Err(CoreError::StaleControl))
         {
             return Err("ended Session accepted an old lease or input".into());
         }
@@ -214,7 +214,7 @@ mod exercise {
             Mutation::CreateWorkspace {
                 name: name.clone(),
                 directory: Some(directory.clone()),
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             },
         )?;
         println!(
@@ -239,7 +239,7 @@ mod exercise {
                 tab,
                 source: root,
                 axis: Axis::Right,
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             },
         )?;
         let unclaimed = mutate(
@@ -250,7 +250,7 @@ mod exercise {
                 tab,
                 source: root,
                 axis: Axis::Down,
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             },
         )?;
         let mut panes = Vec::new();

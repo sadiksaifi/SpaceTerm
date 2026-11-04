@@ -224,7 +224,7 @@ fn failure_text(failure: ToolFailure, name: &str) -> SharedString {
         ToolFailure::Busy => SharedString::new_static(
             "Another server operation is running. Try again when it finishes.",
         ),
-        ToolFailure::NoServerPackage => SharedString::new_static(
+        ToolFailure::NoCorePackage => SharedString::new_static(
             "This SpaceTerm build doesn\u{2019}t include a server package.",
         ),
         ToolFailure::RestartRequired => SharedString::new_static(
@@ -513,7 +513,7 @@ mod tests {
             NAME,
             ToolCheck::Checked(Launcher::Missing),
             None,
-            Some(ToolFailure::NoServerPackage),
+            Some(ToolFailure::NoCorePackage),
             "Show in Finder",
         );
         assert_eq!(

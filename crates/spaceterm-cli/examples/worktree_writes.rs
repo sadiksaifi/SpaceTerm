@@ -16,9 +16,9 @@ mod support;
     reason = "this exercise manages its interrupted originals explicitly"
 )]
 mod worktree_fixture;
-use spaceterm_server::{
-    ServerConnection,
-    connection::link::ServerLink,
+use spaceterm_core::{
+    MachineConnection,
+    connection::link::CoreLink,
     hierarchy::{CloseTarget, Mutation, Outcome},
     protocol,
     worktree::{Branch, BranchName, Error as WorktreeError, Operation},
@@ -29,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 use worktree_fixture::{finish, review, write};
-fn reconcile_fixture_originals(c: &ServerLink) -> Result<(), Box<dyn Error>> {
+fn reconcile_fixture_originals(c: &CoreLink) -> Result<(), Box<dyn Error>> {
     let next = inventory(c)?.1;
     if next > 1024 {
         return Err("fixture has too many retained operation sequences".into());
@@ -44,8 +44,8 @@ fn reconcile_fixture_originals(c: &ServerLink) -> Result<(), Box<dyn Error>> {
                 c.acknowledge(sequence)?;
             }
             Err(error)
-                if error.downcast_ref::<spaceterm_server::ServerError>()
-                    == Some(&spaceterm_server::ServerError::SessionUnavailable) => {}
+                if error.downcast_ref::<spaceterm_core::CoreError>()
+                    == Some(&spaceterm_core::CoreError::SessionUnavailable) => {}
             Err(error) => return Err(error),
         }
     }
@@ -53,16 +53,16 @@ fn reconcile_fixture_originals(c: &ServerLink) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = spaceterm_server::protocol::MAJOR;
-    let a = ServerConnection::for_development_client("worktree-writes-a")?;
-    let b = ServerConnection::for_development_client("worktree-writes-b")?;
+    let major = spaceterm_core::protocol::MAJOR;
+    let a = MachineConnection::for_development_client("worktree-writes-a")?;
+    let b = MachineConnection::for_development_client("worktree-writes-b")?;
     eprintln!("Worktree smoke: idle guard");
     lifecycle::require_idle(&a)?;
     eprintln!("Worktree smoke: first client setup");
     a.setup()?;
     eprintln!("Worktree smoke: second client setup");
     b.setup()?;
-    let mut server = lifecycle::Server::start()?;
+    let mut core = lifecycle::Core::start()?;
     eprintln!("Worktree smoke: create fixture repository");
     let fixture = Repository::new()?;
     let first = connect(&a)?;
@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateWorkspace {
             name: "Worktree writes smoke".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     mutate(
@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     let path = fixture.0.join("created");
     let operation = Operation::Create {
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
         workspace,
         root: fixture.0.clone(),
         path: path.clone(),
@@ -201,7 +201,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     fixture.git(&["config", "filter.wait.smudge", &filter])?;
     let sequence = inventory(&first)?.1;
     let mutation = Mutation::Worktree(Operation::Create {
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
         workspace,
         root: fixture.0.clone(),
         path: path.clone(),
@@ -218,10 +218,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    server.kill()?;
+    core.kill()?;
     first.close();
     second.close();
-    let mut restarted = lifecycle::Server::start()?;
+    let mut restarted = lifecycle::Core::start()?;
     // Recovery stays fenced while the original Git child still holds the inherited write lock.
     // Admission does not reach the host, so the fence refuses the first request.
     std::thread::sleep(Duration::from_millis(200));
@@ -281,7 +281,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stopped_path = fixture.0.join("stopped");
     let sequence = inventory(&first)?.1;
     let mutation = Mutation::Worktree(Operation::Create {
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
         workspace,
         root: fixture.0.clone(),
         path: stopped_path.clone(),
@@ -310,7 +310,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     restarted.0.wait()?;
     assert_eq!(std::fs::read(stopped_path.join("payload"))?, b"payload\n");
     first.close();
-    let mut restarted = lifecycle::Server::start()?;
+    let mut restarted = lifecycle::Core::start()?;
     let first = connect(&a)?;
     let stopped = finish(&first, sequence)?;
     assert!(matches!(stopped.outcome, Outcome::Accepted { .. }));

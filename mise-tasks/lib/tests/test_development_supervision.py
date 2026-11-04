@@ -11,8 +11,8 @@ from pathlib import Path
 
 from spaceterm_tasks import LIBRARY
 
-SERVER = """import os, pathlib, signal, sys, time
-assert all(name not in os.environ for name in ("SPACETERM_SERVER", "SPACETERM_AS", "SPACETERM_PANE", "SPACETERM_CLI"))
+CORE = """import os, pathlib, signal, sys, time
+assert all(name not in os.environ for name in ("SPACETERM_MACHINE", "SPACETERM_AS", "SPACETERM_PANE", "SPACETERM_CLI"))
 root = pathlib.Path(sys.argv[1])
 def stopped(*_):
     (root / "server-stopped").touch()
@@ -40,8 +40,8 @@ class Process(RealProcess):
         return super().wait(timeout=None if timeout is None else min(timeout, 0.01))
 subprocess.Popen = Process
 """
-GATED_SERVER = """import os, pathlib, signal, sys, time
-assert all(name not in os.environ for name in ("SPACETERM_SERVER", "SPACETERM_AS", "SPACETERM_PANE", "SPACETERM_CLI"))
+GATED_CORE = """import os, pathlib, signal, sys, time
+assert all(name not in os.environ for name in ("SPACETERM_MACHINE", "SPACETERM_AS", "SPACETERM_PANE", "SPACETERM_CLI"))
 root = pathlib.Path(sys.argv[1])
 def forced_stop(*_):
     (root / "forced-stop").touch()
@@ -67,19 +67,19 @@ class DevelopmentSupervisionTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.server = self.root / "server.py"
-        self.server.write_text(SERVER)
+        self.core = self.root / "server.py"
+        self.core.write_text(CORE)
         self.client = self.root / "client.py"
         self.client.write_text(CLIENT)
 
     def start(self, fast_deadlines=False):
         driver = (FAST_DEADLINES if fast_deadlines else "") + DRIVER
         process = subprocess.Popen(
-            [sys.executable, "-c", driver, str(self.server), str(self.client), str(self.root)],
+            [sys.executable, "-c", driver, str(self.core), str(self.client), str(self.root)],
             env={
                 **os.environ,
                 "PYTHONPATH": str(LIBRARY),
-                "SPACETERM_SERVER": "saved-connection",
+                "SPACETERM_MACHINE": "saved-connection",
                 "SPACETERM_AS": "parent-agent",
                 "SPACETERM_PANE": "parent-pane",
                 "SPACETERM_CLI": "/parent/cli",
@@ -103,7 +103,7 @@ class DevelopmentSupervisionTests(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline, name)
             time.sleep(0.02)
 
-    def test_ctrl_c_disconnects_owned_client_and_gracefully_stops_server(self):
+    def test_ctrl_c_disconnects_owned_client_and_gracefully_stops_core(self):
         process = self.start()
         self.await_file("client-started", process)
         process.send_signal(signal.SIGINT)
@@ -111,23 +111,23 @@ class DevelopmentSupervisionTests(unittest.TestCase):
         self.assertTrue((self.root / "client-stopped").exists())
         self.assertTrue((self.root / "server-stopped").exists())
 
-    def test_client_exit_stops_server(self):
+    def test_client_exit_stops_core(self):
         self.client.write_text(CLIENT.replace("connection.recv(1)", "connection.close()"))
         process = self.start()
         _, stderr = process.communicate(timeout=15)
         self.assertEqual(process.returncode, 0, stderr)
         self.assertTrue((self.root / "server-stopped").exists())
 
-    def test_server_failure_does_not_launch_client(self):
-        self.server.write_text("raise SystemExit(1)\n")
+    def test_core_failure_does_not_launch_client(self):
+        self.core.write_text("raise SystemExit(1)\n")
         process = self.start()
         process.communicate(timeout=15)
         self.assertNotEqual(process.returncode, 0)
         self.assertFalse((self.root / "client-started").exists())
 
-    def test_interrupt_during_partial_readiness_cleans_up_spawned_server(self):
-        self.server.write_text(
-            SERVER.replace(
+    def test_interrupt_during_partial_readiness_cleans_up_spawned_core(self):
+        self.core.write_text(
+            CORE.replace(
                 'print("spaceterm-development-ready-v1", flush=True)',
                 'sys.stdout.write("s"); sys.stdout.flush()',
             )
@@ -140,8 +140,8 @@ class DevelopmentSupervisionTests(unittest.TestCase):
         self.assertTrue((self.root / "server-stopped").exists())
 
     def test_partial_readiness_has_a_deadline_and_stops_only_its_child(self):
-        self.server.write_text(
-            SERVER.replace(
+        self.core.write_text(
+            CORE.replace(
                 'print("spaceterm-development-ready-v1", flush=True)',
                 'sys.stdout.write("s"); sys.stdout.flush()',
             )
@@ -155,9 +155,9 @@ class DevelopmentSupervisionTests(unittest.TestCase):
         self.assertTrue((self.root / "server-stopped").exists())
         self.assertIsNone(unrelated.poll())
 
-    def test_server_exit_disconnects_client(self):
-        self.server.write_text(
-            SERVER.replace(
+    def test_core_exit_disconnects_client(self):
+        self.core.write_text(
+            CORE.replace(
                 "sys.stdin.buffer.read()",
                 'while not (root / "client-started").exists(): time.sleep(0.01)',
             )
@@ -179,7 +179,7 @@ class DevelopmentSupervisionTests(unittest.TestCase):
             pass
 
     def test_interrupt_waits_for_gated_cleanup_beyond_process_wait_deadlines(self):
-        self.server.write_text(GATED_SERVER)
+        self.core.write_text(GATED_CORE)
         process = self.start(fast_deadlines=True)
         try:
             self.await_file("client-started", process)
@@ -193,9 +193,9 @@ class DevelopmentSupervisionTests(unittest.TestCase):
         process.communicate(timeout=10)
         self.assertTrue((self.root / "server-stopped").exists())
 
-    def test_unconsumed_readiness_does_not_authorize_forced_server_cleanup(self):
-        self.server.write_text(
-            GATED_SERVER.replace(
+    def test_unconsumed_readiness_does_not_authorize_forced_core_cleanup(self):
+        self.core.write_text(
+            GATED_CORE.replace(
                 'print("spaceterm-development-ready-v1", flush=True)',
                 'sys.stdout.write("s"); sys.stdout.flush()',
             )

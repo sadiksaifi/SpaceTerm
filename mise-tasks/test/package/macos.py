@@ -14,9 +14,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, server_package
+from spaceterm_tasks import ROOT, core_package
 from tests.macos_signing_fixture import certificate
-from tests.server_artifact_fixture import configure_trust, prepare
+from tests.core_artifact_fixture import configure_trust, prepare
 
 
 class PackageTests(unittest.TestCase):
@@ -38,9 +38,9 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
-        major = self.root / server_package.PROTOCOL_MAJOR_SOURCE
+        major = self.root / core_package.PROTOCOL_MAJOR_SOURCE
         major.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
+        shutil.copyfile(ROOT / core_package.PROTOCOL_MAJOR_SOURCE, major)
         config = self.root / "packaging/macos/spaceterm/Packager.toml"
         config.write_text(
             re.sub(
@@ -178,11 +178,11 @@ int main(int argc, char **argv) {{
 
     def package(self, release_tag=None, *, candidate_digest=None):
         # Client and server releases are independent. Release fixtures reuse an older server.
-        server_tag = "v0.0.0" if release_tag else None
+        core_tag = "v0.0.0" if release_tag else None
         archive, _ = prepare(
             self.root,
             self.env,
-            server_tag,
+            core_tag,
             self.fingerprint,
             self.credentials,
             include_catalog=True,
@@ -211,8 +211,8 @@ int main(int argc, char **argv) {{
         bundled = self.root / "dist/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight"
         self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
-        server = bundled.with_name("spaceterm")
-        self.assertFalse(server.exists())
+        core = bundled.with_name("spaceterm")
+        self.assertFalse(core.exists())
         self.assertEqual(
             (bundled.parent.parent / "Resources/shell-integration/elvish/rc.elv").read_bytes(),
             (ROOT / "assets/shell-integration/elvish/rc.elv").read_bytes(),
@@ -289,7 +289,7 @@ int main(int argc, char **argv) {{
             f'designated => identifier "io.github.sadiksaifi.spaceterm" and certificate leaf = H"{self.fingerprint.lower()}"',
         )
 
-    def test_verification_rejects_a_tampered_server_catalog(self):
+    def test_verification_rejects_a_tampered_core_catalog(self):
         self.compile_executable(self.artifact, "SpaceTerm Preflight")
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -348,31 +348,29 @@ int main(int argc, char **argv) {{
         self.assertIn("dmg executable application identity", result.stderr)
 
 
-class CurrentServerPackageTests(unittest.TestCase):
-    def test_current_server_passes_signed_package_verification(self):
+class CurrentMachinePackageTests(unittest.TestCase):
+    def test_current_machine_passes_signed_package_verification(self):
         # Build the real server, including its PTY/shell check, rather than the C fixture
         # used to isolate desktop packaging. Only the artifact destination is disposable.
         with tempfile.TemporaryDirectory(prefix="spaceterm-current-server-package-") as temporary:
-            with patch.object(server_package, "DIST", Path(temporary)):
-                archive, signature = server_package.package("spaceterm-preflight")
+            with patch.object(core_package, "DIST", Path(temporary)):
+                archive, signature = core_package.package("spaceterm-preflight")
             destination = Path(temporary) / "desktop"
-            server_package.stage_desktop_artifact(
+            core_package.stage_desktop_artifact(
                 archive, signature, destination, identity="spaceterm-preflight"
             )
             self.assertEqual((destination / "artifact.tar.gz").read_bytes(), archive.read_bytes())
             self.assertEqual((destination / "artifact.sig").read_bytes(), signature.read_bytes())
             verified = Path(temporary) / "verified"
             verified.mkdir()
-            tree, _, _ = server_package.verified_copy(
+            tree, _, _ = core_package.verified_copy(
                 archive, signature, verified, None, identity="spaceterm-preflight"
             )
             launcher = Path(temporary) / "bin/spaceterm"
             launcher.parent.mkdir()
             launcher.symlink_to(
                 tree
-                / server_package.executable_path(
-                    server_package.host_target(), "spaceterm-preflight"
-                )
+                / core_package.executable_path(core_package.host_target(), "spaceterm-preflight")
             )
             result = subprocess.run(
                 [launcher, "server", "provision", "check"],

@@ -13,11 +13,21 @@ mod chrome_state;
 pub(crate) mod chrome_typography;
 mod client_view_state;
 mod control_theme;
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        dead_code,
+        reason = "only a status item without native alerts opens this window"
+    )
+)]
+pub(crate) mod core_control_window;
+pub(crate) mod core_pane;
+pub(crate) mod core_worktrees;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;
 pub(crate) mod direct_access;
+pub(crate) mod direct_machines;
 mod direct_pairing;
-pub(crate) mod direct_servers;
 pub(crate) mod directory_picker;
 mod drag_and_drop;
 pub(crate) mod empty_state;
@@ -29,16 +39,6 @@ pub(crate) mod remembered_view;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
-#[cfg_attr(
-    target_os = "macos",
-    allow(
-        dead_code,
-        reason = "only a status item without native alerts opens this window"
-    )
-)]
-pub(crate) mod server_control_window;
-pub(crate) mod server_pane;
-pub(crate) mod server_worktrees;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
@@ -85,9 +85,9 @@ pub(crate) use workspace_manager::launch_testing;
 #[cfg(test)]
 pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_focus;
 pub(crate) use workspace_manager::{
-    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters, serve_desktop_requests,
+    LocalCoreAdapters, WorkspaceManager, WorkspaceManagerAdapters, serve_desktop_requests,
 };
-pub(crate) use workspace_sidebar::ServerTarget;
+pub(crate) use workspace_sidebar::MachineTarget;
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
 #[cfg(test)]

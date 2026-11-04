@@ -4,10 +4,10 @@
 //!
 //! The spaceterm crate's native tests also include this file, so it names physical keys by their
 //! protocol codes instead of through the spaceterm crate.
-use spaceterm_server::{
-    ServerConnection, ServerError,
+use spaceterm_core::{
+    CoreError, MachineConnection,
     attachments::Attachment,
-    connection::link::{ChannelEvent, ChannelHandle, LinkError, LinkEvent, ServerLink},
+    connection::link::{ChannelEvent, ChannelHandle, CoreLink, LinkError, LinkEvent},
     hierarchy::{Id, Inventory, Mutation, RetainedOutcome},
     pane::{
         AttachmentClaim, FocusTarget, Key, Lease, PaneSize, PasteOutcome, Refusal, accessibility,
@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub type Result<T> = std::result::Result<T, ServerError>;
+pub type Result<T> = std::result::Result<T, CoreError>;
 
 /// How long a helper waits for the server to report on input, show terminal output or end a
 /// channel.
@@ -41,25 +41,25 @@ const ENTER: u32 = 58;
 pub const GENERATION: u64 = 1;
 
 /// Opens a connection of its own, which closes when every clone of it drops.
-pub fn connect(server: &ServerConnection) -> Result<ServerLink> {
-    server.connect(Arc::new(|_: LinkEvent| {}))
+pub fn connect(core: &MachineConnection) -> Result<CoreLink> {
+    core.connect(Arc::new(|_: LinkEvent| {}))
 }
 
-pub fn request(link: &ServerLink, operation: Operation) -> Result<ReplyBody> {
+pub fn request(link: &CoreLink, operation: Operation) -> Result<ReplyBody> {
     Ok(link.request(operation)?.wait()?)
 }
 
 /// Sends a request whose reply carries no value.
-pub fn done(link: &ServerLink, operation: Operation) -> Result<()> {
+pub fn done(link: &CoreLink, operation: Operation) -> Result<()> {
     match request(link, operation)? {
         ReplyBody::Done => Ok(()),
-        _ => Err(ServerError::Protocol),
+        _ => Err(CoreError::Protocol),
     }
 }
 
 /// The newest pushed Workspace inventory and the sequence of the next Workspace edit. The server
 /// pushes one when it admits the link, and each one before the reply to the edit it holds.
-pub fn inventory(link: &ServerLink) -> Result<(Inventory, u64)> {
+pub fn inventory(link: &CoreLink) -> Result<(Inventory, u64)> {
     let (_, revision) = link.next_inventory(0)?;
     Ok((revision.inventory.clone(), revision.next_sequence))
 }
@@ -76,34 +76,34 @@ pub fn no_op() -> Operation {
 }
 
 /// One request that changes nothing; see [`no_op`].
-pub fn round_trip(link: &ServerLink) -> Result<()> {
+pub fn round_trip(link: &CoreLink) -> Result<()> {
     done(link, no_op())
 }
 
 /// Dispatches a Workspace edit, or its Original Operation again after a lost reply. The reply
 /// waits for any Worktree write the outcome depends on.
-pub fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<RetainedOutcome> {
+pub fn mutate(link: &CoreLink, sequence: u64, mutation: Mutation) -> Result<RetainedOutcome> {
     outcome(request(link, Operation::Mutate { sequence, mutation })?)
 }
 
 /// Dispatches a Workspace edit without waiting for its reply, as a client that loses it.
 pub fn submit(
-    link: &ServerLink,
+    link: &CoreLink,
     sequence: u64,
     mutation: Mutation,
-) -> Result<spaceterm_server::connection::link::PendingReply> {
+) -> Result<spaceterm_core::connection::link::PendingReply> {
     Ok(link.request(Operation::Mutate { sequence, mutation })?)
 }
 
 /// The recorded outcome of the edit `sequence`, once it settles.
-pub fn resolve(link: &ServerLink, sequence: u64) -> Result<RetainedOutcome> {
+pub fn resolve(link: &CoreLink, sequence: u64) -> Result<RetainedOutcome> {
     outcome(request(link, Operation::Resolve { sequence })?)
 }
 
 fn outcome(body: ReplyBody) -> Result<RetainedOutcome> {
     match body {
         ReplyBody::Outcome(outcome) => Ok(outcome),
-        _ => Err(ServerError::Protocol),
+        _ => Err(CoreError::Protocol),
     }
 }
 
@@ -124,7 +124,7 @@ pub fn workspace_of(inventory: &Inventory, pane: Id) -> Option<Id> {
 /// Selects the first Pane in the first Tab of the first Workspace in the current inventory.
 /// With `create`, an empty inventory first gains a Workspace. Without it, an empty inventory
 /// has no Pane to claim.
-pub fn first_pane(link: &ServerLink, create: bool) -> Result<Id> {
+pub fn first_pane(link: &CoreLink, create: bool) -> Result<Id> {
     let (inventory, sequence) = inventory(link)?;
     let first = |inventory: &Inventory| {
         inventory
@@ -138,16 +138,16 @@ pub fn first_pane(link: &ServerLink, create: bool) -> Result<Id> {
         return Ok(pane);
     }
     if !create {
-        return Err(ServerError::SessionUnavailable);
+        return Err(CoreError::SessionUnavailable);
     }
     let mutation = Mutation::CreateWorkspace {
         name: "Workspace".into(),
         directory: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     };
     mutate(link, sequence, mutation)?;
     link.acknowledge(sequence)?;
-    first(&self::inventory(link)?.0).ok_or(ServerError::SessionUnavailable)
+    first(&self::inventory(link)?.0).ok_or(CoreError::SessionUnavailable)
 }
 
 /// The reply to a claim. Only `Attached` binds a channel.
@@ -168,7 +168,7 @@ impl Claimed {
 
 /// Claims `pane` under `attachment` on a new channel of `link`. Each claim needs its own channel.
 pub fn claim_in(
-    link: &ServerLink,
+    link: &CoreLink,
     attachment: Attachment,
     pane: Id,
     claim: AttachmentClaim,
@@ -179,7 +179,7 @@ pub fn claim_in(
     let channel = link.open_channel(Arc::new(move |event: ChannelEvent| sink.deliver(event)))?;
     let reply = channel
         .claim(attachment, pane, claim, size, None)
-        .map_err(ServerError::from)
+        .map_err(CoreError::from)
         .and_then(|pending| Ok(pending.wait()?));
     match reply {
         Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) => {
@@ -204,7 +204,7 @@ pub fn claim_in(
         }
         Ok(_) => {
             channel.detach();
-            Err(ServerError::Protocol)
+            Err(CoreError::Protocol)
         }
         Err(error) => {
             channel.detach();
@@ -215,14 +215,8 @@ pub fn claim_in(
 
 /// Claims `pane` under generation [`GENERATION`] of the Workspace that holds it. A Pane missing
 /// from the inventory is unavailable, as the server reports it.
-pub fn claim(
-    link: &ServerLink,
-    pane: Id,
-    claim: AttachmentClaim,
-    size: PaneSize,
-) -> Result<Claimed> {
-    let workspace =
-        workspace_of(&inventory(link)?.0, pane).ok_or(ServerError::SessionUnavailable)?;
+pub fn claim(link: &CoreLink, pane: Id, claim: AttachmentClaim, size: PaneSize) -> Result<Claimed> {
+    let workspace = workspace_of(&inventory(link)?.0, pane).ok_or(CoreError::SessionUnavailable)?;
     let attachment = Attachment {
         workspace,
         generation: GENERATION,
@@ -231,18 +225,18 @@ pub fn claim(
 }
 
 /// Selects `pane`. Only an explicit selection may start or acquire work.
-pub fn select(link: &ServerLink, pane: Id, explicit: bool, size: PaneSize) -> Result<Claimed> {
+pub fn select(link: &CoreLink, pane: Id, explicit: bool, size: PaneSize) -> Result<Claimed> {
     claim(link, pane, AttachmentClaim::Select { explicit }, size)
 }
 
 /// Starts the shell of the inventory's first Pane, or resumes its control. Another client's
 /// control fails as `Controlled`.
-pub fn attach(link: &ServerLink, create: bool, size: PaneSize) -> Result<Pane> {
+pub fn attach(link: &CoreLink, create: bool, size: PaneSize) -> Result<Pane> {
     let pane = first_pane(link, create)?;
     match select(link, pane, create, size)? {
         Claimed::Attached(pane) => Ok(pane),
-        Claimed::Takeover(_) => Err(ServerError::Controlled),
-        Claimed::Restored(_) => Err(ServerError::Protocol),
+        Claimed::Takeover(_) => Err(CoreError::Controlled),
+        Claimed::Restored(_) => Err(CoreError::Protocol),
     }
 }
 
@@ -303,15 +297,15 @@ impl Screen {
     /// does not fit the screen.
     fn apply(&mut self, frame: &Frame) -> Result<()> {
         let update = &frame.update;
-        update.validate().map_err(|_| ServerError::Protocol)?;
+        update.validate().map_err(|_| CoreError::Protocol)?;
         let keyframe = frame.base.is_none();
         if !keyframe && frame.base != self.frame {
-            return Err(ServerError::Protocol);
+            return Err(CoreError::Protocol);
         }
         let geometry = update
             .geometry
             .or(self.geometry.filter(|_| !keyframe))
-            .ok_or(ServerError::Protocol)?;
+            .ok_or(CoreError::Protocol)?;
         // A keyframe and a new grid size start from blank rows.
         let grid = |geometry: Geometry| (geometry.columns, geometry.rows);
         if keyframe || self.geometry.map(grid) != Some(grid(geometry)) {
@@ -320,13 +314,13 @@ impl Screen {
         if let Some(shift) = update.shift {
             shift
                 .apply(&mut self.rows, String::new)
-                .ok_or(ServerError::Protocol)?;
+                .ok_or(CoreError::Protocol)?;
         }
         for row in &update.rows {
             *self
                 .rows
                 .get_mut(usize::from(row.index))
-                .ok_or(ServerError::Protocol)? =
+                .ok_or(CoreError::Protocol)? =
                 row.runs.iter().map(|run| run.text.as_str()).collect();
         }
         self.geometry = Some(geometry);
@@ -419,7 +413,7 @@ impl Events {
 /// A Pane claimed on one channel. Dropping it keeps the Pane's control; [`Pane::release`] gives
 /// control up.
 pub struct Pane {
-    link: ServerLink,
+    link: CoreLink,
     id: Channel,
     /// Taken only when the Pane closes, releases or drops.
     channel: Option<ChannelHandle>,
@@ -440,12 +434,12 @@ impl Pane {
         self.lease
     }
 
-    pub fn link(&self) -> &ServerLink {
+    pub fn link(&self) -> &CoreLink {
         &self.link
     }
 
     fn handle(&self) -> Result<&ChannelHandle> {
-        self.channel.as_ref().ok_or(ServerError::StaleControl)
+        self.channel.as_ref().ok_or(CoreError::StaleControl)
     }
 
     pub fn channel(&self) -> Channel {
@@ -513,7 +507,7 @@ impl Pane {
     pub fn discarded(&self, serial: u32) -> Result<Refusal> {
         match self.outcome(serial)? {
             InputOutcome::Discarded(refusal) => Ok(refusal),
-            InputOutcome::Paste(_) => Err(ServerError::Protocol),
+            InputOutcome::Paste(_) => Err(CoreError::Protocol),
         }
     }
 
@@ -562,10 +556,10 @@ impl Pane {
                 rows: remaining.min(MAX_PAGE_ROWS),
             })?
             else {
-                return Err(ServerError::Protocol);
+                return Err(CoreError::Protocol);
             };
             if page.epoch != history.epoch || page.start < start {
-                return Err(ServerError::Protocol);
+                return Err(CoreError::Protocol);
             }
             if page.rows.is_empty() {
                 break;
@@ -627,7 +621,7 @@ impl Pane {
     /// Waits until the server reports on the Input message `serial`.
     fn outcome(&self, serial: u32) -> Result<InputOutcome> {
         self.until(WAIT, |received| received.outcomes.remove(&serial))?
-            .ok_or(ServerError::Protocol)
+            .ok_or(CoreError::Protocol)
     }
 
     /// Waits until the pushed screen satisfies `matches`, for at most `wait`, and returns it.
@@ -686,7 +680,7 @@ impl Pane {
     /// Waits until the channel ends and returns how it ended.
     pub fn ending(&self) -> Result<Ending> {
         self.until(WAIT, |received| received.ending.clone())?
-            .ok_or(ServerError::Protocol)
+            .ok_or(CoreError::Protocol)
     }
 
     /// How many frames the channel has received.

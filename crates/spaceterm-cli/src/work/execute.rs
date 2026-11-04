@@ -12,7 +12,7 @@ use crate::{
     list,
     scope::{self, ScopeArgs, Selector, TargetData},
 };
-use spaceterm_server::{
+use spaceterm_core::{
     hierarchy::{self, CloseTarget, Outcome},
     labels,
     worktree::{Read as WorktreeRead, ReadReply, Removal},
@@ -24,7 +24,7 @@ pub struct Environment<'a> {
     pub local: bool,
     pub cwd: &'a Path,
     pub current_identity: Option<&'a str>,
-    pub current_server: Option<&'a str>,
+    pub current_machine: Option<&'a str>,
     pub current_pane: Option<&'a str>,
     pub agent: bool,
     pub now: i64,
@@ -117,35 +117,35 @@ pub fn run(
     env: &Environment<'_>,
     journal: &mut dyn Dispatch,
     reader: &mut dyn Read,
-    server_name: &str,
+    machine_name: &str,
     route: &str,
 ) -> Output {
     let path = command.path();
     if let Err(failure) = validate(command, env.local) {
         return Output::failed(path, None, failure, serde_json::json!({}), String::new());
     }
-    let server = ServerRef {
-        name: server_name.into(),
+    let core = MachineRef {
+        name: machine_name.into(),
         route: route.into(),
-        id: hex(&journal.server_id()),
+        id: hex(&journal.machine_id()),
     };
     let mut recovered = match journal.resolve_leftovers() {
         Ok(recovered) => recovered,
         Err(failure) => {
             return Output::failed(
                 path,
-                Some(server),
+                Some(core),
                 failure,
                 serde_json::json!({}),
                 String::new(),
             );
         }
     };
-    let result = execute(command, global, env, journal, reader, &server);
+    let result = execute(command, global, env, journal, reader, &core);
     recovered.extend_from_slice(journal.recovered());
     let mut output = match result {
         Ok(output) => output,
-        Err(error) => error.output(path, server),
+        Err(error) => error.output(path, core),
     };
     if !recovered.is_empty() {
         output.envelope.warnings.push(Warning::new(
@@ -188,8 +188,8 @@ struct Error {
     text: String,
 }
 impl Error {
-    fn output(self, command: &str, server: ServerRef) -> Output {
-        Output::failed(command, Some(server), self.failure, *self.data, self.text)
+    fn output(self, command: &str, core: MachineRef) -> Output {
+        Output::failed(command, Some(core), self.failure, *self.data, self.text)
     }
 }
 impl From<Failure> for Error {
@@ -231,10 +231,10 @@ impl From<WorkError> for Error {
     }
 }
 
-fn snapshot(reader: &mut dyn Read, server: Id) -> Result<Snapshot, Error> {
+fn snapshot(reader: &mut dyn Read, core: Id) -> Result<Snapshot, Error> {
     let inventory = reader.inventory()?;
     Ok(Snapshot {
-        server,
+        core,
         repositories: inventory.repositories.clone(),
         inventory,
     })
@@ -254,14 +254,14 @@ fn execute(
     env: &Environment<'_>,
     journal: &mut dyn Dispatch,
     reader: &mut dyn Read,
-    server: &ServerRef,
+    core: &MachineRef,
 ) -> Result<Output, Error> {
-    let initial = snapshot(reader, journal.server_id())?;
+    let initial = snapshot(reader, journal.machine_id())?;
     let current = scope::current_from_context(
         &initial,
         env.identity,
         env.current_identity,
-        env.current_server,
+        env.current_machine,
         env.current_pane,
     );
     let home = reader.home()?;
@@ -279,12 +279,12 @@ fn execute(
                 &initial,
                 &args,
                 current.as_ref(),
-                scope::Want::Server,
+                scope::Want::Core,
                 scope::Effect::Passive,
             )?;
             let facts = reader.panes(&initial, &target)?;
-            let ReadReply::ServerFacts(facts_server) =
-                reader.worktree(WorktreeRead::ServerFacts)?
+            let ReadReply::MachineFacts(facts_machine) =
+                reader.worktree(WorktreeRead::MachineFacts)?
             else {
                 return Err(Code::ProtocolError.into());
             };
@@ -299,10 +299,10 @@ fn execute(
             let data = list::build(
                 &initial,
                 &target,
-                ListServer {
-                    name: facts_server.machine,
-                    os: facts_server.operating_system,
-                    version: facts_server.version,
+                ListMachine {
+                    name: facts_machine.machine,
+                    os: facts_machine.operating_system,
+                    version: facts_machine.version,
                     sessions,
                 },
                 &facts,
@@ -310,7 +310,7 @@ fn execute(
             let text = list::text(&data);
             Ok(Output::ok(
                 path,
-                server.clone(),
+                core.clone(),
                 data,
                 text,
                 &scope::target_steps(&initial, &target),
@@ -335,7 +335,7 @@ fn execute(
                 scope::Effect::Passive,
             )?;
             let request = spaceterm::desktop_channel::Request::Show {
-                server: initial.server,
+                core: initial.core,
                 workspace: target.workspace.ok_or(Code::ProtocolError)?,
                 tab: if want == scope::Want::Workspace {
                     None
@@ -352,7 +352,7 @@ fn execute(
             let steps = scope::target_steps(&initial, &target);
             Ok(Output::ok(
                 path,
-                server.clone(),
+                core.clone(),
                 Shown {
                     target: steps.clone(),
                 },
@@ -366,7 +366,7 @@ fn execute(
                 journal,
                 workspace::create(name.clone(), directory, control)?,
             )?;
-            let updated = snapshot(reader, initial.server)?;
+            let updated = snapshot(reader, initial.core)?;
             let workspace = updated
                 .inventory
                 .workspaces
@@ -401,13 +401,13 @@ fn execute(
                 hex(&id),
                 data.directory.as_deref().ok_or(Code::ProtocolError)?
             );
-            Ok(Output::ok(path, server.clone(), data, text, &steps))
+            Ok(Output::ok(path, core.clone(), data, text, &steps))
         }
         Command::Workspace(WorkspaceCommand::Rename { new_name, .. }) => {
             let plan = workspace::rename(&initial, &args, current.as_ref(), new_name.clone())?;
             let steps = scope::target_steps(&initial, &plan.target);
             let id = submit(journal, plan.mutation)?;
-            let updated = snapshot(reader, initial.server)?;
+            let updated = snapshot(reader, initial.core)?;
             let workspace = updated
                 .inventory
                 .workspaces
@@ -416,7 +416,7 @@ fn execute(
                 .ok_or(Code::ProtocolError)?;
             Ok(Output::ok(
                 path,
-                server.clone(),
+                core.clone(),
                 WorkspaceChange {
                     target: steps.clone(),
                     workspace: workspace_ref(workspace),
@@ -437,7 +437,7 @@ fn execute(
             let plan = workspace::pin(&initial, &args, current.as_ref(), directory)?;
             let steps = scope::target_steps(&initial, &plan.target);
             let id = submit(journal, plan.mutation)?;
-            let updated = snapshot(reader, initial.server)?;
+            let updated = snapshot(reader, initial.core)?;
             let workspace = updated
                 .inventory
                 .workspaces
@@ -456,7 +456,7 @@ fn execute(
             };
             Ok(Output::ok(
                 path,
-                server.clone(),
+                core.clone(),
                 WorkspacePin {
                     target: steps.clone(),
                     workspace: workspace_ref(workspace),
@@ -485,16 +485,15 @@ fn execute(
             };
             let source = match &plan.mutation {
                 Mutation::CreateTab { source, .. }
-                | Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
-                    source,
-                    ..
+                | Mutation::Worktree(spaceterm_core::worktree::Operation::OpenTab {
+                    source, ..
                 }) => *source,
                 Mutation::SplitPane { source, .. } => Some(*source),
                 _ => None,
             };
             let steps = scope::target_steps(&initial, &plan.target);
             let id = submit(journal, plan.mutation)?;
-            let updated = snapshot(reader, initial.server)?;
+            let updated = snapshot(reader, initial.core)?;
             let (tab, pane) = if matches!(command, Command::Tab(_)) {
                 let tab = updated
                     .inventory
@@ -533,7 +532,7 @@ fn execute(
             };
             Ok(Output::ok(
                 path,
-                server.clone(),
+                core.clone(),
                 data,
                 format!(
                     "Created Pane id:{}\nDirectory: {}\n",
@@ -557,7 +556,7 @@ fn execute(
                 env,
                 journal,
                 reader,
-                server,
+                core,
             )
         }
         Command::Pane(PaneCommand::Close { confirm, .. }) => {
@@ -574,7 +573,7 @@ fn execute(
                 env,
                 journal,
                 reader,
-                server,
+                core,
             )
         }
         Command::Tab(TabCommand::Close { all, confirm, .. }) => {
@@ -586,14 +585,14 @@ fn execute(
                 if token.is_some() {
                     return Err(Code::Changed.into());
                 }
-                if let Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
+                if let Mutation::Worktree(spaceterm_core::worktree::Operation::OpenTab {
                     control: requested,
                     ..
                 }) = &mut fallback
                 {
                     *requested = control;
                 }
-                let Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
+                let Mutation::Worktree(spaceterm_core::worktree::Operation::OpenTab {
                     root: expected_root,
                     path: expected_path,
                     ..
@@ -603,7 +602,7 @@ fn execute(
                 };
                 let (expected_root, expected_path) = (expected_root.clone(), expected_path.clone());
                 let id = submit(journal, fallback)?;
-                reviewed = snapshot(reader, initial.server)?;
+                reviewed = snapshot(reader, initial.core)?;
                 let valid = reviewed
                     .inventory
                     .workspaces
@@ -655,7 +654,7 @@ fn execute(
                 env,
                 journal,
                 reader,
-                server,
+                core,
             )
         }
         Command::Worktree(WorktreeCommand::Create {
@@ -673,17 +672,14 @@ fn execute(
             )?;
             let workspace = target.workspace.ok_or(Code::NotFound)?;
             let repos = initial.repositories.as_ref().ok_or(Code::NotFound)?;
-            let root = spaceterm_server::organize::workspace_worktrees(
-                &initial.inventory,
-                repos,
-                workspace,
-            )
-            .ok_or(Code::NotFound)?
-            .main_root
-            .clone();
+            let root =
+                spaceterm_core::organize::workspace_worktrees(&initial.inventory, repos, workspace)
+                    .ok_or(Code::NotFound)?
+                    .main_root
+                    .clone();
             let ReadReply::Context {
                 settings,
-                home: server_home,
+                home: core_home,
                 branches,
             } = reader.worktree(WorktreeRead::Context { root })?
             else {
@@ -692,7 +688,7 @@ fn execute(
             let paths = paths::Paths {
                 local: env.local,
                 cwd: env.cwd,
-                home: &server_home,
+                home: &core_home,
             };
             let context = worktree::Context {
                 branches: &branches,
@@ -711,15 +707,14 @@ fn execute(
                 },
                 &context,
             )?;
-            let Mutation::Worktree(spaceterm_server::worktree::Operation::Create {
-                branch, ..
-            }) = &plan.mutation
+            let Mutation::Worktree(spaceterm_core::worktree::Operation::Create { branch, .. }) =
+                &plan.mutation
             else {
                 unreachable!()
             };
             let branch = branch.name().to_owned();
             let id = submit(journal, plan.mutation)?;
-            let updated = snapshot(reader, initial.server)?;
+            let updated = snapshot(reader, initial.core)?;
             let tab = updated
                 .inventory
                 .workspaces
@@ -763,14 +758,14 @@ fn execute(
                     CreatedControl::Origin => "origin",
                 }
             );
-            Ok(Output::ok(path, server.clone(), data, text, &steps))
+            Ok(Output::ok(path, core.clone(), data, text, &steps))
         }
         Command::Worktree(WorktreeCommand::Remove { confirm, .. }) => {
             let (target, root, tree) = worktree::remove(&initial, &args, current.as_ref())?;
             let token = confirm.as_deref().or(env.confirmation);
             let removal = if let Some(token) = token {
                 let consent::Review::Removal(removal) =
-                    consent::verify(token, initial.server, journal.client_id(), env.now)?
+                    consent::verify(token, initial.core, journal.client_id(), env.now)?
                 else {
                     return Err(Code::Changed.into());
                 };
@@ -789,7 +784,7 @@ fn execute(
                 };
                 let effects = removal_effects(&initial, &removal, journal.client_id())?;
                 let (token, expires_at) = consent::issue(
-                    initial.server,
+                    initial.core,
                     journal.client_id(),
                     consent::Review::Removal(removal),
                     env.now,
@@ -801,7 +796,7 @@ fn execute(
                 );
                 return Ok(Output::confirmation(
                     path,
-                    server.clone(),
+                    core.clone(),
                     Confirmation {
                         token,
                         expires_at,
@@ -816,11 +811,11 @@ fn execute(
                 .flat_map(|t| t.panes.iter().map(|p| hex(&p.id)))
                 .collect();
             submit(journal, worktree::confirmed_removal(&removal))?;
-            let updated = snapshot(reader, initial.server)?;
+            let updated = snapshot(reader, initial.core)?;
             let steps = scope::target_steps(&initial, &target);
             Ok(Output::ok(
                 path,
-                server.clone(),
+                core.clone(),
                 Closed {
                     target: steps.clone(),
                     closed,
@@ -848,7 +843,7 @@ fn close_work(
     env: &Environment<'_>,
     journal: &mut dyn Dispatch,
     reader: &mut dyn Read,
-    server: &ServerRef,
+    core: &MachineRef,
 ) -> Result<Output, Error> {
     let CloseRequest {
         target,
@@ -860,7 +855,7 @@ fn close_work(
         let consent::Review::Close {
             target: reviewed,
             confirmation,
-        } = consent::verify(token, snapshot.server, journal.client_id(), env.now)?
+        } = consent::verify(token, snapshot.core, journal.client_id(), env.now)?
         else {
             return Err(Code::Changed.into());
         };
@@ -882,7 +877,7 @@ fn close_work(
             } => {
                 effects.fallback = fallback;
                 let (token, expires_at) = consent::issue(
-                    snapshot.server,
+                    snapshot.core,
                     journal.client_id(),
                     consent::Review::Close {
                         target: close,
@@ -897,7 +892,7 @@ fn close_work(
                 );
                 return Ok(Output::confirmation(
                     command,
-                    server.clone(),
+                    core.clone(),
                     Confirmation {
                         token,
                         expires_at,
@@ -913,11 +908,11 @@ fn close_work(
     };
     let closed = confirmation.panes.iter().map(|p| hex(&p.id)).collect();
     submit(journal, mutation)?;
-    let updated = self::snapshot(reader, snapshot.server)?;
+    let updated = self::snapshot(reader, snapshot.core)?;
     let steps = scope::target_steps(snapshot, &target);
     Ok(Output::ok(
         command,
-        server.clone(),
+        core.clone(),
         Closed {
             target: steps.clone(),
             closed,

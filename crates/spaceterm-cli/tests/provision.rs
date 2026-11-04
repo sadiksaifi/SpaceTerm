@@ -27,7 +27,7 @@ fn hidden_build_metadata_is_available_without_environment_or_display() {
     assert_eq!(info["target"], env!("SPACETERM_CLI_TARGET"));
     assert_eq!(info["version"], env!("SPACETERM_CLI_VERSION"));
     assert_eq!(info["commit"], env!("SPACETERM_CLI_COMMIT"));
-    assert_eq!(info["protocol_major"], spaceterm_server::protocol::MAJOR);
+    assert_eq!(info["protocol_major"], spaceterm_core::protocol::MAJOR);
     assert_eq!(info.as_object().unwrap().len(), 7, "{info}");
 }
 
@@ -45,7 +45,7 @@ fn pairing_json_keeps_the_interaction_required_contract_without_a_qr() {
 }
 
 #[test]
-fn server_help_hides_internal_steps_and_gives_the_exact_uninstall_line() {
+fn core_help_hides_internal_steps_and_gives_the_exact_uninstall_line() {
     let output = spaceterm(&["server", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
@@ -54,7 +54,7 @@ fn server_help_hides_internal_steps_and_gives_the_exact_uninstall_line() {
 }
 
 #[test]
-fn completions_are_generated_without_opening_a_server() {
+fn completions_are_generated_without_opening_a_core() {
     let output = spaceterm(&["completion", "zsh"]);
     assert!(output.status.success());
     assert!(output.stderr.is_empty());

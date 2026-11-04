@@ -34,17 +34,17 @@ impl DesktopRecordFile {
 impl RecordFile for DesktopRecordFile {
     fn read(
         &self,
-        accept: &mut dyn FnMut(&[u8]) -> Result<(), spaceterm_server::direct::DirectError>,
-    ) -> Result<(), spaceterm_server::direct::DirectError> {
+        accept: &mut dyn FnMut(&[u8]) -> Result<(), spaceterm_core::direct::DirectError>,
+    ) -> Result<(), spaceterm_core::direct::DirectError> {
         let mut expected = self
             .expected
             .lock()
-            .map_err(|_| spaceterm_server::direct::DirectError::StorageUnavailable)?;
+            .map_err(|_| spaceterm_core::direct::DirectError::StorageUnavailable)?;
         expected.blocked = true;
         let Some(directory) = self
             .paths
             .open_secure_root(AppDirectoryRoot::Data)
-            .map_err(|_| spaceterm_server::direct::DirectError::StorageUnavailable)?
+            .map_err(|_| spaceterm_core::direct::DirectError::StorageUnavailable)?
         else {
             *expected = WriteAuthority::default();
             return Ok(());
@@ -53,7 +53,7 @@ impl RecordFile for DesktopRecordFile {
             .paths
             .filesystem()
             .read_private_file(&directory, OsStr::new(FILE), MAX_BYTES)
-            .map_err(|_| spaceterm_server::direct::DirectError::StorageUnavailable)?;
+            .map_err(|_| spaceterm_core::direct::DirectError::StorageUnavailable)?;
         let Some(snapshot) = snapshot else {
             *expected = WriteAuthority::default();
             return Ok(());

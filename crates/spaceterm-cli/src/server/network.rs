@@ -12,15 +12,15 @@ use super::lifecycle::Settled;
 use super::{Context, Opened, Pending, Reply, Routed};
 use crate::args::Network;
 use crate::contract::{
-    self, CallerEffect, Code, Confirmation, ConfirmationData, DeviceRef, Envelope, Failure,
-    NetworkEffects, NetworkSetting, RecoveredOperation, ServerNetwork, ServerRef, ServiceAction,
+    self, CallerEffect, Code, Confirmation, ConfirmationData, CoreNetwork, DeviceRef, Envelope,
+    Failure, MachineRef, NetworkEffects, NetworkSetting, RecoveredOperation, ServiceAction,
 };
-use spaceterm_server::service::lane::admin;
-use spaceterm_server::service::lane::client::{Lane, within};
-use spaceterm_server::service::lane::network::{
+use spaceterm_core::service::lane::admin;
+use spaceterm_core::service::lane::client::{Lane, within};
+use spaceterm_core::service::lane::network::{
     LaneCallerEffect, LaneNetworkEffects, LaneNetworkSetting, NetworkAccess,
 };
-use spaceterm_server::service::lane::{LaneAction, LaneReply, LaneRequest};
+use spaceterm_core::service::lane::{LaneAction, LaneReply, LaneRequest};
 use std::time::{Duration, Instant};
 
 const COMMAND: &str = "server.network";
@@ -35,7 +35,7 @@ pub fn run(context: &Context<'_>, network: &Network, token: Option<&str>) -> Rep
     };
     let pending = match Pending::open(context, &routed.route) {
         Ok(pending) => pending,
-        Err(failure) => return Reply::failure(COMMAND, Some(routed.server), failure),
+        Err(failure) => return Reply::failure(COMMAND, Some(routed.core), failure),
     };
     let opened = match super::open_lane(context, &routed.connection, &routed.route, &pending) {
         Ok(opened) => opened,
@@ -44,7 +44,7 @@ pub fn run(context: &Context<'_>, network: &Network, token: Option<&str>) -> Rep
                 Code::Unreachable if routed.local => Failure::new(Code::NotRunning),
                 _ => failure,
             };
-            return Reply::failure(COMMAND, Some(routed.server), failure);
+            return Reply::failure(COMMAND, Some(routed.core), failure);
         }
     };
     match token {
@@ -84,10 +84,10 @@ fn preview(
         ..
     } = match admin::preview_network(&mut opened.session, access) {
         Ok(preview) => preview,
-        Err(error) => return failure(routed.server, super::lane_failure(error), opened),
+        Err(error) => return failure(routed.core, super::lane_failure(error), opened),
     };
     if effects.unchanged() {
-        let data = ServerNetwork {
+        let data = CoreNetwork {
             network: Some(setting(&effects.to)),
             operation: None,
             receipt: None,
@@ -95,13 +95,13 @@ fn preview(
         let text = format!("Network Access is already {}.\n", describe(&effects.to));
         return Reply::new(
             &super::with_recovered(
-                Envelope::ok(COMMAND, Some(routed.server), data),
+                Envelope::ok(COMMAND, Some(routed.core), data),
                 opened.recovered,
             ),
             text,
         );
     }
-    let summary = summary(&routed.server.name, &effects);
+    let summary = summary(&routed.core.name, &effects);
     if context.interactive() {
         let warnings: Vec<_> = super::recovered_warning(&opened.recovered)
             .into_iter()
@@ -113,16 +113,16 @@ fn preview(
         }
         return Reply::failure(
             COMMAND,
-            Some(routed.server),
+            Some(routed.core),
             Failure::new(Code::ConfirmationRequired),
         );
     }
     let text = format!(
         "{summary}Confirm with: {}\n",
-        confirm_line(context, &routed.server, access, &token)
+        confirm_line(context, &routed.core, access, &token)
     );
     Reply::new(
-        &preview_envelope(routed.server, token, expires_at, &effects, opened.recovered),
+        &preview_envelope(routed.core, token, expires_at, &effects, opened.recovered),
         text,
     )
 }
@@ -130,20 +130,20 @@ fn preview(
 /// The confirmation a person copies: the same change, target and actor.
 pub(crate) fn confirm_line(
     context: &Context<'_>,
-    server: &ServerRef,
+    core: &MachineRef,
     access: NetworkAccess,
     token: &str,
 ) -> String {
     context.command_line(
-        server,
+        core,
         &["server", "network", &argument(access), "--confirm", token],
     )
 }
 
-fn failure(server: ServerRef, failure: Failure, opened: Opened) -> Reply {
+fn failure(core: MachineRef, failure: Failure, opened: Opened) -> Reply {
     Reply::new(
         &super::with_recovered(
-            Envelope::error(COMMAND, Some(server), failure, contract::Empty {}),
+            Envelope::error(COMMAND, Some(core), failure, contract::Empty {}),
             opened.recovered,
         ),
         String::new(),
@@ -152,7 +152,7 @@ fn failure(server: ServerRef, failure: Failure, opened: Opened) -> Reply {
 
 /// The confirmation envelope of a Network Access preview.
 pub(crate) fn preview_envelope(
-    server: ServerRef,
+    core: MachineRef,
     token: String,
     expires_at: String,
     effects: &LaneNetworkEffects,
@@ -161,7 +161,7 @@ pub(crate) fn preview_envelope(
     super::with_recovered(
         Envelope::confirmation(
             COMMAND,
-            Some(server),
+            Some(core),
             Confirmation {
                 token,
                 expires_at,
@@ -209,9 +209,9 @@ fn describe(setting: &LaneNetworkSetting) -> String {
 
 /// The preview text. It names the server and the devices that lose their route, so it goes to
 /// stdout, or to stderr before an interactive confirmation.
-pub(crate) fn summary(server: &str, effects: &LaneNetworkEffects) -> String {
+pub(crate) fn summary(core: &str, effects: &LaneNetworkEffects) -> String {
     let mut out = format!(
-        "Change Network Access on {server} from {} to {}?\n",
+        "Change Network Access on {core} from {} to {}?\n",
         describe(&effects.from),
         describe(&effects.to)
     );
@@ -271,7 +271,7 @@ fn execute(
                 &super::with_recovered(
                     Envelope::error(
                         COMMAND,
-                        Some(routed.server),
+                        Some(routed.core),
                         super::lane_failure(error),
                         contract::Empty {},
                     ),
@@ -283,36 +283,36 @@ fn execute(
     };
     let settled = super::lifecycle::settle(ServiceAction::Network, outcome);
     let network = settled.failure.is_none().then(|| read_back(lane)).flatten();
-    let status = context.command_line(&routed.server, &["server", "status"]);
-    let (envelope, text) = result(routed.server, settled, network, &status);
+    let status = context.command_line(&routed.core, &["server", "status"]);
+    let (envelope, text) = result(routed.core, settled, network, &status);
     Reply::new(&super::with_recovered(envelope, recovered), text)
 }
 
 /// The envelope and text of a confirmed change, from its settled flow and the Network Access
 /// read back after it, if any. `status` is the command that reads the same server's status.
 pub(crate) fn result(
-    server: ServerRef,
+    core: MachineRef,
     settled: Settled,
     network: Option<LaneNetworkSetting>,
     status: &str,
-) -> (Envelope<ServerNetwork>, String) {
+) -> (Envelope<CoreNetwork>, String) {
     let text = match (&settled.failure, &network) {
         (None, Some(network)) => format!("Network Access is now {}.\n", describe(network)),
         (None, None) => "Network Access changed.\n".to_owned(),
         (Some(failure), _) if failure.code == Code::OutcomeUnconfirmed => format!(
             "Check Network Access with: {status}\nIf this device can't reach {}, run spaceterm server status on that machine.\n",
-            server.name
+            core.name
         ),
         (Some(_), _) => String::new(),
     };
-    let data = ServerNetwork {
+    let data = CoreNetwork {
         network: network.as_ref().map(setting),
         operation: Some(settled.receipt.operation.clone()),
         receipt: Some(settled.receipt),
     };
     let envelope = match settled.failure {
-        None => Envelope::ok(COMMAND, Some(server), data),
-        Some(failure) => Envelope::error(COMMAND, Some(server), failure, data),
+        None => Envelope::ok(COMMAND, Some(core), data),
+        Some(failure) => Envelope::error(COMMAND, Some(core), failure, data),
     };
     (envelope, text)
 }

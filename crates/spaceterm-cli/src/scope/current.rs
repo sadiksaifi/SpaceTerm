@@ -5,15 +5,15 @@ pub(super) fn from_context(
     snapshot: &Snapshot,
     executable_identity: &str,
     identity: Option<&str>,
-    server: Option<&str>,
+    core: Option<&str>,
     pane: Option<&str>,
 ) -> Option<Current> {
     if identity != Some(executable_identity) {
         return None;
     }
-    let server = full_id(server?)?;
+    let core = full_id(core?)?;
     let pane = full_id(pane?)?;
-    if server != snapshot.server
+    if core != snapshot.core
         || !snapshot
             .inventory
             .workspaces
@@ -24,7 +24,7 @@ pub(super) fn from_context(
     {
         return None;
     }
-    Some(Current { server, pane })
+    Some(Current { core, pane })
 }
 
 fn full_id(text: &str) -> Option<Id> {
@@ -44,20 +44,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn environment_context_requires_identity_server_and_existing_pane() {
+    fn environment_context_requires_identity_machine_and_existing_pane() {
         let snapshot = fixture();
-        let server = "09".repeat(32);
+        let core = "09".repeat(32);
         let pane = "16".repeat(32);
         assert_eq!(
             from_context(
                 &snapshot,
                 "spaceterm-development",
                 Some("spaceterm-development"),
-                Some(&server),
+                Some(&core),
                 Some(&pane)
             ),
             Some(Current {
-                server: id(9),
+                core: id(9),
                 pane: id(22)
             })
         );
@@ -67,13 +67,13 @@ mod tests {
                     &snapshot,
                     "spaceterm-development",
                     identity,
-                    Some(&server),
+                    Some(&core),
                     Some(&pane)
                 ),
                 None
             );
         }
-        for server in [
+        for core in [
             None,
             Some("090909"),
             Some("invalid"),
@@ -84,7 +84,7 @@ mod tests {
                     &snapshot,
                     "spaceterm-development",
                     Some("spaceterm-development"),
-                    server,
+                    core,
                     Some(&pane)
                 ),
                 None
@@ -95,7 +95,7 @@ mod tests {
                 &snapshot,
                 "spaceterm-development",
                 Some("spaceterm-development"),
-                Some(&server),
+                Some(&core),
                 Some(&"ff".repeat(32))
             ),
             None

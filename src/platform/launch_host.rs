@@ -23,21 +23,21 @@ pub(crate) fn running_executable() -> Option<PathBuf> {
 
 /// Verified server packages available for remote setup.
 /// An explicit Development override can select a separate catalog for native checks.
-pub(crate) fn server_artifact_catalog() -> Option<PathBuf> {
+pub(crate) fn core_artifact_catalog() -> Option<PathBuf> {
     if !cfg!(spaceterm_packaged)
         && let Some(root) = std::env::var_os("SPACETERM_CLI_ARTIFACTS")
     {
         return Some(PathBuf::from(root));
     }
     let executable = running_executable()?;
-    Some(executable.parent()?.parent()?.join(SERVER_ARTIFACTS))
+    Some(executable.parent()?.parent()?.join(CORE_ARTIFACTS))
 }
 
 /// The server packages' place inside an installation, relative to its executable's parent.
 #[cfg(target_os = "macos")]
-const SERVER_ARTIFACTS: &str = "Resources/server-artifacts";
+const CORE_ARTIFACTS: &str = "Resources/server-artifacts";
 #[cfg(target_os = "linux")]
-const SERVER_ARTIFACTS: &str = "share/spaceterm/server-artifacts";
+const CORE_ARTIFACTS: &str = "share/spaceterm/server-artifacts";
 
 #[cfg(target_os = "macos")]
 fn running_executable_of_host() -> Option<PathBuf> {

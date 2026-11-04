@@ -1,8 +1,8 @@
 //! Explicit native fixtures. The owner runs only in Penguin's isolated mount namespace.
 use super::*;
 use clap::Parser;
-use spaceterm_server::{
-    ServerConnection,
+use spaceterm_core::{
+    MachineConnection,
     direct::{Invitation, NetworkPolicy},
     protocol::{Operation, ReplyBody},
 };
@@ -12,9 +12,9 @@ fn emit(value: serde_json::Value) {
     println!("CLI722 {value}");
     std::io::stdout().flush().unwrap();
 }
-fn round_trip(link: &spaceterm_server::connection::link::ServerLink) -> bool {
+fn round_trip(link: &spaceterm_core::connection::link::CoreLink) -> bool {
     link.request(Operation::ReleaseAttachment {
-        attachment: spaceterm_server::attachments::Attachment {
+        attachment: spaceterm_core::attachments::Attachment {
             workspace: [0; 32],
             generation: 0,
         },
@@ -35,9 +35,9 @@ fn native_owner() {
     let bind = std::env::var("SPACETERM_TEST_BIND").expect("explicit fixture bind");
     let (owner, keep_alive) = std::os::unix::net::UnixStream::pair().unwrap();
     let (ready, waiting) = std::sync::mpsc::sync_channel(1);
-    let server = std::thread::spawn(move || {
-        spaceterm_server::run_owned_development(
-            spaceterm_server::panes(std::sync::Arc::default(), |sync| {
+    let core = std::thread::spawn(move || {
+        spaceterm_core::run_owned_development(
+            spaceterm_core::panes(std::sync::Arc::default(), |sync| {
                 Ok(spaceterm::runtime::Served::new(
                     spaceterm::runtime::WorkspaceHost::local(sync, std::sync::Arc::default())?,
                 ))
@@ -52,7 +52,7 @@ fn native_owner() {
     waiting
         .recv_timeout(Duration::from_secs(30))
         .expect("fixture server ready");
-    let connection = ServerConnection::for_identity(IDENTITY).unwrap();
+    let connection = MachineConnection::for_identity(IDENTITY).unwrap();
     connection
         .set_direct_policy(Some(NetworkPolicy::parse(&bind).unwrap()), true)
         .unwrap();
@@ -96,7 +96,7 @@ fn native_owner() {
     connection.set_direct_policy(None, false).unwrap();
     drop(connection);
     drop(keep_alive);
-    server.join().unwrap().unwrap();
+    core.join().unwrap().unwrap();
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn native_client() {
     let name = std::env::var("SPACETERM_TEST_CONNECTION_NAME").expect("unique fixture name");
     assert!(name.starts_with("cli722-e-native-"));
     let global = Global {
-        server: None,
+        core: None,
         agent: None,
         json: true,
         quiet: false,
@@ -132,7 +132,7 @@ fn native_client() {
         "native join completed"
     );
     let mut targeting = Global {
-        server: Some(name.clone()),
+        core: Some(name.clone()),
         agent: None,
         json: true,
         quiet: false,
@@ -169,10 +169,10 @@ fn native_client() {
         agent.connection.admitted_client_id().unwrap()
     );
     assert_eq!(
-        base.connection.admitted_server_id().unwrap(),
-        agent.connection.admitted_server_id().unwrap()
+        base.connection.admitted_machine_id().unwrap(),
+        agent.connection.admitted_machine_id().unwrap()
     );
-    emit(serde_json::json!({"admitted":true, "route":base.server.route}));
+    emit(serde_json::json!({"admitted":true, "route":base.core.route}));
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
         let output = if line == "work" {
@@ -207,7 +207,7 @@ fn native_client() {
                 "status",
             ])
             .unwrap();
-            let crate::args::Command::Server(command) = &cli.command else {
+            let crate::args::Command::Core(command) = &cli.command else {
                 unreachable!()
             };
             let reply = crate::server::run(IDENTITY, &cli.global, command);

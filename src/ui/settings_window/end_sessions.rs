@@ -6,14 +6,14 @@
 //! server's writer, the one the Workspace Window shares, so the request uses the same operation
 //! sequence and recovery as every other shared edit. Nothing here ever asks twice: a lost answer
 //! is resolved by that writer's recovery, never by another request.
-use super::server_list::ServerChoice;
+use super::machine_list::MachineChoice;
 use super::*;
 use crate::ui::chrome_typography::ChromeTextStyleExt as _;
-use crate::ui::server_worktrees::Client;
+use crate::ui::core_worktrees::Client;
 use crate::ui::sidebar_window::form::CaptionTone;
 use crate::ui::workspaces::WorkspaceRefusalReason;
 use gpui::Task;
-use spaceterm_server::hierarchy::{CloseInventory, Id, Mutation, Outcome, RetainedOutcome};
+use spaceterm_core::hierarchy::{CloseInventory, Id, Mutation, Outcome, RetainedOutcome};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Button, ButtonSize, ButtonVariant, ModalAction,
     ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize,
@@ -106,7 +106,7 @@ pub(super) enum Ended {
 
 pub(super) struct EndAllSessions {
     /// The server the row presents.
-    target: Option<ServerChoice>,
+    target: Option<MachineChoice>,
     /// Counts the times the row started over, so an answer for an earlier server lands nowhere.
     generation: u64,
     availability: Availability,
@@ -129,7 +129,7 @@ impl EndAllSessions {
         }
     }
 
-    fn start_over(&mut self, target: Option<ServerChoice>) {
+    fn start_over(&mut self, target: Option<MachineChoice>) {
         self.target = target;
         self.generation = self.generation.wrapping_add(1);
         self.availability = Availability::Unknown;
@@ -143,31 +143,31 @@ impl EndAllSessions {
 /// The row's caption, derived from its state alone so every state reads one way. A connected
 /// server ready for End All Sessions needs none: the row's count and its confirmation say it.
 pub(super) fn caption(
-    server: &str,
+    core: &str,
     availability: &Availability,
     working: bool,
     ended: Option<Ended>,
 ) -> Option<(SharedString, CaptionTone)> {
     let guidance = |text: String| Some((SharedString::from(text), CaptionTone::Guidance));
     if working {
-        return guidance(format!("Ending every Terminal Session on {server}\u{2026}"));
+        return guidance(format!("Ending every Terminal Session on {core}\u{2026}"));
     }
     match ended {
         Some(Ended::Accepted) => {
             return guidance(format!(
-                "Every Terminal Session on {server} ended. Its Panes show Session Ended until \
+                "Every Terminal Session on {core} ended. Its Panes show Session Ended until \
                  someone chooses Start Session."
             ));
         }
         Some(Ended::Restarted) => {
             return Some((
-                format!("{server} restarted, so nothing ended. Try again.").into(),
+                format!("{core} restarted, so nothing ended. Try again.").into(),
                 CaptionTone::Warning,
             ));
         }
         Some(Ended::Changed) => {
             return Some((
-                format!("The Terminal Sessions on {server} changed, so nothing ended. Try again.")
+                format!("The Terminal Sessions on {core} changed, so nothing ended. Try again.")
                     .into(),
                 CaptionTone::Warning,
             ));
@@ -177,14 +177,14 @@ pub(super) fn caption(
         }
         Some(Ended::Failed) => {
             return Some((
-                format!("{server} couldn\u{2019}t end its Terminal Sessions.").into(),
+                format!("{core} couldn\u{2019}t end its Terminal Sessions.").into(),
                 CaptionTone::Error,
             ));
         }
         Some(Ended::Unconfirmed) => {
             return Some((
                 format!(
-                    "SpaceTerm couldn\u{2019}t confirm whether {server}\u{2019}s Terminal Sessions ended. It will check when the connection returns."
+                    "SpaceTerm couldn\u{2019}t confirm whether {core}\u{2019}s Terminal Sessions ended. It will check when the connection returns."
                 )
                 .into(),
                 CaptionTone::Warning,
@@ -194,10 +194,10 @@ pub(super) fn caption(
     }
     match availability {
         Availability::Unknown | Availability::Offline => {
-            guidance(format!("Connect to {server} to end its Terminal Sessions."))
+            guidance(format!("Connect to {core} to end its Terminal Sessions."))
         }
         Availability::Pending => guidance(format!(
-            "End All Sessions is available once {server} answers an earlier change."
+            "End All Sessions is available once {core} answers an earlier change."
         )),
         // The row's count says how many run, and End All waits until one does.
         Availability::Ready(_) => None,
@@ -205,7 +205,7 @@ pub(super) fn caption(
 }
 
 /// The confirmation's title, message, and detail. Each names the selected server.
-pub(super) fn confirmation(server: &str, live: usize) -> (String, String, String) {
+pub(super) fn confirmation(core: &str, live: usize) -> (String, String, String) {
     let message = match live {
         1 => "This ends 1 Terminal Session for every client and clears its output.".to_owned(),
         count => {
@@ -213,7 +213,7 @@ pub(super) fn confirmation(server: &str, live: usize) -> (String, String, String
         }
     };
     (
-        format!("End All Sessions on {server}?"),
+        format!("End All Sessions on {core}?"),
         message,
         "The server keeps running, and Workspaces, Tabs and Panes stay.".to_owned(),
     )
@@ -224,12 +224,12 @@ impl SettingsWindow {
     /// section, and connection changes call this; rendering never does.
     pub(super) fn sync_end_all_sessions(&mut self, cx: &mut Context<Self>) {
         // The presented server's facts follow the same selection, section and connection changes.
-        self.sync_server_facts(cx);
+        self.sync_machine_facts(cx);
         // Ending every Terminal Session administers the server, which only this computer's
         // server offers.
-        let target = if self.active_section == SettingsSectionId::Servers {
-            self.selected_server()
-                .filter(|target| matches!(target, ServerChoice::Local))
+        let target = if self.active_section == SettingsSectionId::Machines {
+            self.selected_machine()
+                .filter(|target| matches!(target, MachineChoice::Local))
         } else {
             None
         };
@@ -249,8 +249,8 @@ impl SettingsWindow {
                 // The Workspace Window may register a newly presented server's writer after this
                 // window hears of it, so each reading looks the writer up again.
                 let client = cx.update(|cx| match &target {
-                    ServerChoice::Local => Client::get(cx),
-                    ServerChoice::Direct(_) => None,
+                    MachineChoice::Local => Client::get(cx),
+                    MachineChoice::Direct(_) => None,
                 });
                 let availability = client.as_ref().map_or(Availability::Unknown, |client| {
                     Availability::of(&client.source.snapshot())
@@ -291,7 +291,7 @@ impl SettingsWindow {
     pub(super) fn end_all_sessions_caption(&self) -> Option<(SharedString, CaptionTone)> {
         let state = &self.end_all_sessions;
         caption(
-            &self.selected_server_name(),
+            &self.selected_machine_name(),
             &state.availability,
             state.working,
             state.ended,
@@ -318,8 +318,8 @@ impl SettingsWindow {
             return;
         };
         let generation = state.generation;
-        let server = self.selected_server_name();
-        let (title, message, detail) = confirmation(&server, live_sessions(&confirmed).len());
+        let core = self.selected_machine_name();
+        let (title, message, detail) = confirmation(&core, live_sessions(&confirmed).len());
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-server-end-all-sessions"),
@@ -460,10 +460,10 @@ impl SettingsWindow {
         let state = &self.end_all_sessions;
         let working = state.working;
         let offered = self.end_all_sessions_offered();
-        let server = self.selected_server_name();
+        let core = self.selected_machine_name();
         let count = self.running_sessions().or_else(|| {
-            let key = self.selected_server()?.key();
-            super::server_selection::facts(&key, cx)?
+            let key = self.selected_machine()?.key();
+            super::machine_selection::facts(&key, cx)?
                 .running_sessions
                 .and_then(|count| usize::try_from(count).ok())
         });
@@ -481,7 +481,7 @@ impl SettingsWindow {
             .tab_stop(true)
             .debug_selector(END_SELECTOR)
             .accessibility_description(SharedString::from(format!(
-                "Ends every Terminal Session on {server} for every client."
+                "Ends every Terminal Session on {core} for every client."
             )))
             .on_activate(move |_, window, cx| {
                 let _ = owner.update(cx, |settings, cx| {

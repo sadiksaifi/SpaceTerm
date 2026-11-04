@@ -2,14 +2,14 @@
 use super::{Context, Reply, offline_token};
 use crate::{
     contract::{
-        self, Code, Confirmation, EndAllSessionsEffects, EndedSession, Envelope, Failure,
-        ServerEndAllSessions, ServerRef,
+        self, Code, Confirmation, CoreEndAllSessions, EndAllSessionsEffects, EndedSession,
+        Envelope, Failure, MachineRef,
     },
     state::RouteKey,
     work::dispatch::{self, Dispatch},
 };
-use spaceterm_server::{
-    connection::link::{Health, ServerLink},
+use spaceterm_core::{
+    connection::link::{CoreLink, Health},
     hierarchy::{Inventory, Mutation},
     labels,
 };
@@ -22,7 +22,7 @@ pub fn run(context: &Context<'_>, given: Option<&str>) -> Reply {
     if let Err(failure) = context.require_local() {
         return Reply::failure(COMMAND, None, failure);
     }
-    let mut server = None;
+    let mut core = None;
     let mut recovered = Vec::new();
     let result = (|| {
         if crate::interrupt::interrupted() {
@@ -38,24 +38,24 @@ pub fn run(context: &Context<'_>, given: Option<&str>) -> Reply {
                 } else if Instant::now() >= deadline {
                     Code::Timeout.into()
                 } else {
-                    contract::from_server_error(error)
+                    contract::from_core_error(error)
                 }
             })?;
-        let reference = ServerRef {
+        let reference = MachineRef {
             name: "local".into(),
             route: "local".into(),
             id: super::hex(
                 &connection
-                    .admitted_server_id()
-                    .map_err(contract::from_server_error)?,
+                    .admitted_machine_id()
+                    .map_err(contract::from_core_error)?,
             ),
         };
-        server = Some(reference.clone());
+        core = Some(reference.clone());
         let agent = context.agent();
-        let mut connect = |agent: Option<&spaceterm_server::protocol::AgentName>| {
-            spaceterm_server::ServerConnection::for_cli(
+        let mut connect = |agent: Option<&spaceterm_core::protocol::AgentName>| {
+            spaceterm_core::MachineConnection::for_cli(
                 context.identity,
-                spaceterm_server::CliRoute::Local,
+                spaceterm_core::CliRoute::Local,
                 agent.cloned(),
             )
         };
@@ -83,12 +83,12 @@ pub fn run(context: &Context<'_>, given: Option<&str>) -> Reply {
         recovered.extend_from_slice(journal.recovered());
         result
     })();
-    let mut reply = result.unwrap_or_else(|failure| Reply::failure(COMMAND, server, failure));
+    let mut reply = result.unwrap_or_else(|failure| Reply::failure(COMMAND, core, failure));
     reply.envelope = super::with_recovered(reply.envelope, recovered);
     reply
 }
 
-fn inventory(link: &ServerLink, deadline: Instant) -> Result<Inventory, Failure> {
+fn inventory(link: &CoreLink, deadline: Instant) -> Result<Inventory, Failure> {
     loop {
         if crate::interrupt::interrupted() {
             return Err(Code::Interrupted.into());
@@ -100,7 +100,7 @@ fn inventory(link: &ServerLink, deadline: Instant) -> Result<Inventory, Failure>
             return Ok(revision.inventory.clone());
         }
         if let Health::Closed(error) = link.health() {
-            return Err(contract::from_server_error(error.into()));
+            return Err(contract::from_core_error(error.into()));
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -109,13 +109,13 @@ fn inventory(link: &ServerLink, deadline: Instant) -> Result<Inventory, Failure>
 pub(crate) fn execute(
     inventory: &Inventory,
     journal: &mut dyn Dispatch,
-    server: ServerRef,
+    core: MachineRef,
     given: Option<&str>,
     now: SystemTime,
 ) -> Result<Reply, Failure> {
     let confirmation = inventory.close.as_ref().ok_or(Code::Changed)?;
     let observation = postcard::to_allocvec(&(
-        journal.server_id(),
+        journal.machine_id(),
         journal.client_id(),
         confirmation.boot,
         &confirmation.sessions,
@@ -146,11 +146,7 @@ pub(crate) fn execute(
         })?)?;
         let text = format!("Ended {} Terminal Sessions.\n", sessions.len());
         return Ok(Reply::new(
-            &Envelope::ok(
-                COMMAND,
-                Some(server),
-                ServerEndAllSessions { ended: sessions },
-            ),
+            &Envelope::ok(COMMAND, Some(core), CoreEndAllSessions { ended: sessions }),
             text,
         ));
     }
@@ -170,7 +166,7 @@ pub(crate) fn execute(
     Ok(Reply::new(
         &Envelope::confirmation(
             COMMAND,
-            Some(server),
+            Some(core),
             Confirmation {
                 token,
                 expires_at,

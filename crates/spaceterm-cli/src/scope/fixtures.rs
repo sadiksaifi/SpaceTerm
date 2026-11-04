@@ -1,6 +1,6 @@
 use super::*;
-use spaceterm_server::hierarchy::{Pane, Side, Tab, Workspace, WorktreeMembership};
-use spaceterm_server::repository::{self, WorktreeHead, WorktreeRecord};
+use spaceterm_core::hierarchy::{Pane, Side, Tab, Workspace, WorktreeMembership};
+use spaceterm_core::repository::{self, WorktreeHead, WorktreeRecord};
 
 pub(crate) fn id(byte: u8) -> Id {
     [byte; 32]
@@ -43,7 +43,7 @@ pub(crate) fn fixture() -> Snapshot {
     };
     inventory.repositories = Some(repositories.clone());
     Snapshot {
-        server: id(9),
+        core: id(9),
         inventory,
         repositories: Some(repositories),
     }

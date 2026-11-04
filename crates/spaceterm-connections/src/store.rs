@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use spaceterm_server::direct::{Endpoint, PairedDevice, ServerPin};
-use spaceterm_server::{Directory, Lock, LockWait, ServerError};
+use spaceterm_core::direct::{Endpoint, MachinePin, PairedDevice};
+use spaceterm_core::{CoreError, Directory, Lock, LockWait};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum UnpairState {
@@ -42,7 +42,7 @@ pub struct PendingEnrollment {
     pub route: [u8; 32],
     pub name: String,
     pub endpoint: String,
-    pub pin: ServerPin,
+    pub pin: MachinePin,
     pub claim: [u8; 32],
     pub credential: [u8; 32],
     pub credential_store: crate::StoreKind,
@@ -112,7 +112,7 @@ impl ConnectionStore {
     fn read(&self) -> Result<Document, StoreError> {
         match Directory::open(&self.root, false) {
             Ok(directory) => read(&directory),
-            Err(ServerError::NotSetUp) => Ok(Document::default()),
+            Err(CoreError::NotSetUp) => Ok(Document::default()),
             Err(_) => Err(StoreError::Unavailable),
         }
     }
@@ -393,8 +393,8 @@ fn read(directory: &Directory) -> Result<Document, StoreError> {
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty() && name != "local" && name.len() <= 128 && !name.chars().any(char::is_control)
 }
-fn valid_pin(pin: &ServerPin) -> bool {
-    pin.server != [0; 32]
+fn valid_pin(pin: &MachinePin) -> bool {
+    pin.core != [0; 32]
         && pin.public_key != [0; 32]
         && pin.certificate != [0; 32]
         && !pin.build.is_empty()

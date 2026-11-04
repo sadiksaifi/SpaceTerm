@@ -16,8 +16,8 @@ use spaceterm_connections::{
     self as connections, ConnectionStore, CredentialError, CredentialStore, SavedConnection,
     StoreError,
 };
-use spaceterm_server::direct::{DirectError, Invitation};
-use spaceterm_server::pane::control::{ClientName, MAX_CLIENT_NAME_CHARS};
+use spaceterm_core::direct::{DirectError, Invitation};
+use spaceterm_core::pane::control::{ClientName, MAX_CLIENT_NAME_CHARS};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -75,10 +75,10 @@ pub trait HeldOutcomes {
 struct NativeHeld<'a>(&'a str);
 impl HeldOutcomes for NativeHeld<'_> {
     fn count(&self, route: &[u8; 32]) -> Result<u32, Failure> {
-        let state = CliState::open(self.0).map_err(contract::from_server_error)?;
+        let state = CliState::open(self.0).map_err(contract::from_core_error)?;
         let held = state
             .held(&RouteKey::Paired(*route))
-            .map_err(contract::from_server_error)?;
+            .map_err(contract::from_core_error)?;
         Ok(held.into_iter().fold(0u32, |total, identity| {
             total
                 .saturating_add(identity.operations)
@@ -144,8 +144,8 @@ impl CommandOutput {
 
 pub fn execute(command: &ConnectionCommand, global: &Global, identity: &str) -> CommandOutput {
     let path = command_path(command);
-    let environment = if global.server.is_none() {
-        std::env::var_os("SPACETERM_SERVER")
+    let environment = if global.core.is_none() {
+        std::env::var_os("SPACETERM_MACHINE")
     } else {
         None
     };
@@ -157,14 +157,14 @@ pub fn execute(command: &ConnectionCommand, global: &Global, identity: &str) -> 
         Ok(environment) => environment,
         Err(failure) => return CommandOutput::failure(path, failure),
     };
-    match route::selected(global.server.as_deref(), environment) {
+    match route::selected(global.core.as_deref(), environment) {
         Ok("local") => {}
         Ok(_) => return CommandOutput::failure(path, usage("--server")),
         Err(failure) => return CommandOutput::failure(path, failure),
     }
-    let root = match spaceterm_server::cli_state_root(identity) {
+    let root = match spaceterm_core::cli_state_root(identity) {
         Ok(root) => root,
-        Err(error) => return CommandOutput::failure(path, contract::from_server_error(error)),
+        Err(error) => return CommandOutput::failure(path, contract::from_core_error(error)),
     };
     let store = ConnectionStore::new(root);
     let mut io = match terminal::Terminal::new(!global.json && !global.no_input) {
@@ -202,9 +202,9 @@ impl Connections<'_> {
         let path = command_path(command);
         if self
             .global
-            .server
+            .core
             .as_deref()
-            .is_some_and(|server| server != "local")
+            .is_some_and(|core| core != "local")
         {
             return CommandOutput::failure(path, usage("--server"));
         }
@@ -340,7 +340,7 @@ impl Connections<'_> {
             return Err(reserved_name());
         }
         if let Some(address) = address {
-            spaceterm_server::direct::Endpoint::parse(address).map_err(|_| usage("--address"))?;
+            spaceterm_core::direct::Endpoint::parse(address).map_err(|_| usage("--address"))?;
         }
         if !join && !self.allows_input() {
             return Err(Code::InteractionRequired.into());
@@ -348,8 +348,8 @@ impl Connections<'_> {
         self.checkpoint(deadline)?;
         let link = self.io.invitation(deadline)?;
         let mut invitation = Invitation::parse(&link).map_err(contract::from_direct_error)?;
-        if invitation.server_pin().build != self.identity {
-            return Err(contract::from_direct_error(DirectError::WrongServer));
+        if invitation.machine_pin().build != self.identity {
+            return Err(contract::from_direct_error(DirectError::WrongMachine));
         }
         if let Some(address) = address {
             invitation = invitation
@@ -358,7 +358,7 @@ impl Connections<'_> {
         }
         let name = name
             .map(str::to_owned)
-            .unwrap_or_else(|| slug(invitation.server_name()));
+            .unwrap_or_else(|| slug(invitation.machine_name()));
         if !connections::valid_name(&name) {
             return Err(reserved_name());
         }

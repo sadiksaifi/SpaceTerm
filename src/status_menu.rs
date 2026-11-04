@@ -6,7 +6,7 @@ pub(crate) mod service_changes;
 pub(crate) mod worker;
 
 use gpui::{App, Global};
-use spaceterm_server::service::ServiceStatus;
+use spaceterm_core::service::ServiceStatus;
 use std::rc::Rc;
 
 /// Work deferred until no admitted server operation is running.
@@ -109,19 +109,19 @@ pub(crate) fn after_operations(cx: &mut App, work: impl FnOnce(&mut App) + 'stat
 /// Subscribes `changes` to this client's link to its local server, now or once the client
 /// creates that link's handle. The link reports a server this client used ending or admitting it
 /// again. Without a link, the worker's [`service_changes`] watch reports the same changes.
-pub(crate) fn follow_local_server(
-    changes: std::sync::Weak<dyn spaceterm_server::connection::link::LinkSink>,
+pub(crate) fn follow_local_core(
+    changes: std::sync::Weak<dyn spaceterm_core::connection::link::LinkSink>,
     cx: &mut App,
 ) {
-    use crate::ui::server_worktrees::Client;
+    use crate::ui::core_worktrees::Client;
     if let Some(client) = cx.try_global::<Client>() {
-        client.server.subscribe(changes);
+        client.core.subscribe(changes);
         return;
     }
     let mut pending = Some(changes);
     cx.observe_global::<Client>(move |cx| {
         if let Some(changes) = pending.take() {
-            cx.global::<Client>().server.subscribe(changes);
+            cx.global::<Client>().core.subscribe(changes);
         }
     })
     .detach();
@@ -130,7 +130,7 @@ pub(crate) fn follow_local_server(
 /// A status-surface operation succeeded. A server it left running reaches every Workspace Window
 /// still waiting on it, as a Start from Settings does. Nothing here opens a window.
 pub(crate) fn operation_succeeded(cx: &mut App, status: ServiceStatus) {
-    crate::ui::settings_window::local_operations::LocalServerOperations::changed_elsewhere(
+    crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
         cx, status,
     );
 }

@@ -1338,7 +1338,7 @@ mod tests {
             actions,
             [
                 NewWorkspace.name(),
-                crate::ui::settings_window::AddServer.name(),
+                crate::ui::settings_window::AddMachine.name(),
                 crate::ui::OpenLocalDirectory.name(),
                 ChooseWorkspace.name(),
                 NewTab.name(),

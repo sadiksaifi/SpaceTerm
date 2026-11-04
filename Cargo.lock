@@ -6169,8 +6169,8 @@ dependencies = [
  "smol_str",
  "socket2",
  "spaceterm-connections",
+ "spaceterm-core",
  "spaceterm-directories",
- "spaceterm-server",
  "spaceterm-ui",
  "tar",
  "thiserror 2.0.19",
@@ -6202,8 +6202,8 @@ dependencies = [
  "signal-hook",
  "spaceterm",
  "spaceterm-connections",
+ "spaceterm-core",
  "spaceterm-directories",
- "spaceterm-server",
  "zeroize",
 ]
 
@@ -6223,22 +6223,14 @@ dependencies = [
  "security-framework-sys",
  "serde",
  "serde_json",
+ "spaceterm-core",
  "spaceterm-directories",
- "spaceterm-server",
  "zbus",
  "zeroize",
 ]
 
 [[package]]
-name = "spaceterm-directories"
-version = "0.0.0"
-dependencies = [
- "libc",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "spaceterm-server"
+name = "spaceterm-core"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
@@ -6265,6 +6257,14 @@ dependencies = [
  "thiserror 2.0.19",
  "ureq",
  "zeroize",
+]
+
+[[package]]
+name = "spaceterm-directories"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

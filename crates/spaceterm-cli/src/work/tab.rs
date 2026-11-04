@@ -1,6 +1,6 @@
 use super::*;
 use crate::scope::{self, Effect, ScopeArgs, Want};
-use spaceterm_server::{hierarchy::CloseTarget, organize};
+use spaceterm_core::{hierarchy::CloseTarget, organize};
 
 pub fn create(
     snapshot: &Snapshot,
@@ -24,7 +24,7 @@ pub fn create(
     };
     let source = match &mutation {
         Mutation::CreateTab { source, .. }
-        | Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab { source, .. }) => {
+        | Mutation::Worktree(spaceterm_core::worktree::Operation::OpenTab { source, .. }) => {
             *source
         }
         _ => None,

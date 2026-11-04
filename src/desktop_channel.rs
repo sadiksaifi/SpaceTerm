@@ -54,7 +54,7 @@ pub type Id = [u8; 32];
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionContext {
-    pub server: Id,
+    pub core: Id,
     pub pane: Id,
     pub session: Id,
 }
@@ -78,7 +78,7 @@ pub enum Request {
     },
     /// Brings the desktop's own view to a Workspace, and to a Tab and Pane within it when given.
     Show {
-        server: Id,
+        core: Id,
         workspace: Id,
         tab: Option<Id>,
         pane: Option<Id>,
@@ -106,7 +106,7 @@ pub enum Reply {
     Done,
     Refused(Refusal),
     /// The desktop's Terminal Diagnostics counters, totals since it started.
-    Diagnostics(spaceterm_server::diagnostics::TerminalCounterSnapshot),
+    Diagnostics(spaceterm_core::diagnostics::TerminalCounterSnapshot),
 }
 
 /// Why the desktop refused a request. Each names a fixed classification only.
@@ -413,7 +413,7 @@ mod tests {
     fn open(preview: bool) -> Request {
         Request::Open {
             session: SessionContext {
-                server: [1; 32],
+                core: [1; 32],
                 pane: [2; 32],
                 session: [3; 32],
             },
@@ -559,7 +559,7 @@ mod tests {
             open(false),
             open(true),
             Request::Show {
-                server: [1; 32],
+                core: [1; 32],
                 workspace: [4; 32],
                 tab: Some([5; 32]),
                 pane: None,

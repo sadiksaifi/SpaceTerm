@@ -2,14 +2,14 @@
 use super::{lifecycle, status, unpair, update};
 use crate::contract::golden::assert_golden;
 use crate::contract::{
-    Code, DeviceRef, Envelope, Failure, HeldOutcomes, Launcher, Receipt, ReceiptState,
-    RecoveredIdentity, RecoveredKind, RecoveredOperation, RecoveredOutcome, RecoveredState,
-    ServerRef, ServerSetup, ServerStart, ServerUnpair, ServiceAction, SetupNetwork, SetupStep,
-    SetupStepName, StepResult, UpdateEffects, UpdateKind, Version,
+    Code, CoreSetup, CoreStart, CoreUnpair, DeviceRef, Envelope, Failure, HeldOutcomes, Launcher,
+    MachineRef, Receipt, ReceiptState, RecoveredIdentity, RecoveredKind, RecoveredOperation,
+    RecoveredOutcome, RecoveredState, ServiceAction, SetupNetwork, SetupStep, SetupStepName,
+    StepResult, UpdateEffects, UpdateKind, Version,
 };
-use spaceterm_server::diagnostics::{PaneWorkerWaits, TerminalCounterSnapshot};
-use spaceterm_server::service::lane::client::Outcome;
-use spaceterm_server::service::lane::{
+use spaceterm_core::diagnostics::{PaneWorkerWaits, TerminalCounterSnapshot};
+use spaceterm_core::service::lane::client::Outcome;
+use spaceterm_core::service::lane::{
     LaneAction, LaneActivation, LaneCheck, LaneDevice, LaneEffects, LaneNetwork,
     LaneOperationState, LaneReceipt, LaneStaged, LaneStatus, LaneUpdateKind, LaneVersion,
 };
@@ -19,16 +19,16 @@ const OPERATION: &str = "0123456789abcdef0123456789abcdef";
 const BOOT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const NEW_BOOT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
-fn server() -> ServerRef {
-    ServerRef {
+fn core() -> MachineRef {
+    MachineRef {
         name: "penguin".into(),
         route: format!("id:{}", "4e".repeat(32)),
         id: "5b".repeat(32),
     }
 }
 
-fn local() -> ServerRef {
-    ServerRef {
+fn local() -> MachineRef {
+    MachineRef {
         name: "local".into(),
         route: "local".into(),
         id: "5b".repeat(32),
@@ -65,7 +65,7 @@ fn assert_exit<D: serde::Serialize>(envelope: &Envelope<D>, exit: u8) {
 }
 
 #[test]
-fn server_status_reports_service_network_devices_and_held_outcomes() {
+fn core_status_reports_service_network_devices_and_held_outcomes() {
     let lane = LaneStatus {
         running: true,
         stopped: false,
@@ -108,15 +108,15 @@ fn server_status_reports_service_network_devices_and_held_outcomes() {
         identity: RecoveredIdentity::Agent("agent-1".parse().unwrap()),
         count: 3,
     }];
-    let (envelope, _) = status::envelope(server(), &lane, held, recovered());
+    let (envelope, _) = status::envelope(core(), &lane, held, recovered());
     assert_exit(&envelope, 0);
     assert_golden("server_status", &envelope);
 }
 
 #[test]
-fn server_status_of_an_unreachable_server_exits_5() {
+fn core_status_of_an_unreachable_core_exits_5() {
     let envelope = status::unreachable_envelope(
-        server(),
+        core(),
         Failure::new(Code::Unreachable),
         Some("2026-10-30T11:00:00Z".into()),
     );
@@ -140,7 +140,7 @@ fn stop_effects() -> LaneEffects {
 fn a_stop_preview_names_the_sessions_it_ends_and_exits_3() {
     let envelope = lifecycle::preview_envelope(
         "server.stop",
-        server(),
+        core(),
         format!("c1-{}", "ab".repeat(32)),
         EXPIRES.into(),
         &stop_effects(),
@@ -175,7 +175,7 @@ fn a_remote_stop_is_unconfirmed_with_an_observed_shutdown() {
         },
     );
     assert!(!settled.acknowledged);
-    let envelope = lifecycle::operation_envelope("server.stop", server(), settled, Vec::new());
+    let envelope = lifecycle::operation_envelope("server.stop", core(), settled, Vec::new());
     assert_exit(&envelope, 7);
     assert_golden("server_stop_shutdown", &envelope);
 }
@@ -195,7 +195,7 @@ fn a_restart_that_returned_with_a_new_boot_is_done() {
         },
     );
     assert!(settled.acknowledged);
-    let envelope = lifecycle::operation_envelope("server.restart", server(), settled, recovered());
+    let envelope = lifecycle::operation_envelope("server.restart", core(), settled, recovered());
     assert_exit(&envelope, 0);
     assert_golden("server_restart_done", &envelope);
 }
@@ -245,8 +245,7 @@ fn failed_not_performed_and_unconfirmed_restarts_map_to_their_codes() {
         ),
     ] {
         let settled = lifecycle::settle(ServiceAction::Restart, outcome);
-        let envelope =
-            lifecycle::operation_envelope("server.restart", server(), settled, Vec::new());
+        let envelope = lifecycle::operation_envelope("server.restart", core(), settled, Vec::new());
         assert_exit(&envelope, exit);
         assert_golden(name, &envelope);
     }
@@ -259,7 +258,7 @@ fn update_check_lists_approved_latest_and_staged() {
         latest: Some(lane_version("0.7.1", 'b')),
         staged: vec![lane_version("0.7.1", 'b')],
     });
-    let envelope = update::check_envelope(server(), data, Vec::new());
+    let envelope = update::check_envelope(core(), data, Vec::new());
     assert_exit(&envelope, 0);
     assert_golden("server_update_check", &envelope);
 }
@@ -273,9 +272,9 @@ fn an_update_preview_warns_when_the_candidate_has_another_protocol_major() {
         ends_sessions: 1,
         sessions: vec!["0e".repeat(32)],
     };
-    let major = spaceterm_server::protocol::MAJOR + 1;
+    let major = spaceterm_core::protocol::MAJOR + 1;
     let envelope = update::preview_envelope(
-        server(),
+        core(),
         format!("c1-{}", "cd".repeat(32)),
         EXPIRES.into(),
         effects,
@@ -287,11 +286,11 @@ fn an_update_preview_warns_when_the_candidate_has_another_protocol_major() {
     // The same major adds no warning.
     let lane = LaneEffects {
         kind: Some(LaneUpdateKind::Update),
-        to_major: Some(spaceterm_server::protocol::MAJOR),
+        to_major: Some(spaceterm_core::protocol::MAJOR),
         ..stop_effects()
     };
     let same = update::preview_envelope(
-        server(),
+        core(),
         "c1-00".into(),
         EXPIRES.into(),
         UpdateEffects {
@@ -308,7 +307,7 @@ fn an_update_preview_warns_when_the_candidate_has_another_protocol_major() {
 }
 
 #[test]
-fn a_return_preview_on_the_servers_machine_ends_no_sessions() {
+fn a_return_preview_on_the_machines_machine_ends_no_sessions() {
     let envelope = update::preview_envelope(
         local(),
         format!("c1-{}", "ef".repeat(32)),
@@ -344,7 +343,7 @@ fn a_settled_update_reports_its_receipt_and_version() {
         },
     );
     let envelope = update::operation_envelope(
-        server(),
+        core(),
         settled.receipt,
         settled.failure,
         Some(version("0.8.0", 'b')),
@@ -367,7 +366,7 @@ fn a_settled_update_reports_its_receipt_and_version() {
         },
     );
     let envelope = update::operation_envelope(
-        server(),
+        core(),
         unresolved.receipt,
         unresolved.failure,
         Some(version("0.8.0", 'b')),
@@ -394,7 +393,7 @@ fn unpair_previews_then_revokes_one_exact_device() {
     let revoked = Envelope::ok(
         "server.unpair",
         Some(local()),
-        ServerUnpair { revoked: device },
+        CoreUnpair { revoked: device },
     );
     assert_exit(&revoked, 0);
     assert_golden("server_unpair_revoked", &revoked);
@@ -402,7 +401,7 @@ fn unpair_previews_then_revokes_one_exact_device() {
 
 #[test]
 fn unpair_lists_no_label_for_ambiguous_names() {
-    let device = |id: u8| spaceterm_server::direct::DeviceInfo {
+    let device = |id: u8| spaceterm_core::direct::DeviceInfo {
         pairing: [id; 32],
         client: [id; 32],
         name: "Laptop".into(),
@@ -434,7 +433,7 @@ fn setup_reports_each_step() {
     let envelope = Envelope::ok(
         "server.setup",
         Some(local()),
-        ServerSetup {
+        CoreSetup {
             steps: vec![
                 SetupStep {
                     step: SetupStepName::InstallService,
@@ -474,7 +473,7 @@ fn setup_reports_each_step() {
 
 #[test]
 fn start_succeeds_locally_and_is_local_only_remotely() {
-    let started = Envelope::ok("server.start", Some(local()), ServerStart { running: true });
+    let started = Envelope::ok("server.start", Some(local()), CoreStart { running: true });
     assert_exit(&started, 0);
     assert_golden("server_start", &started);
     let remote = Envelope::error(

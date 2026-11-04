@@ -4,8 +4,8 @@
 //! and no input can arrive between its checks and the write it returns.
 use super::*;
 use crate::terminal::metadata::PromptZone;
-use spaceterm_server::pane::run::Observation;
-use spaceterm_server::protocol::{HistoryPosition, RunRefusal};
+use spaceterm_core::pane::run::Observation;
+use spaceterm_core::protocol::{HistoryPosition, RunRefusal};
 
 /// A run the owning shell's prompt accepted. The worker writes `bytes` as one write.
 #[derive(Debug, PartialEq, Eq)]

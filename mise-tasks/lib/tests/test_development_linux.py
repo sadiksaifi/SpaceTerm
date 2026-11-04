@@ -13,11 +13,11 @@ import unittest
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, server_package
+from spaceterm_tasks import ROOT, core_package
 from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
-from spaceterm_tasks.server_builds import _source
+from spaceterm_tasks.core_builds import _source
 
-from tests.server_artifact_fixture import archive_tree, populate, seal_foreign
+from tests.core_artifact_fixture import archive_tree, populate, seal_foreign
 
 ICON_DOCUMENT = ROOT / ICON_DOCUMENT
 
@@ -66,7 +66,7 @@ sys.argv = sys.argv[2:]
 def package(identity, *, target):
     assert identity == "spaceterm-development"
     return tuple(pathlib.Path(value) for value in artifacts[target])
-with patch("spaceterm_tasks.server_builds.package", package):
+with patch("spaceterm_tasks.core_builds.package", package):
     runpy.run_path(sys.argv[0], run_name="__main__")
 """
 
@@ -98,9 +98,9 @@ class LinuxPrefixTests(unittest.TestCase):
             )
         for name in ("server-nonproduction-trust.json", "server-resources.json"):
             shutil.copyfile(ROOT / "packaging" / name, self.root / "packaging" / name)
-        major = self.root / server_package.PROTOCOL_MAJOR_SOURCE
+        major = self.root / core_package.PROTOCOL_MAJOR_SOURCE
         major.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
+        shutil.copyfile(ROOT / core_package.PROTOCOL_MAJOR_SOURCE, major)
         (self.root / ".gitignore").write_text("target/\nrecord\n__pycache__/\n")
         for arguments in (
             ("init", "-q"),
@@ -111,7 +111,7 @@ class LinuxPrefixTests(unittest.TestCase):
         ):
             subprocess.run(["git", "-C", str(self.root), *arguments], check=True)
         self.artifacts = self.private / "server-packages.json"
-        self.artifacts.write_text(json.dumps(self.server_artifacts()))
+        self.artifacts.write_text(json.dumps(self.core_artifacts()))
         self.driver = self.private / "catalog-driver.py"
         self.driver.write_text(CATALOG_DRIVER)
         self.commands = self.private / "commands"
@@ -120,11 +120,11 @@ class LinuxPrefixTests(unittest.TestCase):
         (self.commands / "cargo").chmod(0o755)
         self.record = self.root / "record"
 
-    def server_artifacts(self):
+    def core_artifacts(self):
         artifacts = {}
-        for target in server_package.TARGETS.values():
+        for target in core_package.TARGETS.values():
             tree = self.private / "server-packages" / target / "server"
-            executable = tree / server_package.executable_path(target, "spaceterm-development")
+            executable = tree / core_package.executable_path(target, "spaceterm-development")
             executable.parent.mkdir(parents=True)
             info = {
                 "schema": 1,
@@ -133,7 +133,7 @@ class LinuxPrefixTests(unittest.TestCase):
                 "target": target,
                 "commit": "a" * 40,
                 "version": "dev.aaaaaaaaaaaa",
-                "protocol_major": server_package.PROTOCOL_MAJOR,
+                "protocol_major": core_package.PROTOCOL_MAJOR,
             }
             if target == "x86_64-unknown-linux-gnu":
                 source = f"""
@@ -145,7 +145,7 @@ int main(int argc, char **argv) {{
         return 0;
     }}
     if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "check") == 0) {{
-        puts("Server checks passed.");
+        puts("Core checks passed.");
         return 0;
     }}
     return 1;

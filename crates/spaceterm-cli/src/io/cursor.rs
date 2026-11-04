@@ -11,7 +11,7 @@ const MAX_TEXT: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
-    pub server: [u8; 16],
+    pub core: [u8; 16],
     pub pane: [u8; 16],
     pub session: [u8; 16],
     pub epoch: u64,
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn cursors_round_trip_and_refuse_anything_else() {
         let cursor = Cursor {
-            server: [1; 16],
+            core: [1; 16],
             pane: [2; 16],
             session: [3; 16],
             epoch: 4,

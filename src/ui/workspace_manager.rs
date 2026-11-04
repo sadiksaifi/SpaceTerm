@@ -5,7 +5,7 @@ use super::workspace_chrome::{
     WorkspaceChromeStatusHosts,
 };
 use super::workspace_sidebar::{
-    OUTSIDE_PANE_LABEL, SERVER_WORKSPACE_BADGE, SidebarEvent, WorkspaceMenuCommand,
+    CORE_WORKSPACE_BADGE, OUTSIDE_PANE_LABEL, SidebarEvent, WorkspaceMenuCommand,
     WorkspaceRowViewModel, WorkspaceSidebar, WorktreeMenuCommand, remote_connection_status,
 };
 #[cfg(test)]
@@ -19,8 +19,8 @@ use std::rc::Rc;
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use super::directory_picker::{
-    DirectoryPicker, DirectoryPickerEvent, DirectorySelection, DirectorySource,
-    LocalDirectorySource, ServerDirectorySource,
+    CoreDirectorySource, DirectoryPicker, DirectoryPickerEvent, DirectorySelection,
+    DirectorySource, LocalDirectorySource,
 };
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
 use super::workspace_creation::WorkspaceCreation;
@@ -41,7 +41,7 @@ use crate::appearance::Color;
 use crate::close_confirmation::{CloseConfirmation, CloseTarget};
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    PaneId, ServerConnectionPhase, TabId, ValidatedLocalDirectory, WorkspaceCollection,
+    MachineConnectionPhase, PaneId, TabId, ValidatedLocalDirectory, WorkspaceCollection,
     WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
@@ -102,9 +102,9 @@ pub(crate) struct WorkspaceManagerAdapters {
     pub(crate) directory_selection: Rc<dyn SystemDirectorySelection>,
     pub(crate) window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     /// The account-local server this window launches and presents. It owns local Workspaces.
-    pub(crate) local_server: launch::LocalServerAdapters,
+    pub(crate) local_core: launch::LocalCoreAdapters,
     /// Each presented server's directory channel, which answers questions about its own paths.
-    pub(crate) server_directories: super::directory_picker::ServerDirectories,
+    pub(crate) core_directories: super::directory_picker::CoreDirectories,
 }
 
 /// Owns directory selection, its target, and the field version its draft began at.
@@ -148,7 +148,7 @@ enum PinTarget {
     NewLocalWorkspace { name: String },
     /// A new Workspace on the paired server at `key`, pinned to a directory there and named
     /// `name` unless blank.
-    NewServerWorkspace { key: ServerKey, name: String },
+    NewCoreWorkspace { key: MachineKey, name: String },
 }
 
 /// How applying a chosen directory to a pin target ended.
@@ -175,7 +175,7 @@ enum LocalPinSelection {
 }
 
 /// The server and server identity of a detached Workspace the Workspace Switcher offers.
-type DetachedWorkspace = (ServerKey, spaceterm_server::hierarchy::Id);
+type DetachedWorkspace = (MachineKey, spaceterm_core::hierarchy::Id);
 
 /// What one Workspace Switcher result chooses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,8 +189,8 @@ enum SwitcherChoice {
 /// A Workspace a person asked to open on a paired server's directory, waiting for that server's
 /// edits or its answer about an existing pin.
 #[derive(Clone)]
-pub(super) struct PendingServerDirectory {
-    key: ServerKey,
+pub(super) struct PendingCoreDirectory {
+    key: MachineKey,
     name: String,
     directory: PathBuf,
     /// Where navigation stood when the person chose the directory. Navigation while the server
@@ -216,24 +216,24 @@ struct NavigationMark {
 
 /// One question to the owning server about the directory a person chose in Open Remote
 /// Directory: which attached Workspace there, if any, is already pinned to it.
-struct ServerDirectoryMatch {
+struct CoreDirectoryMatch {
     directory: PathBuf,
     /// The Workspaces asked about, with their pins, in sidebar order.
     pins: Vec<(WorkspaceId, PathBuf)>,
-    server: crate::server_connection::ServerConnection,
+    core: crate::machine_connection::MachineConnection,
     /// The position in `pins` the server matched, once it answers.
     answer: Option<Result<Option<usize>, super::directory_picker::DirectorySourceError>>,
     _task: Task<()>,
 }
 
-impl ServerDirectoryMatch {
+impl CoreDirectoryMatch {
     fn asks(
         &self,
         directory: &PathBuf,
         pins: &[(WorkspaceId, PathBuf)],
-        server: &crate::server_connection::ServerConnection,
+        core: &crate::machine_connection::MachineConnection,
     ) -> bool {
-        self.directory == *directory && self.pins == pins && self.server.same_handle(server)
+        self.directory == *directory && self.pins == pins && self.core.same_handle(core)
     }
 }
 
@@ -243,12 +243,12 @@ const REVEAL_LIFETIME: std::time::Duration = std::time::Duration::from_secs(5);
 /// A Reveal from a Focused Pane, waiting for its server's publication.
 #[derive(Clone, Copy)]
 struct PendingReveal {
-    key: ServerKey,
+    key: MachineKey,
     /// The origin Pane's Workspace.
     workspace_id: WorkspaceId,
     /// Where navigation in that Workspace stood when the Reveal arrived.
     navigation: (u64, TabId, u64),
-    target: spaceterm_server::hierarchy::Placement,
+    target: spaceterm_core::hierarchy::Placement,
     deadline: std::time::Instant,
 }
 
@@ -258,11 +258,11 @@ pub(crate) struct WorkspaceManager {
     transient: WorkspaceTransientUi,
     workspace_switcher: ComboBoxHandle<SwitcherChoice, WorkspaceCreation>,
     /// The Workspace Open Remote Directory is opening, until its server takes it.
-    pub(super) pending_server_directory: Option<PendingServerDirectory>,
+    pub(super) pending_core_directory: Option<PendingCoreDirectory>,
     /// The owning server's answer to whether a Workspace there already uses the directory the
     /// person chose to open.
-    server_directory_match: Option<ServerDirectoryMatch>,
-    server_directories: super::directory_picker::ServerDirectories,
+    core_directory_match: Option<CoreDirectoryMatch>,
+    core_directories: super::directory_picker::CoreDirectories,
     sidebar: Entity<WorkspaceSidebar>,
     local_filesystem: LocalFilesystemAuthority,
     workspaces: WorkspaceCollection<Entity<TabManager>>,
@@ -277,9 +277,9 @@ pub(crate) struct WorkspaceManager {
     /// The server whose creation this window presents without opening it, while the reading
     /// right after that creation's submission runs, because newer navigation superseded the
     /// person's original choice.
-    quiet_creation: Option<ServerKey>,
+    quiet_creation: Option<MachineKey>,
     /// Follows the keyboard owner a pending Open Remote Directory settled on.
-    server_directory_keyboard: Option<gpui::Subscription>,
+    core_directory_keyboard: Option<gpui::Subscription>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
@@ -298,11 +298,11 @@ pub(crate) struct WorkspaceManager {
     workspace_repositories: workspace_repositories::WorkspaceRepositories,
     /// Each presented SpaceTerm Server's Workspaces, their edit state, and the answers still to
     /// present. Adopting a server adds its Workspaces beside the others and changes none of them.
-    binding: ServerBindings,
+    binding: CoreBindings,
     /// Follows the desktop's paired connections while the window lives.
-    _direct_servers: Option<crate::ui::direct_servers::DirectChanges>,
+    _direct_machines: Option<crate::ui::direct_machines::DirectChanges>,
     /// Each presented paired route's Pane opener and the connection it follows.
-    direct_routes: direct_servers::DirectRoutes,
+    direct_routes: direct_machines::DirectRoutes,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
     /// Eases the empty stage's top edge as the band above it fills or empties, on the sidebar's
@@ -355,8 +355,8 @@ impl WorkspaceManager {
             lifecycle: lifecycle_dependencies,
             directory_selection,
             window_drag: operating_system_window_drag_platform,
-            local_server,
-            server_directories,
+            local_core,
+            core_directories,
         } = adapters;
         let pane_construction = PaneConstruction::new(
             key_input_adapter_factory,
@@ -373,7 +373,7 @@ impl WorkspaceManager {
             }
             manager.flush_display_order();
             // The direct registry outlives this window's interest in it only until quit.
-            manager._direct_servers = None;
+            manager._direct_machines = None;
             async {}
         })
         .detach();
@@ -410,9 +410,9 @@ impl WorkspaceManager {
                 local_selection_pending: false,
             },
             workspace_switcher: ComboBoxHandle::default(),
-            pending_server_directory: None,
-            server_directory_match: None,
-            server_directories,
+            pending_core_directory: None,
+            core_directory_match: None,
+            core_directories,
             sidebar,
             workspaces,
             local_filesystem,
@@ -423,7 +423,7 @@ impl WorkspaceManager {
             pin_operation: 0,
             activation_epoch: 0,
             quiet_creation: None,
-            server_directory_keyboard: None,
+            core_directory_keyboard: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(|cx| super::updates::UpdateControl::new(window, cx)),
@@ -435,19 +435,19 @@ impl WorkspaceManager {
             modal_reread: None,
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             workspace_repositories: workspace_repositories::WorkspaceRepositories::default(),
-            binding: ServerBindings::default(),
-            _direct_servers: None,
-            direct_routes: direct_servers::DirectRoutes::default(),
+            binding: CoreBindings::default(),
+            _direct_machines: None,
+            direct_routes: direct_machines::DirectRoutes::default(),
             empty_focus: cx.focus_handle(),
             empty_band: std::cell::RefCell::default(),
-            launch: launch::LocalLaunchState::new(local_server),
+            launch: launch::LocalLaunchState::new(local_core),
             display_order: display_order::DisplayOrder::default(),
             restoration: crate::ui::remembered_view::Restoration::none(),
             person_keys: None,
         };
         manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
-        manager.follow_direct_servers(window, cx);
+        manager.follow_direct_machines(window, cx);
         manager
     }
 
@@ -673,7 +673,7 @@ impl WorkspaceManager {
     fn active_directory_recovery(
         &self,
         cx: &App,
-    ) -> Option<Entity<super::server_pane::DirectoryRecovery>> {
+    ) -> Option<Entity<super::core_pane::DirectoryRecovery>> {
         self.active_tab_manager()
             .and_then(|manager| manager.read(cx).directory_recovery(cx))
     }
@@ -691,7 +691,7 @@ impl WorkspaceManager {
                     .binding
                     .owner(workspace.id())
                     .and_then(|key| self.binding.origin(key))
-                    .is_some_and(|origin| matches!(origin, ServerOrigin::Direct(_)));
+                    .is_some_and(|origin| matches!(origin, MachineOrigin::Direct(_)));
                 let icon = if remote {
                     IconName::Globe
                 } else {
@@ -882,7 +882,7 @@ impl WorkspaceManager {
             let filesystem = binding.sessions().local_filesystem()?;
             self.workspaces.iter().find_map(|entry| {
                 let pin = binding
-                    .server_workspace(entry.id())?
+                    .core_workspace(entry.id())?
                     .pinned_directory
                     .as_deref()?;
                 filesystem
@@ -925,7 +925,7 @@ impl WorkspaceManager {
                 self.open_local_directory_workspace(directory, name, window, cx)
             }
             // A paired server's Workspace never takes a directory on this computer.
-            PinTarget::NewServerWorkspace { .. } => PinApplication::Failed,
+            PinTarget::NewCoreWorkspace { .. } => PinApplication::Failed,
         }
     }
 
@@ -986,14 +986,14 @@ impl WorkspaceManager {
             PinTarget::NewLocalWorkspace { .. } => {
                 crate::keybindings::Command::OpenLocalDirectory.label()
             }
-            PinTarget::NewServerWorkspace { .. } => "Open Remote Directory",
+            PinTarget::NewCoreWorkspace { .. } => "Open Remote Directory",
         };
         // Another computer's server Workspace browses that server's own directories. Nothing on
         // this computer reads or validates them.
-        let server = match &target {
+        let core = match &target {
             PinTarget::Workspace(workspace_id)
                 if self.has_workspace(*workspace_id)
-                    && !self.is_local_server_workspace(*workspace_id) =>
+                    && !self.is_local_core_workspace(*workspace_id) =>
             {
                 let Some(source) = self.owning_directory_source(*workspace_id, cx) else {
                     Self::show_refusal(
@@ -1007,8 +1007,8 @@ impl WorkspaceManager {
                 };
                 Some(source)
             }
-            PinTarget::NewServerWorkspace { key, .. } => {
-                let Some(source) = self.server_directory_source(*key, cx) else {
+            PinTarget::NewCoreWorkspace { key, .. } => {
+                let Some(source) = self.core_directory_source(*key, cx) else {
                     Self::show_refusal(
                         "open a remote directory",
                         super::workspaces::WorkspaceRefusalReason::Offline,
@@ -1022,8 +1022,8 @@ impl WorkspaceManager {
             }
             _ => None,
         };
-        let remote = server.is_some();
-        let source: Rc<dyn DirectorySource> = match server {
+        let remote = core.is_some();
+        let source: Rc<dyn DirectorySource> = match core {
             Some(source) => Rc::new(source),
             None => Rc::new(LocalDirectorySource::new(
                 self.local_filesystem.clone(),
@@ -1064,19 +1064,19 @@ impl WorkspaceManager {
                             }
                             (
                                 true,
-                                DirectorySelection::Server(directory),
+                                DirectorySelection::Core(directory),
                                 PinTarget::Workspace(workspace_id),
                             ) if remote => PinApplication::from_applied(
-                                manager.pin_server_directory(workspace_id, directory, window, cx),
+                                manager.pin_machine_directory(workspace_id, directory, window, cx),
                             ),
                             (
                                 true,
-                                DirectorySelection::Server(directory),
-                                PinTarget::NewServerWorkspace { key, name },
+                                DirectorySelection::Core(directory),
+                                PinTarget::NewCoreWorkspace { key, name },
                             ) if remote => {
                                 manager.pin_operation = manager.pin_operation.wrapping_add(1);
                                 manager.transient.end_pin();
-                                manager.open_server_directory(key, name, directory, window, cx);
+                                manager.open_core_directory(key, name, directory, window, cx);
                                 PinApplication::Applied
                             }
                             _ => PinApplication::Failed,
@@ -1104,11 +1104,11 @@ impl WorkspaceManager {
                                     // A directory still waiting for its server keeps the owner
                                     // this restoration chose, not the closing chooser.
                                     if manager
-                                        .pending_server_directory
+                                        .pending_core_directory
                                         .as_ref()
                                         .is_some_and(|pending| pending.keyboard.is_none())
                                     {
-                                        manager.settle_server_directory_keyboard(window, cx);
+                                        manager.settle_core_directory_keyboard(window, cx);
                                     }
                                     cx.notify();
                                 });
@@ -1157,7 +1157,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(key) = self.server_key(&super::ServerTarget::Direct(route)) else {
+        let Some(key) = self.machine_key(&super::MachineTarget::Direct(route)) else {
             Self::show_refusal(
                 "open a remote directory",
                 super::workspaces::WorkspaceRefusalReason::Offline,
@@ -1166,22 +1166,22 @@ impl WorkspaceManager {
             );
             return;
         };
-        self.choose_directory(PinTarget::NewServerWorkspace { key, name }, window, cx);
+        self.choose_directory(PinTarget::NewCoreWorkspace { key, name }, window, cx);
     }
 
     /// Opens a Workspace on the paired server at `key` pinned to `directory` there, named `name`
     /// unless blank, or activates the Workspace already pinned to that directory. Only that
     /// server compares its directories, and nothing reads this computer's.
-    pub(super) fn open_server_directory(
+    pub(super) fn open_core_directory(
         &mut self,
-        key: ServerKey,
+        key: MachineKey,
         name: String,
         directory: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.server_directory_match = None;
-        self.pending_server_directory = Some(PendingServerDirectory {
+        self.core_directory_match = None;
+        self.pending_core_directory = Some(PendingCoreDirectory {
             key,
             name,
             directory,
@@ -1189,29 +1189,29 @@ impl WorkspaceManager {
             keyboard: None,
             keyboard_moved: false,
         });
-        self.server_directory_keyboard = None;
+        self.core_directory_keyboard = None;
         // A chooser still open restores focus as it closes, which is not the person's intent, so
         // the keyboard owner settles after that.
         if self.pin_picker.is_none() {
-            self.settle_server_directory_keyboard(window, cx);
+            self.settle_core_directory_keyboard(window, cx);
         }
-        self.continue_server_directory(window, cx);
+        self.continue_core_directory(window, cx);
     }
 
     /// Records what holds the keyboard for the pending Open Remote Directory, and follows the
     /// person moving it elsewhere before the server answers.
-    fn settle_server_directory_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn settle_core_directory_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let keyboard = window.focused(cx);
-        let Some(pending) = self.pending_server_directory.as_mut() else {
+        let Some(pending) = self.pending_core_directory.as_mut() else {
             return;
         };
         pending.keyboard = Some(keyboard.clone());
         pending.keyboard_moved = false;
-        self.server_directory_keyboard = keyboard.map(|owner| {
+        self.core_directory_keyboard = keyboard.map(|owner| {
             cx.on_blur(&owner, window, |manager, window, _| {
                 // Leaving SpaceTerm for another application moves no keyboard owner here.
                 if window.is_window_active()
-                    && let Some(pending) = manager.pending_server_directory.as_mut()
+                    && let Some(pending) = manager.pending_core_directory.as_mut()
                 {
                     pending.keyboard_moved = true;
                 }
@@ -1221,8 +1221,8 @@ impl WorkspaceManager {
 
     /// Whether the pending Open Remote Directory still reflects the person's latest intent: no
     /// newer navigation, and the keyboard where it settled, never moved since.
-    fn server_directory_intent_kept(&self, window: &Window, cx: &App) -> bool {
-        let Some(pending) = &self.pending_server_directory else {
+    fn core_directory_intent_kept(&self, window: &Window, cx: &App) -> bool {
+        let Some(pending) = &self.pending_core_directory else {
             return false;
         };
         self.navigation(cx) == pending.navigation
@@ -1235,21 +1235,21 @@ impl WorkspaceManager {
     /// Asks the pending Workspace's server for it once that server's edits are ready, or
     /// activates the Workspace already pinned to the chosen directory there. Until then the
     /// request waits; a server still finishing its first reading never drops it.
-    fn continue_server_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn continue_core_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use super::workspaces::{WorkspaceRefusalReason, WorkspaceSubmission};
 
-        let Some(PendingServerDirectory {
+        let Some(PendingCoreDirectory {
             key,
             name,
             directory,
             ..
-        }) = self.pending_server_directory.clone()
+        }) = self.pending_core_directory.clone()
         else {
             return;
         };
         let Some(binding) = self.binding.get(key) else {
             // The server stopped being presented, so nothing reaches it.
-            self.finish_server_directory();
+            self.finish_core_directory();
             Self::show_refusal(
                 "open a remote directory",
                 WorkspaceRefusalReason::Offline,
@@ -1263,10 +1263,10 @@ impl WorkspaceManager {
         if !binding.accepts_edits() {
             return;
         }
-        let server_name = self
+        let machine_name = self
             .binding
             .origin(key)
-            .and_then(ServerOrigin::remote_name)
+            .and_then(MachineOrigin::remote_name)
             .unwrap_or_default();
         // A server path compares only with that server's own pins, and only that server can
         // tell whether two of its paths name one directory, such as through a symbolic link.
@@ -1275,7 +1275,7 @@ impl WorkspaceManager {
             .iter()
             .filter_map(|entry| {
                 let pin = binding
-                    .server_workspace(entry.id())?
+                    .core_workspace(entry.id())?
                     .pinned_directory
                     .clone()?;
                 Some((entry.id(), pin))
@@ -1284,15 +1284,15 @@ impl WorkspaceManager {
         let existing = if pins.is_empty() {
             None
         } else {
-            match self.match_server_directory(key, &directory, &pins, window, cx) {
+            match self.match_core_directory(key, &directory, &pins, window, cx) {
                 None => return,
                 Some(Ok(matched)) => matched,
                 Some(Err(())) => {
-                    self.finish_server_directory();
+                    self.finish_core_directory();
                     Self::show_unavailable_with_title(
                         "Couldn\u{2019}t Open Workspace",
                         &format!(
-                            "Couldn\u{2019}t check for an existing Workspace on \u{201C}{server_name}\u{201D}. Try again."
+                            "Couldn\u{2019}t check for an existing Workspace on \u{201C}{machine_name}\u{201D}. Try again."
                         ),
                         window,
                         cx,
@@ -1303,7 +1303,7 @@ impl WorkspaceManager {
                 }
             }
         };
-        let intent_kept = self.server_directory_intent_kept(window, cx);
+        let intent_kept = self.core_directory_intent_kept(window, cx);
         let refusal = match existing {
             // The Workspace already exists, so nothing is created. Later navigation or keyboard
             // intent wins: a person who moved elsewhere while the server answered stays there.
@@ -1327,7 +1327,7 @@ impl WorkspaceManager {
                 None => return,
             },
         };
-        self.finish_server_directory();
+        self.finish_core_directory();
         if let Some(reason) = refusal {
             Self::show_refusal("create a Workspace", reason, window, cx);
         } else if existing.is_none() {
@@ -1354,31 +1354,31 @@ impl WorkspaceManager {
         }
     }
 
-    fn finish_server_directory(&mut self) {
-        self.pending_server_directory = None;
-        self.server_directory_match = None;
-        self.server_directory_keyboard = None;
+    fn finish_core_directory(&mut self) {
+        self.pending_core_directory = None;
+        self.core_directory_match = None;
+        self.core_directory_keyboard = None;
     }
 
     /// The owning server's answer to which of `pins` names `directory`, or `None` while it is
     /// asked. A new question replaces an answer to a different one; the question is always the
     /// current choice and the current pins, so a changed list is asked again.
-    fn match_server_directory(
+    fn match_core_directory(
         &mut self,
-        key: ServerKey,
+        key: MachineKey,
         directory: &PathBuf,
         pins: &[(WorkspaceId, PathBuf)],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Result<Option<WorkspaceId>, ()>> {
-        let Some(client) = self.server_client(key, cx) else {
+        let Some(client) = self.core_client(key, cx) else {
             return Some(Err(()));
         };
-        let server = client.server.clone();
+        let core = client.core.clone();
         if let Some(pending) = self
-            .server_directory_match
+            .core_directory_match
             .as_ref()
-            .filter(|pending| pending.asks(directory, pins, &server))
+            .filter(|pending| pending.asks(directory, pins, &core))
         {
             return pending.answer.as_ref().map(|answer| {
                 answer
@@ -1389,32 +1389,29 @@ impl WorkspaceManager {
         }
         // The question goes to this exact presented connection and stops once it's replaced.
         let available: Rc<dyn Fn() -> bool> = Rc::new(move || client.availability().0);
-        let source = ServerDirectorySource::browsing_through(
-            (self.server_directories)(&server),
-            None,
-            available,
-        );
+        let source =
+            CoreDirectorySource::browsing_through((self.core_directories)(&core), None, available);
         let question = source.match_directory(
             directory.clone(),
             pins.iter().map(|(_, pin)| pin.clone()).collect(),
         );
-        let asked = (directory.clone(), pins.to_vec(), server.clone());
+        let asked = (directory.clone(), pins.to_vec(), core.clone());
         let task = cx.spawn_in(window, async move |manager, cx| {
             let answer = question.await;
             drop(source);
             let _ = manager.update_in(cx, |manager, window, cx| {
-                if let Some(pending) = manager.server_directory_match.as_mut()
+                if let Some(pending) = manager.core_directory_match.as_mut()
                     && pending.asks(&asked.0, &asked.1, &asked.2)
                 {
                     pending.answer = Some(answer);
-                    manager.continue_server_directory(window, cx);
+                    manager.continue_core_directory(window, cx);
                 }
             });
         });
-        self.server_directory_match = Some(ServerDirectoryMatch {
+        self.core_directory_match = Some(CoreDirectoryMatch {
             directory: directory.clone(),
             pins: pins.to_vec(),
-            server,
+            core,
             answer: None,
             _task: task,
         });
@@ -1446,7 +1443,7 @@ impl WorkspaceManager {
             PinTarget::Workspace(workspace_id) => self
                 .workspace_pin_version(*workspace_id)
                 .map(|version| (*workspace_id, version)),
-            PinTarget::NewLocalWorkspace { .. } | PinTarget::NewServerWorkspace { .. } => None,
+            PinTarget::NewLocalWorkspace { .. } | PinTarget::NewCoreWorkspace { .. } => None,
         };
         self.transient.begin_pin(target.clone(), version);
         self.pin_operation = self.pin_operation.wrapping_add(1);
@@ -1607,7 +1604,7 @@ impl WorkspaceManager {
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         // A SpaceTerm Server owns every Workspace's Tabs, Panes, and Sessions, so closing one
         // asks the server to end them for every client.
-        self.request_server_close(target, window, cx);
+        self.request_core_close(target, window, cx);
     }
 
     pub(crate) fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1882,11 +1879,11 @@ impl WorkspaceManager {
                     .owner(workspace_id)
                     .and_then(|key| self.binding.origin(key))
                     .and_then(|origin| match origin {
-                        ServerOrigin::Local => None,
-                        ServerOrigin::Direct(direct) => Some(direct.route),
+                        MachineOrigin::Local => None,
+                        MachineOrigin::Direct(direct) => Some(direct.route),
                     });
                 if let Some(route) = route
-                    && let Some(direct) = crate::ui::direct_servers::installed(cx)
+                    && let Some(direct) = crate::ui::direct_machines::installed(cx)
                 {
                     direct.resume(&route);
                 }
@@ -1973,7 +1970,7 @@ impl WorkspaceManager {
             }
             WorkspaceCreation::OpenLocalDirectory => self.open_local_directory(name, window, cx),
             WorkspaceCreation::Remote(route) => {
-                self.create_workspace_on(&super::ServerTarget::Direct(route), name, window, cx)
+                self.create_workspace_on(&super::MachineTarget::Direct(route), name, window, cx)
             }
             WorkspaceCreation::OpenRemoteDirectory(route) => {
                 self.open_remote_directory(route, name, window, cx)
@@ -2132,35 +2129,35 @@ impl WorkspaceManager {
                     .map(|row| row.name.to_string())
             }),
             pinned: binding.as_ref().is_some_and(|binding| binding.pinned),
-            status: WorkspaceChromeStatus::resolve(self.server_connection_phase(workspace_id, cx)),
+            status: WorkspaceChromeStatus::resolve(self.machine_connection_phase(workspace_id, cx)),
             ..chrome_identity(workspace)
         }
     }
 
     /// How the connection to another computer's server that owns `workspace_id` stands, or
     /// `None` for a Workspace of this computer's server. Reading it reaches no computer.
-    fn server_connection_phase(
+    fn machine_connection_phase(
         &self,
         workspace_id: WorkspaceId,
         cx: &App,
-    ) -> Option<ServerConnectionPhase> {
+    ) -> Option<MachineConnectionPhase> {
         use crate::direct_connections::DirectRouteStatus;
 
         let key = self.binding.owner(workspace_id)?;
         match self.binding.origin(key)? {
-            ServerOrigin::Local => None,
-            ServerOrigin::Direct(direct) => {
-                let status = crate::ui::direct_servers::installed(cx)?.status(&direct.route)?;
+            MachineOrigin::Local => None,
+            MachineOrigin::Direct(direct) => {
+                let status = crate::ui::direct_machines::installed(cx)?.status(&direct.route)?;
                 Some(match status {
-                    DirectRouteStatus::Connected => ServerConnectionPhase::Connected,
+                    DirectRouteStatus::Connected => MachineConnectionPhase::Connected,
                     DirectRouteStatus::Connecting | DirectRouteStatus::Reconnecting => {
-                        ServerConnectionPhase::Reconnecting
+                        MachineConnectionPhase::Reconnecting
                     }
                     DirectRouteStatus::Refused(_) | DirectRouteStatus::Unavailable(_) => {
-                        ServerConnectionPhase::Failed
+                        MachineConnectionPhase::Failed
                     }
                     DirectRouteStatus::Disconnected | DirectRouteStatus::NeedsInteraction => {
-                        ServerConnectionPhase::Disconnected
+                        MachineConnectionPhase::Disconnected
                     }
                 })
             }
@@ -2179,7 +2176,7 @@ impl WorkspaceManager {
     fn workspace_chrome_identity(&self, cx: &App) -> Option<(WorkspaceChromeIdentity, Tooltip)> {
         let workspace = self.workspaces.active_workspace()?;
         let remote_status = self
-            .server_connection_phase(workspace.id(), cx)
+            .machine_connection_phase(workspace.id(), cx)
             .and_then(remote_connection_status);
         let binding = self.workspace_row_facts(workspace.id());
         // The directory belongs to the server, so the chrome shows the server's own.
@@ -2238,7 +2235,8 @@ impl WorkspaceManager {
         let accept_manager = manager.clone();
         let combo_lifecycle_window = window.window_handle();
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let creation_rows = switcher_creation_rows(&self.remote_creation_servers(cx), presentation);
+        let creation_rows =
+            switcher_creation_rows(&self.remote_creation_machines(cx), presentation);
         let collapsed_identity = (presence > 0.0)
             .then(|| self.workspace_chrome_identity(cx))
             .flatten()
@@ -2397,8 +2395,8 @@ impl WorkspaceManager {
                     SwitcherChoice::Presented(workspace_id) => {
                         manager.activate_workspace(workspace_id, window, cx);
                     }
-                    SwitcherChoice::Detached((key, server)) => {
-                        manager.attach_detached_workspace(key, server, window, cx);
+                    SwitcherChoice::Detached((key, core)) => {
+                        manager.attach_detached_workspace(key, core, window, cx);
                     }
                 }
                 manager.sync_terminal_focus_blocker(window, cx);
@@ -2523,7 +2521,7 @@ impl WorkspaceManager {
                     Some(binding) if binding.machine.is_some() => {
                         path = binding.directory.display().to_string().into();
                         tooltip = format!(
-                            "{SERVER_WORKSPACE_BADGE} on {}: {}",
+                            "{CORE_WORKSPACE_BADGE} on {}: {}",
                             binding.machine.as_deref().unwrap_or_default(),
                             binding.directory.display()
                         );
@@ -2534,7 +2532,7 @@ impl WorkspaceManager {
                             compact_home_path(&binding.directory, &self.local_home_directory_path)
                                 .into();
                         tooltip =
-                            format!("{SERVER_WORKSPACE_BADGE}: {}", binding.directory.display());
+                            format!("{CORE_WORKSPACE_BADGE}: {}", binding.directory.display());
                         self.sidebar_badge(workspace.id(), cx)
                     }
                     None => None,
@@ -2573,10 +2571,10 @@ impl WorkspaceManager {
                     }
                     match binding.as_ref().map(|binding| binding.machine.as_ref()) {
                         Some(Some(machine)) => {
-                            tooltip = format!("{SERVER_WORKSPACE_BADGE} on {machine}\n{tooltip}");
+                            tooltip = format!("{CORE_WORKSPACE_BADGE} on {machine}\n{tooltip}");
                         }
                         Some(None) => {
-                            tooltip = format!("{SERVER_WORKSPACE_BADGE}\n{tooltip}");
+                            tooltip = format!("{CORE_WORKSPACE_BADGE}\n{tooltip}");
                         }
                         None => {}
                     }
@@ -2592,7 +2590,7 @@ impl WorkspaceManager {
                         .map(Into::into),
                     tooltip: tooltip.into(),
                     pinned: binding.as_ref().is_some_and(|binding| binding.pinned),
-                    remote_connection_phase: self.server_connection_phase(workspace.id(), cx),
+                    remote_connection_phase: self.machine_connection_phase(workspace.id(), cx),
                     repository,
                     worktrees,
                     creates_worktrees: self.creates_worktrees(workspace.id(), cx),
@@ -2629,19 +2627,19 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.present_server_workspaces(ServerOrigin::Local, edits, sessions, window, cx);
+        self.present_core_workspaces(MachineOrigin::Local, edits, sessions, window, cx);
     }
 
     /// Presents the Workspaces one server's shared edit channel publishes, beside the Workspaces
     /// of every other presented server. A server already presented keeps its binding.
-    pub(crate) fn present_server_workspaces(
+    pub(crate) fn present_core_workspaces(
         &mut self,
-        origin: ServerOrigin,
+        origin: MachineOrigin,
         edits: super::workspaces::WorkspaceEditSource,
         sessions: super::workspaces::WorkspacePaneSessions,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> ServerKey {
+    ) -> MachineKey {
         use super::workspaces::Workspaces;
 
         let first = self.binding.is_empty();
@@ -2688,13 +2686,13 @@ impl WorkspaceManager {
     /// Stops presenting one server's Workspaces, as when the person removes its paired route. The
     /// Workspaces and their Terminal Sessions keep running on that server, and nothing is asked
     /// of it: closing the local Panes drops their subscriptions.
-    pub(crate) fn withdraw_server_workspaces(
+    pub(crate) fn withdraw_core_workspaces(
         &mut self,
-        key: ServerKey,
+        key: MachineKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if key == ServerKey::LOCAL {
+        if key == MachineKey::LOCAL {
             return;
         }
         self.save_arrangements(cx);
@@ -2723,18 +2721,18 @@ impl WorkspaceManager {
         }
         // A Workspace still waiting for this server says it couldn't open rather than vanishing.
         if self
-            .pending_server_directory
+            .pending_core_directory
             .as_ref()
             .is_some_and(|pending| pending.key == key)
         {
-            self.continue_server_directory(window, cx);
+            self.continue_core_directory(window, cx);
         }
         self.present_repositories(cx);
         cx.notify();
     }
 
     /// Reads one server's answer and its inventory, then presents both.
-    fn sync_workspaces(&mut self, key: ServerKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_workspaces(&mut self, key: MachineKey, window: &mut Window, cx: &mut Context<Self>) {
         let ready = self
             .binding
             .get_mut(key)
@@ -2759,7 +2757,7 @@ impl WorkspaceManager {
         let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
             matches!(
                 accepted.mutation,
-                spaceterm_server::hierarchy::Mutation::Close { .. }
+                spaceterm_core::hierarchy::Mutation::Close { .. }
             )
         }) {
             super::workspaces::WorkspaceRemoval::OwnClose
@@ -2776,7 +2774,7 @@ impl WorkspaceManager {
         if let Some(workspace_id) = poll
             .initial
             .filter(|_| !self.restores_remembered_view())
-            .and_then(|server| self.binding.get(key)?.local(server))
+            .and_then(|core| self.binding.get(key)?.local(core))
             && self.activate_workspace(workspace_id, window, cx)
         {
             self.focus(window, cx);
@@ -2816,11 +2814,11 @@ impl WorkspaceManager {
         {
             let _ = binding.take_forgotten();
         }
-        while let Some((server_target, local, notice)) = self
+        while let Some((machine_target, local, notice)) = self
             .binding
             .get(key)
             .and_then(super::workspaces::Workspaces::next_stale_close)
-            && self.present_stale_close(server_target, local, Some(&notice), window, cx)
+            && self.present_stale_close(machine_target, local, Some(&notice), window, cx)
             && let Some(binding) = self.binding.get_mut(key)
         {
             let _ = binding.take_stale_close();
@@ -2830,21 +2828,21 @@ impl WorkspaceManager {
             && self.close_confirmation.pending().is_none()
             && let Some(intent) = self.binding.get(key).and_then(|binding| binding.take_close_intent())
             // The local presentation must still name the exact creation this intent followed.
-            && self.close_target(intent.local, cx) == Some(intent.server)
+            && self.close_target(intent.local, cx) == Some(intent.core)
         {
             let held_keyboard = intent.keyboard.is_some()
                 && intent.keyboard == keyboard_before_reconciliation
                 && self.close_target_is_active(intent.local, cx);
             self.close_keyboard.reviewed = Some(held_keyboard);
-            self.request_server_close(intent.local, window, cx);
+            self.request_core_close(intent.local, window, cx);
             self.close_keyboard.reviewed = None;
         }
         // Each server's reading may present the Worktree it created or change the one under
         // review; both look up their own Workspace's server.
-        self.open_created_server_worktree(window, cx);
-        self.revalidate_server_removal(window, cx);
+        self.open_created_core_worktree(window, cx);
+        self.revalidate_machine_removal(window, cx);
         // A Workspace Open Remote Directory is opening may be asked for now.
-        self.continue_server_directory(window, cx);
+        self.continue_core_directory(window, cx);
         // New Workspace chosen with no Workspace Window open waits for this reading.
         self.create_pending_workspace(key, window, cx);
         // A form presents its own Create's answer, so a failure reaches here only when no
@@ -2853,7 +2851,7 @@ impl WorkspaceManager {
             .binding
             .get(key)
             .and_then(super::workspaces::Workspaces::next_worktree_failure)
-            && self.server_worktree_operation_failure(
+            && self.core_worktree_operation_failure(
                 &failure.operation,
                 failure.error,
                 &notice,
@@ -2897,11 +2895,11 @@ impl WorkspaceManager {
     /// Pane's Session run, so metadata from a run that ended never replaces the current one's.
     fn present_metadata(
         &self,
-        key: ServerKey,
-        inventory: &spaceterm_server::hierarchy::Inventory,
+        key: MachineKey,
+        inventory: &spaceterm_core::hierarchy::Inventory,
         cx: &mut Context<Self>,
     ) {
-        use crate::ui::terminal_pane::ServerSessionRun;
+        use crate::ui::terminal_pane::CoreSessionRun;
 
         let runs = inventory.close.as_ref().map(|close| {
             close
@@ -2911,7 +2909,7 @@ impl WorkspaceManager {
                     let session = pane.session?;
                     Some((
                         pane.id,
-                        ServerSessionRun {
+                        CoreSessionRun {
                             boot: close.boot,
                             session,
                         },
@@ -2949,7 +2947,7 @@ impl WorkspaceManager {
                 .filter_map(|entry| entry.payload().read(cx).arrangement(cx))
                 .collect();
             if let Some(binding) = self.binding.get_mut(key) {
-                binding.save_arrangements(spaceterm_server::client_view::ClientView { workspaces });
+                binding.save_arrangements(spaceterm_core::client_view::ClientView { workspaces });
             }
         }
     }
@@ -2989,8 +2987,8 @@ impl WorkspaceManager {
     /// window here, including the answer to this client's own accepted edit.
     fn apply_inventory(
         &mut self,
-        key: ServerKey,
-        inventory: &spaceterm_server::hierarchy::Inventory,
+        key: MachineKey,
+        inventory: &spaceterm_core::hierarchy::Inventory,
         removal: super::workspaces::WorkspaceRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3006,7 +3004,7 @@ impl WorkspaceManager {
                     let Some(workspace) = inventory
                         .workspaces
                         .iter()
-                        .find(|workspace| workspace.id == facts.server)
+                        .find(|workspace| workspace.id == facts.core)
                     else {
                         continue;
                     };
@@ -3016,7 +3014,7 @@ impl WorkspaceManager {
                     let Some(workspace) = inventory
                         .workspaces
                         .iter()
-                        .find(|workspace| workspace.id == facts.server)
+                        .find(|workspace| workspace.id == facts.core)
                     else {
                         continue;
                     };
@@ -3065,9 +3063,9 @@ impl WorkspaceManager {
     /// never becomes the Active Workspace, because another client's creation is membership here.
     fn present_workspace(
         &mut self,
-        key: ServerKey,
+        key: MachineKey,
         facts: &super::workspaces::WorkspaceFacts,
-        workspace: &spaceterm_server::hierarchy::Workspace,
+        workspace: &spaceterm_core::hierarchy::Workspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3106,7 +3104,7 @@ impl WorkspaceManager {
             .workspaces
             .create_workspace(facts.name.clone(), |workspace_id| {
                 Self::create_tab_manager(
-                    WorkspaceTabs::new(edits, sessions, facts.server),
+                    WorkspaceTabs::new(edits, sessions, facts.core),
                     root,
                     session_factory,
                     TabManagerCreation {
@@ -3213,7 +3211,7 @@ impl WorkspaceManager {
         if let WorkspaceSubmission::Refused(reason) = submission {
             Self::show_refusal("create a Workspace", reason, window, cx);
         } else {
-            self.sync_workspaces(ServerKey::LOCAL, window, cx);
+            self.sync_workspaces(MachineKey::LOCAL, window, cx);
         }
         cx.notify();
         submission == WorkspaceSubmission::Submitted
@@ -3263,7 +3261,7 @@ impl WorkspaceManager {
         let directory = match pin {
             // A local directory names a directory on this machine, which only the account-local
             // server shares. Another server's Workspace never receives one.
-            Some(_) if owner != ServerKey::LOCAL => {
+            Some(_) if owner != MachineKey::LOCAL => {
                 self.transient.end_pin();
                 Self::show_unavailable(REMOTE_LOCAL_PIN_REFUSED, window, cx);
                 return Some(false);
@@ -3288,7 +3286,7 @@ impl WorkspaceManager {
 
     /// Asks another computer's server to pin its Workspace to `directory`, a path that server
     /// validated on its own filesystem. Returns whether the request reached the server.
-    fn pin_server_directory(
+    fn pin_machine_directory(
         &mut self,
         workspace_id: WorkspaceId,
         directory: PathBuf,
@@ -3301,7 +3299,7 @@ impl WorkspaceManager {
         let Some(owner) = self
             .binding
             .owner(workspace_id)
-            .filter(|owner| *owner != ServerKey::LOCAL)
+            .filter(|owner| *owner != MachineKey::LOCAL)
         else {
             return false;
         };
@@ -3327,21 +3325,21 @@ impl WorkspaceManager {
         &self,
         workspace_id: WorkspaceId,
         cx: &mut App,
-    ) -> Option<crate::ui::server_worktrees::Client> {
-        self.server_client(self.binding.owner(workspace_id)?, cx)
+    ) -> Option<crate::ui::core_worktrees::Client> {
+        self.core_client(self.binding.owner(workspace_id)?, cx)
     }
 
     /// The edit writer of the server presented at `key`.
-    fn server_client(
+    fn core_client(
         &self,
-        key: ServerKey,
+        key: MachineKey,
         cx: &mut App,
-    ) -> Option<crate::ui::server_worktrees::Client> {
-        use crate::ui::server_worktrees::Client;
+    ) -> Option<crate::ui::core_worktrees::Client> {
+        use crate::ui::core_worktrees::Client;
 
         match self.binding.origin(key)? {
-            ServerOrigin::Local => Client::get(cx),
-            ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx),
+            MachineOrigin::Local => Client::get(cx),
+            MachineOrigin::Direct(direct) => Client::direct(&direct.route, cx),
         }
     }
 
@@ -3351,29 +3349,25 @@ impl WorkspaceManager {
         &self,
         workspace_id: WorkspaceId,
         cx: &mut App,
-    ) -> Option<ServerDirectorySource> {
-        self.server_directory_source(self.binding.owner(workspace_id)?, cx)
+    ) -> Option<CoreDirectorySource> {
+        self.core_directory_source(self.binding.owner(workspace_id)?, cx)
     }
 
     /// Browses the directories of the server on another computer presented at `key`, or `None`
     /// while that server is unreachable.
-    fn server_directory_source(
-        &self,
-        key: ServerKey,
-        cx: &mut App,
-    ) -> Option<ServerDirectorySource> {
+    fn core_directory_source(&self, key: MachineKey, cx: &mut App) -> Option<CoreDirectorySource> {
         let machine = self
             .binding
             .origin(key)
-            .and_then(ServerOrigin::remote_name)?;
-        let client = self.server_client(key, cx)?;
+            .and_then(MachineOrigin::remote_name)?;
+        let client = self.core_client(key, cx)?;
         if !client.availability().0 {
             return None;
         }
-        let server = client.server.clone();
+        let core = client.core.clone();
         let available: Rc<dyn Fn() -> bool> = Rc::new(move || client.availability().0);
-        Some(ServerDirectorySource::browsing(
-            server,
+        Some(CoreDirectorySource::browsing(
+            core,
             Some(machine),
             available,
         ))
@@ -3384,7 +3378,7 @@ impl WorkspaceManager {
     ///
     /// Captures the exact server targets before applying contextual confirmation. Idle own work
     /// closes directly; other clients' work and Workspace removal always require review.
-    fn request_server_close(
+    fn request_core_close(
         &mut self,
         target: CloseTarget,
         window: &mut Window,
@@ -3401,11 +3395,11 @@ impl WorkspaceManager {
         if self.close_confirmation.pending().is_some() {
             return true;
         }
-        let Some(server_target) = self.close_target(target, cx) else {
+        let Some(machine_target) = self.close_target(target, cx) else {
             // A target this window can no longer name closes nothing.
             return true;
         };
-        if self.request_worktree_close_fallback(target, server_target, window, cx) {
+        if self.request_worktree_close_fallback(target, machine_target, window, cx) {
             return true;
         }
         // A Review hands over what the person's first request held; any other request reads it
@@ -3419,7 +3413,7 @@ impl WorkspaceManager {
             return true;
         };
         match binding.defer_close(WorkspaceCloseIntent {
-            server: server_target,
+            core: machine_target,
             local: target,
             keyboard: held_keyboard.then(|| window.focused(cx)).flatten(),
         }) {
@@ -3430,7 +3424,7 @@ impl WorkspaceManager {
                 return true;
             }
         }
-        let approval = match binding.close_approval(server_target) {
+        let approval = match binding.close_approval(machine_target) {
             Ok(approval) => approval,
             Err(WorkspaceCloseUnavailable::Edits(reason)) => {
                 Self::show_refusal(Self::close_operation(target), reason, window, cx);
@@ -3603,8 +3597,8 @@ impl WorkspaceManager {
         &self,
         target: CloseTarget,
         cx: &App,
-    ) -> Option<spaceterm_server::hierarchy::CloseTarget> {
-        use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+    ) -> Option<spaceterm_core::hierarchy::CloseTarget> {
+        use spaceterm_core::hierarchy::CloseTarget as MachineCloseTarget;
 
         let workspace_id = close_target_workspace(target);
         let binding = self.binding.owning(workspace_id)?;
@@ -3614,15 +3608,15 @@ impl WorkspaceManager {
                 .map(|entry| entry.payload().read(cx))
         };
         match target {
-            CloseTarget::KillWorkspace(workspace_id) => Some(ServerCloseTarget::KillWorkspace {
-                workspace: binding.facts(workspace_id)?.server,
+            CloseTarget::KillWorkspace(workspace_id) => Some(MachineCloseTarget::KillWorkspace {
+                workspace: binding.facts(workspace_id)?.core,
             }),
             CloseTarget::Tab {
                 workspace_id,
                 tab_id,
-            } => Some(ServerCloseTarget::Tab {
-                workspace: binding.facts(workspace_id)?.server,
-                tab: tab_manager(workspace_id)?.server_tab(tab_id)?,
+            } => Some(MachineCloseTarget::Tab {
+                workspace: binding.facts(workspace_id)?.core,
+                tab: tab_manager(workspace_id)?.core_tab(tab_id)?,
             }),
             CloseTarget::Pane {
                 workspace_id,
@@ -3630,23 +3624,23 @@ impl WorkspaceManager {
                 pane_id,
             } => {
                 let manager = tab_manager(workspace_id)?;
-                Some(ServerCloseTarget::Pane {
-                    workspace: binding.facts(workspace_id)?.server,
-                    tab: manager.server_tab(tab_id)?,
-                    pane: manager.server_pane(tab_id, pane_id, cx)?,
+                Some(MachineCloseTarget::Pane {
+                    workspace: binding.facts(workspace_id)?.core,
+                    tab: manager.core_tab(tab_id)?,
+                    pane: manager.core_pane(tab_id, pane_id, cx)?,
                 })
             }
             CloseTarget::Worktree {
                 workspace_id,
                 worktree_id,
             } => {
-                let workspace = binding.server_workspace(workspace_id)?;
+                let workspace = binding.core_workspace(workspace_id)?;
                 let path = self.worktree_root(workspace_id, worktree_id)?;
                 let anchor = workspace
                     .tabs
                     .iter()
                     .find(|tab| tab.worktree.as_ref() == Some(&path))?;
-                Some(ServerCloseTarget::Worktree {
+                Some(MachineCloseTarget::Worktree {
                     workspace: workspace.id,
                     tab: anchor.id,
                 })
@@ -3727,7 +3721,7 @@ impl WorkspaceManager {
 
     /// Withdraws a shared close confirmation that another client's change made stale, and says
     /// why. The person never approves Sessions or Panes they were not shown.
-    fn revalidate_close(&mut self, key: ServerKey, window: &mut Window, cx: &mut Context<Self>) {
+    fn revalidate_close(&mut self, key: MachineKey, window: &mut Window, cx: &mut Context<Self>) {
         use super::workspaces::WorkspaceCloseState;
 
         let Some(binding) = self.binding.get_mut(key) else {
@@ -3897,19 +3891,19 @@ impl WorkspaceManager {
     /// Returns whether the alert was admitted.
     fn present_stale_close(
         &mut self,
-        server_target: spaceterm_server::hierarchy::CloseTarget,
+        machine_target: spaceterm_core::hierarchy::CloseTarget,
         local: Option<CloseTarget>,
         notice: Option<&super::workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let local = local.filter(|local| self.close_target(*local, cx) == Some(server_target));
+        let local = local.filter(|local| self.close_target(*local, cx) == Some(machine_target));
         // The refused close already moved the keyboard, so a Review keeps what holds it now.
         let held_keyboard = local
             .and_then(|local| self.workspaces.workspace(close_target_workspace(local)))
             .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
         self.present_close_changed(
-            super::workspaces::close_changed_title(server_target),
+            super::workspaces::close_changed_title(machine_target),
             local,
             held_keyboard,
             notice,
@@ -4084,7 +4078,7 @@ impl WorkspaceManager {
                 "More than {} changes or Worktree operations failed before SpaceTerm could show \
                  them, and the earliest are no longer available. Review your Workspaces and \
                  Worktrees.",
-                spaceterm_server::hierarchy::UNSEEN_OUTCOMES
+                spaceterm_core::hierarchy::UNSEEN_OUTCOMES
             ),
             vec![ModalAction::new(
                 (),
@@ -4162,8 +4156,8 @@ impl WorkspaceManager {
 
     /// Whether the account-local server owns the Workspace. Only that server shares this
     /// computer's filesystem, so only its Workspaces take local directories and Worktree writes.
-    pub(super) fn is_local_server_workspace(&self, workspace_id: WorkspaceId) -> bool {
-        self.binding.owner(workspace_id) == Some(ServerKey::LOCAL)
+    pub(super) fn is_local_core_workspace(&self, workspace_id: WorkspaceId) -> bool {
+        self.binding.owner(workspace_id) == Some(MachineKey::LOCAL)
     }
 
     /// Opens what one accepted edit of this client's own created, once the server published it.
@@ -4172,12 +4166,12 @@ impl WorkspaceManager {
     /// client created joins the presentation without moving anything here.
     fn open_accepted(
         &mut self,
-        key: ServerKey,
+        key: MachineKey,
         accepted: &super::workspaces::WorkspaceAcceptance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use spaceterm_server::hierarchy::Mutation;
+        use spaceterm_core::hierarchy::Mutation;
 
         if self.is_worktree_close_fallback(&accepted.mutation) {
             return;
@@ -4203,9 +4197,8 @@ impl WorkspaceManager {
             | Mutation::SplitPane { workspace, .. }
             | Mutation::MovePane { workspace, .. }
             | Mutation::MergeTab { workspace, .. }
-            | Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
-                workspace,
-                ..
+            | Mutation::Worktree(spaceterm_core::worktree::Operation::OpenTab {
+                workspace, ..
             }) => {
                 let Some(manager) = self
                     .binding
@@ -4237,7 +4230,7 @@ impl WorkspaceManager {
         &mut self,
         workspace_id: WorkspaceId,
         origin: (TabId, PaneId),
-        target: spaceterm_server::hierarchy::Placement,
+        target: spaceterm_core::hierarchy::Placement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4391,7 +4384,7 @@ impl WorkspaceManager {
 
     fn reconcile_parked_workspaces(
         &mut self,
-        key: ServerKey,
+        key: MachineKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4409,7 +4402,7 @@ impl WorkspaceManager {
             };
             let exists = binding
                 .facts(id)
-                .is_some_and(|facts| inventory.workspaces.iter().any(|w| w.id == facts.server));
+                .is_some_and(|facts| inventory.workspaces.iter().any(|w| w.id == facts.core));
             if exists && binding.optimistically_closing(id) {
                 continue;
             }
@@ -4450,7 +4443,7 @@ impl WorkspaceManager {
         // A Pane's confirmed directory changes without a membership revision, so the row reads
         // the latest inventory.
         let directory = binding
-            .server_workspace(workspace_id)
+            .core_workspace(workspace_id)
             .and_then(super::workspaces::workspace_directory)
             .unwrap_or_else(|| facts.displayed_directory());
         Some(WorkspaceRowFacts {
@@ -4459,7 +4452,7 @@ impl WorkspaceManager {
                 edits: editability.available(),
                 edits_reason: editability.explanation(),
                 status: binding.row_status(
-                    facts.server,
+                    facts.core,
                     self.workspace_inventory(workspace_id)
                         .map(|inventory| inventory.main_root.as_path()),
                 ),
@@ -4467,13 +4460,16 @@ impl WorkspaceManager {
             },
             directory: directory.to_owned(),
             pinned: facts.pinned(),
-            machine: self.binding.origin(key).and_then(ServerOrigin::remote_name),
+            machine: self
+                .binding
+                .origin(key)
+                .and_then(MachineOrigin::remote_name),
         })
     }
 
     /// Whether the account-local server, which creates this window's new Workspaces, is
     /// reachable.
-    fn local_server_reachable(&self) -> bool {
+    fn local_core_reachable(&self) -> bool {
         self.binding.local().is_none_or(|binding| {
             super::workspaces::WorkspaceRefusalReason::from(binding.editability())
                 != super::workspaces::WorkspaceRefusalReason::Offline
@@ -4487,19 +4483,22 @@ impl WorkspaceManager {
     fn detached_switcher_items(&self) -> Vec<ComboBoxItem<SwitcherChoice>> {
         self.binding
             .iter()
-            .flat_map(|(key, binding)| self.detached_server_items(key, binding))
+            .flat_map(|(key, binding)| self.detached_core_items(key, binding))
             .collect()
     }
 
     /// One server's detached Workspaces. Another computer's carry its server name, so two
     /// servers' Workspaces with one name stay distinguishable.
-    fn detached_server_items(
+    fn detached_core_items(
         &self,
-        key: ServerKey,
+        key: MachineKey,
         binding: &super::workspaces::Workspaces,
     ) -> Vec<ComboBoxItem<SwitcherChoice>> {
         let changeable = binding.attachments_changeable();
-        let destination = self.binding.origin(key).and_then(ServerOrigin::remote_name);
+        let destination = self
+            .binding
+            .origin(key)
+            .and_then(MachineOrigin::remote_name);
         binding
             .available_workspaces()
             .into_iter()
@@ -4518,7 +4517,7 @@ impl WorkspaceManager {
                     .chain(destination.clone())
                     .collect();
                 ComboBoxItem::new(
-                    SwitcherChoice::Detached((key, available.server)),
+                    SwitcherChoice::Detached((key, available.core)),
                     available.name,
                 )
                 .description(description)
@@ -4529,7 +4528,7 @@ impl WorkspaceManager {
                         .child(Icon::new(IconName::Terminal, size, foreground))
                         .into_any_element()
                 })
-                .debug_selector(detached_switcher_selector(available.server))
+                .debug_selector(detached_switcher_selector(available.core))
             })
             .collect()
     }
@@ -4541,15 +4540,15 @@ impl WorkspaceManager {
     /// released when it detached; selecting a Pane asks for control afresh, as it does anywhere.
     fn attach_detached_workspace(
         &mut self,
-        key: ServerKey,
-        server: spaceterm_server::hierarchy::Id,
+        key: MachineKey,
+        core: spaceterm_core::hierarchy::Id,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(binding) = self.binding.get_mut(key) else {
             return;
         };
-        if let Err(failure) = binding.attach(server) {
+        if let Err(failure) = binding.attach(core) {
             Self::present_attachment_failure(AttachmentChange::Attach, failure, window, cx);
             return;
         }
@@ -4574,7 +4573,7 @@ impl WorkspaceManager {
         let Some(workspace_id) = self
             .binding
             .get(key)
-            .and_then(|binding| binding.local(server))
+            .and_then(|binding| binding.local(core))
         else {
             return;
         };
@@ -4715,11 +4714,8 @@ const DETACHED_DESCRIPTION: &str = "Detached";
 const DETACHED_UNAVAILABLE_DESCRIPTION: &str = "Detached. Reopen SpaceTerm to attach.";
 
 /// A detached Workspace's Workspace Switcher result, named by its server identity's leading bytes.
-fn detached_switcher_selector(server: spaceterm_server::hierarchy::Id) -> String {
-    let prefix: String = server[..4]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+fn detached_switcher_selector(core: spaceterm_core::hierarchy::Id) -> String {
+    let prefix: String = core[..4].iter().map(|byte| format!("{byte:02x}")).collect();
     format!("workspace-switcher-detached-{prefix}")
 }
 
@@ -4841,11 +4837,11 @@ impl WorkspaceManager {
             ),
         };
         let rows = self.sidebar_rows(cx);
-        let remote_servers = self.remote_creation_servers(cx);
+        let remote_machines = self.remote_creation_machines(cx);
 
-        let rows_changed = self
-            .sidebar
-            .update(cx, |sidebar, cx| sidebar.set_rows(rows, remote_servers, cx));
+        let rows_changed = self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_rows(rows, remote_machines, cx)
+        });
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
         let actions = WorkspaceActions {
@@ -5172,7 +5168,7 @@ struct SwitcherCreationRow {
 /// The Workspace Switcher's creation rows: the local ones, then New Workspace and Open Directory
 /// on each saved paired server.
 fn switcher_creation_rows(
-    servers: &[super::workspace_creation::RemoteCreationServer],
+    machines: &[super::workspace_creation::RemoteCreationMachine],
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<SwitcherCreationRow> {
     let local = WorkspaceCreation::LOCAL
@@ -5185,19 +5181,19 @@ fn switcher_creation_rows(
             starts_group: false,
             available: true,
         });
-    let remote = servers.iter().enumerate().flat_map(|(position, server)| {
+    let remote = machines.iter().enumerate().flat_map(|(position, core)| {
         [
-            WorkspaceCreation::Remote(server.route),
-            WorkspaceCreation::OpenRemoteDirectory(server.route),
+            WorkspaceCreation::Remote(core.route),
+            WorkspaceCreation::OpenRemoteDirectory(core.route),
         ]
         .into_iter()
         .map(move |creation| SwitcherCreationRow {
             creation,
-            label: creation.label(Some(server.display_name().as_ref())),
+            label: creation.label(Some(core.display_name().as_ref())),
             selector: creation.selector(position),
             shortcut: None,
             starts_group: position == 0 && matches!(creation, WorkspaceCreation::Remote(_)),
-            available: server.available,
+            available: core.available,
         })
     });
     local.chain(remote).collect()
@@ -5207,13 +5203,13 @@ mod empty;
 mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
-pub(crate) use launch::{LocalServerAdapters, resume_waiting_launches, start_local_server};
-mod server_bindings;
-use server_bindings::ServerBindings;
-pub(crate) use server_bindings::{ServerKey, ServerOrigin};
+pub(crate) use launch::{LocalCoreAdapters, resume_waiting_launches, start_local_core};
+mod core_bindings;
+use core_bindings::CoreBindings;
+pub(crate) use core_bindings::{MachineKey, MachineOrigin};
 mod desktop_requests;
 pub(crate) use desktop_requests::serve as serve_desktop_requests;
-mod direct_servers;
+mod direct_machines;
 mod display_order;
 mod remembered;
 mod workspace_repositories;

@@ -16,7 +16,7 @@ fn args(
 }
 
 #[test]
-fn explicit_children_search_the_server_and_infer_their_ancestors() {
+fn explicit_children_search_the_core_and_infer_their_ancestors() {
     let snapshot = fixture();
     let result = resolve(
         &snapshot,
@@ -119,15 +119,15 @@ fn a_branch_with_slashes_is_not_a_path() {
 }
 
 #[test]
-fn current_requires_a_matching_server_and_surviving_pane() {
+fn current_requires_a_matching_machine_and_surviving_pane() {
     for current in [
         None,
         Some(Current {
-            server: id(7),
+            core: id(7),
             pane: id(21),
         }),
         Some(Current {
-            server: id(9),
+            core: id(9),
             pane: id(99),
         }),
     ] {
@@ -147,7 +147,7 @@ fn current_requires_a_matching_server_and_surviving_pane() {
 #[test]
 fn current_fills_untouched_levels_for_tab_creation_in_its_worktree() {
     let current = Current {
-        server: id(9),
+        core: id(9),
         pane: id(22),
     };
     let result = resolve(
@@ -167,7 +167,7 @@ fn current_fills_untouched_levels_for_tab_creation_in_its_worktree() {
 #[test]
 fn an_explicit_child_blocks_current_ancestors_but_not_a_singleton() {
     let current = Current {
-        server: id(9),
+        core: id(9),
         pane: id(22),
     };
     let result = resolve(
@@ -238,7 +238,7 @@ fn destructive_target_never_fills_from_a_single_candidate() {
         })
     );
     let current = Current {
-        server: id(9),
+        core: id(9),
         pane: id(23),
     };
     assert!(
@@ -307,16 +307,16 @@ fn exact_handles_win_before_substrings_and_id_fallbacks() {
 }
 
 #[test]
-fn server_resolution_without_selectors_keeps_the_whole_tree() {
+fn core_resolution_without_selectors_keeps_the_whole_tree() {
     let current = Current {
-        server: id(9),
+        core: id(9),
         pane: id(22),
     };
     let result = resolve(
         &fixture(),
         &ScopeArgs::default(),
         Some(&current),
-        Want::Server,
+        Want::Core,
         Effect::Passive,
     )
     .unwrap();
@@ -332,7 +332,7 @@ fn reserved_main_handle_yields_to_a_branch_with_that_literal_name() {
         .as_mut()
         .unwrap()
         .worktrees[1];
-    tree.head = spaceterm_server::repository::WorktreeHead::Branch("main-worktree".into());
+    tree.head = spaceterm_core::repository::WorktreeHead::Branch("main-worktree".into());
     let result = resolve(
         &snapshot,
         &args(None, Some("main-worktree"), None, None),

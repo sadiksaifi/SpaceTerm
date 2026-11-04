@@ -29,19 +29,19 @@ from spaceterm_tasks.accessibility_linux import (
 
 
 class SourceAccessibilitySessionTests(unittest.TestCase):
-    def test_cold_source_session_owns_server_without_service_or_signed_candidate(self):
+    def test_cold_source_session_owns_core_without_service_or_signed_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            server = root / "server"
-            server.write_text(
+            core = root / "server"
+            core.write_text(
                 f"#!{sys.executable}\n"
                 "import pathlib, sys\n"
                 "assert sys.argv[1:] == ['server', 'run', '--owned']\n"
                 "print('spaceterm-development-ready-v1', flush=True)\n"
                 "sys.stdin.buffer.read()\n"
-                f"pathlib.Path({str(root / 'server-cleaned')!r}).touch()\n"
+                f"pathlib.Path({str(root / 'core-cleaned')!r}).touch()\n"
             )
-            server.chmod(0o755)
+            core.chmod(0o755)
             client = root / "client.py"
             client.write_text(
                 "import os, pathlib, socket\n"
@@ -61,7 +61,7 @@ class SourceAccessibilitySessionTests(unittest.TestCase):
                 "[sys.executable, sys.argv[2]], os.environ))\n"
             )
             process = subprocess.Popen(
-                [sys.executable, "-c", driver, str(server), str(client)],
+                [sys.executable, "-c", driver, str(core), str(client)],
                 env={
                     **os.environ,
                     "PYTHONPATH": str(LIBRARY),
@@ -352,8 +352,8 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         # event loop is needed to verify process ownership of discovery.
         self.probe = smoke.Probe.__new__(smoke.Probe)
         self.probe.application_pid = 42
-        self.probe.server_workspace_named = False
-        self.probe.server_workspace_name = "a11y-x11-run-owned"
+        self.probe.machine_workspace_named = False
+        self.probe.machine_workspace_name = "a11y-x11-run-owned"
         self.probe.atspi = SimpleNamespace(
             ROLE_FRAME="frame",
             ROLE_TERMINAL="terminal",
@@ -378,9 +378,9 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
                 ),
             ]
         )
-        self.probe.server_workspace_named = True
+        self.probe.machine_workspace_named = True
         self.probe.workspace_rows = lambda: [
-            Accessible("tree item", name=self.probe.server_workspace_name)
+            Accessible("tree item", name=self.probe.machine_workspace_name)
         ]
         self.assertIs(self.probe.find_terminal(), expected)
 
@@ -396,7 +396,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         self.desktop(
             [Accessible("application", pid=42, children=[Accessible("frame", children=[retained])])]
         )
-        self.probe.server_workspace_named = True
+        self.probe.machine_workspace_named = True
         self.probe.workspace_rows = lambda: [Accessible("tree item", name="Retained work")]
         self.assertIsNone(self.probe.find_terminal())
 
@@ -425,14 +425,14 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         retained.queryText = Mock()
         existing = Accessible("tree item", name="Retained work", states=())
         replacement = Accessible("tree item", name="Retained work", states=())
-        owned = Accessible("tree item", name=self.probe.server_workspace_name)
+        owned = Accessible("tree item", name=self.probe.machine_workspace_name)
         terminal = Accessible("terminal", name="Terminal Pane")
         start = Accessible("button", name="Start New Shell")
         tree = Accessible("tree", name="Workspaces", children=[existing])
         frame = Accessible("frame", children=[tree, retained])
         self.desktop([Accessible("application", pid=42, children=[frame])])
-        self.probe.server_workspace_before = None
-        self.probe.server_workspace_row = None
+        self.probe.core_workspace_before = None
+        self.probe.machine_workspace_row = None
         self.probe.terminal = None
         self.probe.atspi.STATE_FOCUSED = "focused"
         self.probe.wait = lambda predicate, classification: (
@@ -457,7 +457,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         local.action = create
 
         def start_fixture():
-            self.assertTrue(self.probe.server_workspace_named)
+            self.assertTrue(self.probe.machine_workspace_named)
             frame.remove(start)
             frame.append(terminal)
 
@@ -470,11 +470,11 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
 
         driver = SimpleNamespace(workspace_query=name_fixture)
         with patch.dict(
-            os.environ, {"SPACETERM_DEVELOPMENT_CLIENT": self.probe.server_workspace_name}
+            os.environ, {"SPACETERM_DEVELOPMENT_CLIENT": self.probe.machine_workspace_name}
         ):
-            self.probe.open_server_workspace(driver)
+            self.probe.open_core_workspace(driver)
         self.assertIs(self.probe.terminal, terminal)
-        self.assertIs(self.probe.server_workspace_row, owned)
+        self.assertIs(self.probe.machine_workspace_row, owned)
         self.assertEqual(replacement.name, "Retained work")
         retained.queryText.assert_not_called()
 
@@ -484,12 +484,12 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         )
         retained = Accessible("tree item", name="Retained work")
         replacement = Accessible("tree item", name="Retained work")
-        owned = Accessible("tree item", name=self.probe.server_workspace_name, states=())
+        owned = Accessible("tree item", name=self.probe.machine_workspace_name, states=())
         tree = Accessible("tree", name="Workspaces", children=[replacement, owned])
         self.desktop(
             [Accessible("application", pid=42, children=[Accessible("frame", children=[tree])])]
         )
-        self.probe.server_workspace_before = [retained]
+        self.probe.core_workspace_before = [retained]
         self.assertIsNone(self.probe.created_workspace_row())
         replacement.states = ()
         owned.states = ("selected",)
@@ -501,14 +501,14 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         self.desktop(
             [Accessible("application", pid=42, children=[Accessible("frame", children=[tree])])]
         )
-        self.probe.server_workspace_before = []
-        self.probe.server_workspace_row = retained
+        self.probe.core_workspace_before = []
+        self.probe.machine_workspace_row = retained
         self.probe.wait = lambda predicate, classification: (
             predicate() or self.smoke.require(False, classification)
         )
         driver = Mock()
         with self.assertRaisesRegex(SmokeFailure, "^server_workspace_cleanup_identity_missing$"):
-            self.probe.retire_server_workspace(driver)
+            self.probe.retire_core_workspace(driver)
         driver.context_menu.assert_not_called()
         self.assertEqual(list(tree), [retained])
 
@@ -534,10 +534,10 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         self.probe.atspi.ROLE_TREE_ITEM = "tree item"
         self.probe.atspi.STATE_SELECTED = "selected"
         self.probe.atspi.STATE_FOCUSED = "focused"
-        self.probe.server_workspace_before = [other, survivor]
-        self.probe.server_workspace_row = old_owned
-        self.probe.server_workspace_name = owned_name
-        self.probe.server_workspace_named = True
+        self.probe.core_workspace_before = [other, survivor]
+        self.probe.machine_workspace_row = old_owned
+        self.probe.machine_workspace_name = owned_name
+        self.probe.machine_workspace_named = True
 
         def wait(predicate, classification):
             value = predicate()
@@ -565,7 +565,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         menu_item.action = show_confirmation
         confirmation.action = retire
         driver = SimpleNamespace(escape=lambda: None, context_menu=lambda: frame.append(menu_item))
-        self.probe.retire_server_workspace(driver)
+        self.probe.retire_core_workspace(driver)
         self.assertEqual(pressed, ["confirmed"])
         self.assertEqual(list(tree), [other, survivor])
 
@@ -576,14 +576,14 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
             [Accessible("application", pid=42, children=[Accessible("frame", children=[tree])])]
         )
         self.probe.atspi.ROLE_TREE_ITEM = "tree item"
-        self.probe.server_workspace_before = []
-        self.probe.server_workspace_row = None
-        self.probe.server_workspace_name = "a11y-owned"
+        self.probe.core_workspace_before = []
+        self.probe.machine_workspace_row = None
+        self.probe.machine_workspace_name = "a11y-owned"
         self.probe.wait = lambda predicate, classification: (
             predicate() or self.smoke.require(False, classification)
         )
         with self.assertRaisesRegex(SmokeFailure, "server_workspace_cleanup_ambiguous"):
-            self.probe.retire_server_workspace(SimpleNamespace(escape=lambda: None))
+            self.probe.retire_core_workspace(SimpleNamespace(escape=lambda: None))
         self.assertEqual(len(tree), 2)
 
     def test_transient_empty_process_environment_waits_for_verified_private_values(self):
@@ -638,7 +638,7 @@ class AccessibilityCommandInputTests(unittest.TestCase):
             self.assertTrue(predicate())
             waited = True
 
-        probe = SimpleNamespace(terminal=terminal, wait=wait, server_workspace_named=True)
+        probe = SimpleNamespace(terminal=terminal, wait=wait, machine_workspace_named=True)
         input_driver = self.smoke.Input("x11", probe)
 
         def send(arguments):
@@ -650,7 +650,7 @@ class AccessibilityCommandInputTests(unittest.TestCase):
 
     def test_inactive_performance_input_does_not_require_accessibility_publication(self):
         input_driver = self.smoke.Input(
-            "x11", SimpleNamespace(terminal=object(), server_workspace_named=True)
+            "x11", SimpleNamespace(terminal=object(), machine_workspace_named=True)
         )
         with patch.object(self.smoke, "run") as send:
             input_driver.command("python3 workload.py")
@@ -658,7 +658,7 @@ class AccessibilityCommandInputTests(unittest.TestCase):
 
     def test_workload_input_is_refused_before_fixture_ownership_without_sending_keys(self):
         input_driver = self.smoke.Input(
-            "x11", SimpleNamespace(terminal=None, server_workspace_named=False)
+            "x11", SimpleNamespace(terminal=None, machine_workspace_named=False)
         )
         with patch.object(self.smoke, "run") as send:
             for action in (
@@ -687,9 +687,9 @@ class AccessibilitySourceProvenanceTests(unittest.TestCase):
             binary.write_bytes(contents)
             binary.chmod(0o755)
             digest = hashlib.sha256(contents).hexdigest()
-            server = root / "source-server"
-            server.write_bytes(b"source server fixture")
-            server.chmod(0o755)
+            core = root / "source-server"
+            core.write_bytes(b"source server fixture")
+            core.chmod(0o755)
             cargo = root / "cargo"
             cargo.write_text(
                 f"#!{sys.executable}\n"
@@ -700,7 +700,7 @@ class AccessibilitySourceProvenanceTests(unittest.TestCase):
                 "assert 'SPACETERM_CLI_SIGNATURE' not in os.environ\n"
                 "print(json.dumps({'reason': 'compiler-artifact', "
                 "'target': {'name': 'spaceterm'}, "
-                f"'executable': {str(server)!r}}}))\n"
+                f"'executable': {str(core)!r}}}))\n"
             )
             cargo.chmod(0o755)
             tic = root / "tic"
@@ -753,7 +753,7 @@ class AccessibilitySourceProvenanceTests(unittest.TestCase):
                             self.assertNotEqual(staged, binary)
                             self.assertEqual(
                                 (staged.parent / "spaceterm").read_bytes(),
-                                server.read_bytes(),
+                                core.read_bytes(),
                             )
                             self.assertTrue(
                                 (
@@ -788,8 +788,8 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
             binary = root / "prefix/bin/spaceterm"
             binary.parent.mkdir(parents=True)
             binary.touch()
-            server = root / "source-server"
-            server.write_bytes(b"fixture server executable")
+            core = root / "source-server"
+            core.write_bytes(b"fixture server executable")
             sessions = []
             reports = []
 
@@ -826,7 +826,7 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
                 patch.object(smoke.signal, "pidfd_send_signal", create=True),
                 patch.object(smoke.signal, "signal"),
                 patch.object(smoke, "prepare_binary", return_value=binary),
-                patch.object(smoke, "build_executable", return_value=server) as build,
+                patch.object(smoke, "build_executable", return_value=core) as build,
                 patch.object(smoke, "create_private_runtime", side_effect=runtime),
                 patch.object(smoke.subprocess, "Popen", side_effect=session),
                 patch.object(smoke, "retire_direct_child"),
@@ -862,7 +862,7 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
             self.assertFalse(report["passed"])
             self.assertEqual(report["failure"], "server_workspace_cleanup_incomplete")
 
-    def test_successful_accessibility_assertions_require_foreground_server_cleanup(self):
+    def test_successful_accessibility_assertions_require_foreground_core_cleanup(self):
         status, _, _, reports = self.run_fixture(source_cleanup=False)
         self.assertEqual(status, 1)
         for report in reports:
@@ -903,7 +903,7 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
             )
             args = SimpleNamespace(
                 binary=output / "client",
-                server_binary=output / "server",
+                core_binary=output / "server",
                 source_session="x11",
                 output_dir=output,
             )
@@ -914,7 +914,7 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
             self.assertTrue(report["source_run_cleanup"]["passed"])
             self.assertEqual(report["failure"], "server_workspace_cleanup_incomplete")
 
-    def test_bus_only_isolation_run_never_builds_or_preflights_an_application_server(self):
+    def test_bus_only_isolation_run_never_builds_or_preflights_an_application_core(self):
         status, sessions, builds, _ = self.run_fixture(cleanup=False, isolation_only=True)
         self.assertEqual(status, 0)
         self.assertEqual(builds, 0)

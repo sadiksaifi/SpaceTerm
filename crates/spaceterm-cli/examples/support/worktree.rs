@@ -1,24 +1,24 @@
 //! Existing Worktree mutation, original-outcome and removal-review helpers for native checks.
 use super::repository::inventory;
-use spaceterm_server::{
-    ServerConnection, ServerError,
-    connection::link::ServerLink,
+use spaceterm_core::{
+    CoreError, MachineConnection,
+    connection::link::CoreLink,
     hierarchy::{Mutation, RetainedOutcome},
     worktree::{Operation, Read, ReadReply, read_worktree},
 };
 use std::{error::Error, path::Path};
 
 /// The settled outcome of the edit `sequence`. The server replies once the write settles.
-pub fn finish(link: &ServerLink, sequence: u64) -> Result<RetainedOutcome, Box<dyn Error>> {
+pub fn finish(link: &CoreLink, sequence: u64) -> Result<RetainedOutcome, Box<dyn Error>> {
     Ok(super::support::resolve(link, sequence)?)
 }
-pub fn write(link: &ServerLink, operation: Operation) -> Result<RetainedOutcome, Box<dyn Error>> {
+pub fn write(link: &CoreLink, operation: Operation) -> Result<RetainedOutcome, Box<dyn Error>> {
     let sequence = inventory(link)?.1;
     let outcome = super::support::mutate(link, sequence, Mutation::Worktree(operation))?;
-    link.acknowledge(sequence).map_err(ServerError::from)?;
+    link.acknowledge(sequence).map_err(CoreError::from)?;
     Ok(outcome)
 }
-pub fn review(link: &ServerLink, root: &Path, path: &Path) -> Result<Operation, Box<dyn Error>> {
+pub fn review(link: &CoreLink, root: &Path, path: &Path) -> Result<Operation, Box<dyn Error>> {
     let review = match read_worktree(
         link,
         Read::CheckRemoval {
@@ -42,11 +42,11 @@ pub fn review(link: &ServerLink, root: &Path, path: &Path) -> Result<Operation, 
 
 /// Keeps an uncertain original in this client's existing journal until its exact outcome settles.
 pub fn journaled_mutation(
-    server: &ServerConnection,
-    link: &ServerLink,
+    core: &MachineConnection,
+    link: &CoreLink,
     mutation: Mutation,
 ) -> Result<RetainedOutcome, Box<dyn Error>> {
-    let mut journal = server.operation_journal()?;
+    let mut journal = core.operation_journal()?;
     if journal.pending().is_some() {
         return Err("fixture client has an unresolved original; refusing new work".into());
     }
@@ -57,6 +57,6 @@ pub fn journaled_mutation(
         return Err("fixture original identity changed".into());
     }
     journal.retire(result.clone())?;
-    link.acknowledge(sequence).map_err(ServerError::from)?;
+    link.acknowledge(sequence).map_err(CoreError::from)?;
     Ok(result)
 }

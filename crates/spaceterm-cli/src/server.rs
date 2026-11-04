@@ -19,17 +19,17 @@ pub mod update;
 #[cfg(test)]
 mod golden_tests;
 
-use crate::args::{Global, ServerCommand};
+use crate::args::{CoreCommand, Global};
 use crate::contract::{
-    self, Code, Envelope, Failure, RecoveredIdentity, RecoveredKind, RecoveredOperation,
-    RecoveredOutcome, RecoveredState, ServerRef, Warning, WarningCode, WarningDetails,
+    self, Code, Envelope, Failure, MachineRef, RecoveredIdentity, RecoveredKind,
+    RecoveredOperation, RecoveredOutcome, RecoveredState, Warning, WarningCode, WarningDetails,
 };
 use crate::state::{CliState, RouteKey};
 use serde::Serialize;
-use spaceterm_server::service::lane::admin::{self, PendingOperations};
-use spaceterm_server::service::lane::client::{Lane, LaneError, Session};
-use spaceterm_server::service::lane::{LaneOperationState, LaneReceipt};
-use spaceterm_server::{CliRoute, ServerConnection, ServerError};
+use spaceterm_core::service::lane::admin::{self, PendingOperations};
+use spaceterm_core::service::lane::client::{Lane, LaneError, Session};
+use spaceterm_core::service::lane::{LaneOperationState, LaneReceipt};
+use spaceterm_core::{CliRoute, CoreError, MachineConnection};
 use std::io::Write;
 use std::time::Duration;
 
@@ -51,9 +51,9 @@ impl Reply {
     }
 
     /// A failure with no operational data.
-    pub fn failure(command: &str, server: Option<ServerRef>, failure: Failure) -> Self {
+    pub fn failure(command: &str, core: Option<MachineRef>, failure: Failure) -> Self {
         Self::new(
-            &Envelope::error(command, server, failure, contract::Empty {}),
+            &Envelope::error(command, core, failure, contract::Empty {}),
             String::new(),
         )
     }
@@ -64,12 +64,7 @@ impl Reply {
     ) -> Self {
         let data = error.operational_data();
         Self::new(
-            &Envelope::error(
-                command,
-                error.server.map(|server| *server),
-                error.failure,
-                data,
-            ),
+            &Envelope::error(command, error.core.map(|core| *core), error.failure, data),
             String::new(),
         )
     }
@@ -82,8 +77,8 @@ impl Reply {
         }
     }
 
-    fn broken_pipe(command: &str, server: Option<ServerRef>) -> Self {
-        let mut reply = Self::failure(command, server, Failure::new(Code::OutputFailed));
+    fn broken_pipe(command: &str, core: Option<MachineRef>) -> Self {
+        let mut reply = Self::failure(command, core, Failure::new(Code::OutputFailed));
         reply.broken_pipe = true;
         reply
     }
@@ -112,7 +107,7 @@ impl Reply {
 
 /// Runs one `server` command for the server of `identity`, the identity this executable was
 /// built as.
-pub fn run(identity: &str, global: &Global, command: &ServerCommand) -> Reply {
+pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
     let context = Context {
         identity,
         global,
@@ -120,22 +115,22 @@ pub fn run(identity: &str, global: &Global, command: &ServerCommand) -> Reply {
     };
     let path = path(command);
     let mut reply = match command {
-        ServerCommand::Setup {
+        CoreCommand::Setup {
             network,
             automatic_start,
         } => setup::run(&context, network.as_ref(), *automatic_start),
-        ServerCommand::Pair { address } => pair::run(&context, address.as_deref()),
-        ServerCommand::Status => status::run(&context),
-        ServerCommand::Start => lifecycle::start(&context),
-        ServerCommand::Stop(confirm) => {
+        CoreCommand::Pair { address } => pair::run(&context, address.as_deref()),
+        CoreCommand::Status => status::run(&context),
+        CoreCommand::Start => lifecycle::start(&context),
+        CoreCommand::Stop(confirm) => {
             lifecycle::stop_or_restart(&context, lifecycle::Kind::Stop, confirm.confirm.as_deref())
         }
-        ServerCommand::Restart(confirm) => lifecycle::stop_or_restart(
+        CoreCommand::Restart(confirm) => lifecycle::stop_or_restart(
             &context,
             lifecycle::Kind::Restart,
             confirm.confirm.as_deref(),
         ),
-        ServerCommand::Update {
+        CoreCommand::Update {
             check,
             archive,
             signature,
@@ -146,17 +141,17 @@ pub fn run(identity: &str, global: &Global, command: &ServerCommand) -> Reply {
             archive.as_deref().zip(signature.as_deref()),
             confirm.as_deref(),
         ),
-        ServerCommand::Network { access, confirm } => {
+        CoreCommand::Network { access, confirm } => {
             network::run(&context, access, confirm.as_deref())
         }
-        ServerCommand::Permissions { action } => permissions::run(&context, action.as_ref()),
-        ServerCommand::EndAllSessions(confirm) => {
+        CoreCommand::Permissions { action } => permissions::run(&context, action.as_ref()),
+        CoreCommand::EndAllSessions(confirm) => {
             end_all_sessions::run(&context, confirm.confirm.as_deref())
         }
-        ServerCommand::Unpair { device, confirm } => {
+        CoreCommand::Unpair { device, confirm } => {
             unpair::run(&context, device, confirm.as_deref())
         }
-        ServerCommand::Run { .. } | ServerCommand::Provision(_) => {
+        CoreCommand::Run { .. } | CoreCommand::Provision(_) => {
             Reply::failure(path, None, Failure::new(Code::Unsupported))
         }
     };
@@ -165,25 +160,25 @@ pub fn run(identity: &str, global: &Global, command: &ServerCommand) -> Reply {
 }
 
 /// The dotted command path of a server command.
-fn path(command: &ServerCommand) -> &'static str {
+fn path(command: &CoreCommand) -> &'static str {
     match command {
-        ServerCommand::Setup { .. } => "server.setup",
-        ServerCommand::Pair { .. } => "server.pair",
-        ServerCommand::Status => "server.status",
-        ServerCommand::Start => "server.start",
-        ServerCommand::Stop(_) => "server.stop",
-        ServerCommand::Restart(_) => "server.restart",
-        ServerCommand::Update { .. } => "server.update",
-        ServerCommand::Network { .. } => "server.network",
-        ServerCommand::Permissions { action } => match action {
+        CoreCommand::Setup { .. } => "server.setup",
+        CoreCommand::Pair { .. } => "server.pair",
+        CoreCommand::Status => "server.status",
+        CoreCommand::Start => "server.start",
+        CoreCommand::Stop(_) => "server.stop",
+        CoreCommand::Restart(_) => "server.restart",
+        CoreCommand::Update { .. } => "server.update",
+        CoreCommand::Network { .. } => "server.network",
+        CoreCommand::Permissions { action } => match action {
             None => "server.permissions",
             Some(crate::args::PermissionsCommand::Request { .. }) => "server.permissions.request",
             Some(crate::args::PermissionsCommand::Settings { .. }) => "server.permissions.settings",
         },
-        ServerCommand::EndAllSessions(_) => "server.end-all-sessions",
-        ServerCommand::Unpair { .. } => "server.unpair",
-        ServerCommand::Run { .. } => "server.run",
-        ServerCommand::Provision(_) => "server.provision",
+        CoreCommand::EndAllSessions(_) => "server.end-all-sessions",
+        CoreCommand::Unpair { .. } => "server.unpair",
+        CoreCommand::Run { .. } => "server.run",
+        CoreCommand::Provision(_) => "server.provision",
     }
 }
 
@@ -196,7 +191,7 @@ pub struct Context<'a> {
 
 impl Context<'_> {
     /// Whether the command acts on this machine's own server: `--server`, else
-    /// `SPACETERM_SERVER`, else `local`, with the same rule work commands use.
+    /// `SPACETERM_MACHINE`, else `local`, with the same rule work commands use.
     pub fn is_local(&self) -> bool {
         crate::connection::route::selector(self.global).is_ok_and(|selected| selected == "local")
     }
@@ -215,9 +210,9 @@ impl Context<'_> {
     }
 
     /// The CLI's connection to this account's own server, as the base identity or `--as`.
-    pub fn local_connection(&self) -> Result<ServerConnection, Failure> {
-        ServerConnection::for_cli(self.identity, CliRoute::Local, self.agent())
-            .map_err(contract::from_server_error)
+    pub fn local_connection(&self) -> Result<MachineConnection, Failure> {
+        MachineConnection::for_cli(self.identity, CliRoute::Local, self.agent())
+            .map_err(contract::from_core_error)
     }
 
     /// The server this command acts on, with its route. A remote target resolves through the
@@ -231,15 +226,15 @@ impl Context<'_> {
                 .timeout
                 .map(|timeout| std::time::Instant::now() + timeout),
         )?;
-        let server = match &routed.selected {
+        let core = match &routed.selected {
             crate::connection::route::Route::Local => local_ref(self.identity)?,
             crate::connection::route::Route::Paired(saved) => {
-                routed.selected.reference(&saved.paired.pin.server)
+                routed.selected.reference(&saved.paired.pin.core)
             }
         };
         Ok(Routed {
             connection: Ok(routed.connection),
-            server,
+            core,
             route: routed.selected.key(),
             local: routed.selected.is_local(),
         })
@@ -256,11 +251,11 @@ impl Context<'_> {
 
     /// The command line a person copies to repeat a command against the same server as the same
     /// actor: `spaceterm --server ROUTE [--as AGENT] WORDS…`. `server` is the resolved target, so
-    /// the copy ignores a different `SPACETERM_SERVER` or `SPACETERM_AS` in another shell. Every
+    /// the copy ignores a different `SPACETERM_MACHINE` or `SPACETERM_AS` in another shell. Every
     /// word is a [`crate::shell::word`], so the line pastes into any POSIX shell or Zsh.
-    pub fn command_line(&self, server: &ServerRef, words: &[&str]) -> String {
+    pub fn command_line(&self, core: &MachineRef, words: &[&str]) -> String {
         let agent = self.agent();
-        let mut line = vec!["spaceterm", "--server", server.route.as_str()];
+        let mut line = vec!["spaceterm", "--server", core.route.as_str()];
         if let Some(agent) = &agent {
             line.extend(["--as", agent.as_str()]);
         }
@@ -271,7 +266,7 @@ impl Context<'_> {
             .join(" ")
     }
 
-    pub fn agent(&self) -> Option<spaceterm_server::protocol::AgentName> {
+    pub fn agent(&self) -> Option<spaceterm_core::protocol::AgentName> {
         self.global.agent.clone().or_else(|| {
             std::env::var("SPACETERM_AS")
                 .ok()
@@ -295,24 +290,24 @@ fn terminal(fd: libc::c_int) -> bool {
 /// A resolved server and the route its CLI state lives under.
 pub struct Routed {
     /// The route's connection. A local one may be unavailable while the server is stopped.
-    pub connection: Result<ServerConnection, Failure>,
-    pub server: ServerRef,
+    pub connection: Result<MachineConnection, Failure>,
+    pub core: MachineRef,
     pub route: RouteKey,
     pub local: bool,
 }
 
 /// The local server's reference for the envelope, when it has an identity.
-pub fn local_ref(identity: &str) -> Result<ServerRef, Failure> {
-    let service = spaceterm_server::service::Service::for_identity(identity)
-        .map_err(contract::from_server_error)?;
-    let server = service
-        .passive_server_id()
-        .map_err(contract::from_server_error)?
+pub fn local_ref(identity: &str) -> Result<MachineRef, Failure> {
+    let service = spaceterm_core::service::Service::for_identity(identity)
+        .map_err(contract::from_core_error)?;
+    let core = service
+        .passive_machine_id()
+        .map_err(contract::from_core_error)?
         .ok_or(Failure::new(Code::NotSetUp))?;
-    Ok(ServerRef {
+    Ok(MachineRef {
         name: "local".to_owned(),
         route: "local".to_owned(),
-        id: hex(&server),
+        id: hex(&core),
     })
 }
 
@@ -322,9 +317,9 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// A direct-management failure on this machine. The account IPC fails to connect only when the
 /// server is not running.
-pub fn local_direct(error: spaceterm_server::direct::DirectError) -> Failure {
+pub fn local_direct(error: spaceterm_core::direct::DirectError) -> Failure {
     match error {
-        spaceterm_server::direct::DirectError::Transport => Failure::new(Code::NotRunning),
+        spaceterm_core::direct::DirectError::Transport => Failure::new(Code::NotRunning),
         error => contract::from_direct_error(error),
     }
 }
@@ -332,7 +327,7 @@ pub fn local_direct(error: spaceterm_server::direct::DirectError) -> Failure {
 pub fn lane_failure(error: LaneError) -> Failure {
     match error {
         LaneError::Code(code) => contract::from_lane_code(&code),
-        LaneError::Server(error) => contract::from_server_error(error),
+        LaneError::Core(error) => contract::from_core_error(error),
         LaneError::Interrupted => Failure::new(Code::Interrupted),
     }
 }
@@ -351,17 +346,17 @@ pub struct Pending {
 
 impl Pending {
     pub fn open(context: &Context<'_>, route: &RouteKey) -> Result<Self, Failure> {
-        let state = CliState::open(context.identity).map_err(contract::from_server_error)?;
+        let state = CliState::open(context.identity).map_err(contract::from_core_error)?;
         let directory = state
             .identity_dir(route, context.agent().as_ref())
-            .map_err(contract::from_server_error)?;
+            .map_err(contract::from_core_error)?;
         Ok(Self {
             operations: PendingOperations::new(directory),
         })
     }
 
     pub fn list(&self) -> Result<Vec<String>, Failure> {
-        self.operations.list().map_err(contract::from_server_error)
+        self.operations.list().map_err(contract::from_core_error)
     }
 
     /// The shared record, which the lane flow writes right before each `Execute`.
@@ -380,7 +375,7 @@ pub fn dispatch() -> Result<(), LaneError> {
 /// it. A pending operation that has not settled stays recorded for a later command.
 pub fn open_lane(
     context: &Context<'_>,
-    connection: &Result<ServerConnection, Failure>,
+    connection: &Result<MachineConnection, Failure>,
     route: &RouteKey,
     pending: &Pending,
 ) -> Result<Opened, Failure> {
@@ -388,7 +383,7 @@ pub fn open_lane(
     let connection = connection.as_ref().map_err(Clone::clone)?;
     let lane = connection
         .service_lane()
-        .map_err(contract::from_server_error)?;
+        .map_err(contract::from_core_error)?;
     let (session, settled) = admin::open(&lane, &pending.operations).map_err(lane_failure)?;
     let mut recovered: Vec<_> = settled
         .iter()
@@ -442,7 +437,7 @@ pub fn last_connected(context: &Context<'_>, route: &RouteKey) -> Option<String>
 /// command.
 fn settle_journals(
     context: &Context<'_>,
-    connection: &ServerConnection,
+    connection: &MachineConnection,
     route: &RouteKey,
 ) -> Vec<RecoveredOperation> {
     let Ok(state) = CliState::open(context.identity) else {
@@ -467,8 +462,10 @@ fn settle_journals(
             writer: None,
         },
         &mut |agent| match route {
-            RouteKey::Local => ServerConnection::for_cli(identity, CliRoute::Local, agent.cloned()),
-            RouteKey::Paired(_) => Err(ServerError::Unsupported),
+            RouteKey::Local => {
+                MachineConnection::for_cli(identity, CliRoute::Local, agent.cloned())
+            }
+            RouteKey::Paired(_) => Err(CoreError::Unsupported),
         },
         std::time::Instant::now() + Duration::from_secs(30),
     )

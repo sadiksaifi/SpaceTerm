@@ -99,7 +99,7 @@ mod tests {
             "spaceterm://pair/{}",
             URL_SAFE_NO_PAD.encode(body.to_string())
         );
-        spaceterm_server::direct::Invitation::parse(&link)
+        spaceterm_core::direct::Invitation::parse(&link)
             .expect("valid synthetic invitation")
             .display_text()
             .to_string()

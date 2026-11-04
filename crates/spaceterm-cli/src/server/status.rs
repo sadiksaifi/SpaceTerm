@@ -4,11 +4,11 @@
 //! without recovery, start or any other change.
 use super::{Context, Opened, Pending, Reply};
 use crate::contract::{
-    self, Activation, Code, Device, Envelope, Failure, HeldOutcomes, RecoveredIdentity, ServerRef,
-    ServerStatus, StagedVersion, StatusNetwork, UnreachableData, Version,
+    self, Activation, Code, CoreStatus, Device, Envelope, Failure, HeldOutcomes, MachineRef,
+    RecoveredIdentity, StagedVersion, StatusNetwork, UnreachableData, Version,
 };
 use crate::state::{CliState, RouteKey};
-use spaceterm_server::service::lane::{
+use spaceterm_core::service::lane::{
     LaneActivation, LaneReply, LaneRequest, LaneStatus, LaneVersion, Offline,
 };
 use std::time::{Duration, Instant};
@@ -19,12 +19,12 @@ const LIMIT: Duration = Duration::from_secs(30);
 pub fn run(context: &Context<'_>) -> Reply {
     if !context.is_local() {
         return match context.routed() {
-            Ok(routed) => over_lane(context, &routed.connection, routed.server, routed.route),
+            Ok(routed) => over_lane(context, &routed.connection, routed.core, routed.route),
             Err(error) => Reply::routing_failure(COMMAND, error),
         };
     }
-    let server = match super::local_ref(context.identity) {
-        Ok(server) => server,
+    let core = match super::local_ref(context.identity) {
+        Ok(core) => core,
         Err(failure) => return Reply::failure(COMMAND, None, failure),
     };
     // A server that answers its lane reports for itself. Otherwise the stopped service is read
@@ -35,21 +35,21 @@ pub fn run(context: &Context<'_>) -> Reply {
             .and_then(|lane| lane.session())
             .is_ok()
     {
-        return over_lane(context, &Ok(connection), server, RouteKey::Local);
+        return over_lane(context, &Ok(connection), core, RouteKey::Local);
     }
     let status = Offline::new(context.identity)
         .and_then(|offline| offline.admin().status(None))
-        .map_err(contract::from_server_error);
+        .map_err(contract::from_core_error);
     match status {
-        Ok(status) => report(context, server, &status, &RouteKey::Local, Vec::new()),
-        Err(failure) => Reply::failure(COMMAND, Some(server), failure),
+        Ok(status) => report(context, core, &status, &RouteKey::Local, Vec::new()),
+        Err(failure) => Reply::failure(COMMAND, Some(core), failure),
     }
 }
 
 fn over_lane(
     context: &Context<'_>,
-    connection: &Result<spaceterm_server::ServerConnection, Failure>,
-    server: ServerRef,
+    connection: &Result<spaceterm_core::MachineConnection, Failure>,
+    core: MachineRef,
     route: RouteKey,
 ) -> Reply {
     let opened = Pending::open(context, &route)
@@ -62,33 +62,33 @@ fn over_lane(
         Ok(opened) => opened,
         Err(failure) if failure.code == Code::Unreachable || failure.code == Code::NotRunning => {
             let last = super::last_connected(context, &route);
-            return Reply::new(&unreachable_envelope(server, failure, last), String::new());
+            return Reply::new(&unreachable_envelope(core, failure, last), String::new());
         }
-        Err(failure) => return Reply::failure(COMMAND, Some(server), failure),
+        Err(failure) => return Reply::failure(COMMAND, Some(core), failure),
     };
     let reply = session.request(
         &LaneRequest::Status,
         Instant::now() + context.timeout(LIMIT),
     );
     match reply {
-        Ok(LaneReply::Status(status)) => report(context, server, &status, &route, recovered),
+        Ok(LaneReply::Status(status)) => report(context, core, &status, &route, recovered),
         Ok(LaneReply::Error { code }) => {
-            Reply::failure(COMMAND, Some(server), contract::from_lane_code(&code))
+            Reply::failure(COMMAND, Some(core), contract::from_lane_code(&code))
         }
-        Ok(_) => Reply::failure(COMMAND, Some(server), Failure::new(Code::ProtocolError)),
-        Err(error) => Reply::failure(COMMAND, Some(server), contract::from_server_error(error)),
+        Ok(_) => Reply::failure(COMMAND, Some(core), Failure::new(Code::ProtocolError)),
+        Err(error) => Reply::failure(COMMAND, Some(core), contract::from_core_error(error)),
     }
 }
 
 /// An unreachable server is exit 5, with when this CLI last reached it.
 pub(crate) fn unreachable_envelope(
-    server: ServerRef,
+    core: MachineRef,
     failure: Failure,
     last_connected_at: Option<String>,
 ) -> Envelope<UnreachableData> {
     Envelope::error(
         COMMAND,
-        Some(server),
+        Some(core),
         failure,
         UnreachableData { last_connected_at },
     )
@@ -130,24 +130,24 @@ fn held(context: &Context<'_>, route: &RouteKey) -> Vec<HeldOutcomes> {
 
 fn report(
     context: &Context<'_>,
-    server: ServerRef,
+    core: MachineRef,
     status: &LaneStatus,
     route: &RouteKey,
     recovered: Vec<crate::contract::RecoveredOperation>,
 ) -> Reply {
-    let (envelope, text) = envelope(server, status, held(context, route), recovered);
+    let (envelope, text) = envelope(core, status, held(context, route), recovered);
     Reply::new(&envelope, text)
 }
 
 /// The `server.status` envelope and its text, from the lane's status and this CLI's held
 /// outcomes.
 pub(crate) fn envelope(
-    server: ServerRef,
+    core: MachineRef,
     status: &LaneStatus,
     held_outcomes: Vec<HeldOutcomes>,
     recovered: Vec<crate::contract::RecoveredOperation>,
-) -> (Envelope<ServerStatus>, String) {
-    let data = ServerStatus {
+) -> (Envelope<CoreStatus>, String) {
+    let data = CoreStatus {
         running: status.running,
         stopped: status.stopped,
         installed: status.installed,
@@ -187,14 +187,14 @@ pub(crate) fn envelope(
         lane_major: status.lane_major,
         terminal_counters: status.terminal_counters,
     };
-    let text = text(&server, &data);
+    let text = text(&core, &data);
     (
-        super::with_recovered(Envelope::ok(COMMAND, Some(server), data), recovered),
+        super::with_recovered(Envelope::ok(COMMAND, Some(core), data), recovered),
         text,
     )
 }
 
-fn text(server: &ServerRef, data: &ServerStatus) -> String {
+fn text(core: &MachineRef, data: &CoreStatus) -> String {
     let state = if !data.installed {
         "not installed"
     } else if data.running {
@@ -206,7 +206,7 @@ fn text(server: &ServerRef, data: &ServerStatus) -> String {
     };
     let mut out = format!(
         "Server {}: {state}\nVersion: {} (commit {})\n",
-        server.name,
+        core.name,
         data.runtime.version,
         data.runtime.commit.get(..7).unwrap_or(&data.runtime.commit)
     );

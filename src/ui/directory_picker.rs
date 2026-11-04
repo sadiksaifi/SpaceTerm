@@ -29,13 +29,11 @@ use super::{
 
 use crate::domain::ValidatedLocalDirectory;
 
+mod core_source;
 mod local_source;
-mod server_source;
 #[cfg(test)]
-pub(crate) use server_source::testing as server_directory_testing;
-pub(crate) use server_source::{
-    ServerDirectories, ServerDirectorySource, owning_server_directories,
-};
+pub(crate) use core_source::testing as core_directory_testing;
+pub(crate) use core_source::{CoreDirectories, CoreDirectorySource, owning_core_directories};
 
 pub(crate) use local_source::LocalDirectorySource;
 
@@ -97,13 +95,13 @@ pub(crate) type SourceFuture<T> = Pin<Box<dyn Future<Output = Result<T, Director
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) enum DirectorySelection {
     Pin(ValidatedLocalDirectory),
-    Server(std::path::PathBuf),
+    Core(std::path::PathBuf),
 }
 impl fmt::Debug for DirectorySelection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Pin(_) => "DirectorySelection::Pin(<redacted>)",
-            Self::Server(_) => "DirectorySelection::Server(<redacted>)",
+            Self::Core(_) => "DirectorySelection::Server(<redacted>)",
         })
     }
 }
@@ -1477,7 +1475,7 @@ mod tests {
         BackgroundExecutor, Keystroke, Modifiers, Task, TestAppContext, VisualTestContext, div,
     };
 
-    use super::server_source::{DirectoryConnection, DirectoryConnector};
+    use super::core_source::{DirectoryConnection, DirectoryConnector};
     use super::*;
 
     #[test]
@@ -1485,9 +1483,8 @@ mod tests {
         let parsed = parse_picker_path("/sensitive/project").unwrap();
         let row = DirectoryRow::new("sensitive-child".to_owned()).unwrap();
         let listing = DirectoryListing::new(vec![row.clone()]);
-        let event = DirectoryPickerEvent::Confirmed(DirectorySelection::Server(
-            "/sensitive/project".into(),
-        ));
+        let event =
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Core("/sensitive/project".into()));
 
         for debug in [
             format!("{parsed:?}"),
@@ -1496,7 +1493,7 @@ mod tests {
             format!("{event:?}"),
             format!(
                 "{:?}",
-                DirectorySelection::Server("/sensitive/server/".into())
+                DirectorySelection::Core("/sensitive/server/".into())
             ),
         ] {
             assert!(!debug.contains("sensitive"));
@@ -1577,7 +1574,7 @@ mod tests {
                 },
                 &self.state,
             );
-            Box::pin(async move { Ok(DirectorySelection::Server(identity.await?.into())) })
+            Box::pin(async move { Ok(DirectorySelection::Core(identity.await?.into())) })
         }
     }
 
@@ -1653,7 +1650,7 @@ mod tests {
             }
             fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
                 Box::pin(
-                    async move { Ok(DirectorySelection::Server(directory.into_string().into())) },
+                    async move { Ok(DirectorySelection::Core(directory.into_string().into())) },
                 )
             }
         }
@@ -1708,7 +1705,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             *confirmed.borrow(),
-            vec![DirectorySelection::Server("/chosen/".into())]
+            vec![DirectorySelection::Core("/chosen/".into())]
         );
     }
 
@@ -1930,7 +1927,7 @@ mod tests {
         );
         assert!(events.borrow().iter().any(|event| matches!(
             event,
-            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(pinned))
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Core(pinned))
                 if pinned.as_os_str() == identity.as_str()
         )));
     }
@@ -2483,7 +2480,7 @@ mod tests {
                         lifecycle_generation,
                         operation_generation,
                         directory,
-                        result: Ok(DirectorySelection::Server("/home/tester".into())),
+                        result: Ok(DirectorySelection::Core("/home/tester".into())),
                     },
                     window,
                     cx,
@@ -2533,12 +2530,12 @@ mod tests {
         );
     }
 
-    use super::server_source::testing::InProcessServer;
+    use super::core_source::testing::InProcessCore;
 
     /// The owning server reached over a route that refuses a channel beyond the first two it
     /// opened.
     struct LimitedChannels {
-        server: InProcessServer,
+        core: InProcessCore,
         opened: Arc<AtomicUsize>,
     }
 
@@ -2547,18 +2544,18 @@ mod tests {
             if self.opened.fetch_add(1, AtomicOrdering::SeqCst) >= 2 {
                 return Err(());
             }
-            self.server.connect()
+            self.core.connect()
         }
     }
 
     /// Typing a path as one quick burst browses it over one server channel, so a route that
     /// allows only a few channels never reads as a lost connection.
     #[gpui::test]
-    fn typing_a_path_quickly_should_browse_it_over_one_server_channel(cx: &mut TestAppContext) {
+    fn typing_a_path_quickly_should_browse_it_over_one_core_channel(cx: &mut TestAppContext) {
         // The server answers from its own directory channel thread.
         cx.executor().allow_parking();
         let root = std::env::temp_dir().join(format!(
-            "spaceterm-server-directory-burst-{}",
+            "spaceterm-core-directory-burst-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -2566,14 +2563,14 @@ mod tests {
         std::fs::create_dir_all(root.join("projects/beta")).unwrap();
         let handler = crate::runtime::directory_testing::directory_host();
         let opened = Arc::new(AtomicUsize::new(0));
-        let server: Arc<dyn DirectoryConnector> = Arc::new(LimitedChannels {
-            server: InProcessServer(Arc::new(Mutex::new(handler))),
+        let core: Arc<dyn DirectoryConnector> = Arc::new(LimitedChannels {
+            core: InProcessCore(Arc::new(Mutex::new(handler))),
             opened: Arc::clone(&opened),
         });
         cx.update(crate::ui::init).unwrap();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let source = ServerDirectorySource::browsing_through(
-                server,
+            let source = CoreDirectorySource::browsing_through(
+                core,
                 Some("penguin".to_owned()),
                 Rc::new(|| true),
             );
@@ -2649,27 +2646,27 @@ mod tests {
     /// server after the person confirms, through the production server source and the server's
     /// own directory handler, and pin the directory the server validated.
     #[gpui::test]
-    fn a_server_directory_picker_should_create_a_missing_directory_on_its_server(
+    fn a_machine_directory_picker_should_create_a_missing_directory_on_its_machine(
         cx: &mut TestAppContext,
     ) {
         // The server answers from its own directory channel thread.
         cx.executor().allow_parking();
         let root = std::env::temp_dir().join(format!(
-            "spaceterm-server-directory-creation-{}",
+            "spaceterm-core-directory-creation-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let missing = root.join("new/nested");
         let handler = crate::runtime::directory_testing::directory_host();
-        let server: Arc<dyn DirectoryConnector> =
-            Arc::new(InProcessServer(Arc::new(Mutex::new(handler))));
+        let core: Arc<dyn DirectoryConnector> =
+            Arc::new(InProcessCore(Arc::new(Mutex::new(handler))));
         cx.update(crate::ui::init).unwrap();
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let source = ServerDirectorySource::browsing_through(
-                server,
+            let source = CoreDirectorySource::browsing_through(
+                core,
                 Some("penguin".to_owned()),
                 Rc::new(|| true),
             );
@@ -2714,7 +2711,7 @@ mod tests {
                 events.borrow().iter().any(|event| {
                     matches!(
                         event,
-                        DirectoryPickerEvent::Confirmed(DirectorySelection::Server(_))
+                        DirectoryPickerEvent::Confirmed(DirectorySelection::Core(_))
                     )
                 })
             },
@@ -2726,7 +2723,7 @@ mod tests {
             "the server created the directory and its parents"
         );
         let chosen = events.borrow().iter().find_map(|event| match event {
-            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(chosen)) => {
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Core(chosen)) => {
                 Some(chosen.clone())
             }
             _ => None,
@@ -2783,7 +2780,7 @@ mod tests {
     }
 
     struct ControlledRoute {
-        server: InProcessServer,
+        core: InProcessCore,
         controls: Arc<RouteControls>,
     }
 
@@ -2810,7 +2807,7 @@ mod tests {
             );
             let place = self.controls.opened.fetch_add(1, AtomicOrdering::SeqCst);
             Ok(Box::new(ControlledConnection {
-                inner: self.server.connect()?,
+                inner: self.core.connect()?,
                 place,
                 controls: Arc::clone(&self.controls),
             }))
@@ -2821,12 +2818,12 @@ mod tests {
         fn begin(
             &mut self,
             id: u64,
-            operation: spaceterm_server::protocol::Operation,
+            operation: spaceterm_core::protocol::Operation,
         ) -> Result<(), ()> {
             self.open()?;
             let creation = matches!(
                 operation,
-                spaceterm_server::protocol::Operation::DirectoryCreate(_)
+                spaceterm_core::protocol::Operation::DirectoryCreate(_)
             );
             if creation {
                 self.controls.creates.fetch_add(1, AtomicOrdering::SeqCst);
@@ -2857,8 +2854,8 @@ mod tests {
         ) -> Result<
             Option<
                 Result<
-                    spaceterm_server::pane::directories::Value,
-                    spaceterm_server::pane::directories::Error,
+                    spaceterm_core::pane::directories::Value,
+                    spaceterm_core::pane::directories::Error,
                 >,
             >,
             (),
@@ -2900,23 +2897,23 @@ mod tests {
         // The server answers from its own directory channel thread.
         cx.executor().allow_parking();
         let root = std::env::temp_dir().join(format!(
-            "spaceterm-server-directory-{name}-{}",
+            "spaceterm-core-directory-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let missing = root.join("new/nested");
         let handler = crate::runtime::directory_testing::directory_host();
-        let server: Arc<dyn DirectoryConnector> = Arc::new(ControlledRoute {
-            server: InProcessServer(Arc::new(Mutex::new(handler))),
+        let core: Arc<dyn DirectoryConnector> = Arc::new(ControlledRoute {
+            core: InProcessCore(Arc::new(Mutex::new(handler))),
             controls: Arc::clone(controls),
         });
         cx.update(crate::ui::init).unwrap();
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded = Rc::clone(&events);
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let source = ServerDirectorySource::browsing_through(
-                server,
+            let source = CoreDirectorySource::browsing_through(
+                core,
                 Some("penguin".to_owned()),
                 Rc::new(|| true),
             );
@@ -2977,7 +2974,7 @@ mod tests {
         events.borrow().iter().any(|event| {
             matches!(
                 event,
-                DirectoryPickerEvent::Confirmed(DirectorySelection::Server(_))
+                DirectoryPickerEvent::Confirmed(DirectorySelection::Core(_))
             )
         })
     }
@@ -2985,7 +2982,7 @@ mod tests {
     /// The server closed the picker's channel while the person read the creation alert. The
     /// creation still reaches the server once, over a channel admitted just before it.
     #[gpui::test]
-    fn creating_after_an_idle_alert_should_reach_the_server_over_a_fresh_channel(
+    fn creating_after_an_idle_alert_should_reach_the_core_over_a_fresh_channel(
         cx: &mut TestAppContext,
     ) {
         let controls = Arc::new(RouteControls::default());
@@ -3075,9 +3072,7 @@ mod tests {
 
     /// A creation abandoned while its channel was still opening never reaches the server.
     #[gpui::test]
-    fn a_creation_abandoned_while_connecting_should_never_reach_the_server(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_creation_abandoned_while_connecting_should_never_reach_the_core(cx: &mut TestAppContext) {
         let controls = Arc::new(RouteControls::default());
         let (alert, cx) = creation_alert(&controls, "abandoned-create", cx);
         let CreationAlert {

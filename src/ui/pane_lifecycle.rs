@@ -25,7 +25,7 @@ pub(crate) struct PaneLifecycleDependencies {
     pub(crate) permission_setup: Option<Entity<PermissionSetup>>,
     /// The desktop's one Terminal Diagnostics counter set, which its Panes record into and the
     /// Desktop Channel reports.
-    pub(crate) counters: std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters>,
+    pub(crate) counters: std::sync::Arc<spaceterm_core::diagnostics::TerminalCounters>,
 }
 
 #[cfg(test)]
@@ -74,7 +74,7 @@ impl PaneConstruction {
     /// The counters Panes and their server connections record into.
     pub(crate) fn counters(
         &self,
-    ) -> &std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters> {
+    ) -> &std::sync::Arc<spaceterm_core::diagnostics::TerminalCounters> {
         &self.lifecycle.counters
     }
 

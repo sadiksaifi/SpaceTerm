@@ -211,7 +211,7 @@ run = [
 
 [tasks."lint:rust:portable"]
 description = "Lint shared targets without native features"
-run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-cli --all-targets --no-default-features --locked --no-deps -- -D warnings"
+run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-core --package spaceterm-cli --all-targets --no-default-features --locked --no-deps -- -D warnings"
 
 [tasks."lint:python"]
 description = "Lint and type-check the Python task code"
@@ -244,7 +244,7 @@ run = "cargo check --package spaceterm --lib --bins --no-default-features --feat
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
-run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-cli --all-targets --no-default-features --locked"
+run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-core --package spaceterm-cli --all-targets --no-default-features --locked"
 
 [tasks.test]
 description = "Run tests with every feature for the current platform"
@@ -254,7 +254,7 @@ run = "cargo test --all-targets --all-features --locked {{usage.filter | quote}}
 [tasks."test:portable"]
 description = "Run shared tests without native features"
 usage = 'arg "[filter]" help="Run only tests whose names contain this filter"'
-run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-cli --all-targets --no-default-features --locked {{usage.filter | quote}}"
+run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-core --package spaceterm-cli --all-targets --no-default-features --locked {{usage.filter | quote}}"
 
 [tasks."test:desktop"]
 description = "Run desktop library regressions without native integration harnesses"
@@ -425,13 +425,13 @@ run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 
 [tasks."server:test"]
 description = "Test local server account admission and private storage"
-run = "cargo test --package spaceterm-server --package spaceterm-cli --package spaceterm-directories --all-features --locked"
+run = "cargo test --package spaceterm-core --package spaceterm-cli --package spaceterm-directories --all-features --locked"
 
 [tasks."cli:identity:test"]
 description = "Test CLI identities, creation control and journals, then exercise them against a fresh Development server"
 run = [
     "cargo test -p spaceterm-cli --lib --locked -- state:: journal::",
-    "cargo test -p spaceterm-server --features client --lib --locked -- admission:: control:: hierarchy:: a_cli_agent revocation_closes",
+    "cargo test -p spaceterm-core --features client --lib --locked -- admission:: control:: hierarchy:: a_cli_agent revocation_closes",
     "cargo test -p spaceterm --lib --all-features --locked -- create_control_tests workspace_repositories::reveal shell_launch::",
     "cargo test -p spaceterm --lib --features native-tests --locked -- each_shell_puts_the_session_cli_first",
     "cargo run -p spaceterm-cli --example cli_identity --locked",
@@ -443,7 +443,7 @@ run = [
     "cargo test -p spaceterm-cli --lib --locked -- io:: --include-ignored --test-threads=1",
     "cargo test -p spaceterm-cli --test io_concurrency --locked -- --ignored --test-threads=1",
     "cargo test -p spaceterm-cli --test interrupt --locked -- --ignored --test-threads=1",
-    "cargo test -p spaceterm-server --features client --lib --locked -- pane::run pane::keys",
+    "cargo test -p spaceterm-core --features client --lib --locked -- pane::run pane::keys",
     "cargo test -p spaceterm --lib --all-features --locked -- agent_io_tests::observing agent_io_tests::named_keys terminal::metadata terminal::session::subscriptions",
 ]
 
@@ -458,7 +458,7 @@ run = [
 description = "Test CLI targeting, labels, organization and the work commands"
 run = [
     "cargo test -p spaceterm-cli --lib --locked -- scope:: list:: work::",
-    "cargo test -p spaceterm-server --features client --locked -- labels:: organize::",
+    "cargo test -p spaceterm-core --features client --locked -- labels:: organize::",
 ]
 
 [tasks."server:fmt"]
@@ -466,17 +466,17 @@ description = "Format the server crates"
 usage = '''
 flag "--check" help="Check formatting without changing files"
 '''
-run = "cargo fmt --package spaceterm-server --package spaceterm-cli {% if usage.check %}--check{% endif %}"
+run = "cargo fmt --package spaceterm-core --package spaceterm-cli {% if usage.check %}--check{% endif %}"
 
 [tasks."server:test:headless"]
 description = "Test the server without native credential adapters"
-run = "cargo test --package spaceterm-server --no-default-features --locked"
+run = "cargo test --package spaceterm-core --no-default-features --locked"
 
 [tasks."server:check"]
 description = "Check the local server and desktop account admission"
 run = [
-    "cargo clippy --package spaceterm-server --all-targets --all-features --locked --no-deps -- -D warnings",
-    "cargo clippy --package spaceterm-server --all-targets --no-default-features --locked --no-deps -- -D warnings",
+    "cargo clippy --package spaceterm-core --all-targets --all-features --locked --no-deps -- -D warnings",
+    "cargo clippy --package spaceterm-core --all-targets --no-default-features --locked --no-deps -- -D warnings",
     "cargo clippy --package spaceterm-cli --all-targets --all-features --locked --no-deps -- -D warnings",
     "cargo clippy --package spaceterm-cli --all-targets --no-default-features --locked --no-deps -- -D warnings",
 ]
@@ -499,7 +499,7 @@ run = "cargo tree --package spaceterm-cli --no-default-features --edges normal,b
 
 [tasks."server:lock"]
 description = "Refresh local server dependencies without upgrading unrelated packages"
-run = "cargo update --package spaceterm-server --offline"
+run = "cargo update --package spaceterm-core --offline"
 
 [tasks."server:pane:test"]
 description = "Verify persistent server Pane ownership with real headless PTYs"
@@ -618,7 +618,7 @@ run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/server_update\" {{usage.prev
 
 [tasks."server:admission:host"]
 description = "Observe refusal of a real other-account peer without sending requests"
-run = "cargo test --package spaceterm-server --locked --lib host::tests::refuses_a_real_other_account_peer_without_sending_protocol_bytes -- --ignored --exact"
+run = "cargo test --package spaceterm-core --locked --lib host::tests::refuses_a_real_other_account_peer_without_sending_protocol_bytes -- --ignored --exact"
 
 [tasks."server:service"]
 description = "Run a Development CLI server command"
@@ -644,7 +644,7 @@ run = "cargo run --package spaceterm-cli --example service_session --locked -- {
 
 [tasks."server:service:test:macos"]
 description = "Verify launchd unload permits graceful cleanup in the current GUI login domain"
-run = "cargo test --package spaceterm-server --all-features --locked --lib service::macos::tests::launchd_unload_allows_in_flight_cleanup_to_finish -- --ignored --exact"
+run = "cargo test --package spaceterm-core --all-features --locked --lib service::macos::tests::launchd_unload_allows_in_flight_cleanup_to_finish -- --ignored --exact"
 
 [tasks."server:graphics:desktop:test"]
 description = "Test bounded server graphics transfer, fixture parity, and desktop painting without native credentials"
@@ -655,7 +655,7 @@ run = [
 
 [tasks."server:graphics:transport:test"]
 description = "Test authenticated graphics transfers and slow readers with fixture identities"
-run = "cargo test --package spaceterm-server --lib --features client --locked"
+run = "cargo test --package spaceterm-core --lib --features client --locked"
 
 [tasks."server:directory:build"]
 description = "Build the server directory-recovery check before native code signing"
@@ -680,11 +680,11 @@ run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/directory_recovery\" {% if u
 
 [tasks."bench:latency:quic"]
 description = "Measure a paired QUIC request's round trip on loopback, in a release build"
-run = "cargo test --release --package spaceterm-server --lib --all-features --locked -- direct::tests::quic_connections::quic_request_round_trip_on_loopback --ignored --exact --nocapture"
+run = "cargo test --release --package spaceterm-core --lib --all-features --locked -- direct::tests::quic_connections::quic_request_round_trip_on_loopback --ignored --exact --nocapture"
 
 [tasks."server:direct:test"]
 description = "Test direct-network proof, Network Access, enrollment and revocation boundaries"
-run = "cargo test --package spaceterm-server --features client --locked -- direct"
+run = "cargo test --package spaceterm-core --features client --locked -- direct"
 
 [tasks."server:direct:desktop:test"]
 description = "Test saved direct connections, restricted revocation recovery and desktop presentation"

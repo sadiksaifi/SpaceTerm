@@ -5,14 +5,14 @@
 //! flow, which survives the server's own stop.
 use super::{Context, Opened, Pending, Reply, Routed};
 use crate::contract::{
-    self, Code, Confirmation, ConfirmationData, Envelope, Failure, Observed, Receipt, ReceiptState,
-    RecoveredOperation, ServerRef, ServerStart, ServiceAction, ServiceEffects, ServiceOperation,
+    self, Code, Confirmation, ConfirmationData, CoreStart, Envelope, Failure, MachineRef, Observed,
+    Receipt, ReceiptState, RecoveredOperation, ServiceAction, ServiceEffects, ServiceOperation,
 };
-use spaceterm_server::service::Service;
-use spaceterm_server::service::control::{Action as ControlAction, Controller, Wording};
-use spaceterm_server::service::lane::admin::{self, Verdict};
-use spaceterm_server::service::lane::client::Outcome;
-use spaceterm_server::service::lane::{LaneAction, LaneEffects, LaneOperationState, LaneReceipt};
+use spaceterm_core::service::Service;
+use spaceterm_core::service::control::{Action as ControlAction, Controller, Wording};
+use spaceterm_core::service::lane::admin::{self, Verdict};
+use spaceterm_core::service::lane::client::Outcome;
+use spaceterm_core::service::lane::{LaneAction, LaneEffects, LaneOperationState, LaneReceipt};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,25 +51,25 @@ pub fn start(context: &Context<'_>) -> Reply {
     if let Err(failure) = context.require_local() {
         return Reply::failure(COMMAND, None, failure);
     }
-    let server = super::local_ref(context.identity).ok();
+    let core = super::local_ref(context.identity).ok();
     if let Err(failure) = crate::interrupt::dispatch() {
-        return Reply::failure(COMMAND, server, failure);
+        return Reply::failure(COMMAND, core, failure);
     }
     let started = Service::for_identity(context.identity)
         .and_then(|service| Controller::new(service).start())
-        .map_err(contract::from_server_error);
+        .map_err(contract::from_core_error);
     match started {
         Ok(status) => Reply::new(
             &Envelope::ok(
                 COMMAND,
-                server,
-                ServerStart {
+                core,
+                CoreStart {
                     running: status.running,
                 },
             ),
             "Server started.\n".to_owned(),
         ),
-        Err(failure) => Reply::failure(COMMAND, server, failure),
+        Err(failure) => Reply::failure(COMMAND, core, failure),
     }
 }
 
@@ -81,7 +81,7 @@ pub fn stop_or_restart(context: &Context<'_>, kind: Kind, token: Option<&str>) -
     };
     let pending = match Pending::open(context, &routed.route) {
         Ok(pending) => pending,
-        Err(failure) => return Reply::failure(command, Some(routed.server), failure),
+        Err(failure) => return Reply::failure(command, Some(routed.core), failure),
     };
     let opened = match super::open_lane(context, &routed.connection, &routed.route, &pending) {
         Ok(opened) => opened,
@@ -102,7 +102,7 @@ fn not_running(context: &Context<'_>, routed: &Routed, command: &str, failure: F
     {
         return Reply::failure(
             command,
-            Some(routed.server.clone()),
+            Some(routed.core.clone()),
             Failure::new(Code::Stopped),
         );
     }
@@ -110,7 +110,7 @@ fn not_running(context: &Context<'_>, routed: &Routed, command: &str, failure: F
         Code::Unreachable if routed.local => Failure::new(Code::NotRunning),
         _ => failure,
     };
-    Reply::failure(command, Some(routed.server.clone()), failure)
+    Reply::failure(command, Some(routed.core.clone()), failure)
 }
 
 fn preview(
@@ -130,14 +130,14 @@ fn preview(
     } = match previewed {
         Ok(preview) => preview,
         Err(error) => {
-            return Reply::failure(command, Some(routed.server), super::lane_failure(error));
+            return Reply::failure(command, Some(routed.core), super::lane_failure(error));
         }
     };
-    let wording = Wording::for_server(
-        &routed.server.name,
+    let wording = Wording::for_core(
+        &routed.core.name,
         kind.control(),
         effects.ends_sessions > 0,
-        spaceterm_server::service::ServiceStartup::AtLogin,
+        spaceterm_core::service::ServiceStartup::AtLogin,
     );
     let summary = format!("{}\n{}\n", wording.message(), wording.detail());
     if context.interactive() {
@@ -151,14 +151,14 @@ fn preview(
         }
         return Reply::failure(
             command,
-            Some(routed.server),
+            Some(routed.core),
             Failure::new(Code::ConfirmationRequired),
         );
     }
     let text = format!(
         "{summary}Confirm with: {}\n",
         context.command_line(
-            &routed.server,
+            &routed.core,
             &[
                 command.split('.').collect::<Vec<_>>(),
                 vec!["--confirm", &token]
@@ -169,7 +169,7 @@ fn preview(
     Reply::new(
         &preview_envelope(
             command,
-            routed.server,
+            routed.core,
             token,
             expires_at,
             &effects,
@@ -182,7 +182,7 @@ fn preview(
 /// The confirmation envelope of a Stop or Restart preview.
 pub(crate) fn preview_envelope(
     command: &str,
-    server: ServerRef,
+    core: MachineRef,
     token: String,
     expires_at: String,
     effects: &LaneEffects,
@@ -191,7 +191,7 @@ pub(crate) fn preview_envelope(
     super::with_recovered(
         Envelope::confirmation(
             command,
-            Some(server),
+            Some(core),
             Confirmation {
                 token,
                 expires_at,
@@ -242,7 +242,7 @@ fn execute(
                 &super::with_recovered(
                     Envelope::error(
                         command,
-                        Some(routed.server),
+                        Some(routed.core),
                         super::lane_failure(error),
                         contract::Empty {},
                     ),
@@ -264,14 +264,14 @@ fn execute(
         (Some(Observed::Shutdown), None) => "Server stopped.\n".to_owned(),
         (Some(Observed::Shutdown), _) => format!(
             "Stop is in progress. Confirm on {} with: spaceterm server status\n",
-            routed.server.name
+            routed.core.name
         ),
         (_, None) if kind == Kind::Restart => "Server restarted.\n".to_owned(),
         (_, None) => "Server stopped.\n".to_owned(),
         (_, Some(_)) => String::new(),
     };
     Reply::new(
-        &operation_envelope(command, routed.server, settled, recovered),
+        &operation_envelope(command, routed.core, settled, recovered),
         text,
     )
 }
@@ -279,7 +279,7 @@ fn execute(
 /// The envelope of a confirmed Stop or Restart, from its settled flow.
 pub(crate) fn operation_envelope(
     command: &str,
-    server: ServerRef,
+    core: MachineRef,
     settled: Settled,
     recovered: Vec<RecoveredOperation>,
 ) -> Envelope<ServiceOperation> {
@@ -289,8 +289,8 @@ pub(crate) fn operation_envelope(
         observed: settled.observed,
     };
     let envelope = match settled.failure {
-        None => Envelope::ok(command, Some(server), data),
-        Some(failure) => Envelope::error(command, Some(server), failure, data),
+        None => Envelope::ok(command, Some(core), data),
+        Some(failure) => Envelope::error(command, Some(core), failure, data),
     };
     super::with_recovered(envelope, recovered)
 }
@@ -302,7 +302,7 @@ pub(crate) fn operation_envelope(
 /// It follows the operation's own `deadline`, and an interrupt moves that to the settlement
 /// instant. A held ledger lock never blocks it: the read is tried again until then.
 fn confirm_local_stop(context: &Context<'_>, settled: Settled, deadline: Instant) -> Settled {
-    use spaceterm_server::service::operations::{Ledger, OperationId, State};
+    use spaceterm_core::service::operations::{Ledger, OperationId, State};
     let Some(id) = OperationId::parse(&settled.receipt.operation) else {
         return settled;
     };

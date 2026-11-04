@@ -10,16 +10,16 @@
 //! on a pty. A command prefix such as `ssh penguin` reaches a remote machine.
 //!
 //! ```text
-//! server_admin_native [--identity ID] [--server NAME] [--cli PATH]
+//! core_admin_native [--identity ID] [--server NAME] [--cli PATH]
 //!     [--machine PREFIX] [--machine-cli PATH] [--machine-fixture PATH]
 //!     [--network all|IP|IP:PORT|off] [--candidate ARCHIVE SIGNATURE]
 //!     [--next-major ARCHIVE SIGNATURE] [--broken ARCHIVE SIGNATURE]
 //!     [--restore ARCHIVE SIGNATURE] [--expiry] [--case NAME]...
-//! server_admin_native fixture ID ACTION [ARGUMENT]...
+//! core_admin_native fixture ID ACTION [ARGUMENT]...
 //! ```
 //!
 //! Each option also reads `SPACETERM_ADMIN_<OPTION>` with dashes as underscores, for example
-//! `SPACETERM_ADMIN_SERVER=penguin` and `SPACETERM_ADMIN_MACHINE="ssh penguin"`. Without
+//! `SPACETERM_ADMIN_CORE=penguin` and `SPACETERM_ADMIN_MACHINE="ssh penguin"`. Without
 //! `--server`, the target is this machine's own server. Update cases run only when their
 //! archives are given. `--expiry` waits out a token's ten-minute lifetime.
 //!
@@ -33,10 +33,10 @@
 mod support;
 
 use serde_json::Value;
-use spaceterm_server::service::operations::{
+use spaceterm_core::service::operations::{
     Action, Actor, Ledger, MAX_RECORDS, OperationId, Record, State,
 };
-use spaceterm_server::{CliRoute, ServerConnection};
+use spaceterm_core::{CliRoute, MachineConnection};
 use std::error::Error;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -67,7 +67,7 @@ fn main() -> ExitCode {
 
 struct Options {
     identity: String,
-    server: String,
+    core: String,
     cli: String,
     machine: Vec<String>,
     machine_cli: String,
@@ -100,7 +100,7 @@ impl Options {
                 .unwrap_or_else(|_| identity.to_owned())
         };
         let mut options = Self {
-            server: env("SERVER").unwrap_or_else(|| "local".into()),
+            core: env("SERVER").unwrap_or_else(|| "local".into()),
             cli: env("CLI").unwrap_or_else(|| launcher(&identity)),
             machine: env("MACHINE")
                 .map(|v| v.split_whitespace().map(str::to_owned).collect())
@@ -128,7 +128,7 @@ impl Options {
             };
             match flag.as_str() {
                 "--identity" => options.identity = value()?,
-                "--server" => options.server = value()?,
+                "--server" => options.core = value()?,
                 "--cli" => options.cli = value()?,
                 "--machine" => {
                     options.machine = value()?.split_whitespace().map(str::to_owned).collect()
@@ -219,7 +219,7 @@ impl Options {
     fn cli(&self, arguments: &[&str]) -> Result<Ran> {
         let mut command = Command::new(&self.cli);
         command
-            .args(["--server", &self.server])
+            .args(["--server", &self.core])
             .args(arguments)
             .arg("--json");
         let (exit, stdout) = output(&mut command)?;
@@ -370,7 +370,7 @@ fn status(options: &Options) -> Result<String> {
 }
 
 fn local_only(options: &Options) -> Result<String> {
-    if options.server == "local" {
+    if options.core == "local" {
         return Ok("skipped: the target is this machine".into());
     }
     let started = Instant::now();
@@ -539,7 +539,7 @@ fn helper_killed(options: &Options) -> Result<String> {
     command
         .args([
             "--server",
-            &options.server,
+            &options.core,
             "server",
             "restart",
             "--confirm",
@@ -576,7 +576,7 @@ fn stop(options: &Options) -> Result<String> {
         .as_str()
         .unwrap_or("")
         .to_owned();
-    let local = options.server == "local";
+    let local = options.core == "local";
     match (local, ran.exit, ran.envelope["data"]["observed"].as_str()) {
         (false, 7, Some("shutdown")) | (true, 0 | 7, _) => {}
         (_, exit, observed) => {
@@ -771,7 +771,7 @@ fn fixture(arguments: &[String]) -> Result<()> {
         }
         "inject-admitted" => inject_admitted(identity, rest.first().ok_or("operation")?)?,
         "ledger-state" => ledger_state(identity, rest.first().ok_or("operation")?)?,
-        "end-server" => end_server(identity)?,
+        "end-server" => end_core(identity)?,
         "kill-helper" => kill_helper(identity, rest.first().map_or("30", String::as_str))?,
         "start-session" => start_session(identity)?,
         "pair-checks" => pair_checks(rest.first().ok_or("cli")?)?,
@@ -782,8 +782,8 @@ fn fixture(arguments: &[String]) -> Result<()> {
 }
 
 fn fixture_record(identity: &str, id: OperationId, state: State) -> Result<Record> {
-    let server = spaceterm_server::service::Service::for_identity(identity)?
-        .passive_server_id()?
+    let core = spaceterm_core::service::Service::for_identity(identity)?
+        .passive_machine_id()?
         .ok_or("no server")?;
     Ok(Record {
         id,
@@ -791,7 +791,7 @@ fn fixture_record(identity: &str, id: OperationId, state: State) -> Result<Recor
             pairing: Some(FIXTURE_PAIRING),
             client: FIXTURE_PAIRING,
         },
-        server,
+        core,
         // No server run has this boot, so recovery treats the record as its predecessor's.
         boot: [0; 32],
         action: Action::Restart,
@@ -813,7 +813,7 @@ fn fill_ledger(identity: &str) -> Result<String> {
                 ledger.mark(&id, State::Unresolved)?;
                 written += 1;
             }
-            Err(spaceterm_server::ServerError::Capacity) => break,
+            Err(spaceterm_core::CoreError::Capacity) => break,
             Err(error) => return Err(error.into()),
         }
     }
@@ -842,14 +842,14 @@ fn ledger_state(identity: &str, operation: &str) -> Result<String> {
 }
 
 /// The server process's own pattern, from its unit's argv.
-fn server_pattern(identity: &str) -> String {
+fn core_pattern(identity: &str) -> String {
     format!("server run --service --identity {identity}")
 }
 
 /// Ends the server cleanly with SIGTERM and waits until it has exited. Its supervisor does not
 /// restart a successful exit, so a local Start brings it back.
-fn end_server(identity: &str) -> Result<String> {
-    let pattern = server_pattern(identity);
+fn end_core(identity: &str) -> Result<String> {
+    let pattern = core_pattern(identity);
     Command::new("pkill")
         .args(["-TERM", "-f", &pattern])
         .status()?;
@@ -889,12 +889,12 @@ fn kill_helper(identity: &str, seconds: &str) -> Result<String> {
 /// Starts a Terminal Session on the server and leaves it running.
 fn start_session(identity: &str) -> Result<String> {
     let agent = "admin-native".parse()?;
-    let server = ServerConnection::for_cli(identity, CliRoute::Local, Some(agent))?;
-    let link = support::connect(&server)?;
+    let core = MachineConnection::for_cli(identity, CliRoute::Local, Some(agent))?;
+    let link = support::connect(&core)?;
     let pane = support::attach(
         &link,
         true,
-        spaceterm_server::pane::PaneSize {
+        spaceterm_core::pane::PaneSize {
             columns: 80,
             rows: 24,
             cell_width: 8,
@@ -925,7 +925,7 @@ fn pair_checks(cli: &str) -> Result<String> {
     // An IP, and a DNS name with a port, as a NAT or cloud machine advertises itself.
     for address in ["203.0.113.5", "build.example.test:9300"] {
         let (link, exit, withdrawn) = pair_on_pty(cli, &["server", "pair", "--address", address])?;
-        let invitation = spaceterm_server::direct::Invitation::parse(&link)
+        let invitation = spaceterm_core::direct::Invitation::parse(&link)
             .map_err(|_| "the first line is no Invitation Link")?;
         if !invitation.endpoint().contains(address) {
             return Err(format!("the link does not advertise {address}").into());

@@ -13,13 +13,13 @@ use spaceterm_ui::{
 };
 
 use super::SettingsWindow;
-use super::server_list::ServerChoice;
+use super::machine_list::MachineChoice;
 use crate::direct_connections::{
     DirectConnections, DirectRouteId, DirectRouteStatus, PendingUnpair, RefusalReason,
     UnpairProgress,
 };
 use crate::ui::direct_access::AccessFailure;
-use crate::ui::direct_servers::{DirectServerAction, UnpairAction};
+use crate::ui::direct_machines::{DirectMachineAction, UnpairAction};
 
 pub(super) const UNPAIR_SELF_CONFIRM_SELECTOR: &str = "settings-direct-server-unpair-confirm";
 pub(super) const UNPAIR_SELF_CANCEL_SELECTOR: &str = "settings-direct-server-unpair-cancel";
@@ -33,7 +33,7 @@ pub(super) struct DirectRouteRows {
     pub(super) connections: DirectConnections,
     /// Why the latest step on a route didn't take effect.
     pub(super) problem: Option<(DirectRouteId, AccessFailure)>,
-    pub(super) _changes: crate::ui::direct_servers::DirectChanges,
+    pub(super) _changes: crate::ui::direct_machines::DirectChanges,
     pub(super) _work: Option<Task<()>>,
 }
 
@@ -41,13 +41,13 @@ impl DirectRouteRows {
     /// Follows the registry so each state change repaints the rows and follows the selected
     /// server. Construction reads nothing.
     pub(super) fn new(connections: DirectConnections, cx: &mut Context<SettingsWindow>) -> Self {
-        let follow = crate::ui::direct_servers::DirectChanges::follow(&connections, |changes| {
+        let follow = crate::ui::direct_machines::DirectChanges::follow(&connections, |changes| {
             cx.spawn(async move |settings, cx| {
                 while changes.recv().await.is_ok() {
                     let followed = settings.update(cx, |settings, cx| {
                         settings.follow_remote_routes();
-                        settings.reconcile_servers(cx);
-                        settings.sync_server_location(cx);
+                        settings.reconcile_machines(cx);
+                        settings.sync_machine_location(cx);
                         cx.notify();
                     });
                     if followed.is_err() {
@@ -68,7 +68,7 @@ impl DirectRouteRows {
 impl SettingsWindow {
     /// The selected direct route, its status and name, from the registry's snapshot.
     fn selected_direct_route(&self) -> Option<(DirectRouteId, DirectRouteStatus, SharedString)> {
-        let Some(ServerChoice::Direct(route)) = self.selected_server() else {
+        let Some(MachineChoice::Direct(route)) = self.selected_machine() else {
             return None;
         };
         let rows = self.direct_routes.as_ref()?;
@@ -87,7 +87,7 @@ impl SettingsWindow {
     pub(super) fn run_direct_action(
         &mut self,
         route: DirectRouteId,
-        action: DirectServerAction,
+        action: DirectMachineAction,
         cx: &mut Context<Self>,
     ) {
         let Some(rows) = self.direct_routes.as_mut() else {
@@ -96,11 +96,11 @@ impl SettingsWindow {
         rows.problem = None;
         let connections = rows.connections.clone();
         match action {
-            DirectServerAction::Connect => connections.connect(&route),
+            DirectMachineAction::Connect => connections.connect(&route),
             // The person asked, so the system may ask them before it releases this device's key.
-            DirectServerAction::Resume => connections.resume(&route),
-            DirectServerAction::Cancel => connections.cancel(&route),
-            DirectServerAction::Disconnect => connections.disconnect(&route),
+            DirectMachineAction::Resume => connections.resume(&route),
+            DirectMachineAction::Cancel => connections.cancel(&route),
+            DirectMachineAction::Disconnect => connections.disconnect(&route),
         }
         cx.notify();
     }
@@ -190,8 +190,8 @@ impl SettingsWindow {
                     rows.problem = Some((route, AccessFailure::from(error)));
                 }
                 // The selection gives way to this computer's server once the route is gone.
-                settings.reconcile_servers(cx);
-                settings.sync_server_location(cx);
+                settings.reconcile_machines(cx);
+                settings.sync_machine_location(cx);
                 cx.notify();
             });
         });
@@ -199,7 +199,7 @@ impl SettingsWindow {
             rows.problem = None;
             rows._work = Some(task);
         }
-        self.sync_server_location(cx);
+        self.sync_machine_location(cx);
         cx.notify();
     }
 

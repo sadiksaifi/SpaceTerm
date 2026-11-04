@@ -3,7 +3,7 @@ use crate::{
     contract::*,
     scope::{Resolved, Snapshot},
 };
-use spaceterm_server::{
+use spaceterm_core::{
     hierarchy::{self, Id},
     labels, organize, repository,
 };
@@ -20,10 +20,10 @@ pub fn collect(
     snapshot: &Snapshot,
     target: &Resolved,
     actor: Id,
-    link: &spaceterm_server::connection::link::ServerLink,
+    link: &spaceterm_core::connection::link::CoreLink,
     deadline: std::time::Instant,
 ) -> Result<Vec<PaneFacts>, Failure> {
-    use spaceterm_server::protocol::{ObserveReply, ReplyBody, SessionState};
+    use spaceterm_core::protocol::{ObserveReply, ReplyBody, SessionState};
     use std::sync::Arc;
     let close = snapshot
         .inventory
@@ -56,18 +56,18 @@ pub fn collect(
                     .session;
                 let channel = link
                     .open_channel(Arc::new(|_| {}))
-                    .map_err(|e| from_server_error(e.into()))?;
+                    .map_err(|e| from_core_error(e.into()))?;
                 let request = channel
                     .observe(pane.id, expected)
-                    .map_err(|e| from_server_error(e.into()))?;
+                    .map_err(|e| from_core_error(e.into()))?;
                 let reply = match request
                     .wait_for(deadline.saturating_duration_since(std::time::Instant::now()))
                 {
                     Some(reply) => reply.map_err(|error| match error {
-                        spaceterm_server::connection::link::RequestError::Refused(
-                            spaceterm_server::pane::Refusal::Stale,
+                        spaceterm_core::connection::link::RequestError::Refused(
+                            spaceterm_core::pane::Refusal::Stale,
                         ) => Failure::new(Code::Changed),
-                        error => from_server_error(error.into()),
+                        error => from_core_error(error.into()),
                     })?,
                     None => {
                         request.cancel();
@@ -124,7 +124,7 @@ pub fn collect(
 pub fn build(
     snapshot: &Snapshot,
     target: &Resolved,
-    server: ListServer,
+    core: ListMachine,
     live: &[PaneFacts],
 ) -> Result<List, Code> {
     let repos = snapshot
@@ -219,7 +219,7 @@ pub fn build(
     }
     Ok(List {
         revision: snapshot.inventory.revision,
-        server,
+        core,
         workspaces,
     })
 }
@@ -267,7 +267,7 @@ pub fn text(list: &List) -> String {
     let mut output = String::new();
     output.push_str(&format!(
         "{} ({} {})\n",
-        list.server.name, list.server.os, list.server.version
+        list.core.name, list.core.os, list.core.version
     ));
     for workspace in &list.workspaces {
         output.push_str(&format!(
@@ -357,14 +357,14 @@ mod tests {
             &snapshot,
             &ScopeArgs::default(),
             None,
-            Want::Server,
+            Want::Core,
             Effect::Passive,
         )
         .unwrap();
         let list = build(
             &snapshot,
             &target,
-            ListServer {
+            ListMachine {
                 name: "fixture".into(),
                 os: "test".into(),
                 version: "1".into(),

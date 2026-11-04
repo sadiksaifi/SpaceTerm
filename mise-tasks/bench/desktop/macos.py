@@ -139,7 +139,7 @@ class App:
     def installations(self):
         return Path.home() / ".local" / "share" / self.identity / "server" / "installations"
 
-    def is_server(self, command):
+    def is_core(self, command):
         return command.startswith(str(self.installations) + "/") and command.endswith("/spaceterm")
 
 
@@ -224,10 +224,10 @@ class Desktop:
         """The Pane whose shell wrote `receipt`, or a TaskError when the receipt cannot tell."""
         raise NotImplementedError
 
-    def stop_server(self):
+    def stop_core(self):
         raise NotImplementedError
 
-    def start_server(self):
+    def start_core(self):
         raise NotImplementedError
 
     def start_shell(self):
@@ -414,7 +414,7 @@ class Desktop:
     def ready(self):
         """One visible, frontmost window of WINDOW size whose focused Pane runs typed commands."""
         if not self.pids("server"):
-            self.start_server()
+            self.start_core()
         self.check_layout()
         if self.client() is None or self.window() is None:
             self.launch()
@@ -446,7 +446,7 @@ class CurrentDesktop(Desktop):
         for row in rows:
             if row["command"] == self.app.executable:
                 roots[row["pid"]] = "client"
-            elif self.app.is_server(row["command"]):
+            elif self.app.is_core(row["command"]):
                 roots[row["pid"]] = "server"
         return roots
 
@@ -464,7 +464,7 @@ class CurrentDesktop(Desktop):
             raise TaskError(f"no installed {self.app.name} server")
         return str(installed[-1])
 
-    def has_server(self):
+    def has_core(self):
         return self.app.installations.exists()
 
     def confirmed(self, *arguments):
@@ -487,12 +487,12 @@ class CurrentDesktop(Desktop):
         if action == "stop":
             wait_until(lambda: not self.pids("server"), 30, "the server did not stop")
 
-    def stop_server(self):
-        if self.has_server():
+    def stop_core(self):
+        if self.has_core():
             self.service("stop")
 
-    def start_server(self):
-        if self.has_server():
+    def start_core(self):
+        if self.has_core():
             self.service("start")
 
     def start_session(self):
@@ -547,7 +547,7 @@ class CurrentDesktop(Desktop):
             raise TaskError("spaceterm pane read did not report the Pane's history")
         return retained_rows(envelope)
 
-    def server_counters(self):
+    def core_counters(self):
         """The local server's Terminal Diagnostics counters."""
         command = [self.cli(), "--server", "local", "--json", "server", "status"]
         return terminal_counters(command, "spaceterm server status")
@@ -560,7 +560,7 @@ class CurrentDesktop(Desktop):
 
     def counters(self, client=True):
         return {
-            "server": self.server_counters(),
+            "server": self.core_counters(),
             "client": self.client_counters() if client else None,
         }
 
@@ -583,10 +583,10 @@ class ReferenceDesktop(Desktop):
             raise TaskError("the focused Pane's shell reported no session")
         return f"session {receipt['session']}"
 
-    def stop_server(self):
+    def stop_core(self):
         pass
 
-    def start_server(self):
+    def start_core(self):
         pass
 
     def start_shell(self):
@@ -709,10 +709,10 @@ class Bench:
         clock = self.clock
         if desktop.client() is not None:
             desktop.terminate()
-        desktop.stop_server()
+        desktop.stop_core()
         started = clock.monotonic()
         before = {"monotonic": time.monotonic(), "processes": []}
-        desktop.start_server()
+        desktop.start_core()
         desktop.launch()
         wait_until(desktop.window, 30, "the cold client showed no window")
         window_s = clock.monotonic() - started
@@ -894,7 +894,7 @@ def check_isolation(app):
     other = RELEASE if app == PREFLIGHT else PREFLIGHT
     rows = processes()
     running = [
-        row for row in rows if row["command"] == other.executable or other.is_server(row["command"])
+        row for row in rows if row["command"] == other.executable or other.is_core(row["command"])
     ]
     if running:
         raise TaskError(

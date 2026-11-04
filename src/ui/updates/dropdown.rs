@@ -15,7 +15,7 @@ use spaceterm_ui::{
     Tooltip,
 };
 
-use super::server_rows::{ServerUpdateAction, ServerUpdateRow, ServerUpdates};
+use super::machine_rows::{CoreUpdateAction, CoreUpdates, MachineUpdateRow};
 use super::{
     CHECK_FOR_UPDATES_TITLE, CURRENT_VERSION, ControlCommand, ControlGlyph, ControlPresentation,
     InstallRequest, PillCommand, PillTone, UpdatePill, check_for_updates, failure_message,
@@ -35,28 +35,28 @@ enum UpdatesMenuAction {
     Status,
     Client(ControlCommand),
     CheckForUpdates,
-    Server(ServerUpdateAction),
+    Core(CoreUpdateAction),
 }
 
 /// The update pill at the trailing end of one window's title bar. It appears while the client or a
 /// server asks for action, and the Updates menu behind its chevron keeps every row.
 pub(crate) struct UpdateControl {
-    servers: Entity<ServerUpdates>,
+    machines: Entity<CoreUpdates>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl UpdateControl {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let servers = cx.new(ServerUpdates::new);
+        let machines = cx.new(CoreUpdates::new);
         let mut subscriptions = vec![
-            cx.observe(&servers, |_, _, cx| cx.notify()),
+            cx.observe(&machines, |_, _, cx| cx.notify()),
             // The pill shows server needs while the menu is closed. A Settings journey changes
             // them elsewhere, so returning to the window reads them again.
             cx.observe_window_activation(window, |control, window, cx| {
                 if window.is_window_active() {
                     control
-                        .servers
-                        .update(cx, |servers, cx| servers.refresh(cx));
+                        .machines
+                        .update(cx, |machines, cx| machines.refresh(cx));
                     // A due client reminder waits for an active window.
                     if let Some(updates) = service(cx) {
                         updates.read(cx).window_activated();
@@ -67,7 +67,7 @@ impl UpdateControl {
         subscriptions
             .extend(service(cx).map(|updates| cx.observe(&updates, |_, _, cx| cx.notify())));
         Self {
-            servers,
+            machines,
             _subscriptions: subscriptions,
         }
     }
@@ -78,7 +78,7 @@ impl UpdateControl {
             UpdatesMenuAction::Status => {}
             UpdatesMenuAction::CheckForUpdates => check_for_updates(cx),
             UpdatesMenuAction::Client(command) => activate_client(command, window, cx),
-            UpdatesMenuAction::Server(action) => action.activate(cx),
+            UpdatesMenuAction::Core(action) => action.activate(cx),
         });
     }
 }
@@ -87,7 +87,7 @@ impl UpdateControl {
 fn activate_pill(command: PillCommand, window: AnyWindowHandle, cx: &mut App) {
     cx.defer(move |cx| match command {
         PillCommand::Client(Some(command)) => activate_client(command, window, cx),
-        PillCommand::Server(action) => action.activate(cx),
+        PillCommand::Core(action) => action.activate(cx),
         PillCommand::Client(None) | PillCommand::Menu => {}
     });
 }
@@ -176,7 +176,7 @@ fn client_section(
 /// One section per actual server, named by its machine and account. The status reads as a
 /// disabled row, and the action that reaches the server's Settings journey follows it under its
 /// own name.
-fn server_sections(rows: Vec<ServerUpdateRow>) -> Vec<MenuEntry<UpdatesMenuAction>> {
+fn core_sections(rows: Vec<MachineUpdateRow>) -> Vec<MenuEntry<UpdatesMenuAction>> {
     if rows.is_empty() {
         return vec![MenuEntry::section(
             "Servers",
@@ -190,7 +190,7 @@ fn server_sections(rows: Vec<ServerUpdateRow>) -> Vec<MenuEntry<UpdatesMenuActio
                 status_row(row.detail).debug_selector(format!("update-server-{index}-status")),
             ];
             entries.extend(row.action.map(|action| {
-                MenuEntry::action(action.label(), UpdatesMenuAction::Server(action))
+                MenuEntry::action(action.label(), UpdatesMenuAction::Core(action))
                     .debug_selector(format!("update-server-{index}-action"))
             }));
             MenuEntry::section(row.label, entries)
@@ -234,16 +234,16 @@ fn pill_glyph(
 /// Reads the server inventory again whenever the Updates menu opens, so a local service change
 /// is observed without polling.
 fn refresh_on_open(
-    servers: WeakEntity<ServerUpdates>,
+    machines: WeakEntity<CoreUpdates>,
 ) -> impl Fn(&MenuLifecycleEvent, &mut App) + 'static {
     move |event, cx| {
         if *event != MenuLifecycleEvent::Opened {
             return;
         }
-        let servers = servers.clone();
+        let machines = machines.clone();
         // Lifecycle delivery can occur while the window is borrowed.
         cx.defer(move |cx| {
-            let _ = servers.update(cx, |servers, cx| servers.refresh(cx));
+            let _ = machines.update(cx, |machines, cx| machines.refresh(cx));
         });
     }
 }
@@ -256,7 +256,7 @@ impl UpdateControl {
     ) -> (
         UpdateState,
         Option<ControlPresentation>,
-        Vec<ServerUpdateRow>,
+        Vec<MachineUpdateRow>,
     ) {
         let wording = DesktopPresentation::get(cx).wording();
         let (state, presentation) = match service(cx) {
@@ -273,7 +273,7 @@ impl UpdateControl {
             }
             None => (UpdateState::Unavailable, None),
         };
-        (state, presentation, self.servers.read(cx).rows())
+        (state, presentation, self.machines.read(cx).rows())
     }
 
     /// Whether the pill shows: something asks for action. The title bar that holds it is then
@@ -295,12 +295,12 @@ impl Render for UpdateControl {
         };
         let mut entries = vec![client_section(presentation.as_ref(), &state, wording)];
         entries.push(MenuEntry::separator());
-        entries.extend(server_sections(rows));
+        entries.extend(core_sections(rows));
 
         let appearance = chrome(cx);
         let glyph_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
         let handle = window.window_handle();
-        let servers = self.servers.downgrade();
+        let machines = self.machines.downgrade();
         let placement = MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End);
         let variant = match pill.tone() {
             PillTone::Primary => ButtonVariant::Primary,
@@ -314,7 +314,7 @@ impl Render for UpdateControl {
                 .size(MenuSize::Wide)
                 .placement(placement)
                 .debug_selector("update-control-menu")
-                .on_lifecycle(refresh_on_open(servers))
+                .on_lifecycle(refresh_on_open(machines))
                 .on_activate(move |activation, _, cx| {
                     UpdateControl::activate(activation.action().clone(), handle, cx)
                 })
@@ -370,7 +370,7 @@ impl Render for UpdateControl {
                     })
                     .debug_selector("update-control")
                     .on_activate(move |_, _, cx| activate_pill(command.clone(), handle, cx))
-                    .on_menu_lifecycle(refresh_on_open(servers))
+                    .on_menu_lifecycle(refresh_on_open(machines))
                     .on_menu_activate(move |activation, _, cx| {
                         UpdateControl::activate(activation.action().clone(), handle, cx)
                     })

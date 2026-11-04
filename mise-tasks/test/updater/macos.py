@@ -4,7 +4,7 @@
 
 import base64
 import functools
-import http.server
+import http.core
 import os
 import plistlib
 import shutil
@@ -26,7 +26,7 @@ def run(*arguments, **kwargs):
     return subprocess.run(arguments, check=True, capture_output=True, **kwargs).stdout
 
 
-class QuietHandler(http.server.SimpleHTTPRequestHandler):
+class QuietHandler(http.core.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
@@ -40,10 +40,10 @@ def main():
         root = Path(temporary)
         fingerprint, credentials = certificate(root / "signing")
         signing.enter_context(release_keychain(fingerprint, {**os.environ, **credentials}))
-        server = http.server.ThreadingHTTPServer(
+        core = http.core.ThreadingHTTPCore(
             ("127.0.0.1", 0), functools.partial(QuietHandler, directory=root)
         )
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
         thread.start()
         try:
             seed = os.urandom(32)
@@ -98,7 +98,7 @@ def main():
                 directory.mkdir()
                 log = directory / "events"
                 log.touch()
-                feed_url = f"http://127.0.0.1:{server.server_port}/{scenario}/appcast.xml"
+                feed_url = f"http://127.0.0.1:{core.core_port}/{scenario}/appcast.xml"
                 apps = []
                 for version, name in (("0.1.0", "Installed"), ("0.1.1", "New")):
                     app = directory / name / "SpaceTermUpdateTest.app"
@@ -198,7 +198,7 @@ def main():
                 # Exercise the production generator and verifier, then serve the fixture locally.
                 feed.write_text(
                     feed.read_text().replace(
-                        prefix, f"http://127.0.0.1:{server.server_port}/{scenario}/"
+                        prefix, f"http://127.0.0.1:{core.core_port}/{scenario}/"
                     )
                 )
                 run(str(sparkle / "bin/sign_update"), "--ed-key-file", "-", str(feed), input=key)
@@ -269,7 +269,7 @@ def main():
                         process.terminate()
                         process.wait(timeout=5)
         finally:
-            server.shutdown()
+            core.shutdown()
 
 
 if __name__ == "__main__":

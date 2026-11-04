@@ -281,11 +281,11 @@ impl WorkspaceManager {
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let reachable = self.local_server_reachable();
+        let reachable = self.local_core_reachable();
         let place = presentation.wording().this_computer_phrase;
         let local = self.binding.local();
         let stopped = local.and_then(|binding| binding.connection_error())
-            == Some(spaceterm_server::ServerError::Stopped);
+            == Some(spaceterm_core::CoreError::Stopped);
         let (title, detail): (&'static str, SharedString) = if reachable {
             // A reachable server ends any reconnect the person asked for.
             self.launch.reconnect_from.set(None);
@@ -417,7 +417,7 @@ const RECONNECTING: &str = "Reconnecting\u{2026}";
 enum Reconnect {
     Trying,
     /// The attempt ended without a connection, for the reason the connection gave.
-    Failed(Option<spaceterm_server::ServerError>),
+    Failed(Option<spaceterm_core::CoreError>),
 }
 
 impl Reconnect {

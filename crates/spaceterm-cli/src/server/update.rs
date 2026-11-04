@@ -8,19 +8,19 @@
 use super::lifecycle::{self, Settled};
 use super::{Context, Opened, Pending, Reply, Routed};
 use crate::contract::{
-    self, Code, Confirmation, Envelope, Failure, Receipt, ReceiptState, ServerRef, ServiceAction,
+    self, Code, Confirmation, Envelope, Failure, MachineRef, Receipt, ReceiptState, ServiceAction,
     UpdateCheck, UpdateEffects, UpdateKind, UpdateOperation, Version, Warning, WarningCode,
     WarningDetails,
 };
 use base64::Engine;
-use spaceterm_server::service::activation::{ActivationPhase, ActivationStatus};
-use spaceterm_server::service::lane::admin;
-use spaceterm_server::service::lane::client::within;
-use spaceterm_server::service::lane::{
+use spaceterm_core::service::activation::{ActivationPhase, ActivationStatus};
+use spaceterm_core::service::lane::admin;
+use spaceterm_core::service::lane::client::within;
+use spaceterm_core::service::lane::{
     LaneAction, LaneEffects, LaneReply, LaneRequest, LaneUpdateKind, LaneVersion, MAX_CHUNK,
     Offline,
 };
-use spaceterm_server::service::{RetainedInstallation, Service};
+use spaceterm_core::service::{RetainedInstallation, Service};
 use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -41,7 +41,7 @@ pub fn run(
     };
     let pending = match Pending::open(context, &routed.route) {
         Ok(pending) => pending,
-        Err(failure) => return Reply::failure(COMMAND, Some(routed.server), failure),
+        Err(failure) => return Reply::failure(COMMAND, Some(routed.core), failure),
     };
     settle_first(routed.local, check, &mut || {
         let _ = Service::for_identity(context.identity).and_then(|v| v.recover_activation());
@@ -50,7 +50,7 @@ pub fn run(
     match opened {
         Ok(opened) => running(context, routed, opened, &pending, check, files, token),
         Err(_) if routed.local => stopped(context, routed, check, files, token),
-        Err(failure) => Reply::failure(COMMAND, Some(routed.server), failure),
+        Err(failure) => Reply::failure(COMMAND, Some(routed.core), failure),
     }
 }
 
@@ -96,14 +96,14 @@ fn check_text(check: &UpdateCheck) -> String {
 
 /// The envelope of `server update --check`.
 pub(crate) fn check_envelope(
-    server: ServerRef,
+    core: MachineRef,
     data: UpdateCheck,
     recovered: Vec<contract::RecoveredOperation>,
 ) -> Envelope<UpdateCheck> {
-    super::with_recovered(Envelope::ok(COMMAND, Some(server), data), recovered)
+    super::with_recovered(Envelope::ok(COMMAND, Some(core), data), recovered)
 }
 
-pub(crate) fn lane_check(check: spaceterm_server::service::lane::LaneCheck) -> UpdateCheck {
+pub(crate) fn lane_check(check: spaceterm_core::service::lane::LaneCheck) -> UpdateCheck {
     UpdateCheck {
         approved: version(&check.approved),
         latest: check.latest.as_ref().map(version),
@@ -120,11 +120,11 @@ fn running(
     files: Option<(&Path, &Path)>,
     token: Option<&str>,
 ) -> Reply {
-    let server = routed.server.clone();
+    let core = routed.core.clone();
     let fail = |failure: Failure, recovered| {
         Reply::new(
             &super::with_recovered(
-                Envelope::error(COMMAND, Some(server.clone()), failure, contract::Empty {}),
+                Envelope::error(COMMAND, Some(core.clone()), failure, contract::Empty {}),
                 recovered,
             ),
             String::new(),
@@ -135,7 +135,7 @@ fn running(
             Ok(check) => {
                 let data = lane_check(check);
                 let text = check_text(&data);
-                Reply::new(&check_envelope(server, data, opened.recovered), text)
+                Reply::new(&check_envelope(core, data, opened.recovered), text)
             }
             Err(error) => fail(super::lane_failure(error), opened.recovered),
         };
@@ -183,7 +183,7 @@ fn running(
         Some((archive, signature)) if routed.local => Offline::new(context.identity)
             .and_then(|offline| offline.admin().stage_files(archive, signature))
             .map(|v| installed(&v))
-            .map_err(contract::from_server_error),
+            .map_err(contract::from_core_error),
         Some((archive, signature)) => upload(&mut opened.session, archive, signature),
         None => admin::stage_fetch(&mut opened.session)
             .map(|staged| version(&staged))
@@ -241,7 +241,7 @@ fn preview(
     let (Some(from), Some(to)) = (&effects.from, &effects.to) else {
         return Reply::failure(
             COMMAND,
-            Some(routed.server),
+            Some(routed.core),
             Failure::new(Code::ProtocolError),
         );
     };
@@ -255,7 +255,7 @@ fn preview(
         ends_sessions: effects.ends_sessions,
         sessions: effects.sessions.clone(),
     };
-    let summary = summary(&routed.server.name, &data);
+    let summary = summary(&routed.core.name, &data);
     if context.interactive() {
         let warnings: Vec<_> = major_warning(effects.to_major)
             .into_iter()
@@ -268,17 +268,17 @@ fn preview(
         }
         return Reply::failure(
             COMMAND,
-            Some(routed.server),
+            Some(routed.core),
             Failure::new(Code::ConfirmationRequired),
         );
     }
     let text = format!(
         "{summary}Confirm with: {}\n",
-        context.command_line(&routed.server, &["server", "update", "--confirm", &token])
+        context.command_line(&routed.core, &["server", "update", "--confirm", &token])
     );
     Reply::new(
         &preview_envelope(
-            routed.server,
+            routed.core,
             token,
             expires_at,
             data,
@@ -291,7 +291,7 @@ fn preview(
 
 /// The confirmation envelope of an update or return preview.
 pub(crate) fn preview_envelope(
-    server: ServerRef,
+    core: MachineRef,
     token: String,
     expires_at: String,
     effects: UpdateEffects,
@@ -300,7 +300,7 @@ pub(crate) fn preview_envelope(
 ) -> Envelope<contract::ConfirmationData<UpdateEffects>> {
     let mut envelope = Envelope::confirmation(
         COMMAND,
-        Some(server),
+        Some(core),
         Confirmation {
             token,
             expires_at,
@@ -315,27 +315,27 @@ pub(crate) fn preview_envelope(
 
 /// After an update to another protocol major, work commands need a matching CLI.
 fn major_warning(to_major: Option<u16>) -> Option<Warning> {
-    let server_major = to_major?;
-    let client_major = spaceterm_server::protocol::MAJOR;
-    (server_major != client_major).then(|| {
+    let core_major = to_major?;
+    let client_major = spaceterm_core::protocol::MAJOR;
+    (core_major != client_major).then(|| {
         Warning::new(
             WarningCode::ClientMajorDiffers,
             WarningDetails::Major {
                 client_major,
-                server_major,
+                core_major,
             },
         )
     })
 }
 
-fn summary(server: &str, effects: &UpdateEffects) -> String {
+fn summary(core: &str, effects: &UpdateEffects) -> String {
     let change = match effects.kind {
         UpdateKind::Update => format!(
-            "Update the {server} server from {} to {}?",
+            "Update the {core} server from {} to {}?",
             effects.from.version, effects.to.version
         ),
         UpdateKind::Return => format!(
-            "Return the {server} server from {} to {}?",
+            "Return the {core} server from {} to {}?",
             effects.from.version, effects.to.version
         ),
     };
@@ -381,7 +381,7 @@ fn execute(
                 &super::with_recovered(
                     Envelope::error(
                         COMMAND,
-                        Some(routed.server),
+                        Some(routed.core),
                         super::lane_failure(error),
                         contract::Empty {},
                     ),
@@ -409,14 +409,14 @@ fn finish(
         Some(_) => String::new(),
     };
     Reply::new(
-        &operation_envelope(routed.server, receipt, failure, version, recovered),
+        &operation_envelope(routed.core, receipt, failure, version, recovered),
         text,
     )
 }
 
 /// The envelope of a confirmed update or return.
 pub(crate) fn operation_envelope(
-    server: ServerRef,
+    core: MachineRef,
     receipt: Receipt,
     failure: Option<Failure>,
     version: Option<Version>,
@@ -432,15 +432,15 @@ pub(crate) fn operation_envelope(
         receipt,
     };
     let envelope = match failure {
-        None => Envelope::ok(COMMAND, Some(server), data),
-        Some(failure) => Envelope::error(COMMAND, Some(server), failure, data),
+        None => Envelope::ok(COMMAND, Some(core), data),
+        Some(failure) => Envelope::error(COMMAND, Some(core), failure, data),
     };
     super::with_recovered(envelope, recovered)
 }
 
 /// Sends a signed archive over the lane in order, then returns the staged installation.
 fn upload(
-    session: &mut spaceterm_server::service::lane::client::Session,
+    session: &mut spaceterm_core::service::lane::client::Session,
     archive: &Path,
     signature: &Path,
 ) -> Result<Version, Failure> {
@@ -530,11 +530,11 @@ fn stopped(
     files: Option<(&Path, &Path)>,
     token: Option<&str>,
 ) -> Reply {
-    let server = routed.server.clone();
-    let fail = |failure: Failure| Reply::failure(COMMAND, Some(server.clone()), failure);
+    let core = routed.core.clone();
+    let fail = |failure: Failure| Reply::failure(COMMAND, Some(core.clone()), failure);
     let offline = match Offline::new(context.identity) {
         Ok(offline) => offline,
-        Err(error) => return fail(contract::from_server_error(error)),
+        Err(error) => return fail(contract::from_core_error(error)),
     };
     let admin = offline.admin();
     if check {
@@ -542,14 +542,14 @@ fn stopped(
             Ok(check) => {
                 let data = lane_check(check);
                 let text = check_text(&data);
-                Reply::new(&check_envelope(server, data, Vec::new()), text)
+                Reply::new(&check_envelope(core, data, Vec::new()), text)
             }
-            Err(error) => fail(contract::from_server_error(error)),
+            Err(error) => fail(contract::from_core_error(error)),
         };
     }
     let service = match Service::for_identity(context.identity) {
         Ok(service) => service,
-        Err(error) => return fail(contract::from_server_error(error)),
+        Err(error) => return fail(contract::from_core_error(error)),
     };
     // A candidate that never became ready can return to the previous runtime instead.
     if let Ok(approval) = service.prepare_return() {
@@ -562,11 +562,11 @@ fn stopped(
         };
         let observed = match approval.confirmation_token() {
             Ok(observed) => observed,
-            Err(error) => return fail(contract::from_server_error(error)),
+            Err(error) => return fail(contract::from_core_error(error)),
         };
         match confirmed(
             context,
-            &routed.server.name,
+            &routed.core.name,
             &effects,
             ("return", &observed),
             token,
@@ -590,12 +590,12 @@ fn stopped(
     };
     let candidate = match staged {
         Ok(candidate) => candidate,
-        Err(error) => return fail(contract::from_server_error(error)),
+        Err(error) => return fail(contract::from_core_error(error)),
     };
     let approval = match service.prepare_activation(&candidate) {
         Ok(Some(approval)) => approval,
         Ok(None) => return fail(Failure::new(Code::NoCandidate)),
-        Err(error) => return fail(contract::from_server_error(error)),
+        Err(error) => return fail(contract::from_core_error(error)),
     };
     let effects = UpdateEffects {
         from: installed(approval.previous()),
@@ -606,11 +606,11 @@ fn stopped(
     };
     let observed = match approval.confirmation_token() {
         Ok(observed) => observed,
-        Err(error) => return fail(contract::from_server_error(error)),
+        Err(error) => return fail(contract::from_core_error(error)),
     };
     match confirmed(
         context,
-        &routed.server.name,
+        &routed.core.name,
         &effects,
         ("update", &observed),
         token,
@@ -629,7 +629,7 @@ fn stopped(
     offline_activated(routed, ServiceAction::Update, activated, to)
 }
 
-type Activated = Result<ActivationStatus, spaceterm_server::ServerError>;
+type Activated = Result<ActivationStatus, spaceterm_core::CoreError>;
 
 /// The thread that runs a dispatched offline activation. Once `settle_by` reports an interrupt,
 /// [`within`] waits for its result only until that instant. A result that did not arrive by then
@@ -645,11 +645,9 @@ fn offline_activated(
 ) -> Reply {
     match activated {
         Some(Ok(status)) => offline_finish(routed, action, &status, to),
-        Some(Err(error)) => Reply::failure(
-            COMMAND,
-            Some(routed.server),
-            contract::from_server_error(error),
-        ),
+        Some(Err(error)) => {
+            Reply::failure(COMMAND, Some(routed.core), contract::from_core_error(error))
+        }
         None => {
             let failure = Failure::new(Code::ActivationUnresolved);
             // The activation chose its operation ID, which this command never received.
@@ -669,7 +667,7 @@ fn offline_activated(
 /// that has not expired, or by the person at a prompt. Any other token is `changed`.
 fn confirmed(
     context: &Context<'_>,
-    server: &str,
+    core: &str,
     effects: &UpdateEffects,
     (purpose, observed): (&str, &str),
     given: Option<&str>,
@@ -683,7 +681,7 @@ fn confirmed(
         )
         .map(|()| true),
         None if context.interactive() => {
-            eprint!("{}", summary(server, effects));
+            eprint!("{}", summary(core, effects));
             Ok(super::confirm("Update Server"))
         }
         None => Ok(false),
@@ -700,15 +698,15 @@ fn offline_preview(
         super::offline_token::issue(purpose, observed.as_bytes(), std::time::SystemTime::now());
     let text = format!(
         "{}Confirm with: {}\n",
-        summary(&routed.server.name, &effects),
+        summary(&routed.core.name, &effects),
         context.command_line(
-            &routed.server,
+            &routed.core,
             &["server", "update", "--confirm", &issued.token]
         )
     );
     Reply::new(
         &preview_envelope(
-            routed.server,
+            routed.core,
             issued.token,
             issued.expires_at,
             effects,
@@ -722,7 +720,7 @@ fn offline_preview(
 fn offline_finish(
     routed: Routed,
     action: ServiceAction,
-    status: &spaceterm_server::service::activation::ActivationStatus,
+    status: &spaceterm_core::service::activation::ActivationStatus,
     to: Version,
 ) -> Reply {
     let (state, failure) = match status.phase {

@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use gpui::{App, Bounds, DisplayId, Pixels, Size, Window, WindowBounds, WindowOptions, px};
-use spaceterm_server::hierarchy::Id;
-use spaceterm_server::workspace_order::{OwnerId, WorkspaceReference};
+use spaceterm_core::hierarchy::Id;
+use spaceterm_core::workspace_order::{OwnerId, WorkspaceReference};
 
 use super::settings_window::SettingsSectionId;
 
@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn the_remembered_active_workspace_returns_when_its_server_presents_it() {
+    fn the_remembered_active_workspace_returns_when_its_core_presents_it() {
         let mut restoration = Restoration::new(view(Some(reference(1, 1))));
         assert!(restoration.remembered());
         assert!(!restoration.selects(&reference(1, 2)));
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn an_offline_servers_workspace_returns_when_the_server_does() {
+    fn an_offline_machines_workspace_returns_when_the_machine_does() {
         let mut restoration = Restoration::new(view(Some(reference(2, 1))));
         // The local server's inventory changes nothing.
         restoration.published(owner(1), |_| false);
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn a_view_a_retained_copy_presented_applies_again_when_its_server_publishes() {
+    fn a_view_a_retained_copy_presented_applies_again_when_its_core_publishes() {
         let mut restoration = Restoration::new(view(None));
         let remembered = restoration
             .take_workspace(&reference(1, 1))

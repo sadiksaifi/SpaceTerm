@@ -8,12 +8,12 @@
 use super::{Context, Reply};
 use crate::args::{Network, Toggle};
 use crate::contract::{
-    self, Code, Details, Envelope, Failure, Launcher, ServerSetup, SetupNetwork, SetupStep,
+    self, Code, CoreSetup, Details, Envelope, Failure, Launcher, SetupNetwork, SetupStep,
     SetupStepName, StepResult, UnsupportedSessionDetails, UnsupportedSessionReason, Version,
 };
-use spaceterm_server::direct::{DEFAULT_PORT, NetworkPolicy};
-use spaceterm_server::service::lane::Offline;
-use spaceterm_server::service::{LingerAuthorization, Service};
+use spaceterm_core::direct::{DEFAULT_PORT, NetworkPolicy};
+use spaceterm_core::service::lane::Offline;
+use spaceterm_core::service::{LingerAuthorization, Service};
 use std::path::{Path, PathBuf};
 
 const COMMAND: &str = "server.setup";
@@ -70,7 +70,7 @@ pub fn path_ok(home: &Path, path: Option<&std::ffi::OsStr>) -> bool {
 
 /// The installation whose executable `executable` is, in this machine's package layout.
 fn installation_of(executable: &Path, identity: &str) -> Option<PathBuf> {
-    let layout = spaceterm_server::service::Layout::host(identity)?;
+    let layout = spaceterm_core::service::Layout::host(identity)?;
     let mut installation = executable;
     for _ in layout.executable().components() {
         installation = installation.parent()?;
@@ -128,8 +128,8 @@ pub fn run(context: &Context<'_>, network: Option<&Network>, automatic: Option<T
     }
     match setup(context, network, automatic) {
         Ok((data, text)) => {
-            let server = super::local_ref(context.identity).ok();
-            Reply::new(&Envelope::ok(COMMAND, server, data), text)
+            let core = super::local_ref(context.identity).ok();
+            Reply::new(&Envelope::ok(COMMAND, core, data), text)
         }
         Err(failure) => Reply::failure(COMMAND, super::local_ref(context.identity).ok(), failure),
     }
@@ -139,25 +139,25 @@ fn setup(
     context: &Context<'_>,
     network: Option<&Network>,
     automatic: Option<Toggle>,
-) -> Result<(ServerSetup, String), Failure> {
-    let service = Service::for_identity(context.identity).map_err(contract::from_server_error)?;
+) -> Result<(CoreSetup, String), Failure> {
+    let service = Service::for_identity(context.identity).map_err(contract::from_core_error)?;
     let installations = service.installations_directory();
     let home = service
         .account_home()
         .ok_or(Failure::new(Code::StorageUnavailable))?;
     let launcher = launcher(&home, &installations, context.identity);
     let mut steps = Vec::new();
-    let before = service.status().map_err(contract::from_server_error)?;
+    let before = service.status().map_err(contract::from_core_error)?;
     crate::interrupt::dispatch()?;
     // Linux starts the server only with boot startup authorized, so authorize it before the
     // first start. macOS starts at login and has no such step.
-    let linger = match service.linger().map_err(contract::from_server_error)? {
+    let linger = match service.linger().map_err(contract::from_core_error)? {
         None => StepResult::Skipped,
         Some(true) => StepResult::AlreadyDone,
         Some(false) if context.interactive() => {
             service
                 .enable_linger(LingerAuthorization::Terminal)
-                .map_err(contract::from_server_error)?;
+                .map_err(contract::from_core_error)?;
             StepResult::Done
         }
         Some(false) => return Err(Failure::new(Code::AuthorizationRequired)),
@@ -172,12 +172,12 @@ fn setup(
             .ok_or(Failure::new(Code::NoCandidate))?;
         service
             .install(&installation)
-            .map_err(contract::from_server_error)?;
+            .map_err(contract::from_core_error)?;
         StepResult::Done
     };
     steps.push(step(SetupStepName::InstallService, install));
     steps.push(step(SetupStepName::Linger, linger));
-    let status = service.status().map_err(contract::from_server_error)?;
+    let status = service.status().map_err(contract::from_core_error)?;
     let start = if status.stopped {
         // Only `server start` reverses a deliberate Stop.
         StepResult::Skipped
@@ -188,7 +188,7 @@ fn setup(
             StepResult::Done
         }
     } else {
-        service.connect().map_err(contract::from_server_error)?;
+        service.connect().map_err(contract::from_core_error)?;
         StepResult::Done
     };
     steps.push(step(SetupStepName::Start, start));
@@ -202,26 +202,21 @@ fn setup(
         None => StepResult::Skipped,
         Some(toggle) => {
             let enabled = toggle == Toggle::On;
-            if service
-                .status()
-                .map_err(contract::from_server_error)?
-                .enabled
-                == enabled
-            {
+            if service.status().map_err(contract::from_core_error)?.enabled == enabled {
                 StepResult::AlreadyDone
             } else {
                 service
                     .set_automatic_start(enabled)
-                    .map_err(contract::from_server_error)?;
+                    .map_err(contract::from_core_error)?;
                 StepResult::Done
             }
         }
     };
     steps.push(step(SetupStepName::AutomaticStart, automatic_step));
-    let status = service.status().map_err(contract::from_server_error)?;
+    let status = service.status().map_err(contract::from_core_error)?;
     let lane = Offline::new(context.identity)
         .and_then(|offline| offline.admin().status(None))
-        .map_err(contract::from_server_error)?;
+        .map_err(contract::from_core_error)?;
     let network = match connection.direct_status() {
         Ok(direct) => SetupNetwork {
             enabled: direct.enabled,
@@ -237,7 +232,7 @@ fn setup(
             addresses: Vec::new(),
         },
     };
-    let data = ServerSetup {
+    let data = CoreSetup {
         steps,
         runtime: Version {
             version: lane.runtime.version.clone(),
@@ -257,7 +252,7 @@ fn setup(
 /// server readies the new listener before it changes anything, so an address it can't listen at
 /// fails the step and keeps the current Network Access.
 fn set_network(
-    connection: &spaceterm_server::ServerConnection,
+    connection: &spaceterm_core::MachineConnection,
     network: &Network,
 ) -> Result<StepResult, Failure> {
     let current = connection
@@ -285,13 +280,13 @@ fn set_network(
     let status = connection
         .set_direct_policy(policy.or(current.policy), enabled)
         .map_err(contract::from_direct_error)?;
-    if let spaceterm_server::direct::ListenerState::Failed(error) = status.listener {
+    if let spaceterm_core::direct::ListenerState::Failed(error) = status.listener {
         return Err(contract::from_direct_error(error));
     }
     Ok(StepResult::Done)
 }
 
-fn text(data: &ServerSetup) -> String {
+fn text(data: &CoreSetup) -> String {
     let mut out = String::new();
     for step in &data.steps {
         let name = match step.step {
@@ -331,7 +326,7 @@ mod tests {
         let home = root.join("home");
         let installations = root.join("data/installations");
         let digest = "ab".repeat(32);
-        let executable = spaceterm_server::service::Layout::host("spaceterm")
+        let executable = spaceterm_core::service::Layout::host("spaceterm")
             .unwrap()
             .executable();
         std::fs::create_dir_all(installations.join(&digest)).unwrap();

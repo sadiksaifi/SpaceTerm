@@ -1,8 +1,8 @@
 //! `pane run` on the terminal worker: admission between two PTY reads, the markers a pending
 //! run follows, and the input and output progress a client confirms delivery and idleness by.
 use super::*;
-use spaceterm_server::pane::run::{Marker, Observation};
-use spaceterm_server::protocol::{HistoryPosition, RunRefusal};
+use spaceterm_core::pane::run::{Marker, Observation};
+use spaceterm_core::protocol::{HistoryPosition, RunRefusal};
 
 /// The most run observations a subscription keeps unread. Beyond it the run lost track.
 const MAX_RUN_OBSERVATIONS: usize = 64;

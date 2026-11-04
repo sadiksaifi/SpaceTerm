@@ -10,19 +10,19 @@ use crate::args::{Cli, Command, PaneCommand};
 use crate::contract::{Format, Screen as ScreenData, ScreenSize};
 use clap::Parser;
 use spaceterm::runtime::{Served, WorkspaceHost};
-use spaceterm_server::connection::io::{Waker, serve, spawn_link};
-use spaceterm_server::connection::loopback::Loopback;
-use spaceterm_server::connection::outbox::Outbox;
-use spaceterm_server::connection::server::AdmittedConnection;
-use spaceterm_server::connection::service::{PaneService, Peer, SharedPaneService};
-use spaceterm_server::connection::sync::SyncWorker;
-use spaceterm_server::hierarchy::{CreateControl, Mutation, Outcome};
-use spaceterm_server::protocol::screen::History;
-use spaceterm_server::protocol::{Operation, ReplyBody};
+use spaceterm_core::connection::admitted::AdmittedConnection;
+use spaceterm_core::connection::io::{Waker, serve, spawn_link};
+use spaceterm_core::connection::loopback::Loopback;
+use spaceterm_core::connection::outbox::Outbox;
+use spaceterm_core::connection::service::{PaneService, Peer, SharedPaneService};
+use spaceterm_core::connection::sync::SyncWorker;
+use spaceterm_core::hierarchy::{CreateControl, Mutation, Outcome};
+use spaceterm_core::protocol::screen::History;
+use spaceterm_core::protocol::{Operation, ReplyBody};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once};
 
-const SERVER: Id = [9; 32];
+const CORE: Id = [9; 32];
 
 /// The shell and home every test's Terminal Sessions start with.
 fn environment() {
@@ -43,14 +43,14 @@ fn shell() -> String {
     std::env::var("SPACETERM_TEST_ZSH").unwrap_or_else(|_| "/bin/zsh".into())
 }
 
-struct Server {
+struct Core {
     service: SharedPaneService,
     sync: SyncWorker,
     stopping: Arc<AtomicBool>,
     clients: u8,
 }
 
-impl Server {
+impl Core {
     fn start() -> Self {
         environment();
         let (sync, _) = SyncWorker::spawn().unwrap();
@@ -81,9 +81,9 @@ impl Server {
     }
 
     /// A new connection of `client`.
-    fn connect(&mut self, client: u8) -> ServerLink {
+    fn connect(&mut self, client: u8) -> CoreLink {
         self.clients += 1;
-        let (server, peer_end) = Loopback::pair(64).unwrap();
+        let (core, peer_end) = Loopback::pair(64).unwrap();
         let (waker, wake) = Waker::new().unwrap();
         let outbox = Outbox::new(wake);
         let peer = Peer {
@@ -100,14 +100,12 @@ impl Server {
             AdmittedConnection::new(peer, outbox, self.sync.clone(), None, Instant::now());
         let service = Arc::clone(&self.service);
         let stopping = Arc::clone(&self.stopping);
-        std::thread::spawn(move || {
-            serve(Box::new(server), connection, &waker, &service, &stopping)
-        });
+        std::thread::spawn(move || serve(Box::new(core), connection, &waker, &service, &stopping));
         spawn_link(Box::new(peer_end), Arc::new(|_| {})).unwrap()
     }
 }
 
-impl Drop for Server {
+impl Drop for Core {
     fn drop(&mut self) {
         let _ = self.service.lock().unwrap().shutdown();
         self.stopping.store(true, Ordering::Release);
@@ -115,7 +113,7 @@ impl Drop for Server {
 }
 
 /// A new Workspace and its first Pane.
-fn workspace(link: &ServerLink, sequence: u64) -> (Id, Id) {
+fn workspace(link: &CoreLink, sequence: u64) -> (Id, Id) {
     let reply = request(
         link,
         Operation::Mutate {
@@ -157,7 +155,7 @@ fn workspace(link: &ServerLink, sequence: u64) -> (Id, Id) {
 
 fn target(workspace: Id, pane: Id, running: bool) -> PaneTarget {
     PaneTarget {
-        server: SERVER,
+        core: CORE,
         workspace,
         pane,
         running,
@@ -222,7 +220,7 @@ fn runs() -> crate::state::Runs {
 
 /// Runs `command`, retrying while the shell has not drawn its first prompt.
 fn run_at_prompt(
-    link: &ServerLink,
+    link: &CoreLink,
     target: &PaneTarget,
     command: &str,
     runs: &mut crate::state::Runs,
@@ -267,8 +265,8 @@ fn output_text(done: &Done<crate::contract::PaneRun>) -> String {
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn run_read_and_page_through_scrollback() {
-    let mut server = Server::start();
-    let link = server.connect(1);
+    let mut core = Core::start();
+    let link = core.connect(1);
     let (workspace, pane) = workspace(&link, 1);
     let target = target(workspace, pane, false);
     let mut runs = runs();
@@ -430,8 +428,8 @@ fn run_read_and_page_through_scrollback() {
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn send_wait_and_release() {
-    let mut server = Server::start();
-    let link = server.connect(1);
+    let mut core = Core::start();
+    let link = core.connect(1);
     let (workspace, pane) = workspace(&link, 1);
     let mut runs = runs();
     let target = target(workspace, pane, false);
@@ -488,8 +486,8 @@ fn send_wait_and_release() {
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn observe_controlled_panes_and_end_sessions() {
-    let mut server = Server::start();
-    let person = server.connect(1);
+    let mut core = Core::start();
+    let person = core.connect(1);
     let (workspace, pane) = workspace(&person, 1);
     let mut runs = runs();
     let sized = run_args("true");
@@ -523,7 +521,7 @@ fn observe_controlled_panes_and_end_sessions() {
         ..target
     };
 
-    let agent = server.connect(2);
+    let agent = core.connect(2);
     let observed = read::read(&agent, &target, &read_args(&[]), Deadline::after(None));
     let screen = observed.data.unwrap().rows.unwrap().screen.unwrap();
     assert_eq!(screen.size.columns, 100, "observing keeps the size");
@@ -601,8 +599,8 @@ fn forward_pages_reclaim_the_omitted_screen_budget() {
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn paste_then_enter_is_delivered() {
-    let mut server = Server::start();
-    let link = server.connect(1);
+    let mut core = Core::start();
+    let link = core.connect(1);
     let (workspace, pane) = workspace(&link, 1);
     let target = target(workspace, pane, false);
     let ready = run_at_prompt(&link, &target, "true", &mut runs());
@@ -660,8 +658,8 @@ fn unsupported_shells_and_disabled_integration_fail_without_startup_wait() {
             std::env::set_var("SHELL", shell);
             std::env::set_var("SPACETERM_SHELL_INTEGRATION", mode);
         }
-        let mut server = Server::start();
-        let link = server.connect(1);
+        let mut core = Core::start();
+        let link = core.connect(1);
         let (workspace, pane) = workspace(&link, 1);
         let started = Instant::now();
         let done = run::run(
@@ -711,8 +709,8 @@ fn slow_startup(name: &str, fallback: &str, rc: &str) {
     }
     let mut results = Vec::new();
     for prestarted in [false, true] {
-        let mut server = Server::start();
-        let link = server.connect(1);
+        let mut core = Core::start();
+        let link = core.connect(1);
         let (workspace, pane) = workspace(&link, 1);
         let mut target = target(workspace, pane, false);
         let started = Instant::now();
@@ -721,7 +719,7 @@ fn slow_startup(name: &str, fallback: &str, rc: &str) {
             let claimed = channel
                 .claim(
                     &target,
-                    spaceterm_server::pane::AttachmentClaim::Select { explicit: true },
+                    spaceterm_core::pane::AttachmentClaim::Select { explicit: true },
                     None,
                     Deadline::after(Some(Duration::from_secs(10))),
                 )
@@ -855,8 +853,8 @@ fn run_commands_are_one_line_without_control_characters() {
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn clearing_scrollback_keeps_the_epoch() {
-    let mut server = Server::start();
-    let link = server.connect(1);
+    let mut core = Core::start();
+    let link = core.connect(1);
     let (workspace, pane) = workspace(&link, 1);
     let mut runs = runs();
     let target = target(workspace, pane, false);
@@ -905,10 +903,10 @@ fn clearing_scrollback_keeps_the_epoch() {
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn runs_refuse_typed_input_and_survive_take_over_and_lost_links() {
-    let mut server = Server::start();
-    let link = server.connect(1);
-    let spare = server.connect(1);
-    let person = server.connect(2);
+    let mut core = Core::start();
+    let link = core.connect(1);
+    let spare = core.connect(1);
+    let person = core.connect(2);
     let (workspace, pane) = workspace(&link, 1);
     let mut runs = runs();
     let target = target(workspace, pane, false);
@@ -1019,8 +1017,8 @@ fn runs_refuse_typed_input_and_survive_take_over_and_lost_links() {
 }
 
 fn run_at_prompt_with(
-    link: &ServerLink,
-    connect: &mut dyn FnMut() -> Result<ServerLink, Failure>,
+    link: &CoreLink,
+    connect: &mut dyn FnMut() -> Result<CoreLink, Failure>,
     target: &PaneTarget,
     command: &str,
     runs: &mut crate::state::Runs,
@@ -1052,8 +1050,8 @@ fn run_at_prompt_with(
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn list_maps_a_stale_observation_to_changed() {
-    let mut server = Server::start();
-    let link = server.connect(1);
+    let mut core = Core::start();
+    let link = core.connect(1);
     let (workspace, pane) = workspace(&link, 1);
     let target = target(workspace, pane, false);
     let done = run_at_prompt(&link, &target, "true", &mut runs());
@@ -1070,7 +1068,7 @@ fn list_maps_a_stale_observation_to_changed() {
         .unwrap()
         .session = Some([99; 32]);
     let snapshot = crate::scope::Snapshot {
-        server: SERVER,
+        core: CORE,
         repositories: inventory.repositories.clone(),
         inventory,
     };
@@ -1078,7 +1076,7 @@ fn list_maps_a_stale_observation_to_changed() {
         &snapshot,
         &crate::scope::ScopeArgs::default(),
         None,
-        crate::scope::Want::Server,
+        crate::scope::Want::Core,
         crate::scope::Effect::Passive,
     )
     .unwrap();
@@ -1098,9 +1096,9 @@ fn list_maps_a_stale_observation_to_changed() {
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn concurrent_runs_of_one_identity_refuse_the_second_without_input() {
-    let mut server = Server::start();
-    let first = server.connect(1);
-    let second = server.connect(1);
+    let mut core = Core::start();
+    let first = core.connect(1);
+    let second = core.connect(1);
     let (workspace, pane) = workspace(&first, 1);
     let target = target(workspace, pane, false);
     let done = run_at_prompt(&first, &target, "true", &mut runs());
@@ -1171,9 +1169,9 @@ fn concurrent_runs_of_one_identity_refuse_the_second_without_input() {
 #[test]
 #[ignore = "starts a server and shells; run mise run cli:io:test"]
 fn stale_session_fences_leave_control_and_ended_sessions_unchanged() {
-    let mut server = Server::start();
-    let person = server.connect(1);
-    let agent = server.connect(2);
+    let mut core = Core::start();
+    let person = core.connect(1);
+    let agent = core.connect(2);
     let (workspace, pane) = workspace(&person, 1);
     let target = target(workspace, pane, false);
     let ready = run_at_prompt(&person, &target, "true", &mut runs());
@@ -1225,18 +1223,18 @@ fn stale_session_fences_leave_control_and_ended_sessions_unchanged() {
 #[test]
 #[ignore = "starts real PTYs; run on one thread with cli:io:test"]
 fn end_all_sessions_preview_and_confirmation_end_only_the_reviewed_sessions() {
-    use crate::contract::{Mode as OutputMode, ServerRef};
+    use crate::contract::{MachineRef, Mode as OutputMode};
     use crate::server::end_all_sessions;
     use crate::work::dispatch::Dispatch;
-    use spaceterm_server::hierarchy::Inventory;
+    use spaceterm_core::hierarchy::Inventory;
 
     struct Journal {
-        link: ServerLink,
+        link: CoreLink,
         sequence: u64,
     }
     impl Dispatch for Journal {
-        fn server_id(&self) -> Id {
-            SERVER
+        fn machine_id(&self) -> Id {
+            CORE
         }
         fn client_id(&self) -> Id {
             [1; 32]
@@ -1262,17 +1260,17 @@ fn end_all_sessions_preview_and_confirmation_end_only_the_reviewed_sessions() {
             Ok(result.outcome)
         }
     }
-    fn inventory(link: &ServerLink) -> Inventory {
+    fn inventory(link: &CoreLink) -> Inventory {
         link.inventory().unwrap().1.inventory.clone()
     }
-    let mut host = Server::start();
+    let mut host = Core::start();
     let link = host.connect(1);
     let (workspace, pane) = workspace(&link, 1);
     let channel = super::channel::Channel::open(&link).unwrap();
     let claimed = channel
         .claim(
             &target(workspace, pane, false),
-            spaceterm_server::pane::AttachmentClaim::Select { explicit: true },
+            spaceterm_core::pane::AttachmentClaim::Select { explicit: true },
             None,
             Deadline::after(Some(Duration::from_secs(10))),
         )
@@ -1293,10 +1291,10 @@ fn end_all_sessions_preview_and_confirmation_end_only_the_reviewed_sessions() {
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(5));
     };
-    let server = ServerRef {
+    let core = MachineRef {
         name: "local".into(),
         route: "local".into(),
-        id: hex(&SERVER),
+        id: hex(&CORE),
     };
     let mut journal = Journal {
         link: link.clone(),
@@ -1304,7 +1302,7 @@ fn end_all_sessions_preview_and_confirmation_end_only_the_reviewed_sessions() {
     };
     let now = std::time::SystemTime::now();
     let preview =
-        end_all_sessions::execute(&initial, &mut journal, server.clone(), None, now).unwrap();
+        end_all_sessions::execute(&initial, &mut journal, core.clone(), None, now).unwrap();
     let mut stdout = Vec::new();
     assert_eq!(
         preview.write(
@@ -1320,13 +1318,13 @@ fn end_all_sessions_preview_and_confirmation_end_only_the_reviewed_sessions() {
     let preview: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
     let token = preview["data"]["confirmation"]["token"].as_str().unwrap();
     let refused =
-        end_all_sessions::execute(&initial, &mut journal, server.clone(), Some("wrong"), now);
+        end_all_sessions::execute(&initial, &mut journal, core.clone(), Some("wrong"), now);
     assert!(matches!(refused, Err(failure) if failure.code == Code::Changed));
     assert_eq!(
         inventory(&link).close.unwrap().sessions,
         initial.close.as_ref().unwrap().sessions
     );
-    let done = end_all_sessions::execute(&initial, &mut journal, server, Some(token), now).unwrap();
+    let done = end_all_sessions::execute(&initial, &mut journal, core, Some(token), now).unwrap();
     assert_eq!(done.exit(), 0);
     let until = Instant::now() + Duration::from_secs(10);
     loop {

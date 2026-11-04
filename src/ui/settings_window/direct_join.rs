@@ -4,7 +4,7 @@
 //! these in its join stages.
 
 use crate::direct_connections::EnrollmentStage;
-use crate::server_connection::direct::DirectError;
+use crate::machine_connection::direct::DirectError;
 
 /// What a stop SpaceTerm couldn't save says. It states the rule rather than the server's state,
 /// since a later quiet save may already have sent it, and it stays only until a save succeeds.
@@ -18,7 +18,7 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
         DirectError::Rejected => DECLINED,
         DirectError::InvalidInvitation => "Invalid or used invitation. Ask for a new one.",
         DirectError::Expired => "Invitation expired. Ask for a new one.",
-        DirectError::WrongServer => "This invitation is for a different SpaceTerm app.",
+        DirectError::WrongMachine => "This invitation is for a different SpaceTerm app.",
         DirectError::IncompatibleProtocol => "SpaceTerm and this server are incompatible.",
         DirectError::AuthenticationRefused
         | DirectError::PinMismatch

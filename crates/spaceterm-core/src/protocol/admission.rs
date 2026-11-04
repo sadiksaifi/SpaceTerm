@@ -1,0 +1,653 @@
+//! Bounded admission: the Hello/Offer preamble every protocol major reads the same way, as
+//! length-prefixed JSON. An incompatible peer therefore always receives a typed incompatibility.
+//! After admission both peers switch to the postcard framing in [`super::frame`].
+//! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
+//! The preamble is frozen: later majors read and write these exact messages, so the service lane
+//! ([`Lane::Service`]) works across majors.
+use super::MAJOR;
+use crate::pane::control::ClientName;
+use crate::{AuthenticatedStatus, CoreError};
+use ring::rand::{SecureRandom, SystemRandom};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
+
+const MAX_FRAME: usize = 8192;
+const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Hello {
+    versions: Vec<u16>,
+    build: String,
+    core: [u8; 32],
+    /// The base Client Identity.
+    client: [u8; 32],
+    /// Composed by the client and rechecked by the server.
+    name: ClientName,
+    agent: Option<AgentName>,
+    lane: Lane,
+}
+
+/// What an admitted connection carries. The service lane stays in bounded JSON whatever the
+/// selected work major, so remote administration works across majors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Lane {
+    Work,
+    Service,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Offer {
+    /// 0 means no shared work major.
+    selected: u16,
+    build: String,
+    core: [u8; 32],
+    core_major: u16,
+    /// The effective Client Identity, derived from the agent name when the client sent one.
+    client: [u8; 32],
+}
+
+/// An agent name, `[a-z0-9][a-z0-9-]{0,31}`. It names an identity, not a secret.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentName(String);
+
+impl AgentName {
+    pub const MAX_LEN: usize = 32;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The Client Identity of this agent under the base Client Identity `base`:
+    /// `SHA-256("spaceterm.agent.v1" || base || name)`. The server derives it at admission, so a
+    /// paired client can only name agents of its own pairing.
+    pub fn client(&self, base: &[u8; 32]) -> [u8; 32] {
+        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+        digest.update(b"spaceterm.agent.v1");
+        digest.update(base);
+        digest.update(self.0.as_bytes());
+        let mut client = [0; 32];
+        client.copy_from_slice(digest.finish().as_ref());
+        client
+    }
+
+    /// The suffix every Client Name of this agent ends with.
+    pub(crate) fn name_suffix(&self) -> String {
+        format!(" CLI {}", self.0)
+    }
+}
+
+/// The agent name did not match `[a-z0-9][a-z0-9-]{0,31}`. It carries no value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "Agent names use 1 to 32 lowercase letters, digits or hyphens, starting with a letter or digit."
+)]
+pub struct InvalidAgentName;
+
+impl TryFrom<String> for AgentName {
+    type Error = InvalidAgentName;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        let bytes = name.as_bytes();
+        let valid = !bytes.is_empty()
+            && bytes.len() <= Self::MAX_LEN
+            && bytes[0].is_ascii_lowercase() | bytes[0].is_ascii_digit()
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-');
+        if valid {
+            Ok(Self(name))
+        } else {
+            Err(InvalidAgentName)
+        }
+    }
+}
+
+impl std::str::FromStr for AgentName {
+    type Err = InvalidAgentName;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        name.to_owned().try_into()
+    }
+}
+
+impl From<AgentName> for String {
+    fn from(name: AgentName) -> Self {
+        name.0
+    }
+}
+
+pub(crate) fn random() -> Result<[u8; 32], CoreError> {
+    let mut bytes = [0; 32];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| CoreError::StorageUnavailable)?;
+    Ok(bytes)
+}
+
+/// The transport of one admission: whole length-prefixed frames, each before a deadline. Account
+/// IPC writes them back to back; a paired connection carries the same bytes on its QUIC L0 stream.
+pub(crate) trait Preamble {
+    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError>;
+    /// One frame of at most `max` bytes, without its length prefix.
+    fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError>;
+    /// Admission proved the peer, so the transport may now hold frames as large as the
+    /// service lane's. A transport without its own flow control needs nothing.
+    fn admitted(&mut self) {}
+}
+
+/// Prefixes `bytes` with their length, the admission framing on every transport.
+pub(crate) fn prefixed(bytes: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(4 + bytes.len());
+    frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    frame.extend_from_slice(bytes);
+    frame
+}
+
+impl Preamble for UnixStream {
+    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError> {
+        self.set_nonblocking(true)
+            .map_err(|_| CoreError::Protocol)?;
+        let frame = prefixed(frame);
+        let mut rest = frame.as_slice();
+        while !rest.is_empty() {
+            match self.write(rest) {
+                Ok(0) => return Err(CoreError::Protocol),
+                Ok(count) => rest = &rest[count..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if !crate::connection::io::wait_fd(self.as_raw_fd(), true, deadline) {
+                        return Err(CoreError::Protocol);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(CoreError::Protocol),
+            }
+        }
+        Ok(())
+    }
+
+    fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError> {
+        self.set_nonblocking(true)
+            .map_err(|_| CoreError::Protocol)?;
+        let mut size = [0; 4];
+        read_exact(self, &mut size, deadline)?;
+        let size = u32::from_be_bytes(size) as usize;
+        if size > max {
+            return Err(CoreError::Protocol);
+        }
+        let mut bytes = vec![0; size];
+        read_exact(self, &mut bytes, deadline)?;
+        Ok(bytes)
+    }
+}
+
+fn read_exact(
+    stream: &mut UnixStream,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> Result<(), CoreError> {
+    while !bytes.is_empty() {
+        match stream.read(bytes) {
+            Ok(0) => return Err(CoreError::Protocol),
+            Ok(count) => bytes = &mut bytes[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if !crate::connection::io::wait_fd(stream.as_raw_fd(), false, deadline) {
+                    return Err(CoreError::Protocol);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(CoreError::Protocol),
+        }
+    }
+    Ok(())
+}
+
+/// JSON admission messages under one absolute deadline.
+pub(crate) struct Wire<'a> {
+    stream: &'a mut dyn Preamble,
+    deadline: Instant,
+}
+impl<'a> Wire<'a> {
+    pub(crate) fn new(stream: &'a mut dyn Preamble) -> Self {
+        Self {
+            stream,
+            deadline: Instant::now() + CONNECTION_LIMIT,
+        }
+    }
+    pub(crate) fn read<T: DeserializeOwned>(&mut self) -> Result<T, CoreError> {
+        let bytes = self.stream.receive(MAX_FRAME, self.deadline)?;
+        serde_json::from_slice(&bytes).map_err(|_| CoreError::Protocol)
+    }
+    pub(crate) fn write(&mut self, value: &impl Serialize) -> Result<(), CoreError> {
+        let bytes = serde_json::to_vec(value).map_err(|_| CoreError::Protocol)?;
+        if bytes.len() > MAX_FRAME {
+            return Err(CoreError::Protocol);
+        }
+        self.stream.send(&bytes, self.deadline)
+    }
+}
+
+/// A connection the server admitted: its effective Client Identity, which an agent name derives
+/// from the base one, and the name it presents.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Admitted {
+    pub status: AuthenticatedStatus,
+    pub client: [u8; 32],
+    pub agent: Option<AgentName>,
+    pub name: ClientName,
+}
+
+/// What a client's hello selected.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// A work connection, which the caller serves with the protocol.
+    Work(Admitted),
+    /// A service-lane connection as `Actor`. The caller serves the lane, or closes the connection
+    /// when it has none.
+    Service(crate::service::operations::Actor),
+}
+
+#[cfg(test)]
+impl Admission {
+    /// The admitted work connection. Panics on a service-lane hello.
+    pub(crate) fn work(self) -> Admitted {
+        match self {
+            Self::Work(admitted) => admitted,
+            Self::Service(_) => panic!("expected a work connection"),
+        }
+    }
+}
+
+/// Both peers verify the owning account before accepting any protocol values. The client's
+/// identity and name are nonsecret and grant nothing beyond the connection's authority.
+pub(crate) fn admit_core(
+    stream: &mut UnixStream,
+    core: &[u8; 32],
+    build: &str,
+) -> Result<Admission, CoreError> {
+    crate::host::check_peer(stream)?;
+    admit_core_transport(stream, core, build, None)
+}
+
+/// Only the paired host calls this after pinned-server and enrolled-device proof validation.
+/// Every agent it admits derives from the pairing's own Client Identity.
+pub(crate) fn admit_direct_machine(
+    stream: &mut dyn Preamble,
+    paired: &crate::direct::PairedDevice,
+) -> Result<Admission, CoreError> {
+    admit_core_transport(
+        stream,
+        &paired.pin.core,
+        &paired.pin.build,
+        Some((paired.client, paired.pairing)),
+    )
+}
+
+fn admit_core_transport(
+    stream: &mut dyn Preamble,
+    core: &[u8; 32],
+    build: &str,
+    paired: Option<([u8; 32], crate::direct::PairingId)>,
+) -> Result<Admission, CoreError> {
+    let expected_client = paired.map(|(client, _)| client);
+    let mut wire = Wire::new(stream);
+    let hello: Hello = wire.read()?;
+    if hello.build != build
+        || hello.core != *core
+        || hello.client == [0; 32]
+        || expected_client.is_some_and(|client| hello.client != client)
+    {
+        return Err(CoreError::AuthenticationRefused);
+    }
+    if hello.versions.is_empty() || hello.versions.len() > 16 {
+        return Err(CoreError::Protocol);
+    }
+    // An agent's Client Name keeps " CLI <agent>" whole, so every client can tell agents apart.
+    if let Some(agent) = &hello.agent
+        && !hello.name.as_str().ends_with(&agent.name_suffix())
+    {
+        return Err(CoreError::Protocol);
+    }
+    let client = hello
+        .agent
+        .as_ref()
+        .map_or(hello.client, |agent| agent.client(&hello.client));
+    let selected = if hello.versions.contains(&MAJOR) {
+        MAJOR
+    } else {
+        0
+    };
+    wire.write(&Offer {
+        selected,
+        build: build.to_owned(),
+        core: *core,
+        core_major: MAJOR,
+        client,
+    })?;
+    if hello.lane == Lane::Service {
+        stream.admitted();
+        return Ok(Admission::Service(crate::service::operations::Actor {
+            pairing: paired.map(|(_, pairing)| pairing),
+            client,
+        }));
+    }
+    if selected == 0 {
+        return Err(CoreError::IncompatibleProtocol);
+    }
+    Ok(Admission::Work(Admitted {
+        status: AuthenticatedStatus {
+            protocol_major: selected,
+        },
+        client,
+        agent: hello.agent,
+        name: hello.name,
+    }))
+}
+
+/// Who a client admits as: its base Client Identity, its Client Name and its optional agent.
+#[derive(Clone, Copy)]
+pub(crate) struct Caller<'a> {
+    pub client: &'a [u8; 32],
+    pub name: &'a ClientName,
+    pub agent: Option<&'a AgentName>,
+}
+
+impl<'a> From<(&'a [u8; 32], &'a ClientName)> for Caller<'a> {
+    fn from((client, name): (&'a [u8; 32], &'a ClientName)) -> Self {
+        Self {
+            client,
+            name,
+            agent: None,
+        }
+    }
+}
+
+impl Caller<'_> {
+    /// The Client Identity the server must offer back.
+    pub(crate) fn effective(&self) -> [u8; 32] {
+        self.agent
+            .map_or(*self.client, |agent| agent.client(self.client))
+    }
+}
+
+/// Admits a service-lane connection as `caller`. The lane is answered whatever the work majors
+/// of the two peers, so this returns the server's work major for the caller to compare.
+#[cfg_attr(
+    not(feature = "client"),
+    allow(dead_code, reason = "the CLI's server commands open the service lane")
+)]
+pub(crate) fn admit_service_lane(
+    stream: &mut dyn Preamble,
+    caller: Caller<'_>,
+    core: &[u8; 32],
+    build: &str,
+) -> Result<u16, CoreError> {
+    let mut wire = Wire::new(stream);
+    wire.write(&Hello {
+        versions: vec![MAJOR],
+        build: build.to_owned(),
+        core: *core,
+        client: *caller.client,
+        name: caller.name.clone(),
+        agent: caller.agent.cloned(),
+        lane: Lane::Service,
+    })?;
+    let offer: Offer = wire.read()?;
+    if offer.build != build || offer.core != *core || offer.client != caller.effective() {
+        return Err(CoreError::AuthenticationRefused);
+    }
+    stream.admitted();
+    Ok(offer.core_major)
+}
+
+#[cfg_attr(
+    not(feature = "client"),
+    allow(dead_code, reason = "client side used by desktop and admission tests")
+)]
+pub(crate) fn admit_client<'a>(
+    stream: &mut UnixStream,
+    caller: impl Into<Caller<'a>>,
+    core: &[u8; 32],
+    build: &str,
+) -> Result<AuthenticatedStatus, CoreError> {
+    crate::host::check_peer(stream)?;
+    admit_transport(stream, caller, core, build)
+}
+
+pub(crate) fn admit_transport<'a>(
+    stream: &mut dyn Preamble,
+    caller: impl Into<Caller<'a>>,
+    core: &[u8; 32],
+    build: &str,
+) -> Result<AuthenticatedStatus, CoreError> {
+    let caller = caller.into();
+    let mut wire = Wire::new(stream);
+    wire.write(&Hello {
+        versions: vec![MAJOR],
+        build: build.to_owned(),
+        core: *core,
+        client: *caller.client,
+        name: caller.name.clone(),
+        agent: caller.agent.cloned(),
+        lane: Lane::Work,
+    })?;
+    let offer: Offer = wire.read()?;
+    if offer.build != build || offer.core != *core || offer.client != caller.effective() {
+        return Err(CoreError::AuthenticationRefused);
+    }
+    if offer.selected != MAJOR {
+        return Err(CoreError::IncompatibleProtocol);
+    }
+    Ok(AuthenticatedStatus {
+        protocol_major: offer.selected,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn account_admission_preserves_nonsecret_client_identity() {
+        let (mut client, mut core) = UnixStream::pair().unwrap();
+        let thread =
+            std::thread::spawn(move || admit_core(&mut core, &[7; 32], "spaceterm-development"));
+        let result = admit_client(
+            &mut client,
+            (&[9; 32], &"Build Mac".into()),
+            &[7; 32],
+            "spaceterm-development",
+        );
+        assert_eq!(result.unwrap().protocol_major, MAJOR);
+        let admitted = thread.join().unwrap().unwrap().work();
+        assert_eq!(
+            (admitted.client, admitted.name.as_str()),
+            ([9; 32], "Build Mac")
+        );
+    }
+    #[test]
+    fn a_client_of_another_major_is_offered_none_and_refused() {
+        let (mut client, mut core) = UnixStream::pair().unwrap();
+        let thread =
+            std::thread::spawn(move || admit_core(&mut core, &[7; 32], "spaceterm-development"));
+        let mut wire = Wire::new(&mut client);
+        wire.write(&Hello {
+            versions: vec![MAJOR + 1],
+            build: "spaceterm-development".into(),
+            core: [7; 32],
+            client: [9; 32],
+            name: "Build Mac".into(),
+            agent: None,
+            lane: Lane::Work,
+        })
+        .unwrap();
+        let offer: Offer = wire.read().unwrap();
+        assert_eq!(offer.selected, 0);
+        assert_eq!(
+            thread.join().unwrap().err(),
+            Some(CoreError::IncompatibleProtocol)
+        );
+    }
+    #[test]
+    fn substituted_build_or_core_is_refused_before_operations() {
+        for (build, id) in [("spaceterm", [7; 32]), ("spaceterm-development", [8; 32])] {
+            let (mut client, mut core) = UnixStream::pair().unwrap();
+            let thread = std::thread::spawn(move || {
+                admit_core(&mut core, &[7; 32], "spaceterm-development")
+            });
+            assert!(
+                admit_client(&mut client, (&[9; 32], &"Build Mac".into()), &id, build).is_err()
+            );
+            assert_eq!(
+                thread.join().unwrap(),
+                Err(CoreError::AuthenticationRefused)
+            );
+        }
+    }
+    #[test]
+    fn client_refuses_an_offer_for_another_build_or_core() {
+        for (build, machine_id) in [("spaceterm", [7; 32]), ("spaceterm-development", [8; 32])] {
+            let (mut client, mut core) = UnixStream::pair().unwrap();
+            let thread = std::thread::spawn(move || {
+                let mut wire = Wire::new(&mut core);
+                let _: Hello = wire.read().unwrap();
+                wire.write(&Offer {
+                    selected: MAJOR,
+                    build: build.into(),
+                    core: machine_id,
+                    core_major: MAJOR,
+                    client: [9; 32],
+                })
+                .unwrap();
+            });
+            assert_eq!(
+                admit_client(
+                    &mut client,
+                    (&[9; 32], &"Build Mac".into()),
+                    &[7; 32],
+                    "spaceterm-development",
+                ),
+                Err(CoreError::AuthenticationRefused)
+            );
+            thread.join().unwrap();
+        }
+    }
+    #[test]
+    fn oversized_frames_are_refused_before_admission() {
+        let (mut client, mut core) = UnixStream::pair().unwrap();
+        client.write_all(&u32::MAX.to_be_bytes()).unwrap();
+        assert_eq!(
+            admit_core(&mut core, &[7; 32], "spaceterm-development"),
+            Err(CoreError::Protocol)
+        );
+    }
+    #[test]
+    fn stalled_connections_obey_an_absolute_deadline() {
+        let (_client, mut core) = UnixStream::pair().unwrap();
+        let mut wire = Wire::new(&mut core);
+        wire.deadline = Instant::now() + Duration::from_millis(10);
+        assert!(matches!(wire.read::<Hello>(), Err(CoreError::Protocol)));
+    }
+    #[test]
+    fn an_agent_is_admitted_as_the_identity_the_machine_derives_from_its_base() {
+        let agent: AgentName = "agent-1".parse().unwrap();
+        let derived = agent.client(&[9; 32]);
+        assert_ne!(derived, [9; 32]);
+        assert_ne!(
+            derived,
+            agent.client(&[8; 32]),
+            "each base derives its own agents"
+        );
+        let other: AgentName = "agent-2".parse().unwrap();
+        assert_ne!(derived, other.client(&[9; 32]));
+        let (mut client, mut core) = UnixStream::pair().unwrap();
+        let thread =
+            std::thread::spawn(move || admit_core(&mut core, &[7; 32], "spaceterm-development"));
+        let name: ClientName = "Build Mac CLI agent-1".into();
+        admit_client(
+            &mut client,
+            Caller {
+                client: &[9; 32],
+                name: &name,
+                agent: Some(&agent),
+            },
+            &[7; 32],
+            "spaceterm-development",
+        )
+        .unwrap();
+        let admitted = thread.join().unwrap().unwrap().work();
+        assert_eq!(admitted.client, derived);
+        assert_eq!(admitted.agent, Some(agent));
+    }
+
+    #[test]
+    fn an_agent_whose_name_hides_it_is_refused() {
+        let agent: AgentName = "agent-1".parse().unwrap();
+        let (mut client, mut core) = UnixStream::pair().unwrap();
+        let thread =
+            std::thread::spawn(move || admit_core(&mut core, &[7; 32], "spaceterm-development"));
+        let name: ClientName = "Build Mac".into();
+        assert!(
+            admit_client(
+                &mut client,
+                Caller {
+                    client: &[9; 32],
+                    name: &name,
+                    agent: Some(&agent),
+                },
+                &[7; 32],
+                "spaceterm-development",
+            )
+            .is_err()
+        );
+        assert_eq!(thread.join().unwrap(), Err(CoreError::Protocol));
+    }
+
+    /// A paired connection's Hello must carry its pairing's own Client Identity, so its agents
+    /// always derive from it and never from another pairing's.
+    #[test]
+    fn a_paired_client_cannot_admit_an_agent_of_another_pairing() {
+        let agent: AgentName = "agent-1".parse().unwrap();
+        let (mut client, mut core) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn(move || {
+            admit_core_transport(
+                &mut core,
+                &[7; 32],
+                "spaceterm-development",
+                Some(([9; 32], [8; 32])),
+            )
+        });
+        let name: ClientName = "Build Mac CLI agent-1".into();
+        assert!(
+            admit_transport(
+                &mut client,
+                Caller {
+                    client: &[8; 32],
+                    name: &name,
+                    agent: Some(&agent),
+                },
+                &[7; 32],
+                "spaceterm-development",
+            )
+            .is_err()
+        );
+        assert_eq!(
+            thread.join().unwrap(),
+            Err(CoreError::AuthenticationRefused)
+        );
+    }
+
+    #[test]
+    fn agent_names_follow_their_pattern() {
+        for valid in ["a", "agent-1", "0", &"a".repeat(32)] {
+            assert!(valid.parse::<AgentName>().is_ok(), "{valid}");
+        }
+        for invalid in ["", "-a", "Agent", "a_b", "a b", &"a".repeat(33), "é"] {
+            assert!(invalid.parse::<AgentName>().is_err(), "{invalid}");
+        }
+    }
+}

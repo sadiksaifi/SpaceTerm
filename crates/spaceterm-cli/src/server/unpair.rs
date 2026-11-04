@@ -5,10 +5,10 @@
 //! either does.
 use super::{Context, Reply};
 use crate::contract::{
-    Code, Confirmation, Details, DeviceRef, Envelope, Failure, Level, ServerUnpair, TargetDetails,
+    Code, Confirmation, CoreUnpair, Details, DeviceRef, Envelope, Failure, Level, TargetDetails,
 };
 use serde::Serialize;
-use spaceterm_server::direct::DeviceInfo;
+use spaceterm_core::direct::DeviceInfo;
 
 const COMMAND: &str = "server.unpair";
 /// What an unpair token confirms, so it confirms nothing else.
@@ -22,14 +22,14 @@ pub struct UnpairEffects {
 
 /// The confirmation envelope of an unpair preview.
 pub(crate) fn preview_envelope(
-    server: crate::contract::ServerRef,
+    core: crate::contract::MachineRef,
     token: String,
     expires_at: String,
     device: DeviceRef,
 ) -> Envelope<crate::contract::ConfirmationData<UnpairEffects>> {
     Envelope::confirmation(
         COMMAND,
-        Some(server),
+        Some(core),
         Confirmation {
             token,
             expires_at,
@@ -79,8 +79,8 @@ pub fn select<'a>(devices: &'a [DeviceInfo], selector: &str) -> Result<&'a Devic
 }
 
 /// What an unpair token binds: the exact server and pairing, and the device's key.
-pub fn observation(server: &str, device: &DeviceInfo) -> Vec<u8> {
-    let mut bytes = server.as_bytes().to_vec();
+pub fn observation(core: &str, device: &DeviceInfo) -> Vec<u8> {
+    let mut bytes = core.as_bytes().to_vec();
     bytes.extend_from_slice(&device.pairing);
     bytes.extend_from_slice(&device.public_key);
     bytes
@@ -94,8 +94,8 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
         Ok(routed) => routed,
         Err(error) => return Reply::routing_failure(COMMAND, error),
     };
-    let server = routed.server.clone();
-    let fail = |failure: Failure| Reply::failure(COMMAND, Some(server.clone()), failure);
+    let core = routed.core.clone();
+    let fail = |failure: Failure| Reply::failure(COMMAND, Some(core.clone()), failure);
     let connection = match &routed.connection {
         Ok(connection) => connection,
         Err(failure) => return fail(failure.clone()),
@@ -108,7 +108,7 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
         Ok(device) => device,
         Err(failure) => return fail(failure),
     };
-    let observed = observation(&server.id, device);
+    let observed = observation(&core.id, device);
     let now = std::time::SystemTime::now();
     let named = DeviceRef {
         id: super::hex(&device.pairing),
@@ -133,7 +133,7 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
             &named.id[..8],
             named.id
         );
-        return Reply::new(&preview_envelope(server, current, expires_at, named), text);
+        return Reply::new(&preview_envelope(core, current, expires_at, named), text);
     }
     let mut operation = [0; 32];
     if ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut operation).is_err() {
@@ -146,7 +146,7 @@ pub fn run(context: &Context<'_>, selector: &str, given: Option<&str>) -> Reply 
         Ok(_) => {
             let text = format!("Unpaired {}.\n", named.name);
             Reply::new(
-                &Envelope::ok(COMMAND, Some(server), ServerUnpair { revoked: named }),
+                &Envelope::ok(COMMAND, Some(core), CoreUnpair { revoked: named }),
                 text,
             )
         }

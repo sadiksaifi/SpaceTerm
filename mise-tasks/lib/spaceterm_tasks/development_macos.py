@@ -45,7 +45,7 @@ def cached_icon(parent, name):
     return cache
 
 
-def stage_bundle(executable, server, *, catalog=None):
+def stage_bundle(executable, core, *, catalog=None):
     template = identity(IDENTITY)
     name = template["CFBundleName"]
     if name != template["CFBundleExecutable"]:
@@ -68,7 +68,7 @@ def stage_bundle(executable, server, *, catalog=None):
         (contents / "Info.plist").write_bytes(plistlib.dumps(info))
         shutil.copyfile(executable, contents / "MacOS" / name)
         (contents / "MacOS" / name).chmod(0o755)
-        shutil.copyfile(server, contents / "MacOS" / "spaceterm")
+        shutil.copyfile(core, contents / "MacOS" / "spaceterm")
         (contents / "MacOS" / "spaceterm").chmod(0o755)
         resources = contents / "Resources"
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
@@ -106,7 +106,7 @@ def stage_bundle(executable, server, *, catalog=None):
 
 
 def launch():
-    from spaceterm_tasks.server_builds import prepare
+    from spaceterm_tasks.core_builds import prepare
 
     with (
         development_run(),
@@ -114,7 +114,7 @@ def launch():
     ):
         environment = source_environment(os.environ)
         catalog = prepare(Path(temporary) / "catalog", "spaceterm-development")
-        server = build_executable(
+        core = build_executable(
             "--package",
             "spaceterm-cli",
             "--no-default-features",
@@ -122,9 +122,7 @@ def launch():
             binary="spaceterm",
             env=environment,
         )
-        bundle = stage_bundle(
-            build_executable("--locked", env=environment), server, catalog=catalog
-        )
+        bundle = stage_bundle(build_executable("--locked", env=environment), core, catalog=catalog)
         scenario = environment.get("SPACETERM_UPDATE_PREVIEW")
         if scenario:
             print(f"Update preview: {scenario}. Choose SpaceTerm Development > Check for Updates…")

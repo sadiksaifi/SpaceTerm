@@ -11,17 +11,17 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
-use spaceterm_server::hierarchy::{
+use spaceterm_core::hierarchy::{
     Axis, CloseInventory, ConfirmedPane, Id, Inventory, Mutation, Outcome, Pane, Tab, Workspace,
 };
 
-use super::server::testing::{ScriptedEdits, ScriptedPanes};
-use super::server::{
+use super::core_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+use super::core_workspaces::{
     WorkspaceDraft, WorkspaceEditSource, WorkspaceEditability, WorkspaceEdits, WorkspaceFacts,
     WorkspaceField, WorkspacePaneOpener, WorkspacePaneSessions, WorkspacePlan, WorkspaceRefusal,
     WorkspaceRefusalReason, WorkspaceSubmission, WorkspaceTabs, Workspaces,
 };
-use crate::terminal::server_session::ServerPaneStatus;
+use crate::terminal::core_session::CorePaneStatus;
 use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::tab_manager::TabManager;
@@ -61,7 +61,7 @@ pub(crate) fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
 pub(crate) fn tab(id: Id, panes: Vec<Pane>) -> Tab {
     Tab {
         worktree: None,
-        worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+        worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
         worktree_repository: None,
         id,
         root_pane: panes[0].id,
@@ -125,7 +125,7 @@ fn tab_manager(cx: &mut TestAppContext) -> (WorkspaceHarness, &mut VisualTestCon
         )
         .with_reading_available(true),
     );
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(session_factory);
     let panes = ScriptedPanes::new(session_factory.clone());
     let sessions = WorkspacePaneSessions::with_opener(
         Rc::clone(&panes) as Rc<dyn WorkspacePaneOpener>,
@@ -174,7 +174,7 @@ fn publish(harness: &WorkspaceHarness, inventory: Inventory, cx: &mut VisualTest
         harness.manager.update(cx, |manager, cx| {
             manager.reconcile(
                 &workspace,
-                super::server::WorkspaceRemoval::Published,
+                super::core_workspaces::WorkspaceRemoval::Published,
                 window,
                 cx,
             );
@@ -225,7 +225,7 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
-fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut TestAppContext) {
+fn new_tab_should_present_provisionally_while_the_core_validates_it(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
     assert_eq!(tab_count(&harness, cx), 1);
     let root = harness
@@ -242,7 +242,7 @@ fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut T
         vec![Mutation::CreateTab {
             workspace: WORKSPACE,
             source: Some(ROOT_PANE),
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }],
         "New Tab should ask the server"
     );
@@ -255,7 +255,7 @@ fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut T
 }
 
 #[gpui::test]
-fn command_t_should_ask_the_server_for_a_tab_beside_the_active_one(cx: &mut TestAppContext) {
+fn command_t_should_ask_the_core_for_a_tab_beside_the_active_one(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
 
     cx.simulate_keystrokes("cmd-t");
@@ -266,7 +266,7 @@ fn command_t_should_ask_the_server_for_a_tab_beside_the_active_one(cx: &mut Test
         vec![Mutation::CreateTab {
             workspace: WORKSPACE,
             source: Some(ROOT_PANE),
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }],
     );
     assert_eq!(tab_count(&harness, cx), 2, "the earlier Tab stays");
@@ -348,7 +348,7 @@ fn a_published_split_should_join_the_layout_without_taking_focus(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn a_split_in_a_workspace_should_ask_the_server_for_the_pane(cx: &mut TestAppContext) {
+fn a_split_in_a_workspace_should_ask_the_core_for_the_pane(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
 
     click("pane-split-down-1", cx);
@@ -360,7 +360,7 @@ fn a_split_in_a_workspace_should_ask_the_server_for_the_pane(cx: &mut TestAppCon
             tab: ROOT_TAB,
             source: ROOT_PANE,
             axis: Axis::Down,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }],
         "Split Down should ask the server"
     );
@@ -482,14 +482,14 @@ fn a_publication_that_replaces_every_known_pane_should_keep_the_tab(cx: &mut Tes
 }
 
 #[gpui::test]
-fn a_pane_whose_shell_exits_should_keep_its_place_until_the_server_publishes(
+fn a_pane_whose_shell_exits_should_keep_its_place_until_the_core_publishes(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = tab_manager(cx);
 
     // The Terminal Session ends before the next reading of the inventory. The server may have
     // created a Pane this client has not seen, so membership waits for what the server publishes.
-    harness.panes.pane(ROOT_PANE).set(ServerPaneStatus::Ended);
+    harness.panes.pane(ROOT_PANE).set(CorePaneStatus::Ended);
     cx.update(|_, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.exit_pane_for_test(cx);
@@ -525,7 +525,7 @@ fn a_pane_whose_shell_exits_should_keep_its_place_until_the_server_publishes(
 }
 
 #[gpui::test]
-fn focus_a_pane_regains_should_not_ask_the_server_for_it(cx: &mut TestAppContext) {
+fn focus_a_pane_regains_should_not_ask_the_core_for_it(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
     let selections = harness.panes.pane(ROOT_PANE).selections();
 
@@ -546,7 +546,7 @@ fn focus_a_pane_regains_should_not_ask_the_server_for_it(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn opening_a_workspace_should_ask_the_server_for_its_focused_pane(cx: &mut TestAppContext) {
+fn opening_a_workspace_should_ask_the_core_for_its_focused_pane(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
     publish(
         &harness,
@@ -588,7 +588,7 @@ fn opening_a_workspace_should_ask_the_server_for_its_focused_pane(cx: &mut TestA
 }
 
 #[gpui::test]
-fn an_explicit_pane_press_should_ask_the_server_for_that_pane(cx: &mut TestAppContext) {
+fn an_explicit_pane_press_should_ask_the_core_for_that_pane(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
     publish(
         &harness,
@@ -621,7 +621,7 @@ fn an_explicit_pane_press_should_ask_the_server_for_that_pane(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn an_offline_client_should_ask_the_server_for_no_pane(cx: &mut TestAppContext) {
+fn an_offline_client_should_ask_the_core_for_no_pane(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
     publish(
         &harness,
@@ -651,10 +651,7 @@ fn an_offline_client_should_ask_the_server_for_no_pane(cx: &mut TestAppContext) 
 #[gpui::test]
 fn a_takeover_screen_should_replace_the_pane_and_offer_take_over(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
-    harness
-        .panes
-        .pane(ROOT_PANE)
-        .set(ServerPaneStatus::Takeover);
+    harness.panes.pane(ROOT_PANE).set(CorePaneStatus::Takeover);
     settle(&harness, cx);
 
     assert!(
@@ -678,7 +675,7 @@ fn each_pane_change_should_show_without_a_timer(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
     let pane = harness.panes.pane(ROOT_PANE);
 
-    pane.set(ServerPaneStatus::Takeover);
+    pane.set(CorePaneStatus::Takeover);
     settle(&harness, cx);
     assert!(
         cx.debug_bounds("pane-takeover-1").is_some(),
@@ -697,7 +694,7 @@ fn each_pane_change_should_show_without_a_timer(cx: &mut TestAppContext) {
 /// knows where typing goes before taking it over. Each change is announced.
 #[gpui::test]
 fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mut TestAppContext) {
-    use spaceterm_server::pane::control::Controller;
+    use spaceterm_core::pane::control::Controller;
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = tab_manager(cx);
@@ -725,7 +722,7 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
     announced(
         cx,
         "Controlled by Sadik’s MacBook Pro",
-        crate::ui::server_pane::TAKEOVER_DETAIL,
+        crate::ui::core_pane::TAKEOVER_DETAIL,
     );
 
     pane.offer_take_over(client("Build Server"));
@@ -733,7 +730,7 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
     announced(
         cx,
         "Controlled by Build Server",
-        crate::ui::server_pane::TAKEOVER_DETAIL,
+        crate::ui::core_pane::TAKEOVER_DETAIL,
     );
     assert!(
         A11yTree::read(cx)
@@ -753,11 +750,11 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
     // An interrupted connection cannot say who controls the Pane now, so it names nobody.
     pane.offer_take_over(client("Build Server"));
     settle(&harness, cx);
-    pane.set(ServerPaneStatus::TakeoverReconnecting);
+    pane.set(CorePaneStatus::TakeoverReconnecting);
     settle(&harness, cx);
     let tree = A11yTree::read(cx);
     assert!(tree.find("Controlled by Build Server").is_none());
-    assert!(tree.find(crate::ui::server_pane::TAKEOVER_TITLE).is_some());
+    assert!(tree.find(crate::ui::core_pane::TAKEOVER_TITLE).is_some());
 }
 
 /// An ended Session has nothing to take over, so a client without its control grant sees the same
@@ -766,7 +763,7 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
 fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::pane::{SessionEnd, control::Controller};
+    use spaceterm_core::pane::{SessionEnd, control::Controller};
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = tab_manager(cx);
@@ -792,7 +789,7 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
     assert_eq!(pane.restored_starts(), 0, "presenting it starts nothing");
     assert_eq!(pane.take_overs(), 0, "presenting it takes nothing over");
 
-    pane.set(ServerPaneStatus::TakeoverReconnecting);
+    pane.set(CorePaneStatus::TakeoverReconnecting);
     settle(&harness, cx);
     assert_eq!(
         A11yTree::read(cx).node("Reconnecting…")["aria"]["description"],
@@ -804,7 +801,7 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
 /// starts the shell in that one request.
 #[gpui::test]
 fn start_session_on_another_clients_ended_pane_should_take_it_over(cx: &mut TestAppContext) {
-    use spaceterm_server::pane::{SessionEnd, control::Controller};
+    use spaceterm_core::pane::{SessionEnd, control::Controller};
 
     let (harness, cx) = tab_manager(cx);
     let pane = harness.panes.pane(ROOT_PANE);
@@ -829,7 +826,7 @@ fn an_interrupted_pane_should_offer_retry_until_its_screen_returns(cx: &mut Test
     harness
         .panes
         .pane(ROOT_PANE)
-        .set(ServerPaneStatus::Reconnecting);
+        .set(CorePaneStatus::Reconnecting);
     settle(&harness, cx);
 
     assert!(
@@ -857,10 +854,7 @@ fn an_interrupted_pane_should_offer_retry_until_its_screen_returns(cx: &mut Test
 #[gpui::test]
 fn a_restored_pane_should_offer_start_new_shell_without_starting_one(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
-    harness
-        .panes
-        .pane(ROOT_PANE)
-        .set(ServerPaneStatus::Restored);
+    harness.panes.pane(ROOT_PANE).set(CorePaneStatus::Restored);
     settle(&harness, cx);
 
     assert!(
@@ -888,8 +882,8 @@ fn an_ended_pane_should_offer_start_session_without_starting_one(cx: &mut TestAp
     harness
         .panes
         .pane(ROOT_PANE)
-        .set(ServerPaneStatus::SessionEnded(
-            spaceterm_server::pane::SessionEnd::EndAllSessions,
+        .set(CorePaneStatus::SessionEnded(
+            spaceterm_core::pane::SessionEnd::EndAllSessions,
         ));
     settle(&harness, cx);
 
@@ -905,8 +899,8 @@ fn an_ended_pane_should_offer_start_session_without_starting_one(cx: &mut TestAp
     harness
         .panes
         .pane(ROOT_PANE)
-        .reconnect_to(ServerPaneStatus::SessionEnded(
-            spaceterm_server::pane::SessionEnd::EndAllSessions,
+        .reconnect_to(CorePaneStatus::SessionEnded(
+            spaceterm_core::pane::SessionEnd::EndAllSessions,
         ));
     settle(&harness, cx);
     assert_eq!(
@@ -935,8 +929,8 @@ fn an_unavailable_pane_offers_explicit_retry_and_keeps_terminal_content_hidden(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = tab_manager(cx);
-    harness.panes.pane(ROOT_PANE).set(ServerPaneStatus::Failed(
-        crate::server_connection::ServerError::DirectoryUnavailable,
+    harness.panes.pane(ROOT_PANE).set(CorePaneStatus::Failed(
+        crate::machine_connection::CoreError::DirectoryUnavailable,
     ));
     settle(&harness, cx);
     assert!(cx.debug_bounds("pane-directory-unavailable-1").is_some());
@@ -975,16 +969,14 @@ mod independent_views {
     /// One Pane Layout signature, with every Pane named by its server identity and every Split
     /// by its axis and ratio, so two clients' layouts compare although their local Pane numbers
     /// differ.
-    fn describe(signature: &str, server: impl Fn(PaneId) -> Option<Id>) -> String {
+    fn describe(signature: &str, core: impl Fn(PaneId) -> Option<Id>) -> String {
         let mut described = String::new();
         let mut rest = signature;
         while !rest.is_empty() {
             if let Some(after) = rest.strip_prefix("pane:") {
                 let end = after.find([',', ')']).unwrap_or(after.len());
                 let pane = PaneId::new(after[..end].parse().expect("a Pane number"));
-                described.push_str(label(
-                    server(pane).expect("every Pane has a server identity"),
-                ));
+                described.push_str(label(core(pane).expect("every Pane has a server identity")));
                 rest = &after[end..];
             } else if let Some(after) = rest.strip_prefix("split:") {
                 let end = after.find('(').expect("a Split lists its children");
@@ -1012,14 +1004,14 @@ mod independent_views {
                 .into_iter()
                 .map(|tab| {
                     manager
-                        .server_tab(tab)
+                        .core_tab(tab)
                         .expect("every Tab has a server identity")
                 })
                 .collect();
             let (active_tab, _) = manager.active_terminal_identity(cx);
             let layout = describe(
                 &manager.active_tab_view().read(cx).layout_signature(),
-                |pane| manager.server_pane(active_tab, pane, cx),
+                |pane| manager.core_pane(active_tab, pane, cx),
             );
             (order, layout)
         })
@@ -1030,8 +1022,8 @@ mod independent_views {
         harness.manager.read_with(cx, |manager, cx| {
             let (tab, pane) = manager.active_terminal_identity(cx);
             (
-                manager.server_tab(tab).expect("a server Tab"),
-                manager.server_pane(tab, pane, cx).expect("a server Pane"),
+                manager.core_tab(tab).expect("a server Tab"),
+                manager.core_pane(tab, pane, cx).expect("a server Pane"),
             )
         })
     }
@@ -1040,7 +1032,7 @@ mod independent_views {
         harness.manager.read_with(cx, |manager, cx| {
             let (tab, _) = manager.active_terminal_identity(cx);
             match manager.active_tab_view().read(cx).zoom_state() {
-                ZoomState::Zoomed(pane) => manager.server_pane(tab, pane, cx),
+                ZoomState::Zoomed(pane) => manager.core_pane(tab, pane, cx),
                 ZoomState::Restored => None,
             }
         })
@@ -1392,7 +1384,7 @@ mod edits {
             )
             .with_reading_available(true),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
+        let session_factory = WorkspaceTerminalSessionFactory::new_core(session_factory);
         let sessions = WorkspacePaneSessions::with_opener(
             ScriptedPanes::new(session_factory) as Rc<dyn WorkspacePaneOpener>,
             &PaneConstruction::testing(),
@@ -1414,10 +1406,7 @@ mod edits {
     }
 
     fn bind(binding: &mut Workspaces, inventory: &Inventory) {
-        binding.register(
-            local(),
-            WorkspaceFacts::from_server(&inventory.workspaces[0]),
-        );
+        binding.register(local(), WorkspaceFacts::from_core(&inventory.workspaces[0]));
     }
 
     #[test]
@@ -1561,8 +1550,8 @@ mod edits {
     }
 
     /// A Worktree removal that this client asked for and the server refused.
-    fn refused_removal() -> spaceterm_server::worktree::Operation {
-        spaceterm_server::worktree::Operation::Remove {
+    fn refused_removal() -> spaceterm_core::worktree::Operation {
+        spaceterm_core::worktree::Operation::Remove {
             root: "/srv/app".into(),
             path: "/srv/app-feature".into(),
             boot: [8; 32],
@@ -1588,7 +1577,7 @@ mod edits {
         let waiting = first.next_conflict().map(|(conflict, _)| conflict.draft);
         edits.submit_for_recovery(Mutation::Worktree(refused_removal()));
         edits.answer(Outcome::WorktreeFailed(
-            spaceterm_server::worktree::Error::Changed,
+            spaceterm_core::worktree::Error::Changed,
         ));
         first.poll();
         drop(first);
@@ -1690,7 +1679,7 @@ mod edits {
         assert!(reopened.next_conflict().is_none());
     }
 
-    const JOURNAL_SERVER: Id = [61; 32];
+    const JOURNAL_CORE: Id = [61; 32];
     const JOURNAL_CLIENT: Id = [62; 32];
     const ROUTE: [u8; 32] = [63; 32];
 
@@ -1699,13 +1688,9 @@ mod edits {
     struct JournalAt(PathBuf);
 
     impl JournalAt {
-        fn open(&self) -> spaceterm_server::hierarchy::ClientJournal {
-            spaceterm_server::hierarchy::ClientJournal::open_in(
-                &self.0,
-                JOURNAL_SERVER,
-                JOURNAL_CLIENT,
-            )
-            .expect("the journal opens")
+        fn open(&self) -> spaceterm_core::hierarchy::ClientJournal {
+            spaceterm_core::hierarchy::ClientJournal::open_in(&self.0, JOURNAL_CORE, JOURNAL_CLIENT)
+                .expect("the journal opens")
         }
     }
 
@@ -1716,19 +1701,19 @@ mod edits {
     }
 
     impl super::super::PresentationRecord for JournalAt {
-        fn presented(&self, sequence: u64) -> Result<(), spaceterm_server::ServerError> {
-            spaceterm_server::hierarchy::ClientJournal::open_in(
+        fn presented(&self, sequence: u64) -> Result<(), spaceterm_core::CoreError> {
+            spaceterm_core::hierarchy::ClientJournal::open_in(
                 &self.0,
-                JOURNAL_SERVER,
+                JOURNAL_CORE,
                 JOURNAL_CLIENT,
             )?
             .presented(sequence)
         }
 
-        fn forgotten_presented(&self, total: u64) -> Result<(), spaceterm_server::ServerError> {
-            spaceterm_server::hierarchy::ClientJournal::open_in(
+        fn forgotten_presented(&self, total: u64) -> Result<(), spaceterm_core::CoreError> {
+            spaceterm_core::hierarchy::ClientJournal::open_in(
                 &self.0,
-                JOURNAL_SERVER,
+                JOURNAL_CORE,
                 JOURNAL_CLIENT,
             )?
             .forgotten_presented(total)
@@ -1739,7 +1724,7 @@ mod edits {
     /// until it exits.
     fn held_journal() -> (
         std::sync::Arc<JournalAt>,
-        spaceterm_server::hierarchy::ClientJournal,
+        spaceterm_core::hierarchy::ClientJournal,
     ) {
         let mut name = [0; 8];
         getrandom::fill(&mut name).expect("random");
@@ -1756,7 +1741,7 @@ mod edits {
             name: "Mine".to_owned(),
         };
         held.submit(5, refused.clone()).expect("submitted");
-        held.retire(spaceterm_server::hierarchy::RetainedOutcome {
+        held.retire(spaceterm_core::hierarchy::RetainedOutcome {
             sequence: 5,
             mutation: refused,
             outcome: Outcome::Conflict,
@@ -1866,7 +1851,7 @@ mod edits {
         let missing_tab = Mutation::CreateTab {
             workspace: [9; 32],
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         };
         edits.submit_for_recovery(missing_tab.clone());
         edits.answer(Outcome::Missing);
@@ -1921,7 +1906,7 @@ mod edits {
         edits.submit_for_recovery(Mutation::CreateTab {
             workspace: WORKSPACE,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         });
         edits.answer(Outcome::Accepted { target: SECOND_TAB });
 
@@ -1935,7 +1920,7 @@ mod edits {
 
     #[test]
     fn a_recovered_worktree_removal_keeps_its_target_and_offline_status() {
-        use spaceterm_server::worktree::Operation;
+        use spaceterm_core::worktree::Operation;
         let (mut binding, edits) = binding(Some(root_only()));
         let path = std::path::PathBuf::from("/fixture/linked");
         edits.submit_for_recovery(Mutation::Worktree(Operation::Remove {
@@ -1956,7 +1941,7 @@ mod edits {
         );
         assert!(binding.removing_worktree(&path));
         edits.set_connected(false);
-        edits.set_error(spaceterm_server::ServerError::NotRunning);
+        edits.set_error(spaceterm_core::CoreError::NotRunning);
         binding.poll();
         assert_eq!(
             binding
@@ -2015,7 +2000,7 @@ mod edits {
                 .plan(poll.inventory.as_ref().expect("accepted inventory"))
                 .iter()
                 .any(|step| {
-                    matches!(step, WorkspacePlan::Create { facts } if facts.server == target)
+                    matches!(step, WorkspacePlan::Create { facts } if facts.core == target)
                 }),
             "the accepted Workspace remains attached after provisional binding"
         );
@@ -2101,9 +2086,7 @@ mod edits {
 
     #[test]
     fn detached_workspace_keeps_its_latest_arrangement_while_other_views_are_saved() {
-        use spaceterm_server::client_view::{
-            ClientView, Layout, LayoutNode, TabView, WorkspaceView,
-        };
+        use spaceterm_core::client_view::{ClientView, Layout, LayoutNode, TabView, WorkspaceView};
         let (mut binding, _) = binding(Some(root_only()));
         binding.poll();
         bind(&mut binding, &root_only());
@@ -2230,12 +2213,12 @@ mod close {
     use crate::domain::TabId;
     use crate::ui::pane_lifecycle::PaneConstruction;
     use crate::ui::workspaces::{WorkspaceCloseState, WorkspaceCloseUnavailable};
-    use spaceterm_server::hierarchy::{CloseConfirmation, CloseTarget};
+    use spaceterm_core::hierarchy::{CloseConfirmation, CloseTarget};
 
     fn binding(inventory: Inventory) -> (Workspaces, Rc<ScriptedEdits>) {
         let edits = Rc::new(ScriptedEdits::new(Some(inventory)));
         let source = WorkspaceEditSource::new(Rc::clone(&edits) as Rc<dyn WorkspaceEdits>);
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
             crate::terminal::testing::TestTerminalSessionFactory::new(
                 crate::terminal::testing::TestTerminalSessionRecords::default(),
             )
@@ -2290,7 +2273,7 @@ mod close {
     }
 
     #[test]
-    fn a_confirmed_close_should_ask_the_server_to_end_exactly_what_it_showed() {
+    fn a_confirmed_close_should_ask_the_core_to_end_exactly_what_it_showed() {
         let published = with_session(split_beside_second_tab(), SPLIT_PANE, [40; 32]);
         let (mut binding, edits) = binding(published.clone());
 

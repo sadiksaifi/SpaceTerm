@@ -18,10 +18,7 @@ fn split_inventory() -> Inventory {
 fn keyboard_navigation_focuses_an_already_visible_takeover_screen(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
     publish(&harness, split_inventory(), cx);
-    harness
-        .panes
-        .pane(SPLIT_PANE)
-        .set(ServerPaneStatus::Takeover);
+    harness.panes.pane(SPLIT_PANE).set(CorePaneStatus::Takeover);
     settle(&harness, cx);
     cx.dispatch_action(crate::ui::FocusNextPane);
     cx.run_until_parked();
@@ -40,7 +37,7 @@ fn keyboard_navigation_focuses_an_already_visible_takeover_screen(cx: &mut TestA
 }
 
 #[gpui::test]
-fn initiating_a_split_restores_zoom_before_the_server_replies(cx: &mut TestAppContext) {
+fn initiating_a_split_restores_zoom_before_the_core_replies(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
     publish(&harness, split_inventory(), cx);
     cx.dispatch_action(crate::ui::TogglePaneZoom);

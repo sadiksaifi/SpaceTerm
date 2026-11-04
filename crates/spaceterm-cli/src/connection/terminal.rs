@@ -97,15 +97,15 @@ impl InteractionIo for Terminal {
     }
     fn consent(
         &mut self,
-        invitation: &spaceterm_server::direct::Invitation,
+        invitation: &spaceterm_core::direct::Invitation,
         deadline: Instant,
     ) -> Result<bool, Failure> {
         self.answer(
             &format!(
                 "Join {} at {}? Server fingerprint: {}. [y/N] ",
-                invitation.server_name(),
+                invitation.machine_name(),
                 invitation.endpoint(),
-                invitation.server_pin().fingerprint()
+                invitation.machine_pin().fingerprint()
             ),
             deadline,
         )

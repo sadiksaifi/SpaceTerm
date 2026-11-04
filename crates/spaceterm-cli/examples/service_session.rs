@@ -4,8 +4,8 @@
     reason = "Service evidence uses the shared hierarchy and never uses `support::attach`."
 )]
 mod support;
-use spaceterm_server::{
-    ServerConnection, ServerError,
+use spaceterm_core::{
+    CoreError, MachineConnection,
     hierarchy::{Mutation, Outcome},
     pane::*,
     service::Service,
@@ -36,7 +36,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             "Signed retained account service installed and started without administrator authorization."
         );
     }
-    let client = ServerConnection::for_identity(&identity)?;
+    let client = MachineConnection::for_identity(&identity)?;
     client.setup()?;
     let first = support::connect(&client)?;
     let (_, next_sequence) = support::inventory(&first)?;
@@ -46,7 +46,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Mutation::CreateWorkspace {
             name: "Service lifecycle check".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let Outcome::Accepted { target } = outcome.outcome else {
@@ -91,7 +91,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let Claimed::Attached(resumed) = support::select(&second, pane, true, size)? else {
         return Err("reattachment refused".into());
     };
-    if (lease.server, lease.session) != (resumed.lease().server, resumed.lease().session) {
+    if (lease.core, lease.session) != (resumed.lease().core, resumed.lease().session) {
         return Err("session was replaced".into());
     }
     resumed.await_output("SERVICE-CONTINUED")?;
@@ -107,9 +107,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     service.set_automatic_start(false)?;
     service.stop()?;
     if !matches!(
-        spaceterm_server::LocalStartup::for_identity(&identity)?
-            .run(|| Err(ServerError::NotInstalled), || false)?,
-        spaceterm_server::StartupOutcome::Stopped
+        spaceterm_core::LocalStartup::for_identity(&identity)?
+            .run(|| Err(CoreError::NotInstalled), || false)?,
+        spaceterm_core::StartupOutcome::Stopped
     ) {
         return Err("normal launch reversed Stop".into());
     }

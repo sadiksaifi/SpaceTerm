@@ -230,7 +230,7 @@ pub(crate) enum TerminalPaneEvent {
     Exited,
     /// The server created work for this Pane's Controlling Client from this Pane's Terminal
     /// Session, and asks to show it.
-    Reveal(spaceterm_server::hierarchy::Placement),
+    Reveal(spaceterm_core::hierarchy::Placement),
 }
 
 impl std::fmt::Debug for TerminalPaneEvent {
@@ -307,7 +307,7 @@ struct PaneTerminalSessionLifecycle {
     /// The newest Terminal Metadata published in the server's inventory.
     metadata: Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>,
     /// The server Session run whose published metadata this Pane presents.
-    server_run: Option<ServerSessionRun>,
+    core_run: Option<CoreSessionRun>,
     /// The Terminal Session takes no input because its server connection is interrupted.
     connection_interrupted: bool,
     native_service_session_identity: u64,
@@ -328,7 +328,7 @@ impl PaneTerminalSessionLifecycle {
             session_epoch: 0,
             accepted_screen_generation: None,
             metadata: None,
-            server_run: None,
+            core_run: None,
             connection_interrupted: false,
             native_service_session_identity: 0,
             _event_task: None,
@@ -564,7 +564,7 @@ pub(crate) struct TerminalPane {
     declined_permissions: Vec<SystemPermission>,
     /// The offer the notice shows now and when it began, while the notice shows.
     permission_request_showing: Option<PermissionRequestShowing>,
-    server_permission_grant: Option<crate::terminal::session::ClientEffectGrant>,
+    core_permission_grant: Option<crate::terminal::session::ClientEffectGrant>,
     /// Re-reads the offer whenever the Permission Setup or an authorization changes, from the
     /// first request on.
     _permission_setup: Option<gpui::Subscription>,
@@ -851,7 +851,7 @@ impl TerminalPane {
             permission_request: Vec::new(),
             declined_permissions: Vec::new(),
             permission_request_showing: None,
-            server_permission_grant: None,
+            core_permission_grant: None,
             _permission_setup: None,
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
@@ -1257,7 +1257,7 @@ impl TerminalPane {
             self.ime.cancel();
             self.invalidate_preedit_layout();
             self.advance_native_service_focus_epoch();
-            if self.server_permission_grant.take().is_some() {
+            if self.core_permission_grant.take().is_some() {
                 self.requested_permissions.clear();
                 self.permission_request.clear();
                 self.permission_request_showing = None;
@@ -1308,7 +1308,7 @@ impl TerminalPane {
         if focus_changed || self.input_method_focus != input_method {
             self.terminal_input_focus = focused;
             self.input_method_focus = input_method;
-            if self.server_permission_grant.take().is_some() {
+            if self.core_permission_grant.take().is_some() {
                 self.requested_permissions.clear();
                 self.permission_request.clear();
                 self.permission_request_showing = None;
@@ -1515,7 +1515,7 @@ impl TerminalPane {
         let command = running
             .map(|command| sanitize_title(&command.line))
             .filter(|line| !line.is_empty());
-        let label = spaceterm_server::labels::activity(
+        let label = spaceterm_core::labels::activity(
             &metadata.title.value,
             metadata.title.provenance == TitleProvenance::TerminalControl,
             command.as_deref(),
@@ -1549,7 +1549,7 @@ impl TerminalPane {
     }
 
     /// Bind a presentation-only Pane after the server supplies its actual membership.
-    pub(crate) fn bind_pending_server(
+    pub(crate) fn bind_pending_core(
         &mut self,
         factory: WorkspaceTerminalSessionFactory,
         cx: &mut Context<Self>,
@@ -1569,7 +1569,7 @@ impl TerminalPane {
     /// Presents this Pane through `factory` from now on, as when its paired route connects or
     /// disconnects. The previous subscription ends, and the last screen stays until the new one
     /// supplies a screen.
-    pub(crate) fn rebind_server(
+    pub(crate) fn rebind_core(
         &mut self,
         factory: WorkspaceTerminalSessionFactory,
         cx: &mut Context<Self>,
@@ -1702,7 +1702,7 @@ impl TerminalPane {
     /// Pauses or resumes input while a server-backed Pane's server connection is interrupted. The
     /// Terminal Session and its last Screen stay in place, so the screen reads frozen. Input during
     /// the interruption reaches nothing and is never replayed.
-    pub(crate) fn set_server_connection_interrupted(
+    pub(crate) fn set_machine_connection_interrupted(
         &mut self,
         interrupted: bool,
         window: &Window,
@@ -1733,7 +1733,7 @@ impl TerminalPane {
     /// Screens the server publishes after it. The former screen, title, accessible text, and
     /// cached frames are gone, and the next measurement supplies dimensions again. The server
     /// publishes Terminal Metadata to every client whatever control it holds, so that stays.
-    pub(crate) fn clear_server_presentation(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_core_presentation(&mut self, cx: &mut Context<Self>) {
         let update = crate::terminal::TerminalAppearanceUpdate::new(
             self.appearance.generation,
             Arc::clone(&self.appearance.terminal),
@@ -2424,13 +2424,13 @@ impl TerminalPane {
     /// Whether the Terminal Session these facts describe is running. A server's Session runs
     /// whether or not this client ever presented it or controls it, as its inventory says.
     fn metadata_session_running(&self) -> bool {
-        self.terminal_session.server_run.is_some()
+        self.terminal_session.core_run.is_some()
             && !matches!(self.pane_state, PaneTerminalState::Exited(_))
     }
 
     /// Whether this Pane already presents `revision` of the metadata `run` published.
-    pub(crate) fn presents_server_metadata(&self, run: ServerSessionRun, revision: u64) -> bool {
-        self.terminal_session.server_run == Some(run)
+    pub(crate) fn presents_core_metadata(&self, run: CoreSessionRun, revision: u64) -> bool {
+        self.terminal_session.core_run == Some(run)
             && self
                 .terminal_session
                 .metadata
@@ -2442,25 +2442,25 @@ impl TerminalPane {
     /// nothing while none runs. This holds for a Pane this client never painted, which has no
     /// Terminal Session handle. Each Session run numbers its revisions from its own start, so
     /// another run, including one after the server restarted, replaces what this Pane showed.
-    pub(crate) fn present_server_metadata(
+    pub(crate) fn present_core_metadata(
         &mut self,
         published: Option<(
-            ServerSessionRun,
+            CoreSessionRun,
             Arc<crate::terminal::metadata::TerminalMetadataSnapshot>,
         )>,
         cx: &mut Context<Self>,
     ) {
         let changed = match published {
             Some((run, snapshot)) => {
-                let new_run = self.terminal_session.server_run != Some(run);
+                let new_run = self.terminal_session.core_run != Some(run);
                 if new_run {
-                    self.terminal_session.server_run = Some(run);
+                    self.terminal_session.core_run = Some(run);
                     self.terminal_session.metadata = None;
                 }
                 self.accept_metadata(snapshot) || new_run
             }
             None => {
-                let had_run = self.terminal_session.server_run.take().is_some();
+                let had_run = self.terminal_session.core_run.take().is_some();
                 let had_metadata = self.terminal_session.metadata.take().is_some();
                 let had_directory = self.terminal_session.current_directory.take().is_some();
                 had_run || had_metadata || had_directory
@@ -2500,7 +2500,7 @@ impl TerminalPane {
                 const OPERATION: &str = "receive-terminal-graphics";
                 match self.screen.graphics.failure {
                     Some(error) => {
-                        use spaceterm_server::pane::graphics::Error;
+                        use spaceterm_core::pane::graphics::Error;
                         let reason = match error {
                             Error::Malformed | Error::Missing => {
                                 crate::terminal::failure::FailureReason::InvalidValue
@@ -2549,7 +2549,7 @@ impl TerminalPane {
                 if !request.grant.current() {
                     return false;
                 }
-                use spaceterm_server::pane::effects::Effect;
+                use spaceterm_core::pane::effects::Effect;
                 match request.effect {
                     Effect::Bell => {
                         return self.handle_event(
@@ -2577,7 +2577,7 @@ impl TerminalPane {
                         screen_recording,
                         accessibility,
                     } => {
-                        self.server_permission_grant = Some(request.grant);
+                        self.core_permission_grant = Some(request.grant);
                         let request =
                             crate::terminal::permission_request::PermissionRequest::from_effect(
                                 screen_recording,
@@ -2587,7 +2587,7 @@ impl TerminalPane {
                     }
                     Effect::Reveal(reveal) => {
                         cx.emit(TerminalPaneEvent::Reveal(
-                            spaceterm_server::hierarchy::Placement {
+                            spaceterm_core::hierarchy::Placement {
                                 workspace: reveal.workspace,
                                 tab: reveal.tab,
                                 pane: reveal.pane,
@@ -4135,12 +4135,12 @@ impl TerminalPane {
     /// Reads which requested permissions the notice offers, and reports whether that changed.
     fn refresh_permission_offer(&mut self, cx: &App) -> bool {
         if self
-            .server_permission_grant
+            .core_permission_grant
             .as_ref()
             .is_some_and(|grant| !grant.owned())
         {
             self.requested_permissions.clear();
-            self.server_permission_grant = None;
+            self.core_permission_grant = None;
         }
         let offered = match &self.lifecycle_dependencies.permission_setup {
             Some(setup) if !self.requested_permissions.is_empty() => {
@@ -4217,7 +4217,7 @@ impl TerminalPane {
     fn set_up_requested_permissions(&mut self, cx: &mut Context<Self>) {
         if !self.permission_request_armed(cx)
             || self
-                .server_permission_grant
+                .core_permission_grant
                 .as_ref()
                 .is_some_and(|grant| !grant.owned())
         {
@@ -5798,9 +5798,9 @@ fn ime_candidate_bounds(
 /// One run of a Terminal Session on a SpaceTerm Server: the server boot and the Session it
 /// started. The server orders published metadata revisions only within one run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ServerSessionRun {
-    pub(crate) boot: spaceterm_server::hierarchy::Id,
-    pub(crate) session: spaceterm_server::hierarchy::Id,
+pub(crate) struct CoreSessionRun {
+    pub(crate) boot: spaceterm_core::hierarchy::Id,
+    pub(crate) session: spaceterm_core::hierarchy::Id,
 }
 
 /// The identity one Pane caption presents: where its Terminal Session runs, where it is, what it
@@ -5853,7 +5853,7 @@ fn short_hostname(host: &str) -> &str {
         .unwrap_or(host)
 }
 
-use spaceterm_server::labels::compact_home_directory;
+use spaceterm_core::labels::compact_home_directory;
 
 fn normalized_pane_title(reported_title: &str, fallback_title: &str) -> String {
     let reported = reported_title

@@ -5,13 +5,13 @@ use crate::{
     scope::fixtures::{fixture, id},
 };
 use clap::Parser;
-use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Id, Outcome};
+use spaceterm_core::hierarchy::{CloseInventory, ConfirmedPane, Id, Outcome};
 use std::time::UNIX_EPOCH;
 
 #[derive(Default)]
 struct Journal(Vec<Mutation>, Option<Outcome>);
 impl Dispatch for Journal {
-    fn server_id(&self) -> Id {
+    fn machine_id(&self) -> Id {
         id(9)
     }
     fn client_id(&self) -> Id {
@@ -50,8 +50,8 @@ fn live() -> Inventory {
     });
     inventory
 }
-fn server() -> ServerRef {
-    ServerRef {
+fn core() -> MachineRef {
+    MachineRef {
         name: "local".into(),
         route: "local".into(),
         id: super::super::hex(&id(9)),
@@ -61,7 +61,7 @@ fn now() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_800_000_000)
 }
 fn preview(inventory: &Inventory, journal: &mut dyn Dispatch) -> Reply {
-    execute(inventory, journal, server(), None, now()).unwrap()
+    execute(inventory, journal, core(), None, now()).unwrap()
 }
 fn token(reply: &Reply) -> &str {
     reply.envelope.data.body["confirmation"]["token"]
@@ -104,7 +104,7 @@ fn wrong_stale_and_expired_tokens_never_dispatch() {
             6 => at += offline_token::LIFETIME,
             _ => unreachable!(),
         }
-        let Err(failure) = execute(&changed, &mut journal, server(), Some(&given), at) else {
+        let Err(failure) = execute(&changed, &mut journal, core(), Some(&given), at) else {
             panic!("changed approval accepted");
         };
         assert_eq!(failure.code, Code::Changed);
@@ -117,14 +117,7 @@ fn confirmation_dispatches_the_exact_previewed_membership() {
     let inventory = live();
     let mut journal = Journal::default();
     let reply = preview(&inventory, &mut journal);
-    let done = execute(
-        &inventory,
-        &mut journal,
-        server(),
-        Some(token(&reply)),
-        now(),
-    )
-    .unwrap();
+    let done = execute(&inventory, &mut journal, core(), Some(token(&reply)), now()).unwrap();
     assert_eq!(done.exit(), 0);
     assert_eq!(
         journal.0,
@@ -172,17 +165,11 @@ fn paired_route_is_refused_before_local_state_or_transport_access() {
 }
 
 #[test]
-fn server_refusal_after_review_is_changed_without_a_success_result() {
+fn machine_refusal_after_review_is_changed_without_a_success_result() {
     let inventory = live();
     let mut journal = Journal(Vec::new(), Some(Outcome::StaleConfirmation));
     let reply = preview(&inventory, &mut journal);
-    let Err(failure) = execute(
-        &inventory,
-        &mut journal,
-        server(),
-        Some(token(&reply)),
-        now(),
-    ) else {
+    let Err(failure) = execute(&inventory, &mut journal, core(), Some(token(&reply)), now()) else {
         panic!("server refusal reported success");
     };
     assert_eq!(failure.code, Code::Changed);
@@ -193,24 +180,21 @@ fn control_transfers_do_not_broaden_the_previewed_sessions() {
     let mut inventory = live();
     let mut journal = Journal::default();
     let reply = preview(&inventory, &mut journal);
-    inventory.close.as_mut().unwrap().controls.push(
-        spaceterm_server::hierarchy::ConfirmedControl {
+    inventory
+        .close
+        .as_mut()
+        .unwrap()
+        .controls
+        .push(spaceterm_core::hierarchy::ConfirmedControl {
             pane: id(21),
             session: Some(id(31)),
             owner: id(99),
             epoch: 2,
-        },
-    );
+        });
     assert_eq!(
-        execute(
-            &inventory,
-            &mut journal,
-            server(),
-            Some(token(&reply)),
-            now()
-        )
-        .unwrap()
-        .exit(),
+        execute(&inventory, &mut journal, core(), Some(token(&reply)), now())
+            .unwrap()
+            .exit(),
         0
     );
 }

@@ -10,7 +10,7 @@ use gpui::{
     IntoElement, LayoutId, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
     UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
 };
-use spaceterm_server::diagnostics::TerminalCounters;
+use spaceterm_core::diagnostics::TerminalCounters;
 use unicode_bidi::{BidiClass, bidi_class};
 
 use crate::appearance::{Color, ResolvedTerminalAppearance, TerminalColors};

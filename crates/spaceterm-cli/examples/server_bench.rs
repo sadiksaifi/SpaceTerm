@@ -1,6 +1,6 @@
 //! Presentation client for `mise run bench:server`.
 //!
-//! server_bench IDENTITY [--accessibility] [--columns N] [--rows N] [--max-hz N]
+//! core_bench IDENTITY [--accessibility] [--columns N] [--rows N] [--max-hz N]
 //!
 //! The client creates a Workspace, claims its Pane at a fixed size, presents it and acknowledges
 //! every pushed frame at once, as a desktop client that keeps up does. With `--accessibility` it
@@ -17,13 +17,13 @@
 //!
 //! When its input ends, it closes the Workspace and exits. It prints no terminal contents.
 use spaceterm::runtime::PhysicalKey;
-use spaceterm_server::ServerConnection;
-use spaceterm_server::attachments::Attachment;
-use spaceterm_server::connection::link::{ChannelEvent, ChannelHandle, LinkEvent, ServerLink};
-use spaceterm_server::hierarchy::{CloseTarget, CreateControl, Id, Mutation, Outcome};
-use spaceterm_server::pane::accessibility::Demand;
-use spaceterm_server::pane::{AttachmentClaim, FocusTarget, Key, PaneSize};
-use spaceterm_server::protocol::{
+use spaceterm_core::MachineConnection;
+use spaceterm_core::attachments::Attachment;
+use spaceterm_core::connection::link::{ChannelEvent, ChannelHandle, CoreLink, LinkEvent};
+use spaceterm_core::hierarchy::{CloseTarget, CreateControl, Id, Mutation, Outcome};
+use spaceterm_core::pane::accessibility::Demand;
+use spaceterm_core::pane::{AttachmentClaim, FocusTarget, Key, PaneSize};
+use spaceterm_core::protocol::{
     ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody, limits,
 };
 use std::io::{BufRead, Write};
@@ -111,7 +111,7 @@ struct Received {
 }
 
 impl Received {
-    fn json(&self, link: &ServerLink) -> serde_json::Value {
+    fn json(&self, link: &CoreLink) -> serde_json::Value {
         serde_json::json!({
             "event": "stats",
             "frames": self.frames,
@@ -137,8 +137,11 @@ fn main() {
 }
 
 fn run(options: &Options) -> Result<()> {
-    let server = at("connect", ServerConnection::for_identity(&options.identity))?;
-    let link = at("connect", connect(&server))?;
+    let core = at(
+        "connect",
+        MachineConnection::for_identity(&options.identity),
+    )?;
+    let link = at("connect", connect(&core))?;
     let (inventory, sequence) = inventory(&link)?;
     let Some(boot) = inventory.close.as_ref().map(|close| close.boot) else {
         return fail("server boot");
@@ -154,13 +157,13 @@ fn run(options: &Options) -> Result<()> {
     let (sender, messages) = mpsc::channel();
     let result = present(options, &link, workspace, &sender, &messages);
     // A fresh connection closes the Workspace even when the presentation's link failed.
-    let closed = close(&server, boot, workspace);
+    let closed = close(&core, boot, workspace);
     result.and(closed)
 }
 
 fn present(
     options: &Options,
-    link: &ServerLink,
+    link: &CoreLink,
     workspace: Id,
     sender: &Sender<Message>,
     messages: &mpsc::Receiver<Message>,
@@ -319,19 +322,17 @@ fn hex(id: &Id) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn connect(
-    server: &ServerConnection,
-) -> std::result::Result<ServerLink, spaceterm_server::ServerError> {
-    server.connect(Arc::new(|_: LinkEvent| {}))
+fn connect(core: &MachineConnection) -> std::result::Result<CoreLink, spaceterm_core::CoreError> {
+    core.connect(Arc::new(|_: LinkEvent| {}))
 }
 
-fn request(link: &ServerLink, stage: &str, operation: Operation) -> Result<ReplyBody> {
+fn request(link: &CoreLink, stage: &str, operation: Operation) -> Result<ReplyBody> {
     let pending = at(stage, link.request(operation))?;
     at(stage, pending.wait())
 }
 
 /// The newest pushed inventory. The server pushes one when it admits the link.
-fn inventory(link: &ServerLink) -> Result<(spaceterm_server::hierarchy::Inventory, u64)> {
+fn inventory(link: &CoreLink) -> Result<(spaceterm_core::hierarchy::Inventory, u64)> {
     match link.next_inventory(0) {
         Ok((_, revision)) => Ok((revision.inventory.clone(), revision.next_sequence)),
         Err(_) => fail("inventory"),
@@ -340,7 +341,7 @@ fn inventory(link: &ServerLink) -> Result<(spaceterm_server::hierarchy::Inventor
 
 /// Applies one Workspace edit and retires its outcome, so retained outcomes never reach the
 /// server's per-client capacity.
-fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
+fn mutate(link: &CoreLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
     let reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
     let ReplyBody::Outcome(result) = reply else {
         return fail("mutation outcome");
@@ -364,8 +365,8 @@ fn nothing() -> Operation {
 }
 
 /// Kills the bench Workspace on a fresh connection, unless the server restarted.
-fn close(server: &ServerConnection, boot: Id, workspace: Id) -> Result<()> {
-    let link = at("cleanup connect", connect(server))?;
+fn close(core: &MachineConnection, boot: Id, workspace: Id) -> Result<()> {
+    let link = at("cleanup connect", connect(core))?;
     let (inventory, sequence) = inventory(&link)?;
     if inventory.close.as_ref().map(|close| close.boot) != Some(boot) {
         return fail("the server restarted; nothing to close");

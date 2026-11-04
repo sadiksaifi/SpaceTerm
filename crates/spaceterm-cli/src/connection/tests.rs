@@ -1,9 +1,9 @@
 use super::*;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use connections::{Interaction, StoreKind, UnpairState};
-use spaceterm_server::direct::{
-    ComparisonCode, DeviceCredential, Enrollment, PairedDevice, PairingClaim, RevocationReceipt,
-    ServerPin,
+use spaceterm_core::direct::{
+    ComparisonCode, DeviceCredential, Enrollment, MachinePin, PairedDevice, PairingClaim,
+    RevocationReceipt,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -108,7 +108,7 @@ impl Drop for Fixture {
 }
 fn global() -> Global {
     Global {
-        server: None,
+        core: None,
         agent: None,
         json: true,
         quiet: false,
@@ -117,10 +117,10 @@ fn global() -> Global {
         timeout: None,
     }
 }
-fn pin() -> ServerPin {
-    ServerPin {
+fn pin() -> MachinePin {
+    MachinePin {
         build: "spaceterm-development".into(),
-        server: [3; 32],
+        core: [3; 32],
         public_key: [4; 32],
         certificate: [5; 32],
     }
@@ -258,7 +258,7 @@ impl PairingNetwork for Network {
         Ok(PairingClaim {
             id: enrollment.claim_id(),
             invitation_id: [2; 32],
-            server: pin().server,
+            core: pin().core,
             device_public_key: [8; 32],
             device_name: "Fixture CLI".into(),
             expires_at_unix_seconds: 2000000000,
@@ -298,7 +298,7 @@ impl PairingNetwork for Network {
             return Err(DirectError::Transport);
         }
         Ok(RevocationReceipt {
-            server: connection.paired.pin.server,
+            core: connection.paired.pin.core,
             operation: connection.route,
             target: connection.paired.pairing,
         })
@@ -676,7 +676,7 @@ fn a_broken_comparison_pipe_cancels_the_unfinished_join_and_exits_silently() {
 }
 
 #[test]
-fn server_selection_is_local_without_state_and_remote_prefix_ambiguity_stays_in_data() {
+fn machine_selection_is_local_without_state_and_remote_prefix_ambiguity_stays_in_data() {
     let fixture = Fixture::new();
     assert_eq!(
         route::selected(Some("local"), Some("penguin")).unwrap(),
@@ -709,7 +709,7 @@ fn server_selection_is_local_without_state_and_remote_prefix_ambiguity_stays_in_
     assert!(json["data"].to_string().contains("private-first-label"));
     let selected = route::resolve("private-second-label", &fixture.store)
         .unwrap_or_else(|_| panic!("exact saved name"));
-    assert_eq!(selected.reference(&[0; 32]).id, hex(&pin().server));
+    assert_eq!(selected.reference(&[0; 32]).id, hex(&pin().core));
 }
 
 #[test]
@@ -965,7 +965,7 @@ fn rename_rejects_invalid_names_remote_routes_and_interruption_before_effects() 
             "penguin",
             "lab",
             Global {
-                server: Some("remote".into()),
+                core: Some("remote".into()),
                 ..global()
             },
             false,
@@ -1029,8 +1029,7 @@ fn contended_connection_commands_time_out_without_late_store_writes() {
         };
         let before = std::fs::read(fixture.store_path()).unwrap();
         let directory =
-            spaceterm_server::Directory::open(fixture.store_path().parent().unwrap(), false)
-                .unwrap();
+            spaceterm_core::Directory::open(fixture.store_path().parent().unwrap(), false).unwrap();
         let lock = directory.lock("connections.lock", false).unwrap();
         let holder = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(2));
@@ -1065,7 +1064,7 @@ fn contended_rename_observes_cancellation_without_a_late_write() {
     fixture.insert(1, "penguin");
     let before = std::fs::read(fixture.store_path()).unwrap();
     let directory =
-        spaceterm_server::Directory::open(fixture.store_path().parent().unwrap(), false).unwrap();
+        spaceterm_core::Directory::open(fixture.store_path().parent().unwrap(), false).unwrap();
     let lock = directory.lock("connections.lock", false).unwrap();
     let interrupted = fixture.io.interrupted.clone();
     let holder = std::thread::spawn(move || {

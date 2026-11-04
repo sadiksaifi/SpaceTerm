@@ -4,7 +4,7 @@
 //! each blocking wait by what ended it. A blocking wait is one receive call that found the queue
 //! empty and slept; wakeups inside the channel's own implementation are not visible here.
 use super::Command;
-use spaceterm_server::diagnostics::{PaneWorkerWaitEnd, TerminalCounters};
+use spaceterm_core::diagnostics::{PaneWorkerWaitEnd, TerminalCounters};
 use std::sync::Arc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
@@ -68,7 +68,7 @@ impl WorkerCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spaceterm_server::diagnostics::{
+    use spaceterm_core::diagnostics::{
         PaneWorkerCommands, PaneWorkerWaits, TerminalCounterSnapshot,
     };
     use std::thread;

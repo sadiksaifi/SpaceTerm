@@ -56,25 +56,25 @@ pub(crate) fn thread_spawner() -> ReadSpawner {
 
 /// The Pull Requests a SpaceTerm Server's repositories have whose value changed.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ServerPullRequestsChanged;
+pub(crate) struct CorePullRequestsChanged;
 
 /// One Pull Request lookup for a branch a SpaceTerm Server reads: the parsed query the server
 /// sent, and the upstream it tracks. A new branch or upstream is a new lookup.
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub(crate) struct ServerPullRequestKey {
+pub(crate) struct CorePullRequestKey {
     pub(crate) query: PullRequestQuery,
     pub(crate) upstream: Option<Arc<str>>,
 }
 
-impl std::fmt::Debug for ServerPullRequestKey {
+impl std::fmt::Debug for CorePullRequestKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("ServerPullRequestKey(<redacted>)")
+        formatter.write_str("CorePullRequestKey(<redacted>)")
     }
 }
 
 /// The last answer for one server branch, and whether a lookup for it runs.
 #[derive(Default)]
-struct ServerPullRequest {
+struct CorePullRequest {
     value: Option<PullRequest>,
     in_flight: bool,
     /// The window activated while the lookup ran, so it looks up once more when it finishes.
@@ -137,13 +137,13 @@ pub(crate) struct RepositoryStatusStore {
     github_hosts: Arc<GitHubHosts>,
     /// Pull Requests for branches SpaceTerm Servers read. Only the parsed query comes from the
     /// server; the GitHub CLI, its login, and these answers stay on this client.
-    server_pull_requests: HashMap<ServerPullRequestKey, ServerPullRequest>,
+    core_pull_requests: HashMap<CorePullRequestKey, CorePullRequest>,
     /// The GitHub CLI status the last tool check found, which server lookups follow.
-    server_github_cli: GitHubCliStatus,
+    core_github_cli: GitHubCliStatus,
     cancellation: CancellationToken,
 }
 
-impl EventEmitter<ServerPullRequestsChanged> for RepositoryStatusStore {}
+impl EventEmitter<CorePullRequestsChanged> for RepositoryStatusStore {}
 
 impl Drop for RepositoryStatusStore {
     fn drop(&mut self) {
@@ -164,8 +164,8 @@ impl RepositoryStatusStore {
             spawn,
             tools: ToolState::default(),
             github_hosts: Arc::default(),
-            server_pull_requests: HashMap::new(),
-            server_github_cli: GitHubCliStatus::Unknown,
+            core_pull_requests: HashMap::new(),
+            core_github_cli: GitHubCliStatus::Unknown,
             cancellation: CancellationToken::default(),
         };
         if preferences.show_repository_status {
@@ -189,15 +189,15 @@ impl RepositoryStatusStore {
         if self.tools.checked && github_cli_missing {
             self.check_tools(cx);
         }
-        self.lookup_server_pull_requests(cx);
+        self.lookup_core_pull_requests(cx);
     }
 
     /// The cached Pull Request for a branch a SpaceTerm Server reads. Reading never looks up.
-    pub(crate) fn server_pull_request(&self, key: &ServerPullRequestKey) -> Option<PullRequest> {
-        if !self.server_pull_requests_enabled(self.server_github_cli) {
+    pub(crate) fn core_pull_request(&self, key: &CorePullRequestKey) -> Option<PullRequest> {
+        if !self.core_pull_requests_enabled(self.core_github_cli) {
             return None;
         }
-        self.server_pull_requests
+        self.core_pull_requests
             .get(key)
             .and_then(|entry| entry.value.clone())
     }
@@ -205,34 +205,34 @@ impl RepositoryStatusStore {
     /// Follows the branches SpaceTerm Servers' views present now. A branch seen for the first time
     /// is looked up once with this client's GitHub CLI; one no view presents is forgotten. Lookups
     /// run again only when the window activates, as they do for local repositories.
-    pub(crate) fn follow_server_pull_requests(
+    pub(crate) fn follow_core_pull_requests(
         &mut self,
-        wanted: impl IntoIterator<Item = ServerPullRequestKey>,
+        wanted: impl IntoIterator<Item = CorePullRequestKey>,
         cx: &mut Context<Self>,
     ) {
-        let wanted: std::collections::HashSet<ServerPullRequestKey> = wanted.into_iter().collect();
-        let before = self.server_pull_requests.len();
-        self.server_pull_requests
+        let wanted: std::collections::HashSet<CorePullRequestKey> = wanted.into_iter().collect();
+        let before = self.core_pull_requests.len();
+        self.core_pull_requests
             .retain(|key, _| wanted.contains(key));
-        let forgot = self.server_pull_requests.len() != before;
+        let forgot = self.core_pull_requests.len() != before;
         for key in wanted {
-            if !self.server_pull_requests.contains_key(&key) {
-                self.server_pull_requests
-                    .insert(key.clone(), ServerPullRequest::default());
-                self.lookup_server_pull_request(key, cx);
+            if !self.core_pull_requests.contains_key(&key) {
+                self.core_pull_requests
+                    .insert(key.clone(), CorePullRequest::default());
+                self.lookup_core_pull_request(key, cx);
             }
         }
         if forgot {
-            cx.emit(ServerPullRequestsChanged);
+            cx.emit(CorePullRequestsChanged);
         }
     }
 
-    fn server_pull_requests_enabled(&self, github_cli: GitHubCliStatus) -> bool {
+    fn core_pull_requests_enabled(&self, github_cli: GitHubCliStatus) -> bool {
         self.preferences.pull_requests_enabled() && github_cli == GitHubCliStatus::SignedIn
     }
 
     /// Looks up one server branch's Pull Request, or once more after the running lookup.
-    fn lookup_server_pull_request(&mut self, key: ServerPullRequestKey, cx: &mut Context<Self>) {
+    fn lookup_core_pull_request(&mut self, key: CorePullRequestKey, cx: &mut Context<Self>) {
         if !self.preferences.pull_requests_enabled() {
             return;
         }
@@ -241,10 +241,10 @@ impl RepositoryStatusStore {
             self.check_tools(cx);
             return;
         }
-        if !self.server_pull_requests_enabled(self.server_github_cli) {
+        if !self.core_pull_requests_enabled(self.core_github_cli) {
             return;
         }
-        let Some(entry) = self.server_pull_requests.get_mut(&key) else {
+        let Some(entry) = self.core_pull_requests.get_mut(&key) else {
             return;
         };
         if entry.in_flight {
@@ -266,7 +266,7 @@ impl RepositoryStatusStore {
             },
             move |store, result, cx| {
                 let result = result.unwrap_or(Err(PullRequestError::Unavailable));
-                store.server_pull_request_finished(key, result, cx);
+                store.core_pull_request_finished(key, result, cx);
             },
             cx,
         );
@@ -274,16 +274,16 @@ impl RepositoryStatusStore {
 
     /// A failed lookup keeps the last known Pull Request; a signed-out or missing GitHub CLI
     /// clears it, as it does for local repositories.
-    fn server_pull_request_finished(
+    fn core_pull_request_finished(
         &mut self,
-        key: ServerPullRequestKey,
+        key: CorePullRequestKey,
         result: Result<Option<PullRequest>, PullRequestError>,
         cx: &mut Context<Self>,
     ) {
         if matches!(result, Err(PullRequestError::NotLoggedIn)) {
             self.check_tools(cx);
         }
-        let Some(entry) = self.server_pull_requests.get_mut(&key) else {
+        let Some(entry) = self.core_pull_requests.get_mut(&key) else {
             return;
         };
         entry.in_flight = false;
@@ -299,18 +299,18 @@ impl RepositoryStatusStore {
         };
         if entry.value != value {
             entry.value = value;
-            cx.emit(ServerPullRequestsChanged);
+            cx.emit(CorePullRequestsChanged);
         }
         if again {
-            self.lookup_server_pull_request(key, cx);
+            self.lookup_core_pull_request(key, cx);
         }
     }
 
     /// Looks up every followed server branch again, as when Pull Requests turn on.
-    fn lookup_server_pull_requests(&mut self, cx: &mut Context<Self>) {
-        let keys: Vec<ServerPullRequestKey> = self.server_pull_requests.keys().cloned().collect();
+    fn lookup_core_pull_requests(&mut self, cx: &mut Context<Self>) {
+        let keys: Vec<CorePullRequestKey> = self.core_pull_requests.keys().cloned().collect();
         for key in keys {
-            self.lookup_server_pull_request(key, cx);
+            self.lookup_core_pull_request(key, cx);
         }
     }
 
@@ -335,14 +335,14 @@ impl RepositoryStatusStore {
             self.check_tools(cx);
         }
         if pull_requests_turned_on {
-            self.lookup_server_pull_requests(cx);
+            self.lookup_core_pull_requests(cx);
         } else if !preferences.pull_requests_enabled() {
-            for entry in self.server_pull_requests.values_mut() {
+            for entry in self.core_pull_requests.values_mut() {
                 entry.value = None;
             }
         }
         // Server Workspaces present the toggles too, so their views follow every change.
-        cx.emit(ServerPullRequestsChanged);
+        cx.emit(CorePullRequestsChanged);
     }
 
     fn check_tools(&mut self, cx: &mut Context<Self>) {
@@ -392,11 +392,11 @@ impl RepositoryStatusStore {
         cx.set_global(RepositoryTools { github_cli });
         // Server branches waiting for the first check, or for a login, are looked up now. A
         // check that changes nothing looks nothing up again.
-        let was_enabled = self.server_pull_requests_enabled(self.server_github_cli);
-        self.server_github_cli = github_cli;
-        match (was_enabled, self.server_pull_requests_enabled(github_cli)) {
-            (false, true) => self.lookup_server_pull_requests(cx),
-            (true, false) => cx.emit(ServerPullRequestsChanged),
+        let was_enabled = self.core_pull_requests_enabled(self.core_github_cli);
+        self.core_github_cli = github_cli;
+        match (was_enabled, self.core_pull_requests_enabled(github_cli)) {
+            (false, true) => self.lookup_core_pull_requests(cx),
+            (true, false) => cx.emit(CorePullRequestsChanged),
             _ => {}
         }
     }
@@ -425,7 +425,7 @@ impl RepositoryStatusStore {
 const TOOL_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
-mod server_pull_request_tests {
+mod core_pull_request_tests {
     use std::sync::Mutex;
 
     use gpui::TestAppContext;
@@ -495,8 +495,8 @@ mod server_pull_request_tests {
         }
     }
 
-    fn key(branch: &str) -> ServerPullRequestKey {
-        ServerPullRequestKey {
+    fn key(branch: &str) -> CorePullRequestKey {
+        CorePullRequestKey {
             query: PullRequestQuery {
                 repository: GitHubRepository {
                     host: "github.com".into(),
@@ -533,21 +533,21 @@ mod server_pull_request_tests {
     }
 
     #[gpui::test]
-    fn a_server_branch_should_be_looked_up_once_locally_until_the_window_activates(
+    fn a_core_branch_should_be_looked_up_once_locally_until_the_window_activates(
         cx: &mut TestAppContext,
     ) {
         let cli = Arc::new(LocalGitHubCli::default());
         let store = store(&cli, cx);
 
         store.update(cx, |store, cx| {
-            store.follow_server_pull_requests([key("feature")], cx);
+            store.follow_core_pull_requests([key("feature")], cx);
         });
         cx.run_until_parked();
         store.update(cx, |store, cx| {
-            store.follow_server_pull_requests([key("feature")], cx);
+            store.follow_core_pull_requests([key("feature")], cx);
         });
         cx.run_until_parked();
-        let found = store.read_with(cx, |store, _| store.server_pull_request(&key("feature")));
+        let found = store.read_with(cx, |store, _| store.core_pull_request(&key("feature")));
         let reused = cli.lookups().len();
         store.update(cx, |store, cx| store.window_activated(cx));
         cx.run_until_parked();
@@ -589,28 +589,28 @@ mod server_pull_request_tests {
         let store = store(&cli, cx);
 
         store.update(cx, |store, cx| {
-            store.follow_server_pull_requests([key("feature")], cx);
+            store.follow_core_pull_requests([key("feature")], cx);
         });
         cx.run_until_parked();
         store.update(cx, |store, cx| {
-            store.follow_server_pull_requests([key("other")], cx);
+            store.follow_core_pull_requests([key("other")], cx);
         });
         cx.run_until_parked();
 
         assert_eq!(cli.lookups().len(), 2);
         store.read_with(cx, |store, _| {
-            assert_eq!(store.server_pull_request(&key("feature")), None);
+            assert_eq!(store.core_pull_request(&key("feature")), None);
         });
     }
 
     #[gpui::test]
-    fn turning_pull_requests_off_should_hide_server_pull_requests_without_a_lookup(
+    fn turning_pull_requests_off_should_hide_core_pull_requests_without_a_lookup(
         cx: &mut TestAppContext,
     ) {
         let cli = Arc::new(LocalGitHubCli::default());
         let store = store(&cli, cx);
         store.update(cx, |store, cx| {
-            store.follow_server_pull_requests([key("feature")], cx);
+            store.follow_core_pull_requests([key("feature")], cx);
         });
         cx.run_until_parked();
 
@@ -628,7 +628,7 @@ mod server_pull_request_tests {
 
         assert_eq!(cli.lookups().len(), 1);
         store.read_with(cx, |store, _| {
-            assert_eq!(store.server_pull_request(&key("feature")), None);
+            assert_eq!(store.core_pull_request(&key("feature")), None);
         });
     }
 }

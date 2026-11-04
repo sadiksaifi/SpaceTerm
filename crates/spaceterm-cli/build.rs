@@ -1,7 +1,7 @@
 mod build_resources;
 #[path = "../../build/identity.rs"]
 mod identity;
-#[path = "../spaceterm-server/src/protocol/major.rs"]
+#[path = "../spaceterm-core/src/protocol/major.rs"]
 mod major;
 
 fn main() {
@@ -20,7 +20,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!("cargo:rerun-if-changed=../../build/identity.rs");
-    println!("cargo:rerun-if-changed=../spaceterm-server/src/protocol/major.rs");
+    println!("cargo:rerun-if-changed=../spaceterm-core/src/protocol/major.rs");
     println!("cargo:rerun-if-changed=src");
     let release = std::env::var("SPACETERM_RELEASE_TAG").ok();
     let packaged = std::env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");

@@ -619,5 +619,5 @@ mod tests {
     }
 }
 
-mod server;
-pub use server::{ServerDirectories, desktop_channel_directory};
+mod core_directories;
+pub use core_directories::{CoreDirectories, desktop_channel_directory};

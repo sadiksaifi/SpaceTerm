@@ -287,7 +287,7 @@ mod tests {
     use crate::platform::unix_adapter_tests::short_temporary_root;
     use crate::ssh::askpass::AskPassCapabilityCopy;
 
-    use crate::ssh::provisioning::SshServerBootstrap as _;
+    use crate::ssh::provisioning::SshCoreBootstrap as _;
 
     const IDENTITY: &str = "spaceterm-development";
 
@@ -821,7 +821,7 @@ fn quote(value: &str) -> String {
 /// of the machine the script runs on.
 #[cfg(feature = "desktop")]
 fn executable_case(identity: &str, variable: &str) -> String {
-    use spaceterm_server::service::Layout;
+    use spaceterm_core::service::Layout;
     let executable = |target| {
         Layout::for_target(target, identity)
             .map(|layout| quote(&layout.executable().to_string_lossy()))
@@ -834,7 +834,7 @@ fn executable_case(identity: &str, variable: &str) -> String {
     )
 }
 #[cfg(feature = "desktop")]
-impl crate::ssh::provisioning::SshServerBootstrap for UnixSshProcessAdapter {
+impl crate::ssh::provisioning::SshCoreBootstrap for UnixSshProcessAdapter {
     /// This script selects only the approved digest in a fixed account/build namespace.
     /// It never evaluates a path or an endpoint supplied by the remote protocol.
     fn locator(&self, identity: &str, action: &str, missing: bool) -> String {
@@ -847,7 +847,7 @@ impl crate::ssh::provisioning::SshServerBootstrap for UnixSshProcessAdapter {
             r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
-unset SPACETERM_SERVER SPACETERM_AS
+unset SPACETERM_MACHINE SPACETERM_AS
 uid=$(id -u)
 [ "$uid" -gt 0 ] || exit 71
 root="$HOME/.local/share/{}/server"
@@ -965,7 +965,7 @@ fn transfer_script(
         r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
-unset SPACETERM_SERVER SPACETERM_AS
+unset SPACETERM_MACHINE SPACETERM_AS
 umask 077
 work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-{work}.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM

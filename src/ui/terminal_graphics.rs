@@ -818,12 +818,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn server_graphics_reach_the_desktop_image_atlas_and_paint_measured_geometry(
+    fn core_graphics_reach_the_desktop_image_atlas_and_paint_measured_geometry(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::terminal::server_graphics::Graphics;
+        use crate::terminal::core_graphics::Graphics;
         use gpui::{Bounds, point, px, size};
-        use spaceterm_server::pane::{
+        use spaceterm_core::pane::{
             Lease, Reply, Request,
             graphics::{Chunk, Image, ImageKey, Placement, Snapshot},
         };
@@ -862,7 +862,7 @@ mod tests {
         graphics
             .poll(
                 Lease {
-                    server: [1; 32],
+                    core: [1; 32],
                     session: [2; 32],
                     control: [3; 32],
                     connection: [4; 32],

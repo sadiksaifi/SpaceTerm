@@ -10,13 +10,13 @@
 use super::{Context, Pending, Reply};
 use crate::args::{PermissionName, PermissionsCommand};
 use crate::contract::{
-    Code, Envelope, Failure, PermissionRequested, PermissionSettings, ServerPermissions, ServerRef,
+    Code, CorePermissions, Envelope, Failure, MachineRef, PermissionRequested, PermissionSettings,
 };
 use crate::state::RouteKey;
-use spaceterm_server::permissions::{
+use spaceterm_core::permissions::{
     AccessibilityNaming, PermissionHolder, PermissionState, RequestOutcome, SystemPermission,
 };
-use spaceterm_server::service::lane::{LaneReply, LaneRequest};
+use spaceterm_core::service::lane::{LaneReply, LaneRequest};
 use std::time::{Duration, Instant};
 
 /// A probe answers within three seconds.
@@ -33,8 +33,8 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
     if !context.is_local() {
         return Reply::failure(path, None, Failure::new(Code::LocalOnly));
     }
-    let server = match super::local_ref(context.identity) {
-        Ok(server) => server,
+    let core = match super::local_ref(context.identity) {
+        Ok(core) => core,
         Err(failure) => return Reply::failure(path, None, failure),
     };
     let request = match command {
@@ -45,10 +45,10 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
         Some(PermissionsCommand::Settings { permission }) => {
             return match open_settings(permission.permission()) {
                 Ok(()) => {
-                    let (envelope, text) = settings(server, permission.permission());
+                    let (envelope, text) = settings(core, permission.permission());
                     Reply::new(&envelope, text)
                 }
-                Err(failure) => Reply::failure(path, Some(server), failure),
+                Err(failure) => Reply::failure(path, Some(core), failure),
             };
         }
     };
@@ -62,7 +62,7 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
     });
     let mut opened = match opened {
         Ok(opened) => opened,
-        Err(failure) => return Reply::failure(path, Some(server), failure),
+        Err(failure) => return Reply::failure(path, Some(core), failure),
     };
     let reply = opened
         .session
@@ -82,7 +82,7 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
     let recovered = opened.recovered;
     match (command, reply) {
         (None, Ok(LaneReply::Permissions(report))) => {
-            let (mut envelope, text) = status(server, &report);
+            let (mut envelope, text) = status(core, &report);
             envelope.data.recovered_operations = recovered;
             Reply::new(&envelope, text)
         }
@@ -96,7 +96,7 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
             };
             let (mut envelope, text) = requested(
                 context,
-                server,
+                core,
                 permission.permission(),
                 outcome,
                 report.as_ref(),
@@ -104,16 +104,16 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
             envelope.data.recovered_operations = recovered;
             Reply::new(&envelope, text)
         }
-        (_, Ok(_)) => Reply::failure(path, Some(server), Failure::new(Code::ProtocolError)),
-        (_, Err(failure)) => Reply::failure(path, Some(server), failure),
+        (_, Ok(_)) => Reply::failure(path, Some(core), Failure::new(Code::ProtocolError)),
+        (_, Err(failure)) => Reply::failure(path, Some(core), failure),
     }
 }
 
 /// The `server.permissions` envelope and its text.
 pub(crate) fn status(
-    server: ServerRef,
-    report: &spaceterm_server::permissions::PermissionsReport,
-) -> (Envelope<ServerPermissions>, String) {
+    core: MachineRef,
+    report: &spaceterm_core::permissions::PermissionsReport,
+) -> (Envelope<CorePermissions>, String) {
     let naming = report.accessibility_naming;
     let width = report
         .permissions
@@ -133,8 +133,8 @@ pub(crate) fn status(
     text.push('\n');
     let envelope = Envelope::ok(
         "server.permissions",
-        Some(server),
-        ServerPermissions {
+        Some(core),
+        CorePermissions {
             permissions: report.permissions.clone(),
             accessibility_naming: naming,
             holder: report.holder.clone(),
@@ -146,22 +146,22 @@ pub(crate) fn status(
 /// The `server.permissions.request` envelope and its text.
 pub(crate) fn requested(
     context: &Context<'_>,
-    server: ServerRef,
+    core: MachineRef,
     permission: SystemPermission,
     outcome: RequestOutcome,
-    report: Option<&spaceterm_server::permissions::PermissionsReport>,
+    report: Option<&spaceterm_core::permissions::PermissionsReport>,
 ) -> (Envelope<PermissionRequested>, String) {
     let naming = report.map_or_else(AccessibilityNaming::default, |report| {
         report.accessibility_naming
     });
-    let product = spaceterm_server::service::bundle_name(context.identity)
+    let product = spaceterm_core::service::bundle_name(context.identity)
         .and_then(|name| name.strip_suffix(".app"))
         .unwrap_or("SpaceTerm");
     let holder = report.map_or(product, |report| holder_name(&report.holder));
     let name = name(permission, naming);
     let settings = || {
         context.command_line(
-            &server,
+            &core,
             &[
                 "server",
                 "permissions",
@@ -193,7 +193,7 @@ pub(crate) fn requested(
     };
     let envelope = Envelope::ok(
         "server.permissions.request",
-        Some(server),
+        Some(core),
         PermissionRequested {
             permission,
             outcome,
@@ -208,7 +208,7 @@ fn open_settings(permission: SystemPermission) -> Result<(), Failure> {
         return Err(Failure::new(Code::Unsupported));
     }
     let mut child = std::process::Command::new("/usr/bin/open")
-        .arg(spaceterm_server::permissions::settings_uri(permission))
+        .arg(spaceterm_core::permissions::settings_uri(permission))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -233,12 +233,12 @@ fn open_settings(permission: SystemPermission) -> Result<(), Failure> {
 
 /// The `server.permissions.settings` envelope and its text.
 pub(crate) fn settings(
-    server: ServerRef,
+    core: MachineRef,
     permission: SystemPermission,
 ) -> (Envelope<PermissionSettings>, String) {
     let envelope = Envelope::ok(
         "server.permissions.settings",
-        Some(server),
+        Some(core),
         PermissionSettings { permission },
     );
     (
@@ -285,14 +285,14 @@ fn state(state: PermissionState) -> &'static str {
 
 fn holder_name(holder: &PermissionHolder) -> &str {
     match holder {
-        PermissionHolder::Server { name } => name,
+        PermissionHolder::Core { name } => name,
         PermissionHolder::Launcher => "the app that started SpaceTerm",
     }
 }
 
 fn holder_sentence(holder: &PermissionHolder) -> String {
     match holder {
-        PermissionHolder::Server { name } => {
+        PermissionHolder::Core { name } => {
             format!("System Settings lists these permissions under {name}.")
         }
         PermissionHolder::Launcher => {
@@ -305,10 +305,10 @@ fn holder_sentence(holder: &PermissionHolder) -> String {
 mod tests {
     use super::*;
     use crate::args::Global;
-    use spaceterm_server::permissions::{PermissionReading, PermissionsReport};
+    use spaceterm_core::permissions::{PermissionReading, PermissionsReport};
 
-    fn server() -> ServerRef {
-        ServerRef {
+    fn core() -> MachineRef {
+        MachineRef {
             id: "ab".repeat(32),
             name: "local".into(),
             route: "local".into(),
@@ -341,9 +341,9 @@ mod tests {
         }
     }
 
-    fn global(server: Option<&str>) -> Global {
+    fn global(core: Option<&str>) -> Global {
         Global {
-            server: server.map(Into::into),
+            core: core.map(Into::into),
             agent: None,
             json: true,
             quiet: false,
@@ -356,8 +356,8 @@ mod tests {
     #[test]
     fn the_status_names_each_permission_and_its_holder() {
         let (envelope, text) = status(
-            server(),
-            &report(PermissionHolder::Server {
+            core(),
+            &report(PermissionHolder::Core {
                 name: "SpaceTerm".into(),
             }),
         );
@@ -370,7 +370,7 @@ mod tests {
              Device Control    not allowed\n\
              System Settings lists these permissions under SpaceTerm.\n"
         );
-        let (_, text) = status(server(), &report(PermissionHolder::Launcher));
+        let (_, text) = status(core(), &report(PermissionHolder::Launcher));
         assert!(text.ends_with("The app that started SpaceTerm holds these permissions.\n"));
     }
 
@@ -382,11 +382,11 @@ mod tests {
             identity: "spaceterm",
             global: &global,
         };
-        let held = report(PermissionHolder::Server {
+        let held = report(PermissionHolder::Core {
             name: "SpaceTerm".into(),
         });
         let text =
-            |permission, outcome| requested(&context, server(), permission, outcome, Some(&held)).1;
+            |permission, outcome| requested(&context, core(), permission, outcome, Some(&held)).1;
         assert_eq!(
             text(SystemPermission::Microphone, RequestOutcome::Requested),
             "Answer the system prompt on this Mac.\n"
@@ -428,7 +428,7 @@ mod tests {
         );
         let (envelope, _) = requested(
             &context,
-            server(),
+            core(),
             SystemPermission::Microphone,
             RequestOutcome::Requested,
             Some(&held),
@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_server_is_refused_before_anything_is_sent() {
+    fn a_remote_machine_is_refused_before_anything_is_sent() {
         let global = global(Some("studio"));
         let context = Context {
             credentials: crate::connection::CliCredentials::new("spaceterm-development"),

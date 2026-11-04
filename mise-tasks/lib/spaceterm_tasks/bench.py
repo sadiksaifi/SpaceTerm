@@ -674,14 +674,14 @@ def compare_desktop_reference(reference, results, budgets, scenarios, states):
     return reasons
 
 
-def regressions(baseline, current, server_budgets):
+def regressions(baseline, current, core_budgets):
     """Server medians in `current` that exceed `baseline` by more than the allowed fraction.
 
     A difference under the metric's noise floor never counts. Returns one entry per comparison;
     `compare_server` first establishes that the two are comparable and complete.
     """
-    allowed = server_budgets["regression"]
-    floors = server_budgets["floor"]
+    allowed = core_budgets["regression"]
+    floors = core_budgets["floor"]
     results = []
     for name, metrics in sorted(current.items()):
         old = baseline[name]
@@ -701,25 +701,25 @@ def regressions(baseline, current, server_budgets):
     return results
 
 
-SERVER_METRICS = ("cpu_s", "peak_footprint_bytes", "after_footprint_bytes", "bytes_sent")
+CORE_METRICS = ("cpu_s", "peak_footprint_bytes", "after_footprint_bytes", "bytes_sent")
 # Settings that define the work a bench:server run measures.
-SERVER_SETTINGS = ("seconds", "columns", "rows", "max_hz")
+MACHINE_SETTINGS = ("seconds", "columns", "rows", "max_hz")
 # Environment facts that a baseline is valid for: the same host, hardware, isolation and input.
-SERVER_ENVIRONMENT = ("host", "hardware", "cpus", "memory_bytes", "jailed", "input_sha256")
+CORE_ENVIRONMENT = ("host", "hardware", "cpus", "memory_bytes", "jailed", "input_sha256")
 
 
-def summarize_server(runs):
+def summarize_core(runs):
     """Medians of each bench:server metric per `workload/condition` across runs."""
     groups = {}
     for run in runs:
         groups.setdefault(f"{run['workload']}/{run['condition']}", []).append(run["values"])
     return {
-        name: {metric: median([values[metric] for values in group]) for metric in SERVER_METRICS}
+        name: {metric: median([values[metric] for values in group]) for metric in CORE_METRICS}
         for name, group in groups.items()
     }
 
 
-def compare_server(baseline, results, server_budgets):
+def compare_core(baseline, results, core_budgets):
     """Compares a bench:server run with a host baseline.
 
     Returns `{"status", "reasons", "comparisons"}`. Status is `incomparable` when the baseline
@@ -730,10 +730,10 @@ def compare_server(baseline, results, server_budgets):
     if baseline is None:
         return {"status": "incomparable", "reasons": ["no baseline"], "comparisons": []}
     reasons = []
-    for key in SERVER_SETTINGS:
+    for key in MACHINE_SETTINGS:
         if baseline["settings"].get(key) != results["settings"].get(key):
             reasons.append(f"setting {key} differs")
-    for key in SERVER_ENVIRONMENT:
+    for key in CORE_ENVIRONMENT:
         if baseline["environment"].get(key) != results["environment"].get(key):
             reasons.append(f"environment {key} differs")
     for name, metrics in sorted(results["summary"].items()):
@@ -741,14 +741,14 @@ def compare_server(baseline, results, server_budgets):
         if old is None:
             reasons.append(f"baseline lacks {name}")
             continue
-        for metric in SERVER_METRICS:
+        for metric in CORE_METRICS:
             if metrics.get(metric) is None:
                 reasons.append(f"run lacks {name} {metric}")
             elif old.get(metric) is None:
                 reasons.append(f"baseline lacks {name} {metric}")
     if reasons:
         return {"status": "incomparable", "reasons": reasons, "comparisons": []}
-    comparisons = regressions(baseline["summary"], results["summary"], server_budgets)
+    comparisons = regressions(baseline["summary"], results["summary"], core_budgets)
     regressed = any(entry["regressed"] for entry in comparisons)
     return {
         "status": "regressed" if regressed else "within",

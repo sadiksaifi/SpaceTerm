@@ -46,6 +46,8 @@ pub(crate) mod find;
 pub(crate) mod geometry;
 pub(crate) mod graphics;
 pub(crate) use native_services::hyperlink;
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) mod core_metadata;
 pub(crate) mod identity;
 pub(crate) mod key;
 #[cfg(feature = "desktop")]
@@ -60,8 +62,6 @@ pub(crate) mod metadata;
     )
 )]
 pub(crate) mod native_services;
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
-pub(crate) mod server_metadata;
 pub(crate) mod title;
 pub(crate) use native_services::osc52;
 pub(crate) use native_services::paste;
@@ -144,9 +144,9 @@ pub(crate) use pointer_input::{
 #[cfg(feature = "desktop")]
 pub(crate) mod changes;
 #[cfg(feature = "desktop")]
-pub(crate) mod server_graphics;
+pub(crate) mod core_graphics;
 #[cfg(feature = "desktop")]
-pub(crate) mod server_session;
+pub(crate) mod core_session;
 #[cfg(feature = "desktop")]
 pub(crate) mod workspace_client;
 

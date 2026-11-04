@@ -10,19 +10,19 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use spaceterm_server::hierarchy::{Id, Mutation};
+use spaceterm_core::hierarchy::{Id, Mutation};
 
-use super::{DirectServer, WorkspaceEdits, WorkspacePaneOpener, WorkspacePaneSubscription};
+use super::{DirectMachine, WorkspaceEdits, WorkspacePaneOpener, WorkspacePaneSubscription};
 use crate::direct_connections::DirectRouteId;
-use crate::server_connection::ServerError;
+use crate::machine_connection::CoreError;
 use crate::terminal::WorkspaceTerminalSessionFactory;
-use crate::terminal::server_session::ServerPaneStatus;
+use crate::terminal::core_session::CorePaneStatus;
 use crate::terminal::workspace_client::WorkspaceSnapshot;
-use crate::ui::server_pane::ServerPaneConnection;
+use crate::ui::core_pane::MachinePaneConnection;
 
 /// Opens one paired route's Panes through its current connection, or as unavailable without one.
 pub(crate) struct DirectRoutePanes {
-    direct: DirectServer,
+    direct: DirectMachine,
     connected: RefCell<Option<Rc<dyn WorkspacePaneOpener>>>,
     /// The title each of the route's Panes presents without a connection.
     titles: RefCell<BTreeMap<Id, String>>,
@@ -30,7 +30,7 @@ pub(crate) struct DirectRoutePanes {
 }
 
 impl DirectRoutePanes {
-    pub(crate) fn new(direct: DirectServer) -> Self {
+    pub(crate) fn new(direct: DirectMachine) -> Self {
         Self {
             direct,
             connected: RefCell::new(None),
@@ -68,7 +68,7 @@ impl WorkspacePaneOpener for DirectRoutePanes {
         WorkspaceTerminalSessionFactory::pending()
     }
 
-    fn direct_route(&self) -> Option<&DirectServer> {
+    fn direct_route(&self) -> Option<&DirectMachine> {
         Some(&self.direct)
     }
 
@@ -80,11 +80,11 @@ impl WorkspacePaneOpener for DirectRoutePanes {
 /// A Pane of a server this client is not connected to. Nothing it is asked reaches a server.
 struct UnavailablePane;
 
-impl ServerPaneConnection for UnavailablePane {
-    fn status(&self) -> ServerPaneStatus {
-        ServerPaneStatus::Offline
+impl MachinePaneConnection for UnavailablePane {
+    fn status(&self) -> CorePaneStatus {
+        CorePaneStatus::Offline
     }
-    fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
+    fn controller(&self) -> Option<spaceterm_core::pane::control::Controller> {
         None
     }
     fn connection_generation(&self) -> u64 {
@@ -104,18 +104,18 @@ impl ServerPaneConnection for UnavailablePane {
 /// journal, which needs no connection, so the presentation outlives the Workspace Window. A write
 /// fails while another writer, such as the route's previous edit loop, still holds the journal.
 pub(crate) trait PresentationRecord: Send + Sync {
-    fn presented(&self, sequence: u64) -> Result<(), ServerError>;
-    fn forgotten_presented(&self, total: u64) -> Result<(), ServerError>;
+    fn presented(&self, sequence: u64) -> Result<(), CoreError>;
+    fn forgotten_presented(&self, total: u64) -> Result<(), CoreError>;
 }
 
 /// A route's client storage, as [`crate::direct_connections::DirectConnections::storage`] opens
 /// it.
-impl PresentationRecord for spaceterm_server::ServerConnection {
-    fn presented(&self, sequence: u64) -> Result<(), ServerError> {
+impl PresentationRecord for spaceterm_core::MachineConnection {
+    fn presented(&self, sequence: u64) -> Result<(), CoreError> {
         self.operation_journal()?.presented(sequence)
     }
 
-    fn forgotten_presented(&self, total: u64) -> Result<(), ServerError> {
+    fn forgotten_presented(&self, total: u64) -> Result<(), CoreError> {
         self.operation_journal()?.forgotten_presented(total)
     }
 }
@@ -292,8 +292,8 @@ impl WorkspaceEdits for UnavailableEdits {
             presenting: Vec::new(),
             forgotten: 0,
             forgotten_presented: 0,
-            error: Some(spaceterm_server::ServerError::Direct(
-                spaceterm_server::direct::DirectError::Transport,
+            error: Some(spaceterm_core::CoreError::Direct(
+                spaceterm_core::direct::DirectError::Transport,
             )),
             failed_attempts: 0,
         }

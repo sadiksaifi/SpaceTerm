@@ -17,9 +17,9 @@
 //! The window's own changes are not input, so they never settle anything.
 
 use gpui::{App, Context, Window};
-use spaceterm_server::workspace_order::WorkspaceReference;
+use spaceterm_core::workspace_order::WorkspaceReference;
 
-use super::{ServerKey, WorkspaceManager};
+use super::{MachineKey, WorkspaceManager};
 use crate::domain::WorkspaceId;
 use crate::ui::remembered_view::{Restoration, SidebarView, WindowPlacement, WindowView};
 
@@ -154,9 +154,9 @@ impl WorkspaceManager {
     /// when it was the Active Workspace and the person has given the window no input since.
     pub(super) fn restore_remembered_workspace(
         &mut self,
-        key: ServerKey,
+        key: MachineKey,
         workspace_id: WorkspaceId,
-        server: spaceterm_server::hierarchy::Id,
+        core: spaceterm_core::hierarchy::Id,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -169,7 +169,7 @@ impl WorkspaceManager {
         let retained_copy = binding.presents_retained_copy();
         let reference = WorkspaceReference {
             owner,
-            workspace: server,
+            workspace: core,
         };
         let Some(manager) = self
             .workspaces
@@ -213,7 +213,7 @@ impl WorkspaceManager {
     /// selected instead.
     pub(super) fn settle_remembered_view(
         &mut self,
-        key: ServerKey,
+        key: MachineKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

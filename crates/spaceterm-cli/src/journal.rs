@@ -8,7 +8,7 @@
 //!
 //! ```ignore
 //! let mut editor = Editor::open(&state, RouteKey::Local, agent.as_ref(), &connection, &link,
-//!     &mut |agent| ServerConnection::for_cli(identity, CliRoute::Local, agent.cloned()), deadline)?;
+//!     &mut |agent| MachineConnection::for_cli(identity, CliRoute::Local, agent.cloned()), deadline)?;
 //! let applied = editor.mutate(Mutation::CreateTab { workspace, source, control }, deadline)?;
 //! // applied.target is the new Tab; editor.recovered() fills data.recovered_operations.
 //! ```
@@ -20,23 +20,23 @@
 //! again: a pending edit is only resolved, and a run only asked about.
 use crate::contract::{
     Code, Failure, RecoveredIdentity, RecoveredKind, RecoveredOperation, RecoveredOutcome,
-    RecoveredState, Warning, WarningCode, WarningDetails, from_outcome, from_server_error,
+    RecoveredState, Warning, WarningCode, WarningDetails, from_core_error, from_outcome,
 };
 use crate::io::run::settled;
 use crate::state::{CliState, RouteKey, Runs, WriterGuard};
-use spaceterm_server::connection::link::{RequestError, ServerLink};
-use spaceterm_server::hierarchy::{ClientJournal, Mutation, Outcome, RetainedOutcome};
-use spaceterm_server::pane::Refusal;
-use spaceterm_server::protocol::{AgentName, Operation, ReplyBody, RunReply, RunState};
-use spaceterm_server::{ServerConnection, ServerError};
+use spaceterm_core::connection::link::{CoreLink, RequestError};
+use spaceterm_core::hierarchy::{ClientJournal, Mutation, Outcome, RetainedOutcome};
+use spaceterm_core::pane::Refusal;
+use spaceterm_core::protocol::{AgentName, Operation, ReplyBody, RunReply, RunState};
+use spaceterm_core::{CoreError, MachineConnection};
 use std::time::Instant;
 
 /// One identity's Workspace edits on one server. It holds the identity's writer lock from
 /// before settlement until it drops, so every sequence it allocates is retired and acknowledged
 /// under that one lock.
 pub struct Editor<'a> {
-    connection: &'a ServerConnection,
-    link: &'a ServerLink,
+    connection: &'a MachineConnection,
+    link: &'a CoreLink,
     writer: WriterGuard,
     recovered: Vec<RecoveredOperation>,
 }
@@ -45,7 +45,7 @@ pub struct Editor<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Applied {
     /// What the edit created or changed, as `Outcome::Accepted` names it.
-    pub target: spaceterm_server::hierarchy::Id,
+    pub target: spaceterm_core::hierarchy::Id,
     pub outcome: RetainedOutcome,
 }
 
@@ -58,9 +58,9 @@ impl<'a> Editor<'a> {
         state: &CliState,
         route: RouteKey,
         agent: Option<&AgentName>,
-        connection: &'a ServerConnection,
-        link: &'a ServerLink,
-        connect: &mut dyn FnMut(Option<&AgentName>) -> Result<ServerConnection, ServerError>,
+        connection: &'a MachineConnection,
+        link: &'a CoreLink,
+        connect: &mut dyn FnMut(Option<&AgentName>) -> Result<MachineConnection, CoreError>,
         deadline: Instant,
     ) -> Result<Self, Failure> {
         let mut writer = state
@@ -115,8 +115,8 @@ impl<'a> Editor<'a> {
 /// Runs `mutation` as this identity's next edit and returns its validated outcome.
 fn dispatch(
     writer: &mut WriterGuard,
-    connection: &ServerConnection,
-    link: &ServerLink,
+    connection: &MachineConnection,
+    link: &CoreLink,
     mutation: Mutation,
     deadline: Instant,
 ) -> Result<RetainedOutcome, Failure> {
@@ -127,12 +127,12 @@ fn dispatch(
     }
     let (_, revision) = link
         .next_inventory(0)
-        .map_err(|error| from_server_error(error.into()))?;
+        .map_err(|error| from_core_error(error.into()))?;
     let sequence = revision.next_sequence;
     crate::interrupt::dispatch()?;
     journal
         .submit(sequence, mutation.clone())
-        .map_err(from_server_error)?;
+        .map_err(from_core_error)?;
     let reply = request(link, Operation::Mutate { sequence, mutation }, deadline);
     let outcome = match reply {
         Some(Ok(ReplyBody::Outcome(outcome))) => outcome,
@@ -142,7 +142,7 @@ fn dispatch(
             // recorded outcome, or its absence, decides.
             return match resolve(journal, link, sequence, deadline)? {
                 Resolved::Outcome(outcome) => Ok(*outcome),
-                Resolved::Missing => Err(from_server_error(refusal.into())),
+                Resolved::Missing => Err(from_core_error(refusal.into())),
                 Resolved::Unknown => Err(Failure::new(Code::OutcomeUnconfirmed)),
             };
         }
@@ -162,7 +162,7 @@ enum Resolved {
 
 fn resolve(
     journal: &mut ClientJournal,
-    link: &ServerLink,
+    link: &CoreLink,
     sequence: u64,
     deadline: Instant,
 ) -> Result<Resolved, Failure> {
@@ -172,7 +172,7 @@ fn resolve(
         )?))),
         Some(Ok(_)) => Err(Failure::new(Code::ProtocolError)),
         Some(Err(Refusal::Missing)) => {
-            journal.abandon().map_err(from_server_error)?;
+            journal.abandon().map_err(from_core_error)?;
             Ok(Resolved::Missing)
         }
         Some(Err(_)) | None => Ok(Resolved::Unknown),
@@ -183,7 +183,7 @@ fn resolve(
 /// it forgot it too. An unconfirmed acknowledgement keeps the outcome for the next command.
 fn finish(
     journal: &mut ClientJournal,
-    link: &ServerLink,
+    link: &CoreLink,
     outcome: RetainedOutcome,
     deadline: Instant,
 ) -> Result<RetainedOutcome, Failure> {
@@ -195,7 +195,7 @@ fn finish(
     if outcome.outcome == Outcome::Pending {
         return Ok(outcome);
     }
-    journal.retire(outcome.clone()).map_err(from_server_error)?;
+    journal.retire(outcome.clone()).map_err(from_core_error)?;
     acknowledge(journal, link, outcome.sequence, deadline)?;
     Ok(outcome)
 }
@@ -209,7 +209,7 @@ const ACKNOWLEDGE_CONFIRMATION: std::time::Duration = std::time::Duration::from_
 /// outcome for the next command, which acknowledges it again.
 fn acknowledge(
     journal: &mut ClientJournal,
-    link: &ServerLink,
+    link: &CoreLink,
     sequence: u64,
     deadline: Instant,
 ) -> Result<(), Failure> {
@@ -220,7 +220,7 @@ fn acknowledge(
     loop {
         match request(link, Operation::Resolve { sequence }, until) {
             Some(Err(Refusal::Missing)) => {
-                return journal.settled(sequence).map_err(from_server_error);
+                return journal.settled(sequence).map_err(from_core_error);
             }
             Some(Ok(ReplyBody::Outcome(_))) if Instant::now() < until => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -233,7 +233,7 @@ fn acknowledge(
 /// Sends `operation` and waits for its reply until `deadline`. `None` means no reply arrived:
 /// the deadline passed or the link ended.
 fn request(
-    link: &ServerLink,
+    link: &CoreLink,
     operation: Operation,
     deadline: Instant,
 ) -> Option<Result<ReplyBody, Refusal>> {
@@ -256,8 +256,8 @@ fn request(
 /// so settlement uses the lock it already holds.
 pub struct Current<'a> {
     pub agent: Option<&'a AgentName>,
-    pub connection: &'a ServerConnection,
-    pub link: &'a ServerLink,
+    pub connection: &'a MachineConnection,
+    pub link: &'a CoreLink,
     pub writer: Option<&'a mut WriterGuard>,
 }
 
@@ -272,7 +272,7 @@ pub fn settle(
     state: &CliState,
     route: &RouteKey,
     current: Current<'_>,
-    connect: &mut dyn FnMut(Option<&AgentName>) -> Result<ServerConnection, ServerError>,
+    connect: &mut dyn FnMut(Option<&AgentName>) -> Result<MachineConnection, CoreError>,
     deadline: Instant,
 ) -> Result<Vec<RecoveredOperation>, Failure> {
     let Current {
@@ -282,7 +282,7 @@ pub fn settle(
         writer,
     } = current;
     let mut recovered = Vec::new();
-    let held = state.held(route).map_err(from_server_error)?;
+    let held = state.held(route).map_err(from_core_error)?;
     let mut writer = writer;
     for identity in held {
         let name = identity.agent();
@@ -345,8 +345,8 @@ fn settle_identity(
     route: &RouteKey,
     agent: Option<&AgentName>,
     identity: RecoveredIdentity,
-    connection: &ServerConnection,
-    link: &ServerLink,
+    connection: &MachineConnection,
+    link: &CoreLink,
     writer: Option<&mut WriterGuard>,
     deadline: Instant,
 ) -> Result<Vec<RecoveredOperation>, Failure> {
@@ -373,7 +373,7 @@ fn settle_identity(
 
 fn settle_journal(
     journal: &mut ClientJournal,
-    link: &ServerLink,
+    link: &CoreLink,
     deadline: Instant,
 ) -> Result<Option<RecoveredOperation>, Failure> {
     if let Some(pending) = journal.pending().cloned() {
@@ -405,7 +405,7 @@ fn settle_journal(
 
 fn settle_runs(
     runs: &mut Runs,
-    link: &ServerLink,
+    link: &CoreLink,
     deadline: Instant,
 ) -> Result<Vec<RecoveredOperation>, Failure> {
     let mut recovered = Vec::new();

@@ -1,6 +1,6 @@
 //! The Git section. Repository Status and Pull Requests are Client Settings, and the GitHub CLI
 //! runs on this computer, so those rows ignore the server picker. "Git on <server>" follows the
-//! picker: its Git row reads the selected server's Git, and [`super::server_location`] edits its
+//! picker: its Git row reads the selected server's Git, and [`super::machine_location`] edits its
 //! New Worktree Location.
 
 use gpui::prelude::*;
@@ -14,7 +14,7 @@ use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::repository_status_store::RepositoryTools;
 use crate::ui::sidebar_window::form::badge;
-use spaceterm_server::worktree::path_template::WorktreePathTemplateError;
+use spaceterm_core::worktree::path_template::WorktreePathTemplateError;
 
 /// New Worktree Location's description, beside its field.
 pub(super) const WORKTREE_LOCATION_DESCRIPTION: &str = "Use {repository} and {branch}.";
@@ -213,7 +213,7 @@ impl SettingsWindow {
         if row == SettingsRowId::GitHubCli {
             github_cli_presentation(github_cli(cx))
         } else {
-            git_presentation(self.server_git())
+            git_presentation(self.core_git())
         }
     }
 
@@ -256,7 +256,7 @@ mod tests {
     use crate::repository_status::MINIMUM_GIT_VERSION;
 
     #[test]
-    fn the_servers_git_shows_its_version_beside_whether_it_is_usable() {
+    fn the_machines_git_shows_its_version_beside_whether_it_is_usable() {
         let ready = git_presentation(GitToolStatus::Ready(ToolVersion {
             major: 2,
             minor: 47,

@@ -24,7 +24,7 @@ pub(super) trait DirectNetwork: Send + Sync {
         route: &DirectRoute,
         credential: DeviceCredential,
         gate: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<ServerConnection, DirectError>;
+    ) -> Result<MachineConnection, DirectError>;
     fn revoke(
         &self,
         endpoint: &str,
@@ -36,7 +36,7 @@ pub(super) trait DirectNetwork: Send + Sync {
     fn cancel_enrollment(
         &self,
         endpoint: &str,
-        pin: &direct::ServerPin,
+        pin: &direct::MachinePin,
         claim: [u8; 32],
         credential: &DeviceCredential,
     ) -> Result<Option<direct::RevocationReceipt>, DirectError>;
@@ -51,16 +51,16 @@ impl DirectNetwork for NativeNetwork {
         route: &DirectRoute,
         credential: DeviceCredential,
         gate: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<ServerConnection, DirectError> {
+    ) -> Result<MachineConnection, DirectError> {
         let connector = Arc::new(Connector {
             endpoint: route.endpoint.clone(),
             paired: route.paired.clone(),
             credential,
             gate,
         });
-        let server = ServerConnection::direct(identity, route.id, route.paired.clone(), connector)?;
-        server.refresh()?;
-        Ok(server)
+        let core = MachineConnection::direct(identity, route.id, route.paired.clone(), connector)?;
+        core.refresh()?;
+        Ok(core)
     }
     fn revoke(
         &self,
@@ -75,7 +75,7 @@ impl DirectNetwork for NativeNetwork {
     fn cancel_enrollment(
         &self,
         endpoint: &str,
-        pin: &direct::ServerPin,
+        pin: &direct::MachinePin,
         claim: [u8; 32],
         credential: &DeviceCredential,
     ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -129,8 +129,8 @@ impl DirectConnections {
         name: ClientName,
     ) -> Result<JoinId, DirectError> {
         let mut invitation = direct::Invitation::parse(&text)?;
-        if invitation.server_pin().build != self.0.identity {
-            return Err(DirectError::WrongServer);
+        if invitation.machine_pin().build != self.0.identity {
+            return Err(DirectError::WrongMachine);
         }
         if let Some(endpoint) = endpoint {
             invitation = invitation.with_address(&endpoint.authority())?;
@@ -270,8 +270,8 @@ impl Drop for JobPermit {
 pub(super) fn follow_link(
     owner: &Arc<Inner>,
     id: DirectRouteId,
-) -> Arc<dyn spaceterm_server::connection::link::LinkSink> {
-    use spaceterm_server::connection::link::{Health, LinkEvent};
+) -> Arc<dyn spaceterm_core::connection::link::LinkSink> {
+    use spaceterm_core::connection::link::{Health, LinkEvent};
     let owner = Arc::downgrade(owner);
     Arc::new(move |event: LinkEvent| {
         let (LinkEvent::Health(Health::Closed(_)), Some(owner)) = (event, owner.upgrade()) else {
@@ -292,7 +292,7 @@ struct RouteJob {
     saved: SavedRoute,
     interaction: Interaction,
     gate: Arc<std::sync::atomic::AtomicBool>,
-    server: Option<ServerConnection>,
+    core: Option<MachineConnection>,
     due: Instant,
 }
 
@@ -378,7 +378,7 @@ fn work(owner: &Arc<Inner>) -> Option<Instant> {
                     saved: saved.clone(),
                     interaction: runtime.retry.interaction,
                     gate: Arc::clone(&runtime.gate),
-                    server: runtime.server.clone(),
+                    core: runtime.core.clone(),
                     due: runtime.retry.due,
                 })
             })
@@ -464,10 +464,10 @@ fn work(owner: &Arc<Inner>) -> Option<Instant> {
 }
 
 fn check_route(owner: &Arc<Inner>, job: RouteJob) {
-    let result = match job.server {
+    let result = match job.core {
         // The route's shared connection judges its own health with pings. Refreshing a live
         // connection reads that health without network traffic; only an ended one reconnects.
-        Some(server) => server.refresh().map(|_| server).map_err(DirectError::from),
+        Some(core) => core.refresh().map(|_| core).map_err(DirectError::from),
         None => connect(owner, &job.saved, job.interaction, Arc::clone(&job.gate)),
     };
     let mut state = owner.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -482,9 +482,9 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
     }
     runtime.retry.interaction = Interaction::Quiet;
     match result {
-        Ok(server) => {
-            if runtime.server.is_none() {
-                runtime.server = Some(server);
+        Ok(core) => {
+            if runtime.core.is_none() {
+                runtime.core = Some(core);
                 // A new connection has a new link to follow.
                 runtime.health = None;
             }
@@ -492,15 +492,15 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
             runtime.retry.attempt = 0;
             runtime.retry.due = Instant::now();
             if runtime.health.is_none()
-                && let Some(server) = &runtime.server
+                && let Some(core) = &runtime.core
             {
                 let health = follow_link(owner, job.saved.route.id);
-                server.subscribe(Arc::downgrade(&health));
+                core.subscribe(Arc::downgrade(&health));
                 runtime.health = Some(health);
             }
         }
         Err(error) => {
-            runtime.status = route_failure(error, runtime.server.is_some());
+            runtime.status = route_failure(error, runtime.core.is_some());
             runtime.retry.delay();
         }
     }
@@ -513,20 +513,20 @@ pub(super) fn connect(
     saved: &SavedRoute,
     interaction: Interaction,
     gate: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<ServerConnection, DirectError> {
+) -> Result<MachineConnection, DirectError> {
     let credential = credential(owner, saved, interaction)?;
     owner
         .network
         .connect(&owner.identity, &saved.route, credential, gate)
 }
 
-fn route_failure(error: DirectError, had_server: bool) -> DirectRouteStatus {
+fn route_failure(error: DirectError, had_core: bool) -> DirectRouteStatus {
     match error {
         DirectError::InteractionRequired => DirectRouteStatus::NeedsInteraction,
         DirectError::Revoked => DirectRouteStatus::Refused(RefusalReason::Revoked),
         DirectError::PinMismatch => DirectRouteStatus::Refused(RefusalReason::PinMismatch),
         DirectError::AuthenticationRefused
-        | DirectError::WrongServer
+        | DirectError::WrongMachine
         | DirectError::Substituted => DirectRouteStatus::Refused(RefusalReason::InvalidProof),
         DirectError::IncompatibleProtocol => {
             DirectRouteStatus::Refused(RefusalReason::Incompatible)
@@ -537,7 +537,7 @@ fn route_failure(error: DirectError, had_server: bool) -> DirectRouteStatus {
         DirectError::StorageUnavailable => {
             DirectRouteStatus::Unavailable(UnavailableReason::Storage)
         }
-        _ if had_server => DirectRouteStatus::Reconnecting,
+        _ if had_core => DirectRouteStatus::Reconnecting,
         _ => DirectRouteStatus::Unavailable(UnavailableReason::Network),
     }
 }
@@ -572,14 +572,14 @@ fn recover(owner: &Arc<Inner>, mut pending: PendingRecord, interaction: Interact
                     )?)
                 }
                 Authority::Account { pin } => {
-                    let server = owner
+                    let core = owner
                         .local
                         .clone()
                         .ok_or(DirectError::InteractionRequired)?;
-                    if server.direct_status()?.pin != *pin {
-                        return Err(DirectError::WrongServer);
+                    if core.direct_status()?.pin != *pin {
+                        return Err(DirectError::WrongMachine);
                     }
-                    Some(server.revoke_device(pending.operation, pending.target)?)
+                    Some(core.revoke_device(pending.operation, pending.target)?)
                 }
                 Authority::Enrollment {
                     endpoint,
@@ -599,7 +599,7 @@ fn recover(owner: &Arc<Inner>, mut pending: PendingRecord, interaction: Interact
                 }
             };
             if let Some(receipt) = receipt
-                && (receipt.server != pending.server()
+                && (receipt.core != pending.core()
                     || (!matches!(pending.authority, Authority::Enrollment { .. })
                         && (receipt.operation != pending.operation
                             || receipt.target != pending.target)))
@@ -769,9 +769,9 @@ fn enroll(
             state.document.ensure_capacity()?;
             state.document.pending.push(PendingRecord::enrollment(
                 id,
-                invitation.server_name().to_owned(),
+                invitation.machine_name().to_owned(),
                 invitation.endpoint().to_owned(),
-                invitation.server_pin().clone(),
+                invitation.machine_pin().clone(),
                 enrollment.claim_id(),
                 key,
                 cancelled,
@@ -851,7 +851,7 @@ fn enroll(
                 let saved = SavedRoute {
                     route: DirectRoute {
                         id,
-                        label: invitation.server_name().to_owned(),
+                        label: invitation.machine_name().to_owned(),
                         endpoint: invitation.endpoint().to_owned(),
                         paired,
                     },
@@ -926,7 +926,7 @@ fn complete_enrollment(owner: &DirectConnections, id: JoinId, saved: SavedRoute)
             id,
             RouteState {
                 status: DirectRouteStatus::Connecting,
-                server: None,
+                core: None,
                 gate: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 retry: Retry::new(Interaction::Quiet),
                 health: None,
@@ -990,7 +990,7 @@ pub(super) mod enrollment_tests {
                 Ok(direct::PairingClaim {
                     id: claim,
                     invitation_id: [7; 32],
-                    server: self.paired.pin.server,
+                    core: self.paired.pin.core,
                     device_public_key: self.paired.client,
                     device_name: "Network fixture".into(),
                     expires_at_unix_seconds: u64::MAX,
@@ -1020,7 +1020,7 @@ pub(super) mod enrollment_tests {
             _: &DirectRoute,
             _: DeviceCredential,
             _: Arc<std::sync::atomic::AtomicBool>,
-        ) -> Result<ServerConnection, DirectError> {
+        ) -> Result<MachineConnection, DirectError> {
             Err(DirectError::Transport)
         }
         fn revoke(
@@ -1036,7 +1036,7 @@ pub(super) mod enrollment_tests {
         fn cancel_enrollment(
             &self,
             _: &str,
-            _: &direct::ServerPin,
+            _: &direct::MachinePin,
             claim: [u8; 32],
             _: &DeviceCredential,
         ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -1128,10 +1128,10 @@ pub(super) mod enrollment_tests {
                 .unwrap()
                 .as_secs()
                 + 60;
-            Self::with_server_expiry(label, stage, expires)
+            Self::with_core_expiry(label, stage, expires)
         }
 
-        fn with_server_expiry(label: &str, stage: EnrollmentStage, expires: u64) -> Self {
+        fn with_core_expiry(label: &str, stage: EnrollmentStage, expires: u64) -> Self {
             Unjoined::new(label, stage, expires).join(None)
         }
 
@@ -1203,15 +1203,12 @@ pub(super) mod enrollment_tests {
     }
 
     #[test]
-    fn server_approved_join_ignores_wall_clock_skew_and_bounds_its_local_wait() {
+    fn core_approved_join_ignores_wall_clock_skew_and_bounds_its_local_wait() {
         // The network boundary accepts a live invitation on a server whose wall clock
         // differs from this client's. Neither timestamp determines the local wait.
         for expires in [1, 253_402_300_799] {
-            let fixture = LiveJoin::with_server_expiry(
-                "Clock-skewed server",
-                EnrollmentStage::Claim,
-                expires,
-            );
+            let fixture =
+                LiveJoin::with_core_expiry("Clock-skewed server", EnrollmentStage::Claim, expires);
             let remaining = fixture.owner.0.state.lock().unwrap().joins[&fixture.id]
                 .deadline
                 .checked_duration_since(Instant::now())
@@ -1243,8 +1240,8 @@ pub(super) mod enrollment_tests {
     }
 
     #[test]
-    fn server_expiry_refuses_a_join_despite_a_future_invitation_timestamp() {
-        let fixture = LiveJoin::with_server_expiry(
+    fn core_expiry_refuses_a_join_despite_a_future_invitation_timestamp() {
+        let fixture = LiveJoin::with_core_expiry(
             "Expired server invitation",
             EnrollmentStage::Claim,
             253_402_300_799,
@@ -1493,12 +1490,12 @@ pub(super) mod enrollment_tests {
                 fixture.owner.route(&id).is_none(),
                 "successful cancellation must remove an already-published route"
             );
-            assert!(fixture.owner.server(&id).is_none());
+            assert!(fixture.owner.core(&id).is_none());
             assert!(!gate.load(Ordering::Acquire));
             let relaunched = fixture.relaunch();
             for owner in [&fixture.owner, &relaunched] {
                 assert!(owner.route(&id).is_none());
-                assert!(owner.server(&id).is_none());
+                assert!(owner.core(&id).is_none());
                 let state = owner.0.state.lock().unwrap();
                 assert_eq!(state.document.pending.len(), 1);
                 let pending = &state.document.pending[0];
@@ -1634,7 +1631,7 @@ pub(super) mod enrollment_tests {
         ));
         for owner in [&fixture.owner, &relaunched] {
             assert!(owner.route(&id).is_none());
-            assert!(owner.server(&id).is_none());
+            assert!(owner.core(&id).is_none());
             let state = owner.0.state.lock().unwrap();
             let pending = &state.document.pending[0];
             assert!(pending.cancel_requested);

@@ -8,10 +8,10 @@ mod lifecycle;
 mod support;
 #[path = "support/workspace.rs"]
 mod workspace;
-use lifecycle::{Server, connect, require_idle, size};
+use lifecycle::{Core, connect, require_idle, size};
 use spaceterm::runtime::PhysicalKey;
-use spaceterm_server::{
-    ServerConnection, ServerError,
+use spaceterm_core::{
+    CoreError, MachineConnection,
     hierarchy::*,
     pane::*,
     protocol::{InputEvent, Operation},
@@ -45,7 +45,7 @@ fn refused(pane: &Pane, generation: u64, key: Key) -> Result<(), Box<dyn Error>>
     assert_eq!(pane.discarded(serial)?, Refusal::Stale);
     Ok(())
 }
-fn command(pane: &Pane, generation: u64, text: &str) -> Result<(), ServerError> {
+fn command(pane: &Pane, generation: u64, text: &str) -> Result<(), CoreError> {
     pane.input(
         generation,
         vec![
@@ -92,7 +92,7 @@ fn unsafe_paste(pane: &Pane, generation: u64) -> Result<u64, Box<dyn Error>> {
     Ok(p.id)
 }
 fn native_effects(pane: &Pane) -> Result<(), Box<dyn Error>> {
-    use spaceterm_server::pane::effects::{Completion, Effect};
+    use spaceterm_core::pane::effects::{Completion, Effect};
     pane.focus(3, FocusTarget::Terminal)?;
     command(
         pane,
@@ -162,13 +162,13 @@ fn attached(claimed: Claimed, failure: &'static str) -> Result<Pane, Box<dyn Err
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = spaceterm_server::protocol::MAJOR;
-    let first = ServerConnection::for_development_client("input-first")?;
-    let second = ServerConnection::for_development_client("input-second")?;
+    let major = spaceterm_core::protocol::MAJOR;
+    let first = MachineConnection::for_development_client("input-first")?;
+    let second = MachineConnection::for_development_client("input-second")?;
     require_idle(&first)?;
     first.setup()?;
     second.setup()?;
-    let mut server = Server::start()?;
+    let mut core = Core::start()?;
     let a = connect(&first)?;
     let (_, next_sequence) = support::inventory(&a)?;
     let created = support::mutate(
@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateWorkspace {
             name: "Interactive input check".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let Outcome::Accepted { target: workspace } = created.outcome else {
@@ -247,7 +247,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_ne!(lease.control, resumed.lease().control);
     assert_eq!(
         resumed.resolve_paste(1, transferred, true).err(),
-        Some(ServerError::StaleControl)
+        Some(CoreError::StaleControl)
     );
     taken.focus(1, FocusTarget::Terminal)?;
     assert_eq!(
@@ -332,7 +332,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     taken.close()?;
     cleanup.cleanup()?;
     support::done(&b, Operation::Shutdown)?;
-    let _ = server.kill();
+    let _ = core.kill();
     println!(
         "Protocol {major}: account-local clients verified PTY keys/IME, focus reports, paste approval/focus/reconnect/takeover fences, pointer/wheel, measured resize, controlling appearance, clipboard replies/refusal, Permission Requests and background attention."
     );

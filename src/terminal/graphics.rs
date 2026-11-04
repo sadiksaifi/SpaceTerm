@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use libghostty_vt::kitty::graphics::{ImageFormat, ResolvedPlacement};
 use libghostty_vt::{Error, Terminal};
 
-pub(crate) const IMAGE_STORAGE_LIMIT: usize = spaceterm_server::pane::graphics::MAX_RESIDENT_BYTES;
+pub(crate) const IMAGE_STORAGE_LIMIT: usize = spaceterm_core::pane::graphics::MAX_RESIDENT_BYTES;
 pub(crate) const APC_TRANSMISSION_LIMIT: usize = 128 * 1024 * 1024;
 // Bound resident native image/frame data and owned RGBA snapshots together. Transient
 // parser and decoder allocations have their own transmission and image-size limits.
@@ -193,7 +193,7 @@ fn storage_limits(resident: [usize; 2], available: usize) -> [usize; 2] {
     ]
 }
 
-pub use spaceterm_server::pane::graphics::{ImageKey, Placement as ImagePlacementSnapshot};
+pub use spaceterm_core::pane::graphics::{ImageKey, Placement as ImagePlacementSnapshot};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImageSnapshot {
@@ -206,7 +206,7 @@ pub struct ImageSnapshot {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GraphicsSnapshot {
-    pub failure: Option<spaceterm_server::pane::graphics::Error>,
+    pub failure: Option<spaceterm_core::pane::graphics::Error>,
     pub generation: u64,
     pub placement_generation: u64,
     pub images: Arc<[Arc<ImageSnapshot>]>,
