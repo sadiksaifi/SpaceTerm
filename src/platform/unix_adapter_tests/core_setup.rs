@@ -1722,7 +1722,7 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
             archive
                 .append_data(
                     &mut header,
-                    std::path::Path::new("server").join(executable),
+                    std::path::Path::new("core").join(executable),
                     helper.as_bytes(),
                 )
                 .unwrap();
@@ -1938,11 +1938,11 @@ metadata=os.fstat(fd)
 assert stat.S_ISREG(metadata.st_mode) and metadata.st_uid==os.geteuid() and metadata.st_nlink==1 and stat.S_IMODE(metadata.st_mode)==0o600
 original=os.pread(fd,16385,0)
 record=json.loads(original)
-assert record['server']==approved['server']
+assert record['core']==approved['core']
 policy=open(policy_path,'rb').read()
 assert json.loads(policy)['stopped']
-record['server'][0]^=1
-assert any(record['server'])
+record['core'][0]^=1
+assert any(record['core'])
 replacement=json.dumps(record,separators=(',',':')).encode()
 def write(data):
     os.lseek(fd,0,os.SEEK_SET)

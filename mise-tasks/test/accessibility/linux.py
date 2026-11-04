@@ -74,7 +74,7 @@ def parse_args():
         "--binary", type=Path, help="Existing source-built executable; skips the client build"
     )
     parser.add_argument("--expected-binary-sha256", help="Required SHA256 pin for --binary")
-    parser.add_argument("--server-binary", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--core-binary", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -2371,7 +2371,7 @@ def main():
         if binary is not None:
             command.extend(("--binary", str(binary)))
         if core_binary is not None:
-            command.extend(("--server-binary", str(core_binary)))
+            command.extend(("--core-binary", str(core_binary)))
         if args.isolation_only:
             command = ["dbus-run-session", "--", *command]
             command.append("--isolation-only")

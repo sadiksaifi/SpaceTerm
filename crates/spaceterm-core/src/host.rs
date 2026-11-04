@@ -1402,7 +1402,7 @@ mod startup_tests {
         time::{Duration, Instant},
     };
 
-    const CHILD_TEST: &str = "host::startup_tests::server_start_child";
+    const CHILD_TEST: &str = "host::startup_tests::core_start_child";
     const CHILD_ROOT: &str = "SPACETERM_MACHINE_START_FIXTURE";
 
     struct Fixture {
@@ -1438,6 +1438,18 @@ mod startup_tests {
         }
         fn start_test(&self, test: &str, block_shutdown: bool) -> ChildGuard {
             use std::os::unix::process::CommandExt;
+            // A selector that names no test would start a child that exits at once, and a test
+            // that only waits for exit would pass without starting SpaceTerm Core.
+            let listed = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--ignored", "--list"])
+                .output()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&listed.stdout)
+                    .lines()
+                    .any(|line| line == format!("{test}: test")),
+                "{test} names no child test"
+            );
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args(["--exact", test, "--ignored"])
@@ -1824,7 +1836,7 @@ mod startup_tests {
     #[test]
     fn exhausted_descriptors_pause_accepting_without_ending_the_core() {
         let fixture = Fixture::new();
-        let mut child = fixture.start_test("host::startup_tests::server_descriptor_child", false);
+        let mut child = fixture.start_test("host::startup_tests::core_descriptor_child", false);
         let first = connect_when_ready(&fixture);
         // Idle connections hold descriptors in admission until the server runs out.
         let idle: Vec<_> = (0..64)
@@ -1876,7 +1888,7 @@ mod startup_tests {
     #[test]
     fn shutdown_signal_stops_core_with_an_inherited_blocked_mask() {
         let fixture = Fixture::new();
-        let mut child = fixture.start_test("host::startup_tests::server_signal_child", true);
+        let mut child = fixture.start_test("host::startup_tests::core_signal_child", true);
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut stream = loop {
             match UnixStream::connect(fixture.paths.socket()) {
@@ -2233,7 +2245,7 @@ mod startup_tests {
         };
         use std::io::{Read, Write};
         let fixture = Fixture::new();
-        let mut child = fixture.start_test("host::startup_tests::server_shutdown_child", false);
+        let mut child = fixture.start_test("host::startup_tests::core_shutdown_child", false);
         let mut pending = connect_when_ready(&fixture);
         protocol::admit_client(
             &mut pending,

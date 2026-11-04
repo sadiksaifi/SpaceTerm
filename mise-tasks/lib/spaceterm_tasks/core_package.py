@@ -1,8 +1,8 @@
 """Independent server artifacts authenticated by identity-scoped Ed25519 trust.
 
-On x86_64 glibc Linux (Ubuntu 22.04 or newer) the layout is server/bin/spaceterm beside
-server/share/spaceterm. On Apple Silicon macOS 26 it is an app-like bundle named for the
-identity, server/<bundle>.app/Contents/{Info.plist,MacOS/spaceterm,Resources}, because macOS
+On x86_64 glibc Linux (Ubuntu 22.04 or newer) the layout is core/bin/spaceterm beside
+core/share/spaceterm. On Apple Silicon macOS 26 it is an app-like bundle named for the
+identity, core/<bundle>.app/Contents/{Info.plist,MacOS/spaceterm,Resources}, because macOS
 attributes System Permissions to a bundle's identifier and signature. Installation
 only retains an exact verified artifact. It never selects an active version or
 writes server identity, organization, credentials, stopped intent, or services.
@@ -44,8 +44,8 @@ IDENTITIES = ("spaceterm", "spaceterm-preflight", "spaceterm-development")
 # Settings show the bundle's Launch Services display name, which is its directory name.
 BUNDLES = {
     "spaceterm": "SpaceTerm Core",
-    "spaceterm-preflight": "SpaceTerm Preflight Core",
-    "spaceterm-development": "SpaceTerm Development Core",
+    "spaceterm-preflight": "SpaceTerm Core Preflight",
+    "spaceterm-development": "SpaceTerm Core Development",
 }
 CORE_INFO = ROOT / "packaging/macos/core/Info.plist"
 SHARED_RESOURCES = "share/spaceterm"
@@ -220,7 +220,7 @@ def build_info(executable):
 
 # Every executable a supported layout holds. The tree check then requires the declared target's.
 EXECUTABLES = {
-    f"server/{executable_path(target, identity)}"
+    f"core/{executable_path(target, identity)}"
     for target in TARGETS.values()
     for identity in IDENTITIES
 }
@@ -258,7 +258,7 @@ def unpack_verified(
                     or path.is_absolute()
                     or ".." in path.parts
                     or not path.parts
-                    or path.parts[0] != "server"
+                    or path.parts[0] != "core"
                     or member.name in names
                     or not (member.isfile() or member.isdir())
                     or member.mode
@@ -267,7 +267,7 @@ def unpack_verified(
                     raise TaskError("the server archive layout is invalid")
                 names.add(member.name)
                 members.append(member)
-            manifest = source.getmember("server/build.json")
+            manifest = source.getmember("core/build.json")
             if not manifest.isfile() or manifest.size > 4096:
                 raise TaskError("the server build document is invalid")
             stream = source.extractfile(manifest)
@@ -282,7 +282,7 @@ def unpack_verified(
             source.extractall(destination, members=members, filter="data")
             # Archives may omit directory entries. Tarfile creates those parents using the
             # account's umask, which must not grant group write access to a retained runtime.
-            tree = destination / "server"
+            tree = destination / "core"
             for directory in [tree, *(path for path in tree.rglob("*") if path.is_dir())]:
                 directory.chmod(0o755)
     except (OSError, tarfile.TarError, KeyError):
@@ -578,7 +578,7 @@ def verify_tree(tree, expected, *, native=True):
         )
     except (OSError, subprocess.TimeoutExpired):
         raise TaskError("the installed server headless check failed") from None
-    if result.returncode or result.stderr or result.stdout != b"Server checks passed.\n":
+    if result.returncode or result.stderr or result.stdout != b"SpaceTerm Core checks passed.\n":
         raise TaskError("the installed server headless check failed")
 
 
@@ -610,7 +610,7 @@ def verified_copy(
         target=target,
         expected_sha256=expected_sha256,
     )
-    tree = directory / "payload/server"
+    tree = directory / "payload/core"
     verify_tree(tree, info, native=native)
     return tree, private, raw
 
@@ -627,7 +627,7 @@ def install(archive, signature, expected):
 
     expected = document(json.dumps(expected))
     home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
-    parent = home / ".local/share" / expected["identity"] / "server/installations"
+    parent = home / ".local/share" / expected["identity"] / "core/installations"
     # Existing inaccessible state is a failure, never permission to recreate identity.
     current = Path(home.anchor)
     for part in parent.parts[1:]:
@@ -739,7 +739,7 @@ def package(identity, release_tag=None, *, target=None):
     DIST.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".server-package-") as temporary:
         directory = Path(temporary)
-        tree = directory / "server"
+        tree = directory / "core"
         core = tree / executable_path(target, identity)
         core.parent.mkdir(parents=True)
         shutil.copyfile(executable, core)

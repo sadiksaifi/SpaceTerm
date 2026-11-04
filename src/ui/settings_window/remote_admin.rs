@@ -471,7 +471,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
                     ),
                 )
             };
-            let wording = Wording::for_core(name, action, true, startup);
+            let wording = Wording::for_machine(name, action, true, startup);
             RemoteConfirmation {
                 title: wording.title(),
                 message: wording.message(),
@@ -499,7 +499,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
                 || preview.action == LaneAction::Return;
             // A return names the version it returns to as the previous one.
             let wording = if returning {
-                UpdateWording::for_core(
+                UpdateWording::for_machine(
                     name,
                     UpdateChange::Return,
                     build(to),
@@ -508,7 +508,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
                     false,
                 )
             } else {
-                UpdateWording::for_core(
+                UpdateWording::for_machine(
                     name,
                     UpdateChange::Update,
                     build(from),

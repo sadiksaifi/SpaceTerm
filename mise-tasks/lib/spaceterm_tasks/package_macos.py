@@ -82,7 +82,7 @@ def package_bundle(release_tag=None):
             STAGE / "server-artifact",
             template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
             release_tag,
-            catalog_destination=STAGE / "server-artifacts",
+            catalog_destination=STAGE / "core-artifacts",
         )
     )
     print(f"Building the Apple Silicon {template['CFBundleName']} executable")
@@ -94,9 +94,7 @@ def package_bundle(release_tag=None):
     shutil.copyfile(executable, binaries / template["CFBundleExecutable"])
     (binaries / template["CFBundleExecutable"]).chmod(0o755)
     config["resources"].append({"src": str(STAGE / "server-artifact"), "target": "server-artifact"})
-    config["resources"].append(
-        {"src": str(STAGE / "server-artifacts"), "target": "server-artifacts"}
-    )
+    config["resources"].append({"src": str(STAGE / "core-artifacts"), "target": "core-artifacts"})
     config["version"] = version
     # cargo-packager stamps CFBundleVersion with the build time; the identity's Info.plist
     # entries override its generated ones, so add the tag-derived versions to them.
@@ -229,7 +227,7 @@ def verify_bundle(app, name, release_tag, label):
     from spaceterm_tasks.core_catalog import verify_catalog
 
     verify_catalog(
-        resources / "server-artifacts",
+        resources / "core-artifacts",
         template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
         require_all=bool(release_tag),
     )

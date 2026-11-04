@@ -32,7 +32,7 @@ pub(crate) enum Request {
 
 pub(crate) enum Event {
     Status(Result<ServiceStatus, CoreError>),
-    /// Whether the Server version row offers Update Server.
+    /// Whether the Server version row offers Update SpaceTerm Core.
     Update(bool),
     /// A confirmation to present, or why the operation is no longer available.
     #[cfg(target_os = "macos")]

@@ -77,7 +77,7 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
             crate::check::run()?;
             std::io::stdout()
                 .lock()
-                .write_all(b"Server checks passed.\n")
+                .write_all(b"SpaceTerm Core checks passed.\n")
                 .map_err(Error::Output)?;
         }
         InternalCommand::SshDiscover => {

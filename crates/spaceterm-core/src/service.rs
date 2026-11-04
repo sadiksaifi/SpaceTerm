@@ -1186,7 +1186,7 @@ mod tests {
             ));
             let paths = Paths {
                 identity: "spaceterm-development".into(),
-                data: root.join(".local/share/spaceterm-development/server"),
+                data: root.join(".local/share/spaceterm-development/core"),
                 runtime: root.join("runtime"),
             };
             let data = Directory::open(&paths.data, true).unwrap();
@@ -2656,7 +2656,7 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut wire = protocol::Wire::new(&mut stream);
                 let hello: serde_json::Value = wire.read()?;
-                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "server":hello["server"], "core_major":protocol::MAJOR, "client":hello["client"]}))
+                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "core":hello["core"], "core_major":protocol::MAJOR, "client":hello["client"]}))
             }));
             assert!(matches!(
                 LocalStartup::with_service(supervisor.service())

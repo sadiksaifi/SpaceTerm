@@ -30,13 +30,13 @@ class CoreCatalogTests(unittest.TestCase):
         self,
         native_target,
         *,
-        check_stdout="Server checks passed.\n",
+        check_stdout="SpaceTerm Core checks passed.\n",
         check_stderr="",
         check_exit=0,
         **changed,
     ):
         directory = Path(tempfile.mkdtemp(dir=self.root))
-        tree = directory / "server"
+        tree = directory / "core"
         # Signed foreign executables are opaque to the catalog. These headers declare
         # the supported machine; native producers separately verify their executables.
         if native_target == "aarch64-apple-darwin":
@@ -140,10 +140,10 @@ int main(int argc, char **argv) {{
         for output, error, status in (
             ("", "", 0),
             ("Unexpected success.\n", "", 0),
-            ("Server checks passed.", "", 0),
-            ("Server checks passed.\nExtra output.\n", "", 0),
-            ("Server checks passed.\n", "", 1),
-            ("Server checks passed.\n", "warning\n", 0),
+            ("SpaceTerm Core checks passed.", "", 0),
+            ("SpaceTerm Core checks passed.\nExtra output.\n", "", 0),
+            ("SpaceTerm Core checks passed.\n", "", 1),
+            ("SpaceTerm Core checks passed.\n", "warning\n", 0),
         ):
             with self.subTest(output=output, error=error, status=status):
                 archive, signature, info = self.artifact(
@@ -210,7 +210,7 @@ int main(int argc, char **argv) {{
     def test_explicit_native_entry_must_match_its_executable_even_when_local_pin_differs(self):
         source, originals = self.catalog(commit="b" * 40, version="dev.bbbbbbbbbbbb")
         archive, signature, info = originals[self.target]
-        tree = archive.parent / "server"
+        tree = archive.parent / "core"
         (tree / "build.json").write_text(
             json.dumps({**info, "commit": "c" * 40, "version": "dev.cccccccccccc"})
         )
@@ -231,7 +231,7 @@ int main(int argc, char **argv) {{
         source, originals = self.catalog()
         target = next(value for value in originals if value != self.target)
         archive, signature, _ = originals[target]
-        tree = archive.parent / "server"
+        tree = archive.parent / "core"
         names = b"xterm-spaceterm\0"
         data = (
             struct.pack("<6h", 0x021E, len(names), 0, 1, 0, 0) + names + struct.pack("<i", 100000)
@@ -277,7 +277,7 @@ int main(int argc, char **argv) {{
         for corrupt_machine in (False, True):
             with self.subTest(corrupt_machine=corrupt_machine):
                 archive, signature, _ = self.artifact(self.target)
-                tree = archive.parent / "server"
+                tree = archive.parent / "core"
                 if corrupt_machine:
                     executable = core_package.executable_path(self.target, self.identity)
                     (tree / executable).write_bytes(b"wrong native machine")

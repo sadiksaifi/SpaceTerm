@@ -224,7 +224,7 @@ mod tests {
             .mode(0o700)
             .create(&home)
             .unwrap();
-        let installations = home.join(".local/share/spaceterm-development/server/installations");
+        let installations = home.join(".local/share/spaceterm-development/core/installations");
         let first = installations.join("a".repeat(64));
         let second = installations.join("b".repeat(64));
         let path = home.join(".local/bin/spaceterm-development");
@@ -297,7 +297,7 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(home.clone());
-        let installations = home.join(".local/share/spaceterm-development/server/installations");
+        let installations = home.join(".local/share/spaceterm-development/core/installations");
         let path = home.join(".local/bin/spaceterm-development");
         BEFORE_CREATION.set(Some(|launcher| {
             std::fs::write(launcher, b"local tool").unwrap();
@@ -336,7 +336,7 @@ mod tests {
         }
         let _cleanup = Cleanup(home.clone());
         let identity = "spaceterm-development";
-        let installations = home.join(".local/share/spaceterm-development/server/installations");
+        let installations = home.join(".local/share/spaceterm-development/core/installations");
         let first = installations.join("a".repeat(64));
         let second = installations.join("b".repeat(64));
         let path = home.join(".local/bin").join(identity);

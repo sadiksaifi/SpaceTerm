@@ -187,7 +187,7 @@ mod exercise {
             &Path::new(&home)
                 .join(".local/share")
                 .join(IDENTITY)
-                .join("server/clients"),
+                .join("core/clients"),
             &mut 1024,
         )?;
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();

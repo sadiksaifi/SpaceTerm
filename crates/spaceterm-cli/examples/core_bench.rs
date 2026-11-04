@@ -60,7 +60,7 @@ struct Options {
 fn options(arguments: &[String]) -> Result<Options> {
     let [identity, flags @ ..] = arguments else {
         return fail(
-            "usage: server_bench IDENTITY [--accessibility] [--columns N] [--rows N] [--max-hz N]",
+            "usage: core_bench IDENTITY [--accessibility] [--columns N] [--rows N] [--max-hz N]",
         );
     };
     let mut options = Options {
@@ -131,7 +131,7 @@ fn main() {
     // SAFETY: main has a single thread here.
     unsafe { std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", "server-bench") };
     if let Err(Failure(stage)) = options(&arguments).and_then(|options| run(&options)) {
-        eprintln!("server_bench: {stage}");
+        eprintln!("core_bench: {stage}");
         std::process::exit(1);
     }
 }
@@ -304,7 +304,7 @@ fn read_commands(sender: &Sender<Message>) {
         } else if line == "stats" {
             Message::Stats
         } else {
-            eprintln!("server_bench: unknown command");
+            eprintln!("core_bench: unknown command");
             continue;
         };
         if sender.send(message).is_err() {

@@ -25,8 +25,8 @@ impl CoreDirectories {
         #[cfg(not(target_os = "macos"))]
         let temporary = Path::new("/tmp");
         Ok(Self {
-            data: home.join(".local/share").join(identity).join("server"),
-            runtime: temporary.join(format!("{identity}-server-{uid}")),
+            data: home.join(".local/share").join(identity).join("core"),
+            runtime: temporary.join(format!("{identity}-core-{uid}")),
         })
     }
 }
@@ -105,16 +105,21 @@ mod tests {
                 .unwrap();
         assert_eq!(
             development.data,
-            Path::new("/home/owner/.local/share/spaceterm-development/server")
+            Path::new("/home/owner/.local/share/spaceterm-development/core")
         );
         assert_eq!(
             release.data,
-            Path::new("/home/owner/.local/share/spaceterm/server")
+            Path::new("/home/owner/.local/share/spaceterm/core")
         );
         assert_eq!(
             other.data,
-            Path::new("/home/other/.local/share/spaceterm-development/server")
+            Path::new("/home/other/.local/share/spaceterm-development/core")
         );
+        #[cfg(target_os = "macos")]
+        let runtime = "/private/tmp/spaceterm-development-core-501";
+        #[cfg(not(target_os = "macos"))]
+        let runtime = "/tmp/spaceterm-development-core-501";
+        assert_eq!(development.runtime, Path::new(runtime));
         assert_ne!(development.data, other.data);
         assert_ne!(development.data, release.data);
         assert_ne!(development.runtime, release.runtime);

@@ -304,7 +304,7 @@ pub(crate) fn open_machine_settings(target: crate::ui::MachineTarget, cx: &mut A
     });
 }
 
-/// Opens Settings on Servers and starts the one Update Server journey there, for a surface that
+/// Opens Settings on Servers and starts the one Update SpaceTerm Core journey there, for a surface that
 /// offers it elsewhere, such as the incompatible-server screen or the status item. The journey
 /// reads the server first and asks before it changes anything.
 pub(crate) fn open_core_update(cx: &mut App) {

@@ -37,6 +37,24 @@ class ResourcePolicyTests(unittest.TestCase):
         )
 
 
+class CoreBundleNameTests(unittest.TestCase):
+    def test_each_identity_names_its_core_bundle_and_identifier(self):
+        self.assertEqual(
+            [
+                (core_package.bundle_directory(identity), core_package.core_identifier(identity))
+                for identity in ("spaceterm", "spaceterm-preflight", "spaceterm-development")
+            ],
+            [
+                ("SpaceTerm Core.app", "io.github.sadiksaifi.spaceterm.core"),
+                ("SpaceTerm Core Preflight.app", "io.github.sadiksaifi.spaceterm-preflight.core"),
+                (
+                    "SpaceTerm Core Development.app",
+                    "io.github.sadiksaifi.spaceterm-development.core",
+                ),
+            ],
+        )
+
+
 class CoreArchiveTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -93,7 +111,7 @@ class CoreArchiveTests(unittest.TestCase):
         )
 
     def test_signed_archive_retains_exact_candidate_identity(self):
-        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
+        self.archive_with([("core/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         self.assertEqual(self.unpack(), self.info)
 
     def test_nonproduction_artifact_trust_needs_no_production_secret_and_cannot_sign_release(self):
@@ -103,9 +121,7 @@ class CoreArchiveTests(unittest.TestCase):
         for identity in ("spaceterm-preflight", "spaceterm-development", "spaceterm"):
             with self.subTest(identity=identity):
                 info = {**self.info, "identity": identity}
-                self.archive_with(
-                    [("server/build.json", json.dumps(info).encode(), tarfile.REGTYPE)]
-                )
+                self.archive_with([("core/build.json", json.dumps(info).encode(), tarfile.REGTYPE)])
                 destination = self.root / identity
                 environment = {"PATH": os.environ["PATH"]}
                 if identity != "spaceterm":
@@ -132,16 +148,16 @@ class CoreArchiveTests(unittest.TestCase):
                         )
 
     def test_verified_extraction_does_not_leave_group_writable_implicit_directories(self):
-        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
+        self.archive_with([("core/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         previous = os.umask(0o002)
         try:
             self.unpack()
         finally:
             os.umask(previous)
-        self.assertEqual(stat.S_IMODE((self.root / "unpacked/server").stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((self.root / "unpacked/core").stat().st_mode), 0o755)
 
     def test_production_trust_cannot_authenticate_a_nonproduction_candidate(self):
-        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
+        self.archive_with([("core/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         production_fixture_seed = bytes(range(32))
         release.sign_ed25519(production_fixture_seed, self.archive, self.signature)
         with patch.object(
@@ -152,7 +168,7 @@ class CoreArchiveTests(unittest.TestCase):
         self.assertFalse((self.root / "unpacked").exists())
 
     def test_unsigned_and_tampered_archives_are_refused_before_extraction(self):
-        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
+        self.archive_with([("core/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         self.archive.write_bytes(self.archive.read_bytes() + b"tampered")
         with self.assertRaises(TaskError):
             self.unpack()
@@ -171,7 +187,7 @@ class CoreArchiveTests(unittest.TestCase):
             with self.subTest(key=key):
                 wrong = {**self.info, key: value}
                 self.archive_with(
-                    [("server/build.json", json.dumps(wrong).encode(), tarfile.REGTYPE)]
+                    [("core/build.json", json.dumps(wrong).encode(), tarfile.REGTYPE)]
                 )
                 with self.assertRaises(TaskError):
                     self.unpack()
@@ -180,22 +196,22 @@ class CoreArchiveTests(unittest.TestCase):
         for name, kind in [
             ("../escaped", tarfile.REGTYPE),
             ("/absolute", tarfile.REGTYPE),
-            ("server/link", tarfile.SYMTYPE),
-            ("server/device", tarfile.CHRTYPE),
-            ("server//duplicate", tarfile.REGTYPE),
+            ("core/link", tarfile.SYMTYPE),
+            ("core/device", tarfile.CHRTYPE),
+            ("core//duplicate", tarfile.REGTYPE),
             ("other/file", tarfile.REGTYPE),
         ]:
             with self.subTest(name=name):
                 self.archive_with([(name, b"payload", kind)])
                 with self.assertRaises(TaskError):
                     self.unpack()
-        entry = ("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)
+        entry = ("core/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)
         self.archive_with([entry, entry])
         with self.assertRaises(TaskError):
             self.unpack()
 
     def test_signed_package_with_missing_or_extra_resources_is_refused(self):
-        tree = self.root / "server"
+        tree = self.root / "core"
         (tree / "bin").mkdir(parents=True)
         (tree / "bin/spaceterm").write_bytes(b"never executed")
         (tree / "bin/spaceterm").chmod(0o755)
@@ -224,7 +240,7 @@ class CoreArchiveTests(unittest.TestCase):
                     )
 
     def test_desktop_artifact_rejects_wrong_exact_build_before_staging(self):
-        tree = self.root / "server"
+        tree = self.root / "core"
         (tree / "bin").mkdir(parents=True)
         (tree / "bin/spaceterm").write_bytes(b"native executable fixture")
         (tree / "bin/spaceterm").chmod(0o755)
@@ -253,7 +269,7 @@ class CoreArchiveTests(unittest.TestCase):
                 core_queries.append(arguments[0])
                 output = json.dumps(self.info).encode()
             elif arguments[1:] == ["internal", "check"]:
-                output = b"Server checks passed.\n"
+                output = b"SpaceTerm Core checks passed.\n"
             else:
                 return run(arguments, **kwargs)
             if kwargs.get("text"):
@@ -338,7 +354,7 @@ class CoreArchiveTests(unittest.TestCase):
 
     def test_signed_malformed_build_document_is_refused(self):
         for payload in [b"null", b"[]", b"{}", b"invalid", b'{"schema":1,"schema":2}']:
-            self.archive_with([("server/build.json", payload, tarfile.REGTYPE)])
+            self.archive_with([("core/build.json", payload, tarfile.REGTYPE)])
             with self.assertRaises(TaskError):
                 self.unpack()
 

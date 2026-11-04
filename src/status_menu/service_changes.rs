@@ -143,7 +143,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let data = root.join("data/server");
+        let data = root.join("data/core");
         std::fs::create_dir_all(&data).unwrap();
         prepare(&data);
         let runtime = root.join("runtime");

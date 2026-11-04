@@ -44,7 +44,7 @@ def _record(archive, signature, role, target):
         core_package.artifact_public_key("spaceterm-preflight"), archive, signature
     )
     with tarfile.open(archive, "r:gz") as source:
-        stream = source.extractfile("server/build.json")
+        stream = source.extractfile("core/build.json")
         if stream is None:
             raise TaskError("the fixture build document is missing")
         info = core_package.document(stream.read(4097))
@@ -110,7 +110,7 @@ def _broken_verification(destination, target, result):
     broken = destination / target / "broken.tar.gz"
     signature = broken.with_suffix(broken.suffix + ".sig")
     resources = core_package.resource_directory(target, "spaceterm-preflight")
-    omitted = f"server/{resources}/shell-integration/VERSION"
+    omitted = f"core/{resources}/shell-integration/VERSION"
     with tarfile.open(normal, "r:gz") as source, tarfile.open(broken, "w:gz") as output:
         for member in source:
             if member.name != omitted:

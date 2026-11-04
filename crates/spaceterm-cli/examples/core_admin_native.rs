@@ -58,7 +58,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("server_admin_native: {error}");
+            eprintln!("core_admin_native: {error}");
             ExitCode::FAILURE
         }
     }

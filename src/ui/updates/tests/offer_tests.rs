@@ -8,7 +8,7 @@ use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
-/// Installs this computer's server offering Update Server, as its service reports an included
+/// Installs this computer's server offering Update SpaceTerm Core, as its service reports an included
 /// build newer than the approved one.
 fn local_offer(cx: &mut TestAppContext) {
     cx.update(|cx| {

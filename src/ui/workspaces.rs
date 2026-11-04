@@ -1143,7 +1143,7 @@ mod core_workspaces {
         }
 
         /// The name of another computer's server, or `None` for this computer's. Only this
-        /// computer's server takes Start Server from this client.
+        /// computer's server takes Start SpaceTerm Core from this client.
         pub(crate) fn remote_name(&self) -> Option<SharedString> {
             self.opener.remote_display().map(SharedString::from)
         }

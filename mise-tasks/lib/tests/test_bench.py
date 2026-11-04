@@ -15,7 +15,7 @@ from spaceterm_tasks import ROOT, TaskError, bench
 
 PS = """    1     0 /sbin/launchd
   100     1 /Applications/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight
-  200     1 /Users/me/.local/share/spaceterm-preflight/server/installations/a/SpaceTerm Preflight Core.app/Contents/MacOS/spaceterm
+  200     1 /Users/me/.local/share/spaceterm-preflight/core/installations/a/SpaceTerm Core Preflight.app/Contents/MacOS/spaceterm
   201   200 /bin/zsh
   202   201 /bin/cat
   300     1 /usr/bin/yes
@@ -535,7 +535,7 @@ def golden(name):
 
 
 def command_words(envelope):
-    """The CLI arguments that name an envelope's command: `server.status` is `server status`."""
+    """The CLI arguments that name an envelope's command: `machine.list` is `machine list`."""
     return envelope["command"].split(".")
 
 
@@ -577,12 +577,12 @@ class CounterReadTests(unittest.TestCase):
         self.assertEqual(counters, reply["data"]["terminal_counters"])
 
     def test_the_desktop_reads_the_local_machines_counters_from_machine_status(self):
-        reply = golden("server_status")
+        reply = golden("status")
         self.answer(reply)
         counters = self.current_desktop().core_counters()
         self.assertEqual(
             json.loads(self.argv.read_text()),
-            ["--server", "local", "--json", *command_words(reply)],
+            ["--machine", "local", "--json", *command_words(reply)],
         )
         self.assertEqual(counters, reply["data"]["terminal_counters"])
 
@@ -615,11 +615,11 @@ class CounterReadTests(unittest.TestCase):
         task = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(task)
         context = {"cli": str(self.cli), "jail": SimpleNamespace(wrap=list), "env": None}
-        reply = golden("server_status")
+        reply = golden("status")
         self.answer(reply)
         self.assertEqual(task.counters(context), reply["data"]["terminal_counters"])
         self.answer(reply | {"data": reply["data"] | {"terminal_counters": None}})
-        with self.assertRaisesRegex(TaskError, "spaceterm server status reported no"):
+        with self.assertRaisesRegex(TaskError, "spaceterm status reported no"):
             task.counters(context)
 
 
@@ -1149,7 +1149,11 @@ class DesktopScenarioTests(unittest.TestCase):
 
 class BaselineFileTests(unittest.TestCase):
     def test_checked_in_core_baselines_carry_every_metric(self):
-        for path in sorted((bench.BASELINES / "server").glob("*.json")):
+        paths = sorted((bench.BASELINES / "core").glob("*.json"))
+        self.assertEqual(
+            [path.stem for path in paths], ["macbook-pro-personal", "penguin"], "checked-in hosts"
+        )
+        for path in paths:
             with self.subTest(host=path.stem):
                 data = json.loads(path.read_text())
                 for values in data["summary"].values():

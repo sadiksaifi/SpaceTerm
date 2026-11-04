@@ -45,7 +45,7 @@ def prepare(
     }
     directory = root / "target/server-artifact-fixture"
     shutil.rmtree(directory, ignore_errors=True)
-    tree = directory / "server"
+    tree = directory / "core"
     executable = tree / core_package.executable_path(expected["target"], expected["identity"])
     executable.parent.mkdir(parents=True)
     source = f"""
@@ -57,7 +57,7 @@ int main(int argc, char **argv) {{
         return 0;
     }}
     if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "check") == 0) {{
-        puts("Core checks passed.");
+        puts("SpaceTerm Core checks passed.");
         return 0;
     }}
     return 1;
@@ -130,7 +130,7 @@ int main(int argc, char **argv) {{
         shutil.copyfile(signature, local / "artifact.sig")
         (local / "artifact.sha256").write_text(release.sha256(archive) + "\n")
         target = "x86_64-unknown-linux-gnu" if sys.platform == "darwin" else "aarch64-apple-darwin"
-        foreign = directory / "foreign/server"
+        foreign = directory / "foreign/core"
         executable = foreign / core_package.executable_path(target, expected["identity"])
         executable.parent.mkdir(parents=True)
         if target == "aarch64-apple-darwin":

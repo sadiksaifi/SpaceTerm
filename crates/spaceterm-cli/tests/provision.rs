@@ -12,7 +12,7 @@ fn spaceterm(args: &[&str]) -> Output {
 fn source_build_provision_check_uses_compiled_resources() {
     let output = spaceterm(&["internal", "check"]);
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"Server checks passed.\n");
+    assert_eq!(output.stdout, b"SpaceTerm Core checks passed.\n");
     assert!(output.stderr.is_empty());
 }
 

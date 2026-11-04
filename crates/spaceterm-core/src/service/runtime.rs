@@ -219,9 +219,7 @@ impl Service {
     }
 
     fn cli_home(&self) -> Result<&Path, CoreError> {
-        let suffix = Path::new(".local/share")
-            .join(&self.identity)
-            .join("server");
+        let suffix = Path::new(".local/share").join(&self.identity).join("core");
         if !self.paths.data.ends_with(suffix) {
             return Err(CoreError::UnsafeStorage);
         }
@@ -799,7 +797,7 @@ fn contents_for_target(
             return Err(CoreError::RuntimeUnavailable);
         }
         let path = path
-            .strip_prefix("server")
+            .strip_prefix("core")
             .map_err(|_| CoreError::RuntimeUnavailable)?;
         if path
             .components()

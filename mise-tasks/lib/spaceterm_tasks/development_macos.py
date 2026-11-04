@@ -78,7 +78,7 @@ def stage_bundle(executable, core, *, catalog=None):
             "Development terminfo compilation failed",
         )
         if catalog is not None:
-            shutil.copytree(catalog, resources / "server-artifacts")
+            shutil.copytree(catalog, resources / "core-artifacts")
         verify_resources(resources, "Development bundle")
         checked(
             [

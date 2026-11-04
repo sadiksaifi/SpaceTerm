@@ -24,7 +24,7 @@ work to settle again. A workload that failed fails the task. The task records th
 seconds, peak footprint, footprint 10 s after the workload and every byte the server wrote to the
 client's connection, then confirms with `spaceterm pane read` that the Pane shows the workload's
 completion marker. The task also records how much each of the server's Terminal Diagnostics
-counters moved during the workload, read from `spaceterm server status` outside the measured
+counters moved during the workload, read from `spaceterm status` outside the measured
 window; a failed read fails the task.
 
 Results go to `--output`. The medians are compared with mise-tasks/bench/baselines/core/HOST.json;
@@ -92,13 +92,11 @@ class Jail:
     def __init__(self):
         self.directory = None
         if sys.platform.startswith("linux") and shutil.which("bwrap"):
-            self.directory = Path(
-                tempfile.mkdtemp(prefix="spaceterm-bench-server-", dir="/var/tmp")
-            )
+            self.directory = Path(tempfile.mkdtemp(prefix="spaceterm-bench-core-", dir="/var/tmp"))
             for name in ("share", "runtime"):
                 (self.directory / name).mkdir(mode=0o700)
             self.share = Path.home() / ".local" / "share" / IDENTITY
-            self.runtime = Path("/tmp") / f"{IDENTITY}-server-{os.geteuid()}"
+            self.runtime = Path("/tmp") / f"{IDENTITY}-core-{os.geteuid()}"
             for mount in (self.share, self.runtime):
                 mount.mkdir(mode=0o700, parents=True, exist_ok=True)
 
@@ -218,7 +216,7 @@ class Client:
 
 def confirm(cli, jail, env, client, number):
     """Observes the Pane through the CLI until it shows the workload's completion marker."""
-    command = [cli, "--server", "local", "--quiet", "--timeout", "30s", "pane", "read"]
+    command = [cli, "--machine", "local", "--quiet", "--timeout", "30s", "pane", "read"]
     command += ["--pane", f"id:{client.pane}", "--rows", "1", "--max-bytes", "4096"]
     command += ["--wait-for", f"{MARKER} {number}"]
     # The output is terminal content; only the exit status matters.
@@ -232,10 +230,8 @@ def confirm(cli, jail, env, client, number):
 def counters(context):
     """The server's Terminal Diagnostics counters. This checkout's server always reports them,
     so a failed read fails the task."""
-    command = [context["cli"], "--server", "local", "--json", "server", "status"]
-    return terminal_counters(
-        context["jail"].wrap(command), "spaceterm server status", context["env"]
-    )
+    command = [context["cli"], "--machine", "local", "--json", "status"]
+    return terminal_counters(context["jail"].wrap(command), "spaceterm status", context["env"])
 
 
 def measure(context, client, workload, args):
@@ -321,11 +317,11 @@ def run(args):
     output = (
         Path(args.output)
         if args.output
-        else ROOT / "target" / "bench" / "server" / time.strftime("%Y%m%d-%H%M%S")
+        else ROOT / "target" / "bench" / "core" / time.strftime("%Y%m%d-%H%M%S")
     )
     budgets = load_budgets()["server"]
     executable = build_executable(*BUILD, binary="spaceterm")
-    presenter = build_executable(*BUILD, binary="server_bench", example=True)
+    presenter = build_executable(*BUILD, binary="core_bench", example=True)
     input_path, input_digest = fixed_input()
     env = developer_environment(source_environment(os.environ))
     jail = Jail()
@@ -376,7 +372,7 @@ def run(args):
         "summary": summary,
     }
     print(table(summary))
-    baseline_path = BASELINES / "server" / f"{host}.json"
+    baseline_path = BASELINES / "core" / f"{host}.json"
     if args.record:
         write_json(
             baseline_path,

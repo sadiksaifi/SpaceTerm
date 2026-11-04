@@ -73,7 +73,7 @@ def jailed(args, command):
     jail = shlex.quote(args.jail)
     return (
         f'bwrap --dev-bind / / --bind {jail}/share "$HOME/.local/share/{IDENTITY}" '
-        f'--bind {jail}/runtime "/tmp/{IDENTITY}-server-$(id -u)" -- {command}'
+        f'--bind {jail}/runtime "/tmp/{IDENTITY}-core-$(id -u)" -- {command}'
     )
 
 
@@ -88,7 +88,7 @@ def build_owner(args):
         command += (
             f" && rm -rf {jail}/share {jail}/runtime"
             f' && mkdir -p {jail}/share {jail}/runtime "$HOME/.local/share/{IDENTITY}" '
-            f'"/tmp/{IDENTITY}-server-$(id -u)" && chmod 700 {jail}/share {jail}/runtime'
+            f'"/tmp/{IDENTITY}-core-$(id -u)" && chmod 700 {jail}/share {jail}/runtime'
         )
     if remote(args, command).returncode:
         raise TaskError("the owner host build failed")

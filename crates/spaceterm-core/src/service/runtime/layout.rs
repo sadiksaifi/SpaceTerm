@@ -83,13 +83,13 @@ impl Layout {
 /// The macOS bundle directory of an identity's SpaceTerm Core package, named for the identity's
 /// product. Privacy prompts and System Settings show a bundle's Launch Services display name,
 /// which is its directory name, not `CFBundleName` or `CFBundleDisplayName`. A person therefore
-/// sees SpaceTerm Core, SpaceTerm Preflight Core or SpaceTerm Development Core. The system hides
+/// sees SpaceTerm Core, SpaceTerm Core Preflight or SpaceTerm Core Development. The system hides
 /// the `.app` extension unless the person turned on "Show all filename extensions".
 pub fn bundle_name(identity: &str) -> Option<&'static str> {
     match identity {
         "spaceterm" => Some("SpaceTerm Core.app"),
-        "spaceterm-preflight" => Some("SpaceTerm Preflight Core.app"),
-        "spaceterm-development" => Some("SpaceTerm Development Core.app"),
+        "spaceterm-preflight" => Some("SpaceTerm Core Preflight.app"),
+        "spaceterm-development" => Some("SpaceTerm Core Development.app"),
         _ => None,
     }
 }
@@ -108,15 +108,15 @@ mod tests {
         let layout = Layout::for_target(MACOS, "spaceterm-preflight").unwrap();
         assert_eq!(
             layout.executable(),
-            Path::new("SpaceTerm Preflight Core.app/Contents/MacOS/spaceterm")
+            Path::new("SpaceTerm Core Preflight.app/Contents/MacOS/spaceterm")
         );
         assert_eq!(
             layout.resource(Path::new("share/spaceterm/shell-integration/VERSION")),
             Some(PathBuf::from(
-                "SpaceTerm Preflight Core.app/Contents/Resources/shell-integration/VERSION"
+                "SpaceTerm Core Preflight.app/Contents/Resources/shell-integration/VERSION"
             ))
         );
-        assert_eq!(layout.signed(), Path::new("SpaceTerm Preflight Core.app"));
+        assert_eq!(layout.signed(), Path::new("SpaceTerm Core Preflight.app"));
         assert_eq!(layout.bundle_files().len(), 2);
     }
 

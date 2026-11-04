@@ -121,7 +121,7 @@ def package(release_tag=None):
             STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifact",
             DIRECTORIES[name],
             release_tag,
-            catalog_destination=STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifacts",
+            catalog_destination=STAGE / DIRECTORIES[name] / "share/spaceterm/core-artifacts",
         )
     )
     print(f"Building the x86_64 Linux {display_name} executable")
@@ -195,7 +195,7 @@ def verify_tree(tree, name, release_tag):
     from spaceterm_tasks.core_catalog import verify_catalog
 
     verify_catalog(
-        tree / "share/spaceterm/server-artifacts", DIRECTORIES[name], require_all=bool(release_tag)
+        tree / "share/spaceterm/core-artifacts", DIRECTORIES[name], require_all=bool(release_tag)
     )
 
     identifier = application_id(name)

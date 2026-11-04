@@ -491,7 +491,7 @@ run = "cargo run --package spaceterm-cli --no-default-features --locked -- inter
 
 [tasks."core:status"]
 description = "Connect to the existing Development server"
-run = "cargo run --package spaceterm-cli --locked -- server status"
+run = "cargo run --package spaceterm-cli --locked -- status"
 
 [tasks."core:dependencies"]
 description = "Show the isolated headless server's production dependencies"
@@ -544,7 +544,7 @@ run = [
 
 [tasks."core:admin:native"]
 description = "Verify Preflight administration from Mac to Penguin and from Penguin to Mac"
-run = 'cargo run -p spaceterm-cli --example server_admin_native --locked -- "$@"'
+run = 'cargo run -p spaceterm-cli --example core_admin_native --locked -- "$@"'
 
 [tasks."core:workspace:smoke"]
 description = "Exercise retained Development work through server kill and shutdown"
@@ -571,7 +571,7 @@ run = "cargo test --package spaceterm --lib --no-default-features --features nat
 
 [tasks."core:setup:native:test"]
 description = "Verify temporary provisioning and QUIC admission in an owner-confirmed native account"
-usage = 'arg "[test]" default="native_server_setup_acceptance" help="Exact function name in the native setup fixture; see docs/local-server.md for scope and opt-ins"'
+usage = 'arg "[test]" default="native_core_setup_acceptance" help="Exact function name in the native setup fixture; see docs/local-server.md for scope and opt-ins"'
 run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- ssh::provisioning::unix_adapter_tests::{{usage.test | quote}} --ignored --exact --nocapture"
 
 [tasks."core:worktree:smoke"]
@@ -601,7 +601,7 @@ run = "cargo test --package spaceterm-cli --no-default-features --locked"
 
 [tasks."core:update:build"]
 description = "Build the signed native update check before code signing"
-run = "cargo build --package spaceterm-cli --example server_update --locked"
+run = "cargo build --package spaceterm-cli --example core_update --locked"
 
 [tasks."core:update:smoke"]
 description = "Exercise exact signed updates against disposable Development service state"
@@ -614,16 +614,16 @@ arg "<candidate-signature>" help="Candidate archive signature"
 arg "<candidate-sha256>" help="Candidate complete archive SHA256"
 flag "--confirm-disposable-development" help="Authorize replacement of disposable Development server work"
 '''
-run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/server_update\" {{usage.previous_archive | quote}} {{usage.previous_signature | quote}} {{usage.previous_sha256 | quote}} {{usage.candidate_archive | quote}} {{usage.candidate_signature | quote}} {{usage.candidate_sha256 | quote}} {% if usage.confirm_disposable_development %}--confirm-disposable-development{% endif %}"
+run = "\"${CARGO_TARGET_DIR:-target}/debug/examples/core_update\" {{usage.previous_archive | quote}} {{usage.previous_signature | quote}} {{usage.previous_sha256 | quote}} {{usage.candidate_archive | quote}} {{usage.candidate_signature | quote}} {{usage.candidate_sha256 | quote}} {% if usage.confirm_disposable_development %}--confirm-disposable-development{% endif %}"
 
 [tasks."core:admission:host"]
 description = "Observe refusal of a real other-account peer without sending requests"
 run = "cargo test --package spaceterm-core --locked --lib host::tests::refuses_a_real_other_account_peer_without_sending_protocol_bytes -- --ignored --exact"
 
 [tasks."core:service"]
-description = "Run a Development CLI server command"
+description = "Run a Development CLI command for SpaceTerm Core"
 usage = '''
-arg "<action>" help="Development server command" {
+arg "<action>" help="SpaceTerm Core command" {
   choices "setup" "status" "start" "stop" "restart" "update"
 }
 flag "--network <network>" help="Network Access for setup"
@@ -632,7 +632,7 @@ flag "--automatic-start <preference>" help="Automatic startup for setup" {
 }
 flag "--confirm <token>" help="Token returned by the command's preview"
 '''
-run = "cargo run --package spaceterm-cli --no-default-features --locked -- server {{usage.action}} {% if usage.network %}--network {{usage.network | quote}}{% endif %} {% if usage.automatic_start %}--automatic-start {{usage.automatic_start | quote}}{% endif %} {% if usage.confirm %}--confirm {{usage.confirm | quote}}{% endif %}"
+run = "cargo run --package spaceterm-cli --no-default-features --locked -- {{usage.action}} {% if usage.network %}--network {{usage.network | quote}}{% endif %} {% if usage.automatic_start %}--automatic-start {{usage.automatic_start | quote}}{% endif %} {% if usage.confirm %}--confirm {{usage.confirm | quote}}{% endif %}"
 
 [tasks."core:service:session:macos"]
 description = "Verify authenticated Session survival and durable Stop on an installed macOS server"
@@ -742,8 +742,8 @@ run = [
   "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- terminal::core_session",
   "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- runtime::core_host::boundary_tests",
   "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- terminal::geometry::tests",
-  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- server_find_reports_an_oversized_query",
-  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- an_oversized_server_input_method_commit",
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- core_find_reports_an_oversized_query",
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- an_oversized_core_input_method_commit",
 ]
 
 [tasks."cli:credentials:test"]

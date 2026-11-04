@@ -34,7 +34,7 @@ impl Fixture {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir(&root).unwrap();
-        let store = ConnectionStore::new(root.join("server/clients/cli"));
+        let store = ConnectionStore::new(root.join("core/clients/cli"));
         let interrupted = Arc::new(AtomicBool::new(false));
         Self {
             root,
@@ -618,7 +618,7 @@ fn no_store_and_locked_no_input_paths_have_bounded_errors_and_no_plaintext() {
 }
 impl Fixture {
     fn store_path(&self) -> PathBuf {
-        self.root.join("server/clients/cli/connections.json")
+        self.root.join("core/clients/cli/connections.json")
     }
 }
 
@@ -771,7 +771,7 @@ fn connection_process_add() {
     let name = std::env::var("SPACETERM_TEST_CONNECTION_NAME").unwrap();
     let mut fixture = Fixture::new();
     let root = PathBuf::from(root);
-    fixture.store = ConnectionStore::new(root.join("server/clients/cli"));
+    fixture.store = ConnectionStore::new(root.join("core/clients/cli"));
     fixture.network.barrier = Some((root, name.clone()));
     let output = fixture.run(&add(&name));
     assert_eq!(output.exit, 0, "{}", output.envelope);

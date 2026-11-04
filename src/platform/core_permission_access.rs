@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(
             PermissionAccess::holder(&access),
             PermissionHolder::Core {
-                name: "SpaceTerm".into()
+                name: "SpaceTerm Core".into()
             },
             "the holder System Settings is expected to list"
         );

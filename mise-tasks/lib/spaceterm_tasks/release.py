@@ -305,7 +305,7 @@ def machine_feed_name(target):
 
 
 def core_release_directory(target):
-    return DIST / f"release-server-{core_platform(target)}"
+    return DIST / f"release-core-{core_platform(target)}"
 
 
 def sign_core_release(seed, archive, signature, build, published_at, directory):

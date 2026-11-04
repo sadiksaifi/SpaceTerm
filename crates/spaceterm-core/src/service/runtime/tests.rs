@@ -151,7 +151,7 @@ fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it
                 entries[0].1 = serde_json::to_vec(&manifest).unwrap();
                 relayout(entries, target(), remote_target);
                 let executable = format!(
-                    "server/{}",
+                    "core/{}",
                     Layout::for_target(remote_target, "spaceterm-development")
                         .unwrap()
                         .executable()
@@ -460,7 +460,7 @@ fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
     let home = temporary();
     let service = Service::for_paths(crate::host::Paths {
         identity: "spaceterm-development".into(),
-        data: home.join(".local/share/spaceterm-development/server"),
+        data: home.join(".local/share/spaceterm-development/core"),
         runtime: home.join("runtime"),
     })
     .unwrap();
@@ -750,20 +750,20 @@ fn relayout(entries: &mut Vec<(String, Vec<u8>, u32)>, from: &str, to: &str) {
     entries.retain(|(name, _, _)| {
         !bundle
             .iter()
-            .any(|file| Path::new(name) == Path::new("server").join(file))
+            .any(|file| Path::new(name) == Path::new("core").join(file))
     });
     for (name, _, _) in entries.iter_mut() {
         if let Some(path) = Path::new(name.as_str())
-            .strip_prefix("server")
+            .strip_prefix("core")
             .ok()
             .and_then(placed)
         {
-            *name = format!("server/{}", path.display());
+            *name = format!("core/{}", path.display());
         }
     }
     for file in to.bundle_files() {
         entries.push((
-            format!("server/{}", file.display()),
+            format!("core/{}", file.display()),
             b"signed bundle file".to_vec(),
             0o644,
         ));
@@ -822,16 +822,16 @@ fn signed_missing_resources_unsafe_layout_and_malformed_build_are_refused_before
                         entries.retain(|(name, _, _)| !name.ends_with(".zshenv"));
                     }
                     1 => {
-                        entries.push(("server/../escaped".into(), b"unsafe".to_vec(), 0o644));
+                        entries.push(("core/../escaped".into(), b"unsafe".to_vec(), 0o644));
                     }
                     2 => {
-                        entries.push(("server//ambiguous".into(), b"unsafe".to_vec(), 0o644));
+                        entries.push(("core//ambiguous".into(), b"unsafe".to_vec(), 0o644));
                     }
                     3 => {
                         entries.push(entries[0].clone());
                     }
                     4 => {
-                        entries.push(("server/extra".into(), b"unsafe".to_vec(), 0o644));
+                        entries.push(("core/extra".into(), b"unsafe".to_vec(), 0o644));
                     }
                     5 => {
                         entries[0].1 = b"{\"schema\":1,\"schema\":1}".to_vec();
@@ -1091,7 +1091,7 @@ fn installation_with(root: &Path, edit: impl FnMut(&mut Vec<(String, Vec<u8>, u3
 /// Retains a signed fixture whose native executable holds `executable` bytes.
 fn installation_with_executable(root: &Path, executable: Vec<u8>) -> PathBuf {
     let main = format!(
-        "server/{}",
+        "core/{}",
         Layout::host("spaceterm-development")
             .unwrap()
             .executable()
@@ -1271,7 +1271,7 @@ fn installing_and_staging_hold_the_same_transient_memory_for_any_package_size() 
         "retain_cli",
     ];
     let main = format!(
-        "server/{}",
+        "core/{}",
         Layout::host("spaceterm-development")
             .unwrap()
             .executable()
@@ -1287,7 +1287,7 @@ fn installing_and_staging_hold_the_same_transient_memory_for_any_package_size() 
                 identity: "spaceterm-development".into(),
                 data: root
                     .join(name)
-                    .join(".local/share/spaceterm-development/server"),
+                    .join(".local/share/spaceterm-development/core"),
                 runtime: root.join(name).join("runtime"),
             })
             .unwrap()
@@ -1395,7 +1395,7 @@ fn installation_with_same_length_substitute(root: &Path) -> (PathBuf, Vec<u8>, V
     let signed = incompressible(4 * CHUNK);
     let installation = installation_with_executable(root, signed.clone());
     let main = format!(
-        "server/{}",
+        "core/{}",
         Layout::host("spaceterm-development")
             .unwrap()
             .executable()

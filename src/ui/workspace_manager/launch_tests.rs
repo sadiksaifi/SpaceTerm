@@ -831,7 +831,7 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
     );
 }
 
-/// A Stop between admission and the first inventory offers Start Server, which opens the
+/// A Stop between admission and the first inventory offers Start SpaceTerm Core, which opens the
 /// Workspaces once the server answers.
 #[gpui::test]
 fn a_stop_before_inventory_offers_start_core(cx: &mut TestAppContext) {
@@ -1549,7 +1549,7 @@ fn a_status_menu_start_resumes_a_window_waiting_on_a_stopped_machine(cx: &mut Te
 }
 
 /// Stopping the server from Settings while its Workspaces are open leaves each Pane saying so,
-/// with Start Server where retrying could never connect.
+/// with Start SpaceTerm Core where retrying could never connect.
 fn stopped_in_session(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestContext) {
     stopped_in_session_as(
         crate::terminal::core_session::CorePaneStatus::Failed(CoreError::Stopped),
@@ -1582,7 +1582,7 @@ fn a_pane_stopped_in_session_offers_start_core_instead_of_retry(cx: &mut TestApp
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
 }
 
-/// Once Start Server in a Pane starts the server, a Pane it stopped connects again, so the
+/// Once Start SpaceTerm Core in a Pane starts the server, a Pane it stopped connects again, so the
 /// server says what became of it. Nothing takes control or starts a shell on the person's behalf.
 fn assert_start_reconnects(
     status: crate::terminal::core_session::CorePaneStatus,

@@ -10,7 +10,7 @@ use crate::platform::{
     secure_filesystem::{PrivateFileSnapshot, SecureCommitOutcome, SecureFilesystemError},
 };
 
-const FILE: &str = "server-context.json";
+const FILE: &str = "core-context.json";
 const MAX_BYTES: usize = 512 * 1024;
 const MAX_MACHINES: usize = 257;
 const MAX_DEVICES: usize = 256;

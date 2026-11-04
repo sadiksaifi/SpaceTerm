@@ -346,7 +346,7 @@ impl Service {
     }
 
     /// Explicit return never restores an old state snapshot or any ended Terminal Session.
-    /// The previous runtime remains stopped until a later explicit Start Server.
+    /// The previous runtime remains stopped until a later explicit Start SpaceTerm Core.
     pub fn return_to_previous(
         &self,
         approval: ReturnApproval,

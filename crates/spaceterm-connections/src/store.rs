@@ -496,7 +496,7 @@ mod tests {
             Self(root)
         }
         fn store(&self) -> ConnectionStore {
-            ConnectionStore::new(self.0.join("server/clients/cli"))
+            ConnectionStore::new(self.0.join("core/clients/cli"))
         }
     }
     impl Drop for Fixture {

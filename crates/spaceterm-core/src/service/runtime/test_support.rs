@@ -90,9 +90,9 @@ pub(crate) fn with_artifact<T>(
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(encoder);
     let layout = super::Layout::host(identity).unwrap();
-    let packaged = |path: PathBuf| format!("server/{}", path.display());
+    let packaged = |path: PathBuf| format!("core/{}", path.display());
     let mut entries = vec![
-        ("server/build.json".to_owned(), manifest.into_bytes(), 0o644),
+        ("core/build.json".to_owned(), manifest.into_bytes(), 0o644),
         (
             packaged(layout.executable()),
             b"signed fixture executable".to_vec(),

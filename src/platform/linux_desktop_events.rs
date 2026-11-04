@@ -290,7 +290,7 @@ mod tests {
     }
     #[zbus::interface(name = "org.freedesktop.Notifications")]
     impl Notifications {
-        fn get_core_information(&self) -> (String, String, String, String) {
+        fn get_server_information(&self) -> (String, String, String, String) {
             ("fixture".into(), "fixture".into(), "1".into(), "1.2".into())
         }
         #[allow(clippy::too_many_arguments)]

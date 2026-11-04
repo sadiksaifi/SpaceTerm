@@ -277,7 +277,7 @@ pub enum UpdatePlan {
     },
 }
 
-/// Prepares Update the way `spaceterm server update` does without local files: a return the
+/// Prepares Update the way `spaceterm update` does without local files: a return the
 /// server offers comes first, otherwise the server stages its newest release and previews it.
 pub fn plan_update(session: &mut Session) -> Result<UpdatePlan, LaneError> {
     if let Some(preview) = probe_return(session)? {

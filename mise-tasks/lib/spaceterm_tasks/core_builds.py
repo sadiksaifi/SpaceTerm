@@ -105,7 +105,7 @@ def prepare(destination, identity):
         raise TaskError(
             "Linux catalogs need a Mac-built catalog in SPACETERM_CLI_ARTIFACTS from the same source snapshot"
         )
-    cache = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "server"
+    cache = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "core"
     cache.mkdir(parents=True, exist_ok=True)
     with (cache / ".catalog.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

@@ -35,9 +35,9 @@ pub(crate) fn core_artifact_catalog() -> Option<PathBuf> {
 
 /// The server packages' place inside an installation, relative to its executable's parent.
 #[cfg(target_os = "macos")]
-const CORE_ARTIFACTS: &str = "Resources/server-artifacts";
+const CORE_ARTIFACTS: &str = "Resources/core-artifacts";
 #[cfg(target_os = "linux")]
-const CORE_ARTIFACTS: &str = "share/spaceterm/server-artifacts";
+const CORE_ARTIFACTS: &str = "share/spaceterm/core-artifacts";
 
 #[cfg(target_os = "macos")]
 fn running_executable_of_host() -> Option<PathBuf> {

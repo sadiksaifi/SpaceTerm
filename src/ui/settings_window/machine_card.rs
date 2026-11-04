@@ -929,7 +929,7 @@ impl VersionStep {
     }
 
     /// The element the step occupies. Steps that replace one another share a slot, so keyboard
-    /// focus stays on it when, say, Update Server gives way to Finish Update.
+    /// focus stays on it when, say, Update SpaceTerm Core gives way to Finish Update.
     const fn slot(self) -> &'static str {
         match self {
             Self::Local(action) => action.slot(),
@@ -1068,7 +1068,7 @@ impl SettingsWindow {
 
     /// The Server row's steps: at most one button, and every other step in the ⋯ menu. The
     /// button is a safe restore after a failed update, Update when one is offered, otherwise
-    /// Start Server for a stopped server.
+    /// Start SpaceTerm Core for a stopped server.
     fn machine_row_view(&self, cx: &App) -> Option<MachineRowView> {
         let choice = self.selected_machine()?;
         let version = self.version_view(cx);
@@ -1420,7 +1420,7 @@ impl SettingsWindow {
                 _ => SharedString::new_static(status_step_label(&step)),
             };
             // Steps that replace each other share a slot, so keyboard focus stays on it when,
-            // say, Start Server gives way to Update.
+            // say, Start SpaceTerm Core gives way to Update.
             let slot = status_step_slot(&step).unwrap_or_else(|| status_step_selector(&step));
             let description = status_step_consequence(&step, &name).unwrap_or_else(|| {
                 SharedString::from(format!("{} {name}", label.trim_end_matches('\u{2026}')))

@@ -27,7 +27,7 @@ Every observation records each SpaceTerm process's CPU seconds, RSS, physical fo
 footprint and wakeups per second. Roles are `client`, `server`, `shell` and `program`; `product` is
 the client and server, and its peak is their highest simultaneous sum. Every observation after S1
 also records how much the server's Terminal Diagnostics counters moved, and the client's while it
-runs, read from `spaceterm server status` and `spaceterm diagnostics` outside the measured window;
+runs, read from `spaceterm status` and `spaceterm diagnostics` outside the measured window;
 a failed read fails the task. Results go to `--output` after each observation, then the task checks
 the medians against mise-tasks/bench/budgets.json and fails when a budget is missed or a requested
 budget has no measurement.
@@ -137,7 +137,7 @@ class App:
 
     @property
     def installations(self):
-        return Path.home() / ".local" / "share" / self.identity / "server" / "installations"
+        return Path.home() / ".local" / "share" / self.identity / "core" / "installations"
 
     def is_core(self, command):
         return command.startswith(str(self.installations) + "/") and command.endswith("/spaceterm")
@@ -481,7 +481,7 @@ class CurrentDesktop(Desktop):
 
     def service(self, action):
         """Runs `spaceterm server ACTION`."""
-        status, code = self.confirmed("server", action)
+        status, code = self.confirmed(action)
         if status and not (action == "stop" and code == "stopped"):
             raise TaskError(f"server {action} failed ({code or status})")
         if action == "stop":
@@ -514,14 +514,14 @@ class CurrentDesktop(Desktop):
         desktop would only do after a confirmation dialog."""
         for pane in panes:
             status, code = self.confirmed(
-                "--server", "local", "pane", "close", "--pane", f"id:{pane}"
+                "--machine", "local", "pane", "close", "--pane", f"id:{pane}"
             )
             if status:
                 raise TaskError(f"spaceterm pane close failed ({code or status})")
 
     def layout(self):
         """Each Workspace's Tabs as their Pane counts, from the CLI."""
-        envelope = cli_json([self.cli(), "--server", "local", "--json", "--quiet", "list"])
+        envelope = cli_json([self.cli(), "--machine", "local", "--json", "--quiet", "list"])
         if envelope is None:
             raise TaskError("spaceterm list did not report the Workspaces")
         return layout(envelope)
@@ -540,7 +540,7 @@ class CurrentDesktop(Desktop):
 
     def retained_rows(self, receipt):
         """The rows the CLI reports for the receipt's Pane."""
-        command = [self.cli(), "--server", "local", "--json", "--quiet", "pane", "read"]
+        command = [self.cli(), "--machine", "local", "--json", "--quiet", "pane", "read"]
         command += ["--pane", f"id:{self.pane(receipt)}", "--rows", "1", "--max-bytes", "4096"]
         envelope = cli_json(command)
         if envelope is None:
@@ -549,8 +549,8 @@ class CurrentDesktop(Desktop):
 
     def core_counters(self):
         """The local server's Terminal Diagnostics counters."""
-        command = [self.cli(), "--server", "local", "--json", "server", "status"]
-        return terminal_counters(command, "spaceterm server status")
+        command = [self.cli(), "--machine", "local", "--json", "status"]
+        return terminal_counters(command, "spaceterm status")
 
     def client_counters(self):
         """The desktop's Terminal Diagnostics counters."""

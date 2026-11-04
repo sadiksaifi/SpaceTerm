@@ -849,7 +849,7 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
         self.assertEqual(len(sessions), 2)
         clients = []
         for command, environment in sessions:
-            self.assertIn("--server-binary", command)
+            self.assertIn("--core-binary", command)
             self.assertIn("--source-session", command)
             clients.append(environment["SPACETERM_DEVELOPMENT_CLIENT"])
         self.assertNotEqual(*clients)
@@ -901,14 +901,23 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
                     }
                 )
             )
-            args = SimpleNamespace(
-                binary=output / "client",
-                core_binary=output / "server",
-                source_session="x11",
-                output_dir=output,
-            )
-            with patch.object(smoke, "source_session", return_value=0):
+            # The arguments the outer runner passes, parsed by the task's own parser.
+            argv = [
+                "linux.py",
+                "--binary",
+                str(output / "client"),
+                "--core-binary",
+                str(output / "core"),
+                "--source-session",
+                "x11",
+                "--output-dir",
+                str(output),
+            ]
+            with patch.object(sys, "argv", argv):
+                args = smoke.parse_args()
+            with patch.object(smoke, "source_session", return_value=0) as session:
                 self.assertEqual(smoke.supervised_session(args), 1)
+            self.assertEqual(session.call_args.args[0], output / "core")
             report = json.loads(measurement.read_text())
             self.assertFalse(report["passed"])
             self.assertTrue(report["source_run_cleanup"]["passed"])
@@ -920,7 +929,7 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
         self.assertEqual(builds, 0)
         for command, _ in sessions:
             self.assertIn("--isolation-only", command)
-            self.assertNotIn("--server-binary", command)
+            self.assertNotIn("--core-binary", command)
             self.assertNotIn("--binary", command)
 
 

@@ -123,7 +123,7 @@ class LinuxPrefixTests(unittest.TestCase):
     def core_artifacts(self):
         artifacts = {}
         for target in core_package.TARGETS.values():
-            tree = self.private / "server-packages" / target / "server"
+            tree = self.private / "server-packages" / target / "core"
             executable = tree / core_package.executable_path(target, "spaceterm-development")
             executable.parent.mkdir(parents=True)
             info = {
@@ -145,7 +145,7 @@ int main(int argc, char **argv) {{
         return 0;
     }}
     if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "check") == 0) {{
-        puts("Core checks passed.");
+        puts("SpaceTerm Core checks passed.");
         return 0;
     }}
     return 1;

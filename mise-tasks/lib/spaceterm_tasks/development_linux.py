@@ -240,7 +240,7 @@ def stage_prefix(
         if compiled.returncode or not (resources / "terminfo" / "x" / "xterm-spaceterm").is_file():
             raise TaskError("tic did not produce the SpaceTerm terminfo entry")
         if catalog is not None:
-            shutil.copytree(catalog, resources / "server-artifacts")
+            shutil.copytree(catalog, resources / "core-artifacts")
         prefix = parent / "development"
         shutil.rmtree(prefix, ignore_errors=True)
         staging.rename(prefix)

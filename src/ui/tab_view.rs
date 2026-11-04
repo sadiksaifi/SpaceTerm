@@ -3318,7 +3318,7 @@ impl TabView {
                             view.retry_pane(pane_id, window, cx);
                         });
                     },
-                    // Settings reads the server again, and Restart Server asks before it ends
+                    // Settings reads the server again, and Restart SpaceTerm Core asks before it ends
                     // anything. Nothing here restarts it.
                     on_machine_settings: move |_: &mut Window, cx: &mut App| {
                         if let Some(target) = restart_target.clone() {
@@ -3380,7 +3380,7 @@ impl TabView {
             }
         });
         let has_screen = screen.is_some();
-        // Start Server reaches only this computer's server. Another computer's stopped server
+        // Start SpaceTerm Core reaches only this computer's server. Another computer's stopped server
         // is started there, so its Pane explains that and offers nothing.
         let remote = self.binding.sessions().remote_name();
         let notice = pane.notice().map(|(title, detail, intent)| {

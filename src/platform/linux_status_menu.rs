@@ -331,7 +331,7 @@ impl StatusItem {
 
     #[zbus(property)]
     fn id(&self) -> String {
-        format!("{}-server-status", self.identity)
+        format!("{}-core-status", self.identity)
     }
 
     #[zbus(property)]

@@ -226,7 +226,7 @@ int main(int argc, char **argv) {{
             (artifact / "artifact.sig").read_bytes(),
             Path(self.env["SPACETERM_CLI_SIGNATURE"]).read_bytes(),
         )
-        catalog = artifact.with_name("server-artifacts") / "aarch64-apple-darwin"
+        catalog = artifact.with_name("core-artifacts") / "aarch64-apple-darwin"
         self.assertEqual(
             (catalog / "artifact.tar.gz").read_bytes(), (artifact / "artifact.tar.gz").read_bytes()
         )
@@ -274,7 +274,7 @@ int main(int argc, char **argv) {{
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
         self.assertEqual(json.loads(self.record.read_text())["private_inputs"], [])
         self.assertFalse(json.loads(self.record.read_text())["signing_available"])
-        catalog = bundled.parent.parent / "Resources/server-artifacts"
+        catalog = bundled.parent.parent / "Resources/core-artifacts"
         self.assertEqual(
             set(path.name for path in catalog.iterdir()),
             {"aarch64-apple-darwin", "x86_64-unknown-linux-gnu"},
@@ -293,7 +293,7 @@ int main(int argc, char **argv) {{
         self.compile_executable(self.artifact, "SpaceTerm Preflight")
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        catalog = self.root / "dist/SpaceTerm Preflight.app/Contents/Resources/server-artifacts"
+        catalog = self.root / "dist/SpaceTerm Preflight.app/Contents/Resources/core-artifacts"
         (catalog / "aarch64-apple-darwin/artifact.sha256").write_text("0" * 64 + "\n")
         verified = self.task("preflight/verify/macos.py")
         self.assertNotEqual(verified.returncode, 0)
@@ -352,7 +352,7 @@ class CurrentMachinePackageTests(unittest.TestCase):
     def test_current_machine_passes_signed_package_verification(self):
         # Build the real server, including its PTY/shell check, rather than the C fixture
         # used to isolate desktop packaging. Only the artifact destination is disposable.
-        with tempfile.TemporaryDirectory(prefix="spaceterm-current-server-package-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="spaceterm-current-core-package-") as temporary:
             with patch.object(core_package, "DIST", Path(temporary)):
                 archive, signature = core_package.package("spaceterm-preflight")
             destination = Path(temporary) / "desktop"
@@ -380,7 +380,7 @@ class CurrentMachinePackageTests(unittest.TestCase):
                 timeout=15,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout, b"Server checks passed.\n")
+            self.assertEqual(result.stdout, b"SpaceTerm Core checks passed.\n")
             self.assertEqual(result.stderr, b"")
 
 

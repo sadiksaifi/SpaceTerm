@@ -405,14 +405,10 @@ fn write_signed_package(catalog: &Path, executable: &[u8]) {
     std::fs::create_dir_all(&directory).unwrap();
     let manifest = serde_json::json!({"schema":1,"source_sha256":null,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":spaceterm_core::protocol::MAJOR}).to_string().into_bytes();
     let mut entries = vec![
-        ("server/build.json".to_owned(), manifest, 0o644),
+        ("core/build.json".to_owned(), manifest, 0o644),
+        ("core/bin/spaceterm".to_owned(), executable.to_vec(), 0o755),
         (
-            "server/bin/spaceterm".to_owned(),
-            executable.to_vec(),
-            0o755,
-        ),
-        (
-            "server/share/spaceterm/terminfo/x/xterm-spaceterm".to_owned(),
+            "core/share/spaceterm/terminfo/x/xterm-spaceterm".to_owned(),
             b"terminfo".to_vec(),
             0o644,
         ),
@@ -421,7 +417,7 @@ fn write_signed_package(catalog: &Path, executable: &[u8]) {
         serde_json::from_str::<Vec<String>>(include_str!("../../../packaging/core-resources.json"))
             .unwrap()
     {
-        entries.push((format!("server/{path}"), b"resource".to_vec(), 0o644));
+        entries.push((format!("core/{path}"), b"resource".to_vec(), 0o644));
     }
     let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),

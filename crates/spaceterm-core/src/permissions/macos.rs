@@ -553,8 +553,8 @@ mod tests {
     }
 
     const BUNDLE: &str = "io.github.sadiksaifi.spaceterm-preflight.core";
-    const OWN_BUNDLE: &str = "/installations/aa/SpaceTerm Preflight Core.app";
-    const REGISTER: &str = "register /installations/aa/SpaceTerm Preflight Core.app";
+    const OWN_BUNDLE: &str = "/installations/aa/SpaceTerm Core Preflight.app";
+    const REGISTER: &str = "register /installations/aa/SpaceTerm Core Preflight.app";
 
     #[test]
     fn the_machine_names_its_own_bundle_only_when_launchd_started_it_from_there() {
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(
             report.holder,
             PermissionHolder::Core {
-                name: "SpaceTerm Preflight".into()
+                name: "SpaceTerm Core Preflight".into()
             }
         );
         assert!(report.resettable);
@@ -861,7 +861,7 @@ mod tests {
         let installation = Path::new("/data/installations").join("a".repeat(64));
         assert_eq!(
             own_bundle(&installation.join(layout.executable()), layout),
-            Some(installation.join("SpaceTerm Preflight Core.app"))
+            Some(installation.join("SpaceTerm Core Preflight.app"))
         );
         let development =
             Layout::for_target("aarch64-apple-darwin", "spaceterm-development").unwrap();

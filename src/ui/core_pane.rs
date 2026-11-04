@@ -588,7 +588,7 @@ pub(crate) fn directory_status(
 }
 
 /// The screen of a Pane whose start may have run. Check Shell checks, and never starts a shell. Server
-/// Settings opens the existing Restart Server journey, which asks before it ends anything.
+/// Settings opens the existing Restart SpaceTerm Core journey, which asks before it ends anything.
 ///
 /// The caller owns the element ids, what each action does, and whether this client can restart
 /// the Pane's server.
@@ -755,7 +755,7 @@ pub(crate) fn render_notice(
         .into_any_element()
 }
 
-/// The Start Server action of a Pane whose server the person stopped. Retrying could never
+/// The Start SpaceTerm Core action of a Pane whose server the person stopped. Retrying could never
 /// connect, and only an explicit Start reverses Stop.
 pub(crate) fn start_core_button(
     selector: SharedString,
@@ -1425,7 +1425,7 @@ mod connection {
         }
 
         /// Whether a person can ask for a connection attempt now. A stopped server offers
-        /// Start Server instead, because a retry could never connect. A start that may have run
+        /// Start SpaceTerm Core instead, because a retry could never connect. A start that may have run
         /// can be checked from any status, because the check is passive.
         pub(crate) fn can_retry(&self) -> bool {
             let interrupted = self.status

@@ -666,7 +666,7 @@ fn a_widening_another_app_blocks_keeps_the_listener_and_every_connection() {
         panic!()
     };
     assert_eq!(status.listener, ListenerState::Listening { addr: at });
-    // The same refusal reaches `server setup --network` on the server's own machine.
+    // The same refusal reaches `setup --network` on the server's own machine.
     assert!(matches!(
         fixture.management(Management::SetPolicy {
             enabled: true,
