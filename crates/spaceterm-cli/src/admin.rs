@@ -125,12 +125,7 @@ impl Reply {
             stdout,
             stderr,
         );
-        if let Some(notice) = &self.notice
-            && exit != contract::EXIT_BROKEN_PIPE
-            && crate::notice::shown(mode, stderr_terminal)
-        {
-            let _ = writeln!(stderr, "{notice}");
-        }
+        crate::notice::print(self.notice.as_deref(), exit, mode, stderr_terminal, stderr);
         exit
     }
 }
@@ -197,14 +192,11 @@ fn notice(context: &Context<'_>, command: &CoreCommand, reply: &Reply) -> Option
     }
     let facts = context.facts.borrow_mut().take()?;
     let machine = reply.envelope.machine.as_ref()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
     crate::notice::line(
         &facts,
         display_name(machine),
         &context.command_line(machine, &["restart"]),
-        now,
+        crate::notice::now(),
     )
 }
 
@@ -282,16 +274,7 @@ impl Context<'_> {
     /// so the copy ignores a different `SPACETERM_MACHINE` or `SPACETERM_AS` in another shell.
     /// Every word is a [`crate::shell::word`], so the line pastes into any POSIX shell or Zsh.
     pub fn command_line(&self, machine: &MachineRef, words: &[&str]) -> String {
-        let agent = self.agent();
-        let mut line = vec!["spaceterm", "--machine", machine.route.as_str()];
-        if let Some(agent) = &agent {
-            line.extend(["--as", agent.as_str()]);
-        }
-        line.extend(words);
-        line.iter()
-            .map(|word| crate::shell::word(word))
-            .collect::<Vec<_>>()
-            .join(" ")
+        command_line(&machine.route, self.agent().as_ref(), words)
     }
 
     pub fn agent(&self) -> Option<spaceterm_core::protocol::AgentName> {
@@ -310,7 +293,24 @@ impl Context<'_> {
     }
 }
 
-fn terminal(fd: libc::c_int) -> bool {
+/// `spaceterm --machine ROUTE [--as AGENT] WORDS…`, each word a [`crate::shell::word`].
+pub fn command_line(
+    route: &str,
+    agent: Option<&spaceterm_core::protocol::AgentName>,
+    words: &[&str],
+) -> String {
+    let mut line = vec!["spaceterm", "--machine", route];
+    if let Some(agent) = agent {
+        line.extend(["--as", agent.as_str()]);
+    }
+    line.extend(words);
+    line.iter()
+        .map(|word| crate::shell::word(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn terminal(fd: libc::c_int) -> bool {
     // SAFETY: isatty only observes the descriptor.
     unsafe { libc::isatty(fd) == 1 }
 }

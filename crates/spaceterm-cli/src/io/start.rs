@@ -188,6 +188,12 @@ fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) 
     }
     output.envelope.data.recovered_operations = recovered;
     output.diagnostics = scope::verbose(&target.steps);
+    output.notice = crate::notice::for_work(
+        link.update_facts().as_deref(),
+        &core,
+        agent.as_ref(),
+        crate::notice::now(),
+    );
     output
 }
 

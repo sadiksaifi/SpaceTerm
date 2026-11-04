@@ -214,6 +214,7 @@ pub fn diagnostics(desktop: &dyn Desktop) -> Output {
         ),
         text: counters.lines(),
         diagnostics: String::new(),
+        notice: None,
     }
 }
 
@@ -276,6 +277,7 @@ pub fn open(
         ),
         text: text_output.into(),
         diagnostics: String::new(),
+        notice: None,
     }
 }
 

@@ -89,7 +89,7 @@ fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
         Ok(core) => selected.reference(&core),
         Err(error) => return failed(from_core_error(error)),
     };
-    run_with_confirmation(
+    let mut output = run_with_confirmation(
         deadline,
         timeout,
         |deadline, confirmation| {
@@ -138,6 +138,24 @@ fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
             )
         },
         |output| prompt(cli, output),
+    );
+    if reports_pending_restart(&cli.command) {
+        output.notice = crate::notice::for_work(
+            link.update_facts().as_deref(),
+            &core,
+            agent.as_ref(),
+            crate::notice::now(),
+        );
+    }
+    output
+}
+
+/// Whether the command ends with the notice about a version that waits for a restart: the work
+/// commands on Workspaces, Tabs and Panes. `worktree` and `show` print none.
+fn reports_pending_restart(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::List(_) | Command::Workspace(_) | Command::Tab(_) | Command::Pane(_)
     )
 }
 
