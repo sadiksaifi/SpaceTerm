@@ -120,6 +120,9 @@ pub(super) trait CoreServiceControl: Send + Sync {
     fn uninstall(&self) -> Result<ServiceStatus, CoreError>;
     /// When the service starts the server.
     fn startup(&self) -> ServiceStartup;
+    /// Whether Linux lets the account's services survive logout. Other platforms return None.
+    /// Reads the current policy without requesting authorization.
+    fn linger(&self) -> Result<Option<bool>, CoreError>;
     /// Asks the operating system to let this account's services run at boot and after logout.
     /// Runs only from the person's confirmed authorization step. A cancelled or refused
     /// authorization returns an error and changes nothing.
@@ -160,6 +163,10 @@ impl CoreServiceControl for Service {
 
     fn startup(&self) -> ServiceStartup {
         Service::startup(self)
+    }
+
+    fn linger(&self) -> Result<Option<bool>, CoreError> {
+        Service::linger(self)
     }
 
     fn authorize_startup(&self) -> Result<(), CoreError> {
@@ -1160,7 +1167,7 @@ pub(super) struct AutomaticStart {
 
 /// Presents the offered service and owns passive reads.
 pub(super) struct MachineServiceRow {
-    control: Result<Arc<dyn CoreServiceControl>, CoreError>,
+    pub(super) control: Result<Arc<dyn CoreServiceControl>, CoreError>,
     pub(super) state: ServiceState,
     pub(super) automatic_start: AutomaticStart,
     /// A change to automatic start the person asked for while a read or an earlier change ran,
@@ -2232,6 +2239,11 @@ pub(super) mod testing {
     }
 
     impl CoreServiceControl for ScriptedService {
+        fn linger(&self) -> Result<Option<bool>, CoreError> {
+            Ok((self.startup == ServiceStartup::AtBoot)
+                .then(|| *self.authorized.lock().expect("authorized")))
+        }
+
         fn status(&self) -> CoreAnswer<'_, ServiceStatus> {
             Box::pin(async move {
                 self.calls.lock().expect("calls").push(ServiceCall::Status);

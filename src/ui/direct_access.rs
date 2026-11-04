@@ -108,6 +108,8 @@ pub(crate) enum AccessFailure {
     PortInUse,
     /// Direct network access is off, so the server opens no invitation.
     Disabled,
+    /// Linux needs the account's services to survive logout before remote work is offered.
+    LingerRequired,
     /// The server already holds as many devices or connections as it allows.
     Capacity,
     /// The server couldn't durably save the change, so nothing changed.
@@ -325,6 +327,9 @@ impl AccessFailure {
             ),
             Self::Disabled => {
                 format!("Allow devices to connect to \u{201C}{core}\u{201D} before inviting one.")
+            }
+            Self::LingerRequired => {
+                "Paired devices need SpaceTerm Core to keep running after you log out.".to_owned()
             }
             Self::Capacity => {
                 format!("\u{201C}{core}\u{201D} has reached its device or connection limit.")

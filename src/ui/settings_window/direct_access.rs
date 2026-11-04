@@ -62,6 +62,13 @@ enum Change {
     TurningOff,
 }
 
+/// The person's remote-work action, continued only after the local linger prerequisite holds.
+#[derive(Clone, Copy)]
+enum PairingAction {
+    Network { address: IpAddr, change: Change },
+    Invite,
+}
+
 impl Change {
     const fn progress(self) -> &'static str {
         match self {
@@ -177,6 +184,8 @@ pub(super) struct DirectAccess {
     /// What the presented server last reported, as SpaceTerm retained it.
     known: LastKnown,
     change: Option<Change>,
+    preparing_pairing: bool,
+    pairing_work: Option<Task<()>>,
     /// Why the person's latest step didn't take effect.
     problem: Option<AccessFailure>,
     /// Devices the person asked to remove that the server still lists.
@@ -194,6 +203,8 @@ impl DirectAccess {
             devices: None,
             known: LastKnown::default(),
             change: None,
+            preparing_pairing: false,
+            pairing_work: None,
             problem: None,
             unpairing: Vec::new(),
             poll: None,
@@ -208,6 +219,8 @@ impl DirectAccess {
         self.devices = None;
         self.known = LastKnown::default();
         self.change = None;
+        self.preparing_pairing = false;
+        self.pairing_work = None;
         self.problem = None;
         self.unpairing.clear();
         self.poll = None;
@@ -688,7 +701,7 @@ impl SettingsWindow {
                 items,
                 appearance,
             )
-            .disabled(change.is_some())
+            .disabled(change.is_some() || self.direct_access.preparing_pairing)
             .on_accept(move |acceptance, window, cx| {
                 let address = *acceptance.item_id();
                 let _ = owner.update(cx, |settings, cx| {
@@ -709,13 +722,18 @@ impl SettingsWindow {
         let switch = Switch::new(ACCESS_SELECTOR, name, on)
             .size(ToggleSize::Regular)
             .label_hidden(true)
-            .disabled(state.is_none() || change.is_some() || (!on && !can_turn_on))
+            .disabled(
+                state.is_none()
+                    || change.is_some()
+                    || self.direct_access.preparing_pairing
+                    || (!on && !can_turn_on),
+            )
             .debug_selector(ACCESS_SELECTOR)
             .on_change(move |change, window, cx| {
                 let enabled = change.requested();
                 let _ = owner.update(cx, |settings, cx| {
                     if enabled {
-                        settings.turn_on_network_access(None, cx);
+                        settings.turn_on_network_access(None, window, cx);
                     } else {
                         settings.confirm_turn_off(window, cx);
                     }
@@ -735,20 +753,33 @@ impl SettingsWindow {
 
     /// Moves access to `address` while it is on. While it is off, keeps `address` for when it
     /// turns on, and leaves access off. Either way the chosen port stays.
-    fn choose_address(&mut self, address: IpAddr, _: &mut Window, cx: &mut Context<Self>) {
+    fn choose_address(&mut self, address: IpAddr, window: &mut Window, cx: &mut Context<Self>) {
         let on = self
             .direct_access
             .state()
             .is_some_and(|state| state.policy.is_some());
         if on {
-            self.apply_address(address, true, Change::Moving, cx);
+            self.prepare_pairing(
+                PairingAction::Network {
+                    address,
+                    change: Change::Moving,
+                },
+                false,
+                window,
+                cx,
+            );
         } else {
             self.apply_address(address, false, Change::Choosing, cx);
         }
     }
 
     /// Turns access on at the address the person chose, or the one the server suggests.
-    fn turn_on_network_access(&mut self, chosen: Option<IpAddr>, cx: &mut Context<Self>) {
+    fn turn_on_network_access(
+        &mut self,
+        chosen: Option<IpAddr>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(address) = self
             .direct_access
             .state()
@@ -756,7 +787,140 @@ impl SettingsWindow {
         else {
             return;
         };
-        self.apply_address(address, true, Change::TurningOn, cx);
+        self.prepare_pairing(
+            PairingAction::Network {
+                address,
+                change: Change::TurningOn,
+            },
+            false,
+            window,
+            cx,
+        );
+    }
+
+    /// Reads linger at the action boundary, including when it changed while Settings was open.
+    /// Local-only startup and choosing an address while access is off need no authorization.
+    fn prepare_pairing(
+        &mut self,
+        action: PairingAction,
+        authorize: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.network_access_live()
+            || self.direct_access.preparing_pairing
+            || self.direct_access.change.is_some()
+        {
+            return;
+        }
+        let Some(service) = self.core_service.as_ref() else {
+            // Foreground Development has no service lifetime, under ADR 0030.
+            self.continue_pairing(action, window, cx);
+            return;
+        };
+        let control = service.control.clone();
+        let generation = self.direct_access.generation;
+        self.direct_access.preparing_pairing = true;
+        self.direct_access.problem = None;
+        self.direct_access.pairing_work = Some(cx.spawn_in(window, async move |settings, cx| {
+            let ready = cx
+                .background_executor()
+                .spawn(async move {
+                    let control = control?;
+                    if authorize {
+                        control.authorize_startup()?;
+                    }
+                    if control.linger()? == Some(false) {
+                        return Err(CoreError::AuthorizationRequired);
+                    }
+                    Ok(())
+                })
+                .await;
+            let _ = settings.update_in(cx, |settings, window, cx| {
+                if settings.direct_access.generation != generation {
+                    return;
+                }
+                settings.direct_access.preparing_pairing = false;
+                match ready {
+                    Ok(()) => settings.continue_pairing(action, window, cx),
+                    Err(CoreError::AuthorizationRequired) => {
+                        settings.direct_access.problem = Some(AccessFailure::LingerRequired);
+                        if !authorize {
+                            settings.offer_pairing_linger(action, generation, window, cx);
+                        }
+                    }
+                    Err(error) => {
+                        settings.direct_access.problem =
+                            Some(crate::machine_connection::direct::DirectError::from(error).into())
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn offer_pairing_linger(
+        &mut self,
+        action: PairingAction,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = cx.weak_entity();
+        let handle = window.window_handle();
+        let title = "Allow SpaceTerm Core to Keep Running?";
+        let result = Alert::new(
+            ModalId::new("settings-pairing-linger"),
+            title,
+            title,
+            AccessFailure::LingerRequired.explanation(""),
+            vec![
+                ModalAction::new(
+                    true,
+                    "Enable Linger",
+                    ModalActionRole::Affirmative,
+                    "settings-pairing-linger-enable",
+                ).with_emphasis(ModalActionEmphasis::Prominent),
+                ModalAction::new(
+                    false,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    "settings-pairing-linger-cancel",
+                ),
+            ],
+        )
+        .intent(AlertIntent::Warning)
+        .detail("This applies to every service your account runs and stays on after uninstalling SpaceTerm.")
+        .present(window, cx, move |outcome, cx| {
+            if !matches!(outcome, AlertOutcome::Activated { action_id: true, .. }) {
+                return;
+            }
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = owner.update(cx, |settings, cx| {
+                    if settings.direct_access.generation == generation {
+                        settings.prepare_pairing(action, true, window, cx);
+                    }
+                });
+            });
+        });
+        if result.is_err() {
+            eprintln!("failed to present the pairing linger authorization");
+        }
+    }
+
+    fn continue_pairing(
+        &mut self,
+        action: PairingAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            PairingAction::Network { address, change } => {
+                self.apply_address(address, true, change, cx);
+            }
+            PairingAction::Invite => self.show_invite_device(window, cx),
+        }
     }
 
     /// Saves `address`, with the port chosen before, and whether access is on.
@@ -959,7 +1123,11 @@ impl SettingsWindow {
                 Button::new(INVITE_SELECTOR, "Invite Device\u{2026}")
                     .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Regular)
-                    .disabled(!listening)
+                    .disabled(
+                        !listening
+                            || self.direct_access.preparing_pairing
+                            || self.direct_access.change.is_some(),
+                    )
                     .tab_stop(true)
                     .debug_selector(INVITE_SELECTOR)
                     .accessibility_description(SharedString::from(format!(
@@ -1054,6 +1222,10 @@ impl SettingsWindow {
 
     /// Opens Invite Device on the selected server.
     fn invite_device(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prepare_pairing(PairingAction::Invite, false, window, cx);
+    }
+
+    fn show_invite_device(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.network_access_live() {
             return;
         }
