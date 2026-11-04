@@ -117,7 +117,7 @@ impl SettingsWindow {
         };
         let owner = cx.weak_entity();
         let revoked = status == DirectRouteStatus::Refused(RefusalReason::Revoked);
-        let here = self.this_computer.to_lowercase();
+        let here = self.this_computer_phrase;
         let title = format!("Remove {name}?");
         let message = if revoked {
             format!("{name} already unpaired this device, so this removes it from {here}.")

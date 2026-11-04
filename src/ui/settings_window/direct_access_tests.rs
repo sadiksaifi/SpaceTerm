@@ -552,7 +552,7 @@ fn enabling_linger_continues_the_requested_invitation(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn cancelling_linux_authorization_never_invites_a_device(cx: &mut TestAppContext) {
+fn cancelling_linger_authorization_never_invites_a_device(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     let service = ScriptedService::with_boot_startup(Ok(running()));
     service.answer_prompt(Prompt::Cancel);

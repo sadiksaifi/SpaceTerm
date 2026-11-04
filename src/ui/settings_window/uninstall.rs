@@ -18,7 +18,7 @@ use spaceterm_ui::{
 };
 
 use crate::application_identity::ApplicationIdentity;
-use crate::installed_app::{Account, AppIdentity, InstalledApp, remove_directory};
+use crate::installed_app::{InstalledApp, remove_directory};
 use crate::machine_connection::CoreError;
 pub(crate) use crate::machine_connection::service::Data;
 use crate::machine_connection::service::{CliUninstall, Service};
@@ -153,7 +153,7 @@ pub(super) fn done_message(data: Data, here: &str) -> String {
 
 impl SettingsWindow {
     fn here(&self) -> String {
-        self.this_computer.to_lowercase()
+        self.this_computer_phrase.to_owned()
     }
 
     fn on_mac(&self) -> bool {
@@ -162,11 +162,7 @@ impl SettingsWindow {
 
     /// The Advanced row's description.
     pub(super) fn uninstall_description(&self) -> &'static str {
-        if self.on_mac() {
-            "Removes SpaceTerm and SpaceTerm Core from this Mac."
-        } else {
-            "Removes SpaceTerm and SpaceTerm Core from this computer."
-        }
+        self.uninstall_description
     }
 
     pub(super) fn render_uninstall(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -475,11 +471,7 @@ struct InstalledSpaceTerm {
 /// The removal this build offers, or `None` when it doesn't run from an installed app.
 pub(super) fn installed(service: &Service) -> Option<Arc<dyn SpaceTermRemoval>> {
     let identity = ApplicationIdentity::current().directory_name();
-    let app = InstalledApp::running(
-        &std::env::current_exe().ok()?,
-        &AppIdentity::for_identity(identity),
-        &Account::current(identity)?,
-    )?;
+    let app = InstalledApp::current(identity)?;
     Some(Arc::new(InstalledSpaceTerm {
         service: service.clone(),
         app,

@@ -82,6 +82,7 @@ fn desktop_profile(
                     "Move SpaceTerm to Applications",
                     "Install SpaceTerm in Applications to update.",
                 ),
+                uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this Mac.",
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::NativeMenu,

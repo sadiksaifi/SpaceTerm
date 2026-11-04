@@ -492,6 +492,10 @@ pub(crate) struct SettingsWindow {
     remote_admin: remote_admin::RemoteAdministration,
     /// How Servers names the server for this account on this computer.
     this_computer: &'static str,
+    /// This computer inside a sentence, such as "this computer".
+    this_computer_phrase: &'static str,
+    /// The Uninstall SpaceTerm row's description, in this desktop's wording.
+    uninstall_description: &'static str,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -765,7 +769,10 @@ impl SettingsWindow {
         let direct_routes = crate::ui::direct_machines::installed(cx)
             .map(|connections| direct_routes::DirectRouteRows::new(connections, cx));
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let this_computer = presentation.wording().this_computer;
+        let wording = presentation.wording();
+        let this_computer = wording.this_computer;
+        let this_computer_phrase = wording.this_computer_phrase;
+        let uninstall_description = wording.uninstall_description;
         let available_sections = SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -887,6 +894,8 @@ impl SettingsWindow {
             retained_status: std::collections::BTreeMap::new(),
             remote_admin: remote_admin::RemoteAdministration::default(),
             this_computer,
+            this_computer_phrase,
+            uninstall_description,
         };
         // Servers and Git present the retained selection, which loads after the window opens.
         cx.observe_global::<machine_selection::MachineSelection>(|settings, cx| {

@@ -60,8 +60,9 @@ impl Account {
     /// This account's directories for the build identity `identity`, or `None` without an
     /// absolute HOME or a SpaceTerm Core data root, so nothing is removed.
     pub fn current(identity: &str) -> Option<Self> {
-        let home = absolute(std::env::var_os("HOME"))?;
-        let data_home = absolute(std::env::var_os("XDG_DATA_HOME"))
+        let environment = crate::platform::app_directories::AppDirectoryEnvironment::capture();
+        let home = absolute(environment.home)?;
+        let data_home = absolute(environment.xdg_data_home)
             .unwrap_or_else(|| home.join(".local").join("share"));
         let core_data = spaceterm_core::core_data_root(identity).ok()?;
         Some(Self {
@@ -118,6 +119,16 @@ impl InstalledApp {
             tree_of(&executable, identity, account)
         }?;
         Some(Self::new(location, identity, account))
+    }
+
+    /// The installed app of the build identity `identity` that runs this process, or `None`
+    /// for a build that runs from elsewhere.
+    pub fn current(identity: &str) -> Option<Self> {
+        Self::running(
+            &std::env::current_exe().ok()?,
+            &AppIdentity::for_identity(identity),
+            &Account::current(identity)?,
+        )
     }
 
     /// The apps of `identity` installed where the installer puts them: on macOS

@@ -108,7 +108,8 @@ pub(crate) enum AccessFailure {
     PortInUse,
     /// Direct network access is off, so the server opens no invitation.
     Disabled,
-    /// Linux needs the account's services to survive logout before remote work is offered.
+    /// The machine must keep the account's services running after logout before it offers
+    /// remote work.
     LingerRequired,
     /// The server already holds as many devices or connections as it allows.
     Capacity,

@@ -120,7 +120,8 @@ pub(super) trait CoreServiceControl: Send + Sync {
     fn uninstall(&self) -> Result<ServiceStatus, CoreError>;
     /// When the service starts the server.
     fn startup(&self) -> ServiceStartup;
-    /// Whether Linux lets the account's services survive logout. Other platforms return None.
+    /// Whether the account's services keep running after logout on a system that needs linger.
+    /// Other systems return None.
     /// Reads the current policy without requesting authorization.
     fn linger(&self) -> Result<Option<bool>, CoreError>;
     /// Asks the operating system to let this account's services run at boot and after logout.

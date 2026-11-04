@@ -1125,7 +1125,7 @@ fn each_refused_machine_reads_as_one_sentence(cx: &mut TestAppContext) {
     }
 }
 
-/// Declining to let a Linux machine keep SpaceTerm Core running after logout stops setup with
+/// Declining to let a machine that needs linger keep SpaceTerm Core running after logout stops setup with
 /// the reason, and Try Again asks again.
 #[gpui::test]
 fn a_declined_linger_says_why_setup_stopped(cx: &mut TestAppContext) {

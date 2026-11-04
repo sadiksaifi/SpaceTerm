@@ -329,7 +329,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         if let Some(refusal) = preflight.refusal() {
             return Err(SetupFailure::Unsupported(refusal));
         }
-        // A remote Linux machine keeps SpaceTerm Core running after logout only with linger.
+        // A machine that needs linger keeps SpaceTerm Core running after logout only with it.
         if preflight.needs_linger() {
             session.authorize_linger(&ssh_cancellation)?;
         }
