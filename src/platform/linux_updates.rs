@@ -375,10 +375,7 @@ impl Shared {
             .map_err(|_| UpdateError::Check)?;
         let signature = self
             .transport
-            .get(
-                &self.target.feed_signature_url(),
-                MAX_FEED_SIGNATURE_BYTES,
-            )
+            .get(&self.target.feed_signature_url(), MAX_FEED_SIGNATURE_BYTES)
             .map_err(|_| UpdateError::Check)?;
         ReleaseFeed::verify(
             &self.trust,
@@ -1064,7 +1061,8 @@ mod tests {
         let fixture = installed("old");
         let signer = ReleaseSigner::new(3);
         let archive = release(b"new");
-        let (shared, receiver) = shared(&fixture, served(&signer, "1.1.0", &archive), signer.trust());
+        let (shared, receiver) =
+            shared(&fixture, served(&signer, "1.1.0", &archive), signer.trust());
         let generation = shared
             .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
             .unwrap();
@@ -1320,6 +1318,24 @@ mod tests {
         fs::rename(&installation.root, &previous).unwrap();
         assert!(installation.discard_unclaimed_staging().is_err());
         assert!(Installation::executable_in(&previous).is_file());
+    }
+
+    #[test]
+    fn release_appcast_enclosure_should_pass_desktop_admission() {
+        let Some(directory) = std::env::var_os("SPACETERM_RELEASE_FIXTURE").map(PathBuf::from)
+        else {
+            return;
+        };
+        let url = fs::read_to_string(directory.join("appcast-enclosure")).unwrap();
+        assert!(crate::updates::allows_release(
+            "1.0.1", "1.0.1", &url, false
+        ));
+        assert!(!crate::updates::allows_release(
+            "1.0.1",
+            "1.0.1",
+            &url.replace("macos-arm64", "darwin-arm64"),
+            false
+        ));
     }
 
     /// test:updater:linux signs a release with the release task and passes its directory here,

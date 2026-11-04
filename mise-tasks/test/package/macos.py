@@ -26,7 +26,7 @@ from tests.macos_signing_fixture import NAME, TEAM, certificate
 
 
 class PackageTests(unittest.TestCase):
-    """Preflight packages for real, and release packages as a dry run: ad hoc under the
+    """Preflight packages for real, and release packages as a dry run: ad hoc without the
     hardened runtime, signed with the fixture update key, not notarized."""
 
     @classmethod
@@ -320,6 +320,10 @@ int main(int argc, char **argv) {{
         ):
             # A dry run signs without the hardened runtime, so ad hoc code can load Sparkle.
             self.assertIn("flags=0x2(adhoc)", macos_codesign.details(code))
+        self.assertEqual(
+            self.run_command(str(app / "Contents/MacOS/SpaceTerm"), "--version").stdout,
+            "SpaceTerm 0.0.1\n",
+        )
         self.assertEqual(macos_codesign.signed_entitlements(app), {})
         self.assertIn("Dry run: notarization and stapling skipped for SpaceTerm.app", result.stdout)
         self.assertIn(

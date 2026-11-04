@@ -55,6 +55,10 @@ def run():
             protocols=release_feed.protocols(),
             archive=archive,
         )
+        # Feed the desktop admission gate the URL the appcast writer publishes.
+        (assets / "appcast-enclosure").write_text(
+            release_feed.download_url("1.0.1", release_feed.dmg_name("1.0.1"))
+        )
         executable.rename(assets / "executable")
         tests = subprocess.run(
             [

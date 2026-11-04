@@ -329,7 +329,10 @@ impl UpdateModel {
 #[cfg(any(spaceterm_sparkle, test))]
 pub(crate) fn allows_release(version: &str, display: &str, url: &str, informational: bool) -> bool {
     use spaceterm_core::update::{facts::Version, feed};
-    let Some(release) = Version::parse(version).ok().filter(|v| v.release().is_some()) else {
+    let Some(release) = Version::parse(version)
+        .ok()
+        .filter(|v| v.release().is_some())
+    else {
         return false;
     };
     !informational

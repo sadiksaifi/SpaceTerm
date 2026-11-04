@@ -243,10 +243,7 @@ mod tests {
     #[test]
     fn a_core_feed_or_a_future_feed_should_be_rejected() {
         let signer = ReleaseSigner::new(7);
-        for (target, published) in [
-            (FeedTarget::CORE_LINUX, NOW),
-            (TARGET, NOW + 3600),
-        ] {
+        for (target, published) in [(FeedTarget::CORE_LINUX, NOW), (TARGET, NOW + 3600)] {
             let (feed, signature) = signer.feed(target, "1.2.3", published, b"a");
             assert_eq!(
                 verified(&signer, &feed, &signature),
