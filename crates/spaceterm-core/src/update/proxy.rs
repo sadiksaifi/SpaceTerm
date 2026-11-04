@@ -107,10 +107,7 @@ pub fn write(data: &Path, proxy: Option<&Proxy>) -> Result<(), CoreError> {
                 proxy: proxy.clone(),
             },
         ),
-        None => match directory.remove(FILE_NAME) {
-            Ok(()) | Err(CoreError::NotSetUp) => Ok(()),
-            Err(error) => Err(error),
-        },
+        None => directory.remove_record(FILE_NAME),
     }
 }
 
