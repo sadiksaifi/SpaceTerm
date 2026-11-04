@@ -80,6 +80,30 @@ fn now() -> Result<u64, CoreError> {
         .as_secs())
 }
 
+/// The live Terminal Session IDs, read under the server's service lock. With `fence`, the
+/// server refuses every later Session start until `link` closes.
+#[cfg(feature = "client")]
+fn sessions(
+    link: &crate::connection::link::CoreLink,
+    fence: bool,
+) -> Result<Vec<crate::hierarchy::Id>, CoreError> {
+    if !matches!(link.health(), crate::connection::link::Health::Live) {
+        return Err(CoreError::Changed);
+    }
+    match link
+        .request(crate::protocol::Operation::Sessions { fence })
+        .map_err(|_| CoreError::Changed)?
+        .wait()
+    {
+        Ok(crate::protocol::ReplyBody::Sessions(mut sessions)) => {
+            sessions.sort_unstable();
+            Ok(sessions)
+        }
+        Ok(_) => Err(CoreError::Protocol),
+        Err(_) => Err(CoreError::Changed),
+    }
+}
+
 impl Service {
     /// Preview an uninstall or confirm its exact service, data choice and live Session
     /// observation. A preview is retained for ten minutes. Neither preview nor retention starts
@@ -155,23 +179,11 @@ impl Service {
         if status.running != initial.running {
             return Err(CoreError::Changed);
         }
-        let sessions = if let Some(link) = link {
-            if !matches!(link.health(), crate::connection::link::Health::Live) {
-                return Err(CoreError::Changed);
-            }
-            let (_, revision) = link.next_inventory(0).map_err(|_| CoreError::Protocol)?;
-            let close = revision
-                .inventory
-                .close
-                .as_ref()
-                .ok_or(CoreError::Protocol)?;
-            close
-                .sessions
-                .iter()
-                .filter_map(|pane| pane.session)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
+        // A confirmation fences Session starts in the same step that reads the Sessions it
+        // compares, and `link` holds that fence until the removal below finished.
+        let sessions = match &link {
+            Some(link) => sessions(link, matches!(request, Request::Confirm(_)))?,
+            None => Vec::new(),
         };
         let observation =
             activation::confirmation_token(&(&self.identity, &state, &status, &sessions, choice))?;
@@ -205,6 +217,7 @@ impl Service {
             });
         }
         self.remove_locked(&data, state.is_some(), status.running)?;
+        drop(link);
         drop(operation);
         drop(data);
         if choice == Data::Delete {

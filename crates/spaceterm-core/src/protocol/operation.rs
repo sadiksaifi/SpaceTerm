@@ -97,6 +97,11 @@ pub enum Operation {
     RunStatus { run: RunId },
     /// Retires a settled run's receipt.
     RunAcknowledge { run: RunId },
+    /// Replies the live Terminal Session IDs, read under the service lock. With `fence`, the
+    /// same hold also refuses every later Session start with `ServiceBusy` until this
+    /// connection closes, so an uninstall confirmed against these Sessions ends no other.
+    /// Account-local connections only.
+    Sessions { fence: bool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -124,6 +129,8 @@ pub enum ReplyBody {
     Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
     Observe(ObserveReply),
     Run(RunReply),
+    /// The live Terminal Session IDs, for `Operation::Sessions`.
+    Sessions(Vec<crate::hierarchy::Id>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

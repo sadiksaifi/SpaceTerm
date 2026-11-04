@@ -276,6 +276,7 @@ fn administration(operation: &Operation) -> bool {
     matches!(
         operation,
         Operation::Shutdown
+            | Operation::Sessions { .. }
             | Operation::Mutate {
                 mutation: crate::hierarchy::Mutation::EndAllSessions { .. },
                 ..
