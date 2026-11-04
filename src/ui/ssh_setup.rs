@@ -20,7 +20,7 @@ use crate::ssh::askpass::AskPassAttemptFactory;
 use spaceterm_core::provisioning::{MINIMUM_GLIBC, MINIMUM_MACOS, RestoredAccess, SetupRefusal};
 
 use crate::ssh::provisioning::{
-    IncompatibilityKind, RefusalKind, SetupApprovalHandler, SetupFailure, SetupOffer,
+    IncompatibilityKind, NetworkAfter, RefusalKind, SetupApprovalHandler, SetupFailure, SetupOffer,
     SetupOperation, SetupPhase, SshSetupBackend, UnavailableKind,
 };
 
@@ -177,19 +177,31 @@ pub(crate) fn phase_detail(phase: SetupPhase, name: &str) -> SharedString {
     }
 }
 
-/// What the sheet says while Try Again turns Network Access on `name` back on, until pairing
-/// begins.
-/// What a blocked UDP port left Network Access as, as SpaceTerm Core reported it.
-fn restored_access(access: RestoredAccess, n: &str) -> String {
-    match access {
-        RestoredAccess::Off => format!("Network Access on {n} is off again."),
-        RestoredAccess::On => format!("Network Access on {n} is on again at its earlier address."),
-        RestoredAccess::Unknown => {
-            format!("SpaceTerm couldn\u{2019}t read whether Network Access on {n} is on.")
+/// What setup left Network Access on `n` as after this computer couldn't reach SpaceTerm Core
+/// there, or `None` when setup didn't change it.
+fn network_after(network: NetworkAfter, n: &str) -> Option<String> {
+    Some(match network {
+        NetworkAfter::Unchanged => return None,
+        NetworkAfter::Restored(RestoredAccess::Off) => {
+            format!("Network Access on {n} is off again.")
         }
-    }
+        NetworkAfter::Restored(RestoredAccess::On) => {
+            format!("Network Access on {n} is on again at its earlier address.")
+        }
+        NetworkAfter::Restored(RestoredAccess::Kept) => {
+            format!("Network Access on {n} changed during setup, so SpaceTerm left it as it is.")
+        }
+        NetworkAfter::Restored(RestoredAccess::Failed) => format!(
+            "SpaceTerm couldn\u{2019}t turn Network Access on {n} back to how it was, so it\u{2019}s still on."
+        ),
+        NetworkAfter::Unconfirmed => format!(
+            "SpaceTerm couldn\u{2019}t confirm whether Network Access on {n} is back to how it was."
+        ),
+    })
 }
 
+/// What the sheet says while Try Again turns Network Access on `name` back on, from the moment
+/// the person allows it until pairing ends.
 pub(crate) fn restoring_network(name: &str) -> SharedString {
     format!("Turning Network Access on {name} back on\u{2026}").into()
 }
@@ -218,21 +230,30 @@ impl SetupProblem {
 pub(crate) fn problem(failure: &SetupFailure, name: &str) -> SetupProblem {
     let n = name;
     match failure {
-        SetupFailure::Unsupported(refusal) => SetupProblem {
-            explanation: refusal_sentence(*refusal, n).into(),
-            footnote: match refusal {
-                SetupRefusal::UdpBlocked { access, .. } => Some(restored_access(*access, n).into()),
-                _ => None,
-            },
-            retry: retry_refusal(*refusal),
+        SetupFailure::Unsupported(refusal) => {
+            SetupProblem::new(refusal_sentence(*refusal, n), retry_refusal(*refusal))
+        }
+        // A firewall is named only when SSH reached the same address and SpaceTerm Core
+        // listened there. Otherwise the address itself may be the one to change.
+        SetupFailure::Unreachable {
+            address,
+            network,
+            blocked_port,
+        } => SetupProblem {
+            explanation: match blocked_port {
+                Some(port) => format!(
+                    "SpaceTerm reached {n} at {} over SSH but not on UDP port {port}, so allow that port in {n}\u{2019}s firewall and try again.",
+                    address.host()
+                ),
+                None => format!(
+                    "SpaceTerm can\u{2019}t reach {n} at {}, so check the address and try again.",
+                    address.authority()
+                ),
+            }
+            .into(),
+            footnote: network_after(*network, n).map(Into::into),
+            retry: true,
         },
-        SetupFailure::Unreachable { address } => SetupProblem::new(
-            format!(
-                "SpaceTerm can\u{2019}t reach {n} at {}, so check the address and try again.",
-                address.authority()
-            ),
-            true,
-        ),
         // The kept build is changed only on that machine, after which trying again can help.
         SetupFailure::Incompatible(IncompatibilityKind::Installation) => SetupProblem::new(
             format!(
@@ -272,14 +293,12 @@ pub(crate) fn start_failure(name: &str) -> SetupProblem {
     )
 }
 
-/// Whether trying again can help: a login session, linger and a firewall can each change while
-/// the sheet stays open.
+/// Whether trying again can help: a login session and linger can each change while the sheet
+/// stays open.
 const fn retry_refusal(refusal: SetupRefusal) -> bool {
     matches!(
         refusal,
-        SetupRefusal::NobodyLoggedIn { .. }
-            | SetupRefusal::LingerDeclined
-            | SetupRefusal::UdpBlocked { .. }
+        SetupRefusal::NobodyLoggedIn { .. } | SetupRefusal::LingerDeclined
     )
 }
 
@@ -335,9 +354,6 @@ fn refusal_sentence(refusal: SetupRefusal, n: &str) -> String {
         }
         SetupRefusal::LingerDeclined => format!(
             "Setup stopped because {n} must let SpaceTerm Core keep running after you log out."
-        ),
-        SetupRefusal::UdpBlocked { port, .. } => format!(
-            "SpaceTerm can\u{2019}t reach {n} on UDP port {port}, so allow that port in {n}\u{2019}s firewall and try again."
         ),
     }
 }

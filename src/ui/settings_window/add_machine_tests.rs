@@ -21,6 +21,7 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
+use crate::ssh::provisioning::NetworkAfter;
 use crate::ssh::provisioning::{SetupOperation, SshSetupBackend, own_port};
 use crate::ui::appearance_runtime;
 use spaceterm_core::provisioning::{RestoredAccess, SetupRefusal};
@@ -36,6 +37,8 @@ enum Outcome {
     },
     /// Runs until the sheet cancels it, then reports the cancellation.
     UntilCancelled,
+    /// Asks about each of `offers` in turn, then runs until the sheet cancels it.
+    OffersThenUntilCancelled(Vec<SetupOffer>),
     /// Runs until the sheet cancels it, then reports `failure`, as a setup does whose earlier
     /// step had already changed the other computer.
     UntilCancelledThen(SetupFailure),
@@ -139,6 +142,17 @@ impl SshSetupBackend for Computers {
                     }
                 }
                 then
+            }
+            Some(Outcome::OffersThenUntilCancelled(offers)) => {
+                for offer in offers {
+                    let approved = request.approvals.approve(offer, cancellation);
+                    self.answered(approved);
+                    if !approved {
+                        return Err(SetupFailure::Cancelled);
+                    }
+                }
+                self.wait_for_cancellation(cancellation);
+                Err(SetupFailure::Cancelled)
             }
             Some(Outcome::UntilCancelled) | None => {
                 self.wait_for_cancellation(cancellation);
@@ -930,17 +944,119 @@ fn cancelling_setup_keeps_the_sheet_until_setup_stops(cx: &mut TestAppContext) {
     assert_eq!(sheet.selected(), Some(MachineChoice::Local));
 }
 
-/// A machine this computer can't reach over UDP names the port in one sentence and says that
-/// Network Access is off again. Try Again says it turns Network Access back on.
+fn unreachable(network: NetworkAfter, blocked_port: Option<u16>) -> SetupFailure {
+    SetupFailure::Unreachable {
+        address: address("10.1.2.3"),
+        network,
+        blocked_port,
+    }
+}
+
+/// With evidence that a firewall drops UDP, the sheet names the port in one sentence and says
+/// Network Access is off again. Back offers the address setup tried for editing.
 #[gpui::test]
-fn a_blocked_udp_port_is_named_and_try_again_turns_network_access_back_on(cx: &mut TestAppContext) {
+fn a_blocked_udp_port_is_named_and_back_offers_the_address(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![Outcome::Finish(Err(unreachable(
+                NetworkAfter::Restored(RestoredAccess::Off),
+                Some(9231),
+            )))]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+
+    assert!(sheet.says(
+        "SpaceTerm reached penguin at 10.1.2.3 over SSH but not on UDP port 9231, so allow that port in penguin\u{2019}s firewall and try again."
+    ));
+    assert!(sheet.says("Network Access on penguin is off again."));
+
+    sheet.choose(SheetAction::Back.selector());
+    assert_eq!(sheet.title(), "Add Machine");
+    assert_eq!(
+        sheet.typed(),
+        ("penguin".to_owned(), "10.1.2.3:9231".to_owned()),
+        "the address setup tried comes back for editing"
+    );
+}
+
+/// Without evidence that a firewall drops UDP, as through an SSH proxy, the sheet names the
+/// address and blames no firewall.
+#[gpui::test]
+fn an_unreachable_address_without_firewall_evidence_blames_no_firewall(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![Outcome::Finish(Err(unreachable(
+                NetworkAfter::Restored(RestoredAccess::Off),
+                None,
+            )))]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+
+    assert!(sheet.says(
+        "SpaceTerm can\u{2019}t reach penguin at 10.1.2.3:9231, so check the address and try again."
+    ));
+    assert!(!sheet.says("firewall"));
+    assert!(sheet.says("Network Access on penguin is off again."));
+}
+
+/// Try Again after Network Access went off again says it turns Network Access back on only once
+/// the person allows Network Access. Signing in and the earlier steps read as themselves.
+#[gpui::test]
+fn try_again_says_it_turns_network_access_back_on_only_once_allowed(cx: &mut TestAppContext) {
+    let network = SetupOffer::Network {
+        address: address("10.1.2.3"),
+        bind: "10.1.2.3:9231".parse().unwrap(),
+        current: None,
+        enabled: false,
+    };
     let (mut sheet, _) = open_settings(
         |_| {
             vec![
-                Outcome::Finish(Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
-                    port: 9231,
-                    access: RestoredAccess::Off,
-                }))),
+                Outcome::Finish(Err(unreachable(
+                    NetworkAfter::Restored(RestoredAccess::Off),
+                    Some(9231),
+                ))),
+                Outcome::OffersThenUntilCancelled(vec![network]),
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+
+    sheet.choose(SheetAction::TryAgain.selector());
+    sheet.settle(|sheet| sheet.title() == "Allow Network Access on penguin?");
+    assert!(!sheet.says("Turning Network Access on penguin back on\u{2026}"));
+
+    sheet.choose(SheetAction::AllowNetwork.selector());
+    sheet.settle(|sheet| sheet.says("Turning Network Access on penguin back on\u{2026}"));
+    sheet.choose(SheetAction::Cancel.selector());
+    sheet.settle(|sheet| !sheet.open());
+}
+
+/// While Try Again is still signing in and checking, before anything turns Network Access on,
+/// the sheet reads as setup's own steps.
+#[gpui::test]
+fn try_again_reads_as_its_own_steps_before_network_access_is_allowed(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![
+                Outcome::Finish(Err(unreachable(
+                    NetworkAfter::Restored(RestoredAccess::Off),
+                    Some(9231),
+                ))),
                 Outcome::UntilCancelled,
             ]
         },
@@ -951,14 +1067,10 @@ fn a_blocked_udp_port_is_named_and_try_again_turns_network_access_back_on(cx: &m
     sheet.choose(SheetAction::SetUp.selector());
     sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
 
-    assert!(sheet.says(
-        "SpaceTerm can\u{2019}t reach penguin on UDP port 9231, so allow that port in penguin\u{2019}s firewall and try again."
-    ));
-    assert!(sheet.says("Network Access on penguin is off again."));
-
     sheet.choose(SheetAction::TryAgain.selector());
-    sheet.settle(|sheet| sheet.says("Turning Network Access on penguin back on\u{2026}"));
-    assert_eq!(sheet.computers.asked().len(), 2, "Try Again sets up again");
+    sheet.settle(|sheet| sheet.says("Setting up penguin"));
+    assert!(sheet.says("Connecting over SSH\u{2026}"));
+    assert!(!sheet.says("Turning Network Access on penguin back on\u{2026}"));
     sheet.choose(SheetAction::Cancel.selector());
     sheet.settle(|sheet| !sheet.open());
 }
@@ -970,10 +1082,10 @@ fn a_blocked_udp_port_says_network_access_that_stayed_on_is_on(cx: &mut TestAppC
     let (mut sheet, _) = open_settings(
         |_| {
             vec![
-                Outcome::Finish(Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
-                    port: 9231,
-                    access: RestoredAccess::On,
-                }))),
+                Outcome::Finish(Err(unreachable(
+                    NetworkAfter::Restored(RestoredAccess::On),
+                    Some(9231),
+                ))),
                 Outcome::UntilCancelled,
             ]
         },
@@ -992,18 +1104,43 @@ fn a_blocked_udp_port_says_network_access_that_stayed_on_is_on(cx: &mut TestAppC
     assert!(!sheet.says("Turning Network Access on penguin back on\u{2026}"));
     sheet.choose(SheetAction::Cancel.selector());
     sheet.settle(|sheet| !sheet.open());
+}
 
-    let unknown = crate::ui::ssh_setup::problem(
-        &SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
-            port: 9231,
-            access: RestoredAccess::Unknown,
-        }),
-        "penguin",
-    );
-    assert_eq!(
-        unknown.footnote.as_deref(),
-        Some("SpaceTerm couldn\u{2019}t read whether Network Access on penguin is on.")
-    );
+/// Each outcome of putting Network Access back reads as its own footnote. A restore that a newer
+/// choice superseded, one that failed, and one SpaceTerm Core didn't confirm each say so.
+#[test]
+fn each_network_access_outcome_reads_as_its_own_footnote() {
+    for (network, footnote) in [
+        (NetworkAfter::Unchanged, None),
+        (
+            NetworkAfter::Restored(RestoredAccess::Off),
+            Some("Network Access on penguin is off again."),
+        ),
+        (
+            NetworkAfter::Restored(RestoredAccess::On),
+            Some("Network Access on penguin is on again at its earlier address."),
+        ),
+        (
+            NetworkAfter::Restored(RestoredAccess::Kept),
+            Some("Network Access on penguin changed during setup, so SpaceTerm left it as it is."),
+        ),
+        (
+            NetworkAfter::Restored(RestoredAccess::Failed),
+            Some(
+                "SpaceTerm couldn\u{2019}t turn Network Access on penguin back to how it was, so it\u{2019}s still on.",
+            ),
+        ),
+        (
+            NetworkAfter::Unconfirmed,
+            Some(
+                "SpaceTerm couldn\u{2019}t confirm whether Network Access on penguin is back to how it was.",
+            ),
+        ),
+    ] {
+        let problem = crate::ui::ssh_setup::problem(&unreachable(network, None), "penguin");
+        assert_eq!(problem.footnote.as_deref(), footnote, "{network:?}");
+        assert!(problem.retry);
+    }
 }
 
 /// A machine this computer can't reach at an address says where. Back offers that address for
@@ -1013,9 +1150,7 @@ fn back_after_an_unreachable_address_offers_it_for_editing(cx: &mut TestAppConte
     let (mut sheet, route) = open_settings(
         |route| {
             vec![
-                Outcome::Finish(Err(SetupFailure::Unreachable {
-                    address: address("10.1.2.3"),
-                })),
+                Outcome::Finish(Err(unreachable(NetworkAfter::Unchanged, None))),
                 Outcome::Finish(Ok(route)),
             ]
         },

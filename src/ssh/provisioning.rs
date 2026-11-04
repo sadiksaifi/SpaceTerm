@@ -31,7 +31,7 @@ use crate::{
 use sha2::{Digest, Sha256};
 use spaceterm_core::{
     CoreError,
-    direct::{DirectError, DirectStatus, MachinePin, NetworkPolicy},
+    direct::{DirectError, DirectStatus, ListenerState, MachinePin, NetworkPolicy},
     pane::control::ClientName,
     provisioning::{
         AccountDiscovery, NetworkRestore, RestoredAccess, SetupCancellation,
@@ -132,13 +132,30 @@ pub(crate) enum SetupFailure {
     Cancelled,
     /// Add Machine refuses this computer. Each refusal reads as one sentence.
     Unsupported(spaceterm_core::provisioning::SetupRefusal),
+    /// This computer couldn't reach SpaceTerm Core at `address` over UDP after setup paired it.
+    /// `network` is what setup left Network Access as. `blocked_port` is the UDP port when the
+    /// evidence points at a firewall: SSH reached `address` itself, with no proxy, and SpaceTerm
+    /// Core reported listening on that port.
     Unreachable {
         address: SetupAddress,
+        network: NetworkAfter,
+        blocked_port: Option<u16>,
     },
     Incompatible(IncompatibilityKind),
     Refused(RefusalKind),
     Unavailable(UnavailableKind),
     Unconfirmed(SetupOperation),
+}
+/// What setup left Network Access as when this computer couldn't reach SpaceTerm Core.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NetworkAfter {
+    /// Setup didn't change Network Access.
+    Unchanged,
+    /// Setup changed Network Access and revoked its pairing. SpaceTerm Core then did this with
+    /// the Network Access setup changed.
+    Restored(RestoredAccess),
+    /// Setup changed Network Access, and SpaceTerm Core didn't confirm the cancellation.
+    Unconfirmed,
 }
 pub(crate) trait SshSetupBackend: Send + Sync {
     fn setup(
@@ -295,6 +312,10 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             Some(address) => address,
             None => resolved_setup_address(&resolved)?,
         };
+        // SSH dials the address setup advertises only when the person entered none and the
+        // configuration names no proxy. Only then can a UDP failure there be blamed on a firewall.
+        let ssh_dials_address =
+            request.address.is_none() && !resolved_through_proxy(&resolved.stdout);
         let master_command = SshCommandContext::setup_master(
             self.config.executable.clone(),
             &configuration,
@@ -549,7 +570,9 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             Ok(())
         });
         if let Err(error) = prepared_reply {
-            let confirmed = session.cancel_enrollment(prepared.operation(), &status.pin, None);
+            let confirmed = session
+                .cancel_enrollment(prepared.operation(), &status.pin, None)
+                .is_some();
             drop(session);
             if confirmed {
                 let _ = self.direct.confirm_setup_cancelled(&prepared);
@@ -578,7 +601,9 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             });
         let cancelled = cancellation.is_cancelled();
         let cleanup_confirmed = (enrolled.is_err() || cancelled)
-            && session.cancel_enrollment(prepared.operation(), &status.pin, None);
+            && session
+                .cancel_enrollment(prepared.operation(), &status.pin, None)
+                .is_some();
         // When setup changed Network Access, SSH stays open through the QUIC check, so a blocked
         // UDP port can put Network Access back. Otherwise the broker and socket close first.
         let changed_network =
@@ -620,24 +645,47 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         if failure != SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable) {
             return Err(failure);
         }
-        // No QUIC packet reached SpaceTerm Core. Setup revokes its pairing and puts Network
-        // Access back as it was, which Try Again changes again.
-        let Some(session) = session.filter(|session| {
-            session.cancel_enrollment(
-                prepared.operation(),
-                &status.pin,
-                Some(NetworkRestore::before(&status)),
-            )
-        }) else {
-            return Err(SetupFailure::Unreachable { address });
+        // No QUIC packet reached SpaceTerm Core. When setup changed Network Access, it revokes its
+        // pairing and asks SpaceTerm Core to put Network Access back in the same step, which Try
+        // Again changes again.
+        let Some(session) = session else {
+            return Err(SetupFailure::Unreachable {
+                address,
+                network: NetworkAfter::Unchanged,
+                blocked_port: None,
+            });
         };
-        let _ = self.direct.confirm_setup_cancelled(&prepared);
-        // The refusal says what is on now, as SpaceTerm Core reports it after the restore.
-        let restored = session.direct_status(&CancellationToken::default()).ok();
-        Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
-            port: bind.port(),
-            access: RestoredAccess::read(restored.as_ref()),
-        }))
+        // Whether SpaceTerm Core listens on the port this computer dialed, read before the
+        // restore changes it.
+        let listening = session
+            .direct_status(&CancellationToken::default())
+            .is_ok_and(|current| {
+                matches!(current.listener, ListenerState::Listening { addr }
+                    if addr.port() == bind.port() && (addr.ip().is_unspecified() || addr == bind))
+            });
+        let network = match session.cancel_enrollment(
+            prepared.operation(),
+            &status.pin,
+            Some(NetworkRestore::new(
+                NetworkPolicy::new(bind)
+                    .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?,
+                &status,
+            )),
+        ) {
+            Some(Some(restored)) => {
+                let _ = self.direct.confirm_setup_cancelled(&prepared);
+                NetworkAfter::Restored(restored)
+            }
+            _ => {
+                let _ = self.direct.cancel_setup(&prepared);
+                NetworkAfter::Unconfirmed
+            }
+        };
+        Err(SetupFailure::Unreachable {
+            address,
+            network,
+            blocked_port: (ssh_dials_address && listening).then_some(bind.port()),
+        })
     }
 }
 
@@ -737,20 +785,21 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         }
         Ok(output)
     }
-    /// Revokes this setup's pairing, and restores Network Access when `restore` says how it
-    /// was. True once SpaceTerm Core confirmed both.
+    /// Revokes this setup's pairing, and restores Network Access in the same step when
+    /// `restore` says how it was. `Some` once SpaceTerm Core confirmed the cancellation, holding
+    /// what it did with Network Access when `restore` asked it to.
     fn cancel_enrollment(
         &self,
         operation: [u8; 32],
         pin: &MachinePin,
         restore: Option<NetworkRestore>,
-    ) -> bool {
+    ) -> Option<Option<RestoredAccess>> {
         let Ok(command) = ValidatedRemoteShellCommand::core_script(&self.config.bootstrap.locator(
             identity(),
             "setup-direct-cancel",
             false,
         )) else {
-            return false;
+            return None;
         };
         let Ok(command) = SshCommandContext::setup_channel(
             self.config.executable.clone(),
@@ -759,14 +808,15 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             self.destination,
             command,
         ) else {
-            return false;
+            return None;
         };
+        let asked = restore.is_some();
         let Ok(input) = serde_json::to_vec(&SetupCancellation {
             operation,
             pin: pin.clone(),
             restore,
         }) else {
-            return false;
+            return None;
         };
         let result = run_captured_effect(
             &self.config.adapter,
@@ -777,14 +827,16 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             &CancellationToken::default(),
             Instant::now() + OBSERVATION,
         );
-        match result {
-            Ok(output) if output.exit.is_success() => {
-                serde_json::from_slice::<SetupCancellationReply>(&output.stdout).is_ok_and(
-                    |reply| reply.cancelled && reply.operation == operation && reply.pin == *pin,
-                )
-            }
-            _ => false,
-        }
+        let output = result.ok().filter(|output| output.exit.is_success())?;
+        serde_json::from_slice::<SetupCancellationReply>(&output.stdout)
+            .ok()
+            .filter(|reply| {
+                reply.cancelled
+                    && reply.operation == operation
+                    && reply.pin == *pin
+                    && reply.restored.is_some() == asked
+            })
+            .map(|reply| reply.restored)
     }
     fn discover(&self, cancellation: &CancellationToken) -> Result<Discovery, SetupFailure> {
         parse_discovery(&self.read("ssh-discover", cancellation)?.stdout)
@@ -970,6 +1022,18 @@ fn resolved_setup_address(output: &CapturedProcessOutput) -> Result<SetupAddress
         own_port(),
     )
     .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))
+}
+
+/// Whether `ssh -G` output names a proxy, so SSH reaches the destination through another host.
+/// Output that isn't text counts as proxied, so it never blames a firewall.
+fn resolved_through_proxy(stdout: &[u8]) -> bool {
+    std::str::from_utf8(stdout).map_or(true, |output| {
+        output.lines().any(|line| {
+            line.split_once(' ').is_some_and(|(key, value)| {
+                matches!(key, "proxyjump" | "proxycommand") && !value.eq_ignore_ascii_case("none")
+            })
+        })
+    })
 }
 
 /// The UDP port this desktop's build identity uses unless an address names one.
@@ -1203,3 +1267,24 @@ fn validate_discovery(discovery: &AccountDiscovery) -> Result<(), SetupFailure> 
 ))]
 #[path = "../platform/unix_adapter_tests/core_setup.rs"]
 mod unix_adapter_tests;
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::resolved_through_proxy;
+
+    /// Only a configuration without a proxy lets setup blame a firewall for blocked UDP.
+    #[test]
+    fn a_proxy_in_the_resolved_configuration_is_detected() {
+        assert!(!resolved_through_proxy(b"hostname penguin\nport 22\n"));
+        assert!(!resolved_through_proxy(
+            b"hostname penguin\nport 22\nproxycommand none\n"
+        ));
+        assert!(resolved_through_proxy(
+            b"hostname penguin\nport 22\nproxyjump bastion\n"
+        ));
+        assert!(resolved_through_proxy(
+            b"hostname penguin\nproxycommand ssh -W %h:%p bastion\n"
+        ));
+        assert!(resolved_through_proxy(&[0xff, 0xfe]));
+    }
+}

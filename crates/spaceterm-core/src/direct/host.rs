@@ -214,8 +214,9 @@ impl State {
     /// whose address can't be bound leaves the current listener and its connections as they are.
     /// A listener whose saved Network Access covers the address it listens at stays, widened in place
     /// when Network Access widens from one address to every interface at the same port. Otherwise a new
-    /// listener binds now. Only this server's own listener on every interface can hold an
-    /// address it covers, so a narrowing that it blocks defers the bind until it retires.
+    /// listener binds now. A bind that one of this server's own listeners blocks, such as a
+    /// narrowing from every interface or a widening past a retired listener of the same port,
+    /// defers until that listener retires.
     fn prepare_listener(&mut self, next: &storage::Record) -> Result<Prepared, DirectError> {
         let Some(policy) = next.policy.clone().filter(|_| next.enabled) else {
             return Ok(Prepared::Off);
@@ -261,14 +262,14 @@ impl State {
             Err(Bind::Other) => Err(DirectError::AddressUnavailable),
         }
     }
-    /// Whether one of this server's own listeners on every interface holds `address`'s port.
-    /// No other socket can then hold `address`, so it binds once that listener retires.
+    /// Whether one of this server's own listeners, current or retired, holds `address`'s port
+    /// at an address that overlaps it: the same address, or every interface on either side. The
+    /// bind then waits for that listener to retire instead of blaming another app.
     fn holds(&self, address: std::net::SocketAddr) -> bool {
-        !address.ip().is_unspecified()
-            && self.listener.iter().chain(&self.retired).any(|listener| {
-                let own = listener.address();
-                own.port() == address.port() && own.ip().is_unspecified()
-            })
+        self.listener
+            .iter()
+            .chain(&self.retired)
+            .any(|listener| overlaps(listener.address(), address))
     }
     /// Moves to the listener [`Self::prepare_listener`] readied, after the record committed.
     /// Anything but `Keep` starts a new generation, which ends every paired connection.
@@ -884,7 +885,11 @@ impl State {
                     client: info.client,
                 })
             }
-            Management::CancelSetup { pin, operation } => {
+            Management::CancelSetup {
+                pin,
+                operation,
+                restore,
+            } => {
                 if actor.is_some() {
                     return Err(DirectError::AuthenticationRefused);
                 }
@@ -894,52 +899,32 @@ impl State {
                 if operation == [0; 32] {
                     return Err(DirectError::InvalidRequest);
                 }
-                if let Some(device) = self.record.devices.iter().find(|d| d.claim == operation) {
+                let clients = if let Some(device) =
+                    self.record.devices.iter().find(|d| d.claim == operation)
+                {
                     let pairing = device.info.pairing;
                     let cancellation = crypto::hash(&wire::transcript(
                         "cancel", &self.pin, &operation, &pairing,
                     )?);
-                    let (_, clients) = self.revoke(Some(pairing), cancellation, pairing)?;
-                    return Ok((
-                        ManagementReply::SetupCancelled {
-                            pin: self.pin.clone(),
-                            operation,
-                        },
-                        clients,
-                    ));
-                }
-                self.cancel_reservation(operation, None, true)?;
-                ManagementReply::SetupCancelled {
-                    pin: self.pin.clone(),
-                    operation,
-                }
+                    self.revoke(Some(pairing), cancellation, pairing)?.1
+                } else {
+                    self.cancel_reservation(operation, None, true)?;
+                    Vec::new()
+                };
+                // The pairing is gone either way. The restore runs under the same lock, so no
+                // other change lands between the comparison and the write.
+                let restored = restore.map(|restore| self.restore_network(&operation, restore));
+                return Ok((
+                    ManagementReply::SetupCancelled {
+                        pin: self.pin.clone(),
+                        operation,
+                        restored,
+                    },
+                    clients,
+                ));
             }
             Management::SetPolicy { policy, enabled } => {
-                if enabled && policy.is_none() && self.record.policy.is_none() {
-                    return Err(DirectError::InvalidRequest);
-                }
-                let policy = policy
-                    .map(|policy| NetworkPolicy::new(policy.bind))
-                    .transpose()?;
-                // One address must belong to this machine. Every interface always does.
-                if let Some(policy) = &policy
-                    && !policy.is_every_interface()
-                    && !network::snapshot(self.network.as_ref())?.contains(&policy.bind.ip())
-                {
-                    return Err(DirectError::InvalidAddress);
-                }
-                let generation = crypto::random()?;
-                let mut next = self.record.clone();
-                if let Some(policy) = policy {
-                    next.policy = Some(policy);
-                }
-                next.enabled = enabled;
-                // Network administration runs with account-local authority, over IPC or for a
-                // previewed service-lane change. A change that keeps no listener retires all
-                // QUIC authority.
-                let prepared = self.prepare_listener(&next)?;
-                self.commit(next)?;
-                self.switch_listener(prepared, generation);
+                self.set_policy(policy, enabled)?;
                 ManagementReply::Status(self.status())
             }
             Management::Invite { advertise } => {
@@ -1063,6 +1048,75 @@ impl State {
             }
         };
         Ok((reply, Vec::new()))
+    }
+    /// Sets Network Access to `policy`, or keeps the configured one when `policy` is `None`, and
+    /// turns it on or off.
+    fn set_policy(
+        &mut self,
+        policy: Option<NetworkPolicy>,
+        enabled: bool,
+    ) -> Result<(), DirectError> {
+        if enabled && policy.is_none() && self.record.policy.is_none() {
+            return Err(DirectError::InvalidRequest);
+        }
+        let policy = policy
+            .map(|policy| NetworkPolicy::new(policy.bind))
+            .transpose()?;
+        // One address must belong to this machine. Every interface always does.
+        if let Some(policy) = &policy
+            && !policy.is_every_interface()
+            && !network::snapshot(self.network.as_ref())?.contains(&policy.bind.ip())
+        {
+            return Err(DirectError::InvalidAddress);
+        }
+        let generation = crypto::random()?;
+        let mut next = self.record.clone();
+        if let Some(policy) = policy {
+            next.policy = Some(policy);
+        }
+        next.enabled = enabled;
+        // Network administration runs with account-local authority, over IPC or for a
+        // previewed service-lane change. A change that keeps no listener retires all
+        // QUIC authority.
+        let prepared = self.prepare_listener(&next)?;
+        self.commit(next)?;
+        self.switch_listener(prepared, generation);
+        Ok(())
+    }
+    /// Puts Network Access back as `restore` says it was before the setup `operation`, only
+    /// while it is still what that setup installed and no later setup began. Network Access that
+    /// is already as it was reads as put back, so a repeated cancellation agrees with the first.
+    fn restore_network(
+        &mut self,
+        operation: &OperationId,
+        restore: super::NetworkRestore,
+    ) -> super::RestoredAccess {
+        use super::RestoredAccess;
+        let put_back = |record: &storage::Record| {
+            record.enabled == restore.enabled
+                && (restore.policy.is_none() || record.policy == restore.policy)
+        };
+        let outcome = |enabled: bool| {
+            if enabled {
+                RestoredAccess::On
+            } else {
+                RestoredAccess::Off
+            }
+        };
+        if put_back(&self.record) {
+            return outcome(self.record.enabled);
+        }
+        let installed = self.record.enabled
+            && self.record.policy.as_ref() == Some(&restore.installed)
+            && Some(self.record.setup_generation) == setup_generation(operation).checked_add(1);
+        if !installed {
+            return RestoredAccess::Kept;
+        }
+        // An earlier policy is kept as the configured one even while access is off.
+        match self.set_policy(restore.policy, restore.enabled) {
+            Ok(()) => outcome(self.record.enabled),
+            Err(_) => RestoredAccess::Failed,
+        }
     }
     fn check_setup(
         &self,
@@ -1825,6 +1879,13 @@ fn after_retirement(
     }
 }
 
+/// Whether a listener at `own` blocks a bind at `address`: the same port at the same address, or
+/// every interface on either side.
+fn overlaps(own: std::net::SocketAddr, address: std::net::SocketAddr) -> bool {
+    own.port() == address.port()
+        && (own.ip().is_unspecified() || address.ip().is_unspecified() || own.ip() == address.ip())
+}
+
 /// What a test runs as an admission reaches a [`Pause`], with the admission's Client Identity.
 #[cfg(test)]
 pub(super) type PauseHook = Arc<dyn Fn(Pause, [u8; 32]) + Send + Sync>;
@@ -1908,6 +1969,19 @@ mod agent_tests;
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    /// A retired listener at one address of the port blocks a widening to every interface at
+    /// that port. The bind is this Core's own, so it waits instead of blaming another app.
+    #[test]
+    fn a_listener_of_the_same_port_overlaps_every_interface_and_its_own_address() {
+        let at = |address: &str| address.parse::<std::net::SocketAddr>().unwrap();
+        assert!(overlaps(at("192.0.2.8:9231"), at("0.0.0.0:9231")));
+        assert!(overlaps(at("0.0.0.0:9231"), at("192.0.2.8:9231")));
+        assert!(overlaps(at("[::]:9231"), at("0.0.0.0:9231")));
+        assert!(overlaps(at("192.0.2.8:9231"), at("192.0.2.8:9231")));
+        assert!(!overlaps(at("192.0.2.8:9231"), at("192.0.2.9:9231")));
+        assert!(!overlaps(at("0.0.0.0:9231"), at("0.0.0.0:9232")));
+    }
 
     pub(crate) fn reserve_policy(state: &Shared, ip: std::net::IpAddr) -> NetworkPolicy {
         let mut state = state.lock().unwrap();
