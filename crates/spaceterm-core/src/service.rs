@@ -732,7 +732,8 @@ impl Service {
         });
         self.resume_activation(data)?;
         let mut state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
-        if recovering {
+        // Recovery settles an interrupted activation. An uninstall still removes the service.
+        if recovering && action != control::Action::Uninstall {
             return self.snapshot(&state);
         }
         if action == control::Action::Uninstall && !state.installed && !state.removing {

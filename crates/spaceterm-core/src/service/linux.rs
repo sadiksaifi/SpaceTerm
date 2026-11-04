@@ -433,6 +433,8 @@ impl Supervisor for UserService {
         Duration::from_secs(90)
     }
     fn uninstall(&self, runtime: &Path) -> Result<(), CoreError> {
+        // The startup link goes first, so systemd never keeps a link to a removed unit.
+        self.startup(false)?;
         self.registration().remove(&self.contents(runtime)?)?;
         self.systemctl(&["daemon-reload"])?;
         Ok(())
