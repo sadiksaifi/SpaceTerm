@@ -736,7 +736,7 @@ fn an_address_another_app_holds_is_refused_before_the_current_listener_retires()
             enabled: true,
             policy: Some(NetworkPolicy::new(elsewhere).unwrap()),
         }),
-        Err(DirectError::AddressUnavailable)
+        Err(DirectError::PortInUse)
     ));
     assert_eq!(policy(&fixture), (Some(at), true));
     assert!(call(&mut stream, &LaneRequest::Status).is_ok());

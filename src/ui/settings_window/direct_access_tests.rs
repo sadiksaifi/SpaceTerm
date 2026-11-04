@@ -456,9 +456,13 @@ fn turning_on_listens_at_the_address_the_core_suggests_on_spaceterms_port(cx: &m
 
     click(ACCESS_SELECTOR, cx);
 
-    assert_eq!(access.policies(), vec![policy("192.168.1.21:9231")]);
+    let port = crate::machine_connection::direct::default_port(
+        crate::application_identity::ApplicationIdentity::current().directory_name(),
+    );
+    let bind = format!("192.168.1.21:{port}");
+    assert_eq!(access.policies(), vec![policy(&bind)]);
     assert!(access_on(&window, cx));
-    assert!(reads("Listening on 192.168.1.21:9231.", cx));
+    assert!(reads(&format!("Listening on {bind}."), cx));
 }
 
 #[gpui::test]

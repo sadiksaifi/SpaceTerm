@@ -726,7 +726,7 @@ fn correcting_a_refused_address_keeps_focus_in_it(cx: &mut TestAppContext) {
     sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
     assert_eq!(
         sheet.computers.asked()[0].address.as_deref(),
-        Some("studio.local:9231")
+        Some(format!("studio.local:{}", own_port()).as_str())
     );
 }
 
@@ -781,7 +781,7 @@ fn an_entered_network_name_reaches_setup_with_its_port(cx: &mut TestAppContext) 
 
     assert_eq!(
         sheet.computers.asked()[0].address.as_deref(),
-        Some("penguin.tail1234.ts.net:9231")
+        Some(format!("penguin.tail1234.ts.net:{}", own_port()).as_str())
     );
 }
 
@@ -1425,7 +1425,10 @@ fn an_entered_invitation_address_replaces_only_where_join_connects(cx: &mut Test
         panic!("the joined server is selected")
     };
     let route = direct.route(&route).expect("the joined server is saved");
-    assert_eq!(route.endpoint, "quic://public.example:9231");
+    assert_eq!(
+        route.endpoint,
+        format!("quic://public.example:{}", own_port())
+    );
     assert_eq!(route.paired.pin, pin, "the invitation's pin stays");
 }
 

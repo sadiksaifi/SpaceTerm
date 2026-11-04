@@ -18,7 +18,7 @@ pub enum Data {
 /// An uninstall preview carries only bounded service effects and a nonsecret approval token.
 #[cfg(feature = "client")]
 #[derive(Debug)]
-pub enum CliUninstall {
+pub enum CoreUninstall {
     Preview {
         token: String,
         expires_at: u64,
@@ -41,11 +41,11 @@ impl Service {
     /// observation. A preview is retained for ten minutes. Neither preview nor retention starts
     /// a server. A stopped Core uninstalls without a preview.
     #[cfg(feature = "client")]
-    pub fn uninstall_cli(
+    pub fn uninstall_core(
         &self,
         confirmation: Option<&str>,
         choice: Data,
-    ) -> Result<CliUninstall, CoreError> {
+    ) -> Result<CoreUninstall, CoreError> {
         // Admission waits for the service lock, so establish this passive link first.
         let initial = self.passive_status()?;
         let link = if initial.running {
@@ -61,7 +61,7 @@ impl Service {
             // Nothing was ever set up. Only a launcher can remain.
             Err(CoreError::NotSetUp) => {
                 self.remove_files()?;
-                return Ok(CliUninstall::Completed);
+                return Ok(CoreUninstall::Completed);
             }
             Err(error) => return Err(error),
         };
@@ -98,7 +98,7 @@ impl Service {
             .as_secs();
         if let Some(token) = confirmation {
             let preview = data
-                .read_json::<UninstallConfirmation>("cli-uninstall.json")?
+                .read_json::<UninstallConfirmation>("uninstall.json")?
                 .ok_or(CoreError::Changed)?;
             if preview.token != token
                 || preview.observation != observation
@@ -106,7 +106,7 @@ impl Service {
             {
                 return Err(CoreError::Changed);
             }
-            data.remove(c"cli-uninstall.json")?;
+            data.remove(c"uninstall.json")?;
         } else if status.running {
             let token = format!(
                 "c1-{}",
@@ -117,14 +117,14 @@ impl Service {
             );
             let expires_at = now + 600;
             data.write_json(
-                c"cli-uninstall.json",
+                c"uninstall.json",
                 &UninstallConfirmation {
                     token: token.clone(),
                     expires_at,
                     observation,
                 },
             )?;
-            return Ok(CliUninstall::Preview {
+            return Ok(CoreUninstall::Preview {
                 token,
                 expires_at,
                 sessions,
@@ -136,7 +136,7 @@ impl Service {
         if choice == Data::Delete {
             self.remove_data_root()?;
         }
-        Ok(CliUninstall::Completed)
+        Ok(CoreUninstall::Completed)
     }
 
     /// Remove Machine's uninstall, run by the helper after it stopped the Core: revokes every

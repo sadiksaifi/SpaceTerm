@@ -255,9 +255,14 @@ fn invitations_advertise_dns_and_nat_authorities_without_local_interface_checks(
     let fixture = fixture(network(&["10.0.0.5", "127.0.0.1"], &["10.0.0.5"]));
     for listener in ["0.0.0.0", "127.0.0.1"] {
         fixture.listen_at(listener.parse().unwrap());
+        // Without a port, the invitation names the build identity's own.
+        let own = format!(
+            "quic://203.0.113.5:{}",
+            crate::direct::default_port(&fixture.state.lock().unwrap().pin.build)
+        );
         for (authority, expected) in [
             ("Penguin.EXAMPLE:9443", "quic://penguin.example:9443"),
-            ("203.0.113.5", "quic://203.0.113.5:9231"),
+            ("203.0.113.5", own.as_str()),
             ("[2001:db8::9]:9443", "quic://[2001:db8::9]:9443"),
         ] {
             let ManagementReply::Invitation(text) = fixture

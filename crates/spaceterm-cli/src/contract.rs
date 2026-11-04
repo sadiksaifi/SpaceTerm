@@ -851,7 +851,7 @@ codes! {
     DiskFull = "disk_full", Failed, true, "SpaceTerm Core couldn\u{2019}t install the update because the disk is full. Nothing changed.";
     DownloadFailed = "download_failed", Failed, true, "SpaceTerm Core couldn\u{2019}t download the update. Nothing changed.";
     AuthorizationRequired = "authorization_required", ActionRequired, false, "Administrator authorization is required.";
-    LingerRequired = "linger_required", ActionRequired, false, "Paired devices need SpaceTerm Core to keep running after you log out. Authorize it with: spaceterm setup";
+    LingerRequired = "linger_required", ActionRequired, false, "Paired devices need SpaceTerm Core to keep running after you log out. Authorize it with: spaceterm setup.";
     NotRunning = "not_running", Unavailable, true, "SpaceTerm Core is not running.";
     StorageUnavailable = "storage_unavailable", Unavailable, false, "Storage is unavailable.";
     IncompatibleState = "incompatible_state", Unavailable, false, "The saved state is from an incompatible SpaceTerm.";

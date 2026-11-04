@@ -668,6 +668,38 @@ fn a_confirmed_stop_is_admitted_once_behind_the_fence() {
 }
 
 #[test]
+fn a_paired_device_removes_the_machine_with_one_admitted_uninstall() {
+    with_lane(|lane| {
+        lane.host.sessions.lock().unwrap().push([3; 32]);
+        let (token, effects) = preview(&lane.lane, LaneAction::Uninstall);
+        assert_eq!(effects.ends_sessions, 1);
+        assert!(!effects.start_requires_machine);
+        assert!(matches!(
+            execute(&lane.lane, LaneAction::Uninstall, &token, 1),
+            LaneReply::Accepted { .. }
+        ));
+        assert!(lane.host.fenced.load(Ordering::SeqCst));
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        let LaneReply::Receipt(receipt) = lane.lane.answer(
+            LaneRequest::Resolve {
+                operation: OperationId([1; 16]).to_string(),
+            },
+            &ACTOR,
+        ) else {
+            panic!("expected a receipt");
+        };
+        assert_eq!(receipt.action, LaneAction::Uninstall);
+        assert_eq!(
+            serde_json::to_value(LaneRequest::Preview {
+                action: LaneAction::Uninstall
+            })
+            .unwrap(),
+            serde_json::json!({"request": "preview", "action": {"action": "uninstall"}})
+        );
+    });
+}
+
+#[test]
 fn a_spent_foreign_or_changed_observation_token_is_refused_as_changed() {
     with_lane(|lane| {
         let (token, _) = preview(&lane.lane, LaneAction::Restart);

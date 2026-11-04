@@ -20,7 +20,7 @@ pub use runtime::{
     verify_candidate_bytes,
 };
 #[cfg(feature = "client")]
-pub use uninstall::CliUninstall;
+pub use uninstall::CoreUninstall;
 pub use uninstall::Data;
 
 use crate::{
@@ -2343,6 +2343,68 @@ mod tests {
                     assert!(service.start().unwrap().running);
                     ready(startup.run(no_provision, || false).unwrap());
                     assert_eq!(supervisor.starts.load(Ordering::Relaxed), 2);
+                },
+            );
+        }
+
+        #[test]
+        fn uninstall_removes_service_launcher_and_versions_and_keeps_data_unless_asked() {
+            for choice in [Data::Keep, Data::Delete] {
+                let fixture = Fixture::new();
+                fresh(&fixture);
+                let supervisor = AccountSupervisor::new(fixture.paths.clone());
+                let service = supervisor.service();
+                runtime::test_support::with_artifact(
+                    &fixture.root.join("artifact"),
+                    &fixture.paths.identity,
+                    |archive, signature| {
+                        let startup = LocalStartup::with_service(service.clone()).unwrap();
+                        ready(
+                            startup
+                                .run(|| provision(&service, archive, signature), || false)
+                                .unwrap(),
+                        );
+                        service.stop().unwrap();
+                        assert!(matches!(
+                            service.uninstall_core(None, choice),
+                            Ok(CoreUninstall::Completed)
+                        ));
+                        assert!(supervisor.registered.lock().unwrap().is_none());
+                        let data = &fixture.paths.data;
+                        assert!(!data.join("installations").exists());
+                        assert!(!data.join("service.json").exists());
+                        assert_eq!(data.join("identity.json").exists(), choice == Data::Keep);
+                        assert_eq!(data.exists(), choice == Data::Keep);
+                    },
+                );
+            }
+        }
+
+        #[test]
+        fn remove_machine_revokes_every_pairing_and_uninstalls_but_keeps_data() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    service.stop().unwrap();
+                    let data = &fixture.paths.data;
+                    std::fs::write(data.join("direct.json"), b"{}").unwrap();
+                    service.remove_machine().unwrap();
+                    assert!(!data.join("direct.json").exists());
+                    assert!(supervisor.registered.lock().unwrap().is_none());
+                    assert!(!data.join("installations").exists());
+                    assert!(!data.join("service.json").exists());
+                    assert!(data.join("identity.json").exists());
                 },
             );
         }

@@ -958,9 +958,6 @@ impl LaneCore {
     }
 
     fn preview(&self, action: &LaneAction, actor: &Actor) -> Result<LaneReply, CoreError> {
-        if let Some(refused) = local_only(action, actor) {
-            return Ok(refused);
-        }
         let prepared = self.admin().prepare(action, &self.core, &self.boot)?;
         let sessions = self.host.sessions();
         let observation = observation(&prepared, &sessions);
@@ -982,9 +979,6 @@ impl LaneCore {
         actor: &Actor,
     ) -> Result<(LaneReply, Option<OperationId>), CoreError> {
         let id = OperationId::parse(operation).ok_or(CoreError::Protocol)?;
-        if let Some(refused) = local_only(action, actor) {
-            return Ok((refused, None));
-        }
         // One Execute at a time, so a repeated Execute on another connection waits for the
         // first and finds its record instead of a spent token.
         let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
@@ -1550,13 +1544,6 @@ fn effects(prepared: &Prepared, sessions: &[Id]) -> LaneEffects {
         effects.sessions = sorted;
     }
     effects
-}
-
-/// Stop answers only the Core's own machine.
-fn local_only(action: &LaneAction, actor: &Actor) -> Option<LaneReply> {
-    (*action == LaneAction::Stop && actor.pairing.is_some()).then(|| LaneReply::Error {
-        code: LOCAL_ONLY.to_owned(),
-    })
 }
 
 fn action_key(action: &LaneAction) -> Result<Vec<u8>, CoreError> {
