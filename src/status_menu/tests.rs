@@ -621,8 +621,11 @@ fn the_flat_menu_offers_start_for_a_stopped_local_core(cx: &mut TestAppContext) 
 
 /// This computer's SpaceTerm Core is off in Login Items, so the service refuses the menu's Start.
 /// The menu opens Login Items, where the person turns it on, instead of an alert with only OK.
+/// The refused Start never runs by itself: the menu keeps offering Start for the person to choose.
 #[gpui::test]
-fn a_start_refused_by_login_items_opens_that_list(cx: &mut TestAppContext) {
+fn a_start_refused_by_login_items_opens_that_list_and_never_runs_by_itself(
+    cx: &mut TestAppContext,
+) {
     let mut stopped = machine(LOCAL, "This Computer", 0);
     stopped.link = MachineLink::Stopped;
     let fixture = start(vec![stopped], cx);
@@ -644,7 +647,7 @@ fn a_start_refused_by_login_items_opens_that_list(cx: &mut TestAppContext) {
             _ => None,
         })
         .expect("the menu offers Start");
-    cx.update(|cx| fixture.menu.perform(start_command, cx));
+    cx.update(|cx| fixture.menu.perform(start_command.clone(), cx));
     cx.run_until_parked();
     fixture.machines.emit(MachineUpdatesEvent::Finished {
         machine: LOCAL,
@@ -655,6 +658,16 @@ fn a_start_refused_by_login_items_opens_that_list(cx: &mut TestAppContext) {
 
     assert_eq!(fixture.host.login_items.get(), 1);
     assert!(fixture.host.alerts.borrow().is_empty());
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(60 * 60));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.performed(),
+        [(LOCAL, MachineAction::Start)],
+        "nothing starts by itself"
+    );
+    assert!(fixture.host.menu().offers(&start_command));
 }
 
 #[gpui::test]

@@ -224,7 +224,7 @@ pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
     // The Core refused its preview: the sessions or the Pending Version changed since. The
     // window previews again and always asks, so nothing runs again by itself.
     // The Core starts nothing that is off in Login Items, so Start opens that list, where the
-    // person turns it on.
+    // person turns it on. Nothing starts by itself: the window offers Start again.
     if failure == ActionFailure::LoginItemOff {
         crate::local_startup::open_login_items();
         return;
