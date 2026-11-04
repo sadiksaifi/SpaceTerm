@@ -216,6 +216,9 @@ def verify(path, identifier, expected_entitlements, *, team=None, identity=ADHOC
         raise TaskError(f"{label} designated requirement is not the team's")
     if f"TeamIdentifier={team}" not in detail.splitlines():
         raise TaskError(f"{label} is not signed by team {team}")
+    # Notarization requires a secure timestamp; codesign shows it as Timestamp, not Signed Time.
+    if not any(line.startswith("Timestamp=") for line in detail.splitlines()):
+        raise TaskError(f"{label} has no secure timestamp")
     requirement = f"={team_requirement(team)}"
     checked(
         ["codesign", "--verify", "--strict", "--deep", "-R", requirement, str(path)],

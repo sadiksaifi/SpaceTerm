@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from spaceterm_tasks import TaskError, macos_codesign
 from spaceterm_tasks.macos_signing import release_keychain, signing_environment
@@ -43,6 +44,63 @@ def fixture_app(root, identifier, version=1):
     )
     compile_executable(contents / "MacOS/Fixture", f"int main(){{return {version};}}".encode())
     return app
+
+
+class CoreEntitlementTests(unittest.TestCase):
+    def test_core_grants_each_hardened_runtime_resource_and_describes_it(self):
+        self.assertEqual(
+            CORE_ENTITLEMENTS,
+            {
+                f"com.apple.security.{name}": True
+                for name in (
+                    "automation.apple-events",
+                    "device.audio-input",
+                    "device.camera",
+                    "personal-information.addressbook",
+                    "personal-information.calendars",
+                    "personal-information.location",
+                    "personal-information.photos-library",
+                )
+            },
+        )
+        info = plistlib.loads((macos_codesign.CORE_ENTITLEMENTS.parent / "Info.plist").read_bytes())
+        for key in (
+            "NSAppleEventsUsageDescription",
+            "NSMicrophoneUsageDescription",
+            "NSCameraUsageDescription",
+            "NSContactsUsageDescription",
+            "NSCalendarsFullAccessUsageDescription",
+            "NSCalendarsWriteOnlyAccessUsageDescription",
+            "NSLocationUsageDescription",
+            "NSPhotoLibraryUsageDescription",
+            "NSLocalNetworkUsageDescription",
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(info[key].startswith("SpaceTerm Core "))
+
+
+class SigningArgumentTests(unittest.TestCase):
+    def signed(self, identity, **keywords):
+        with patch.object(macos_codesign, "checked") as checked:
+            macos_codesign.sign(Path("Fixture.app"), identity, **keywords)
+        return checked.call_args.args[0]
+
+    def test_certificate_signatures_carry_a_secure_timestamp_and_the_team_requirement(self):
+        arguments = self.signed(NAME, identifier="io.example", team=TEAM)
+        self.assertIn("--timestamp", arguments)
+        self.assertNotIn("--timestamp=none", arguments)
+        self.assertEqual(arguments[arguments.index("--options") + 1], "runtime")
+        self.assertEqual(
+            arguments[arguments.index("--requirements") + 1],
+            "=" + macos_codesign.designated_requirement("io.example", TEAM),
+        )
+
+    def test_adhoc_signatures_have_no_timestamp_and_no_team_requirement(self):
+        arguments = self.signed("-", identifier="io.example", team=TEAM)
+        self.assertIn("--timestamp=none", arguments)
+        self.assertNotIn("--timestamp", arguments)
+        self.assertNotIn("--requirements", arguments)
+        self.assertEqual(arguments[arguments.index("--options") + 1], "runtime")
 
 
 class IdentityTests(unittest.TestCase):
