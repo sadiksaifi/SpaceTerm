@@ -18,9 +18,7 @@ use crate::machine_connection::CoreError;
 use crate::machine_connection::service::activation::{
     ActivationPhase, ActivationStatus, is_released_downgrade,
 };
-use crate::machine_connection::service::control::{
-    BuildName, UpdateWording, build_labels,
-};
+use crate::machine_connection::service::control::{BuildName, UpdateWording, build_labels};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
 use crate::ui::sidebar_window::form::CaptionTone;
 
@@ -357,9 +355,7 @@ type Facts = (
 );
 
 fn present_facts(facts: &UpdateFacts) -> Facts {
-    if let Some(activation) = facts
-        .activation
-        .as_ref()
+    if let Some(activation) = facts.activation.as_ref()
         && let Some(unresolved) = present_activation(activation)
     {
         return unresolved;
@@ -415,9 +411,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         Ok(included) if included.approved => (
             "Up to date",
             "settings-server-update-state-current",
-            format!(
-                "{now} It\u{2019}s the SpaceTerm Core version included with SpaceTerm."
-            ),
+            format!("{now} It\u{2019}s the SpaceTerm Core version included with SpaceTerm."),
             CaptionTone::Guidance,
             Vec::new(),
         ),
@@ -444,9 +438,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
             (
                 "Update available",
                 "settings-server-update-state-available",
-                format!(
-                    "{now} SpaceTerm includes SpaceTerm Core version {included}. {effect}"
-                ),
+                format!("{now} SpaceTerm includes SpaceTerm Core version {included}. {effect}"),
                 CaptionTone::Guidance,
                 vec![UpdateAction::Update],
             )

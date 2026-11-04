@@ -17,9 +17,7 @@ use gpui::{AnyWindowHandle, App, AppContext as _, Context, Global, SharedString,
 use spaceterm_core::service::control::{self, BuildName, UpdateWording, Wording};
 use spaceterm_core::service::lane::admin::{self, Preview, Verdict};
 use spaceterm_core::service::lane::client::{LaneError, Outcome};
-use spaceterm_core::service::lane::{
-    LaneAction, LaneCheck, LaneReceipt, LaneStatus, LaneVersion,
-};
+use spaceterm_core::service::lane::{LaneAction, LaneCheck, LaneReceipt, LaneStatus, LaneVersion};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
     ModalActionRole, ModalId,

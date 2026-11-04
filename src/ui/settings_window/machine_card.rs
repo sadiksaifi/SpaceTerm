@@ -965,7 +965,7 @@ impl SettingsWindow {
                 VersionView {
                     subtitle: subtitle.into(),
                     actions: vec![VersionStep::Observe],
-                    }
+                }
             }
         }
     }

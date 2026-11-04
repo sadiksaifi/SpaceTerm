@@ -7,9 +7,9 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 
 use super::testing::{Outcome, ScriptedUpdate, UpdateCall, approved, available, included};
 use super::{
-    CoreUpdateControl, FINISH_SELECTOR, IncludedCore, UPDATE_CANCEL_SELECTOR, UPDATE_CHECK_SELECTOR,
-    UPDATE_CONFIRM_SELECTOR, UPDATE_SELECTOR, UpdateAction, UpdateFacts, UpdatePresentation,
-    UpdateState, UpdateStep, present_update,
+    CoreUpdateControl, FINISH_SELECTOR, IncludedCore, UPDATE_CANCEL_SELECTOR,
+    UPDATE_CHECK_SELECTOR, UPDATE_CONFIRM_SELECTOR, UPDATE_SELECTOR, UpdateAction, UpdateFacts,
+    UpdatePresentation, UpdateState, UpdateStep, present_update,
 };
 use crate::appearance::Appearance;
 use crate::local_startup::CandidateError;
@@ -364,9 +364,9 @@ fn a_failed_update_reports_the_return_to_the_previous_version(cx: &mut TestAppCo
     let presentation = harness.presentation();
     assert_eq!(presentation.state, "Update failed");
     assert!(
-        presentation
-            .explanation
-            .contains("didn\u{2019}t start, and Terminal Sessions ended. SpaceTerm Core returned to 1.4.0"),
+        presentation.explanation.contains(
+            "didn\u{2019}t start, and Terminal Sessions ended. SpaceTerm Core returned to 1.4.0"
+        ),
         "{}",
         presentation.explanation
     );

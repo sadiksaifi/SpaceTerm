@@ -339,7 +339,15 @@ class CoreArchiveTests(unittest.TestCase):
             core_package.compatible_candidate(
                 {
                     **self.info,
-                    "protocols": {**core_package.PROTOCOLS, **{"work": {**core_package.PROTOCOLS["work"], "major": core_package.PROTOCOL_MAJOR + 1}}},
+                    "protocols": {
+                        **core_package.PROTOCOLS,
+                        **{
+                            "work": {
+                                **core_package.PROTOCOLS["work"],
+                                "major": core_package.PROTOCOL_MAJOR + 1,
+                            }
+                        },
+                    },
                 },
                 self.info["identity"],
             )

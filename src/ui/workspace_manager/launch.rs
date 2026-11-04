@@ -303,9 +303,7 @@ const fn failure_title(error: CoreError) -> &'static str {
         CoreError::IncompatibleState | CoreError::IncompatibleProtocol => {
             "Incompatible SpaceTerm Core"
         }
-        CoreError::ActivationUnresolved => {
-            "SpaceTerm Core Update Unfinished"
-        }
+        CoreError::ActivationUnresolved => "SpaceTerm Core Update Unfinished",
         CoreError::CandidateChanged => "Restart SpaceTerm",
         CoreError::CandidateMissing => "SpaceTerm Core Not Included",
         CoreError::RuntimeUnavailable => "Couldn\u{2019}t Verify SpaceTerm Core",
