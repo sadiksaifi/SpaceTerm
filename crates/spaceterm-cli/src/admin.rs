@@ -20,6 +20,8 @@ pub mod update;
 
 #[cfg(test)]
 mod golden_tests;
+#[cfg(test)]
+mod notice_tests;
 
 use crate::args::{CoreCommand, Global};
 use crate::contract::{
@@ -100,6 +102,17 @@ impl Reply {
         stdout: &mut dyn Write,
         stderr: &mut dyn Write,
     ) -> u8 {
+        self.write_to(mode, terminal(libc::STDERR_FILENO), stdout, stderr)
+    }
+
+    /// [`Self::write`], with whether stderr is a terminal given.
+    fn write_to(
+        &self,
+        mode: contract::Mode,
+        stderr_terminal: bool,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+    ) -> u8 {
         if self.broken_pipe {
             return contract::EXIT_BROKEN_PIPE;
         }
@@ -114,7 +127,7 @@ impl Reply {
         );
         if let Some(notice) = &self.notice
             && exit != contract::EXIT_BROKEN_PIPE
-            && crate::notice::shown(mode, terminal(libc::STDERR_FILENO))
+            && crate::notice::shown(mode, stderr_terminal)
         {
             let _ = writeln!(stderr, "{notice}");
         }
