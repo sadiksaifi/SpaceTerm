@@ -4,7 +4,9 @@
 //! opened from its mounted DMG asks once, before any window opens, to move itself there. Moving
 //! is the person's explicit choice: it copies the app to Applications, or to the account's own
 //! Applications folder when the shared one is not writable, then opens the copy and quits.
-//! When another SpaceTerm of this build already runs, it comes forward instead.
+//! When another SpaceTerm of this build already runs, it comes forward instead. SpaceTerm checks
+//! for one before the prompt, after it, and just before the copy replaces the installed app,
+//! since the person can open the installed app at any time meanwhile.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt as _;
@@ -16,6 +18,7 @@ use core_foundation::base::TCFType as _;
 use core_foundation::error::CFErrorRef;
 use core_foundation::url::{CFURL, CFURLRef};
 use objc2::MainThreadMarker;
+use objc2::rc::Retained;
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationOptions, NSRunningApplication,
 };
@@ -47,23 +50,89 @@ pub(crate) fn leave_disk_image() -> bool {
     if !read_only_volume(&original) {
         return false;
     }
-    // A SpaceTerm that already runs, such as the one in Applications, can't be replaced, and the
-    // person gets the SpaceTerm they asked for.
-    if activate_running_copy(mtm) {
-        return true;
+    leave(&Desktop { mtm, original });
+    true
+}
+
+/// The steps of leaving the disk image. Tests script them.
+trait Leaving {
+    type Running;
+    /// Another running SpaceTerm of this build, read afresh each time.
+    fn running_copy(&self) -> Option<Self::Running>;
+    /// Brings `running` forward in this SpaceTerm's place.
+    fn activate(&self, running: &Self::Running);
+    /// Asks the person. True when they chose Move to Applications.
+    fn ask(&self) -> bool;
+    /// Moves this app into Applications, unless another SpaceTerm starts first. `None` when the
+    /// move failed.
+    fn move_and_reopen(&self) -> Option<Installation>;
+    /// Says the move failed and how to move SpaceTerm by hand.
+    fn report_failure(&self);
+}
+
+/// Asks to move SpaceTerm to Applications and moves it. A SpaceTerm that already runs, such as
+/// the one in Applications, can't be replaced, and the person gets the SpaceTerm they asked
+/// for. It is checked before the prompt, after it, and just before the copy takes the installed
+/// app's place, since the person can open the installed app while the prompt is open or the copy
+/// runs.
+fn leave<L: Leaving>(steps: &L) {
+    let forward = |steps: &L| {
+        steps
+            .running_copy()
+            .map(|running| steps.activate(&running))
+            .is_some()
+    };
+    if forward(steps) || !steps.ask() || forward(steps) {
+        return;
     }
-    let alert = application_alert(AlertSeverity::Standard, mtm);
-    alert.setMessageText(ns_string!("Move SpaceTerm to Applications?"));
-    alert.setInformativeText(ns_string!(
-        "SpaceTerm runs from Applications so it can install SpaceTerm Core and update itself."
-    ));
-    alert.addButtonWithTitle(ns_string!("Move to Applications"));
-    alert.addButtonWithTitle(ns_string!("Quit"));
-    if run_modal_alert(&alert, AlertActivation::FORCEFUL, |_| {}) != NSAlertFirstButtonReturn {
-        return true;
+    match steps.move_and_reopen() {
+        Some(Installation::Installed(_)) => {}
+        // It opened while the copy ran, so the copy was discarded and the installed app stays.
+        Some(Installation::Running) => {
+            forward(steps);
+        }
+        None => steps.report_failure(),
     }
-    if move_and_reopen(&original).is_none() {
-        let failed = application_alert(AlertSeverity::Standard, mtm);
+}
+
+/// The disk image's own SpaceTerm, on the event thread.
+struct Desktop {
+    mtm: MainThreadMarker,
+    original: PathBuf,
+}
+
+impl Leaving for Desktop {
+    type Running = Retained<NSRunningApplication>;
+
+    fn running_copy(&self) -> Option<Self::Running> {
+        running_copy()
+    }
+
+    fn activate(&self, running: &Self::Running) {
+        NSApplication::sharedApplication(self.mtm).yieldActivationToApplication(running);
+        running.activateFromApplication_options(
+            &NSRunningApplication::currentApplication(),
+            NSApplicationActivationOptions::ActivateAllWindows,
+        );
+    }
+
+    fn ask(&self) -> bool {
+        let alert = application_alert(AlertSeverity::Standard, self.mtm);
+        alert.setMessageText(ns_string!("Move SpaceTerm to Applications?"));
+        alert.setInformativeText(ns_string!(
+            "SpaceTerm runs from Applications so it can install SpaceTerm Core and update itself."
+        ));
+        alert.addButtonWithTitle(ns_string!("Move to Applications"));
+        alert.addButtonWithTitle(ns_string!("Quit"));
+        run_modal_alert(&alert, AlertActivation::FORCEFUL, |_| {}) == NSAlertFirstButtonReturn
+    }
+
+    fn move_and_reopen(&self) -> Option<Installation> {
+        move_and_reopen(&self.original)
+    }
+
+    fn report_failure(&self) {
+        let failed = application_alert(AlertSeverity::Standard, self.mtm);
         failed.setMessageText(ns_string!("SpaceTerm couldn\u{2019}t move to Applications"));
         failed.setInformativeText(&NSString::from_str(
             "Drag SpaceTerm to Applications in Finder, then open it there.",
@@ -71,27 +140,15 @@ pub(crate) fn leave_disk_image() -> bool {
         failed.addButtonWithTitle(ns_string!("Quit"));
         run_modal_alert(&failed, AlertActivation::FORCEFUL, |_| {});
     }
-    true
 }
 
-/// Brings forward another running SpaceTerm of this build. Returns whether one runs.
-fn activate_running_copy(mtm: MainThreadMarker) -> bool {
-    let Some(identifier) = NSBundle::mainBundle().bundleIdentifier() else {
-        return false;
-    };
-    let current = NSRunningApplication::currentApplication();
-    let Some(running) = NSRunningApplication::runningApplicationsWithBundleIdentifier(&identifier)
+/// Another running SpaceTerm of this build, read afresh each time.
+fn running_copy() -> Option<Retained<NSRunningApplication>> {
+    let identifier = NSBundle::mainBundle().bundleIdentifier()?;
+    let current = NSRunningApplication::currentApplication().processIdentifier();
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&identifier)
         .iter()
-        .find(|app| app.processIdentifier() != current.processIdentifier())
-    else {
-        return false;
-    };
-    NSApplication::sharedApplication(mtm).yieldActivationToApplication(&running);
-    running.activateFromApplication_options(
-        &current,
-        NSApplicationActivationOptions::ActivateAllWindows,
-    );
-    true
+        .find(|app| app.processIdentifier() != current)
 }
 
 /// Where the person keeps the app: Gatekeeper may run an app from a disk image through a
@@ -142,8 +199,9 @@ fn read_only_volume(path: &Path) -> bool {
 }
 
 /// Copies the app at `original` into Applications and opens the copy once this process exits.
-/// An older copy there goes to the Trash only after the new copy took its place.
-fn move_and_reopen(original: &Path) -> Option<()> {
+/// An older copy there goes to the Trash only after the new copy took its place. `None` when
+/// the move failed.
+fn move_and_reopen(original: &Path) -> Option<Installation> {
     let name = original.file_name()?.to_owned();
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let shared = Path::new("/Applications");
@@ -154,7 +212,7 @@ fn move_and_reopen(original: &Path) -> Option<()> {
         std::fs::create_dir_all(&personal).ok()?;
         personal
     };
-    let destination = install(
+    let destination = match install(
         original,
         &folder,
         |source, staging| {
@@ -169,8 +227,12 @@ fn move_and_reopen(original: &Path) -> Option<()> {
             }
             copied
         },
+        || running_copy().is_some(),
         |previous| trash(previous, &name, &home.join(".Trash")),
-    )?;
+    )? {
+        Installation::Installed(destination) => destination,
+        Installation::Running => return Some(Installation::Running),
+    };
     Command::new("/bin/sh")
         .args([
             "-c",
@@ -185,20 +247,32 @@ fn move_and_reopen(original: &Path) -> Option<()> {
         .process_group(0)
         .spawn()
         .ok()?;
-    Some(())
+    Some(Installation::Installed(destination))
+}
+
+/// What a completed [`install`] did.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Installation {
+    /// The copy took the installed app's place, at this path.
+    Installed(PathBuf),
+    /// Another SpaceTerm of this build started before the copy could take its place, so the copy
+    /// was discarded and the installed app is unchanged.
+    Running,
 }
 
 /// Puts a complete copy of the app at `source` into `folder` under the same name, and returns
 /// where. `copy` fills a hidden staging path in `folder` first, so `folder` never holds a
-/// partial app. An app already there moves aside, the staged copy takes its name, and only then
-/// does `discard` receive the old app. Any failure puts the old app back and removes the staged
-/// copy.
+/// partial app. `running` is asked last, just before anything in `folder` changes: while another
+/// SpaceTerm runs, the staged copy goes and the installed app stays. Otherwise an app already
+/// there moves aside, the staged copy takes its name, and only then does `discard` receive the
+/// old app. Any failure puts the old app back and removes the staged copy.
 fn install(
     source: &Path,
     folder: &Path,
     copy: impl FnOnce(&Path, &Path) -> bool,
+    running: impl FnOnce() -> bool,
     discard: impl FnOnce(&Path),
-) -> Option<PathBuf> {
+) -> Option<Installation> {
     let name = source.file_name()?;
     let destination = folder.join(name);
     let hidden = |role: &str| {
@@ -212,6 +286,10 @@ fn install(
     if !copy(source, &staging) {
         let _ = std::fs::remove_dir_all(&staging);
         return None;
+    }
+    if running() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Some(Installation::Running);
     }
     let previous = destination
         .symlink_metadata()
@@ -233,7 +311,7 @@ fn install(
     if let Some(previous) = previous {
         discard(&previous);
     }
-    Some(destination)
+    Some(Installation::Installed(destination))
 }
 
 /// Moves the replaced app at `previous` into `trash` as `name`, numbered when the Trash already
@@ -345,6 +423,7 @@ mod tests {
                 std::fs::create_dir_all(staging.join("Contents")).unwrap();
                 false
             },
+            || false,
             |previous| discarded.push(previous.to_owned()),
         );
 
@@ -365,14 +444,133 @@ mod tests {
         app(&destination, "old");
         let mut discarded = Vec::new();
 
-        let installed = install(&source, &applications.0, copy_tree, |previous| {
-            discarded.push((contents(previous), contents(&destination)));
-            std::fs::remove_dir_all(previous).unwrap();
-        });
+        let installed = install(
+            &source,
+            &applications.0,
+            copy_tree,
+            || false,
+            |previous| {
+                discarded.push((contents(previous), contents(&destination)));
+                std::fs::remove_dir_all(previous).unwrap();
+            },
+        );
 
-        assert_eq!(installed.as_deref(), Some(destination.as_path()));
+        assert_eq!(installed, Some(Installation::Installed(destination.clone())));
         assert_eq!(entries(&applications.0), ["SpaceTerm.app"]);
         assert_eq!(contents(&destination), "new");
         assert_eq!(discarded, [("old".to_owned(), "new".to_owned())]);
+    }
+
+    /// The installed SpaceTerm opened while the copy ran. Nothing in Applications changes: the
+    /// staged copy goes, the installed app stays, and no old app is discarded.
+    #[test]
+    fn an_installed_app_that_opens_during_the_copy_keeps_its_place() {
+        let disk_image = Folder::new();
+        let applications = Folder::new();
+        let source = disk_image.0.join("SpaceTerm.app");
+        app(&source, "new");
+        let destination = applications.0.join("SpaceTerm.app");
+        app(&destination, "old");
+        let copied = std::cell::Cell::new(false);
+        let mut discarded = Vec::new();
+
+        let installed = install(
+            &source,
+            &applications.0,
+            |source, staging| {
+                copied.set(copy_tree(source, staging));
+                copied.get()
+            },
+            || {
+                assert!(copied.get(), "the check runs after the copy, just before the swap");
+                true
+            },
+            |previous| discarded.push(previous.to_owned()),
+        );
+
+        assert_eq!(installed, Some(Installation::Running));
+        assert_eq!(entries(&applications.0), ["SpaceTerm.app"]);
+        assert_eq!(contents(&destination), "old");
+        assert!(discarded.is_empty());
+    }
+
+    /// Scripted steps: each running-copy read answers the next value, then none.
+    struct Scripted {
+        running: std::cell::RefCell<std::collections::VecDeque<bool>>,
+        moved: Option<Installation>,
+        steps: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl Scripted {
+        fn new(running: impl IntoIterator<Item = bool>, moved: Option<Installation>) -> Self {
+            Self {
+                running: std::cell::RefCell::new(running.into_iter().collect()),
+                moved,
+                steps: std::cell::RefCell::default(),
+            }
+        }
+
+        fn steps(&self) -> Vec<&'static str> {
+            self.steps.borrow().clone()
+        }
+    }
+
+    impl Leaving for Scripted {
+        type Running = ();
+
+        fn running_copy(&self) -> Option<()> {
+            self.running
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(false)
+                .then_some(())
+        }
+
+        fn activate(&self, (): &()) {
+            self.steps.borrow_mut().push("activate");
+        }
+
+        fn ask(&self) -> bool {
+            self.steps.borrow_mut().push("ask");
+            true
+        }
+
+        fn move_and_reopen(&self) -> Option<Installation> {
+            self.steps.borrow_mut().push("move");
+            self.moved.clone()
+        }
+
+        fn report_failure(&self) {
+            self.steps.borrow_mut().push("report_failure");
+        }
+    }
+
+    /// The person opened the installed SpaceTerm while the prompt was open. Choosing Move to
+    /// Applications then brings it forward and moves nothing.
+    #[test]
+    fn an_installed_app_that_opens_during_the_prompt_comes_forward_instead() {
+        let steps = Scripted::new([false, true], Some(Installation::Installed(PathBuf::new())));
+        leave(&steps);
+        assert_eq!(steps.steps(), ["ask", "activate"]);
+    }
+
+    /// The installed SpaceTerm opened while the copy ran, so the move discarded its copy. That
+    /// SpaceTerm comes forward, and nothing reports a failure.
+    #[test]
+    fn an_installed_app_that_opens_during_the_copy_comes_forward() {
+        let steps = Scripted::new([false, false, true], Some(Installation::Running));
+        leave(&steps);
+        assert_eq!(steps.steps(), ["ask", "move", "activate"]);
+    }
+
+    /// With no other SpaceTerm running, the move runs once, and only a failed one is reported.
+    #[test]
+    fn without_a_running_copy_the_move_runs_and_reports_only_failure() {
+        let steps = Scripted::new([], Some(Installation::Installed(PathBuf::new())));
+        leave(&steps);
+        assert_eq!(steps.steps(), ["ask", "move"]);
+        let steps = Scripted::new([], None);
+        leave(&steps);
+        assert_eq!(steps.steps(), ["ask", "move", "report_failure"]);
     }
 }
