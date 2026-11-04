@@ -282,4 +282,104 @@ mod tests {
         let request = proxy.join().unwrap();
         assert!(request.starts_with("CONNECT github.com:443 "), "{request}");
     }
+
+    /// Every variable ureq reads a proxy from.
+    const PROXY_VARIABLES: [&str; 6] = [
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ];
+
+    /// Runs only inside [`environment_proxies_never_reach_a_fetch`]'s child process.
+    #[test]
+    fn environment_proxy_probe() {
+        if std::env::var_os("SPACETERM_PROXY_PROBE").is_none() {
+            return;
+        }
+        let environment = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        environment.set_nonblocking(true).unwrap();
+        let named = format!("http://{}", environment.local_addr().unwrap());
+        for variable in PROXY_VARIABLES {
+            // SAFETY: this child process runs this one test on one thread, before it starts any
+            // other thread, so nothing reads the environment concurrently.
+            unsafe { std::env::set_var(variable, &named) };
+        }
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("NO_PROXY");
+            std::env::remove_var("no_proxy");
+        }
+        assert!(
+            ureq::Proxy::try_from_env().is_some(),
+            "the environment names a proxy ureq would use"
+        );
+        assert!(
+            Releases::new(None).agent.config().proxy().is_none(),
+            "no configured proxy means a direct connection"
+        );
+        let explicit = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let explicit_port = explicit.local_addr().unwrap().port();
+        let refusing = std::thread::spawn(move || {
+            use std::io::BufRead;
+            let (stream, _) = explicit.accept().unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let mut stream = stream;
+            stream
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
+                )
+                .unwrap();
+            request
+        });
+        let configured = Releases::new(Some(
+            &Proxy::parse(&format!("http://127.0.0.1:{explicit_port}")).unwrap(),
+        ));
+        let proxy = configured.agent.config().proxy().unwrap();
+        assert_eq!((proxy.host(), proxy.port()), ("127.0.0.1", explicit_port));
+        assert_eq!(
+            configured.feed(FeedTarget::CORE_LINUX),
+            Err(FetchError::Proxy)
+        );
+        assert!(
+            refusing
+                .join()
+                .unwrap()
+                .starts_with("CONNECT github.com:443 ")
+        );
+        assert_eq!(
+            environment.accept().map(drop).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::WouldBlock),
+            "no request reached the environment's proxy"
+        );
+    }
+
+    /// A service inherits whatever proxy variables its manager passes. Feed fetches ignore every
+    /// one of them. The child process keeps the variables from every other test.
+    #[test]
+    fn environment_proxies_never_reach_a_fetch() {
+        if std::env::var_os("SPACETERM_PROXY_PROBE").is_some() {
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "update::fetch::tests::environment_proxy_probe",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env("SPACETERM_PROXY_PROBE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
