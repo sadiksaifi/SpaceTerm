@@ -1,28 +1,11 @@
 name: Release
 
-# A tag push releases. Every other run is a dry run of the same jobs: a generated update key,
+# A tag push releases. A manual run is a dry run of the same jobs: a generated update key,
 # ad hoc code signatures, no notarization, no protected environment and nothing published.
+# Pull requests and pushes to main run nothing here; these checks run only for a release.
 on:
   push:
     tags: ["v[0-9]*.[0-9]*.[0-9]*"]
-  pull_request:
-    paths:
-      - .github/workflows/release.yml
-      - .mise.toml
-      - mise.lock
-      - mise-tasks/**
-      - packaging/**
-      - cliff.toml
-      - build.rs
-      - build/**
-      - crates/spaceterm-cli/build.rs
-      - crates/spaceterm-core/src/protocol/version.rs
-      - crates/spaceterm-core/src/service/runtime.rs
-      - crates/spaceterm-core/src/update/**
-      - src/updates.rs
-      - src/updates/**
-      - src/platform/linux_updates.rs
-      - src/platform/macos_updater.m
   workflow_dispatch:
 
 permissions:
