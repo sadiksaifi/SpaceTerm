@@ -300,7 +300,10 @@ int main(int argc, char **argv) {{
             self.assertIn("(adhoc,runtime)", macos_codesign.details(code))
         self.assertEqual(macos_codesign.signed_entitlements(app), {})
         self.assertIn("Dry run: notarization and stapling skipped for SpaceTerm.app", result.stdout)
-        self.assertIn("Dry run: notarization and stapling skipped for SpaceTerm.dmg", result.stdout)
+        self.assertIn(
+            "Dry run: notarization and stapling skipped for SpaceTerm_0.0.1_aarch64.dmg",
+            result.stdout,
+        )
         self.assertEqual(
             {path.name for path in (self.root / "dist/release-desktop-macos").iterdir()},
             {"SpaceTerm-0.0.1-macos-arm64.dmg", "appcast.xml"},
