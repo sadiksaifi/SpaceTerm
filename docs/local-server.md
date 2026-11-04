@@ -81,7 +81,7 @@ For a local Development package, run the installer with `--headless --identity s
 spaceterm uninstall
 ```
 
-Uninstall previews any Terminal Sessions it would end. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk unless you add `--delete-data`. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. `install.sh --headless --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
+Uninstall previews any Terminal Sessions it would end. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. `install.sh --headless --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
 
 [Signing] Developer ID signing, hardened runtime, notarization and the installer's Developer ID requirement check are future work. Ed25519 authenticates the package and feed independently.
 
@@ -89,9 +89,9 @@ Uninstall previews any Terminal Sessions it would end. Workspace organization, M
 
 Standard Development and Preflight commands prepare signed SpaceTerm Core packages for both supported targets from the current working tree, including uncommitted edits. macOS builds natively on a Mac so the CLI can use Security.framework. Cargo and Zig cross-build Linux locally. A Linux host needs `SPACETERM_CLI_ARTIFACTS` pointing at a Mac-built catalog. Its macOS artifact must carry the same signed source digest as the Linux checkout. The pinned tools and Rust targets live in [.mise.toml](../.mise.toml) and [rust-toolchain.toml](../rust-toolchain.toml).
 
-Catalog preparation refuses source changes during preparation and keeps separate Cargo outputs under `$CARGO_TARGET_DIR/server`, or `target/server` when no target directory is set. `mise run core:catalog --help` describes standalone preparation. Matching-host packages receive native executable, signature and PTY checks. Foreign packages receive signature, static target, dependency and resource checks; acceptance also requires native verification on their own targets. Release packaging retains native production signing.
+Catalog preparation refuses source changes during preparation and keeps separate Cargo outputs under `$CARGO_TARGET_DIR/core`, or `target/core` when no target directory is set. `mise run core:catalog --help` describes standalone preparation. Matching-host packages receive native executable, signature and PTY checks. Foreign packages receive signature, static target, dependency and resource checks; acceptance also requires native verification on their own targets. Release packaging retains native production signing.
 
-Clients read `server-artifacts` in their installation resources. Each target contains `artifact.tar.gz`, raw `artifact.sig` and lowercase `artifact.sha256`. Before offering installation, verification checks signature, identity, target, complete digest, resources and protocol requirements and retains those verified bytes. A missing package and failed verification have distinct results. A usable approved installation requires no replacement catalog. Source clients may select an isolated catalog through `SPACETERM_CLI_ARTIFACTS`.
+Clients read `core-artifacts` in their installation resources. Each target contains `artifact.tar.gz`, raw `artifact.sig` and lowercase `artifact.sha256`. Before offering installation, verification checks signature, identity, target, complete digest, resources and protocol requirements and retains those verified bytes. A missing package and failed verification have distinct results. A usable approved installation requires no replacement catalog. Source clients may select an isolated catalog through `SPACETERM_CLI_ARTIFACTS`.
 
 ## Native setup verification
 

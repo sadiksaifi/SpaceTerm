@@ -1381,7 +1381,7 @@ mod exercise {
                         .ok_or("missing bind address")?
                         .parse::<SocketAddr>())?)
                 }
-                "--expect-server" => {
+                "--expect-machine" => {
                     expected = Some(id(args.next().ok_or("missing server identity")?)?)
                 }
                 "--confirm-idle-development" => confirmed = true,
@@ -1395,7 +1395,9 @@ mod exercise {
             println!(
                 "Requires a parent-prepared foreground Development server and signed native examples on macOS and Penguin."
             );
-            println!("Use --bind IP:PORT --expect-server SERVER_HEX --confirm-idle-development.");
+            println!(
+                "Use --bind IP:PORT --expect-machine MACHINE_ID_HEX --confirm-idle-development."
+            );
             println!(
                 "Confirms no user Terminal Sessions, paired devices, pending claims or outstanding invitations."
             );
@@ -1416,7 +1418,7 @@ mod exercise {
         )?;
         owner(
             bind.ok_or("--bind is required")?,
-            expected.ok_or("--expect-server is required")?,
+            expected.ok_or("--expect-machine is required")?,
             restart,
         )
     }

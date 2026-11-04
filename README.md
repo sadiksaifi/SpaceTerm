@@ -51,9 +51,9 @@ flowchart TB
     W3T2 --> W3T2P1["Pane"]
 ```
 
-## Add a remote server
+## Add a remote Machine
 
-Open Settings > Servers > Add Server and use your existing OpenSSH configuration or an Invitation Link. SSH prepares and pairs the server, then closes. SpaceTerm uses the saved QUIC connection, on UDP port 9231 by default, for remote work. The server needs that UDP port reachable from your computer. Create Workspaces and browse directories on your added servers from either sidebar creation menu.
+Open Settings > Machines > Add Machine… and use your existing OpenSSH configuration or an Invitation Link. SSH installs and starts SpaceTerm Core on that computer, pairs it, then closes. SpaceTerm uses the saved QUIC connection, on UDP port 9231 by default, for remote work, so that UDP port must be reachable from your computer. Create Workspaces and browse directories on your added Machines from either sidebar creation menu.
 
 ## Copy and paste over SSH and tmux
 

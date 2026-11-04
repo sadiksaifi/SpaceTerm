@@ -63,7 +63,7 @@ mod exercise {
                 match arg.as_str() {
                     "--run" => run = true,
                     "--help" => return Ok(None),
-                    "--expect-server" => core = Some(id(next()?)?),
+                    "--expect-machine" => core = Some(id(next()?)?),
                     "--expect-boot" => boot = Some(id(next()?)?),
                     _ => return Err("unknown argument".into()),
                 }
@@ -72,7 +72,7 @@ mod exercise {
                 return Ok(None);
             }
             Ok(Some(Self {
-                core: core.ok_or("--expect-server is required")?,
+                core: core.ok_or("--expect-machine is required")?,
                 boot,
             }))
         }
@@ -149,7 +149,7 @@ mod exercise {
     pub fn run() -> Result<()> {
         let Some(options) = Options::parse(&std::env::args().skip(1).collect::<Vec<_>>())? else {
             println!("Dry run: no storage or server access performed.");
-            println!("Use --run --expect-server HEX [--expect-boot HEX] for IPC.");
+            println!("Use --run --expect-machine HEX [--expect-boot HEX] for IPC.");
             println!(
                 "Requires an existing foreground Development server and python3 on its host. Creates and closes one test Workspace; never starts, installs or resets a server."
             );
@@ -236,9 +236,9 @@ mod exercise {
         fn mutation_requires_explicit_run_and_exact_machine_identity() {
             assert!(parse(&[]).unwrap().is_none());
             assert!(parse(&["--run"]).is_err());
-            assert!(parse(&["--run", "--expect-server", &"00".repeat(32)]).is_err());
+            assert!(parse(&["--run", "--expect-machine", &"00".repeat(32)]).is_err());
             assert!(
-                parse(&["--run", "--expect-server", &"12".repeat(32)])
+                parse(&["--run", "--expect-machine", &"12".repeat(32)])
                     .unwrap()
                     .is_some()
             );
