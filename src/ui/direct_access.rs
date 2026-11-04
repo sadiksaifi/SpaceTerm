@@ -104,6 +104,8 @@ pub(crate) enum AccessFailure {
     InvalidAddress,
     /// The server couldn't listen at the address and port, so nothing changed.
     AddressUnavailable,
+    /// Another app holds the UDP port, so nothing changed.
+    PortInUse,
     /// Direct network access is off, so the server opens no invitation.
     Disabled,
     /// The server already holds as many devices or connections as it allows.
@@ -262,9 +264,8 @@ fn classify(error: impl Into<DirectError>) -> AccessFailure {
         | DirectError::Revoked => AccessFailure::Unreachable,
         DirectError::IncompatibleProtocol => AccessFailure::IncompatibleProtocol,
         DirectError::InvalidAddress => AccessFailure::InvalidAddress,
-        DirectError::AddressUnavailable | DirectError::PortInUse => {
-            AccessFailure::AddressUnavailable
-        }
+        DirectError::AddressUnavailable => AccessFailure::AddressUnavailable,
+        DirectError::PortInUse => AccessFailure::PortInUse,
         DirectError::Disabled => AccessFailure::Disabled,
         DirectError::Capacity => AccessFailure::Capacity,
         DirectError::StorageUnavailable => AccessFailure::Storage,
@@ -317,7 +318,10 @@ impl AccessFailure {
                 )
             }
             Self::AddressUnavailable => format!(
-                "\u{201C}{core}\u{201D} couldn\u{2019}t listen at that address and port. Another app may be using the port."
+                "\u{201C}{core}\u{201D} couldn\u{2019}t listen at that address, so choose another address."
+            ),
+            Self::PortInUse => format!(
+                "Another app on \u{201C}{core}\u{201D} is using that UDP port, so choose another port."
             ),
             Self::Disabled => {
                 format!("Allow devices to connect to \u{201C}{core}\u{201D} before inviting one.")

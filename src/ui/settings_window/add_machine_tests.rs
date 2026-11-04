@@ -1359,6 +1359,11 @@ fn closing_add_machine_while_ssh_hosts_are_read_takes_nothing_from_the_read(
 
 /// A real invitation link for a server named `server`, as Invite Device creates one.
 fn invitation(core: &str) -> Zeroizing<String> {
+    invitation_from(core, "spaceterm-development")
+}
+
+/// A real invitation link from the SpaceTerm Core of the build identity named `build`.
+fn invitation_from(core: &str, build: &str) -> Zeroizing<String> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let expires = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1366,7 +1371,7 @@ fn invitation(core: &str) -> Zeroizing<String> {
         .as_secs()
         + 60;
     let pin = crate::machine_connection::direct::MachinePin {
-        build: "spaceterm-development".into(),
+        build: build.into(),
         core: [1; 32],
         public_key: [3; 32],
         certificate: [4; 32],
@@ -1383,6 +1388,27 @@ fn invitation(core: &str) -> Zeroizing<String> {
         "spaceterm://pair/{}",
         URL_SAFE_NO_PAD.encode(&*payload)
     ))
+}
+
+/// A Release desktop never pairs with a Preflight Core, and the reverse, so joining refuses before
+/// anything reaches the machine.
+#[gpui::test]
+fn an_invitation_from_another_edition_of_spaceterm_says_so_in_one_sentence(
+    cx: &mut TestAppContext,
+) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(invitation_from(
+        "studio",
+        "spaceterm-preflight",
+    ))));
+
+    sheet.choose(SheetAction::Join.selector());
+    sheet.settle(|sheet| {
+        sheet.says(
+            "This invitation comes from another edition of SpaceTerm, so open it in the \
+             matching edition.",
+        )
+    });
 }
 
 #[gpui::test]

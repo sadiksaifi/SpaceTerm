@@ -481,6 +481,24 @@ fn a_change_the_core_couldnt_save_leaves_access_off_and_says_why(cx: &mut TestAp
     ));
 }
 
+/// Each build identity has its own port, so a port in use is most often another app's.
+#[gpui::test]
+fn a_port_another_app_uses_leaves_access_off_and_says_so(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
+    *access.refusal.lock().expect("refusal") = Some(AccessFailure::from(
+        crate::machine_connection::direct::DirectError::PortInUse,
+    ));
+    let (window, cx) = open_machines(&access, cx);
+
+    click(ACCESS_SELECTOR, cx);
+
+    assert!(!access_on(&window, cx));
+    assert!(reads(
+        "Another app on \u{201C}studio\u{201D} is using that UDP port, so choose another port.",
+        cx
+    ));
+}
+
 #[gpui::test]
 fn a_core_without_a_reachable_address_cant_be_turned_on_and_says_so(cx: &mut TestAppContext) {
     let access = ScriptedAccess::new(Listener::Off, Some(addresses(&[], None)));
