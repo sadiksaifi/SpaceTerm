@@ -72,12 +72,18 @@ jobs:
     needs: [plan, pair]
     if: always()
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    # install_args selects this job's tools; keep mise run from installing the rest.
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
     steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: "python"
       - name: Require every planned pair to pass
         env:
           PLAN: ${{ needs.plan.result }}
+          ANY: ${{ needs.plan.outputs.any }}
           PAIR: ${{ needs.pair.result }}
-        run: |
-          test "$PLAN" = success
-          test "$PAIR" = success || test "$PAIR" = skipped
+        run: mise run compat:verdict "$PLAN" "$ANY" "$PAIR"

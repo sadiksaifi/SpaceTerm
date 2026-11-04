@@ -69,6 +69,17 @@ def plan(output, path=RELEASES):
     print(f"{len(include)} compatibility pairs planned.")
 
 
+def verdict(planning, planned, pairs):
+    """Passes only when planning succeeded and the pairs ran as planned: every one passed when
+    the plan had any, and none ran when it had none. The arguments are GitHub job results and
+    the plan's `any` output."""
+    if planning != "success":
+        raise TaskError("the compatibility plan did not succeed")
+    if (planned, pairs) not in (("true", "success"), ("false", "skipped")):
+        raise TaskError(f"the planned pairs ended {pairs}")
+    print("Every planned compatibility pair passed.")
+
+
 def candidate_tag(listed):
     """A release tag for this commit's build: the next minor after the newest listed release."""
     if not listed:

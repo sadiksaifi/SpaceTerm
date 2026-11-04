@@ -4,8 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spaceterm_tasks import TaskError
-from spaceterm_tasks.compatibility import RELEASES, candidate_tag, expected, plan, releases
+from spaceterm_tasks import ROOT, TaskError
+from spaceterm_tasks.compatibility import (
+    RELEASES,
+    candidate_tag,
+    expected,
+    plan,
+    releases,
+    verdict,
+)
 
 
 class CompatibilityPlanTests(unittest.TestCase):
@@ -82,3 +89,30 @@ class CompatibilityPlanTests(unittest.TestCase):
                 with self.subTest(candidate=candidate, release=release):
                     with self.assertRaises(TaskError):
                         expected(candidate, release, current)
+
+    def test_planned_pairs_must_all_pass_and_skipped_pairs_pass_only_without_any(self):
+        verdict("success", "true", "success")
+        verdict("success", "false", "skipped")
+        for planning, planned, pairs in [
+            ("success", "true", "skipped"),
+            ("success", "true", "failure"),
+            ("success", "true", "cancelled"),
+            ("success", "false", "success"),
+            ("success", "", "skipped"),
+            ("failure", "false", "skipped"),
+            ("failure", "true", "success"),
+        ]:
+            with self.subTest(planning=planning, planned=planned, pairs=pairs):
+                with self.assertRaises(TaskError):
+                    verdict(planning, planned, pairs)
+
+    def test_the_aggregate_check_gives_the_verdict_the_planned_pairs(self):
+        workflow = (ROOT / ".github/workflows/compatibility.yml").read_text()
+        aggregate = workflow[workflow.index("\n  compatible:\n") :]
+        for line in [
+            "PLAN: ${{ needs.plan.result }}",
+            "ANY: ${{ needs.plan.outputs.any }}",
+            "PAIR: ${{ needs.pair.result }}",
+            'run: mise run compat:verdict "$PLAN" "$ANY" "$PAIR"',
+        ]:
+            self.assertIn(line, aggregate)
