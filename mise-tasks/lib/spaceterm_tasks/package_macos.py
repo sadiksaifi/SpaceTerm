@@ -18,7 +18,15 @@ import tomllib
 from contextlib import nullcontext
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, macos_codesign, macos_notary, macos_signing, sparkle
+from spaceterm_tasks import (
+    ROOT,
+    TaskError,
+    macos_codesign,
+    macos_notary,
+    macos_signing,
+    sparkle,
+    update_signing,
+)
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
@@ -69,9 +77,22 @@ def signer(release_tag):
     return macos_codesign.signing_identity(os.environ), macos_codesign.team_id(os.environ)
 
 
+def bundle_template(name, release_tag):
+    """The Info.plist entries of the identity this package builds.
+
+    A dry-run release's appcast is signed with the dry run's generated update key, and Sparkle
+    signs an appcast only for an app that trusts the signing key. So a dry-run app pins that key
+    as `SUPublicEDKey`; every other package keeps the tracked entries.
+    """
+    template = identity(name)
+    if release_tag and update_signing.dry_run():
+        template = {**template, "SUPublicEDKey": update_signing.trust()[0]}
+    return template
+
+
 def package_bundle(release_tag=None, notes=None):
     name = selected_identity(release_tag)
-    template = identity(name)
+    template = bundle_template(name, release_tag)
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
@@ -212,7 +233,7 @@ def verify(app=None, dmg=None, release_tag=None):
 
 
 def verify_bundle(app, name, release_tag, label):
-    template = identity(name)
+    template = bundle_template(name, release_tag)
     contents = app / "Contents"
     try:
         info = plistlib.loads((contents / "Info.plist").read_bytes())

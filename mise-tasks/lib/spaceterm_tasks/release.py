@@ -29,7 +29,6 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, macos_codesign, release_feed, sparkle, update_signing
-from spaceterm_tasks.macos_bundle import identity
 from spaceterm_tasks.packaging import DIST, STABLE_TAG, checked, release_version
 from spaceterm_tasks.release_feed import (
     APPCAST,
@@ -202,12 +201,14 @@ def desktop_linux(tag, notes_file=NOTES, core_directory=CORE):
     print("The Linux desktop archive is ready to sign")
 
 
-def sparkle_signing(environment):
-    """Sparkle's options for the update key, which must match the key the app trusts."""
+def sparkle_signing(environment, plist):
+    """Sparkle's options for the update key, which must be the key the packaged app trusts.
+
+    A release app pins the current key of update-trust.json, a dry-run app its generated key.
+    """
     seed = update_signing.release_seed(environment)
-    if not update_signing.dry_run(environment):
-        if identity("spaceterm")["SUPublicEDKey"] != update_signing.trust(environment)[0]:
-            raise TaskError("SUPublicEDKey must equal the current key in update-trust.json")
+    if plist.get("SUPublicEDKey") != update_signing.trust(environment)[0]:
+        raise TaskError("the app's SUPublicEDKey must be the current update key")
     return ["--ed-key-file", "-"], update_signing.encoded_seed(seed).encode()
 
 
@@ -247,7 +248,7 @@ def appcast(tag):
     plist = plistlib.loads((DIST / "SpaceTerm.app/Contents/Info.plist").read_bytes())
     if plist["CFBundleShortVersionString"] != version or plist["CFBundleVersion"] != version:
         raise TaskError("package the selected Git tag before writing its appcast")
-    options, stdin = sparkle_signing(os.environ)
+    options, stdin = sparkle_signing(os.environ, plist)
     environment = {
         key: value for key, value in os.environ.items() if key != update_signing.SIGNING_SECRET
     }
