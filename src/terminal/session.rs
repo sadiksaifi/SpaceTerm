@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use spaceterm_server::diagnostics::{PaneWorkerCommand, TerminalCounters};
+use spaceterm_core::diagnostics::{PaneWorkerCommand, TerminalCounters};
 use thiserror::Error;
 use worker_commands::{Waited, WorkerCommands};
 
@@ -111,7 +111,7 @@ pub enum TerminalSessionEvent {
     /// A server Pane's line mode changed. A server Pane's client sends it to its view. A
     /// Terminal Session retains its line state in its subscription instead, so a change never
     /// displaces a queued screen.
-    Line(spaceterm_server::pane::LineState),
+    Line(spaceterm_core::pane::LineState),
     /// A paste may have been written before the connection lost its acknowledgement.
     PasteUnconfirmed,
     Exited(TerminalSessionExit),
@@ -301,10 +301,10 @@ pub enum SelectionCopyError {
 /// Server-backed delivery for native accessibility requests, which the server Pane's
 /// connection fences by its own epoch and focus generation.
 #[cfg(feature = "desktop")]
-pub(crate) type ServerAccessibilitySelection =
+pub(crate) type CoreAccessibilitySelection =
     Arc<dyn Fn(AccessibilitySelectionRequest) + Send + Sync>;
 #[cfg(feature = "desktop")]
-pub(crate) type ServerAccessibilityDemand = Arc<dyn Fn() + Send + Sync>;
+pub(crate) type CoreAccessibilityDemand = Arc<dyn Fn() + Send + Sync>;
 
 #[cfg_attr(
     not(target_os = "macos"),
@@ -316,7 +316,7 @@ pub(crate) type ServerAccessibilityDemand = Arc<dyn Fn() + Send + Sync>;
 #[derive(Clone)]
 #[cfg(feature = "desktop")]
 pub struct AccessibilitySelectionSender {
-    deliver: ServerAccessibilitySelection,
+    deliver: CoreAccessibilitySelection,
 }
 
 #[cfg(feature = "desktop")]
@@ -340,7 +340,7 @@ impl AccessibilitySelectionSender {
         let (requests, receiver) = mpsc::channel();
         let requests = Mutex::new(requests);
         (
-            Self::server(Arc::new(move |request| {
+            Self::core(Arc::new(move |request| {
                 let _ = requests
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -351,7 +351,7 @@ impl AccessibilitySelectionSender {
     }
 
     #[cfg(feature = "desktop")]
-    pub(crate) fn server(deliver: ServerAccessibilitySelection) -> Self {
+    pub(crate) fn core(deliver: CoreAccessibilitySelection) -> Self {
         Self { deliver }
     }
 
@@ -367,7 +367,7 @@ enum AccessibilityDemandTarget {
         schedule_input: ScheduleInput,
     },
     #[cfg(feature = "desktop")]
-    Server(ServerAccessibilityDemand),
+    Core(CoreAccessibilityDemand),
 }
 
 #[cfg_attr(
@@ -397,9 +397,9 @@ impl fmt::Debug for AccessibilityDemandSender {
 )]
 impl AccessibilityDemandSender {
     #[cfg(feature = "desktop")]
-    pub(crate) fn server(demand: ServerAccessibilityDemand) -> Self {
+    pub(crate) fn core(demand: CoreAccessibilityDemand) -> Self {
         Self {
-            target: AccessibilityDemandTarget::Server(demand),
+            target: AccessibilityDemandTarget::Core(demand),
         }
     }
 
@@ -422,7 +422,7 @@ impl AccessibilityDemandSender {
                 }
             }
             #[cfg(feature = "desktop")]
-            AccessibilityDemandTarget::Server(demand) => demand(),
+            AccessibilityDemandTarget::Core(demand) => demand(),
         }
     }
 }
@@ -671,26 +671,26 @@ impl TerminalRuntime {
     ///
     /// The receiver yields `true` only when the Selection changed; stale endpoints, mismatched
     /// screens, synchronized output and a stopped worker yield `false` or disconnect.
-    pub(crate) fn set_server_accessibility_selection(
+    pub(crate) fn set_machine_accessibility_selection(
         &self,
         selection: Option<AccessibilitySelectionRefs>,
     ) -> mpsc::Receiver<bool> {
         let (tx, rx) = mpsc::sync_channel(1);
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ServerAccessibilitySelection(selection, tx));
+            let _ = commands.send(Command::CoreAccessibilitySelection(selection, tx));
         }
         rx
     }
     /// Ends server client accessibility demand without changing visual Screen publication.
     /// A later `AccessibilityDemandSender::request` reactivates semantic publication.
-    pub(crate) fn end_server_accessibility_demand(&self) {
+    pub(crate) fn end_core_accessibility_demand(&self) {
         if let Some(commands) = &self.commands {
             let _ = commands.send(Command::EndAccessibilityDemand(Instant::now()));
         }
     }
     /// Ends server client accessibility demand and drops the semantic store. The next demand
     /// builds a complete model again, even when the terminal has not changed.
-    pub(crate) fn release_server_accessibility(&self) {
+    pub(crate) fn release_core_accessibility(&self) {
         if let Some(commands) = &self.commands {
             let _ = commands.send(Command::ReleaseAccessibility(Instant::now()));
         }
@@ -1012,7 +1012,7 @@ enum Command {
     ReadScrollback(scrollback::ScrollbackRead),
     /// Writes one command at the owning shell's empty prompt, or refuses it.
     Run(String, RunReply),
-    ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
+    CoreAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
     EndAccessibilityDemand(Instant),
     ReleaseAccessibility(Instant),
     Subscribe {
@@ -1082,7 +1082,7 @@ impl Command {
     fn requires_presentation_barrier(&self) -> bool {
         matches!(
             self,
-            Self::ApplicationPointer(..) | Self::ServerAccessibilitySelection(..)
+            Self::ApplicationPointer(..) | Self::CoreAccessibilitySelection(..)
         )
     }
 
@@ -1102,7 +1102,7 @@ impl Command {
             | Self::RestartInputSerials
             | Self::CopyOrForward(..)
             | Self::FlushInput => PaneWorkerCommand::Input,
-            Self::ServerAccessibilitySelection(..)
+            Self::CoreAccessibilitySelection(..)
             | Self::EndAccessibilityDemand(..)
             | Self::ReleaseAccessibility(..)
             | Self::AccessibilityDemand
@@ -1136,7 +1136,7 @@ impl fmt::Debug for Command {
         let name = match self {
             Self::ReadScrollback(..) => "ReadScrollback",
             Self::Run(..) => "Run",
-            Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
+            Self::CoreAccessibilitySelection(..) => "CoreAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
             Self::ReleaseAccessibility(..) => "ReleaseAccessibility",
             Self::Subscribe { .. } => "Subscribe",
@@ -1590,7 +1590,7 @@ impl TerminalWorker {
         match command {
             Command::ReadScrollback(read) => self.read_scrollback(read),
             Command::Run(command, reply) => self.process_run(&command, reply),
-            Command::ServerAccessibilitySelection(selection, reply) => {
+            Command::CoreAccessibilitySelection(selection, reply) => {
                 match self.emulator.set_accessibility_selection_refs(selection) {
                     Ok(changed) => {
                         let _ = reply.send(changed);
@@ -2074,7 +2074,7 @@ impl TerminalWorker {
             }
         }
         if let Some((request, epoch)) = requested {
-            let effect = spaceterm_server::pane::effects::Effect::PermissionSetup {
+            let effect = spaceterm_core::pane::effects::Effect::PermissionSetup {
                 screen_recording: request.permissions().contains(
                     &crate::platform::permission_access::SystemPermission::ScreenRecording,
                 ),
@@ -2088,7 +2088,7 @@ impl TerminalWorker {
         }
 
         if received_output {
-            self.schedules.note_hidden_server_content_changed();
+            self.schedules.note_hidden_machine_content_changed();
             let metadata = self.emulator.metadata();
             let metadata_revised = metadata.revision != previous_metadata.revision;
             if metadata_revised {
@@ -2173,11 +2173,11 @@ impl TerminalWorker {
         self.deliver_run_observations();
         for event in self.emulator.take_attention_events() {
             let effect = match event {
-                AttentionEvent::Bell => spaceterm_server::pane::effects::Effect::Bell,
+                AttentionEvent::Bell => spaceterm_core::pane::effects::Effect::Bell,
                 AttentionEvent::CommandFinished {
                     exit_status,
                     duration,
-                } => spaceterm_server::pane::effects::Effect::CommandFinished {
+                } => spaceterm_core::pane::effects::Effect::CommandFinished {
                     exit_status,
                     duration_ms: duration.as_millis().min(u128::from(u64::MAX)) as u64,
                 },
@@ -2334,7 +2334,7 @@ impl TerminalWorker {
     }
 
     fn publish_visible_screen_change(&mut self) -> bool {
-        self.schedules.note_hidden_server_content_changed();
+        self.schedules.note_hidden_machine_content_changed();
         self.schedules.request_presentation();
         if self.schedules.take_visible_presentation() {
             self.publish_screen()
@@ -2593,7 +2593,7 @@ impl TerminalWorker {
     /// An effect without that client is dropped.
     fn send_client_effect(
         &self,
-        effect: spaceterm_server::pane::effects::Effect,
+        effect: spaceterm_core::pane::effects::Effect,
         epoch: Option<u64>,
     ) -> bool {
         if self.clipboard.authority.native_request(epoch) {

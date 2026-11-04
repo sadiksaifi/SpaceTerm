@@ -16,8 +16,8 @@ use std::net::SocketAddr;
 use gpui::SharedString;
 use zeroize::Zeroizing;
 
-use crate::server_connection::ServerConnection;
-use crate::server_connection::direct::{
+use crate::machine_connection::MachineConnection;
+use crate::machine_connection::direct::{
     ClaimId, ComparisonCode, DeviceInfo, DirectError, DirectStatus, Invitation, ListenerState,
     NetworkAddresses, NetworkPolicy, PairingClaim, PairingId,
 };
@@ -26,7 +26,7 @@ use crate::server_connection::direct::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AccessState {
     /// The server's name, which every step that changes its access names.
-    pub(crate) server_name: SharedString,
+    pub(crate) machine_name: SharedString,
     /// The address the server listens at while access is on. `None` is off.
     pub(crate) policy: Option<SocketAddr>,
     /// The address the owner chose last, which the server keeps while access is off too, so
@@ -146,7 +146,7 @@ pub(crate) trait DirectAccessControl: Send + Sync {
     fn devices(&self) -> Result<Vec<Device>, AccessFailure>;
 }
 
-impl DirectAccessControl for ServerConnection {
+impl DirectAccessControl for MachineConnection {
     fn status(&self) -> Result<AccessState, AccessFailure> {
         self.direct_status().map(access_state).map_err(classify)
     }
@@ -164,9 +164,8 @@ impl DirectAccessControl for ServerConnection {
     fn invite(&self, address: Option<std::net::IpAddr>) -> Result<OpenInvitation, AccessFailure> {
         let advertise = if let Some(address) = address {
             let status = self.direct_status().map_err(classify)?;
-            let spaceterm_server::direct::ListenerState::Listening { addr } = status.listener
-            else {
-                return Err(classify(spaceterm_server::direct::DirectError::Disabled));
+            let spaceterm_core::direct::ListenerState::Listening { addr } = status.listener else {
+                return Err(classify(spaceterm_core::direct::DirectError::Disabled));
             };
             Some(std::net::SocketAddr::new(address, addr.port()).to_string())
         } else {
@@ -205,7 +204,7 @@ impl DirectAccessControl for ServerConnection {
 fn access_state(status: DirectStatus) -> AccessState {
     let configured = status.policy.map(|policy| policy.bind);
     AccessState {
-        server_name: status.server_name.into(),
+        machine_name: status.machine_name.into(),
         policy: configured.filter(|_| status.enabled),
         configured,
         listener: match status.listener {
@@ -271,7 +270,7 @@ fn classify(error: impl Into<DirectError>) -> AccessFailure {
         DirectError::Expired => AccessFailure::ClaimExpired,
         // A claim another client declined is one already answered.
         DirectError::AlreadyDecided | DirectError::Rejected => AccessFailure::ClaimDecided,
-        DirectError::ChangedClaim | DirectError::Substituted | DirectError::WrongServer => {
+        DirectError::ChangedClaim | DirectError::Substituted | DirectError::WrongMachine => {
             AccessFailure::ClaimChanged
         }
         DirectError::AuthenticationRefused
@@ -291,40 +290,40 @@ impl AccessFailure {
     /// What happened, in one sentence naming `server`.
     /// Why reading the server's access failed. A read changes nothing, so it never says that a
     /// change failed.
-    pub(crate) fn read_explanation(self, server: &str) -> String {
+    pub(crate) fn read_explanation(self, core: &str) -> String {
         match self {
             Self::Storage => format!(
-                "\u{201C}{server}\u{201D} couldn\u{2019}t read its network settings. Try again."
+                "\u{201C}{core}\u{201D} couldn\u{2019}t read its network settings. Try again."
             ),
-            other => other.explanation(server),
+            other => other.explanation(core),
         }
     }
 
     /// Why the person's change didn't take effect.
-    pub(crate) fn explanation(self, server: &str) -> String {
+    pub(crate) fn explanation(self, core: &str) -> String {
         match self {
             Self::Unreachable => {
-                format!("SpaceTerm can\u{2019}t reach \u{201C}{server}\u{201D}. Try again.")
+                format!("SpaceTerm can\u{2019}t reach \u{201C}{core}\u{201D}. Try again.")
             }
             Self::IncompatibleProtocol => format!(
-                "This SpaceTerm Client and the SpaceTerm Server on \"{server}\" use incompatible SpaceTerm Protocol versions."
+                "This SpaceTerm Client and SpaceTerm Core on \u{201C}{core}\u{201D} use incompatible SpaceTerm Protocol versions."
             ),
             Self::InvalidAddress => {
                 format!(
-                    "Enter an IP address of \u{201C}{server}\u{201D}, optionally followed by a port."
+                    "Enter an IP address of \u{201C}{core}\u{201D}, optionally followed by a port."
                 )
             }
             Self::AddressUnavailable => format!(
-                "\u{201C}{server}\u{201D} couldn\u{2019}t listen at that address and port. Another app may be using the port."
+                "\u{201C}{core}\u{201D} couldn\u{2019}t listen at that address and port. Another app may be using the port."
             ),
             Self::Disabled => {
-                format!("Allow devices to connect to \u{201C}{server}\u{201D} before inviting one.")
+                format!("Allow devices to connect to \u{201C}{core}\u{201D} before inviting one.")
             }
             Self::Capacity => {
-                format!("\u{201C}{server}\u{201D} has reached its device or connection limit.")
+                format!("\u{201C}{core}\u{201D} has reached its device or connection limit.")
             }
             Self::Storage => {
-                format!("\u{201C}{server}\u{201D} couldn\u{2019}t save the change. Try again.")
+                format!("\u{201C}{core}\u{201D} couldn\u{2019}t save the change. Try again.")
             }
             Self::InvitationEnded => "Create a new invitation to invite this device.".to_owned(),
             Self::ClaimExpired => {
@@ -336,7 +335,7 @@ impl AccessFailure {
             Self::ClaimChanged => {
                 "SpaceTerm refused the changed request. Invite the device again.".to_owned()
             }
-            Self::Refused => format!("\u{201C}{server}\u{201D} refused the request."),
+            Self::Refused => format!("\u{201C}{core}\u{201D} refused the request."),
         }
     }
 }
@@ -381,7 +380,7 @@ pub(crate) fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server_connection::direct::ServerPin;
+    use crate::machine_connection::direct::MachinePin;
 
     fn claim_with_exchange(prefix: [u8; 4]) -> PairingClaim {
         let mut exchange_hash = [0; 32];
@@ -389,7 +388,7 @@ mod tests {
         PairingClaim {
             id: [1; 32],
             invitation_id: [7; 32],
-            server: [2; 32],
+            core: [2; 32],
             device_public_key: [3; 32],
             device_name: "MacBook".into(),
             expires_at_unix_seconds: 1_000,
@@ -399,15 +398,15 @@ mod tests {
 
     fn status(listener: ListenerState) -> DirectStatus {
         DirectStatus {
-            pin: ServerPin {
+            pin: MachinePin {
                 build: "1.0.0".to_owned(),
-                server: [2; 32],
+                core: [2; 32],
                 public_key: [4; 32],
                 certificate: [5; 32],
             },
             policy: NetworkPolicy::parse("192.168.1.20").ok(),
             enabled: true,
-            server_name: "studio".to_owned(),
+            machine_name: "studio".to_owned(),
             listener,
             network_addresses: Ok(NetworkAddresses {
                 available: vec!["192.168.1.21".parse().expect("an address")],
@@ -426,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listening_address_the_server_no_longer_has_reads_as_gone() {
+    fn a_listening_address_the_core_no_longer_has_reads_as_gone() {
         let state = access_state(status(ListenerState::Failed(DirectError::InvalidAddress)));
 
         assert_eq!(state.listener, Listener::AddressGone);
@@ -440,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn addresses_the_server_couldnt_read_are_unknown_rather_than_empty() {
+    fn addresses_the_machine_couldnt_read_are_unknown_rather_than_empty() {
         let mut unread = status(ListenerState::Off);
         unread.network_addresses = Err(DirectError::Transport);
 

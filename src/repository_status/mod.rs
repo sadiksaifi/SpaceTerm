@@ -396,7 +396,7 @@ pub(crate) trait WatchSets: Send + Sync + 'static {
     fn start(&self, changed: ChangedPaths) -> Result<Box<dyn WatchSet>, RepositoryWatchError>;
 }
 
-pub(crate) use spaceterm_server::repository::{
+pub(crate) use spaceterm_core::repository::{
     ChangeEntry, ChangeKind, ChangeSummary, ChangeTotal, Divergence, FsmonitorPolicy,
     GitHubRepository, GitToolStatus, MAXIMUM_CHANGE_ENTRIES, OperationStep, RepositoryHead,
     RepositoryOperation, RepositoryReadError, ToolVersion, Upstream,

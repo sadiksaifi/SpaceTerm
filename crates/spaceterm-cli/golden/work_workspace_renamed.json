@@ -1,12 +1,5 @@
 {
-  "schema": "spaceterm.cli.v1",
   "command": "workspace.rename",
-  "status": "ok",
-  "server": {
-    "name": "fixture",
-    "route": "local",
-    "id": "0909090909090909090909090909090909090909090909090909090909090909"
-  },
   "data": {
     "revision": 8,
     "target": [
@@ -24,5 +17,12 @@
     }
   },
   "error": null,
+  "machine": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "fixture",
+    "route": "local"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
   "warnings": []
 }

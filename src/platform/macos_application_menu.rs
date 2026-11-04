@@ -55,7 +55,7 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "Add Server…",
+        item: "Add Machine…",
         symbol: "server.rack",
     },
     MenuItemIcon {
@@ -1310,7 +1310,7 @@ mod tests {
             labels(file_menu().owned()),
             [
                 "New Workspace",
-                "Add Server…",
+                "Add Machine…",
                 "Open Local Directory…",
                 "Choose Workspace…",
                 "|",
@@ -1338,7 +1338,7 @@ mod tests {
             actions,
             [
                 NewWorkspace.name(),
-                crate::ui::settings_window::AddServer.name(),
+                crate::ui::settings_window::AddMachine.name(),
                 crate::ui::OpenLocalDirectory.name(),
                 ChooseWorkspace.name(),
                 NewTab.name(),

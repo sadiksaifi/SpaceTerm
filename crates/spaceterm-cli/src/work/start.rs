@@ -11,7 +11,7 @@ use crate::{
     args::{Cli, Command, WorktreeCommand},
     contract::*,
 };
-use spaceterm_server::protocol::AgentName;
+use spaceterm_core::protocol::AgentName;
 use std::{
     io::{BufRead, IsTerminal, Read, Write},
     time::{Duration, Instant},
@@ -68,7 +68,7 @@ fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
             let data = error.operational_data();
             return Output::failed(
                 cli.command.path(),
-                error.server.map(|server| *server),
+                error.machine.map(|machine| *machine),
                 error.failure,
                 data,
                 String::new(),
@@ -81,20 +81,20 @@ fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
             return failed(if Instant::now() >= deadline {
                 Failure::new(Code::Timeout)
             } else {
-                from_server_error(e)
+                from_core_error(e)
             });
         }
     };
-    let server = match connection.admitted_server_id() {
-        Ok(server) => selected.reference(&server),
-        Err(error) => return failed(from_server_error(error)),
+    let core = match connection.admitted_machine_id() {
+        Ok(core) => selected.reference(&core),
+        Err(error) => return failed(from_core_error(error)),
     };
     run_with_confirmation(
         deadline,
         timeout,
         |deadline, confirmation| {
             let mut connect = |agent: Option<&AgentName>| {
-                selected.server_connection(
+                selected.machine_connection(
                     identity,
                     agent.cloned(),
                     credentials,
@@ -128,8 +128,8 @@ fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
                     identity,
                     deadline,
                     local,
-                    name: &server.name,
-                    route: &server.route,
+                    name: &core.name,
+                    route: &core.route,
                     agent: agent.is_some(),
                 },
                 confirmation,
@@ -221,7 +221,7 @@ pub fn run_connected(
         identity,
         deadline,
         local,
-        name: server_name,
+        name: machine_name,
         route,
         agent,
     } = *selected;
@@ -239,14 +239,14 @@ pub fn run_connected(
         Err(_) => return failed(Failure::new(Code::DirectoryUnavailable)),
     };
     let current_identity = std::env::var("SPACETERM_IDENTITY").ok();
-    let current_server = std::env::var("SPACETERM_SERVER_ID").ok();
+    let current_machine = std::env::var("SPACETERM_MACHINE_ID").ok();
     let current_pane = std::env::var("SPACETERM_PANE").ok();
     let env = Environment {
         identity,
         local,
         cwd: &cwd,
         current_identity: current_identity.as_deref(),
-        current_server: current_server.as_deref(),
+        current_machine: current_machine.as_deref(),
         current_pane: current_pane.as_deref(),
         agent,
         now: jiff::Timestamp::now().as_second(),
@@ -259,7 +259,7 @@ pub fn run_connected(
         &env,
         journal,
         reader,
-        server_name,
+        machine_name,
         route,
     )
 }
@@ -273,7 +273,7 @@ mod tests {
         work::backend,
     };
     use clap::Parser;
-    use spaceterm_server::hierarchy::{
+    use spaceterm_core::hierarchy::{
         CloseInventory, ConfirmedPane, Id, Inventory, Mutation, Outcome,
     };
     use std::{cell::RefCell, collections::VecDeque, path::PathBuf, rc::Rc};
@@ -288,8 +288,8 @@ mod tests {
         }
         fn worktree(
             &mut self,
-            _: spaceterm_server::worktree::Read,
-        ) -> Result<spaceterm_server::worktree::ReadReply, Failure> {
+            _: spaceterm_core::worktree::Read,
+        ) -> Result<spaceterm_core::worktree::ReadReply, Failure> {
             panic!("workspace kill reads no Worktrees")
         }
         fn panes(
@@ -308,7 +308,7 @@ mod tests {
         sent: Rc<RefCell<Vec<Mutation>>>,
     }
     impl dispatch::Dispatch for Writer<'_> {
-        fn server_id(&self) -> Id {
+        fn machine_id(&self) -> Id {
             id(9)
         }
         fn client_id(&self) -> Id {
@@ -378,7 +378,7 @@ mod tests {
                             local: true,
                             cwd: std::path::Path::new("/client"),
                             current_identity: None,
-                            current_server: None,
+                            current_machine: None,
                             current_pane: None,
                             agent: false,
                             now: 100,

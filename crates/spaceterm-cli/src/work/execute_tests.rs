@@ -5,7 +5,7 @@ use crate::{
     scope::fixtures::{fixture, id},
 };
 use clap::Parser;
-use spaceterm_server::{
+use spaceterm_core::{
     hierarchy::{CloseInventory, ConfirmedPane, Inventory},
     worktree::ReadReply,
 };
@@ -24,7 +24,7 @@ struct Script {
 #[derive(Clone)]
 struct Double(Rc<RefCell<Script>>);
 impl Dispatch for Double {
-    fn server_id(&self) -> Id {
+    fn machine_id(&self) -> Id {
         id(9)
     }
     fn client_id(&self) -> Id {
@@ -96,7 +96,7 @@ fn env() -> Environment<'static> {
         local: true,
         cwd: Path::new("/client/cwd"),
         current_identity: None,
-        current_server: None,
+        current_machine: None,
         current_pane: None,
         agent: true,
         now: 100,
@@ -138,7 +138,7 @@ fn live(mut inventory: Inventory) -> Inventory {
 }
 
 #[test]
-fn workspace_creation_reports_the_server_chosen_directory_after_journal_acknowledgement() {
+fn workspace_creation_reports_the_machine_chosen_directory_after_journal_acknowledgement() {
     let initial = fixture().inventory;
     let mut updated = initial.clone();
     let mut created = updated.workspaces[1].clone();
@@ -286,7 +286,7 @@ fn fallback_creation_must_be_accepted_before_a_fresh_close_preview() {
     let script = script.borrow();
     assert_eq!(script.sent.len(), 1);
     assert!(
-        matches!(&script.sent[0],Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {path,..}) if path==Path::new("/repo"))
+        matches!(&script.sent[0],Mutation::Worktree(spaceterm_core::worktree::Operation::OpenTab {path,..}) if path==Path::new("/repo"))
     );
     let sessions = &output.envelope.data.body["confirmation"]["effects"]["sessions"];
     assert_eq!(sessions.as_array().unwrap().len(), 1);
@@ -301,7 +301,7 @@ fn failed_fallback_keeps_all_original_tabs_and_dispatches_no_close() {
     let script = Rc::new(RefCell::new(Script {
         inventories: VecDeque::from([initial]),
         outcomes: VecDeque::from([Ok(Outcome::WorktreeFailed(
-            spaceterm_server::worktree::Error::Missing,
+            spaceterm_core::worktree::Error::Missing,
         ))]),
         ..Default::default()
     }));
@@ -331,11 +331,11 @@ fn list_output_keeps_operational_titles_and_paths_out_of_diagnostics() {
         .unwrap()
         .title = "private-title".into();
     initial.workspaces[0].tabs[0].panes[0].current_directory = Some("/private-path".into());
-    let server_facts =
-        spaceterm_server::worktree::ServerFacts::new("fixture", "test", "1").unwrap();
+    let machine_facts =
+        spaceterm_core::worktree::MachineFacts::new("fixture", "test", "1").unwrap();
     let script = Rc::new(RefCell::new(Script {
         inventories: VecDeque::from([initial]),
-        replies: VecDeque::from([ReadReply::ServerFacts(server_facts)]),
+        replies: VecDeque::from([ReadReply::MachineFacts(machine_facts)]),
         ..Default::default()
     }));
     let output = run_script(&["list"], &env(), &script);
@@ -465,7 +465,7 @@ fn renames_use_the_frozen_name_version_and_return_the_accepted_name() {
 }
 
 #[test]
-fn tab_and_split_creation_report_server_directories_and_stable_root_sources() {
+fn tab_and_split_creation_report_core_directories_and_stable_root_sources() {
     for split in [false, true] {
         let initial = fixture().inventory;
         let mut updated = initial.clone();
@@ -582,13 +582,13 @@ fn confirmed_pane_and_tab_closes_submit_only_the_original_review() {
 
 #[test]
 fn worktree_creation_uses_the_main_branch_and_opens_exactly_one_tab() {
-    use spaceterm_server::worktree::{Branch, BranchName, Branches, Operation, Settings};
+    use spaceterm_core::worktree::{Branch, BranchName, Branches, Operation, Settings};
     for (agent, in_session, expected_control) in [
         (true, false, "self"),
         (false, true, "origin"),
         (false, false, "unclaimed"),
     ] {
-        for open in [false, true] {
+        {
             let initial = fixture().inventory;
             let mut updated = initial.clone();
             let mut tab = updated.workspaces[0].tabs[0].clone();
@@ -620,17 +620,14 @@ fn worktree_creation_uses_the_main_branch_and_opens_exactly_one_tab() {
                 outcomes: VecDeque::from([Ok(Outcome::Accepted { target: id(40) })]),
                 ..Default::default()
             }));
-            let mut args = vec!["worktree", "create", "feature/new", "--workspace", "api"];
-            if open {
-                args.push("--open");
-            }
-            let server = hex(&id(9));
+            let args = ["worktree", "create", "feature/new", "--workspace", "api"];
+            let core = hex(&id(9));
             let pane = hex(&id(21));
             let mut environment = env();
             environment.agent = agent;
             if in_session {
                 environment.current_identity = Some("test");
-                environment.current_server = Some(&server);
+                environment.current_machine = Some(&core);
                 environment.current_pane = Some(&pane);
             }
             let output = run_script(&args, &environment, &script);
@@ -671,8 +668,8 @@ fn worktree_creation_uses_the_main_branch_and_opens_exactly_one_tab() {
 }
 
 #[test]
-fn worktree_removal_reuses_the_server_approval_without_requesting_a_new_one() {
-    use spaceterm_server::worktree::{AffectedTab, Operation};
+fn worktree_removal_reuses_the_machine_approval_without_requesting_a_new_one() {
+    use spaceterm_core::worktree::{AffectedTab, Operation};
     let initial = live(fixture().inventory);
     let removal = Removal {
         boot: id(9),
@@ -758,8 +755,8 @@ fn every_command_reports_settled_leftovers_and_a_bounded_warning() {
     };
     let script = Rc::new(RefCell::new(Script {
         inventories: VecDeque::from([fixture().inventory]),
-        replies: VecDeque::from([ReadReply::ServerFacts(
-            spaceterm_server::worktree::ServerFacts::new("fixture", "test", "1").unwrap(),
+        replies: VecDeque::from([ReadReply::MachineFacts(
+            spaceterm_core::worktree::MachineFacts::new("fixture", "test", "1").unwrap(),
         )]),
         recovered: vec![recovered.clone()],
         ..Default::default()
@@ -775,7 +772,7 @@ fn every_command_reports_settled_leftovers_and_a_bounded_warning() {
 
 #[test]
 fn unconfirmed_worktree_creation_never_retries_or_opens_another_tab() {
-    use spaceterm_server::worktree::{Branches, Settings};
+    use spaceterm_core::worktree::{Branches, Settings};
     let script = Rc::new(RefCell::new(Script {
         inventories: VecDeque::from([fixture().inventory]),
         replies: VecDeque::from([ReadReply::Context {
@@ -790,7 +787,7 @@ fn unconfirmed_worktree_creation_never_retries_or_opens_another_tab() {
         ..Default::default()
     }));
     let output = run_script(
-        &["worktree", "create", "new", "--workspace", "api", "--open"],
+        &["worktree", "create", "new", "--workspace", "api"],
         &env(),
         &script,
     );
@@ -885,7 +882,7 @@ fn workspace_pin_rejects_remote_relative_and_invalid_paths_before_recovery() {
 }
 
 #[test]
-fn workspace_pin_resolves_remote_home_on_the_server() {
+fn workspace_pin_resolves_remote_home_on_the_machine() {
     for (path, expected) in [("~/repo", "/server/home/repo"), ("/srv/repo", "/srv/repo")] {
         let mut updated = fixture().inventory;
         updated.workspaces[0].pinned_directory = Some(expected.into());
@@ -909,7 +906,7 @@ fn workspace_pin_resolves_remote_home_on_the_server() {
 }
 
 #[test]
-fn workspace_pin_reports_a_server_refusal_without_echoing_the_directory() {
+fn workspace_pin_reports_a_machine_refusal_without_echoing_the_directory() {
     let script = Rc::new(RefCell::new(Script {
         inventories: VecDeque::from([fixture().inventory]),
         outcomes: VecDeque::from([Ok(Outcome::Invalid)]),
@@ -1021,11 +1018,11 @@ mod show {
             answer,
             requests: RefCell::default(),
         };
-        let server = "09".repeat(32);
+        let core = "09".repeat(32);
         let pane = current.map(|byte| format!("{byte:02x}").repeat(32));
         let env = Environment {
             current_identity: Some("test"),
-            current_server: Some(&server),
+            current_machine: Some(&core),
             current_pane: pane.as_deref(),
             desktop: &desktop,
             ..env()
@@ -1049,7 +1046,7 @@ mod show {
         assert_eq!(
             requests,
             [Request::Show {
-                server: id(9),
+                core: id(9),
                 workspace: id(1),
                 tab: Some(id(12)),
                 pane: Some(id(22)),
@@ -1064,7 +1061,7 @@ mod show {
         assert_eq!(
             requests,
             [Request::Show {
-                server: id(9),
+                core: id(9),
                 workspace: id(2),
                 tab: None,
                 pane: None,
@@ -1074,7 +1071,7 @@ mod show {
         assert_eq!(
             requests,
             [Request::Show {
-                server: id(9),
+                core: id(9),
                 workspace: id(1),
                 tab: Some(id(12)),
                 pane: None,

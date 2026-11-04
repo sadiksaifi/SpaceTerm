@@ -4,21 +4,21 @@
 use std::rc::Rc;
 
 use gpui::{TestAppContext, VisualTestContext};
-use spaceterm_server::client_view::RetainedInventory;
-use spaceterm_server::hierarchy::{Inventory, Mutation};
+use spaceterm_core::client_view::RetainedInventory;
+use spaceterm_core::hierarchy::{Inventory, Mutation};
 
-use super::{MultiServerHarness, ServerKey, named_route, server_inventory, settle_panes};
+use super::{MachineKey, MultiMachineHarness, core_inventory, named_route, settle_panes};
 use crate::direct_connections::DirectRouteId;
 use crate::domain::{PresentedWorkspace as _, WorkspaceId};
 use crate::ui::workspaces::testing::{FixedOwner, ScriptedEdits, ScriptedPanes};
-use crate::ui::workspaces::{DirectServer, WorkspaceRefusalReason, WorkspaceSubmission};
+use crate::ui::workspaces::{DirectMachine, WorkspaceRefusalReason, WorkspaceSubmission};
 
 /// `workspaces` as the server publishes them, each Pane titled by the program running in it.
 fn titled_inventory(revision: u64, workspaces: &[(&str, u8)]) -> Inventory {
-    use spaceterm_server::pane::metadata::{
+    use spaceterm_core::pane::metadata::{
         DirectoryProvenance, Freshness, Progress, PromptZone, Snapshot, TitleGlyph, TitleProvenance,
     };
-    let mut inventory = server_inventory(revision, workspaces);
+    let mut inventory = core_inventory(revision, workspaces);
     for workspace in &mut inventory.workspaces {
         let name = workspace.name.clone();
         for pane in workspace.tabs.iter_mut().flat_map(|tab| &mut tab.panes) {
@@ -45,7 +45,7 @@ fn titled_inventory(revision: u64, workspaces: &[(&str, u8)]) -> Inventory {
     inventory
 }
 
-impl MultiServerHarness {
+impl MultiMachineHarness {
     /// Binds the saved route `name` at `route` with no connection, as launch does before the
     /// route's first connection.
     fn present_saved_route(
@@ -54,12 +54,12 @@ impl MultiServerHarness {
         route: DirectRouteId,
         retained: Option<RetainedInventory>,
         cx: &mut VisualTestContext,
-    ) -> ServerKey {
+    ) -> MachineKey {
         let key = cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
                 let key = manager
                     .present_direct_route(
-                        DirectServer {
+                        DirectMachine {
                             route,
                             name: name.to_owned().into(),
                         },
@@ -108,7 +108,7 @@ impl MultiServerHarness {
         route: DirectRouteId,
         connection: Option<(Rc<ScriptedEdits>, Rc<ScriptedPanes>)>,
         cx: &mut VisualTestContext,
-    ) -> ServerKey {
+    ) -> MachineKey {
         let key = cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
                 manager.follow_direct_route(
@@ -116,7 +116,7 @@ impl MultiServerHarness {
                     connection.map(|(edits, panes)| (edits as Rc<_>, panes as Rc<_>)),
                 );
                 let key = manager
-                    .server_key(&crate::ui::ServerTarget::Direct(route))
+                    .machine_key(&crate::ui::MachineTarget::Direct(route))
                     .expect("the route stays presented");
                 manager.sync_workspaces(key, window, cx);
                 key
@@ -127,30 +127,29 @@ impl MultiServerHarness {
     }
 
     /// The local Workspace presenting the server Workspace `server` at `key`.
-    fn local(&self, key: ServerKey, server: u8, cx: &mut VisualTestContext) -> Option<WorkspaceId> {
-        self.manager.read_with(cx, |manager, _| {
-            manager.binding.get(key)?.local([server; 32])
-        })
+    fn local(&self, key: MachineKey, core: u8, cx: &mut VisualTestContext) -> Option<WorkspaceId> {
+        self.manager
+            .read_with(cx, |manager, _| manager.binding.get(key)?.local([core; 32]))
     }
 
     /// The row status `key`'s server Workspace `server` shows in place of its directory.
     fn row_status(
         &self,
-        key: ServerKey,
-        server: u8,
+        key: MachineKey,
+        core: u8,
         cx: &mut VisualTestContext,
     ) -> Option<&'static str> {
         self.manager.read_with(cx, |manager, _| {
             manager
                 .binding
                 .get(key)?
-                .row_status([server; 32], None)
+                .row_status([core; 32], None)
                 .map(|status| status.text)
         })
     }
 
     /// Whether this client's attachments let the route at `key` open the server Pane `pane`.
-    fn permits(&self, key: ServerKey, pane: u8, cx: &mut VisualTestContext) -> bool {
+    fn permits(&self, key: MachineKey, pane: u8, cx: &mut VisualTestContext) -> bool {
         self.manager.read_with(cx, |manager, _| {
             manager
                 .binding
@@ -162,7 +161,7 @@ impl MultiServerHarness {
     /// Republishes `edits`' inventory as `inventory` and reads it.
     fn republish(
         &self,
-        key: ServerKey,
+        key: MachineKey,
         edits: &ScriptedEdits,
         inventory: Inventory,
         cx: &mut VisualTestContext,
@@ -199,8 +198,8 @@ impl MultiServerHarness {
     /// Asks the route at `key` for a new Tab in its Workspace `server`.
     fn create_tab(
         &self,
-        key: ServerKey,
-        server: u8,
+        key: MachineKey,
+        core: u8,
         cx: &mut VisualTestContext,
     ) -> WorkspaceSubmission {
         self.manager.update(cx, |manager, _| {
@@ -209,9 +208,9 @@ impl MultiServerHarness {
                 .get_mut(key)
                 .expect("the route is presented");
             binding.edits().submit(Mutation::CreateTab {
-                workspace: [server; 32],
-                source: Some([server + 50; 32]),
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                workspace: [core; 32],
+                source: Some([core + 50; 32]),
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             })
         })
     }
@@ -222,8 +221,8 @@ fn offline_notice_shown(cx: &mut VisualTestContext) -> bool {
         .in_order()
         .iter()
         .any(|node| {
-            node["aria"]["label"].as_str() == Some(crate::ui::server_pane::OFFLINE_TITLE)
-                || node["aria"]["value"].as_str() == Some(crate::ui::server_pane::OFFLINE_TITLE)
+            node["aria"]["label"].as_str() == Some(crate::ui::core_pane::OFFLINE_TITLE)
+                || node["aria"]["value"].as_str() == Some(crate::ui::core_pane::OFFLINE_TITLE)
         })
 }
 
@@ -232,8 +231,8 @@ fn offline_notice_shown(cx: &mut VisualTestContext) -> bool {
 /// unavailable and no Pane reaches a Terminal Session.
 #[gpui::test]
 fn a_saved_route_should_present_what_it_retained_before_it_connects(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     let route = named_route("penguin");
     let retained = RetainedInventory::retain(&titled_inventory(9, &[("Far", 1), ("Farther", 2)]));
 
@@ -267,7 +266,7 @@ fn a_saved_route_should_present_what_it_retained_before_it_connects(cx: &mut Tes
 fn disconnect_should_keep_the_routes_workspaces_until_reconnecting_reconciles_them(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     let key = harness.present_saved_route("penguin", route, None, cx);
     let published = titled_inventory(harness.next_revision(), &[("Far", 1), ("Farther", 2)]);
@@ -345,7 +344,7 @@ fn disconnect_should_keep_the_routes_workspaces_until_reconnecting_reconciles_th
 /// again.
 #[gpui::test]
 fn discarding_a_routes_copy_should_leave_nothing_to_present(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     let retained = RetainedInventory::retain(&titled_inventory(9, &[("Far", 1)]));
     let key = harness.present_saved_route("penguin", route, Some(retained), cx);
@@ -362,8 +361,8 @@ fn discarding_a_routes_copy_should_leave_nothing_to_present(cx: &mut TestAppCont
 /// The most common relaunch: the server's inventory is unchanged since this client retained it,
 /// so it arrives at the copy's revision. It still reads the attachments and opens each Pane.
 #[gpui::test]
-fn a_server_publishing_the_retained_revision_should_open_the_routes_panes(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+fn a_core_publishing_the_retained_revision_should_open_the_routes_panes(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     let published = titled_inventory(9, &[("Far", 1), ("Farther", 2)]);
     let key = harness.present_saved_route(
@@ -403,7 +402,7 @@ fn a_server_publishing_the_retained_revision_should_open_the_routes_panes(cx: &m
 /// Panes again at the same revision.
 #[gpui::test]
 fn reconnecting_at_the_same_revision_should_open_the_routes_panes_again(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     let key = harness.present_saved_route("penguin", route, None, cx);
     let published = titled_inventory(harness.next_revision(), &[("Far", 1)]);
@@ -430,8 +429,8 @@ fn reconnecting_at_the_same_revision_should_open_the_routes_panes_again(cx: &mut
 /// A connection that has not published its inventory yet leaves the retained copy presented and
 /// shared edits unavailable, so no edit is asked against what the server may have changed.
 #[gpui::test]
-fn a_connection_should_take_edits_only_once_the_server_publishes(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+fn a_connection_should_take_edits_only_once_the_machine_publishes(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     let published = titled_inventory(9, &[("Far", 1)]);
     let key = harness.present_saved_route(
@@ -471,7 +470,7 @@ fn a_connection_should_take_edits_only_once_the_server_publishes(cx: &mut TestAp
 /// when the Workspaces, Tabs, Panes, Splits or names do.
 #[gpui::test]
 fn only_a_structural_change_should_write_the_routes_copy(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     let key = harness.present_saved_route("penguin", route, None, cx);
     let first = titled_inventory(harness.next_revision(), &[("Far", 1)]);
@@ -510,11 +509,11 @@ fn only_a_structural_change_should_write_the_routes_copy(cx: &mut TestAppContext
 /// up.
 #[gpui::test]
 fn a_window_should_leave_a_failure_settings_still_shows_to_settings(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Outcome;
-    use spaceterm_server::worktree::{Error, Operation};
+    use spaceterm_core::hierarchy::Outcome;
+    use spaceterm_core::worktree::{Error, Operation};
 
     const ALERT: &str = "modal-action-server-worktree-location-failed-ok";
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     let edits = Rc::new(ScriptedEdits::new(Some(titled_inventory(
         harness.next_revision(),
@@ -522,13 +521,13 @@ fn a_window_should_leave_a_failure_settings_still_shows_to_settings(cx: &mut Tes
     ))));
     // Settings writes through the route's writer and keeps the answer it shows.
     let answer = cx.update(|_, cx| {
-        crate::ui::server_worktrees::testing::present_direct(
+        crate::ui::core_worktrees::testing::present_direct(
             route,
             Rc::clone(&edits),
-            crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}"),
+            crate::ui::core_worktrees::testing::ScriptedReads::new("~/{branch}"),
             cx,
         );
-        let client = crate::ui::server_worktrees::Client::direct(&route, cx).expect("a writer");
+        let client = crate::ui::core_worktrees::Client::direct(&route, cx).expect("a writer");
         let answer = client.source.owner();
         client
             .write_owned(

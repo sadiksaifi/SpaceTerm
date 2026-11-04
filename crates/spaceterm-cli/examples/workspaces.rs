@@ -7,11 +7,11 @@
 mod lifecycle;
 #[expect(dead_code, reason = "The Pane exercise never uses `support::attach`.")]
 mod support;
-use lifecycle::{Server, require_idle, size};
-use spaceterm_server::{
-    ServerConnection, ServerError,
+use lifecycle::{Core, require_idle, size};
+use spaceterm_core::{
+    CoreError, MachineConnection,
     attachments::AttachmentPermit,
-    connection::link::ServerLink,
+    connection::link::CoreLink,
     hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
     pane::*,
     protocol::{Operation, PaneEvent},
@@ -22,12 +22,12 @@ use std::{
 };
 use support::{Claimed, Pane};
 
-fn connect(server: &ServerConnection) -> Result<ServerLink, Box<dyn Error>> {
+fn connect(core: &MachineConnection) -> Result<CoreLink, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(8);
     loop {
-        match server.link() {
+        match core.link() {
             Ok(link) => return Ok(link),
-            Err(ServerError::NotRunning) if Instant::now() < until => {
+            Err(CoreError::NotRunning) if Instant::now() < until => {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => return Err(error.into()),
@@ -35,12 +35,12 @@ fn connect(server: &ServerConnection) -> Result<ServerLink, Box<dyn Error>> {
     }
 }
 
-fn inventory(link: &ServerLink) -> Result<(Inventory, u64), Box<dyn Error>> {
+fn inventory(link: &CoreLink) -> Result<(Inventory, u64), Box<dyn Error>> {
     // A mutation replies on its own link. Drain already-published inventory on this peer too.
     support::round_trip(link)?;
     Ok(support::inventory(link)?)
 }
-fn mutate(link: &ServerLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
+fn mutate(link: &CoreLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
     let (_, sequence) = inventory(link)?;
     let result = support::mutate(link, sequence, mutation)?;
     let Outcome::Accepted { target } = result.outcome else {
@@ -49,20 +49,20 @@ fn mutate(link: &ServerLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
     link.acknowledge(sequence)?;
     Ok(target)
 }
-fn select(link: &ServerLink, pane: Id, explicit: bool) -> Result<Claimed, ServerError> {
+fn select(link: &CoreLink, pane: Id, explicit: bool) -> Result<Claimed, CoreError> {
     support::select(link, pane, explicit, size())
 }
 /// Claims `pane` under `permit`'s attachment, as the desktop does. Releases of earlier
 /// attachments go first.
 fn permitted(
-    link: &ServerLink,
-    choices: &spaceterm_server::attachments::Attachments,
+    link: &CoreLink,
+    choices: &spaceterm_core::attachments::Attachments,
     permit: &AttachmentPermit,
     pane: Id,
     claim: AttachmentClaim,
-) -> Result<Claimed, ServerError> {
+) -> Result<Claimed, CoreError> {
     if !permit.active() {
-        return Err(ServerError::SessionUnavailable);
+        return Err(CoreError::SessionUnavailable);
     }
     choices.release_pending(link)?;
     support::claim_in(link, permit.attachment(), pane, claim, size())
@@ -70,7 +70,7 @@ fn permitted(
 fn attached(claimed: Claimed, failure: &'static str) -> Result<Pane, Box<dyn Error>> {
     claimed.attached().ok_or_else(|| failure.into())
 }
-fn attachment_workflow(a: &ServerConnection, b: &ServerConnection) -> Result<(), Box<dyn Error>> {
+fn attachment_workflow(a: &MachineConnection, b: &MachineConnection) -> Result<(), Box<dyn Error>> {
     let first = connect(a)?;
     let second = connect(b)?;
     let workspace = mutate(
@@ -78,7 +78,7 @@ fn attachment_workflow(a: &ServerConnection, b: &ServerConnection) -> Result<(),
         Mutation::CreateWorkspace {
             name: "Attachments smoke".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let current = inventory(&first)?.0;
@@ -167,13 +167,13 @@ fn attachment_workflow(a: &ServerConnection, b: &ServerConnection) -> Result<(),
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = spaceterm_server::protocol::MAJOR;
-    let a = ServerConnection::for_development_client("shared-smoke-a")?;
-    let b = ServerConnection::for_development_client("shared-smoke-b")?;
+    let major = spaceterm_core::protocol::MAJOR;
+    let a = MachineConnection::for_development_client("shared-smoke-a")?;
+    let b = MachineConnection::for_development_client("shared-smoke-b")?;
     require_idle(&a)?;
     a.setup()?;
     b.setup()?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     attachment_workflow(&a, &b)?;
     let first = connect(&a)?;
     let second = connect(&b)?;
@@ -182,7 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateWorkspace {
             name: "Shared smoke".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let (published, _) = inventory(&second)?;
@@ -205,7 +205,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             tab,
             source: pane,
             axis: Axis::Right,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let pane_b = attached(select(&second, split, true)?, "independent control")?;
@@ -257,7 +257,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let creation = Mutation::CreateTab {
         workspace,
         source: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     };
     // Discard the result at the application boundary and reconnect with its original identity.
     support::mutate(&first, sequence, creation.clone())?;
@@ -265,7 +265,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     second.close();
     drop((pane_a, pane_b));
     host.kill()?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let first = connect(&a)?;
     let before = inventory(&first)?.0;
     let w = before
@@ -337,7 +337,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateWorkspace {
             name: "Survivor".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let current = inventory(&first)?.0;
@@ -379,7 +379,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     second.close();
     drop(survivor_shell);
     host.kill()?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let first = connect(&a)?;
     let saved = support::resolve(&first, sequence)?;
     let replayed = support::mutate(&first, sequence, kill)?;
@@ -407,12 +407,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let (_, sequence) = inventory(&first)?;
     assert!(
-        matches!(support::mutate(&first, sequence, Mutation::CreateTab { workspace, source: None, control: spaceterm_server::hierarchy::CreateControl::Creator, })?, o if o.outcome == Outcome::Missing)
+        matches!(support::mutate(&first, sequence, Mutation::CreateTab { workspace, source: None, control: spaceterm_core::hierarchy::CreateControl::Creator, })?, o if o.outcome == Outcome::Missing)
     );
     first.acknowledge(sequence)?;
     assert!(matches!(
         select(&first, later_pane, true),
-        Err(ServerError::SessionUnavailable)
+        Err(CoreError::SessionUnavailable)
     ));
     close(
         &first,
@@ -428,7 +428,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn close(link: &ServerLink, target: CloseTarget) -> Result<Id, Box<dyn Error>> {
+fn close(link: &CoreLink, target: CloseTarget) -> Result<Id, Box<dyn Error>> {
     let current = inventory(link)?.0;
     let confirmation = current.close_confirmation(target).ok_or("close target")?;
     mutate(

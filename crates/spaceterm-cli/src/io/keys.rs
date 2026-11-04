@@ -3,8 +3,8 @@
 //! A batch holds at most [`MAX_KEY_BATCH`] events and [`MAX_KEY_TEXT_BYTES`] bytes of text, the
 //! bounds a server accepts in one Input message.
 use crate::contract::{Code, Details, Failure, UsageDetails, UsageKind};
-use spaceterm_server::pane::keys::{named, text};
-use spaceterm_server::pane::{Key, MAX_KEY_BATCH, MAX_KEY_TEXT_BYTES};
+use spaceterm_core::pane::keys::{named, text};
+use spaceterm_core::pane::{Key, MAX_KEY_BATCH, MAX_KEY_TEXT_BYTES};
 
 /// The keys `--key` names, in order. An unknown name is `invalid_arguments` for `--key`.
 pub fn parse(names: &[String]) -> Result<Vec<Key>, Failure> {
@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn batches_stay_within_the_servers_bounds_and_keep_order() {
+    fn batches_stay_within_the_machines_bounds_and_keep_order() {
         let mut keys = typed(&"é".repeat(5000));
         keys.extend(parse(&vec!["Enter".to_owned(); 40]).unwrap());
         let total = keys.len();

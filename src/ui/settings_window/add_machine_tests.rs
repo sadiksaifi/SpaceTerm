@@ -1,0 +1,1640 @@
+//! The Add Server sheet, driven through a scripted SSH setup backend that records every setup it
+//! is asked for, and a real direct connections registry whose network is unavailable.
+
+use futures_lite::StreamExt as _;
+use std::collections::VecDeque;
+use std::rc::Rc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+use gpui::{Entity, TestAppContext, VisualTestContext};
+use spaceterm_ui::a11y_testing::{A11yTree, node_id};
+use zeroize::Zeroizing;
+
+use super::super::machines::testing::{ScriptedCore, connected};
+use super::super::machines::{LocalCoreControl, OfferedMachine};
+use super::*;
+use crate::appearance::Appearance;
+use crate::platform::app_paths::AppPaths;
+use crate::platform::appearance::testing::RecordingAppearancePlatform;
+use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::settings::SettingsDocument;
+use crate::settings::storage::testing::MemoryStorage;
+use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
+use crate::ssh::provisioning::{SetupOperation, SshSetupBackend};
+use crate::ui::appearance_runtime;
+
+/// What the scripted computer does with one setup.
+enum Outcome {
+    Finish(Result<DirectRouteId, SetupFailure>),
+    /// Asks about each of `offers` in turn and finishes with `then` once all are approved. A
+    /// declined offer ends setup as cancelled, having changed nothing.
+    Offers {
+        offers: Vec<SetupOffer>,
+        then: Result<DirectRouteId, SetupFailure>,
+    },
+    /// Runs until the sheet cancels it, then reports the cancellation.
+    UntilCancelled,
+    /// Runs until the sheet cancels it, then reports `failure`, as a setup does whose earlier
+    /// step had already changed the other computer.
+    UntilCancelledThen(SetupFailure),
+}
+
+/// One setup the sheet asked for, and how the person answered its offers.
+#[derive(Clone, Debug)]
+struct Asked {
+    destination: String,
+    /// The network address the person entered, as an authority such as `studio.local:9231`.
+    address: Option<String>,
+    answers: Vec<bool>,
+}
+
+/// The SSH computers the test reaches. Each setup takes the next scripted outcome.
+struct Computers {
+    outcomes: Mutex<VecDeque<Outcome>>,
+    asked: Mutex<Vec<Asked>>,
+    waiting: Mutex<Option<(CancellationToken, std::sync::mpsc::SyncSender<()>)>>,
+    started: async_channel::Sender<()>,
+    starts: async_channel::Receiver<()>,
+}
+
+impl Default for Computers {
+    fn default() -> Self {
+        let (started, starts) = async_channel::unbounded();
+        Self {
+            outcomes: Mutex::default(),
+            asked: Mutex::default(),
+            waiting: Mutex::default(),
+            started,
+            starts,
+        }
+    }
+}
+
+impl Computers {
+    fn scripted(outcomes: impl IntoIterator<Item = Outcome>) -> Arc<Self> {
+        Arc::new(Self {
+            outcomes: Mutex::new(outcomes.into_iter().collect()),
+            ..Default::default()
+        })
+    }
+
+    fn wait_for_cancellation(&self, cancellation: &CancellationToken) {
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        *self.waiting.lock().unwrap() = Some((cancellation.clone(), release));
+        self.started.send_blocking(()).unwrap();
+        released
+            .recv_timeout(Duration::from_secs(10))
+            .expect("test releases a cancelled setup worker");
+        assert!(
+            cancellation.is_cancelled(),
+            "the UI cancelled the actual attempt"
+        );
+    }
+
+    fn release_cancelled(&self) {
+        let mut waiting = self.waiting.lock().unwrap();
+        if waiting
+            .as_ref()
+            .is_some_and(|(cancel, _)| cancel.is_cancelled())
+        {
+            let (_, release) = waiting.take().unwrap();
+            release.send(()).unwrap();
+        }
+    }
+
+    fn asked(&self) -> Vec<Asked> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    fn answered(&self, approved: bool) {
+        if let Some(asked) = self.asked.lock().unwrap().last_mut() {
+            asked.answers.push(approved);
+        }
+    }
+}
+
+impl SshSetupBackend for Computers {
+    fn setup(
+        &self,
+        request: SetupRequest,
+        cancellation: &CancellationToken,
+        _: &SetupProgress,
+    ) -> Result<DirectRouteId, SetupFailure> {
+        self.asked.lock().unwrap().push(Asked {
+            destination: request.destination.as_str().to_owned(),
+            address: request.address.as_ref().map(SetupAddress::authority),
+            answers: Vec::new(),
+        });
+        let outcome = self.outcomes.lock().unwrap().pop_front();
+        match outcome {
+            Some(Outcome::Finish(result)) => result,
+            Some(Outcome::Offers { offers, then }) => {
+                for offer in offers {
+                    let approved = request.approvals.approve(offer, cancellation);
+                    self.answered(approved);
+                    if !approved {
+                        return Err(SetupFailure::Cancelled);
+                    }
+                }
+                then
+            }
+            Some(Outcome::UntilCancelled) | None => {
+                self.wait_for_cancellation(cancellation);
+                Err(SetupFailure::Cancelled)
+            }
+            Some(Outcome::UntilCancelledThen(failure)) => {
+                self.wait_for_cancellation(cancellation);
+                Err(failure)
+            }
+        }
+    }
+}
+
+/// OpenSSH's prompts, which no scripted setup asks for.
+struct NoPrompts;
+impl AskPassAttemptFactory for NoPrompts {
+    fn start_attempt(&self, _: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
+        Err(AskPassUnavailable)
+    }
+}
+
+/// This computer's OpenSSH configuration as a test scripts it. Reading waits until the test
+/// releases it, as a read of a slow or unavailable volume does.
+struct Hosts {
+    listed: Vec<SshDestination>,
+    released: Mutex<bool>,
+    release: Condvar,
+    /// Whether a read has returned its hosts.
+    started: async_channel::Sender<()>,
+    starts: async_channel::Receiver<()>,
+}
+
+impl Hosts {
+    /// A configuration naming no hosts, read at once.
+    fn none() -> Arc<Self> {
+        let hosts = Self::held(&[]);
+        hosts.release();
+        hosts
+    }
+
+    /// A configuration naming `aliases`, whose read waits for [`Self::release`].
+    fn held(aliases: &[&str]) -> Arc<Self> {
+        let (started, starts) = async_channel::unbounded();
+        Arc::new(Self {
+            listed: aliases
+                .iter()
+                .map(|alias| SshDestination::new((*alias).to_owned()).unwrap())
+                .collect(),
+            released: Mutex::new(false),
+            release: Condvar::new(),
+            started,
+            starts,
+        })
+    }
+
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.release.notify_all();
+    }
+
+    fn wait_until_started(&self, cx: &mut VisualTestContext) {
+        cx.foreground_executor()
+            .clone()
+            .block_test(self.starts.recv())
+            .expect("the host read starts");
+    }
+}
+
+impl SshHostSource for Hosts {
+    fn hosts(&self) -> Vec<SshDestination> {
+        self.started.send_blocking(()).unwrap();
+        let released = self.released.lock().unwrap();
+        // This timeout only diagnoses a test that failed before releasing its worker.
+        let (released, timeout) = self
+            .release
+            .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+            .unwrap();
+        assert!(!timeout.timed_out(), "test must release its held host read");
+        drop(released);
+        self.listed.clone()
+    }
+}
+
+struct Setup(Arc<Computers>, Arc<Hosts>);
+impl SshSetupFactory for Setup {
+    fn backend(&self) -> Option<Arc<dyn SshSetupBackend>> {
+        Some(Arc::clone(&self.0) as Arc<dyn SshSetupBackend>)
+    }
+    fn prompts(&self, _: &Window, _: &mut App) -> Option<Arc<dyn AskPassAttemptFactory>> {
+        Some(Arc::new(NoPrompts))
+    }
+    fn hosts(&self) -> Arc<dyn SshHostSource> {
+        Arc::clone(&self.1) as Arc<dyn SshHostSource>
+    }
+}
+
+struct Sheet<'a> {
+    window: Entity<SettingsWindow>,
+    computers: Arc<Computers>,
+    hosts: Arc<Hosts>,
+    direct: DirectConnections,
+    cx: &'a mut VisualTestContext,
+}
+
+/// Opens Settings on Servers with the local server, the scripted setup and a direct registry
+/// holding one saved route, `studio`, which a scripted setup can return.
+fn open_settings(
+    outcomes: impl FnOnce(DirectRouteId) -> Vec<Outcome>,
+    cx: &mut TestAppContext,
+) -> (Sheet<'_>, DirectRouteId) {
+    let (direct, route) = crate::direct_connections::tests::offline("studio");
+    let computers = Computers::scripted(outcomes(route));
+    (
+        open_settings_using(computers, Hosts::none(), direct, cx),
+        route,
+    )
+}
+
+/// Opens Settings as [`open_settings`] does, with the direct registry `direct` and no scripted
+/// setups.
+fn open_settings_with(direct: DirectConnections, cx: &mut TestAppContext) -> Sheet<'_> {
+    open_settings_using(Arc::default(), Hosts::none(), direct, cx)
+}
+
+fn open_settings_using(
+    computers: Arc<Computers>,
+    hosts: Arc<Hosts>,
+    direct: DirectConnections,
+    cx: &mut TestAppContext,
+) -> Sheet<'_> {
+    // Setup and the registry's workers run on their own threads.
+    cx.executor().allow_parking();
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
+    let platform = RecordingAppearancePlatform::default();
+    platform.set_system_appearance(Some(Appearance::Dark));
+    let installed = direct.clone();
+    let factory = Rc::new(Setup(Arc::clone(&computers), Arc::clone(&hosts)));
+    cx.update(|cx| {
+        appearance_runtime::install(settings, Rc::new(platform), cx)
+            .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        crate::ui::ssh_setup::install(factory, cx);
+        crate::ui::direct_machines::install(installed, cx);
+    });
+    let local = Some(OfferedMachine {
+        connection: Ok(ScriptedCore::new(Ok(connected(1))) as Arc<dyn LocalCoreControl>),
+        service: None,
+        update: None,
+        command_line_tool: None,
+    });
+    let (window, cx) = cx.add_window_view(|window, cx| {
+        SettingsWindow::new_with_capabilities(
+            Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+            Default::default(),
+            crate::theme_registry::testing::offline(),
+            local,
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    Sheet {
+        window,
+        computers,
+        hosts,
+        direct,
+        cx,
+    }
+}
+
+impl Drop for Sheet<'_> {
+    fn drop(&mut self) {
+        self.hosts.release();
+        self.cx.update(|window, cx| {
+            if let Some(sheet) = open_sheet(window, cx) {
+                sheet.update(cx, |sheet, cx| sheet.abandon(cx));
+            }
+        });
+        self.computers.release_cancelled();
+    }
+}
+
+impl Sheet<'_> {
+    fn begin(&mut self, request: AddMachineRequest) {
+        let settings = self.window.clone();
+        self.cx.update(|window, cx| {
+            settings.update(cx, |settings, cx| {
+                settings.begin_add_machine(request, window, cx);
+            });
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// Clicks the sheet's field whose selector is `selector` and types `text` into it, as the
+    /// person does.
+    fn type_into(&mut self, selector: &'static str, text: &str) {
+        let position = self
+            .cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+            .center();
+        self.cx.simulate_click(position, gpui::Modifiers::none());
+        self.cx.simulate_input(text);
+        self.cx.run_until_parked();
+    }
+
+    /// Types `host` into the SSH method's empty Host field.
+    fn fill(&mut self, host: &str) {
+        self.type_into(HOST_SELECTOR, host);
+    }
+
+    /// Shows the optional network address and types `address` into its empty field.
+    fn enter_address(&mut self, address: &str) {
+        self.click(ADDRESS_DISCLOSURE_SELECTOR);
+        self.type_into(ADDRESS_SELECTOR, address);
+    }
+
+    /// Clicks the sheet's control whose selector is `selector`.
+    fn click(&mut self, selector: &'static str) {
+        let position = self
+            .cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+            .center();
+        self.cx.simulate_click(position, gpui::Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    /// The Host and Network Address fields' values.
+    fn typed(&mut self) -> (String, String) {
+        self.cx.update(|window, cx| {
+            let sheet = open_sheet(window, cx).expect("the sheet is open");
+            let sheet = sheet.read(cx);
+            (
+                sheet.host.read(cx).value().to_owned(),
+                sheet.address.read(cx).value().to_owned(),
+            )
+        })
+    }
+
+    /// The value of the sheet's field `field` picks, and whether it has keyboard focus.
+    fn field(&mut self, field: fn(&AddMachineSheet) -> &Entity<TextInput>) -> (String, bool) {
+        self.cx.update(|window, cx| {
+            let sheet = open_sheet(window, cx).expect("the sheet is open");
+            let input = field(sheet.read(cx)).read(cx);
+            (
+                input.value().to_owned(),
+                input.focus_handle().is_focused(window),
+            )
+        })
+    }
+
+    /// Replaces the refused text in the focused field one keystroke at a time with `text`, as the
+    /// person corrects it. After each keystroke the field `typing` keeps focus and the field
+    /// `kept` keeps its value.
+    fn correct(
+        &mut self,
+        typing: fn(&AddMachineSheet) -> &Entity<TextInput>,
+        kept: fn(&AddMachineSheet) -> &Entity<TextInput>,
+        text: &str,
+    ) {
+        let (refused, focused) = self.field(typing);
+        assert!(focused, "the refused field has keyboard focus");
+        let (other, _) = self.field(kept);
+        let presentation = self.presented().0;
+        let edits =
+            std::iter::repeat_n(None, refused.chars().count()).chain(text.chars().map(Some));
+        for edit in edits {
+            match edit {
+                None => self.cx.simulate_keystrokes("backspace"),
+                Some(character) => self.cx.simulate_input(&character.to_string()),
+            }
+            self.cx.run_until_parked();
+            let (_, focused) = self.field(typing);
+            assert!(focused, "the corrected field keeps keyboard focus");
+            assert_eq!(self.field(kept).0, other, "the other field is unchanged");
+            assert_eq!(
+                self.presented().0,
+                presentation,
+                "the sheet stays on screen while the person types"
+            );
+        }
+        assert_eq!(self.field(typing).0, text);
+    }
+
+    /// Folds the refused address away with its disclosure, opens it again and retypes it with
+    /// `text` after Select All. The field stays shown and focused through every keystroke, and
+    /// the field `kept` keeps its value.
+    fn retype_after_folding(
+        &mut self,
+        disclosure: &'static str,
+        selector: &'static str,
+        typing: fn(&AddMachineSheet) -> &Entity<TextInput>,
+        kept: fn(&AddMachineSheet) -> &Entity<TextInput>,
+        text: &str,
+    ) {
+        let (other, _) = self.field(kept);
+        self.click(disclosure);
+        assert!(
+            self.cx.debug_bounds(selector).is_none(),
+            "the disclosure folds a refused address away"
+        );
+        self.click(disclosure);
+        self.click(selector);
+        self.cx.simulate_keystrokes("cmd-a");
+        for character in text.chars() {
+            self.cx.simulate_input(&character.to_string());
+            self.cx.run_until_parked();
+            assert!(
+                self.cx.debug_bounds(selector).is_some(),
+                "an edit never hides the address"
+            );
+            assert!(self.field(typing).1, "the address keeps keyboard focus");
+            assert_eq!(self.field(kept).0, other, "the other field is unchanged");
+        }
+        assert_eq!(self.field(typing).0, text);
+    }
+
+    /// The role and name of the node with keyboard focus, as assistive technology reads it.
+    fn focus(&mut self) -> (String, String) {
+        let tree = A11yTree::read(self.cx);
+        let node = tree.focused().expect("a node has keyboard focus");
+        (
+            node["aria"]["role"].as_str().unwrap_or_default().to_owned(),
+            node["aria"]["label"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    }
+
+    /// Presses and releases Space, which activates a focused button on release.
+    fn press_space(&mut self) {
+        self.cx.simulate_keystrokes("space");
+        self.cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("space").unwrap(),
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// What assistive technology reads from the focused node: its help, expanded state and value.
+    fn announced(&mut self) -> (String, Option<bool>, String) {
+        let tree = A11yTree::read(self.cx);
+        let node = tree.focused().expect("a node has keyboard focus");
+        (
+            node["aria"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            node["aria"]["expanded"].as_bool(),
+            node["aria"]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    }
+
+    /// Opens and folds the focused Network Address disclosure with Space. Its help, expanded state
+    /// and value follow each change while it keeps focus, so assistive technology announces the
+    /// new state in place. `hint` is its help while folded.
+    fn toggle_disclosure_in_place(&mut self, hint: &str) {
+        let folded = (hint.to_owned(), Some(false), "collapsed".to_owned());
+        let expanded = (
+            DISCLOSURE_HIDE.to_owned(),
+            Some(true),
+            "expanded".to_owned(),
+        );
+        let disclosure = ("Button".to_owned(), "Network Address".to_owned());
+        assert_eq!(self.announced(), folded);
+        self.press_space();
+        assert_eq!(self.focus(), disclosure);
+        assert_eq!(self.announced(), expanded);
+        self.press_space();
+        assert_eq!(self.focus(), disclosure);
+        assert_eq!(self.announced(), folded);
+    }
+
+    /// Presses Tab until the Network Address disclosure has keyboard focus.
+    fn tab_to_disclosure(&mut self) {
+        for _ in 0..6 {
+            if self.focus() == ("Button".to_owned(), "Network Address".to_owned()) {
+                return;
+            }
+            self.cx.simulate_keystrokes("tab");
+            self.cx.run_until_parked();
+        }
+        panic!("Tab reaches the Network Address disclosure");
+    }
+
+    /// Shows an SSH sign-in prompt in the sheet's window, then has the person dismiss it, as the
+    /// AskPass presenter reports both.
+    fn decline_prompt(&mut self) {
+        self.cx
+            .update(|window, cx| crate::ui::ssh_setup::prompt_requested(window, cx));
+        self.cx.run_until_parked();
+        self.cx.update(|window, cx| {
+            crate::ui::ssh_setup::prompt_settled(window.window_handle().window_id(), true, cx);
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// Shows `join` in the sheet as if the sheet had started it with an invitation from
+    /// `server`, then follows it.
+    fn adopt(&mut self, join: crate::direct_connections::JoinId, core: &str) {
+        let sheet = self
+            .cx
+            .update(|window, cx| open_sheet(window, cx))
+            .expect("the sheet is open");
+        let core = core.to_owned();
+        self.cx.update(|window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.stage = Stage::Joining {
+                    join: Some(join),
+                    core,
+                };
+                sheet.observe(window, cx);
+            });
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// Activates the sheet's action whose selector is `selector`.
+    fn choose(&mut self, selector: &str) {
+        let selector: &'static str = Box::leak(format!("modal-action-{selector}").into_boxed_str());
+        let position = self
+            .cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+            .center();
+        self.cx
+            .simulate_mouse_move(position, None, gpui::Modifiers::none());
+        self.cx.simulate_click(position, gpui::Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    fn selected(&mut self) -> Option<MachineChoice> {
+        self.window
+            .read_with(self.cx, |settings, _| settings.selected_machine())
+    }
+
+    /// The sheet's current presentation and whether its host field has keyboard focus.
+    fn presented(&mut self) -> (Option<spaceterm_ui::ModalPresentationId>, bool) {
+        self.cx.update(|window, cx| {
+            let Some(sheet) = open_sheet(window, cx) else {
+                return (None, false);
+            };
+            let sheet = sheet.read(cx);
+            (
+                sheet
+                    .presentation
+                    .as_ref()
+                    .map(DialogCompletion::presentation_id),
+                sheet.host.read(cx).focus_handle().is_focused(window),
+            )
+        })
+    }
+
+    fn open(&mut self) -> bool {
+        self.cx
+            .update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx))
+    }
+
+    /// The sheet's visible title, as assistive technology reads its dialog.
+    fn title(&mut self) -> String {
+        let tree = A11yTree::read(self.cx);
+        let dialogs = tree.with_role("Dialog");
+        let dialog = dialogs.first().expect("the sheet is presented");
+        dialog["aria"]["label"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The sheet's node named `label`, if it offers one.
+    fn find(&mut self, label: &str) -> Option<serde_json::Value> {
+        let tree = A11yTree::read(self.cx);
+        let dialog = *tree
+            .with_role("Dialog")
+            .first()
+            .expect("the sheet is presented");
+        tree.descendants(dialog)
+            .into_iter()
+            .find(|node| node["aria"]["label"] == label)
+            .cloned()
+    }
+
+    /// The sheet's node named `label`, as assistive technology reads it.
+    fn node(&mut self, label: &str) -> serde_json::Value {
+        self.find(label)
+            .unwrap_or_else(|| panic!("the sheet offers {label}"))
+    }
+
+    /// Whether the sheet's button named `label` is unavailable.
+    fn disabled(&mut self, label: &str) -> bool {
+        self.node(label)["aria"]["disabled"] == true
+    }
+
+    /// Whether any Label the window publishes says `text`.
+    fn says(&mut self, text: &str) -> bool {
+        A11yTree::read(self.cx)
+            .with_role("Label")
+            .iter()
+            .any(|node| {
+                node["aria"]["value"]
+                    .as_str()
+                    .is_some_and(|value| value.contains(text))
+            })
+    }
+
+    /// Repaints until `done` holds, while setup and the registry's workers run on their own
+    /// threads.
+    fn settle(&mut self, mut done: impl FnMut(&mut Self) -> bool) {
+        let sheet = self.cx.update(|window, cx| open_sheet(window, cx));
+        let mut notifications = sheet.as_ref().map(|sheet| self.cx.cx.notifications(sheet));
+        let connections = self.direct.subscribe();
+        loop {
+            self.cx.run_until_parked();
+            self.computers.release_cancelled();
+            if done(self) {
+                break;
+            }
+            self.cx.foreground_executor().clone().block_test(async {
+                let changed = async {
+                    match &mut notifications {
+                        Some(notifications) => {
+                            notifications.next().await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                };
+                let registry = async {
+                    let _ = connections.recv().await;
+                };
+                let started = async {
+                    let _ = self.computers.starts.recv().await;
+                };
+                futures_lite::future::race(changed, futures_lite::future::race(registry, started))
+                    .await;
+            });
+        }
+        self.direct.close_subscription(&connections);
+    }
+}
+
+fn address(text: &str) -> SetupAddress {
+    SetupAddress::parse(text).unwrap()
+}
+
+/// A network address that names no host is refused before SSH runs, and stays shown so the
+/// person can correct it.
+#[gpui::test]
+fn an_address_that_names_no_host_is_refused_before_setup_runs(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.enter_address("not a host");
+
+    sheet.choose(SheetAction::SetUp.selector());
+
+    assert!(sheet.says("Enter a host name or IP address"));
+    assert_eq!(sheet.title(), "Add Machine");
+    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_some());
+    assert!(
+        sheet.computers.asked().is_empty(),
+        "SSH runs only for a usable address"
+    );
+}
+
+/// Correcting a refused network address keeps keyboard focus in it, so no keystroke reaches the
+/// host.
+#[gpui::test]
+fn correcting_a_refused_address_keeps_focus_in_it(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(|route| vec![Outcome::Finish(Ok(route))], cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.enter_address("not a host");
+    sheet.choose(SheetAction::SetUp.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.correct(|sheet| &sheet.address, |sheet| &sheet.host, "studio.local");
+
+    assert!(!sheet.says("Enter a host name or IP address"));
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
+    assert_eq!(
+        sheet.computers.asked()[0].address.as_deref(),
+        Some("studio.local:9231")
+    );
+}
+
+/// A refused address the person folded away and opened again stays shown while they correct it.
+#[gpui::test]
+fn correcting_a_refused_address_after_folding_it_keeps_it_shown(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.enter_address("not a host");
+    sheet.choose(SheetAction::SetUp.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.retype_after_folding(
+        ADDRESS_DISCLOSURE_SELECTOR,
+        ADDRESS_SELECTOR,
+        |sheet| &sheet.address,
+        |sheet| &sheet.host,
+        "studio.local",
+    );
+}
+
+#[gpui::test]
+fn setup_selects_the_paired_machine_it_added_and_closes_the_sheet(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(|route| vec![Outcome::Finish(Ok(route))], cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("me@build.local");
+
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
+
+    let asked = sheet.computers.asked();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].destination, "me@build.local");
+    assert_eq!(
+        asked[0].address, None,
+        "without an entered address, setup uses the one SSH reaches"
+    );
+}
+
+/// A name the person entered, such as a Tailscale name, reaches setup with SpaceTerm's port
+/// unless they gave another.
+#[gpui::test]
+fn an_entered_network_name_reaches_setup_with_its_port(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(|route| vec![Outcome::Finish(Ok(route))], cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.enter_address("penguin.tail1234.ts.net");
+
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
+
+    assert_eq!(
+        sheet.computers.asked()[0].address.as_deref(),
+        Some("penguin.tail1234.ts.net:9231")
+    );
+}
+
+/// Installing waits for the person within the one setup, which goes on once they approve it.
+#[gpui::test]
+fn an_installation_offer_waits_for_install_and_setup_goes_on(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![Outcome::Offers {
+                offers: vec![SetupOffer::Installation {
+                    version: "1.4.0".into(),
+                    platform: ("Linux".into(), "x86_64".into()),
+                }],
+                then: Ok(route),
+            }]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Install SpaceTerm Core on \u{201C}penguin\u{201D}?");
+
+    assert!(sheet.says("SpaceTerm may ask for your sudo password on that computer."));
+    assert!(
+        sheet.computers.asked()[0].answers.is_empty(),
+        "nothing installs before Install"
+    );
+
+    sheet.choose(SheetAction::Install.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
+
+    let asked = sheet.computers.asked();
+    assert_eq!(asked.len(), 1, "approving continues the same setup");
+    assert_eq!(asked[0].answers, [true]);
+}
+
+#[gpui::test]
+fn a_stopped_core_starts_only_after_the_person_chooses_start_core(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![Outcome::Offers {
+                offers: vec![SetupOffer::Startup],
+                then: Ok(route),
+            }]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Core on \u{201C}penguin\u{201D}?");
+
+    sheet.choose(SheetAction::Start.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
+
+    assert_eq!(sheet.computers.asked()[0].answers, [true]);
+}
+
+/// Network access changes only after the person allows it, and the sheet says where the server
+/// will listen, where this computer reaches it, and which address it leaves.
+#[gpui::test]
+fn network_access_changes_only_after_the_person_allows_it(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![Outcome::Offers {
+                offers: vec![SetupOffer::Network {
+                    address: address("studio.local"),
+                    bind: "192.168.1.20:9231".parse().unwrap(),
+                    current: Some("10.0.0.4:9231".parse().unwrap()),
+                    enabled: true,
+                }],
+                then: Ok(route),
+            }]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Allow Network Access on \u{201C}penguin\u{201D}?");
+
+    assert!(sheet.says("at 192.168.1.20:9231"));
+    assert!(sheet.says("reach it at studio.local:9231"));
+    assert!(sheet.says("It stops listening at 10.0.0.4:9231."));
+    assert!(sheet.computers.asked()[0].answers.is_empty());
+
+    sheet.choose(SheetAction::AllowNetwork.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
+
+    assert_eq!(sheet.computers.asked()[0].answers, [true]);
+}
+
+/// Cancel on an offer declines it, so setup changes nothing more and the sheet closes once setup
+/// has stopped.
+#[gpui::test]
+fn cancelling_an_offer_declines_it_and_adds_no_core(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![Outcome::Offers {
+                offers: vec![SetupOffer::Startup],
+                then: Ok(route),
+            }]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Core on \u{201C}penguin\u{201D}?");
+
+    sheet.choose(SheetAction::Cancel.selector());
+    sheet.settle(|sheet| !sheet.open());
+
+    assert_eq!(sheet.computers.asked()[0].answers, [false]);
+    assert_ne!(sheet.selected(), Some(MachineChoice::Direct(route)));
+}
+
+/// Cancel waits until setup has closed what it opened: the sheet says it is cancelling until
+/// then, and adds no server.
+#[gpui::test]
+fn cancelling_setup_keeps_the_sheet_until_setup_stops(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| vec![Outcome::UntilCancelled], cx);
+    let saved = |sheet: &Sheet<'_>| {
+        sheet
+            .direct
+            .routes()
+            .into_iter()
+            .map(|(route, _)| route)
+            .collect::<Vec<_>>()
+    };
+    let routes = saved(&sheet);
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+
+    sheet.choose(SheetAction::Cancel.selector());
+    sheet.settle(|sheet| !sheet.open());
+
+    assert_eq!(sheet.computers.asked().len(), 1);
+    assert_eq!(saved(&sheet), routes, "a cancelled setup adds no server");
+    assert_eq!(sheet.selected(), Some(MachineChoice::Local));
+}
+
+/// A server this computer can't reach over the network says where it tried. Back offers that
+/// address for editing, and Try Again repeats the same setup.
+#[gpui::test]
+fn an_unreachable_address_says_where_and_back_offers_it_for_editing(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![
+                Outcome::Finish(Err(SetupFailure::Unreachable {
+                    address: address("10.1.2.3"),
+                })),
+                Outcome::Finish(Ok(route)),
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+
+    assert!(sheet.says("couldn\u{2019}t reach it at 10.1.2.3:9231"));
+
+    sheet.choose(SheetAction::Back.selector());
+    assert_eq!(sheet.title(), "Add Machine");
+    assert_eq!(
+        sheet.typed(),
+        ("penguin".to_owned(), "10.1.2.3:9231".to_owned()),
+        "the address setup tried comes back for editing"
+    );
+
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
+    assert_eq!(
+        sheet.computers.asked()[1].address.as_deref(),
+        Some("10.1.2.3:9231")
+    );
+}
+
+/// A save SpaceTerm couldn't confirm may already be listed, so the sheet offers no Try Again that
+/// could pair this computer twice.
+#[gpui::test]
+fn an_unconfirmed_save_offers_no_try_again(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![Outcome::Finish(Err(SetupFailure::Unconfirmed(
+                SetupOperation::Save,
+            )))]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+
+    assert!(sheet.says("couldn\u{2019}t confirm it saved the connection"));
+    assert!(sheet.find("Try Again").is_none());
+}
+
+#[gpui::test]
+fn escape_closes_a_filled_in_sheet_without_setting_up(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Ssh(Some("penguin".into())));
+    assert!(sheet.open());
+
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.cx.run_until_parked();
+
+    assert!(!sheet.open(), "Escape cancels the sheet");
+    assert!(
+        sheet.computers.asked().is_empty(),
+        "a filled-in host sets up only after Set Up"
+    );
+}
+
+/// Typing a host's first character makes Set Up available on the same sheet: the presentation,
+/// the field's focus and Set Up's accessibility node all stay.
+#[gpui::test]
+fn typing_the_first_host_character_makes_set_up_available_in_place(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+    assert_eq!(sheet.title(), "Add Machine");
+    assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_none());
+    let (before, _) = sheet.presented();
+    let set_up = sheet.node("Set Up");
+
+    sheet.type_into(HOST_SELECTOR, "p");
+
+    let (after, focused) = sheet.presented();
+    let available = sheet.node("Set Up");
+    assert!(before.is_some());
+    assert_eq!(after, before, "the sheet stays the same presentation");
+    assert!(focused, "the host field keeps keyboard focus");
+    assert_eq!(set_up["aria"]["disabled"], true);
+    assert_ne!(available["aria"]["disabled"], true);
+    assert_eq!(node_id(&set_up), node_id(&available));
+}
+
+/// Set Up can't be chosen while the host is missing, by pointer or by Return.
+#[gpui::test]
+fn an_unavailable_set_up_sets_up_nothing(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.cx.run_until_parked();
+
+    assert!(sheet.open());
+    assert_eq!(sheet.title(), "Add Machine");
+    assert!(sheet.computers.asked().is_empty());
+}
+
+/// Declining a sign-in before setup changed anything returns to the form with the values kept.
+#[gpui::test]
+fn declining_a_sign_in_before_any_change_returns_to_the_form(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| vec![Outcome::UntilCancelled], cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    // The backend has entered its cancellation wait, rather than merely being scheduled.
+    sheet
+        .cx
+        .foreground_executor()
+        .clone()
+        .block_test(sheet.computers.starts.recv())
+        .expect("the setup worker starts");
+    sheet.cx.run_until_parked();
+    assert!(sheet.says("Setting up \u{201C}penguin\u{201D}"));
+    assert!(sheet.find("Set Up").is_none());
+    let completion = sheet.cx.update(|window, cx| {
+        open_sheet(window, cx)
+            .unwrap()
+            .update(cx, |sheet, _| sheet._setup.take().unwrap())
+    });
+
+    sheet.decline_prompt();
+    assert!(
+        sheet.find("Set Up").is_none(),
+        "the held worker has not answered yet"
+    );
+    sheet.computers.release_cancelled();
+    // This task returns only after the backend returned and its answer reached the sheet.
+    sheet
+        .cx
+        .foreground_executor()
+        .clone()
+        .block_test(completion);
+    sheet.cx.run_until_parked();
+    assert!(sheet.open());
+    assert_eq!(sheet.title(), "Add Machine");
+    assert_eq!(sheet.node("Set Up")["aria"]["role"], "Button");
+
+    assert!(
+        !sheet.disabled("Set Up"),
+        "the host and address stay for another try"
+    );
+    assert_eq!(sheet.computers.asked().len(), 1);
+}
+
+/// A start that already ran stays reported when the person declines the sign-in that follows
+/// it: the server may be running, so the sheet says SpaceTerm couldn't confirm the start rather
+/// than returning to the form as if nothing happened.
+#[gpui::test]
+fn declining_a_sign_in_after_a_start_reports_the_unconfirmed_start(cx: &mut TestAppContext) {
+    for (operation, expected) in [
+        (
+            SetupOperation::Start,
+            "couldn\u{2019}t confirm that SpaceTerm Core started",
+        ),
+        (
+            SetupOperation::Install,
+            "couldn\u{2019}t confirm the installation",
+        ),
+    ] {
+        let (mut sheet, route) = open_settings(
+            |_| {
+                vec![Outcome::UntilCancelledThen(SetupFailure::Unconfirmed(
+                    operation,
+                ))]
+            },
+            cx,
+        );
+        sheet.begin(AddMachineRequest::Ssh(None));
+        sheet.fill("penguin");
+        sheet.choose(SheetAction::SetUp.selector());
+        sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+
+        sheet.decline_prompt();
+        sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+
+        assert!(sheet.says(expected));
+        assert!(sheet.open());
+        assert_ne!(sheet.selected(), Some(MachineChoice::Direct(route)));
+    }
+}
+
+/// Reading the SSH configuration can wait on a slow volume. The sheet opens and both methods work
+/// meanwhile, and the hosts that arrive later fill only the SSH Hosts menu, leaving what the
+/// person typed as it was.
+#[gpui::test]
+fn add_machine_stays_usable_while_ssh_hosts_are_read(cx: &mut TestAppContext) {
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let hosts = Hosts::held(&["penguin-alias"]);
+    let mut sheet = open_settings_using(Arc::default(), Arc::clone(&hosts), direct, cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+
+    hosts.wait_until_started(sheet.cx);
+    assert_eq!(sheet.title(), "Add Machine");
+    assert!(
+        sheet.cx.debug_bounds(HOSTS_MENU_SELECTOR).is_none(),
+        "no hosts are listed before the read answers"
+    );
+    sheet.fill("me@build.local");
+    sheet.enter_address("192.168.1.20");
+    assert!(!sheet.disabled("Set Up"), "the SSH method works meanwhile");
+    sheet.begin(AddMachineRequest::Invitation(Some(invitation("studio"))));
+    assert!(sheet.says("127.0.0.1:9231"), "and so does an invitation");
+    assert!(!sheet.disabled("Join"));
+    sheet.begin(AddMachineRequest::Ssh(None));
+
+    hosts.release();
+    sheet.settle(|sheet| sheet.cx.debug_bounds(HOSTS_MENU_SELECTOR).is_some());
+    let trigger = sheet
+        .cx
+        .debug_bounds(HOSTS_MENU_SELECTOR)
+        .expect("the SSH Hosts menu is offered")
+        .center();
+    sheet.cx.simulate_click(trigger, gpui::Modifiers::none());
+    sheet.cx.run_until_parked();
+
+    let alias = format!("{HOST_CHOICE_SELECTOR}-0");
+    assert!(
+        sheet
+            .cx
+            .debug_bounds(Box::leak(alias.into_boxed_str()))
+            .is_some(),
+        "the menu lists the configured host"
+    );
+    assert!(
+        A11yTree::read(sheet.cx).find("penguin-alias").is_some(),
+        "the listed host reads by its alias"
+    );
+    sheet.cx.update(spaceterm_ui::dismiss_active_menu);
+    sheet.cx.run_until_parked();
+
+    assert!(sheet.open(), "closing the menu leaves the sheet open");
+    assert_eq!(
+        sheet.typed(),
+        ("me@build.local".to_owned(), "192.168.1.20".to_owned()),
+        "the listed hosts change nothing the person typed"
+    );
+    assert!(sheet.computers.asked().is_empty());
+}
+
+/// A sheet closed while the SSH configuration is still being read takes nothing from the read
+/// when it answers.
+#[gpui::test]
+fn closing_add_machine_while_ssh_hosts_are_read_takes_nothing_from_the_read(
+    cx: &mut TestAppContext,
+) {
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let hosts = Hosts::held(&["penguin-alias"]);
+    let mut sheet = open_settings_using(Arc::default(), Arc::clone(&hosts), direct, cx);
+    sheet.begin(AddMachineRequest::Ssh(None));
+
+    hosts.wait_until_started(sheet.cx);
+    let reading = sheet
+        .cx
+        .update(|window, cx| open_sheet(window, cx).unwrap());
+    let delivery = reading.update(sheet.cx, |sheet, _| sheet._discovery.take().unwrap());
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.cx.run_until_parked();
+    assert!(
+        !sheet.open(),
+        "Escape closes the sheet while the read waits"
+    );
+
+    hosts.release();
+    // Await the real discovery task, including delivery to the closed sheet.
+    sheet.cx.foreground_executor().clone().block_test(delivery);
+    sheet.cx.run_until_parked();
+    assert!(reading.read_with(sheet.cx, |sheet, _| sheet.hosts.is_empty()));
+
+    assert!(!sheet.open(), "the answer reopens nothing");
+    assert!(
+        sheet.cx.debug_bounds(HOSTS_MENU_SELECTOR).is_none(),
+        "no host list appears from the closed sheet's read"
+    );
+    assert!(sheet.computers.asked().is_empty());
+}
+
+/// A real invitation link for a server named `server`, as Invite Device creates one.
+fn invitation(core: &str) -> Zeroizing<String> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 60;
+    let pin = crate::machine_connection::direct::MachinePin {
+        build: "spaceterm-development".into(),
+        core: [1; 32],
+        public_key: [3; 32],
+        certificate: [4; 32],
+    };
+    let payload = Zeroizing::new(
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "id": ([7_u8; 32]), "endpoint": "quic://127.0.0.1:9231",
+            "pin": pin, "machine_name": core, "token": ([8_u8; 32]), "expires": expires,
+            "valid_for_seconds": 300,
+        }))
+        .unwrap(),
+    );
+    Zeroizing::new(format!(
+        "spaceterm://pair/{}",
+        URL_SAFE_NO_PAD.encode(&*payload)
+    ))
+}
+
+#[gpui::test]
+fn a_delivered_invitation_names_its_machine_and_address_and_waits_for_join(
+    cx: &mut TestAppContext,
+) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(invitation("studio"))));
+
+    assert!(
+        sheet.says("studio"),
+        "the sheet names the invitation's server"
+    );
+    assert!(sheet.says("127.0.0.1:9231"), "and the address it reaches");
+    assert!(!sheet.disabled("Join"), "the person can join it");
+    assert_eq!(
+        sheet.title(),
+        "Add Machine",
+        "a delivered link joins nothing until the person chooses Join"
+    );
+}
+
+/// The invitation's network address starts folded away, and one that names no host is refused
+/// before anything is joined. It stays shown with keyboard focus, and the link stays for another
+/// try.
+#[gpui::test]
+fn an_invitation_address_that_names_no_host_is_refused_before_join(cx: &mut TestAppContext) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(link)));
+    assert!(
+        sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_none(),
+        "the optional network address starts folded away"
+    );
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+
+    sheet.choose(SheetAction::Join.selector());
+
+    assert!(sheet.says("Enter a host name or IP address"));
+    assert_eq!(sheet.title(), "Add Machine", "nothing was joined");
+    assert!(!sheet.disabled("Join"), "the link stays for another try");
+    let focused = sheet.cx.update(|window, cx| {
+        let sheet = open_sheet(window, cx).expect("the sheet is open");
+        sheet
+            .read(cx)
+            .endpoint
+            .read(cx)
+            .focus_handle()
+            .is_focused(window)
+    });
+    assert!(focused, "the refused address has keyboard focus");
+}
+
+/// Correcting a refused invitation address keeps keyboard focus in it, so no keystroke reaches the
+/// invitation link.
+#[gpui::test]
+fn correcting_a_refused_invitation_address_keeps_focus_in_it(cx: &mut TestAppContext) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(link.clone())));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+    sheet.choose(SheetAction::Join.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.correct(
+        |sheet| &sheet.endpoint,
+        |sheet| &sheet.link,
+        "public.example",
+    );
+
+    assert_eq!(sheet.field(|sheet| &sheet.link).0, link.as_str());
+    assert!(!sheet.says("Enter a host name or IP address"));
+    sheet.choose(SheetAction::Join.selector());
+    sheet.settle(|sheet| A11yTree::read(sheet.cx).find("Code").is_some());
+    assert_eq!(sheet.title(), "Join studio");
+}
+
+/// Both disclosures announce their new state in place while they keep keyboard focus.
+#[gpui::test]
+fn the_network_address_disclosures_announce_their_state_in_place(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    for (request, selector, description, field) in [
+        (
+            AddMachineRequest::Ssh(None),
+            ADDRESS_SELECTOR,
+            ADDRESS_DISCLOSURE_DESCRIPTION,
+            (|sheet: &AddMachineSheet| &sheet.address)
+                as fn(&AddMachineSheet) -> &Entity<TextInput>,
+        ),
+        (
+            AddMachineRequest::Invitation(Some(invitation("studio"))),
+            ENDPOINT_SELECTOR,
+            ENDPOINT_DISCLOSURE_DESCRIPTION,
+            (|sheet: &AddMachineSheet| &sheet.endpoint)
+                as fn(&AddMachineSheet) -> &Entity<TextInput>,
+        ),
+    ] {
+        sheet.begin(request);
+        assert!(sheet.cx.debug_bounds(selector).is_none());
+        sheet.tab_to_disclosure();
+        sheet.toggle_disclosure_in_place(description);
+        sheet.press_space();
+        assert!(sheet.cx.debug_bounds(selector).is_some());
+        assert_eq!(
+            sheet.focus(),
+            ("Button".to_owned(), "Network Address".to_owned())
+        );
+        sheet.cx.simulate_keystrokes("tab");
+        sheet.cx.run_until_parked();
+        assert!(sheet.field(field).1, "Tab enters the shown address");
+        sheet.cx.simulate_keystrokes("shift-tab");
+        sheet.press_space();
+        assert!(sheet.cx.debug_bounds(selector).is_none());
+        assert_eq!(
+            sheet.focus(),
+            ("Button".to_owned(), "Network Address".to_owned())
+        );
+    }
+}
+
+/// A refused invitation address the person folded away and opened again stays shown while they
+/// correct it.
+#[gpui::test]
+fn correcting_a_refused_invitation_address_after_folding_it_keeps_it_shown(
+    cx: &mut TestAppContext,
+) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(link.clone())));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "not a host");
+    sheet.choose(SheetAction::Join.selector());
+    assert!(sheet.says("Enter a host name or IP address"));
+
+    sheet.cx.simulate_keystrokes("cmd-a");
+    for character in "public.example".chars() {
+        sheet.cx.simulate_input(&character.to_string());
+        sheet.cx.run_until_parked();
+        assert!(sheet.field(|sheet| &sheet.endpoint).1);
+    }
+    assert_eq!(sheet.field(|sheet| &sheet.endpoint).0, "public.example");
+    assert_eq!(sheet.field(|sheet| &sheet.link).0, link.as_str());
+    sheet.retype_after_folding(
+        ENDPOINT_DISCLOSURE_SELECTOR,
+        ENDPOINT_SELECTOR,
+        |sheet| &sheet.endpoint,
+        |sheet| &sheet.link,
+        "public.example",
+    );
+}
+
+/// An entered address replaces only the one the invitation names. An address that doesn't reach
+/// the server pauses the join with the usual network failure, and the saved connection keeps the
+/// invitation's pinned identity.
+#[gpui::test]
+fn an_entered_invitation_address_replaces_only_where_join_connects(cx: &mut TestAppContext) {
+    let (direct, link) = crate::direct_connections::tests::lost_claim_invitation("studio");
+    let pin = Invitation::parse(&link).unwrap().machine_pin().clone();
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(link)));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "Public.EXAMPLE");
+
+    sheet.choose(SheetAction::Join.selector());
+    sheet.settle(|sheet| {
+        sheet.says(
+            "SpaceTerm couldn\u{2019}t reach the machine. Check your network, then try again.",
+        )
+    });
+    assert_eq!(sheet.title(), "Pairing Paused");
+
+    sheet.choose(SheetAction::TryAgain.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected().is_some());
+
+    let Some(MachineChoice::Direct(route)) = sheet.selected() else {
+        panic!("the joined server is selected")
+    };
+    let route = direct.route(&route).expect("the joined server is saved");
+    assert_eq!(route.endpoint, "quic://public.example:9231");
+    assert_eq!(route.paired.pin, pin, "the invitation's pin stays");
+}
+
+/// A link delivered later doesn't take an address entered for an earlier one.
+#[gpui::test]
+fn a_delivered_link_starts_without_an_earlier_address(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(invitation("studio"))));
+    sheet.click(ENDPOINT_DISCLOSURE_SELECTOR);
+    sheet.type_into(ENDPOINT_SELECTOR, "public.example");
+
+    sheet.begin(AddMachineRequest::Invitation(Some(invitation("annex"))));
+
+    assert!(sheet.says("annex"));
+    assert!(sheet.cx.debug_bounds(ENDPOINT_SELECTOR).is_none());
+    let entered = sheet.cx.update(|window, cx| {
+        let sheet = open_sheet(window, cx).expect("the sheet is open");
+        sheet.read(cx).endpoint.read(cx).value().to_owned()
+    });
+    assert!(entered.is_empty());
+}
+
+#[gpui::test]
+fn a_link_that_isnt_an_invitation_says_so_and_cant_join(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(Zeroizing::new(
+        "spaceterm://pair/not-an-invitation".to_owned(),
+    ))));
+
+    assert!(sheet.says("Invalid SpaceTerm invitation link."));
+    assert!(sheet.disabled("Join"));
+}
+
+#[gpui::test]
+fn a_join_whose_save_is_unconfirmed_still_selects_its_core_and_closes_the_sheet(
+    cx: &mut TestAppContext,
+) {
+    let (direct, join, route) = crate::direct_connections::tests::uncertain_join("studio");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddMachineRequest::Invitation(None));
+
+    sheet.adopt(join, "studio");
+
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
+}
+
+/// A join the network interrupted keeps its request and asks again only when the person chooses
+/// Try Again, without claiming why the server was out of reach.
+#[gpui::test]
+fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAppContext) {
+    let (direct, join) = crate::direct_connections::tests::retryable_join(
+        "studio",
+        crate::direct_connections::EnrollmentStage::Claim,
+    );
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddMachineRequest::Invitation(None));
+
+    sheet.adopt(join, "studio");
+    sheet.settle(|sheet| {
+        sheet.says(
+            "SpaceTerm couldn\u{2019}t reach the machine. Check your network, then try again.",
+        )
+    });
+
+    assert_eq!(sheet.title(), "Pairing Paused");
+    assert!(
+        !sheet.says("denied") && !sheet.says("permission"),
+        "a network failure names no cause SpaceTerm didn't observe"
+    );
+    assert!(
+        direct.pending_unpairs().is_empty(),
+        "an interrupted join withdraws nothing"
+    );
+
+    sheet.choose(SheetAction::TryAgain.selector());
+
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(join)));
+    assert!(direct.pending_unpairs().is_empty());
+}
+
+/// The fixture's storage can't confirm any further save after an unknown publication, so the
+/// person's withdrawal is requested but not retained, and the sheet says exactly that.
+#[gpui::test]
+fn withdrawing_a_join_whose_save_is_unknown_says_the_withdrawal_isnt_saved(
+    cx: &mut TestAppContext,
+) {
+    let (direct, join) = crate::direct_connections::tests::unconfirmed_join("studio");
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddMachineRequest::Invitation(None));
+
+    sheet.adopt(join, "studio");
+    sheet.settle(|sheet| {
+        sheet
+            .says("studio approved this device, but SpaceTerm couldn\u{2019}t save the connection.")
+    });
+
+    assert!(
+        direct.routes().is_empty(),
+        "SpaceTerm uses no connection it may not have saved"
+    );
+    assert!(
+        direct.pending_unpairs().is_empty(),
+        "nothing is withdrawn until the person asks"
+    );
+
+    sheet.choose(SheetAction::Withdraw.selector());
+    sheet.settle(|sheet| sheet.says("Keep SpaceTerm open until the cancellation is saved."));
+
+    assert!(
+        sheet.open(),
+        "the sheet stays to say the withdrawal isn't saved"
+    );
+    assert!(
+        direct.routes().is_empty(),
+        "withdrawing presents no connection"
+    );
+}
+
+/// A stop that couldn't be saved keeps saying so through the registry's unsaved changes, and
+/// changes once the registry saves again, so the sheet follows recovery instead of outliving it.
+#[gpui::test]
+fn an_unsaved_stop_says_so_until_the_registry_saves_again(cx: &mut TestAppContext) {
+    let (direct, route, storage) = crate::direct_connections::tests::offline_with_storage("studio");
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddMachineRequest::Invitation(None));
+    // This computer can't save the registry, as when the stop itself failed to save.
+    storage.set_failing(true);
+    direct.disconnect(&route);
+    assert!(direct.persistence_error(), "the registry couldn't save");
+    let body = sheet
+        .cx
+        .update(|window, cx| open_sheet(window, cx))
+        .expect("the sheet is open");
+    sheet.cx.update(|window, cx| {
+        body.update(cx, |sheet, cx| {
+            sheet.stage = Stage::StopUnsaved {
+                core: "studio".to_owned(),
+            };
+            sheet.show(window, cx);
+        });
+    });
+    sheet.cx.run_until_parked();
+    assert!(sheet.says("Keep SpaceTerm open until the cancellation is saved."));
+
+    // Changes the registry announces but can't save leave the stop unsaved.
+    direct.connect(&route);
+    direct.disconnect(&route);
+    sheet.cx.run_until_parked();
+    assert!(direct.persistence_error());
+    assert!(sheet.says("Keep SpaceTerm open until the cancellation is saved."));
+
+    // A change the registry saves and announces, as a quiet retry's save would.
+    storage.set_failing(false);
+    direct.disconnect(&route);
+    assert!(!direct.persistence_error(), "the registry saved its change");
+
+    sheet.settle(|sheet| sheet.says("SpaceTerm is cancelling the pairing with studio."));
+}
+
+/// Joining shows the code the authenticated exchange produced, which assistive technology reads
+/// digit by digit, while the server's owner decides. Escape stops that exact enrollment.
+#[gpui::test]
+fn joining_shows_the_comparison_code_until_escape_stops_it(cx: &mut TestAppContext) {
+    let (direct, link, code) = crate::direct_connections::tests::waiting_invitation("studio");
+    assert_eq!(
+        code.to_string(),
+        "000007",
+        "the fixture's exchange produces this code"
+    );
+    let mut sheet = open_settings_with(direct.clone(), cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(link)));
+
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.settle(|sheet| {
+        A11yTree::read(sheet.cx)
+            .find("Code")
+            .is_some_and(|node| node["aria"]["value"] == "0 0 0 0 0 7")
+    });
+
+    assert_eq!(sheet.title(), "Join studio");
+    assert!(sheet.says("Check that studio shows this code"));
+    assert!(sheet.says("Waiting for approval…"));
+
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.settle(|sheet| !sheet.open());
+    assert!(direct.routes().is_empty(), "a stopped join adds no server");
+}
+
+/// A link delivered while a join waits doesn't replace it. The sheet says it arrived, and Add
+/// Server shows it once the current join ends.
+#[gpui::test]
+fn a_link_delivered_during_a_join_waits_for_it_to_end(cx: &mut TestAppContext) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let (_, next, _) = crate::direct_connections::tests::waiting_invitation("annex");
+    let mut sheet = open_settings_with(direct, cx);
+    sheet.begin(AddMachineRequest::Invitation(Some(link)));
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.settle(|sheet| A11yTree::read(sheet.cx).find("Code").is_some());
+
+    sheet.begin(AddMachineRequest::Invitation(Some(next)));
+
+    assert_eq!(
+        sheet.title(),
+        "Join studio",
+        "the join underway keeps its place"
+    );
+    assert!(sheet.says("Another invitation is next."));
+
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.settle(|sheet| sheet.open() && sheet.title() == "Add Machine" && sheet.says("annex"));
+    assert!(!sheet.disabled("Join"), "the delivered link waits for Join");
+}

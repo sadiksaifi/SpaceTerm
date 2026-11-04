@@ -5,8 +5,8 @@
     reason = "Git reads start no terminal programs and claim no Panes."
 )]
 mod lifecycle;
-use spaceterm_server::{
-    ServerConnection,
+use spaceterm_core::{
+    MachineConnection,
     hierarchy::{CloseTarget, Mutation},
     protocol::Operation,
     repository::{ChangeTotal, DirectoryFacts, RepositoryHead},
@@ -21,13 +21,13 @@ mod repository;
 mod support;
 use repository::*;
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = spaceterm_server::protocol::MAJOR;
-    let a = ServerConnection::for_development_client("repository-smoke-a")?;
-    let b = ServerConnection::for_development_client("repository-smoke-b")?;
+    let major = spaceterm_core::protocol::MAJOR;
+    let a = MachineConnection::for_development_client("repository-smoke-a")?;
+    let b = MachineConnection::for_development_client("repository-smoke-b")?;
     lifecycle::require_idle(&a)?;
     a.setup()?;
     b.setup()?;
-    let mut server = lifecycle::Server::start()?;
+    let mut core = lifecycle::Core::start()?;
     let repository = Repository::new()?;
     let first = connect(&a)?;
     let second = connect(&b)?;
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateWorkspace {
             name: "Repository reads smoke".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     mutate(
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateTab {
             workspace,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     // Tab membership follows the Worktree listing, which the server may publish after the head.
@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateWorkspace {
             name: "Other active work".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let linked = repository.0.join("linked");
@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateTab {
             workspace,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let current = inventory(&first)?.0;
@@ -180,10 +180,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
     assert!(!linked.exists());
     // Forced restart proves saved membership survives without restoring a program.
-    server.kill()?;
+    core.kill()?;
     first.close();
     second.close();
-    let mut restarted = lifecycle::Server::start()?;
+    let mut restarted = lifecycle::Core::start()?;
     let first = connect(&a)?;
     let restored = await_facts(&first, &repository.0, |f| f.repository.is_some())?;
     assert_eq!(

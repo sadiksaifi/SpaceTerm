@@ -9,8 +9,8 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, release, server_package
-from spaceterm_tasks.server_builds import _source
+from spaceterm_tasks import ROOT, TaskError, release, core_package
+from spaceterm_tasks.core_builds import _source
 
 
 def _git(root, *arguments):
@@ -41,22 +41,22 @@ def _commit(root, description):
 
 def _record(archive, signature, role, target):
     release.verify_ed25519(
-        server_package.artifact_public_key("spaceterm-preflight"), archive, signature
+        core_package.artifact_public_key("spaceterm-preflight"), archive, signature
     )
     with tarfile.open(archive, "r:gz") as source:
-        stream = source.extractfile("server/build.json")
+        stream = source.extractfile("core/build.json")
         if stream is None:
             raise TaskError("the fixture build document is missing")
-        info = server_package.document(stream.read(4097))
+        info = core_package.document(stream.read(4097))
     if (
         info["identity"] != "spaceterm-preflight"
         or info["target"] != target
         or info["protocol_major"]
-        != server_package.PROTOCOL_MAJOR + (1 if role == "next-major" else 0)
+        != core_package.PROTOCOL_MAJOR + (1 if role == "next-major" else 0)
     ):
         raise TaskError("the fixture has a different identity, target or protocol major")
     with tempfile.TemporaryDirectory(prefix="spaceterm-resume-fixture-") as temporary:
-        server_package.verified_copy(archive, signature, Path(temporary), info, native=False)
+        core_package.verified_copy(archive, signature, Path(temporary), info, native=False)
     return {
         "archive": str(archive),
         "signature": str(signature),
@@ -89,7 +89,7 @@ def _build(root, destination, role, targets, result, resume):
                 sys.executable,
                 "-c",
                 "import json,sys; from pathlib import Path; "
-                "from spaceterm_tasks.server_package import package; "
+                "from spaceterm_tasks.core_package import package; "
                 "a,s=package('spaceterm-preflight',target=sys.argv[1]); "
                 "Path(sys.argv[2]).write_text(json.dumps([str(a),str(s)]))",
                 target,
@@ -109,22 +109,22 @@ def _broken_verification(destination, target, result):
     normal = Path(result[target]["normal"]["archive"])
     broken = destination / target / "broken.tar.gz"
     signature = broken.with_suffix(broken.suffix + ".sig")
-    resources = server_package.resource_directory(target, "spaceterm-preflight")
-    omitted = f"server/{resources}/shell-integration/VERSION"
+    resources = core_package.resource_directory(target, "spaceterm-preflight")
+    omitted = f"core/{resources}/shell-integration/VERSION"
     with tarfile.open(normal, "r:gz") as source, tarfile.open(broken, "w:gz") as output:
         for member in source:
             if member.name != omitted:
                 output.addfile(member, source.extractfile(member) if member.isfile() else None)
     release.sign_ed25519(
-        server_package.artifact_signing_seed("spaceterm-preflight"), broken, signature
+        core_package.artifact_signing_seed("spaceterm-preflight"), broken, signature
     )
     release.verify_ed25519(
-        server_package.artifact_public_key("spaceterm-preflight"), broken, signature
+        core_package.artifact_public_key("spaceterm-preflight"), broken, signature
     )
     # Its signature is genuine; the missing resource must still refuse verification.
     with tempfile.TemporaryDirectory(prefix="spaceterm-broken-fixture-") as temporary:
         try:
-            server_package.verified_copy(
+            core_package.verified_copy(
                 broken,
                 signature,
                 Path(temporary),
@@ -148,8 +148,8 @@ def prepare(destination, selected, *, resume=False):
     destination = Path(destination).absolute()
     if destination.exists() and not resume:
         raise TaskError("the fixture destination already exists")
-    targets = list(server_package.TARGETS.values()) if selected == "all" else [selected]
-    if server_package.TARGETS["darwin"] in targets and sys.platform != "darwin":
+    targets = list(core_package.TARGETS.values()) if selected == "all" else [selected]
+    if core_package.TARGETS["darwin"] in targets and sys.platform != "darwin":
         raise TaskError("build macOS fixtures natively on the Mac")
     destination.mkdir(parents=True, exist_ok=resume)
     result = {}
@@ -183,15 +183,15 @@ def prepare(destination, selected, *, resume=False):
         _build(root, destination, "normal", targets, result, resume)
         for target in targets:
             _broken_verification(destination, target, result)
-        major = root / server_package.PROTOCOL_MAJOR_SOURCE
+        major = root / core_package.PROTOCOL_MAJOR_SOURCE
         current = major.read_text()
         major.write_text(
             current.replace(
-                f"pub const MAJOR: u16 = {server_package.PROTOCOL_MAJOR};",
-                f"pub const MAJOR: u16 = {server_package.PROTOCOL_MAJOR + 1};",
+                f"pub const MAJOR: u16 = {core_package.PROTOCOL_MAJOR};",
+                f"pub const MAJOR: u16 = {core_package.PROTOCOL_MAJOR + 1};",
             )
         )
-        if server_package.protocol_major(root) != server_package.PROTOCOL_MAJOR + 1:
+        if core_package.protocol_major(root) != core_package.PROTOCOL_MAJOR + 1:
             raise TaskError("the next-major fixture did not change the protocol major")
         _commit(root, "fixture: next protocol major candidate")
         _build(root, destination, "next-major", targets, result, resume)
@@ -201,7 +201,7 @@ def prepare(destination, selected, *, resume=False):
         start, end = text.index("fn run_server("), text.index("\nfn complete")
         entry.write_text(
             text[:start]
-            + "fn run_server(_service: bool, _owned: bool) -> Result<(), ServerError> {\n    Err(ServerError::StartupFailed)\n}\n"
+            + "fn run_server(_service: bool, _owned: bool) -> Result<(), CoreError> {\n    Err(CoreError::StartupFailed)\n}\n"
             + text[end:]
         )
         _commit(root, "fixture: startup failure for return acceptance")

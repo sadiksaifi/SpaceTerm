@@ -776,7 +776,7 @@ mod linux_adapter_tests {
     /// A private bus with a Sushi fixture and a directory of preview targets.
     struct Fixture {
         address: String,
-        server: zbus::blocking::Connection,
+        core: zbus::blocking::Connection,
         shows: mpsc::Receiver<(String, String, bool)>,
         closes: mpsc::Receiver<()>,
         tokens: mpsc::Receiver<String>,
@@ -831,13 +831,13 @@ mod linux_adapter_tests {
             } else {
                 builder.serve_at(PATH, sushi).unwrap()
             };
-            let server = builder.name(NAME).unwrap().build().unwrap();
+            let core = builder.name(NAME).unwrap().build().unwrap();
             let directory = std::env::temp_dir()
                 .join(format!("spaceterm-preview-{name}-{}", std::process::id()));
             std::fs::create_dir_all(&directory).unwrap();
             Self {
                 address,
-                server,
+                core,
                 shows,
                 closes,
                 tokens: token_receiver,
@@ -872,8 +872,8 @@ mod linux_adapter_tests {
             } else {
                 builder.serve_at(PATH, sushi).unwrap()
             };
-            self.server.release_name(NAME).unwrap();
-            self.server = builder.name(NAME).unwrap().build().unwrap();
+            self.core.release_name(NAME).unwrap();
+            self.core = builder.name(NAME).unwrap().build().unwrap();
             self.shows = shows;
             self.closes = closes;
             self.release = release;
@@ -901,7 +901,7 @@ mod linux_adapter_tests {
         fn emit(&self, changed: &[(&str, Value<'_>)]) {
             let changed: HashMap<&str, &Value<'_>> =
                 changed.iter().map(|(name, value)| (*name, value)).collect();
-            self.server
+            self.core
                 .emit_signal(
                     None::<&str>,
                     PATH,

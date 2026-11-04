@@ -74,7 +74,7 @@ def parse_args():
         "--binary", type=Path, help="Existing source-built executable; skips the client build"
     )
     parser.add_argument("--expected-binary-sha256", help="Required SHA256 pin for --binary")
-    parser.add_argument("--server-binary", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--core-binary", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -112,10 +112,10 @@ class Probe:
         self.context = GLib.MainContext.default()
         self.terminal = None
         self.application_pid = None
-        self.server_workspace_before = None
-        self.server_workspace_row = None
-        self.server_workspace_name = None
-        self.server_workspace_named = False
+        self.core_workspace_before = None
+        self.core_workspace_row = None
+        self.core_workspace_name = None
+        self.core_workspace_named = False
         self.phase = None
         self.counts = Counter()
         self.source_counts = Counter()
@@ -152,14 +152,14 @@ class Probe:
     def find_terminal(self):
         # A process-owned terminal can still belong to retained account work.
         # Only the exact newly created and named Workspace is a workload target.
-        if not self.server_workspace_named:
+        if not self.core_workspace_named:
             return None
         selected = [
             row
             for row in self.workspace_rows()
             if row.getState().contains(self.atspi.STATE_SELECTED)
         ]
-        if len(selected) != 1 or selected[0].name != self.server_workspace_name:
+        if len(selected) != 1 or selected[0].name != self.core_workspace_name:
             return None
         window = self.find_window(self.application_pid)
         if window is None:
@@ -176,7 +176,7 @@ class Probe:
             ):
                 terminals.append(accessible)
             stack.extend(accessible)
-        require(len(terminals) <= 1, "server_workspace_terminal_ambiguous")
+        require(len(terminals) <= 1, "core_workspace_terminal_ambiguous")
         return terminals[0] if terminals else None
 
     def find_window(self, pid):
@@ -216,7 +216,7 @@ class Probe:
         }[name]
         control = self.wait(
             lambda: self.find_named_control(name, root),
-            "server_workspace_control_missing:" + control_id,
+            "core_workspace_control_missing:" + control_id,
         )
         self.press_control(control)
 
@@ -224,13 +224,13 @@ class Probe:
         actions = control.queryAction()
         for index in range(actions.nActions):
             if actions.getName(index).lower() in ("click", "press", "activate"):
-                require(actions.doAction(index), "server_workspace_control_action_failed")
+                require(actions.doAction(index), "core_workspace_control_action_failed")
                 return
-        raise SmokeFailure("server_workspace_control_action_missing")
+        raise SmokeFailure("core_workspace_control_action_missing")
 
     def workspace_rows(self):
         tree = self.wait(
-            lambda: self.find_named_control("Workspaces"), "server_workspace_list_missing"
+            lambda: self.find_named_control("Workspaces"), "core_workspace_list_missing"
         )
         rows, stack, visited = [], [tree], 0
         while stack and visited < 5000:
@@ -243,15 +243,15 @@ class Probe:
         return rows
 
     def created_workspace_row(self):
-        if self.server_workspace_before is None:
+        if self.core_workspace_before is None:
             return None
         rows = [
             row
             for row in self.workspace_rows()
-            if row.name == self.server_workspace_name
+            if row.name == self.core_workspace_name
             and row.getState().contains(self.atspi.STATE_SELECTED)
         ]
-        require(len(rows) <= 1, "server_workspace_creation_ambiguous")
+        require(len(rows) <= 1, "core_workspace_creation_ambiguous")
         return rows[0] if rows else None
 
     def open_workspace_menu(self, row, input_driver):
@@ -264,72 +264,72 @@ class Probe:
             self.press_control(row)
         self.wait(
             lambda: row_has_state(self.atspi.STATE_SELECTED),
-            "server_workspace_not_selected",
+            "core_workspace_not_selected",
         )
-        require(row.queryComponent().grabFocus(), "server_workspace_focus_rejected")
+        require(row.queryComponent().grabFocus(), "core_workspace_focus_rejected")
         self.wait(
             lambda: row_has_state(self.atspi.STATE_FOCUSED),
-            "server_workspace_not_focused",
+            "core_workspace_not_focused",
         )
         input_driver.context_menu()
 
-    def retire_server_workspace(self, input_driver):
-        if self.server_workspace_before is None:
+    def retire_core_workspace(self, input_driver):
+        if self.core_workspace_before is None:
             return
         # Native proxies can be replaced. Only the unique name supplied at creation proves
         # fixture ownership; a proxy absent from an earlier tree can still be retained work.
         input_driver.escape()
         self.wait(
             lambda: self.find_named_control("Workspace name") is None,
-            "server_workspace_rename_not_dismissed",
+            "core_workspace_rename_not_dismissed",
         )
         rows = self.workspace_rows()
-        named = [row for row in rows if row.name == self.server_workspace_name]
-        require(len(named) <= 1, "server_workspace_cleanup_ambiguous")
-        require(named, "server_workspace_cleanup_identity_missing")
+        named = [row for row in rows if row.name == self.core_workspace_name]
+        require(len(named) <= 1, "core_workspace_cleanup_ambiguous")
+        require(named, "core_workspace_cleanup_identity_missing")
         row = named[0]
         name = row.name
         self.open_workspace_menu(row, input_driver)
         self.activate_control("Kill Workspace")
         dialog = self.wait(
             lambda: self.find_named_control(f"Kill Workspace \u201c{name}\u201d?"),
-            "server_workspace_confirmation_missing",
+            "core_workspace_confirmation_missing",
         )
         self.activate_control("Kill Workspace", dialog)
         self.wait(
             lambda: all(
-                current != row and current.name != self.server_workspace_name
+                current != row and current.name != self.core_workspace_name
                 for current in self.workspace_rows()
             ),
-            "server_workspace_cleanup_not_confirmed",
+            "core_workspace_cleanup_not_confirmed",
         )
 
-    def open_server_workspace(self, input_driver):
+    def open_core_workspace(self, input_driver):
         # Exercise the native creation controls. The fixture's named client owns its
         # presentation; this source run's foreground Server owns the PTY.
-        self.server_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
+        self.core_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
         rows = self.workspace_rows()
         require(
-            all(row.name != self.server_workspace_name for row in rows),
-            "server_workspace_fixture_name_in_use",
+            all(row.name != self.core_workspace_name for row in rows),
+            "core_workspace_fixture_name_in_use",
         )
         # Supply the unique name in the creation request. Native proxy replacement cannot
         # prove which unnamed row is new, and renaming a guessed row can touch retained work.
         self.activate_control("Choose Workspace")
         field = self.wait(
-            lambda: self.find_named_control("Workspace name"), "server_workspace_query_missing"
+            lambda: self.find_named_control("Workspace name"), "core_workspace_query_missing"
         )
-        input_driver.workspace_query(self.server_workspace_name, field)
+        input_driver.workspace_query(self.core_workspace_name, field)
         self.wait(
-            lambda: field.queryText().getText(0, -1) == self.server_workspace_name,
-            "server_workspace_query_not_published",
+            lambda: field.queryText().getText(0, -1) == self.core_workspace_name,
+            "core_workspace_query_not_published",
         )
-        self.server_workspace_before = rows
+        self.core_workspace_before = rows
         self.activate_control("New Local Workspace")
-        self.server_workspace_row = self.wait(
-            self.created_workspace_row, "server_workspace_created_row_missing"
+        self.core_workspace_row = self.wait(
+            self.created_workspace_row, "core_workspace_created_row_missing"
         )
-        self.server_workspace_named = True
+        self.core_workspace_named = True
 
         # WorkspaceManager::render_chrome derives this selected row and the single presented
         # Tab manager from the same Active Workspace. This fresh client never navigates the
@@ -343,12 +343,12 @@ class Probe:
 
         pane = self.wait(
             fixture_pane,
-            "server_workspace_pane_missing",
+            "core_workspace_pane_missing",
         )
         if pane.name == "Start New Shell":
             self.press_control(pane)
-        self.terminal = self.wait(self.find_terminal, "server_terminal_object_missing")
-        require(self.terminal.queryComponent().grabFocus(), "server_terminal_focus_rejected")
+        self.terminal = self.wait(self.find_terminal, "core_terminal_object_missing")
+        require(self.terminal.queryComponent().grabFocus(), "core_terminal_focus_rejected")
 
     def event(self, event):
         if self.terminal is not None and event.type.startswith("object:text-changed"):
@@ -522,21 +522,21 @@ class Input:
 
     def require_fixture(self):
         require(
-            self.probe.server_workspace_named and self.probe.terminal is not None,
+            self.probe.core_workspace_named and self.probe.terminal is not None,
             "fixture_terminal_not_selected",
         )
 
     def workspace_query(self, name, field):
         require(
             field.queryComponent().grabFocus(),
-            "server_workspace_query_focus_rejected",
+            "core_workspace_query_focus_rejected",
         )
 
         def focused():
             field.clear_cache()
             return field.getState().contains(self.probe.atspi.STATE_FOCUSED)
 
-        self.probe.wait(focused, "server_workspace_query_not_focused")
+        self.probe.wait(focused, "core_workspace_query_not_focused")
         self._type_text(name)
 
     def _type_text(self, command):
@@ -1810,9 +1810,9 @@ def private_session(args):
         require(
             os.environ.get("SPACETERM_DEVELOPMENT_CLIENT")
             == f"a11y-{args.private_session}-{output.parent.name}".replace("_", "-"),
-            "server_fixture_client_identity_missing",
+            "core_fixture_client_identity_missing",
         )
-        report["server_backed"] = {"owned_foreground_server": True}
+        report["core_backed"] = {"owned_foreground_core": True}
         application = processes.start(
             [str(args.binary), "--new-instance"], stderr=frame_output.writer
         )
@@ -1824,7 +1824,7 @@ def private_session(args):
         app_environment = dict(entry.split(b"=", 1) for entry in app_entries if b"=" in entry)
         actual_backend = {
             "headless_override_absent": b"ZED_HEADLESS" not in app_environment,
-            "named_server_client": app_environment.get(b"SPACETERM_DEVELOPMENT_CLIENT")
+            "named_machine_client": app_environment.get(b"SPACETERM_DEVELOPMENT_CLIENT")
             == os.environ["SPACETERM_DEVELOPMENT_CLIENT"].encode(),
         }
         if args.private_session == "wayland":
@@ -1858,14 +1858,14 @@ def private_session(args):
         if args.private_session == "x11":
             run(["xdotool", "search", "--onlyvisible", "--class", "spaceterm", "windowfocus"])
         input_driver = Input(args.private_session, probe)
-        probe.open_server_workspace(input_driver)
+        probe.open_core_workspace(input_driver)
         readiness.wait(ReadinessStep.TERMINAL_OBJECT, probe.find_terminal, timeout=60)
         report["terminal_accessibility_published"] = True
         window = probe.terminal
         while window is not None and window.getRole() != probe.atspi.ROLE_FRAME:
             window = window.parent
-        require(window is not None, "server_terminal_window_missing")
-        report["server_backed"]["workspace_created_through_native_controls"] = True
+        require(window is not None, "core_terminal_window_missing")
+        report["core_backed"]["workspace_created_through_native_controls"] = True
 
         def orca_terminal_script():
             require(orca_process.poll() is None, "orca_process_exited")
@@ -2070,22 +2070,22 @@ def private_session(args):
             report["application_running_at_cleanup"] = application.poll() is None
             report["native_windows"] = native_windows(args.private_session)
         cleanup = {"passed": True, "creation_attempted": False}
-        report["server_workspace_cleanup"] = cleanup
-        if "probe" in locals() and probe.server_workspace_before is not None:
-            cleanup.update(passed=False, creation_attempted=True, name=probe.server_workspace_name)
+        report["core_workspace_cleanup"] = cleanup
+        if "probe" in locals() and probe.core_workspace_before is not None:
+            cleanup.update(passed=False, creation_attempted=True, name=probe.core_workspace_name)
             try:
                 require(
                     application is not None and application.poll() is None,
-                    "server_workspace_cleanup_application_unavailable",
+                    "core_workspace_cleanup_application_unavailable",
                 )
-                probe.retire_server_workspace(input_driver)
+                probe.retire_core_workspace(input_driver)
                 cleanup["passed"] = True
             except Exception as error:
                 cleanup["failure"] = (
                     str(error) if isinstance(error, SmokeFailure) else type(error).__name__
                 )
                 report.update(passed=False)
-                report.setdefault("failure", "server_workspace_cleanup_incomplete")
+                report.setdefault("failure", "core_workspace_cleanup_incomplete")
         if input_driver is not None:
             input_driver.close()
         try:
@@ -2144,7 +2144,7 @@ def prepare_binary(args, output):
             raise
         shutil.copy2(binary, destination)
     try:
-        server = build_executable(
+        core = build_executable(
             "--package",
             "spaceterm-cli",
             "--no-default-features",
@@ -2153,9 +2153,9 @@ def prepare_binary(args, output):
             env=environment,
         )
         # Reuse Development's resource layout, confined to this run's evidence directory.
-        prefix = stage_prefix(destination, server)
+        prefix = stage_prefix(destination, core)
     except TaskError:
-        raise SmokeFailure("server_source_build_failed") from None
+        raise SmokeFailure("core_source_build_failed") from None
     destination.unlink()
     destination = prefix / "bin" / "spaceterm-desktop"
     with destination.open("rb") as executable:
@@ -2174,19 +2174,17 @@ def prepare_binary(args, output):
     }
     (output / "binary-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
     require(proof["passed"], "source_executable_hash_mismatch")
-    server = prefix / "bin" / "spaceterm"
-    with server.open("rb") as executable:
-        server_digest = hashlib.file_digest(executable, "sha256").hexdigest()
+    core = prefix / "bin" / "spaceterm"
+    with core.open("rb") as executable:
+        core_digest = hashlib.file_digest(executable, "sha256").hexdigest()
     (output / "server-binary-proof.json").write_text(
-        json.dumps({"sha256": server_digest, "size_bytes": server.stat().st_size}) + "\n"
+        json.dumps({"sha256": core_digest, "size_bytes": core.stat().st_size}) + "\n"
     )
     return destination
 
 
 def supervised_session(args):
-    require(
-        args.binary is not None and args.server_binary is not None, "source_executables_missing"
-    )
+    require(args.binary is not None and args.core_binary is not None, "source_executables_missing")
     # supervise removes mise's PYTHONPATH before launching its client. Bootstrap this
     # task explicitly so its library path never reaches the desktop or terminal programs.
     command = [
@@ -2207,7 +2205,7 @@ def supervised_session(args):
     ]
     measurement = args.output_dir / "measurement.json"
     try:
-        status = source_session(args.server_binary, command, os.environ)
+        status = source_session(args.core_binary, command, os.environ)
     except TaskError:
         report = json.loads(measurement.read_text()) if measurement.exists() else {}
         report.update(passed=False, failure="source_session_failed")
@@ -2273,7 +2271,7 @@ def main():
     # A fresh directory keeps stale workload signals from satisfying a later run.
     run_output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     binary = None if args.isolation_only else prepare_binary(args, run_output)
-    server_binary = binary.parent / "spaceterm" if binary is not None else None
+    core_binary = binary.parent / "spaceterm" if binary is not None else None
     backends = ("x11", "wayland") if args.backend == "both" else (args.backend,)
     status = 0
     for backend in backends:
@@ -2356,7 +2354,7 @@ def main():
             environment["SPACETERM_DEVELOPMENT_CLIENT"] = client_name
         environment.update(
             ALSA_CONFIG_PATH=str(null_audio),
-            PULSE_SERVER="unix:" + str(runtime / "private-null-pulse.sock"),
+            PULSE_CORE="unix:" + str(runtime / "private-null-pulse.sock"),
             PIPEWIRE_REMOTE="spaceterm-accessibility-null",
         )
         environment["DISPLAY" if backend == "x11" else "WAYLAND_DISPLAY"] = (
@@ -2372,8 +2370,8 @@ def main():
         ]
         if binary is not None:
             command.extend(("--binary", str(binary)))
-        if server_binary is not None:
-            command.extend(("--server-binary", str(server_binary)))
+        if core_binary is not None:
+            command.extend(("--core-binary", str(core_binary)))
         if args.isolation_only:
             command = ["dbus-run-session", "--", *command]
             command.append("--isolation-only")
@@ -2446,16 +2444,16 @@ def main():
             report.setdefault("failure", "source_run_cleanup_unconfirmed")
             measurement.write_text(json.dumps(report, indent=2) + "\n")
             status = 1
-        if not args.isolation_only and not report.get("server_workspace_cleanup", {}).get("passed"):
+        if not args.isolation_only and not report.get("core_workspace_cleanup", {}).get("passed"):
             # A killed or timed-out wrapper cannot confirm cleanup through its retired GUI.
             report.update(passed=False)
-            report.setdefault("failure", "server_workspace_cleanup_incomplete")
+            report.setdefault("failure", "core_workspace_cleanup_incomplete")
             report.setdefault(
-                "server_workspace_cleanup",
+                "core_workspace_cleanup",
                 {
                     "passed": False,
                     "name": environment["SPACETERM_DEVELOPMENT_CLIENT"],
-                    "failure": "server_workspace_cleanup_unconfirmed",
+                    "failure": "core_workspace_cleanup_unconfirmed",
                 },
             )
             measurement.write_text(json.dumps(report, indent=2) + "\n")
@@ -2472,7 +2470,7 @@ def main():
             # These observers retain classifications, counts and timings only.
             diagnostics = {
                 key: report[key]
-                for key in ("readiness", "orca", "server_workspace_cleanup", "source_run_cleanup")
+                for key in ("readiness", "orca", "core_workspace_cleanup", "source_run_cleanup")
                 if key in report
             }
             print(f"{backend}: diagnostics " + json.dumps(diagnostics, sort_keys=True))

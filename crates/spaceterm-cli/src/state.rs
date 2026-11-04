@@ -15,11 +15,11 @@
 //! mutating command holds it from journal open and sequence allocation through acknowledgement,
 //! so the commands of one identity mutate one at a time. The desktop's `clients/desktop` is never
 //! read or written here.
-use crate::contract::{Code, Failure, RecoveredIdentity, from_server_error};
+use crate::contract::{Code, Failure, RecoveredIdentity, from_core_error};
 use serde::{Deserialize, Serialize};
-use spaceterm_server::hierarchy::{ClientJournal, Id};
-use spaceterm_server::protocol::{AgentName, RunId};
-use spaceterm_server::{Directory, Lock, LockWait, ServerConnection, ServerError};
+use spaceterm_core::hierarchy::{ClientJournal, Id};
+use spaceterm_core::protocol::{AgentName, RunId};
+use spaceterm_core::{CoreError, Directory, Lock, LockWait, MachineConnection};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -63,13 +63,13 @@ impl WriterGuard {
     /// must be the handle of the same route and identity.
     pub fn journal(
         &mut self,
-        connection: &ServerConnection,
+        connection: &MachineConnection,
     ) -> Result<&mut ClientJournal, Failure> {
         if let Some(lock) = self.lock.take() {
             self.journal = Some(
                 connection
                     .operation_journal_locked(lock)
-                    .map_err(from_server_error)?,
+                    .map_err(from_core_error)?,
             );
         }
         self.journal
@@ -124,7 +124,7 @@ impl Runs {
         match self
             .directory
             .wait_lock(RUNS_LOCK, std::time::Duration::from_secs(30), None)
-            .map_err(from_server_error)?
+            .map_err(from_core_error)?
         {
             LockWait::Locked(lock) => Ok(lock),
             LockWait::Held | LockWait::Cancelled => Err(Failure::new(Code::IdentityBusy)),
@@ -135,7 +135,7 @@ impl Runs {
         let record = self
             .directory
             .read_json::<RunsRecord>("runs.json")
-            .map_err(from_server_error)?
+            .map_err(from_core_error)?
             .unwrap_or_default();
         if record.runs.len() > MAX_PENDING_RUNS {
             return Err(Failure::new(Code::StorageUnavailable));
@@ -158,7 +158,7 @@ impl Runs {
         let Some(live) = self
             .live
             .try_lock(&format!("{}.lock", crate::io::hex(&run.0)))
-            .map_err(from_server_error)?
+            .map_err(from_core_error)?
         else {
             return Ok(None);
         };
@@ -166,7 +166,7 @@ impl Runs {
         if !self.read()?.runs.iter().any(|pending| pending.run == run) {
             self.live
                 .remove(&Self::run_lock_name(run))
-                .map_err(from_server_error)?;
+                .map_err(from_core_error)?;
             return Ok(None);
         }
         Ok(Some(live))
@@ -183,13 +183,13 @@ impl Runs {
         let live = self
             .live
             .try_lock(&format!("{}.lock", crate::io::hex(&run.run.0)))
-            .map_err(from_server_error)?
+            .map_err(from_core_error)?
             .ok_or(Failure::new(Code::IdentityBusy))?;
         if !recorded {
             record.runs.push(run);
             self.directory
                 .write_json(RUNS, &record)
-                .map_err(from_server_error)?;
+                .map_err(from_core_error)?;
         }
         Ok(live)
     }
@@ -204,19 +204,19 @@ impl Runs {
         if record.runs.len() != before {
             self.directory
                 .write_json(RUNS, &record)
-                .map_err(from_server_error)?;
+                .map_err(from_core_error)?;
         }
         self.live
             .remove(&Self::run_lock_name(run))
-            .map_err(from_server_error)?;
+            .map_err(from_core_error)?;
         Ok(())
     }
 }
 
 impl CliState {
-    pub fn open(identity: &str) -> Result<Self, ServerError> {
+    pub fn open(identity: &str) -> Result<Self, CoreError> {
         Ok(Self {
-            root: spaceterm_server::cli_state_root(identity)?,
+            root: spaceterm_core::cli_state_root(identity)?,
         })
     }
 
@@ -237,7 +237,7 @@ impl CliState {
         &self,
         route: &RouteKey,
         agent: Option<&AgentName>,
-    ) -> Result<Directory, ServerError> {
+    ) -> Result<Directory, CoreError> {
         Directory::open(&self.identity_path(route, agent), true)
     }
 
@@ -305,13 +305,13 @@ impl CliState {
     }
 
     /// The base identity and every agent this CLI has used on `route`, without creating any.
-    pub fn identities(&self, route: &RouteKey) -> Result<Vec<Option<AgentName>>, ServerError> {
+    pub fn identities(&self, route: &RouteKey) -> Result<Vec<Option<AgentName>>, CoreError> {
         let mut identities = vec![None];
         let agents = self.route_path(route).join("agents");
         let entries = match std::fs::read_dir(&agents) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(identities),
-            Err(_) => return Err(ServerError::StorageUnavailable),
+            Err(_) => return Err(CoreError::StorageUnavailable),
         };
         let mut names: Vec<AgentName> = entries
             .filter_map(Result::ok)
@@ -323,7 +323,7 @@ impl CliState {
     }
 
     /// Every identity of `route` that holds unsettled outcomes, read without their locks.
-    pub fn held(&self, route: &RouteKey) -> Result<Vec<HeldIdentity>, ServerError> {
+    pub fn held(&self, route: &RouteKey) -> Result<Vec<HeldIdentity>, CoreError> {
         let mut held = Vec::new();
         for agent in self.identities(route)? {
             let path = self.identity_path(route, agent.as_ref());

@@ -1,14 +1,14 @@
 //! Background persistence for this client's arrangements of Workspaces, outside Settings.
-use spaceterm_server::client_view::{ClientView, RetainedInventory};
-use spaceterm_server::{ServerConnection, ServerError};
+use spaceterm_core::client_view::{ClientView, RetainedInventory};
+use spaceterm_core::{CoreError, MachineConnection};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct State {
-    loaded: Option<Result<ClientView, ServerError>>,
-    attachments: Option<Result<spaceterm_server::attachments::Attachments, ServerError>>,
+    loaded: Option<Result<ClientView, CoreError>>,
+    attachments: Option<Result<spaceterm_core::attachments::Attachments, CoreError>>,
     pending: Option<ClientView>,
-    error: Option<ServerError>,
+    error: Option<CoreError>,
     closed: bool,
     /// The Workspaces and Tabs this client last presented from the server, as read.
     retained: Option<RetainedInventory>,
@@ -27,7 +27,7 @@ pub(super) struct RetainedClientViews {
     read: async_channel::Receiver<()>,
 }
 impl RetainedClientViews {
-    pub(super) fn new(server: ServerConnection) -> Self {
+    pub(super) fn new(core: MachineConnection) -> Self {
         let state = Arc::new(Mutex::new(State::default()));
         let shared = Arc::clone(&state);
         let (wake, receiver) = std::sync::mpsc::sync_channel(1);
@@ -35,8 +35,8 @@ impl RetainedClientViews {
         let worker = std::thread::Builder::new()
             .name("spaceterm-client-view".into())
             .spawn(move || {
-                let attachments = server.attachments();
-                let opened = server.client_view_store();
+                let attachments = core.attachments();
+                let opened = core.client_view_store();
                 {
                     let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
                     state.attachments = Some(attachments);
@@ -96,7 +96,7 @@ impl RetainedClientViews {
             Ok(worker) => Some(worker),
             Err(_) => {
                 state.lock().unwrap_or_else(|e| e.into_inner()).loaded =
-                    Some(Err(ServerError::StorageUnavailable));
+                    Some(Err(CoreError::StorageUnavailable));
                 None
             }
         };
@@ -117,14 +117,14 @@ impl RetainedClientViews {
     }
     pub(super) fn attachments(
         &self,
-    ) -> Option<Result<spaceterm_server::attachments::Attachments, ServerError>> {
+    ) -> Option<Result<spaceterm_core::attachments::Attachments, CoreError>> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .attachments
             .clone()
     }
-    pub(super) fn loaded(&self) -> Option<Result<ClientView, ServerError>> {
+    pub(super) fn loaded(&self) -> Option<Result<ClientView, CoreError>> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -167,7 +167,7 @@ impl RetainedClientViews {
         drop(state);
         let _ = self.wake.try_send(());
     }
-    pub(super) fn read_error(&self) -> Option<ServerError> {
+    pub(super) fn read_error(&self) -> Option<CoreError> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -175,7 +175,7 @@ impl RetainedClientViews {
             .as_ref()
             .and_then(|loaded| loaded.as_ref().err().copied())
     }
-    pub(super) fn error(&self) -> Option<ServerError> {
+    pub(super) fn error(&self) -> Option<CoreError> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).error
     }
 }

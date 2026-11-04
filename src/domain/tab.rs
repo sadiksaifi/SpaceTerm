@@ -1523,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn insertion_preserves_focus_zoom_and_server_root() {
+    fn insertion_preserves_focus_zoom_and_core_root() {
         let mut tab = four_pane_tab();
         let focused = tab.focused_pane_id();
         let root = tab.root_pane_id();

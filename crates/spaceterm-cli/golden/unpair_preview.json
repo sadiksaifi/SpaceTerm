@@ -1,0 +1,30 @@
+{
+  "command": "unpair",
+  "data": {
+    "confirmation": {
+      "effects": {
+        "device": {
+          "id": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+          "name": "Laptop"
+        }
+      },
+      "expires_at": "2026-10-30T12:10:00Z",
+      "token": "c1-1212121212121212121212121212121212121212121212121212121212121212"
+    }
+  },
+  "error": {
+    "class": "action_required",
+    "code": "confirmation_required",
+    "details": {},
+    "message": "Review the effects, then repeat the command with --confirm.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "local",
+    "route": "local"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "confirmation_required",
+  "warnings": []
+}

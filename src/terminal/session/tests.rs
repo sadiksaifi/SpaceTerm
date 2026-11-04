@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::platform::native_pty::{NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination};
-use spaceterm_server::pane::{LineMode, LineState};
+use spaceterm_core::pane::{LineMode, LineState};
 
 const PASSWORD: LineMode = LineMode {
     canonical: true,
@@ -29,7 +29,7 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
 
 /// Returns after the worker has run every command sent before this call.
 fn worker_round_trip(runtime: &TerminalRuntime) {
-    let _ = runtime.set_server_accessibility_selection(None).recv();
+    let _ = runtime.set_machine_accessibility_selection(None).recv();
 }
 
 /// Fixes the worker's publication clock inside a frame of a publication, so later output
@@ -1808,7 +1808,7 @@ fn permission_request_worker() -> PermissionRequestWorker {
 }
 
 /// The client effects a worker relayed to its controlling client, in order.
-fn relayed_effects(worker: &TerminalWorker) -> Vec<spaceterm_server::pane::effects::Effect> {
+fn relayed_effects(worker: &TerminalWorker) -> Vec<spaceterm_core::pane::effects::Effect> {
     TerminalSubscription {
         events: async_channel::bounded(1).1,
         accessibility: async_channel::bounded(1).1,
@@ -1836,7 +1836,7 @@ fn a_permission_request_is_relayed_and_kept_off_the_screen() {
     ]));
     assert!(matches!(
         relayed_effects(&worker)[..],
-        [spaceterm_server::pane::effects::Effect::PermissionSetup {
+        [spaceterm_core::pane::effects::Effect::PermissionSetup {
             screen_recording: true,
             accessibility: false,
         }]
@@ -1864,7 +1864,7 @@ fn the_permission_requests_in_one_read_become_one_client_effect() {
 
     assert!(matches!(
         relayed_effects(&worker)[..],
-        [spaceterm_server::pane::effects::Effect::PermissionSetup {
+        [spaceterm_core::pane::effects::Effect::PermissionSetup {
             screen_recording: true,
             accessibility: true,
         }]
@@ -3073,7 +3073,7 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
     assert!(worker.feed_test_output(vec![b"\x07\x1b]9;4;1;25\x07".to_vec(),]));
     assert!(matches!(
         relayed_effects(&worker)[..],
-        [spaceterm_server::pane::effects::Effect::Bell]
+        [spaceterm_core::pane::effects::Effect::Bell]
     ));
     assert!(matches!(
         receiver.try_recv().unwrap(),
@@ -3166,7 +3166,7 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
 
     assert!(matches!(
         relayed_effects(&worker)[..],
-        [spaceterm_server::pane::effects::Effect::Bell]
+        [spaceterm_core::pane::effects::Effect::Bell]
     ));
     assert!(matches!(
         receiver.try_recv().unwrap(),
@@ -4609,7 +4609,7 @@ fn clipboard_wait_keeps_selection_queries_live_and_orders_read_before_later_repl
     assert!(worker.feed_test_output(vec![b"before\x1b]52;p;?\x1b\\after\x1b[5n".to_vec()]));
     assert!(worker.clipboard.pending());
     let (reply, selection) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::ServerAccessibilitySelection(None, reply)));
+    assert!(worker.process_command(Command::CoreAccessibilitySelection(None, reply)));
     assert!(selection.try_recv().is_ok());
     assert!(records.snapshot().written.is_empty());
     let request = requests.try_recv().unwrap();
@@ -4638,7 +4638,7 @@ fn clipboard_reply_backpressure_keeps_selection_live_and_preserves_input_order()
         worker.complete_clipboard(Some(id), ClipboardCompletion::Text("x".repeat(1024 * 1024)))
     );
     let (reply, selection) = mpsc::sync_channel(1);
-    assert!(worker.process_command(Command::ServerAccessibilitySelection(None, reply)));
+    assert!(worker.process_command(Command::CoreAccessibilitySelection(None, reply)));
     assert!(selection.try_recv().is_ok());
     assert!(worker.write_pty(b"later input"));
     assert!(records.snapshot().written.is_empty());
@@ -4988,7 +4988,7 @@ fn metadata_only_screen_changes_do_not_schedule_another_semantic_document() {
 }
 
 #[test]
-fn hidden_server_semantic_demand_completes_without_materializing_a_visual_screen() {
+fn hidden_core_semantic_demand_completes_without_materializing_a_visual_screen() {
     let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
     let (events, event_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
     worker.events = events.into();
@@ -5073,7 +5073,7 @@ fn hidden_server_semantic_demand_completes_without_materializing_a_visual_screen
 }
 
 #[test]
-fn hidden_server_semantic_demand_is_enqueued_before_the_visibility_command_runs() {
+fn hidden_core_semantic_demand_is_enqueued_before_the_visibility_command_runs() {
     let (commands, receiver) = mpsc::channel();
     let session = TerminalRuntime {
         metadata_state: TerminalSessionMetadataState::default(),

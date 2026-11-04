@@ -1,23 +1,23 @@
 //! Explicit, state-free verification of an installed server's PTY and shell resources.
 use spaceterm::runtime::*;
-use spaceterm_server::ServerError;
+use spaceterm_core::CoreError;
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
 
-pub fn resources() -> Result<PathBuf, ServerError> {
-    let executable = std::env::current_exe().map_err(|_| ServerError::StartupFailed)?;
-    let directory = executable.parent().ok_or(ServerError::StartupFailed)?;
+pub fn resources() -> Result<PathBuf, CoreError> {
+    let executable = std::env::current_exe().map_err(|_| CoreError::StartupFailed)?;
+    let directory = executable.parent().ok_or(CoreError::StartupFailed)?;
     let root = if directory.file_name().is_some_and(|name| name == "MacOS") {
         directory
             .parent()
-            .ok_or(ServerError::StartupFailed)?
+            .ok_or(CoreError::StartupFailed)?
             .join("Resources")
     } else {
         directory
             .parent()
-            .ok_or(ServerError::StartupFailed)?
+            .ok_or(CoreError::StartupFailed)?
             .join("share/spaceterm")
     };
     if root.join("shell-integration/VERSION").is_file() && root.join("terminfo").is_dir() {
@@ -30,15 +30,15 @@ pub fn resources() -> Result<PathBuf, ServerError> {
     {
         return Ok(PathBuf::from(env!("OUT_DIR")).join("resources"));
     }
-    Err(ServerError::StartupFailed)
+    Err(CoreError::StartupFailed)
 }
 
-pub fn run() -> Result<(), ServerError> {
+pub fn run() -> Result<(), CoreError> {
     let resources = resources()?;
     let filesystem = local_filesystem();
     let directory = filesystem
-        .validate_directory(&std::env::current_dir().map_err(|_| ServerError::StartupFailed)?)
-        .map_err(|_| ServerError::StartupFailed)?;
+        .validate_directory(&std::env::current_dir().map_err(|_| CoreError::StartupFailed)?)
+        .map_err(|_| CoreError::StartupFailed)?;
     let counters = std::sync::Arc::default();
     let factory = NativeTerminalSessionFactory::new(
         native_pty_factory(std::sync::Arc::clone(&counters)),
@@ -68,9 +68,9 @@ pub fn run() -> Result<(), ServerError> {
         .start_runtime(
             geometry,
             LocalTerminalLaunchPlan::new(directory),
-            TerminalAppearanceUpdate::builtin().map_err(|_| ServerError::StartupFailed)?,
+            TerminalAppearanceUpdate::builtin().map_err(|_| CoreError::StartupFailed)?,
         )
-        .map_err(|_| ServerError::StartupFailed)?;
+        .map_err(|_| CoreError::StartupFailed)?;
     let subscription = runtime.subscribe();
     runtime.focus(true);
     // The child checks the resources selected for its shell environment.
@@ -99,7 +99,7 @@ pub fn run() -> Result<(), ServerError> {
     }
     runtime.shutdown();
     if !success {
-        return Err(ServerError::StartupFailed);
+        return Err(CoreError::StartupFailed);
     }
     Ok(())
 }

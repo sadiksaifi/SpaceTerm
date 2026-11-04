@@ -30,11 +30,11 @@ impl DirectConnections {
     pub fn prepare_setup(
         &self,
         endpoint: String,
-        pin: direct::ServerPin,
+        pin: direct::MachinePin,
         generation: u64,
     ) -> Result<SetupEnrollment, DirectError> {
         if pin.build != self.0.identity {
-            return Err(DirectError::WrongServer);
+            return Err(DirectError::WrongMachine);
         }
         let mut operation = random_id()?;
         operation[..8].copy_from_slice(&generation.to_be_bytes());
@@ -65,7 +65,7 @@ impl DirectConnections {
         }
         state.document.pending.push(PendingRecord::enrollment(
             operation,
-            "Server setup".into(),
+            "Machine setup".into(),
             endpoint.clone(),
             pin.clone(),
             operation,
@@ -100,7 +100,7 @@ impl DirectConnections {
         cancellation: &dyn Cancellation,
     ) -> Result<DirectRouteId, DirectError> {
         if !Arc::ptr_eq(&self.0, &prepared.owner.0) || paired.pin != prepared.pin {
-            return Err(DirectError::WrongServer);
+            return Err(DirectError::WrongMachine);
         }
         if cancellation.is_cancelled() {
             self.cancel_setup(prepared)?;
@@ -130,7 +130,7 @@ impl DirectConnections {
             }
         };
         let gate = Arc::new(AtomicBool::new(true));
-        let server = worker::connect(&self.0, &saved, Interaction::Requested, Arc::clone(&gate))?;
+        let core = worker::connect(&self.0, &saved, Interaction::Requested, Arc::clone(&gate))?;
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         let cancelled = cancellation.is_cancelled()
             || state
@@ -182,7 +182,7 @@ impl DirectConnections {
             prepared.operation,
             RouteState {
                 status: DirectRouteStatus::Connected,
-                server: Some(server),
+                core: Some(core),
                 gate,
                 retry: Retry {
                     due: Instant::now() + std::time::Duration::from_secs(5),
@@ -234,7 +234,7 @@ impl DirectConnections {
     /// The caller verifies the receipt's server pin and operation before calling.
     pub fn confirm_setup_cancelled(&self, prepared: &SetupEnrollment) -> Result<(), DirectError> {
         if !Arc::ptr_eq(&self.0, &prepared.owner.0) {
-            return Err(DirectError::WrongServer);
+            return Err(DirectError::WrongMachine);
         }
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         let pending = state
@@ -246,7 +246,7 @@ impl DirectConnections {
         if !matches!(&pending.authority, records::Authority::Enrollment { endpoint, pin, claim, .. }
             if endpoint == &prepared.endpoint && pin == &prepared.pin && *claim == prepared.operation)
         {
-            return Err(DirectError::WrongServer);
+            return Err(DirectError::WrongMachine);
         }
         pending.confirmed = true;
         pending.cancel_requested = true;
@@ -269,7 +269,7 @@ impl DirectConnections {
 
     pub fn cancel_setup(&self, prepared: &SetupEnrollment) -> Result<(), DirectError> {
         if !Arc::ptr_eq(&self.0, &prepared.owner.0) {
-            return Err(DirectError::WrongServer);
+            return Err(DirectError::WrongMachine);
         }
         self.cancel_join(prepared.operation)
     }
@@ -296,7 +296,7 @@ mod tests {
             route: &DirectRoute,
             _: DeviceCredential,
             _: Arc<AtomicBool>,
-        ) -> Result<ServerConnection, DirectError> {
+        ) -> Result<MachineConnection, DirectError> {
             self.connections.fetch_add(1, Ordering::AcqRel);
             if self.fail {
                 return Err(DirectError::Transport);
@@ -308,7 +308,7 @@ mod tests {
                 }
             }
             self.cancellation.cancel();
-            ServerConnection::direct(identity, route.id, route.paired.clone(), Arc::new(Offline))
+            MachineConnection::direct(identity, route.id, route.paired.clone(), Arc::new(Offline))
                 .map_err(DirectError::from)
         }
 
@@ -326,7 +326,7 @@ mod tests {
         fn cancel_enrollment(
             &self,
             _: &str,
-            _: &direct::ServerPin,
+            _: &direct::MachinePin,
             claim: [u8; 32],
             _: &DeviceCredential,
         ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -363,7 +363,7 @@ mod tests {
     }
 
     impl Records for PublicationRecords {
-        fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
+        fn load(&self) -> Result<Document, spaceterm_core::direct::DirectError> {
             Ok(self.document.lock().unwrap().clone())
         }
 
@@ -622,7 +622,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             other.confirm_setup_cancelled(&prepared),
-            Err(DirectError::WrongServer)
+            Err(DirectError::WrongMachine)
         );
         let retained = records.load().unwrap();
         assert!(!retained.pending[0].confirmed);
@@ -641,7 +641,7 @@ mod tests {
             .complete_setup(
                 &prepared,
                 paired.clone(),
-                "Remote server".into(),
+                "Remote machine".into(),
                 &CancellationToken::default(),
             )
             .unwrap();
@@ -672,7 +672,7 @@ mod tests {
                 owner.complete_setup(
                     &prepared,
                     paired,
-                    "Remote server".into(),
+                    "Remote machine".into(),
                     &CancellationToken::default(),
                 ),
                 Err(DirectError::StorageUnavailable)
@@ -702,7 +702,7 @@ mod tests {
             .complete_setup(
                 &prepared,
                 paired.clone(),
-                "Remote server".into(),
+                "Remote machine".into(),
                 &CancellationToken::default(),
             )
             .unwrap();
@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_server_never_publishes_a_setup_route() {
+    fn unreachable_core_never_publishes_a_setup_route() {
         let (owner, records, network) = fixture(true);
         let paired = saved(1, 2).route.paired;
         let prepared = owner
@@ -727,7 +727,7 @@ mod tests {
             owner.complete_setup(
                 &prepared,
                 paired,
-                "Remote server".into(),
+                "Remote machine".into(),
                 &CancellationToken::default(),
             ),
             Err(DirectError::Transport)
@@ -748,7 +748,7 @@ mod tests {
             owner.complete_setup(
                 &prepared,
                 paired,
-                "Remote server".into(),
+                "Remote machine".into(),
                 &network.cancellation,
             ),
             Err(DirectError::Rejected)

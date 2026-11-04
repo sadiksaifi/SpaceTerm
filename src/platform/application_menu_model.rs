@@ -66,7 +66,7 @@ pub(crate) fn file_menu() -> Menu {
         name: "File".into(),
         items: vec![
             MenuItem::action("New Workspace", NewWorkspace),
-            MenuItem::action("Add Server…", crate::ui::settings_window::AddServer),
+            MenuItem::action("Add Machine…", crate::ui::settings_window::AddMachine),
             MenuItem::action("Open Local Directory…", crate::ui::OpenLocalDirectory),
             MenuItem::action("Choose Workspace…", ChooseWorkspace),
             MenuItem::separator(),

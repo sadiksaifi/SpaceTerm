@@ -7,9 +7,9 @@
 //! removes the state it created.
 use spaceterm_cli::journal::{Editor, recovered_warning};
 use spaceterm_cli::state::{CliState, RouteKey};
-use spaceterm_server::{
-    CliRoute, ServerConnection, ServerError,
-    connection::link::{LinkEvent, ServerLink},
+use spaceterm_core::{
+    CliRoute, CoreError, MachineConnection,
+    connection::link::{CoreLink, LinkEvent},
     hierarchy::{CreateControl, Mutation, Outcome},
     protocol::{AgentName, Operation, ReplyBody},
 };
@@ -50,16 +50,16 @@ fn agent(name: &str) -> Result<Option<AgentName>> {
     })
 }
 
-fn handle(agent: Option<&AgentName>) -> std::result::Result<ServerConnection, ServerError> {
-    ServerConnection::for_cli(IDENTITY, CliRoute::Local, agent.cloned())
+fn handle(agent: Option<&AgentName>) -> std::result::Result<MachineConnection, CoreError> {
+    MachineConnection::for_cli(IDENTITY, CliRoute::Local, agent.cloned())
 }
 
-fn connect(server: &ServerConnection) -> Result<ServerLink> {
+fn connect(core: &MachineConnection) -> Result<CoreLink> {
     let until = Instant::now() + Duration::from_secs(10);
     loop {
-        match server.connect(Arc::new(|_: LinkEvent| {})) {
+        match core.connect(Arc::new(|_: LinkEvent| {})) {
             Ok(link) => return Ok(link),
-            Err(ServerError::NotRunning) if Instant::now() < until => {
+            Err(CoreError::NotRunning) if Instant::now() < until => {
                 std::thread::sleep(Duration::from_millis(50))
             }
             Err(error) => return Err(error.into()),
@@ -78,14 +78,14 @@ fn now_ms() -> u128 {
 fn edit(name: &str, workspace: &str) -> Result<()> {
     let agent = agent(name)?;
     let state = CliState::open(IDENTITY)?;
-    let server = handle(agent.as_ref())?;
-    let link = connect(&server)?;
+    let core = handle(agent.as_ref())?;
+    let link = connect(&core)?;
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut editor = Editor::open(
         &state,
         RouteKey::Local,
         agent.as_ref(),
-        &server,
+        &core,
         &link,
         &mut |agent| handle(agent),
         deadline,
@@ -112,12 +112,12 @@ fn edit(name: &str, workspace: &str) -> Result<()> {
 fn abandon(name: &str) -> Result<()> {
     let agent = agent(name)?;
     let state = CliState::open(IDENTITY)?;
-    let server = handle(agent.as_ref())?;
-    let link = connect(&server)?;
+    let core = handle(agent.as_ref())?;
+    let link = connect(&core)?;
     let mut writer = state
         .writer(&RouteKey::Local, agent.as_ref(), Instant::now())
         .map_err(|code| code.as_str())?;
-    let journal = writer.journal(&server).map_err(|failure| failure.text())?;
+    let journal = writer.journal(&core).map_err(|failure| failure.text())?;
     let (_, revision) = link.next_inventory(0)?;
     let mutation = Mutation::CreateWorkspace {
         name: format!("abandoned {name}"),
@@ -167,7 +167,7 @@ fn overlap([first, second]: [(u128, u128); 2]) -> bool {
 }
 
 /// A desktop's edit, the way the desktop dispatches and acknowledges it.
-fn desktop_edit(link: &ServerLink, name: &str) -> Result<Outcome> {
+fn desktop_edit(link: &CoreLink, name: &str) -> Result<Outcome> {
     let (_, revision) = link.next_inventory(0)?;
     let sequence = revision.next_sequence;
     let reply = link
@@ -188,7 +188,7 @@ fn desktop_edit(link: &ServerLink, name: &str) -> Result<Outcome> {
 }
 
 fn parent() -> Result<()> {
-    let data = spaceterm_server::cli_state_root(IDENTITY)?
+    let data = spaceterm_core::cli_state_root(IDENTITY)?
         .parent()
         .and_then(std::path::Path::parent)
         .ok_or("data directory")?
@@ -210,12 +210,12 @@ fn parent() -> Result<()> {
     result
 }
 
-fn exercise(base: &ServerConnection, data: &std::path::Path) -> Result<()> {
+fn exercise(base: &MachineConnection, data: &std::path::Path) -> Result<()> {
     base.setup()?;
     std::thread::spawn(|| {
-        spaceterm_server::run_local_with_panes(
+        spaceterm_core::run_local_with_panes(
             IDENTITY,
-            spaceterm_server::panes(std::sync::Arc::default(), |sync| {
+            spaceterm_core::panes(std::sync::Arc::default(), |sync| {
                 Ok(spaceterm::runtime::Served::new(
                     spaceterm::runtime::WorkspaceHost::local(sync, std::sync::Arc::default())?,
                 ))
@@ -261,7 +261,7 @@ fn exercise(base: &ServerConnection, data: &std::path::Path) -> Result<()> {
     drop(editor);
     assert!(state.held(&RouteKey::Local)?.is_empty());
     println!("the next command settled {ABANDONED} killed agents");
-    let desktop = ServerConnection::for_development_client("cli-identity")?;
+    let desktop = MachineConnection::for_development_client("cli-identity")?;
     let desktop_link = connect(&desktop)?;
     assert!(matches!(
         desktop_edit(&desktop_link, "desktop after settlement")?,

@@ -73,7 +73,7 @@ def jailed(args, command):
     jail = shlex.quote(args.jail)
     return (
         f'bwrap --dev-bind / / --bind {jail}/share "$HOME/.local/share/{IDENTITY}" '
-        f'--bind {jail}/runtime "/tmp/{IDENTITY}-server-$(id -u)" -- {command}'
+        f'--bind {jail}/runtime "/tmp/{IDENTITY}-core-$(id -u)" -- {command}'
     )
 
 
@@ -88,38 +88,38 @@ def build_owner(args):
         command += (
             f" && rm -rf {jail}/share {jail}/runtime"
             f' && mkdir -p {jail}/share {jail}/runtime "$HOME/.local/share/{IDENTITY}" '
-            f'"/tmp/{IDENTITY}-server-$(id -u)" && chmod 700 {jail}/share {jail}/runtime'
+            f'"/tmp/{IDENTITY}-core-$(id -u)" && chmod 700 {jail}/share {jail}/runtime'
         )
     if remote(args, command).returncode:
         raise TaskError("the owner host build failed")
     return target
 
 
-def start_server(args, target):
-    command = jailed(args, f"{target}/release/spaceterm server run --owned")
-    server = subprocess.Popen(
+def start_core(args, target):
+    command = jailed(args, f"{target}/release/spaceterm internal serve --owned")
+    core = subprocess.Popen(
         ["ssh", "-T", args.owner_host, f"exec sh -c {shlex.quote(command)}"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
     )
-    line = server.stdout.readline().strip() if server.stdout else ""
+    line = core.stdout.readline().strip() if core.stdout else ""
     if line != READY:
-        stop_server(server)
+        stop_core(core)
         raise TaskError("the owner host's Development server did not start")
     print(f"netem: Development server ready on {args.owner_host}", file=sys.stderr)
-    return server
+    return core
 
 
-def stop_server(server):
+def stop_core(core):
     # Closing its input ends the foreground server, its Terminal Sessions and its runtime files.
-    if server.stdin:
-        server.stdin.close()
+    if core.stdin:
+        core.stdin.close()
     try:
-        server.wait(timeout=30)
+        core.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        server.terminate()
-        server.wait()
+        core.terminate()
+        core.wait()
 
 
 def qdiscs(args):
@@ -224,7 +224,7 @@ def run(args):
     # Another run's qdisc, or one left by a killed run, would impair the clean cells.
     if netem_active(qdiscs(args)):
         raise TaskError(f"{args.device} on the owner host already has a prio or netem qdisc")
-    server = start_server(args, target)
+    core = start_core(args, target)
     results = []
     pings = []
     try:
@@ -249,7 +249,7 @@ def run(args):
                         clear(args)
     finally:
         clear(args)
-        stop_server(server)
+        stop_core(core)
         if output:
             with (output / "results.jsonl").open("w") as file:
                 for result in results:

@@ -54,8 +54,8 @@ fn run(
             .filter_map(|path| Watched::of(path))
             .collect();
         let paths: Vec<PathBuf> = watched.iter().map(|watched| watched.path()).collect();
-        let server = process().filter(|server| Some(*server) != exited);
-        let Some(mut watch) = start(&paths, server) else {
+        let core = process().filter(|core| Some(*core) != exited);
+        let Some(mut watch) = start(&paths, core) else {
             return;
         };
         if !first && !changed() {
@@ -66,7 +66,7 @@ fn run(
             match watch.wait() {
                 None => return,
                 Some(Fired::Process) => {
-                    exited = server;
+                    exited = core;
                     break;
                 }
                 // A missing directory's parent changes for unrelated entries too. Only the
@@ -124,7 +124,7 @@ mod tests {
         root: PathBuf,
         data: PathBuf,
         runtime: PathBuf,
-        server: Arc<Mutex<Option<u32>>>,
+        core: Arc<Mutex<Option<u32>>>,
         reports: mpsc::Receiver<()>,
     }
 
@@ -134,7 +134,7 @@ mod tests {
 
     /// Follows a service whose `data` directory is first passed to `prepare`, with `server` as the
     /// running server's process.
-    fn fixture_with(prepare: impl FnOnce(&Path), server: Option<u32>) -> Fixture {
+    fn fixture_with(prepare: impl FnOnce(&Path), core: Option<u32>) -> Fixture {
         let root = std::env::temp_dir().join(format!(
             "spaceterm-service-changes-{}-{}",
             std::process::id(),
@@ -143,15 +143,15 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let data = root.join("data/server");
+        let data = root.join("data/core");
         std::fs::create_dir_all(&data).unwrap();
         prepare(&data);
         let runtime = root.join("runtime");
-        let server = Arc::new(Mutex::new(server));
+        let core = Arc::new(Mutex::new(core));
         let (report, reports) = mpsc::channel();
         let process = {
-            let server = Arc::clone(&server);
-            move || *server.lock().unwrap()
+            let core = Arc::clone(&core);
+            move || *core.lock().unwrap()
         };
         follow(
             crate::platform::service_watch,
@@ -165,7 +165,7 @@ mod tests {
             root,
             data,
             runtime,
-            server,
+            core,
             reports,
         }
     }
@@ -212,7 +212,7 @@ mod tests {
             .arg("30")
             .spawn()
             .unwrap();
-        *fixture.server.lock().unwrap() = Some(child.id());
+        *fixture.core.lock().unwrap() = Some(child.id());
         std::fs::write(fixture.runtime.join("s"), b"").unwrap();
         fixture.reported("a started server's endpoint");
         fixture.quiet("a running server");
@@ -220,7 +220,7 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         fixture.reported("the server's process ending");
-        *fixture.server.lock().unwrap() = None;
+        *fixture.core.lock().unwrap() = None;
 
         std::fs::remove_file(fixture.runtime.join("s")).unwrap();
         fixture.reported("a stopped server's endpoint going away");

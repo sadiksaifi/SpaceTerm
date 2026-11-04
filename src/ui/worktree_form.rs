@@ -21,7 +21,7 @@ use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::worktrees::git::{BranchList, BranchName, WorktreeBranch, WorktreeCreateError};
 use crate::worktrees::ref_format::{BranchNameError, validate_branch_name};
-use spaceterm_server::worktree::path_template::expand;
+use spaceterm_core::worktree::path_template::expand;
 
 const FORM_MODAL_ID: &str = "new-worktree-form";
 const CREATE_ACTION_SELECTOR: &str = "new-worktree-create";
@@ -600,8 +600,8 @@ impl WorktreeForm {
         }
         // The form closes, and the Workspace Window asks the person to check the Worktree.
         if result
-            == Err(WorktreeCreateError::Server(
-                spaceterm_server::worktree::Error::Interrupted,
+            == Err(WorktreeCreateError::Core(
+                spaceterm_core::worktree::Error::Interrupted,
             ))
         {
             self.pending_path = None;
@@ -618,10 +618,10 @@ impl WorktreeForm {
         self.set_enabled(true, cx);
         let (field, message): (Option<FormField>, SharedString) = match result {
             Err(WorktreeCreateError::NotSubmitted(reason)) => (None,reason.into()),
-            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location)) => (Some(FormField::Location),"Choose a new or empty directory.".into()),
-            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Missing)) => (None,"The repository is no longer available. Reopen it before creating a Worktree.".into()),
-            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Branch)) => (None,"Git couldn\u{2019}t finish creating the Worktree. Check for leftover files before trying again.".into()),
-            Err(WorktreeCreateError::Server(_)) => (None,"SpaceTerm could not confirm whether the Worktree was created. Review the sidebar before trying again.".into()),
+            Err(WorktreeCreateError::Core(spaceterm_core::worktree::Error::Location)) => (Some(FormField::Location),"Choose a new or empty directory.".into()),
+            Err(WorktreeCreateError::Core(spaceterm_core::worktree::Error::Missing)) => (None,"The repository is no longer available. Reopen it before creating a Worktree.".into()),
+            Err(WorktreeCreateError::Core(spaceterm_core::worktree::Error::Branch)) => (None,"Git couldn\u{2019}t finish creating the Worktree. Check for leftover files before trying again.".into()),
+            Err(WorktreeCreateError::Core(_)) => (None,"SpaceTerm could not confirm whether the Worktree was created. Review the sidebar before trying again.".into()),
             Err(WorktreeCreateError::InvalidName) => (
                 Some(FormField::Name),
                 "Git doesn\u{2019}t accept this name.".into(),
@@ -1293,7 +1293,7 @@ mod tests {
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let context = WorktreeFormContext {
                 repository_name: "app".into(),
-                template: spaceterm_server::worktree::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+                template: spaceterm_core::worktree::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
                     .into(),
                 home: HOME.into(),
                 checked_out: vec![
@@ -1875,7 +1875,7 @@ mod tests {
                 "Branch name already exists.",
             ),
             (
-                WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location),
+                WorktreeCreateError::Core(spaceterm_core::worktree::Error::Location),
                 FormField::Location,
                 "Choose a new or empty directory.",
             ),

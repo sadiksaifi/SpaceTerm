@@ -1,0 +1,381 @@
+//! Organization commits leave the `PaneService` lock as soon as they are ordered.
+//!
+//! A commit changes the in-memory state under the lock and hands the journal its envelope. The
+//! write and its syncs happen later in [`Journal::sync`], off the lock. Each envelope is a whole
+//! state that carries every earlier revision, so a writer writes only the newest pending envelope
+//! and revisions become durable in submission order.
+//!
+//! A failed write leaves the retained record uncertain. Nothing more is written until the service
+//! reads the record back with [`Journal::recover`]. Every revision submitted before that read and
+//! not yet written is lost.
+use spaceterm_core::{
+    CoreError,
+    organization::{Organization, OrganizationStore, WorktreeLock},
+};
+use std::collections::BTreeMap;
+use std::sync::{Condvar, Mutex, MutexGuard};
+
+/// Where the organization is retained: the server's [`OrganizationStore`], or a test double.
+pub(in crate::runtime::core_host) trait Retention:
+    Send + Sync
+{
+    /// Publishes `organization` durably, or fails with the record's state uncertain.
+    fn write(&self, organization: &Organization) -> Result<(), CoreError>;
+    /// Reads the retained organization and confirms that it is durable.
+    fn read(&self) -> Result<Option<Organization>, CoreError>;
+    /// Fences Worktree recovery while a Git write runs. `None` means this store has no fence.
+    fn worktree_lock(&self) -> Result<Option<WorktreeLock>, CoreError>;
+}
+
+impl Retention for OrganizationStore {
+    fn write(&self, organization: &Organization) -> Result<(), CoreError> {
+        OrganizationStore::write(self, Some(organization))
+    }
+    fn read(&self) -> Result<Option<Organization>, CoreError> {
+        OrganizationStore::read(self)
+    }
+    fn worktree_lock(&self) -> Result<Option<WorktreeLock>, CoreError> {
+        OrganizationStore::worktree_lock(self).map(Some)
+    }
+}
+
+/// How many recoveries keep their verdicts. A revision older than these is reported uncertain.
+const RECOVERIES: usize = 16;
+
+/// A commit's place in submission order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime::core_host) struct Revision {
+    epoch: u64,
+    number: u64,
+}
+
+impl Revision {
+    /// Whether retaining `self` retained `other`.
+    pub(in crate::runtime::core_host) fn covers(self, other: Revision) -> bool {
+        self.epoch == other.epoch && other.number <= self.number
+    }
+    /// Whether a recovery before `written` lost `self`, because it was never retained.
+    pub(in crate::runtime::core_host) fn lost_by(self, written: Revision) -> bool {
+        self.epoch < written.epoch
+    }
+}
+
+/// The revision may or may not be retained. The service reads the record back before relying on
+/// any retained state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime::core_host) struct Uncertain;
+
+pub(in crate::runtime::core_host) struct Journal {
+    store: Box<dyn Retention>,
+    /// Called after each successful write with the revision it retained, outside the journal's
+    /// lock.
+    written: Box<dyn Fn(Revision) + Send + Sync>,
+    progress: Mutex<Progress>,
+    wrote: Condvar,
+}
+
+#[derive(Default)]
+struct Progress {
+    /// Starts again after each recovery.
+    epoch: u64,
+    submitted: u64,
+    /// The newest envelope no writer has taken yet.
+    pending: Option<(u64, Organization)>,
+    writing: bool,
+    /// Every revision of this epoch up to here is retained.
+    durable: u64,
+    /// The write that retained `durable` has not reported it yet. Callers waiting for it wait
+    /// until it has, so what it publishes precedes their replies.
+    reporting: bool,
+    failed: bool,
+    /// The last durable revision of each earlier epoch. Later revisions of that epoch were lost.
+    ended: BTreeMap<u64, u64>,
+}
+
+impl Journal {
+    pub(in crate::runtime::core_host) fn new(
+        store: Box<dyn Retention>,
+        written: Box<dyn Fn(Revision) + Send + Sync>,
+    ) -> Self {
+        Self {
+            store,
+            written,
+            progress: Mutex::default(),
+            wrote: Condvar::new(),
+        }
+    }
+
+    pub(in crate::runtime::core_host) fn worktree_lock(
+        &self,
+    ) -> Result<Option<WorktreeLock>, CoreError> {
+        self.store.worktree_lock()
+    }
+
+    fn progress(&self) -> MutexGuard<'_, Progress> {
+        self.progress.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Orders `envelope` after every earlier commit, without touching the disk.
+    pub(in crate::runtime::core_host) fn submit(&self, envelope: Organization) -> Revision {
+        let mut progress = self.progress();
+        progress.submitted += 1;
+        progress.pending = Some((progress.submitted, envelope));
+        Revision {
+            epoch: progress.epoch,
+            number: progress.submitted,
+        }
+    }
+
+    /// The newest submitted revision. Every outcome already in the state is retained with it.
+    pub(in crate::runtime::core_host) fn latest(&self) -> Revision {
+        let progress = self.progress();
+        Revision {
+            epoch: progress.epoch,
+            number: progress.submitted,
+        }
+    }
+
+    /// Whether `revision` is retained already. Never waits.
+    pub(in crate::runtime::core_host) fn retained(&self, revision: Revision) -> bool {
+        let progress = self.progress();
+        if revision.epoch != progress.epoch {
+            return progress
+                .ended
+                .get(&revision.epoch)
+                .is_some_and(|durable| revision.number <= *durable);
+        }
+        revision.number <= progress.durable
+    }
+
+    /// Returns once `revision` is retained. Writes the newest pending envelope unless another
+    /// caller is already writing, in which case it waits for that write and checks again.
+    pub(in crate::runtime::core_host) fn sync(&self, revision: Revision) -> Result<(), Uncertain> {
+        let mut progress = self.progress();
+        loop {
+            if revision.epoch != progress.epoch {
+                let durable = progress.ended.get(&revision.epoch).ok_or(Uncertain)?;
+                return (revision.number <= *durable).then_some(()).ok_or(Uncertain);
+            }
+            if revision.number <= progress.durable && !progress.reporting {
+                return Ok(());
+            }
+            if progress.failed {
+                return Err(Uncertain);
+            }
+            if progress.writing || progress.reporting {
+                progress = self.wrote.wait(progress).unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            let (number, envelope) = progress.pending.take().ok_or(Uncertain)?;
+            let epoch = progress.epoch;
+            progress.writing = true;
+            drop(progress);
+            let result = self.store.write(&envelope);
+            progress = self.progress();
+            progress.writing = false;
+            match result {
+                Ok(()) => {
+                    progress.durable = number;
+                    progress.reporting = true;
+                    drop(progress);
+                    (self.written)(Revision { epoch, number });
+                    progress = self.progress();
+                    progress.reporting = false;
+                }
+                Err(_) => progress.failed = true,
+            }
+            self.wrote.notify_all();
+        }
+    }
+
+    /// Whether nothing waits to be written and the last write succeeded.
+    pub(in crate::runtime::core_host) fn settled(&self) -> bool {
+        let progress = self.progress();
+        !progress.failed && !progress.writing && !progress.reporting && progress.pending.is_none()
+    }
+
+    /// Whether a write failed and the record must be read back.
+    pub(in crate::runtime::core_host) fn uncertain(&self) -> bool {
+        self.progress().failed
+    }
+
+    /// Reads the record back after a failed write and confirms its durability. Call it only while
+    /// [`Self::uncertain`]: no write starts then, so the read sees the final record.
+    pub(in crate::runtime::core_host) fn recover(&self) -> Result<Option<Organization>, CoreError> {
+        let record = self.store.read()?;
+        let mut progress = self.progress();
+        let (epoch, durable) = (progress.epoch, progress.durable);
+        progress.ended.insert(epoch, durable);
+        while progress.ended.len() > RECOVERIES {
+            progress.ended.pop_first();
+        }
+        progress.epoch += 1;
+        progress.submitted = 0;
+        progress.durable = 0;
+        progress.pending = None;
+        progress.failed = false;
+        Ok(record)
+    }
+}
+
+#[cfg(test)]
+pub(in crate::runtime::core_host) mod memory {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+
+    /// Retains organization in memory. Writes can fail or wait for a release.
+    #[derive(Default)]
+    pub(in crate::runtime::core_host) struct Memory {
+        record: Mutex<Option<Organization>>,
+        pub writes: AtomicUsize,
+        pub fail: AtomicBool,
+        gate: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    impl Memory {
+        /// Holds the next write until the returned sender sends or drops.
+        pub fn hold(&self) -> mpsc::Sender<()> {
+            let (release, gate) = mpsc::channel();
+            *self.gate.lock().unwrap() = Some(gate);
+            release
+        }
+        pub fn retained(&self) -> Option<Organization> {
+            self.record.lock().unwrap().clone()
+        }
+    }
+
+    pub(in crate::runtime::core_host) struct Shared(pub Arc<Memory>);
+
+    impl Retention for Shared {
+        fn write(&self, organization: &Organization) -> Result<(), CoreError> {
+            if let Some(gate) = self.0.gate.lock().unwrap().take() {
+                let _ = gate.recv();
+            }
+            self.0.writes.fetch_add(1, Ordering::SeqCst);
+            if self.0.fail.load(Ordering::SeqCst) {
+                return Err(CoreError::StorageUnavailable);
+            }
+            *self.0.record.lock().unwrap() = Some(organization.clone());
+            Ok(())
+        }
+        fn read(&self) -> Result<Option<Organization>, CoreError> {
+            if self.0.fail.load(Ordering::SeqCst) {
+                return Err(CoreError::StorageUnavailable);
+            }
+            Ok(self.0.retained())
+        }
+        fn worktree_lock(&self) -> Result<Option<WorktreeLock>, CoreError> {
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory::{Memory, Shared};
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    fn journal() -> (Arc<Journal>, Arc<Memory>) {
+        let memory = Arc::new(Memory::default());
+        (
+            Arc::new(Journal::new(
+                Box::new(Shared(Arc::clone(&memory))),
+                Box::new(|_| {}),
+            )),
+            memory,
+        )
+    }
+
+    fn named(name: &str) -> Organization {
+        let mut state = spaceterm_core::hierarchy::State::first("/".as_ref()).unwrap();
+        state.inventory.workspaces[0].name = name.into();
+        state.envelope()
+    }
+
+    fn name(organization: &Organization) -> &str {
+        &organization.shared.inventory.workspaces[0].name
+    }
+
+    #[test]
+    fn one_write_retains_every_revision_submitted_before_it_in_order() {
+        let (journal, memory) = journal();
+        let first = journal.submit(named("first"));
+        let second = journal.submit(named("second"));
+        let third = journal.submit(named("third"));
+        assert!(!journal.settled());
+        assert_eq!(journal.sync(first), Ok(()));
+        assert_eq!(memory.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(name(&memory.retained().unwrap()), "third");
+        assert_eq!(journal.sync(third), Ok(()));
+        assert_eq!(journal.sync(second), Ok(()));
+        assert_eq!(
+            memory.writes.load(Ordering::SeqCst),
+            1,
+            "later revisions coalesce"
+        );
+        assert!(journal.settled());
+    }
+
+    #[test]
+    fn a_revision_submitted_during_a_write_waits_for_its_own_write() {
+        let (journal, memory) = journal();
+        let release = memory.hold();
+        let first = journal.submit(named("first"));
+        let writer = {
+            let journal = Arc::clone(&journal);
+            std::thread::spawn(move || journal.sync(first))
+        };
+        while !journal.progress().writing {
+            std::thread::yield_now();
+        }
+        let second = journal.submit(named("second"));
+        let waiter = {
+            let journal = Arc::clone(&journal);
+            std::thread::spawn(move || journal.sync(second))
+        };
+        release.send(()).unwrap();
+        assert_eq!(writer.join().unwrap(), Ok(()));
+        assert_eq!(waiter.join().unwrap(), Ok(()));
+        assert_eq!(memory.writes.load(Ordering::SeqCst), 2);
+        assert_eq!(name(&memory.retained().unwrap()), "second");
+    }
+
+    #[test]
+    fn a_failed_write_loses_unwritten_revisions_until_the_record_is_read_back() {
+        let (journal, memory) = journal();
+        let kept = journal.submit(named("kept"));
+        journal.sync(kept).unwrap();
+        memory.fail.store(true, Ordering::SeqCst);
+        let failed = journal.submit(named("failed"));
+        assert_eq!(journal.sync(failed), Err(Uncertain));
+        let queued = journal.submit(named("queued"));
+        assert!(journal.uncertain());
+        assert_eq!(
+            journal.sync(queued),
+            Err(Uncertain),
+            "nothing is written while uncertain"
+        );
+        assert_eq!(memory.writes.load(Ordering::SeqCst), 2);
+        assert!(
+            journal.recover().is_err(),
+            "an unreadable record stays uncertain"
+        );
+        memory.fail.store(false, Ordering::SeqCst);
+        assert_eq!(name(&journal.recover().unwrap().unwrap()), "kept");
+        assert!(journal.settled());
+        let later = journal.submit(named("later"));
+        journal.sync(later).unwrap();
+        assert_eq!(journal.sync(kept), Ok(()));
+        assert_eq!(journal.sync(failed), Err(Uncertain));
+        assert_eq!(
+            journal.sync(queued),
+            Err(Uncertain),
+            "a later write never confirms a lost one"
+        );
+        assert_eq!(journal.sync(journal.latest()), Ok(()));
+    }
+}

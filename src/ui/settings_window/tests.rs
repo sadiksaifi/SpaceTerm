@@ -23,7 +23,7 @@ use crate::settings::storage::testing::MemoryStorage;
 
 /// What Reset All Settings says it can't give back and what it keeps.
 const RESET_ALL_DETAIL: &str =
-    "This can\u{2019}t be undone. Server connections and system permissions are kept.";
+    "This can\u{2019}t be undone. Machine connections and system permissions are kept.";
 
 pub(super) struct Harness {
     storage: Arc<MemoryStorage>,
@@ -399,15 +399,15 @@ fn open_settings_with_capabilities(
             Default::default(),
             registry,
             // Every section and row presents, so the shared layout checks cover Servers too.
-            Some(super::servers::OfferedServer {
-                connection: Ok(super::servers::testing::ScriptedServer::new(Err(
-                    crate::server_connection::ServerError::NotSetUp,
+            Some(super::machines::OfferedMachine {
+                connection: Ok(super::machines::testing::ScriptedCore::new(Err(
+                    crate::machine_connection::CoreError::NotSetUp,
                 ))),
-                service: Some(Ok(super::servers::testing::ScriptedService::new(Ok(
-                    super::servers::testing::not_installed(),
+                service: Some(Ok(super::machines::testing::ScriptedService::new(Ok(
+                    super::machines::testing::not_installed(),
                 )))),
-                update: Some(super::server_update::testing::ScriptedUpdate::new(
-                    super::server_update::testing::available(),
+                update: Some(super::core_update::testing::ScriptedUpdate::new(
+                    super::core_update::testing::available(),
                 )),
                 command_line_tool: Some(std::sync::Arc::new(
                     crate::command_line_tool::testing::tool(
@@ -463,7 +463,7 @@ pub(super) fn select_section(section: SettingsSectionId, cx: &mut VisualTestCont
         SettingsSectionId::Keybindings => "settings-navigation-settings-section-keybindings",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
         SettingsSectionId::Git => "settings-navigation-settings-section-git",
-        SettingsSectionId::Servers => "settings-navigation-settings-section-servers",
+        SettingsSectionId::Machines => "settings-navigation-settings-section-servers",
         SettingsSectionId::Updates => "settings-navigation-settings-section-updates",
         SettingsSectionId::Advanced => "settings-navigation-settings-section-advanced",
     };
@@ -1261,14 +1261,14 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             | SettingsRowId::GitTool
             | SettingsRowId::ShowPullRequests
             | SettingsRowId::GitHubCli
-            | SettingsRowId::ServerWorktreeLocation
-            | SettingsRowId::ServerStatus
-            | SettingsRowId::ServerAutoStart
+            | SettingsRowId::MachineWorktreeLocation
+            | SettingsRowId::CoreStatus
+            | SettingsRowId::CoreAutoStart
             | SettingsRowId::EndAllSessions
             | SettingsRowId::NetworkAccess
             | SettingsRowId::PairedDevices
-            | SettingsRowId::AllServers
-            | SettingsRowId::AddServer
+            | SettingsRowId::AllMachines
+            | SettingsRowId::AddMachine
             | SettingsRowId::CommandLineTool
             | SettingsRowId::UpdateStatus
             | SettingsRowId::AutomaticUpdateDownloads
@@ -2513,14 +2513,17 @@ fn assert_the_footer_closes_only_the_content_column(
         let gutter = cx
             .debug_bounds(leaked_owned(format!(
                 "{}-disclosure",
-                super::server_list::PICKER_SELECTOR
+                super::machine_list::PICKER_SELECTOR
             )))
             .or_else(|| cx.debug_bounds(leaked_owned(format!("{}-heading", section.selector()))))
             .unwrap();
         assert_eq!(
-            cx.debug_bounds(super::server_list::PICKER_SELECTOR)
+            cx.debug_bounds(super::machine_list::PICKER_SELECTOR)
                 .is_some(),
-            matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git),
+            matches!(
+                section,
+                SettingsSectionId::Machines | SettingsSectionId::Git
+            ),
             "only Servers and Git present the server picker, not {section:?}"
         );
         assert_eq!(
@@ -2783,17 +2786,17 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::ShowPullRequests => "settings-show-pull-requests",
             SettingsRowId::GitTool => "settings-row-git-tool-control",
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
-            SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
-            SettingsRowId::ServerStatus => "settings-server-status",
+            SettingsRowId::MachineWorktreeLocation => "settings-server-worktree-location-frame",
+            SettingsRowId::CoreStatus => "settings-server-status",
             // The fixture has no service observation, so the row says Unknown.
-            SettingsRowId::ServerAutoStart => "settings-server-auto-start-unknown",
+            SettingsRowId::CoreAutoStart => "settings-server-auto-start-unknown",
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
             // The fixture has no network observation, so the row says Unknown. Devices waits
             // for access to be on.
             SettingsRowId::NetworkAccess => "settings-network-access-unknown",
             SettingsRowId::PairedDevices => return None,
             // The list and its add action span the card, with no control column.
-            SettingsRowId::AllServers | SettingsRowId::AddServer => return None,
+            SettingsRowId::AllMachines | SettingsRowId::AddMachine => return None,
             SettingsRowId::CommandLineTool => "settings-row-command-line-tool-control",
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
@@ -4251,7 +4254,7 @@ fn git_switches_save_reset_and_hiding_repository_status_locks_pull_requests(
 }
 
 #[gpui::test]
-fn the_github_cli_row_follows_this_computer_and_the_git_row_only_its_server(
+fn the_github_cli_row_follows_this_computer_and_the_git_row_only_its_machine(
     cx: &mut TestAppContext,
 ) {
     use crate::repository_status::GitHubCliStatus;

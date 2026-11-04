@@ -1,0 +1,686 @@
+use super::*;
+
+fn settings(template: &str, version: u64) -> Settings {
+    Settings {
+        template: template.to_owned(),
+        version,
+    }
+}
+
+/// A field showing a connected server's value.
+fn connected(template: &str, version: u64) -> LocationModel {
+    let mut model = LocationModel::default();
+    model.received(settings(template, version));
+    model
+}
+
+#[test]
+fn each_typed_problem_appears_under_the_field_as_the_person_types() {
+    let mut model = connected("~/.worktrees/{repository}/{branch}", 0);
+
+    for (text, message) in [
+        ("", "Enter a location."),
+        (
+            "~/wt/{repo}/{branch}",
+            "Use only {repository} and {branch} placeholders.",
+        ),
+        (
+            "~/wt/{repository}",
+            "Include {branch} for separate Worktree directories.",
+        ),
+        ("wt/{branch}", "Start the location with ~/ or /."),
+    ] {
+        assert_eq!(
+            model.edited(text),
+            None,
+            "{text:?} needs no server to find its problem"
+        );
+        assert_eq!(model.message(), Some((message, CaptionTone::Error)));
+        assert_eq!(model.commit(), None, "{text:?} is never written");
+    }
+}
+
+#[test]
+fn an_unwritable_folder_appears_only_for_the_text_the_core_checked() {
+    let mut model = connected("~/.worktrees/{repository}/{branch}", 0);
+    let earlier = "/System/{branch}";
+    let current = "/Volumes/Locked/{branch}";
+
+    assert_eq!(model.edited(earlier).as_deref(), Some(earlier));
+    assert_eq!(model.edited(current).as_deref(), Some(current));
+    model.validated(
+        earlier,
+        Err(Error::Template(WorktreePathTemplateError::NotWritable)),
+    );
+    assert_eq!(
+        model.message(),
+        None,
+        "an answer about earlier text lands nowhere"
+    );
+
+    model.validated(
+        current,
+        Err(Error::Template(WorktreePathTemplateError::NotWritable)),
+    );
+    assert_eq!(
+        model.message(),
+        Some((
+            "SpaceTerm Core can\u{2019}t write here.",
+            CaptionTone::Error
+        ))
+    );
+    assert_eq!(model.commit(), None);
+}
+
+#[test]
+fn a_concurrent_change_reloads_the_other_devices_value_and_says_so() {
+    let mut model = connected("~/first/{branch}", 0);
+    model.edited("~/mine/{branch}");
+    assert_eq!(
+        model.received(settings("~/theirs/{branch}", 1)),
+        None,
+        "a read never replaces what the person is typing"
+    );
+    let write = model.commit().unwrap();
+    assert_eq!(write.version, 0);
+
+    assert!(model.committed(write, Err(WriteError::Core(Error::Changed))));
+    assert_eq!(
+        model
+            .changed_elsewhere(Some(settings("~/theirs/{branch}", 1)))
+            .as_deref(),
+        Some("~/theirs/{branch}")
+    );
+    assert_eq!(
+        model.message(),
+        Some((
+            "Another device changed this location.",
+            CaptionTone::Warning
+        ))
+    );
+    assert_eq!(
+        model.commit(),
+        None,
+        "the person's draft is never written over the other device's change"
+    );
+}
+
+#[test]
+fn a_disconnected_core_keeps_its_last_value_and_cannot_change() {
+    let mut model = connected("~/first/{branch}", 2);
+    model.edited("~/draft/{branch}");
+
+    assert_eq!(model.disconnected().as_deref(), Some("~/first/{branch}"));
+    assert!(!model.editable());
+    assert_eq!(model.commit(), None);
+
+    assert_eq!(model.received(settings("~/first/{branch}", 2)), None);
+    assert!(model.editable(), "reconnecting allows changes again");
+}
+
+#[test]
+fn a_remembered_value_shows_until_the_core_answers_and_never_saves() {
+    let mut model = LocationModel::default();
+
+    assert_eq!(
+        model
+            .remembered(Some("~/kept/{branch}".to_owned()))
+            .as_deref(),
+        Some("~/kept/{branch}")
+    );
+    assert!(!model.editable());
+    assert_eq!(model.commit(), None);
+    assert_eq!(
+        model.received(settings("~/now/{branch}", 7)).as_deref(),
+        Some("~/now/{branch}"),
+        "the server's own answer replaces the remembered value"
+    );
+    model.edited("~/typing/{branch}");
+    assert_eq!(
+        model.remembered(Some("~/late/{branch}".to_owned())),
+        None,
+        "facts arriving late never replace the server's value or a draft"
+    );
+    assert_eq!(model.draft, "~/typing/{branch}");
+}
+
+#[test]
+fn a_newer_value_reaches_an_unedited_field_and_an_older_one_never_does() {
+    let mut model = connected("~/first/{branch}", 4);
+
+    assert_eq!(
+        model.received(settings("~/newer/{branch}", 5)).as_deref(),
+        Some("~/newer/{branch}")
+    );
+    assert_eq!(model.received(settings("~/older/{branch}", 3)), None);
+    assert_eq!(model.draft, "~/newer/{branch}");
+}
+
+/// "Git on <server>" against a paired server whose reads and writes a test scripts.
+mod presented {
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui::{TestAppContext, VisualTestContext};
+    use spaceterm_core::hierarchy::{Mutation, Outcome};
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    use super::super::super::machine_list::MachineChoice;
+    use super::super::super::machine_list::tests::{
+        Machines, Paired, click, connected_paired, disconnected, open_with, settle,
+    };
+    use super::*;
+    use crate::core_context::MachineKey;
+    use crate::repository_status::ToolVersion;
+    use crate::ui::core_worktrees::testing::{ScriptedReads, present_direct};
+    use crate::ui::workspaces::testing::ScriptedEdits;
+
+    const GIT_SECTION: &str = "settings-navigation-settings-section-git";
+    const SAVED: &str = "~/penguin/{repository}/{branch}";
+
+    fn penguin(paired: &Paired) -> MachineKey {
+        MachineChoice::Direct(paired.1[0]).key()
+    }
+
+    /// Opens Settings with penguin saved and chosen, whatever the selection would fall back to.
+    fn open_penguin(paired: Paired, cx: &mut TestAppContext) -> Machines<'_> {
+        let key = penguin(&paired);
+        cx.update(|cx| machine_selection::select(key, cx));
+        open_with(false, paired, cx)
+    }
+
+    /// Opens Git with penguin connected and its writer answering from `reads`.
+    fn present_penguin(
+        reads: Arc<ScriptedReads>,
+        cx: &mut TestAppContext,
+    ) -> (Machines<'_>, Rc<ScriptedEdits>) {
+        let paired = connected_paired(&["penguin"], cx);
+        let machines = open_penguin(paired, cx);
+        let edits = Rc::new(ScriptedEdits::new(None));
+        let writer = edits.clone();
+        let route = machines.routes[0];
+        machines.cx.update(|_, cx| {
+            present_direct(route, writer, reads, cx);
+        });
+        click(GIT_SECTION, machines.cx);
+        (machines, edits)
+    }
+
+    fn location_field(cx: &mut VisualTestContext) -> String {
+        A11yTree::read(cx).node("New Worktree Location")["aria"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn says(text: &str, cx: &mut VisualTestContext) -> bool {
+        A11yTree::read(cx).find_text(text).is_some()
+    }
+
+    /// Replaces the field's text as a person typing it does.
+    fn type_location(text: &str, cx: &mut VisualTestContext) {
+        click("settings-server-worktree-location", cx);
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input(text);
+    }
+
+    /// Lets the timers waiting on the field, the poll and a write fire.
+    fn wait(duration: Duration, cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(duration);
+        cx.run_until_parked();
+    }
+
+    fn penguin_location(key: &MachineKey, cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| machine_selection::facts(key, cx))
+            .and_then(|facts| facts.worktree_location)
+    }
+
+    #[gpui::test]
+    fn the_git_row_shows_the_selected_machines_git(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        reads.set_git(GitToolStatus::Ready(ToolVersion {
+            major: 2,
+            minor: 47,
+            patch: 0,
+        }));
+
+        let (machines, _) = present_penguin(reads.clone(), cx);
+        settle(machines.cx, |cx| says("2.47.0", cx));
+
+        assert!(says("Installed", machines.cx));
+        assert!(
+            reads.reads().iter().any(|read| matches!(read, Read::Git)),
+            "the Git row asks the owning server, not this computer"
+        );
+    }
+
+    #[gpui::test]
+    fn a_folder_the_machine_cannot_write_to_is_named_under_the_field_and_never_saved(
+        cx: &mut TestAppContext,
+    ) {
+        let reads = ScriptedReads::new(SAVED);
+        reads.refuse_writes_under("/Volumes/Locked");
+        let (machines, edits) = present_penguin(reads, cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+
+        type_location("/Volumes/Locked/{branch}", machines.cx);
+        wait(Duration::from_millis(400), machines.cx);
+
+        assert!(says("SpaceTerm Core can\u{2019}t write here.", machines.cx));
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        assert!(edits.submitted().is_empty());
+    }
+
+    #[gpui::test]
+    fn a_concurrent_change_reloads_the_field_and_keeps_the_other_devices_value(
+        cx: &mut TestAppContext,
+    ) {
+        let reads = ScriptedReads::new(SAVED);
+        let (machines, edits) = present_penguin(reads.clone(), cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+
+        type_location("~/mine/{branch}", machines.cx);
+        reads.change("~/theirs/{branch}");
+        wait(Duration::from_secs(1), machines.cx);
+        assert_eq!(location_field(machines.cx), "~/mine/{branch}");
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        assert_eq!(
+            edits.submitted(),
+            vec![Mutation::Worktree(Operation::SetLocation {
+                version: 0,
+                template: "~/mine/{branch}".into(),
+            })]
+        );
+        edits.answer(Outcome::WorktreeFailed(Error::Changed));
+        wait(Duration::from_millis(100), machines.cx);
+
+        assert_eq!(location_field(machines.cx), "~/theirs/{branch}");
+        assert!(says("Another device changed this location.", machines.cx));
+        assert_eq!(
+            edits.submitted().len(),
+            1,
+            "the draft is never written over the other device's change"
+        );
+        let mut model = connected("~/.worktrees/{repository}/{branch}", 3);
+        model.edited("~/elsewhere/{repository}/{branch}");
+        assert_eq!(
+            model.commit(),
+            Some(settings("~/elsewhere/{repository}/{branch}", 3))
+        );
+        assert_eq!(model.commit(), None, "one write is in flight");
+        assert!(!model.committed(settings("~/elsewhere/{repository}/{branch}", 3), Ok(())));
+        assert_eq!(
+            model.commit(),
+            None,
+            "the saved text is the server's value now"
+        );
+        assert!(!model.has_draft());
+    }
+
+    /// Whether the detail pane shows all of `selector`.
+    fn in_view(selector: &'static str, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let detail = cx.debug_bounds("settings-detail").expect("the detail pane");
+        cx.debug_bounds(selector).is_some_and(|bounds| {
+            bounds.top() >= detail.top() && bounds.bottom() <= detail.bottom()
+        })
+    }
+
+    /// A failed change arrives while the person has scrolled its field out of view. Settings
+    /// scrolls the error into view, and it counts as seen only once the person edits the
+    /// location again.
+    #[gpui::test]
+    fn a_scrolled_away_failure_should_scroll_into_view_and_wait_for_the_person(
+        cx: &mut TestAppContext,
+    ) {
+        let reads = ScriptedReads::new(SAVED);
+        let (machines, edits) = present_penguin(reads, cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", machines.cx);
+        wait(Duration::from_secs(1), machines.cx);
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        machines.cx.simulate_resize(gpui::size(
+            gpui::px(super::super::super::WINDOW_WIDTH),
+            gpui::px(240.0),
+        ));
+        machines.cx.run_until_parked();
+        let window = machines.window.clone();
+        machines.cx.update(|_, cx| {
+            window.update(cx, |settings, _| {
+                let farthest = settings.scroll.max_offset().y;
+                let field = settings.row_bounds.borrow()[&SettingsRowId::MachineWorktreeLocation];
+                let viewport = settings.scroll.bounds();
+                // Away from the field, in whichever direction the pane can scroll it out.
+                let away = if field.top() - viewport.top() > farthest / 2.0 {
+                    gpui::px(0.0)
+                } else {
+                    -farthest
+                };
+                settings.scroll.set_offset(gpui::point(gpui::px(0.0), away));
+            });
+        });
+        let hidden = !in_view("settings-server-worktree-location-frame", machines.cx);
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), machines.cx);
+        let revealed = in_view("settings-server-worktree-location-message", machines.cx);
+        let shown = says("Couldn\u{2019}t save this location.", machines.cx);
+        let unseen_while_shown = edits.unseen().len();
+        type_location("~/again/{branch}", machines.cx);
+
+        assert!(hidden, "the field starts out of view");
+        assert!(shown);
+        assert!(revealed, "the error scrolls into view");
+        assert_eq!(unseen_while_shown, 1, "showing the error records nothing");
+        assert!(edits.unseen().is_empty(), "editing the location answers it");
+    }
+
+    /// The person moves from Git to another section before the change fails, then closes
+    /// Settings. Settings never showed the failure, so closing it records nothing and the
+    /// failure stays unseen for the Workspace Window.
+    #[gpui::test]
+    fn a_failure_that_arrives_on_another_section_should_stay_unseen_after_closing(
+        cx: &mut TestAppContext,
+    ) {
+        let reads = ScriptedReads::new(SAVED);
+        let (machines, edits) = present_penguin(reads, cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", machines.cx);
+        wait(Duration::from_secs(1), machines.cx);
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        click(
+            "settings-navigation-settings-section-interface",
+            machines.cx,
+        );
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), machines.cx);
+        let window = machines.window.clone();
+        machines.cx.update(|window_context, cx| {
+            let handle = window_context.window_handle();
+            window.update(cx, |settings, cx| {
+                settings.request_close(super::super::super::CloseIntent::Window(handle), cx);
+            });
+        });
+        machines.cx.run_until_parked();
+
+        assert_eq!(edits.unseen().len(), 1);
+    }
+
+    /// The failed reply arrives, and the person closes Settings before any frame draws its
+    /// error. Settings never showed the failure, so it hands it back unanswered.
+    #[gpui::test]
+    fn closing_before_the_error_draws_should_hand_the_failure_back(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (machines, edits) = present_penguin(reads, cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", machines.cx);
+        wait(Duration::from_secs(1), machines.cx);
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        let window = machines.window.clone();
+        let handle = machines.cx.update(|window, _| window.window_handle());
+        // Settings notifies once it holds the reply. Observers run before the frame that would
+        // draw the error, as a close the person made just then does.
+        let closed = Rc::new(std::cell::Cell::new(false));
+        let closing = Rc::clone(&closed);
+        machines.cx.update(|_, cx| {
+            cx.observe(&window, move |settings, cx| {
+                let holding = settings.read(cx).machine_location.unanswered.is_some();
+                if holding && !closing.replace(true) {
+                    settings.update(cx, |settings, cx| {
+                        settings
+                            .request_close(super::super::super::CloseIntent::Window(handle), cx);
+                    });
+                }
+            })
+            .detach();
+        });
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), machines.cx);
+
+        assert!(closed.get(), "Settings held the failure, then closed");
+        assert_eq!(edits.unseen().len(), 1, "the failure is still unseen");
+    }
+
+    /// Settings shows a failed change, and the person resets the location. Reset is their
+    /// response, so the failure counts as seen and never returns.
+    #[gpui::test]
+    fn reset_should_answer_a_shown_failure(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (machines, edits) = present_penguin(reads, cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", machines.cx);
+        wait(Duration::from_secs(1), machines.cx);
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), machines.cx);
+        let shown = says("Couldn\u{2019}t save this location.", machines.cx);
+
+        click("settings-row-server-worktree-location-reset", machines.cx);
+        machines.cx.run_until_parked();
+        edits.answer(Outcome::Accepted { target: [0; 32] });
+        wait(Duration::from_millis(100), machines.cx);
+
+        assert!(shown);
+        assert_eq!(
+            edits.submitted().len(),
+            2,
+            "Reset writes the default location"
+        );
+        assert!(
+            edits.unseen().is_empty(),
+            "Reset answered the shown failure"
+        );
+    }
+
+    /// Settings shows a failed change, and the person presses Enter to write the same location
+    /// again. Enter answers the first failure. The retry's failure stays unseen until the
+    /// person answers it too.
+    #[gpui::test]
+    fn enter_should_answer_a_shown_failure_before_retrying(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (machines, edits) = present_penguin(reads, cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", machines.cx);
+        wait(Duration::from_secs(1), machines.cx);
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), machines.cx);
+        let first = edits.unseen();
+        let shown = says("Couldn\u{2019}t save this location.", machines.cx);
+
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), machines.cx);
+        let after_retry = edits.unseen();
+
+        assert!(shown);
+        assert_eq!(first.len(), 1);
+        assert_eq!(edits.submitted().len(), 2, "Enter wrote the location again");
+        assert_eq!(
+            after_retry
+                .iter()
+                .map(|unseen| unseen.sequence)
+                .collect::<Vec<_>>(),
+            vec![first[0].sequence + 1],
+            "only the retry's failure is still unseen"
+        );
+    }
+
+    /// Settings shows a failed change with the field still focused, and then loses focus to
+    /// another app. The person never responded, so nothing writes, the failure stays unseen and
+    /// its error stays shown.
+    #[gpui::test]
+    fn deactivating_the_window_should_leave_a_shown_failure_unanswered(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (machines, edits) = present_penguin(reads, cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", machines.cx);
+        wait(Duration::from_secs(1), machines.cx);
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), machines.cx);
+        let shown = says("Couldn\u{2019}t save this location.", machines.cx);
+
+        machines.cx.deactivate_window();
+        machines.cx.run_until_parked();
+        wait(Duration::from_millis(100), machines.cx);
+
+        assert!(shown);
+        assert_eq!(edits.submitted().len(), 1, "nothing writes again");
+        assert_eq!(edits.unseen().len(), 1, "the failure is still unseen");
+        assert!(
+            says("Couldn\u{2019}t save this location.", machines.cx),
+            "the error is still shown"
+        );
+    }
+
+    /// The person chose another server before the change was answered, so Settings never showed
+    /// the failure. It stays unseen for the Workspace Window.
+    #[gpui::test]
+    fn a_failure_for_a_machine_settings_left_should_stay_unseen(cx: &mut TestAppContext) {
+        let reads = ScriptedReads::new(SAVED);
+        let (machines, edits) = present_penguin(reads, cx);
+        settle(machines.cx, |cx| location_field(cx) == SAVED);
+        type_location("~/mine/{branch}", machines.cx);
+        wait(Duration::from_secs(1), machines.cx);
+        machines.cx.simulate_keystrokes("enter");
+        machines.cx.run_until_parked();
+        machines.cx.update(|_, cx| {
+            machines.window.update(cx, |settings, cx| {
+                settings.machine_location.choose(None, cx);
+            });
+        });
+
+        edits.answer(Outcome::WorktreeFailed(Error::Unavailable));
+        wait(Duration::from_millis(100), machines.cx);
+
+        assert_eq!(edits.unseen().len(), 1);
+    }
+
+    #[gpui::test]
+    fn a_machine_that_is_not_connected_shows_its_last_known_git_settings(cx: &mut TestAppContext) {
+        // As after a relaunch: the record keeps what penguin last answered, and nothing
+        // presents penguin.
+        let paired = disconnected(&["penguin"]);
+        let key = penguin(&paired);
+        cx.update(|cx| {
+            machine_selection::remember(
+                key,
+                LastKnownFacts {
+                    observed_at: 10,
+                    git: GitToolStatus::Ready(ToolVersion {
+                        major: 2,
+                        minor: 47,
+                        patch: 0,
+                    }),
+                    worktree_location: Some("~/kept/{branch}".to_owned()),
+                    ..LastKnownFacts::default()
+                },
+                cx,
+            );
+        });
+        let machines = open_penguin(paired, cx);
+        click(GIT_SECTION, machines.cx);
+
+        assert_eq!(location_field(machines.cx), "~/kept/{branch}");
+        assert!(says("2.47.0", machines.cx));
+        type_location("~/elsewhere/{branch}", machines.cx);
+        assert_eq!(
+            location_field(machines.cx),
+            "~/kept/{branch}",
+            "a server that isn't connected can't be changed"
+        );
+    }
+
+    #[gpui::test]
+    fn last_known_facts_that_load_after_the_machine_is_chosen_show_at_once(
+        cx: &mut TestAppContext,
+    ) {
+        let paired = disconnected(&["penguin"]);
+        let key = penguin(&paired);
+        let machines = open_penguin(paired, cx);
+        click(GIT_SECTION, machines.cx);
+        assert_eq!(location_field(machines.cx), "");
+
+        // The retained record finishes loading while Git already shows penguin.
+        machines.cx.update(|_, cx| {
+            machine_selection::remember(
+                key,
+                LastKnownFacts {
+                    observed_at: 10,
+                    git: GitToolStatus::Ready(ToolVersion {
+                        major: 2,
+                        minor: 47,
+                        patch: 0,
+                    }),
+                    worktree_location: Some("~/late/{branch}".to_owned()),
+                    ..LastKnownFacts::default()
+                },
+                cx,
+            );
+        });
+        machines.cx.run_until_parked();
+
+        assert_eq!(location_field(machines.cx), "~/late/{branch}");
+        assert!(says("2.47.0", machines.cx));
+    }
+
+    #[gpui::test]
+    fn the_location_read_is_retained_with_the_machines_other_last_known_facts(
+        cx: &mut TestAppContext,
+    ) {
+        // The connection's own observation stamps the time it looks. One newer than any this run
+        // makes keeps the record as its owner wrote it, so only retaining the Git settings can
+        // change it.
+        let observed_at = 4_102_444_800;
+        let paired = connected_paired(&["penguin"], cx);
+        let key = penguin(&paired);
+        cx.update(|cx| {
+            machine_selection::remember(
+                key.clone(),
+                LastKnownFacts {
+                    observed_at,
+                    machine: Some("Penguin".to_owned()),
+                    ..LastKnownFacts::default()
+                },
+                cx,
+            );
+        });
+        let machines = open_penguin(paired, cx);
+        let route = machines.routes[0];
+        machines.cx.update(|_, cx| {
+            present_direct(
+                route,
+                Rc::new(ScriptedEdits::new(None)),
+                ScriptedReads::new(SAVED),
+                cx,
+            );
+        });
+        click(GIT_SECTION, machines.cx);
+        settle(machines.cx, |cx| {
+            penguin_location(&key, cx).as_deref() == Some(SAVED)
+        });
+
+        let facts = machines
+            .cx
+            .update(|_, cx| machine_selection::facts(&key, cx))
+            .unwrap();
+        assert_eq!(
+            (facts.machine.as_deref(), facts.observed_at),
+            (Some("Penguin"), observed_at)
+        );
+    }
+}

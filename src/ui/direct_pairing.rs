@@ -25,7 +25,7 @@ use spaceterm_ui::{
     ProgressRing, ProgressSize, ProgressState,
 };
 
-use crate::server_connection::direct::ClaimId;
+use crate::machine_connection::direct::ClaimId;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -153,7 +153,7 @@ impl Stage {
 /// long as one of them is open.
 pub(crate) struct InviteDevice {
     control: Arc<dyn DirectAccessControl>,
-    server: SharedString,
+    core: SharedString,
     /// The addresses a link can carry while the server listens on every interface, the
     /// suggested one first. Empty when it listens at one address.
     addresses: Vec<std::net::IpAddr>,
@@ -181,7 +181,7 @@ impl InviteDevice {
     /// entity's own update.
     pub(crate) fn present<T: 'static>(
         control: Arc<dyn DirectAccessControl>,
-        server: SharedString,
+        core: SharedString,
         addresses: Vec<std::net::IpAddr>,
         on_paired: impl Fn(&mut T, &mut Context<T>) + 'static,
         window: &mut Window,
@@ -197,7 +197,7 @@ impl InviteDevice {
                 .detach();
             Self {
                 control,
-                server,
+                core,
                 addresses,
                 address: None,
                 window: window.window_handle(),
@@ -284,7 +284,7 @@ impl InviteDevice {
             );
             focus = SheetAction::NewInvitation;
         }
-        let title = format!("Invite Device to {}", self.server);
+        let title = format!("Invite Device to {}", self.core);
         let dialog = Dialog::new(
             ModalId::new(MODAL_ID),
             title.clone(),
@@ -364,7 +364,7 @@ impl InviteDevice {
         )
         .description(format!(
             "It gets full access to \u{201C}{}\u{201D}, including its Workspaces and Terminal Sessions.",
-            self.server
+            self.core
         ))
         .size(DialogSize::Compact)
         .body(cx.entity());
@@ -946,7 +946,7 @@ impl Render for InviteDevice {
                         "invite-device-allowed",
                         format!(
                             "\u{201C}{}\u{201D} can connect to \u{201C}{}\u{201D}.",
-                            device.name, self.server
+                            device.name, self.core
                         )
                         .into(),
                     ))
@@ -992,7 +992,7 @@ impl Render for InviteDevice {
                     .text_center()
                     .child(readable(
                         "invite-device-failed",
-                        failure.explanation(&self.server).into(),
+                        failure.explanation(&self.core).into(),
                     ))
                     .into_any_element(),
             )
@@ -1019,15 +1019,15 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
-    use crate::server_connection::direct::{NetworkPolicy, PairingClaim};
+    use crate::machine_connection::direct::{NetworkPolicy, PairingClaim};
     use crate::ui::direct_access::{AccessState, unix_now};
 
-    const SERVER: &str = "studio";
+    const CORE: &str = "studio";
     const LINK: &str = "spaceterm://pair/test-invitation";
 
     /// A server's invitation operations as the test scripts them, recording what Invite Device
     /// asked of it.
-    struct ScriptedServer {
+    struct ScriptedCore {
         /// The server's clock when the test began, in Unix seconds. It doesn't move, so every
         /// invitation with one lifetime expires in the same second, as on a server issuing them
         /// within one second.
@@ -1047,7 +1047,7 @@ mod tests {
         chosen: Mutex<Option<std::net::IpAddr>>,
     }
 
-    impl ScriptedServer {
+    impl ScriptedCore {
         /// A server whose invitations last `lifetime` seconds from now.
         fn new(lifetime: u64) -> Arc<Self> {
             Arc::new(Self {
@@ -1096,7 +1096,7 @@ mod tests {
             let claim = PairingClaim {
                 id: [id; 32],
                 invitation_id: invitation,
-                server: [1; 32],
+                core: [1; 32],
                 device_public_key: [id; 32],
                 device_name: name.into(),
                 expires_at_unix_seconds: self.expiry(invitation),
@@ -1111,7 +1111,7 @@ mod tests {
         }
     }
 
-    impl DirectAccessControl for ScriptedServer {
+    impl DirectAccessControl for ScriptedCore {
         fn status(&self) -> Result<AccessState, AccessFailure> {
             Err(AccessFailure::Unreachable)
         }
@@ -1182,27 +1182,27 @@ mod tests {
     }
 
     fn invite<'a>(
-        server: &Arc<ScriptedServer>,
+        core: &Arc<ScriptedCore>,
         cx: &'a mut TestAppContext,
     ) -> (Entity<Host>, &'a mut VisualTestContext) {
-        invite_with_addresses(server, Vec::new(), cx)
+        invite_with_addresses(core, Vec::new(), cx)
     }
 
     fn invite_with_addresses<'a>(
-        server: &Arc<ScriptedServer>,
+        core: &Arc<ScriptedCore>,
         addresses: Vec<std::net::IpAddr>,
         cx: &'a mut TestAppContext,
     ) -> (Entity<Host>, &'a mut VisualTestContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let (host, cx) = cx.add_window_view(|_, _| Host { paired: 0 });
-        let control: Arc<dyn DirectAccessControl> = Arc::clone(server) as _;
+        let control: Arc<dyn DirectAccessControl> = Arc::clone(core) as _;
         cx.update(|window, cx| {
             window.activate_window();
             host.update(cx, |_, cx| {
                 assert!(InviteDevice::present(
                     control,
-                    SERVER.into(),
+                    CORE.into(),
                     addresses,
                     |host: &mut Host, _| host.paired += 1,
                     window,
@@ -1264,8 +1264,8 @@ mod tests {
     fn copy_puts_the_exact_link_on_the_clipboard_only_when_the_person_asks(
         cx: &mut TestAppContext,
     ) {
-        let server = ScriptedServer::new(300);
-        let (_, cx) = invite(&server, cx);
+        let core = ScriptedCore::new(300);
+        let (_, cx) = invite(&core, cx);
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()),
             None,
@@ -1288,9 +1288,9 @@ mod tests {
             "eyJzY2hlbWEiOjEsImlkIjpbMTIsMzQsNTYsNzgsOTAsMTIs".repeat(20)
         );
         assert!(link.len() > 950);
-        let server = ScriptedServer::new(300);
-        *server.link.lock().expect("link") = link.clone();
-        let (_, cx) = invite(&server, cx);
+        let core = ScriptedCore::new(300);
+        *core.link.lock().expect("link") = link.clone();
+        let (_, cx) = invite(&core, cx);
 
         let viewport = cx
             .debug_bounds("modal-body-viewport")
@@ -1318,8 +1318,8 @@ mod tests {
 
     #[gpui::test]
     fn the_qr_code_is_named_for_assistive_technology_without_its_link(cx: &mut TestAppContext) {
-        let server = ScriptedServer::new(300);
-        let (_, cx) = invite(&server, cx);
+        let core = ScriptedCore::new(300);
+        let (_, cx) = invite(&core, cx);
 
         let tree = A11yTree::read(cx);
 
@@ -1331,12 +1331,12 @@ mod tests {
     fn a_device_using_the_invitation_is_asked_about_with_its_comparison_code(
         cx: &mut TestAppContext,
     ) {
-        let server = ScriptedServer::new(300);
-        let (_, cx) = invite(&server, cx);
+        let core = ScriptedCore::new(300);
+        let (_, cx) = invite(&core, cx);
 
-        let (invitation, _) = server.invitation();
+        let (invitation, _) = core.invitation();
         // An exchange hash starting 00 00 30 39 derives 12345.
-        server.claim(3, "MacBook", [0, 0, 0x30, 0x39], invitation);
+        core.claim(3, "MacBook", [0, 0, 0x30, 0x39], invitation);
         poll(cx);
 
         let tree = A11yTree::read(cx);
@@ -1348,17 +1348,17 @@ mod tests {
     fn return_allows_exactly_the_device_shown_and_its_presenter_hears_of_it(
         cx: &mut TestAppContext,
     ) {
-        let server = ScriptedServer::new(300);
-        let (host, cx) = invite(&server, cx);
-        let (ours, _) = server.invitation();
-        let theirs = server.invite_elsewhere();
-        server.claim(4, "Elsewhere", [0; 4], theirs);
-        server.claim(3, "MacBook", [0; 4], ours);
+        let core = ScriptedCore::new(300);
+        let (host, cx) = invite(&core, cx);
+        let (ours, _) = core.invitation();
+        let theirs = core.invite_elsewhere();
+        core.claim(4, "Elsewhere", [0; 4], theirs);
+        core.claim(3, "MacBook", [0; 4], ours);
         poll(cx);
 
         press_return(cx);
 
-        assert_eq!(*server.approved.lock().expect("approved"), vec![[3; 32]]);
+        assert_eq!(*core.approved.lock().expect("approved"), vec![[3; 32]]);
         assert_eq!(host.read_with(cx, |host, _| host.paired), 1);
         assert!(says(
             "\u{201C}MacBook\u{201D} can connect to \u{201C}studio\u{201D}.",
@@ -1368,21 +1368,18 @@ mod tests {
 
     #[gpui::test]
     fn escape_refuses_the_device_and_ends_the_used_invitation(cx: &mut TestAppContext) {
-        let server = ScriptedServer::new(300);
-        let (_, cx) = invite(&server, cx);
-        let (invitation, _) = server.invitation();
-        server.claim(3, "MacBook", [0; 4], invitation);
+        let core = ScriptedCore::new(300);
+        let (_, cx) = invite(&core, cx);
+        let (invitation, _) = core.invitation();
+        core.claim(3, "MacBook", [0; 4], invitation);
         poll(cx);
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
 
-        assert!(server.approved.lock().expect("approved").is_empty());
-        assert_eq!(*server.rejected.lock().expect("rejected"), vec![[3; 32]]);
-        assert_eq!(
-            *server.withdrawn.lock().expect("withdrawn"),
-            vec![invitation]
-        );
+        assert!(core.approved.lock().expect("approved").is_empty());
+        assert_eq!(*core.rejected.lock().expect("rejected"), vec![[3; 32]]);
+        assert_eq!(*core.withdrawn.lock().expect("withdrawn"), vec![invitation]);
         assert!(
             shown(&action(RENEW_SELECTOR), cx),
             "New Invitation is offered"
@@ -1391,13 +1388,13 @@ mod tests {
 
     #[gpui::test]
     fn a_claim_on_another_invitation_with_the_same_expiry_asks_nothing(cx: &mut TestAppContext) {
-        let server = ScriptedServer::new(300);
-        let (_, cx) = invite(&server, cx);
-        let (ours, _) = server.invitation();
-        let theirs = server.invite_elsewhere();
-        assert_eq!(server.expiry(ours), server.expiry(theirs));
+        let core = ScriptedCore::new(300);
+        let (_, cx) = invite(&core, cx);
+        let (ours, _) = core.invitation();
+        let theirs = core.invite_elsewhere();
+        assert_eq!(core.expiry(ours), core.expiry(theirs));
 
-        server.claim(4, "Elsewhere", [0; 4], theirs);
+        core.claim(4, "Elsewhere", [0; 4], theirs);
         poll(cx);
 
         assert!(!shown(&action(ALLOW_SELECTOR), cx));
@@ -1411,75 +1408,69 @@ mod tests {
     fn choosing_the_address_in_the_link_opens_an_invitation_there(cx: &mut TestAppContext) {
         let lan: std::net::IpAddr = "192.168.1.20".parse().unwrap();
         let tailnet: std::net::IpAddr = "100.64.0.9".parse().unwrap();
-        let server = ScriptedServer::new(300);
-        *server.chosen.lock().expect("chosen") = Some(lan);
-        let (_, cx) = invite_with_addresses(&server, vec![lan, tailnet], cx);
-        let (first, _) = server.invitation();
+        let core = ScriptedCore::new(300);
+        *core.chosen.lock().expect("chosen") = Some(lan);
+        let (_, cx) = invite_with_addresses(&core, vec![lan, tailnet], cx);
+        let (first, _) = core.invitation();
 
         click(ADDRESS_SELECTOR, cx);
         click("100.64.0.9", cx);
 
         assert_eq!(
-            *server.addresses.lock().expect("addresses"),
+            *core.addresses.lock().expect("addresses"),
             vec![None, Some(tailnet)]
         );
-        assert_eq!(*server.withdrawn.lock().expect("withdrawn"), vec![first]);
+        assert_eq!(*core.withdrawn.lock().expect("withdrawn"), vec![first]);
         assert!(shown(COPY_SELECTOR, cx));
     }
 
     #[gpui::test]
-    fn a_server_at_one_address_offers_no_address_choice(cx: &mut TestAppContext) {
-        let server = ScriptedServer::new(300);
-        let (_, cx) = invite(&server, cx);
+    fn a_machine_at_one_address_offers_no_address_choice(cx: &mut TestAppContext) {
+        let core = ScriptedCore::new(300);
+        let (_, cx) = invite(&core, cx);
         assert!(shown(COPY_SELECTOR, cx));
         assert!(!shown(ADDRESS_SELECTOR, cx));
     }
 
     #[gpui::test]
     fn done_withdraws_the_invitation_so_nobody_can_use_it(cx: &mut TestAppContext) {
-        let server = ScriptedServer::new(300);
-        let (_, cx) = invite(&server, cx);
-        let (invitation, _) = server.invitation();
+        let core = ScriptedCore::new(300);
+        let (_, cx) = invite(&core, cx);
+        let (invitation, _) = core.invitation();
 
         click(&action(DONE_SELECTOR), cx);
 
-        assert_eq!(
-            *server.withdrawn.lock().expect("withdrawn"),
-            vec![invitation]
-        );
+        assert_eq!(*core.withdrawn.lock().expect("withdrawn"), vec![invitation]);
         assert!(!shown(COPY_SELECTOR, cx));
     }
 
     #[gpui::test]
     fn closing_while_a_device_waits_for_an_answer_refuses_it(cx: &mut TestAppContext) {
-        let server = ScriptedServer::new(300);
-        let (_, cx) = invite(&server, cx);
-        let (invitation, _) = server.invitation();
-        server.claim(3, "MacBook", [0; 4], invitation);
+        let core = ScriptedCore::new(300);
+        let (_, cx) = invite(&core, cx);
+        let (invitation, _) = core.invitation();
+        core.claim(3, "MacBook", [0; 4], invitation);
         poll(cx);
 
         cx.update(|window, _| window.remove_window());
         cx.run_until_parked();
 
-        assert!(server.approved.lock().expect("approved").is_empty());
-        assert_eq!(
-            *server.withdrawn.lock().expect("withdrawn"),
-            vec![invitation]
-        );
+        assert!(core.approved.lock().expect("approved").is_empty());
+        assert_eq!(*core.withdrawn.lock().expect("withdrawn"), vec![invitation]);
     }
 
     #[gpui::test]
     fn an_expired_invitation_says_so_and_return_opens_a_new_one(cx: &mut TestAppContext) {
-        let server = ScriptedServer::new(0);
-        let (_, cx) = invite(&server, cx);
-        let (expired, _) = server.invitation();
+        let core = ScriptedCore::new(0);
+        let (_, cx) = invite(&core, cx);
+        let (expired, _) = core.invitation();
         assert!(says("Expired", cx));
-        assert_eq!(*server.withdrawn.lock().expect("withdrawn"), vec![expired]);
+        assert_eq!(*core.withdrawn.lock().expect("withdrawn"), vec![expired]);
 
-        *server.lifetime.lock().expect("lifetime") = 300;
+        *core.lifetime.lock().expect("lifetime") = 300;
         press_return(cx);
 
-        assert_eq!(server.invitations.lock().expect("invitations").len(), 2);
+        assert_eq!(core.invitations.lock().expect("invitations").len(), 2);
         assert!(
             shown(COPY_SELECTOR, cx),
             "the new invitation is ready to copy"

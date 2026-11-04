@@ -1,7 +1,7 @@
 //! One fixture-only terminal exercise shared by the native IPC and QUIC checks.
 use super::support::{Pane, Screen, has_row, no_op, text_key};
-use spaceterm_server::{
-    ServerError,
+use spaceterm_core::{
+    CoreError,
     pane::{FocusTarget, accessibility, graphics},
     protocol::{Operation, ReplyBody},
 };
@@ -14,7 +14,7 @@ type Result<T> = std::result::Result<T, Failure>;
 pub struct Failure {
     stage: &'static str,
     classification: &'static str,
-    cause: Option<ServerError>,
+    cause: Option<CoreError>,
 }
 impl Failure {
     pub fn at(mut self, stage: &'static str) -> Self {
@@ -48,29 +48,29 @@ pub fn stage<T, E: 'static>(stage: &'static str, result: std::result::Result<T, 
         if let Some(failure) = any.downcast_ref::<Failure>() {
             return failure.at(stage);
         }
-        let server = any.downcast_ref::<ServerError>().or_else(|| {
+        let core = any.downcast_ref::<CoreError>().or_else(|| {
             any.downcast_ref::<Box<dyn std::error::Error>>()?
-                .downcast_ref::<ServerError>()
+                .downcast_ref::<CoreError>()
         });
-        let classification = match server {
-            Some(ServerError::StaleControl) => "stale-control",
-            Some(ServerError::Unsupported) => "unsupported",
-            Some(ServerError::Controlled) => "controlled-by-another-client",
-            Some(ServerError::Protocol) => "transport-or-protocol",
-            Some(ServerError::StorageUnavailable) => "storage-unavailable",
-            Some(ServerError::UnsafeStorage) => "unsafe-storage",
-            Some(ServerError::AuthenticationRefused) => "authority-refused",
-            Some(ServerError::DirectoryUnavailable) => "directory-unavailable",
-            Some(ServerError::SessionUnavailable) => "session-unavailable",
-            Some(ServerError::NotRunning) => "server-not-running",
-            Some(ServerError::Capacity) => "capacity",
+        let classification = match core {
+            Some(CoreError::StaleControl) => "stale-control",
+            Some(CoreError::Unsupported) => "unsupported",
+            Some(CoreError::Controlled) => "controlled-by-another-client",
+            Some(CoreError::Protocol) => "transport-or-protocol",
+            Some(CoreError::StorageUnavailable) => "storage-unavailable",
+            Some(CoreError::UnsafeStorage) => "unsafe-storage",
+            Some(CoreError::AuthenticationRefused) => "authority-refused",
+            Some(CoreError::DirectoryUnavailable) => "directory-unavailable",
+            Some(CoreError::SessionUnavailable) => "session-unavailable",
+            Some(CoreError::NotRunning) => "server-not-running",
+            Some(CoreError::Capacity) => "capacity",
             Some(_) => "server-unavailable",
             None => "fixture-operation-unavailable",
         };
         Failure {
             stage,
             classification,
-            cause: server.copied(),
+            cause: core.copied(),
         }
     })
 }
@@ -83,8 +83,8 @@ mod tests {
     fn stage_retains_the_bounded_direct_cause_when_context_changes() {
         let failure = stage::<(), _>(
             "quic-connect-pane",
-            Err(ServerError::Direct(
-                spaceterm_server::direct::DirectError::Transport,
+            Err(CoreError::Direct(
+                spaceterm_core::direct::DirectError::Transport,
             )),
         )
         .unwrap_err();
@@ -383,7 +383,7 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
     // across many page boundaries.
     let history = stage("scrollback-pages", pane.scrollback(complete.history))?;
     require(
-        history.len() > 2 * usize::from(spaceterm_server::protocol::limits::MAX_PAGE_ROWS),
+        history.len() > 2 * usize::from(spaceterm_core::protocol::limits::MAX_PAGE_ROWS),
         "bulk Scrollback did not span several pages",
     )?;
     let fixture: Vec<_> = history

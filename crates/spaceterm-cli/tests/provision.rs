@@ -10,15 +10,15 @@ fn spaceterm(args: &[&str]) -> Output {
 
 #[test]
 fn source_build_provision_check_uses_compiled_resources() {
-    let output = spaceterm(&["server", "provision", "check"]);
+    let output = spaceterm(&["internal", "check"]);
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"Server checks passed.\n");
+    assert_eq!(output.stdout, b"SpaceTerm Core checks passed.\n");
     assert!(output.stderr.is_empty());
 }
 
 #[test]
 fn hidden_build_metadata_is_available_without_environment_or_display() {
-    let output = spaceterm(&["server", "provision", "build-info"]);
+    let output = spaceterm(&["internal", "build-info"]);
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -27,34 +27,41 @@ fn hidden_build_metadata_is_available_without_environment_or_display() {
     assert_eq!(info["target"], env!("SPACETERM_CLI_TARGET"));
     assert_eq!(info["version"], env!("SPACETERM_CLI_VERSION"));
     assert_eq!(info["commit"], env!("SPACETERM_CLI_COMMIT"));
-    assert_eq!(info["protocol_major"], spaceterm_server::protocol::MAJOR);
+    assert_eq!(info["protocol_major"], spaceterm_core::protocol::MAJOR);
     assert_eq!(info.as_object().unwrap().len(), 7, "{info}");
 }
 
 #[test]
 fn pairing_json_keeps_the_interaction_required_contract_without_a_qr() {
-    let output = spaceterm(&["server", "pair", "--json"]);
+    let output = spaceterm(&["pair", "--json"]);
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stderr.is_empty());
     let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let expected: serde_json::Value = serde_json::from_str(include_str!(
-        "../golden/server_pair_interaction_required.json"
-    ))
-    .unwrap();
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../golden/pair_interaction_required.json")).unwrap();
     assert_eq!(actual, expected);
 }
 
 #[test]
-fn server_help_hides_internal_steps_and_gives_the_exact_uninstall_line() {
-    let output = spaceterm(&["server", "--help"]);
+fn help_hides_internal_steps_and_lists_completion() {
+    let output = spaceterm(&["--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(!help.contains("provision"));
-    assert!(help.contains("curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall"));
+    assert!(!help.contains("internal") && !help.contains("diagnostics"));
+    assert!(help.contains("\n  completion "));
 }
 
 #[test]
-fn completions_are_generated_without_opening_a_server() {
+fn completions_leave_out_hidden_commands() {
+    let output = spaceterm(&["completion", "bash"]);
+    assert!(output.status.success());
+    let script = String::from_utf8(output.stdout).unwrap();
+    assert!(script.contains("end-all-sessions"));
+    assert!(!script.contains("ssh-discover") && !script.contains("internal"));
+}
+
+#[test]
+fn completions_are_generated_without_opening_a_connection() {
     let output = spaceterm(&["completion", "zsh"]);
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
@@ -70,7 +77,7 @@ fn a_broken_stdout_pipe_exits_141_without_a_message() {
     use std::os::{fd::OwnedFd, unix::net::UnixStream};
     for args in [
         &["--help"][..],
-        &["server", "provision", "build-info"],
+        &["internal", "build-info"],
         &["list", "--json"],
         &["completion", "zsh"],
     ] {

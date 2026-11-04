@@ -10,12 +10,12 @@ use super::sidebar_motion::{Reveal, SidebarFrame, SidebarMotion};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
-use super::workspace_creation::{RemoteCreationServer, WorkspaceCreation};
+use super::workspace_creation::{RemoteCreationMachine, WorkspaceCreation};
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
-use crate::domain::{ServerConnectionPhase, WorkspaceId, WorktreeId};
+use crate::domain::{MachineConnectionPhase, WorkspaceId, WorktreeId};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
@@ -106,7 +106,7 @@ pub(super) enum WorkspaceMenuCommand {
 
 /// A SpaceTerm Server, by the route this client reaches it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ServerTarget {
+pub(crate) enum MachineTarget {
     Local,
     Direct(crate::direct_connections::DirectRouteId),
 }
@@ -141,7 +141,7 @@ pub(super) enum WorktreeRemoval {
     Unlisted,
     /// This client has no writer for the owning server, or shared edits wait for a connection
     /// or the previous server answer.
-    NeedsServer,
+    NeedsCore,
 }
 
 #[derive(Clone, Copy)]
@@ -174,7 +174,7 @@ pub(super) struct WorkspaceRowViewModel {
     pub(super) machine: Option<SharedString>,
     pub(super) tooltip: SharedString,
     pub(super) pinned: bool,
-    pub(super) remote_connection_phase: Option<ServerConnectionPhase>,
+    pub(super) remote_connection_phase: Option<MachineConnectionPhase>,
     /// The branch or Pull Request that ends line 2, after the directory.
     pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
     /// The Worktrees a git Workspace discloses under its row.
@@ -187,7 +187,7 @@ pub(super) struct WorkspaceRowViewModel {
 }
 
 /// Names a Workspace's origin wherever the sidebar and the Tab strip describe it.
-pub(super) const SERVER_WORKSPACE_BADGE: &str = "Server";
+pub(super) const CORE_WORKSPACE_BADGE: &str = "SpaceTerm Core";
 
 /// Introduces the directory of a Worktree's last-used Pane once that Pane has left the Worktree.
 pub(super) const OUTSIDE_PANE_LABEL: &str = "Pane outside this Worktree";
@@ -544,7 +544,7 @@ struct DraggedWorkspace {
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
     /// The saved paired servers the creation menu offers.
-    remote_servers: Vec<RemoteCreationServer>,
+    remote_machines: Vec<RemoteCreationMachine>,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
     /// Each row's top and bottom within its Workspace group, as last painted. A group is one
@@ -632,7 +632,7 @@ impl WorkspaceSidebar {
         .detach();
         Self {
             rows: Vec::new(),
-            remote_servers: Vec::new(),
+            remote_machines: Vec::new(),
             layout: SidebarLayout {
                 visible,
                 width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -995,24 +995,24 @@ impl WorkspaceSidebar {
         cx.notify();
     }
 }
-pub(super) fn remote_connection_status(phase: ServerConnectionPhase) -> Option<&'static str> {
+pub(super) fn remote_connection_status(phase: MachineConnectionPhase) -> Option<&'static str> {
     match phase {
-        ServerConnectionPhase::Connected => None,
-        ServerConnectionPhase::Reconnecting => Some("Reconnecting…"),
-        ServerConnectionPhase::Disconnected => Some("Not connected"),
-        ServerConnectionPhase::Failed => Some("Connection failed"),
+        MachineConnectionPhase::Connected => None,
+        MachineConnectionPhase::Reconnecting => Some("Reconnecting…"),
+        MachineConnectionPhase::Disconnected => Some("Not connected"),
+        MachineConnectionPhase::Failed => Some("Connection failed"),
     }
 }
 
 pub(super) fn remote_connection_color(
-    phase: ServerConnectionPhase,
+    phase: MachineConnectionPhase,
     colors: &ChromeColors,
 ) -> Color {
     match phase {
-        ServerConnectionPhase::Reconnecting => colors.info,
-        ServerConnectionPhase::Connected => colors.success,
-        ServerConnectionPhase::Disconnected => colors.icon_muted,
-        ServerConnectionPhase::Failed => colors.error,
+        MachineConnectionPhase::Reconnecting => colors.info,
+        MachineConnectionPhase::Connected => colors.success,
+        MachineConnectionPhase::Disconnected => colors.icon_muted,
+        MachineConnectionPhase::Failed => colors.error,
     }
 }
 
@@ -1044,16 +1044,16 @@ impl WorkspaceSidebar {
     pub(super) fn set_rows(
         &mut self,
         rows: Vec<WorkspaceRowViewModel>,
-        remote_servers: Vec<RemoteCreationServer>,
+        remote_machines: Vec<RemoteCreationMachine>,
         cx: &mut Context<Self>,
     ) -> bool {
         // The Workspace Manager sets the rows on every render, so only a change redraws the
         // sidebar.
-        if self.rows == rows && self.remote_servers == remote_servers {
+        if self.rows == rows && self.remote_machines == remote_machines {
             return false;
         }
         self.rows = rows;
-        self.remote_servers = remote_servers;
+        self.remote_machines = remote_machines;
         if self
             .cursor
             .is_some_and(|cursor| !self.visible_keys().iter().any(|(key, _)| *key == cursor))
@@ -1812,18 +1812,18 @@ mod tests {
     fn connection_states_should_use_semantic_colors() {
         assert_eq!(
             remote_connection_color(
-                ServerConnectionPhase::Reconnecting,
+                MachineConnectionPhase::Reconnecting,
                 &ChromeColors::default()
             ),
             ChromeColors::default().info
         );
         assert_eq!(
-            remote_connection_color(ServerConnectionPhase::Failed, &ChromeColors::default()),
+            remote_connection_color(MachineConnectionPhase::Failed, &ChromeColors::default()),
             ChromeColors::default().error
         );
         assert_eq!(
             remote_connection_color(
-                ServerConnectionPhase::Disconnected,
+                MachineConnectionPhase::Disconnected,
                 &ChromeColors::default()
             ),
             ChromeColors::default().icon_muted

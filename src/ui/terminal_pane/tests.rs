@@ -379,7 +379,7 @@ fn text_screen(generation: u64, rows: &[&str]) -> Arc<ScreenSnapshot> {
 fn terminal_pane(cx: &mut TestAppContext) -> (Entity<TerminalPane>, &mut VisualTestContext) {
     focused_pane(
         cx,
-        server_sessions(TestTerminalSessionRecords::default())
+        core_sessions(TestTerminalSessionRecords::default())
             .with_start_failure("terminal session unavailable in UI test"),
     )
 }
@@ -390,7 +390,7 @@ fn focused_pane(
 ) -> (Entity<TerminalPane>, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(sessions));
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(sessions));
     let (pane, cx) =
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.update(|window, cx| {
@@ -444,7 +444,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     let mut dependencies = PaneLifecycleDependencies::testing();
     dependencies.visibility = factory.clone();
     let session_factory =
-        WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(records.clone())));
+        WorkspaceTerminalSessionFactory::new_core(Rc::new(core_sessions(records.clone())));
     let (pane, cx) = cx.add_window_view(|window, cx| {
         TerminalPane::with_adapters(
             session_factory, crate::terminal::testing::test_terminal_key_input_adapter(),
@@ -629,7 +629,7 @@ fn remote_directory_screen(generation: u64, path: &str) -> Arc<ScreenSnapshot> {
     screen
 }
 
-const SERVER_RUN: ServerSessionRun = ServerSessionRun {
+const CORE_RUN: CoreSessionRun = CoreSessionRun {
     boot: [1; 32],
     session: [2; 32],
 };
@@ -644,9 +644,9 @@ fn published_metadata(
 }
 
 #[gpui::test]
-fn server_metadata_rejects_older_revisions_and_clears_a_stale_directory(cx: &mut TestAppContext) {
+fn core_metadata_rejects_older_revisions_and_clears_a_stale_directory(cx: &mut TestAppContext) {
     use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
-    let (pane, cx, _) = server_terminal_pane(cx, true);
+    let (pane, cx, _) = core_terminal_pane(cx, true);
     fn present(
         revision: u64,
         path: &str,
@@ -655,7 +655,7 @@ fn server_metadata_rejects_older_revisions_and_clears_a_stale_directory(cx: &mut
         cx: &mut Context<TerminalPane>,
     ) {
         let metadata = published_metadata(revision, directory_screen(1, path, freshness));
-        pane.present_server_metadata(Some((SERVER_RUN, metadata)), cx);
+        pane.present_core_metadata(Some((CORE_RUN, metadata)), cx);
     }
     pane.update(cx, |pane, cx| {
         present(20, "/projects/latest", MetadataFreshness::Live, pane, cx);
@@ -671,31 +671,31 @@ fn server_metadata_rejects_older_revisions_and_clears_a_stale_directory(cx: &mut
 }
 
 #[gpui::test]
-fn server_metadata_of_another_session_run_replaces_a_higher_revision(cx: &mut TestAppContext) {
+fn core_metadata_of_another_session_run_replaces_a_higher_revision(cx: &mut TestAppContext) {
     use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
-    let (pane, cx, _) = server_terminal_pane(cx, true);
-    let restarted = ServerSessionRun {
+    let (pane, cx, _) = core_terminal_pane(cx, true);
+    let restarted = CoreSessionRun {
         boot: [3; 32],
-        ..SERVER_RUN
+        ..CORE_RUN
     };
     pane.update(cx, |pane, cx| {
         let before = directory_screen(1, "/projects/before", MetadataFreshness::Live);
-        pane.present_server_metadata(Some((SERVER_RUN, published_metadata(40, before))), cx);
+        pane.present_core_metadata(Some((CORE_RUN, published_metadata(40, before))), cx);
         let after = directory_screen(1, "/projects/after", MetadataFreshness::Live);
-        pane.present_server_metadata(Some((restarted, published_metadata(1, after))), cx);
+        pane.present_core_metadata(Some((restarted, published_metadata(1, after))), cx);
         assert_eq!(
             pane.current_directory(),
             Some(CurrentDirectory::Local(PathBuf::from("/projects/after")))
         );
-        assert!(pane.presents_server_metadata(restarted, 1));
+        assert!(pane.presents_core_metadata(restarted, 1));
     });
 }
 
 #[gpui::test]
-fn server_metadata_ending_clears_progress_and_directory(cx: &mut TestAppContext) {
+fn core_metadata_ending_clears_progress_and_directory(cx: &mut TestAppContext) {
     use crate::terminal::metadata::{MetadataFreshness, ProgressMetadata};
     use crate::ui::terminal_status::TerminalProgress;
-    let (pane, cx, _) = server_terminal_pane(cx, true);
+    let (pane, cx, _) = core_terminal_pane(cx, true);
     let mut screen = directory_screen(1, "/projects/build", MetadataFreshness::Live);
     Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).progress = ProgressMetadata::Normal(45);
     let captions = Rc::new(Cell::new(0));
@@ -709,9 +709,9 @@ fn server_metadata_ending_clears_progress_and_directory(cx: &mut TestAppContext)
         .detach();
     });
     pane.update(cx, |pane, cx| {
-        pane.present_server_metadata(Some((SERVER_RUN, published_metadata(1, screen))), cx);
+        pane.present_core_metadata(Some((CORE_RUN, published_metadata(1, screen))), cx);
         assert_eq!(pane.caption().progress, TerminalProgress::Normal(45));
-        pane.present_server_metadata(None, cx);
+        pane.present_core_metadata(None, cx);
         assert_eq!(pane.caption().progress, TerminalProgress::None);
         assert_eq!(pane.current_directory(), None);
     });
@@ -724,7 +724,7 @@ fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
     cx: &mut TestAppContext,
 ) {
     use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness};
-    let (pane, cx, _) = server_terminal_pane(cx, true);
+    let (pane, cx, _) = core_terminal_pane(cx, true);
     for (revision, screen, expected) in [
         (
             1,
@@ -750,10 +750,7 @@ fn current_directory_preserves_machine_and_rejects_stale_or_relative_metadata(
         ),
     ] {
         pane.update(cx, |pane, cx| {
-            pane.present_server_metadata(
-                Some((SERVER_RUN, published_metadata(revision, screen))),
-                cx,
-            );
+            pane.present_core_metadata(Some((CORE_RUN, published_metadata(revision, screen))), cx);
         });
         assert_eq!(
             pane.read_with(cx, |pane, _| pane.current_directory()),
@@ -888,7 +885,7 @@ fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppCo
     let (reply, receiver) = async_channel::bounded(1);
     let (pane, cx) = focused_pane(
         cx,
-        server_sessions(records.clone())
+        core_sessions(records.clone())
             .with_pending_paste_response(receiver)
             .with_paste_resolution(Ok(PasteResolution::Cancelled)),
     );
@@ -929,12 +926,12 @@ fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn deactivating_a_tab_delivers_focus_out_to_its_server_session(cx: &mut TestAppContext) {
+fn deactivating_a_tab_delivers_focus_out_to_its_core_session(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let server = crate::terminal::server_session::push_tests::ConnectedPane::new();
+    let core = crate::terminal::core_session::push_tests::ConnectedPane::new();
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
-    let factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(server.factory.clone()));
+    let factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(core.factory.clone()));
     let (pane, cx) = cx.add_window_view(|window, cx| TerminalPane::new(factory, window, cx));
     cx.update(|window, cx| {
         window.activate_window();
@@ -1029,13 +1026,13 @@ fn deactivating_a_tab_delivers_focus_out_to_its_server_session(cx: &mut TestAppC
 }
 
 /// Sessions of a server Pane whose connection presents what the server reads.
-fn server_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
+fn core_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
     TestTerminalSessionFactory::new(records).with_reading_available(true)
 }
 
 /// Sessions with this client's file authority, as a same-machine server grants local Panes.
 fn same_machine_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
-    server_sessions(records).with_client_filesystem(
+    core_sessions(records).with_client_filesystem(
         crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
     )
 }
@@ -1105,10 +1102,10 @@ fn accessibility_models_are_applied_only_with_their_matching_screen_generation(
 }
 
 #[gpui::test]
-fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut TestAppContext) {
+fn clearing_a_core_presentation_forgets_the_former_screen_and_text(cx: &mut TestAppContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
         TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
             .with_fallback_title("Terminal"),
     ));
@@ -1126,7 +1123,7 @@ fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut Te
         assert!(pane.accessibility.text().contains("secret"));
         assert_eq!(pane.title().as_ref(), "text preflight");
 
-        pane.clear_server_presentation(cx);
+        pane.clear_core_presentation(cx);
 
         assert!(pane.screen.rows.is_empty());
         assert!(pane.last_valid_screen.rows.is_empty());
@@ -1156,7 +1153,7 @@ fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut Te
 }
 
 #[gpui::test]
-fn accesskit_server_pane_keeps_frozen_text_but_refuses_native_focus_while_interrupted(
+fn accesskit_core_pane_keeps_frozen_text_but_refuses_native_focus_while_interrupted(
     cx: &mut TestAppContext,
 ) {
     use gpui::accesskit::Action;
@@ -1164,7 +1161,7 @@ fn accesskit_server_pane_keeps_frozen_text_but_refuses_native_focus_while_interr
 
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
         TestTerminalSessionFactory::new(records.clone()).with_reading_available(true),
     ));
     let (pane, cx) = cx.add_window_view(|window, cx| {
@@ -1217,7 +1214,7 @@ fn accesskit_server_pane_keeps_frozen_text_but_refuses_native_focus_while_interr
     cx.update(|window, cx| {
         window.blur(cx);
         pane.update(cx, |pane, cx| {
-            pane.set_server_connection_interrupted(true, window, cx);
+            pane.set_machine_connection_interrupted(true, window, cx);
             cx.notify();
         });
     });
@@ -1239,7 +1236,7 @@ fn accesskit_server_pane_keeps_frozen_text_but_refuses_native_focus_while_interr
 
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
-            pane.set_server_connection_interrupted(false, window, cx);
+            pane.set_machine_connection_interrupted(false, window, cx);
             cx.notify();
         });
     });
@@ -1321,7 +1318,7 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
     let session_factory =
-        WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(records)));
+        WorkspaceTerminalSessionFactory::new_core(Rc::new(core_sessions(records)));
     let (pane, cx) = cx.add_window_view(|window, cx| {
         TerminalPane::with_adapters(
             session_factory,
@@ -1399,7 +1396,7 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
     let (_, cx) = terminal_pane(cx);
     let factory =
         crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default();
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(core_sessions(
         TestTerminalSessionRecords::default(),
     )));
     let pane = cx.update(|window, cx| {
@@ -1737,8 +1734,8 @@ fn connected_terminal_pane_with_key_propagation(
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(server_sessions(records.clone()));
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(core_sessions(records.clone()));
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(session_factory);
     let propagated_key_downs = Rc::new(Cell::new(0));
     let propagated_for_probe = Rc::clone(&propagated_key_downs);
     let (probe, cx) = cx.add_window_view(|window, cx| {
@@ -1780,7 +1777,7 @@ fn terminal_pane_with_selection_copy(
     let records = TestTerminalSessionRecords::default();
     let (pane, cx) = focused_pane(
         cx,
-        server_sessions(records.clone()).with_selection_copy_response(Ok(Some(copy))),
+        core_sessions(records.clone()).with_selection_copy_response(Ok(Some(copy))),
     );
     (pane, cx, records)
 }
@@ -1811,7 +1808,7 @@ fn terminal_pane_with_session_options(
 ) {
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(configure(
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(configure(
         same_machine_sessions(records.clone()),
     )));
     let (pane, cx) = cx.add_window_view(|window, cx| {
@@ -1836,7 +1833,7 @@ fn terminal_pane_with_session_options(
     (pane, cx, records)
 }
 
-fn server_terminal_pane(
+fn core_terminal_pane(
     cx: &mut TestAppContext,
     available: bool,
 ) -> (
@@ -1852,7 +1849,7 @@ fn server_terminal_pane(
 }
 
 #[gpui::test]
-fn capable_server_pane_reuses_find_scroll_copy_and_services(cx: &mut TestAppContext) {
+fn capable_core_pane_reuses_find_scroll_copy_and_services(cx: &mut TestAppContext) {
     let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
         sessions
             .with_reading_available(true)
@@ -1912,10 +1909,10 @@ fn capable_server_pane_reuses_find_scroll_copy_and_services(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn server_pane_pastes_text_once_without_local_selection_find_or_scrollback(
+fn machine_pane_pastes_text_once_without_local_selection_find_or_scrollback(
     cx: &mut TestAppContext,
 ) {
-    let (_pane, cx, records) = server_terminal_pane(cx, true);
+    let (_pane, cx, records) = core_terminal_pane(cx, true);
     cx.write_to_clipboard(ClipboardItem::new_string("echo hello".into()));
     cx.simulate_keystrokes("cmd-v");
     cx.run_until_parked();
@@ -1944,10 +1941,10 @@ fn server_pane_pastes_text_once_without_local_selection_find_or_scrollback(
 }
 
 #[gpui::test]
-fn server_pane_awaiting_interactive_input_discards_keys_ime_and_paste_chords(
+fn machine_pane_awaiting_interactive_input_discards_keys_ime_and_paste_chords(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records) = server_terminal_pane(cx, false);
+    let (pane, cx, records) = core_terminal_pane(cx, false);
     let mut screen =
         ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "tracking", 1);
     Arc::make_mut(&mut screen).mouse_tracking = true;
@@ -2006,8 +2003,8 @@ fn server_pane_awaiting_interactive_input_discards_keys_ime_and_paste_chords(
 }
 
 #[gpui::test]
-fn server_pane_program_pointer_and_wheel_follow_screen_modes(cx: &mut TestAppContext) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+fn core_pane_program_pointer_and_wheel_follow_screen_modes(cx: &mut TestAppContext) {
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     for (index, (tracking, alternate, modifiers, pointer_expected, wheel_expected)) in [
         (false, false, Modifiers::none(), false, false),
         (true, false, Modifiers::none(), true, true),
@@ -2089,8 +2086,8 @@ fn server_pane_program_pointer_and_wheel_follow_screen_modes(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn server_pane_forwards_active_drag_after_program_tracking_ends(cx: &mut TestAppContext) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+fn core_pane_forwards_active_drag_after_program_tracking_ends(cx: &mut TestAppContext) {
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     let mut screen =
         ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "program", 1);
     Arc::make_mut(&mut screen).mouse_tracking = true;
@@ -2131,8 +2128,8 @@ fn server_pane_forwards_active_drag_after_program_tracking_ends(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn server_pane_shift_right_and_middle_clicks_reach_tracking_programs(cx: &mut TestAppContext) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+fn core_pane_shift_right_and_middle_clicks_reach_tracking_programs(cx: &mut TestAppContext) {
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     let (owner, answer) = async_channel::unbounded();
     owner.try_send("must not paste".to_owned()).unwrap();
     pane.update(cx, |pane, _| {
@@ -2199,10 +2196,10 @@ fn server_pane_shift_right_and_middle_clicks_reach_tracking_programs(cx: &mut Te
 }
 
 #[gpui::test]
-fn server_pane_context_menu_offers_native_links_and_paste_without_selection_or_find(
+fn machine_pane_context_menu_offers_native_links_and_paste_without_selection_or_find(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     records
         .event_sender(1)
         .unwrap()
@@ -2263,10 +2260,8 @@ fn server_pane_context_menu_offers_native_links_and_paste_without_selection_or_f
 }
 
 #[gpui::test]
-fn server_pane_accepts_host_input_method_text_without_terminal_input_focus(
-    cx: &mut TestAppContext,
-) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+fn core_pane_accepts_host_input_method_text_without_terminal_input_focus(cx: &mut TestAppContext) {
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     cx.deactivate_window();
     cx.run_until_parked();
     assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
@@ -2288,10 +2283,10 @@ fn server_pane_accepts_host_input_method_text_without_terminal_input_focus(
 }
 
 #[gpui::test]
-fn server_pane_discards_a_file_drop_when_its_connection_changes_before_insertion(
+fn machine_pane_discards_a_file_drop_when_its_connection_changes_before_insertion(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
             pane.insert_dropped_file_paths(&[PathBuf::from("/tmp/native fixture")], window, cx);
@@ -2310,20 +2305,20 @@ fn server_pane_discards_a_file_drop_when_its_connection_changes_before_insertion
 }
 
 #[gpui::test]
-fn server_pane_takeover_discards_preedit_without_replaying_it(cx: &mut TestAppContext) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+fn core_pane_takeover_discards_preedit_without_replaying_it(cx: &mut TestAppContext) {
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
             pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, cx);
-            pane.set_server_connection_interrupted(true, window, cx);
-            pane.clear_server_presentation(cx);
+            pane.set_machine_connection_interrupted(true, window, cx);
+            pane.clear_core_presentation(cx);
         })
     });
     assert!(pane.read_with(cx, |pane, _| pane.ime.marked_text().is_none()));
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
             pane.replace_text_in_range(None, "仮名", window, cx);
-            pane.set_server_connection_interrupted(false, window, cx);
+            pane.set_machine_connection_interrupted(false, window, cx);
         })
     });
     cx.run_until_parked();
@@ -2336,9 +2331,9 @@ fn server_pane_takeover_discards_preedit_without_replaying_it(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn server_pane_uncertain_paste_warns_without_sending_a_second_payload(cx: &mut TestAppContext) {
+fn core_pane_uncertain_paste_warns_without_sending_a_second_payload(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     cx.write_to_clipboard(ClipboardItem::new_string("echo once".into()));
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
@@ -2398,8 +2393,8 @@ fn clear_requests(records: &TestTerminalSessionRecords) -> usize {
 
 /// The owning server clears its Terminal Session's screen and history.
 #[gpui::test]
-fn command_k_should_ask_the_server_to_clear_the_screen_and_scrollback(cx: &mut TestAppContext) {
-    let (_pane, cx, records) = server_terminal_pane(cx, true);
+fn command_k_should_ask_the_core_to_clear_the_screen_and_scrollback(cx: &mut TestAppContext) {
+    let (_pane, cx, records) = core_terminal_pane(cx, true);
     cx.simulate_keystrokes("cmd-k");
     assert_eq!(clear_requests(&records), 1);
 }
@@ -2407,7 +2402,7 @@ fn command_k_should_ask_the_server_to_clear_the_screen_and_scrollback(cx: &mut T
 /// A Pane whose connection takes no input yet cannot ask its server to clear either.
 #[gpui::test]
 fn command_k_should_ask_nothing_before_the_connection_takes_input(cx: &mut TestAppContext) {
-    let (_pane, cx, records) = server_terminal_pane(cx, false);
+    let (_pane, cx, records) = core_terminal_pane(cx, false);
     cx.simulate_keystrokes("cmd-k");
     assert_eq!(clear_requests(&records), 0);
 }
@@ -2643,7 +2638,7 @@ fn terminal_find_open_edit_navigate_and_close_are_pane_scoped(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn server_find_reports_an_oversized_query_and_recovers_after_edit(cx: &mut TestAppContext) {
+fn core_find_reports_an_oversized_query_and_recovers_after_edit(cx: &mut TestAppContext) {
     let (pane, cx, _) =
         terminal_pane_with_session_options(cx, |sessions| sessions.with_reading_available(true));
     cx.dispatch_action(OpenTerminalFind);
@@ -3113,7 +3108,7 @@ fn open_crowded_repository_popover(pane: &Entity<TerminalPane>, cx: &mut VisualT
     use crate::ui::ShowRepositoryStatus;
 
     pane.update(cx, |pane, cx| {
-        pane.present_server_repository(
+        pane.present_core_repository(
             RepositoryView::Repository(Arc::new(crowded_repository_status())),
             cx,
         );
@@ -3301,7 +3296,7 @@ fn repository_status_popover_holds_input_until_escape_returns_it(cx: &mut TestAp
         read_failure: None,
     };
     pane.update(cx, |pane, cx| {
-        pane.present_server_repository(RepositoryView::Repository(Arc::new(status)), cx);
+        pane.present_core_repository(RepositoryView::Repository(Arc::new(status)), cx);
     });
     let command_count = records.commands().len();
     cx.dispatch_action(ShowRepositoryStatus);
@@ -3359,7 +3354,7 @@ fn hiding_repository_status_under_an_open_popover_should_return_input_to_the_ter
         read_failure: None,
     };
     pane.update(cx, |pane, cx| {
-        pane.present_server_repository(RepositoryView::Repository(Arc::new(status)), cx);
+        pane.present_core_repository(RepositoryView::Repository(Arc::new(status)), cx);
     });
     cx.dispatch_action(ShowRepositoryStatus);
     cx.run_until_parked();
@@ -3368,7 +3363,7 @@ fn hiding_repository_status_under_an_open_popover_should_return_input_to_the_ter
     // Settings turns Repository Status off while its own window is in front.
     cx.deactivate_window();
     pane.update(cx, |pane, cx| {
-        pane.present_server_repository(RepositoryView::Hidden, cx);
+        pane.present_core_repository(RepositoryView::Hidden, cx);
     });
     cx.run_until_parked();
     cx.update(|window, _| window.activate_window());
@@ -3418,7 +3413,7 @@ fn repository_status_popover_should_stay_open_while_another_window_is_in_front(
         read_failure: None,
     };
     pane.update(cx, |pane, cx| {
-        pane.present_server_repository(RepositoryView::Repository(Arc::new(status)), cx);
+        pane.present_core_repository(RepositoryView::Repository(Arc::new(status)), cx);
     });
     cx.dispatch_action(ShowRepositoryStatus);
     cx.run_until_parked();
@@ -4157,7 +4152,7 @@ fn each_painted_grid_counts_once_as_a_painted_frame(cx: &mut TestAppContext) {
 
     assert_eq!(
         counters.snapshot(),
-        spaceterm_server::diagnostics::TerminalCounterSnapshot {
+        spaceterm_core::diagnostics::TerminalCounterSnapshot {
             frames_painted: before.frames_painted + 10,
             ..before
         }
@@ -6550,7 +6545,7 @@ fn non_composing_zwj_prefix_does_not_fit_the_single_glyph_slot(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn an_oversized_server_input_method_commit_preserves_the_entire_host_text(cx: &mut TestAppContext) {
+fn an_oversized_core_input_method_commit_preserves_the_entire_host_text(cx: &mut TestAppContext) {
     let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| sessions);
     let text = "界🙂".repeat(10_000);
     cx.update(|window, cx| {
@@ -7753,8 +7748,8 @@ fn backing_scale_change_should_preserve_the_grid_and_resize_backing_pixels(
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(server_sessions(records.clone()));
-    let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(core_sessions(records.clone()));
+    let session_factory = WorkspaceTerminalSessionFactory::new_core(session_factory);
     let (pane, cx) =
         cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
     cx.run_until_parked();
@@ -8135,12 +8130,12 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
 }
 
 #[gpui::test]
-fn server_graphics_recovery_clears_only_its_own_failure_notice(cx: &mut TestAppContext) {
+fn core_graphics_recovery_clears_only_its_own_failure_notice(cx: &mut TestAppContext) {
     let (pane, cx, _records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, cx| {
         let mut failed = graphics_screen(9, 1);
         Arc::make_mut(&mut failed).graphics.failure =
-            Some(spaceterm_server::pane::graphics::Error::Capacity);
+            Some(spaceterm_core::pane::graphics::Error::Capacity);
         pane.handle_event(TerminalSessionEvent::Screen(failed), cx);
         assert!(pane.pane_state.failure().is_some());
         // Coalescing may discard intermediate frames. The newest frame carries recovery itself.
@@ -8680,7 +8675,7 @@ fn local_origin_should_present_the_account_and_machine_without_its_mdns_suffix()
 }
 
 #[test]
-fn remote_origin_should_name_its_server_and_stay_classified_remote() {
+fn remote_origin_should_name_its_machine_and_stay_classified_remote() {
     let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
         crate::terminal::metadata::RemoteTerminalMetadataContext::new(
             "build-box".to_owned(),
@@ -8698,7 +8693,7 @@ fn remote_origin_should_name_its_server_and_stay_classified_remote() {
 }
 
 #[test]
-fn the_servers_account_should_name_the_user() {
+fn the_machines_account_should_name_the_user() {
     let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
         crate::terminal::metadata::RemoteTerminalMetadataContext::new(
             "build-box".to_owned(),
@@ -9074,7 +9069,9 @@ fn paste_reads_completing_after_focus_moved_or_the_terminal_session_closed_are_d
 }
 
 #[gpui::test]
-fn server_untracked_middle_click_pastes_primary_without_selection_support(cx: &mut TestAppContext) {
+fn machine_untracked_middle_click_pastes_primary_without_selection_support(
+    cx: &mut TestAppContext,
+) {
     let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
     let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
     cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::none());
@@ -9093,7 +9090,7 @@ fn server_untracked_middle_click_pastes_primary_without_selection_support(cx: &m
 }
 
 #[gpui::test]
-fn server_paste_read_from_a_former_connection_is_discarded_without_a_visible_outage(
+fn machine_paste_read_from_a_former_connection_is_discarded_without_a_visible_outage(
     cx: &mut TestAppContext,
 ) {
     let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
@@ -9186,7 +9183,7 @@ mod permission_requests {
             Arc::new(crate::terminal::session::clipboard::ClipboardAuthority::default());
         authority.client_focus(Some(true));
         let request = crate::terminal::session::ClientEffectRequest::new(
-            spaceterm_server::pane::effects::Effect::PermissionSetup {
+            spaceterm_core::pane::effects::Effect::PermissionSetup {
                 screen_recording: permissions.contains(&SystemPermission::ScreenRecording),
                 accessibility: permissions.contains(&SystemPermission::Accessibility),
             },
@@ -9203,9 +9200,7 @@ mod permission_requests {
     }
 
     #[gpui::test]
-    fn server_permission_setup_reuses_the_notice_and_revalidates_its_grant(
-        cx: &mut TestAppContext,
-    ) {
+    fn core_permission_setup_reuses_the_notice_and_revalidates_its_grant(cx: &mut TestAppContext) {
         for (local_authority, revoke) in [(false, false), (true, false), (true, true)] {
             let (pane, cx, _) = terminal_pane_with_session_options(cx, |sessions| {
                 let sessions = sessions;
@@ -9225,7 +9220,7 @@ mod permission_requests {
                 Arc::new(crate::terminal::session::clipboard::ClipboardAuthority::default());
             authority.client_focus(Some(true));
             let request = crate::terminal::session::ClientEffectRequest::new(
-                spaceterm_server::pane::effects::Effect::PermissionSetup {
+                spaceterm_core::pane::effects::Effect::PermissionSetup {
                     screen_recording: false,
                     accessibility: true,
                 },
@@ -9854,7 +9849,7 @@ fn headless_pane() -> (
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
     let factory =
-        WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(records.clone())));
+        WorkspaceTerminalSessionFactory::new_core(Rc::new(core_sessions(records.clone())));
     let handle = cx
         .open_window(size(px(800.0), px(600.0)), move |window, cx| {
             cx.new(|cx| TerminalPane::new(factory, window, cx))
@@ -10010,7 +10005,7 @@ fn deferred_paste_resolution_from_a_former_input_generation_publishes_no_status(
 }
 
 #[gpui::test]
-fn server_paste_confirmation_from_a_former_connection_cannot_be_approved(cx: &mut TestAppContext) {
+fn machine_paste_confirmation_from_a_former_connection_cannot_be_approved(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
     let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
@@ -10034,7 +10029,7 @@ fn server_paste_confirmation_from_a_former_connection_cannot_be_approved(cx: &mu
 }
 
 #[gpui::test]
-fn server_paste_response_from_a_former_connection_cannot_open_confirmation(
+fn machine_paste_response_from_a_former_connection_cannot_open_confirmation(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_ui::a11y_testing::A11yTree;
@@ -10078,8 +10073,8 @@ fn server_paste_response_from_a_former_connection_cannot_open_confirmation(
 }
 
 #[gpui::test]
-fn server_preedit_commit_from_a_former_connection_is_discarded(cx: &mut TestAppContext) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+fn machine_preedit_commit_from_a_former_connection_is_discarded(cx: &mut TestAppContext) {
+    let (pane, cx, records) = core_terminal_pane(cx, true);
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
             pane.replace_and_mark_text_in_range(None, "かな", Some(2..2), window, cx)
@@ -10241,7 +10236,7 @@ fn paste_confirmation_accessibility_confirm_resolves_once_and_restores_terminal_
 }
 
 #[gpui::test]
-fn server_session_exit_cancels_paste_confirmation(cx: &mut TestAppContext) {
+fn core_session_exit_cancels_paste_confirmation(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
     let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     cx.dispatch_action(PasteClipboard);

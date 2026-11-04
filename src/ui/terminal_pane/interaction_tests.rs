@@ -34,12 +34,10 @@ fn accepted_pending_pane_starts_its_presentation_at_unchanged_bounds(cx: &mut Te
     });
     let focus = cx.update(|window, cx| window.focused(cx));
     let records = TestTerminalSessionRecords::default();
-    let accepted = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+    let accepted = WorkspaceTerminalSessionFactory::new_core(Rc::new(
         TestTerminalSessionFactory::new(records.clone()).with_reading_available(true),
     ));
-    pane.update(cx, |pane, cx| {
-        pane.bind_pending_server(accepted.clone(), cx)
-    });
+    pane.update(cx, |pane, cx| pane.bind_pending_core(accepted.clone(), cx));
     cx.run_until_parked();
     assert_eq!(
         records.starts().len(),
@@ -72,7 +70,7 @@ fn accepted_pending_pane_starts_its_presentation_at_unchanged_bounds(cx: &mut Te
             .any(|node| node["aria"]["role"] == "TextRun" && node["aria"]["value"] == "update-42x")
     );
 
-    pane.update(cx, |pane, cx| pane.bind_pending_server(accepted, cx));
+    pane.update(cx, |pane, cx| pane.bind_pending_core(accepted, cx));
     cx.run_until_parked();
     assert_eq!(
         records.starts().len(),
@@ -82,8 +80,8 @@ fn accepted_pending_pane_starts_its_presentation_at_unchanged_bounds(cx: &mut Te
 }
 
 #[gpui::test]
-fn server_backed_repository_status_keeps_its_command_handler(cx: &mut TestAppContext) {
-    let (pane, cx, _) = server_terminal_pane(cx, true);
+fn core_backed_repository_status_keeps_its_command_handler(cx: &mut TestAppContext) {
+    let (pane, cx, _) = core_terminal_pane(cx, true);
     open_crowded_repository_popover(&pane, cx);
     assert!(cx.debug_bounds("repository-status-popover").is_some());
     assert!(pane.read_with(cx, |pane, _| pane.repository_popover_open()));

@@ -1,0 +1,101 @@
+{
+  "command": "status",
+  "data": {
+    "activation": "settled",
+    "automatic_start": true,
+    "devices": [
+      {
+        "fingerprint": "ABCD-EFGH",
+        "id": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+        "last_connected_at": "2026-10-30T11:00:00Z",
+        "name": "Laptop"
+      }
+    ],
+    "held_outcomes": [
+      {
+        "count": 3,
+        "identity": "agent-1"
+      }
+    ],
+    "installed": true,
+    "lane_major": 1,
+    "linger": true,
+    "network": {
+      "addresses": [
+        "192.0.2.10"
+      ],
+      "bind": "0.0.0.0:9231",
+      "enabled": true,
+      "listening": true
+    },
+    "recovered_operations": [
+      {
+        "identity": "base",
+        "kind": "service",
+        "operation": "fedcba9876543210fedcba9876543210",
+        "outcome": {
+          "state": "applied"
+        }
+      }
+    ],
+    "running": true,
+    "runtime": {
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "version": "0.7.0"
+    },
+    "sessions": 2,
+    "staged": [
+      {
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "version": "0.7.1"
+      }
+    ],
+    "stopped": false,
+    "terminal_counters": {
+      "accessibility_rebinds": 0,
+      "accessibility_revision_bytes": 0,
+      "accessibility_revisions": 0,
+      "frames_decoded": 0,
+      "frames_painted": 0,
+      "frames_published": 0,
+      "line_mode_reads": 0,
+      "pane_worker_commands_without_wait": {
+        "accessibility": 0,
+        "client": 0,
+        "input": 0,
+        "other": 0,
+        "output": 0
+      },
+      "pane_worker_waits": {
+        "accessibility": 0,
+        "client": 0,
+        "deadline": 2,
+        "disconnected": 0,
+        "input": 0,
+        "other": 0,
+        "output": 4
+      },
+      "pty_data_reads": 4,
+      "pty_read_attempts": 6,
+      "pty_read_bytes": 10000
+    }
+  },
+  "error": null,
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": [
+    {
+      "code": "recovered_operation",
+      "details": {
+        "count": 1
+      },
+      "message": "SpaceTerm settled an earlier command first. See data.recovered_operations."
+    }
+  ]
+}

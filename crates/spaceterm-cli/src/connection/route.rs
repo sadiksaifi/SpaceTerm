@@ -1,16 +1,16 @@
-//! Select a single server before any credential or transport is opened.
+//! Select a single machine before any credential or transport is opened.
 use super::{CredentialProvider, store_failure, usage};
-use crate::args::{Command, Global, ServerCommand};
+use crate::args::{Command, CoreCommand, Global};
 use crate::contract::{
-    Candidate, CandidatesData, Code, Details, Failure, Level, ServerRef, TargetDetails,
+    Candidate, CandidatesData, Code, Details, Failure, Level, MachineRef, TargetDetails,
 };
 use crate::scope::IdPrefix;
 use crate::state::RouteKey;
 use spaceterm_connections::{
     ConnectionStore, CredentialError, CredentialStore, Interaction, SavedConnection,
 };
-use spaceterm_server::{
-    CliRoute, ServerConnection, ServerError,
+use spaceterm_core::{
+    CliRoute, CoreError, MachineConnection,
     direct::{DeviceCredential, DirectConnection, DirectConnector, DirectError},
     protocol::AgentName,
 };
@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub struct AdmittedRoute {
-    pub connection: ServerConnection,
-    pub link: spaceterm_server::connection::link::ServerLink,
-    pub server: ServerRef,
+    pub connection: MachineConnection,
+    pub link: spaceterm_core::connection::link::CoreLink,
+    pub machine: MachineRef,
     pub recovered: Vec<crate::contract::RecoveredOperation>,
 }
 
@@ -31,14 +31,14 @@ pub enum Route {
 }
 #[derive(Debug)]
 pub struct ResolutionError {
-    pub server: Option<Box<ServerRef>>,
+    pub machine: Option<Box<MachineRef>>,
     pub failure: Failure,
     pub data: CandidatesData,
 }
 impl From<Failure> for ResolutionError {
     fn from(failure: Failure) -> Self {
         Self {
-            server: None,
+            machine: None,
             failure,
             data: CandidatesData {
                 candidates: Vec::new(),
@@ -53,32 +53,32 @@ pub fn selected<'a>(
 ) -> Result<&'a str, Failure> {
     let text = explicit.or(environment).unwrap_or("local");
     if text.is_empty() || text.len() > 128 || text.chars().any(char::is_control) {
-        return Err(usage("--server"));
+        return Err(usage("--machine"));
     }
     if let Some(prefix) = text.strip_prefix("id:") {
-        IdPrefix::parse(prefix).ok_or_else(|| usage("--server"))?;
+        IdPrefix::parse(prefix).ok_or_else(|| usage("--machine"))?;
     }
     Ok(text)
 }
 
-/// Store commands and machine-only commands reject their route before reading local state.
+/// `machine` commands, and commands that act only on this machine, reject a paired route
+/// before reading local state.
 pub fn validate_command(command: &Command, selector: &str) -> Result<(), Failure> {
     if selector == "local" {
         return Ok(());
     }
     match command {
-        Command::Connection(_) => Err(usage("--server")),
-        Command::Server(
-            ServerCommand::Setup { .. }
-            | ServerCommand::Pair { .. }
-            | ServerCommand::Start
-            | ServerCommand::EndAllSessions(_)
-            | ServerCommand::Permissions { .. }
-            | ServerCommand::Unpair { .. }
-            | ServerCommand::Run { .. }
-            | ServerCommand::Provision(_),
-        ) => Err(Code::LocalOnly.into()),
-        // The desktop on this machine presents only this machine's server to these commands.
+        Command::Machine(_) => Err(usage("--machine")),
+        Command::Core(
+            CoreCommand::Status
+            | CoreCommand::Restart(_)
+            | CoreCommand::Update { .. }
+            | CoreCommand::Network { .. },
+        ) => Ok(()),
+        // A stopped SpaceTerm Core can't be started from a paired machine, so neither stops there.
+        Command::Core(_) | Command::Internal(_) => Err(Code::LocalOnly.into()),
+        // The desktop on this machine presents only this machine's SpaceTerm Core to these
+        // commands.
         Command::Open(_) | Command::Show(_) | Command::Diagnostics => Err(Code::LocalOnly.into()),
         _ => Ok(()),
     }
@@ -91,7 +91,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
     }
     let records = store.load().map_err(store_failure)?;
     let matches: Vec<_> = if let Some(prefix) = selector.strip_prefix("id:") {
-        let prefix = IdPrefix::parse(prefix).ok_or_else(|| usage("--server"))?;
+        let prefix = IdPrefix::parse(prefix).ok_or_else(|| usage("--machine"))?;
         records
             .into_iter()
             .filter(|record| prefix.matches(&record.route))
@@ -105,7 +105,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
     match matches.len() {
         0 => Err(Failure::with(
             Code::NotFound,
-            Details::Target(TargetDetails::level(Level::Server)),
+            Details::Target(TargetDetails::level(Level::Machine)),
         )
         .into()),
         1 => Ok(Route::Paired(Box::new(
@@ -113,7 +113,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
         ))),
         _ => {
             let details = TargetDetails {
-                level: Level::Server,
+                level: Level::Machine,
                 parent: None,
                 count: Some(matches.len() as u32),
                 ids: matches
@@ -124,7 +124,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
             let candidates = matches
                 .into_iter()
                 .map(|record| Candidate {
-                    level: Level::Server,
+                    level: Level::Machine,
                     id: Some(super::hex(&record.route)),
                     label: record.name,
                     path: None,
@@ -134,7 +134,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
                 })
                 .collect();
             Err(ResolutionError {
-                server: None,
+                machine: None,
                 failure: Failure::with(Code::AmbiguousTarget, Details::Target(details)),
                 data: CandidatesData { candidates },
             })
@@ -152,17 +152,17 @@ impl Route {
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local)
     }
-    pub fn reference(&self, server: &[u8; 32]) -> ServerRef {
+    pub fn reference(&self, core: &[u8; 32]) -> MachineRef {
         match self {
-            Self::Local => ServerRef {
+            Self::Local => MachineRef {
                 name: "local".into(),
                 route: "local".into(),
-                id: super::hex(server),
+                id: super::hex(core),
             },
-            Self::Paired(saved) => ServerRef {
+            Self::Paired(saved) => MachineRef {
                 name: saved.name.clone(),
                 route: format!("id:{}", super::hex(&saved.route)),
-                id: super::hex(&saved.paired.pin.server),
+                id: super::hex(&saved.paired.pin.core),
             },
         }
     }
@@ -173,9 +173,9 @@ impl Route {
         credentials: &dyn CredentialProvider,
         interaction: Interaction,
         deadline: Instant,
-    ) -> Result<ServerConnection, Failure> {
-        self.server_connection(identity, agent, credentials, interaction, Some(deadline))
-            .map_err(crate::contract::from_server_error)
+    ) -> Result<MachineConnection, Failure> {
+        self.machine_connection(identity, agent, credentials, interaction, Some(deadline))
+            .map_err(crate::contract::from_core_error)
     }
 
     /// Admit the selected route and settle its held outcomes before a passive command.
@@ -193,18 +193,18 @@ impl Route {
             self.connect(identity, agent.clone(), credentials, interaction, deadline)?;
         let link = connection
             .link_cancellable(&|| cancelled() || Instant::now() >= deadline)
-            .map_err(crate::contract::from_server_error)?;
-        let server = connection
-            .admitted_server_id()
-            .map_err(crate::contract::from_server_error)?;
+            .map_err(crate::contract::from_core_error)?;
+        let core = connection
+            .admitted_machine_id()
+            .map_err(crate::contract::from_core_error)?;
         if let Self::Paired(saved) = self
-            && saved.paired.pin.server != server
+            && saved.paired.pin.core != core
         {
             link.close();
-            return Err(Code::ServerIdentityChanged.into());
+            return Err(Code::MachineIdentityChanged.into());
         }
         let state =
-            crate::state::CliState::open(identity).map_err(crate::contract::from_server_error)?;
+            crate::state::CliState::open(identity).map_err(crate::contract::from_core_error)?;
         let recovered = crate::journal::settle(
             &state,
             &self.key(),
@@ -215,7 +215,7 @@ impl Route {
                 writer: None,
             },
             &mut |agent| {
-                self.server_connection(
+                self.machine_connection(
                     identity,
                     agent.cloned(),
                     credentials,
@@ -228,24 +228,24 @@ impl Route {
         Ok(AdmittedRoute {
             connection,
             link,
-            server: self.reference(&server),
+            machine: self.reference(&core),
             recovered,
         })
     }
 
-    pub(crate) fn server_connection(
+    pub(crate) fn machine_connection(
         &self,
         identity: &str,
         agent: Option<AgentName>,
         credentials: &dyn CredentialProvider,
         interaction: Interaction,
         deadline: Option<Instant>,
-    ) -> Result<ServerConnection, ServerError> {
+    ) -> Result<MachineConnection, CoreError> {
         let route = match self {
             Self::Local => CliRoute::Local,
             Self::Paired(saved) => {
                 let credentials = credentials.open(saved.credential_store).map_err(|error| {
-                    ServerError::Direct(match error {
+                    CoreError::Direct(match error {
                         CredentialError::InteractionRequired => DirectError::InteractionRequired,
                         CredentialError::Unavailable => DirectError::CredentialUnavailable,
                     })
@@ -263,7 +263,7 @@ impl Route {
                 }
             }
         };
-        ServerConnection::for_cli(identity, route, agent)
+        MachineConnection::for_cli(identity, route, agent)
     }
 }
 struct Connector {
@@ -300,27 +300,27 @@ impl DirectConnector for Connector {
 pub fn from_global(global: &Global, identity: &str) -> Result<Route, ResolutionError> {
     let selector = selector(global)?;
     let store = ConnectionStore::new(
-        spaceterm_server::cli_state_root(identity).map_err(crate::contract::from_server_error)?,
+        spaceterm_core::cli_state_root(identity).map_err(crate::contract::from_core_error)?,
     );
     resolve(&selector, &store)
 }
 
 pub fn selector(global: &Global) -> Result<String, Failure> {
-    let environment = if global.server.is_none() {
-        std::env::var_os("SPACETERM_SERVER")
+    let environment = if global.machine.is_none() {
+        std::env::var_os("SPACETERM_MACHINE")
     } else {
         None
     };
     let environment = environment
         .as_ref()
-        .map(|value| value.to_str().ok_or_else(|| usage("--server")))
+        .map(|value| value.to_str().ok_or_else(|| usage("--machine")))
         .transpose()?;
-    selected(global.server.as_deref(), environment).map(str::to_owned)
+    selected(global.machine.as_deref(), environment).map(str::to_owned)
 }
 
 pub struct RoutedConnection {
     pub selected: Route,
-    pub connection: ServerConnection,
+    pub connection: MachineConnection,
     pub agent: Option<AgentName>,
     pub interaction: Interaction,
 }
@@ -355,11 +355,11 @@ pub fn connect(
         Interaction::Requested
     };
     let connection = selected
-        .server_connection(identity, agent.clone(), credentials, interaction, deadline)
+        .machine_connection(identity, agent.clone(), credentials, interaction, deadline)
         .map_err(|error| {
-            let mut error = ResolutionError::from(crate::contract::from_server_error(error));
+            let mut error = ResolutionError::from(crate::contract::from_core_error(error));
             if let Route::Paired(saved) = &selected {
-                error.server = Some(Box::new(selected.reference(&saved.paired.pin.server)));
+                error.machine = Some(Box::new(selected.reference(&saved.paired.pin.core)));
             }
             error
         })?;
@@ -377,6 +377,43 @@ impl ResolutionError {
             serde_json::json!({})
         } else {
             serde_json::json!({"candidates": self.data.candidates})
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_command;
+    use crate::args::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn paired_routes_admit_remote_admin_verbs_and_work_commands() {
+        for args in [
+            &["status"][..],
+            &["restart"],
+            &["restart", "--confirm", "c1-00"],
+            &["update"],
+            &["update", "--archive", "a.tar", "--signature", "a.sig"],
+            &["network"],
+            &["network", "off", "--confirm", "c1-00"],
+            &["list"],
+            &["workspace", "create", "api", "--directory", "/srv/api"],
+            &["worktree", "create", "feature"],
+            &["tab", "create"],
+            &["pane", "split"],
+            &["pane", "read"],
+        ] {
+            let cli = Cli::try_parse_from(
+                ["spaceterm", "--machine", "penguin"]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+            )
+            .unwrap();
+            assert!(
+                validate_command(&cli.command, "penguin").is_ok(),
+                "{args:?}"
+            );
         }
     }
 }

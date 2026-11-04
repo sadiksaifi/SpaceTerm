@@ -1,5 +1,5 @@
 use crate::directory_selection::GpuiDirectorySelection;
-use crate::domain::ServerConnectionPhase;
+use crate::domain::MachineConnectionPhase;
 use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::terminal::TerminalSessionFactory;
 use crate::ui::drag_and_drop::finish_slides;
@@ -67,7 +67,7 @@ fn a_pull_request_should_end_its_row_and_open_in_the_browser(cx: &mut TestAppCon
     use crate::ui::repository_status_store::{
         InstalledRepositoryStatus, RepositoryStatusAdapters, RepositoryStatusStore,
     };
-    use spaceterm_server::repository::{
+    use spaceterm_core::repository::{
         ChangeSummary, DirectoryFacts, GitHubRepository, GitToolStatus, PullRequestQuery,
         Repository, RepositoryHead, Snapshot, ToolVersion,
     };
@@ -114,8 +114,8 @@ fn a_pull_request_should_end_its_row_and_open_in_the_browser(cx: &mut TestAppCon
     cx.run_until_parked();
 
     let (manager, _records, cx) = workspace_manager(cx);
-    let server = local_server(cx);
-    let mut inventory = server.edits.applied_inventory();
+    let core = local_core(cx);
+    let mut inventory = core.edits.applied_inventory();
     let directory = inventory.workspaces[0].tabs[0].panes[0]
         .starting_directory
         .clone();
@@ -153,10 +153,10 @@ fn a_pull_request_should_end_its_row_and_open_in_the_browser(cx: &mut TestAppCon
         pinned_worktrees: Vec::new(),
         pin_check: Default::default(),
     });
-    server.edits.set_inventory(inventory);
+    core.edits.set_inventory(inventory);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -259,19 +259,19 @@ fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
 #[test]
 fn remote_connection_phases_have_expected_status_labels() {
     assert_eq!(
-        remote_connection_status(ServerConnectionPhase::Connected),
+        remote_connection_status(MachineConnectionPhase::Connected),
         None
     );
     assert_eq!(
-        remote_connection_status(ServerConnectionPhase::Reconnecting),
+        remote_connection_status(MachineConnectionPhase::Reconnecting),
         Some("Reconnecting…")
     );
     assert_eq!(
-        remote_connection_status(ServerConnectionPhase::Disconnected),
+        remote_connection_status(MachineConnectionPhase::Disconnected),
         Some("Not connected")
     );
     assert_eq!(
-        remote_connection_status(ServerConnectionPhase::Failed),
+        remote_connection_status(MachineConnectionPhase::Failed),
         Some("Connection failed")
     );
 }
@@ -306,9 +306,9 @@ fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppCont
         delegate: Rc::clone(&native_services.file_preview),
     });
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(TestTerminalSessionRecords::default()));
+        Rc::new(core_sessions(TestTerminalSessionRecords::default()));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        local_server_manager(
+        local_core_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -351,9 +351,9 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
         crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
     );
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(TestTerminalSessionRecords::default()));
+        Rc::new(core_sessions(TestTerminalSessionRecords::default()));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        local_server_manager(
+        local_core_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -403,10 +403,10 @@ pub(crate) fn workspace_adapters() -> WorkspaceManagerAdapters {
         lifecycle: PaneLifecycleDependencies::testing(),
         directory_selection: Rc::new(GpuiDirectorySelection),
         window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-        local_server: crate::ui::launch_testing::unanswered(),
+        local_core: crate::ui::launch_testing::unanswered(),
         // A presented server here matches only directories spelled the same, unless a test says
         // otherwise.
-        server_directories: crate::ui::directory_picker::server_directory_testing::matching(),
+        core_directories: crate::ui::directory_picker::core_directory_testing::matching(),
     }
 }
 
@@ -428,21 +428,21 @@ fn publish_workspace(cx: &mut VisualTestContext) {
 /// The scripted account-local server the Workspace Window under test presents. It applies each
 /// edit as the server does, and its Panes run their Terminal Sessions in a test factory.
 #[derive(Clone)]
-pub(crate) struct LocalServer {
+pub(crate) struct LocalCore {
     pub(crate) edits: Rc<crate::ui::workspaces::testing::ScriptedEdits>,
     pub(crate) panes: Rc<crate::ui::workspaces::testing::ScriptedPanes>,
 }
 
-impl gpui::Global for LocalServer {}
+impl gpui::Global for LocalCore {}
 
-impl LocalServer {
+impl LocalCore {
     /// A server with one Workspace in `home_directory`, whose Panes run in `session_factory`.
     pub(crate) fn new(
         session_factory: Rc<dyn TerminalSessionFactory>,
         home_directory: PathBuf,
     ) -> Self {
         let panes = crate::ui::workspaces::testing::ScriptedPanes::connected(
-            WorkspaceTerminalSessionFactory::new_server(session_factory),
+            WorkspaceTerminalSessionFactory::new_core(session_factory),
         );
         Self {
             edits: Rc::new(crate::ui::workspaces::testing::ScriptedEdits::applying(
@@ -472,17 +472,17 @@ impl LocalServer {
             window,
             cx,
         );
-        manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+        manager.sync_workspaces(MachineKey::LOCAL, window, cx);
     }
 }
 
 /// The scripted account-local server of the window under test.
-fn local_server(cx: &mut VisualTestContext) -> LocalServer {
-    cx.update(|_, cx| cx.global::<LocalServer>().clone())
+fn local_core(cx: &mut VisualTestContext) -> LocalCore {
+    cx.update(|_, cx| cx.global::<LocalCore>().clone())
 }
 
 /// Asks the server to pin `workspace` at `directory`, which it accepts, and reads its answer.
-fn pin_on_the_server(
+fn pin_on_the_machine(
     manager: &Entity<WorkspaceManager>,
     workspace: u64,
     directory: &str,
@@ -506,35 +506,30 @@ fn pin_on_the_server(
 }
 
 /// How many closes this window asked its account-local server for.
-fn server_closes(cx: &mut VisualTestContext) -> usize {
-    local_server(cx)
+fn core_closes(cx: &mut VisualTestContext) -> usize {
+    local_core(cx)
         .edits
         .submitted()
         .iter()
-        .filter(|mutation| {
-            matches!(
-                mutation,
-                spaceterm_server::hierarchy::Mutation::Close { .. }
-            )
-        })
+        .filter(|mutation| matches!(mutation, spaceterm_core::hierarchy::Mutation::Close { .. }))
         .count()
 }
 
 /// Terminal Sessions that run in the account-local server, recorded in `records`.
-pub(crate) fn server_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
+pub(crate) fn core_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
     TestTerminalSessionFactory::new(records).with_reading_available(true)
 }
 
 /// Presentations of Terminal Sessions that run in a server, recorded nowhere.
-fn server_session_factory() -> WorkspaceTerminalSessionFactory {
-    WorkspaceTerminalSessionFactory::new_server(Rc::new(server_sessions(
+fn core_session_factory() -> WorkspaceTerminalSessionFactory {
+    WorkspaceTerminalSessionFactory::new_core(Rc::new(core_sessions(
         TestTerminalSessionRecords::default(),
     )))
 }
 
 /// A Workspace Window presenting the account-local server's one Workspace at `home_directory`,
 /// whose Panes run in `session_factory`.
-pub(crate) fn local_server_manager(
+pub(crate) fn local_core_manager(
     session_factory: Rc<dyn TerminalSessionFactory>,
     home_directory: PathBuf,
     adapters: WorkspaceManagerAdapters,
@@ -543,10 +538,10 @@ pub(crate) fn local_server_manager(
     cx: &mut Context<WorkspaceManager>,
 ) -> WorkspaceManager {
     // Every Workspace Window's update control reads this computer's server update state.
-    crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+    crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
     let mut manager =
         WorkspaceManager::new_with_adapters(home_directory.clone(), adapters, sidebar, window, cx);
-    LocalServer::new(session_factory, home_directory).present(&mut manager, window, cx);
+    LocalCore::new(session_factory, home_directory).present(&mut manager, window, cx);
     manager
 }
 
@@ -585,7 +580,7 @@ fn serverless_workspace_manager(
 
 fn open_workspace_window(
     adapters: WorkspaceManagerAdapters,
-    present_server: bool,
+    present_core: bool,
     cx: &mut TestAppContext,
 ) -> (
     Entity<WorkspaceManager>,
@@ -596,10 +591,10 @@ fn open_workspace_window(
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(records.clone()).with_fallback_title("zsh"));
+        Rc::new(core_sessions(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        if present_server {
-            return local_server_manager(
+        if present_core {
+            return local_core_manager(
                 session_factory,
                 std::env::temp_dir(),
                 adapters,
@@ -608,7 +603,7 @@ fn open_workspace_window(
                 cx,
             );
         }
-        crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+        crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
         WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             adapters,
@@ -655,9 +650,9 @@ fn workspace_manager_with_application_actions(
     });
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(records.clone()).with_fallback_title("zsh"));
+        Rc::new(core_sessions(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        local_server_manager(
+        local_core_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(),
@@ -788,9 +783,9 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(records).with_fallback_title("zsh"));
+        Rc::new(core_sessions(records).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        local_server_manager(
+        local_core_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(),
@@ -1030,11 +1025,11 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     let first_records = TestTerminalSessionRecords::default();
     let second_records = TestTerminalSessionRecords::default();
     let first_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(first_records.clone()).with_fallback_title("zsh"));
+        Rc::new(core_sessions(first_records.clone()).with_fallback_title("zsh"));
     let second_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(second_records.clone()).with_fallback_title("zsh"));
+        Rc::new(core_sessions(second_records.clone()).with_fallback_title("zsh"));
     let first = cx.add_window(|window, cx| {
-        local_server_manager(
+        local_core_manager(
             first_factory,
             PathBuf::from("/Users/first"),
             workspace_adapters(),
@@ -1044,7 +1039,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         )
     });
     let second = cx.add_window(|window, cx| {
-        local_server_manager(
+        local_core_manager(
             second_factory,
             PathBuf::from("/Users/second"),
             workspace_adapters(),
@@ -1333,7 +1328,7 @@ fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
 
     assert_eq!(records.starts().len(), 1);
     assert_eq!(
-        local_server(cx).edits.applied_inventory().workspaces[0].pinned_directory,
+        local_core(cx).edits.applied_inventory().workspaces[0].pinned_directory,
         None,
         "the server pins nothing"
     );
@@ -1374,7 +1369,7 @@ fn a_local_workspace_should_pin_the_directory_typed_in_the_directory_picker(
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
 
-    let pinned = local_server(cx).edits.applied_inventory().workspaces[0]
+    let pinned = local_core(cx).edits.applied_inventory().workspaces[0]
         .pinned_directory
         .clone();
     assert_eq!(
@@ -1408,7 +1403,7 @@ fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppCon
     );
     assert_eq!(records.starts().len(), 1);
     assert_eq!(
-        local_server(cx).edits.applied_inventory().workspaces[0].pinned_directory,
+        local_core(cx).edits.applied_inventory().workspaces[0].pinned_directory,
         None,
         "the server pins nothing"
     );
@@ -1548,8 +1543,8 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
-    let server = local_server(cx);
-    let inactive_pane = server.edits.applied_inventory().workspaces[0].tabs[0].root_pane;
+    let core = local_core(cx);
+    let inactive_pane = core.edits.applied_inventory().workspaces[0].tabs[0].root_pane;
     publish_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
@@ -1565,7 +1560,7 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
     cx.run_until_parked();
     assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
 
-    server.edits.exit_pane(inactive_pane);
+    core.edits.exit_pane(inactive_pane);
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -4174,8 +4169,8 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
     let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
     let cx = &mut text_context;
     let (manager, _records, cx) = workspace_manager(cx);
-    let server = local_server(cx);
-    let inactive_pane = server.edits.applied_inventory().workspaces[0].tabs[0].root_pane;
+    let core = local_core(cx);
+    let inactive_pane = core.edits.applied_inventory().workspaces[0].tabs[0].root_pane;
     publish_workspace(cx);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
@@ -4186,7 +4181,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
     cx.run_until_parked();
     click("toggle-sidebar-button", cx);
 
-    server.edits.exit_pane(inactive_pane);
+    core.edits.exit_pane(inactive_pane);
     cx.run_until_parked();
 
     let chrome = cx
@@ -5832,7 +5827,7 @@ fn workspace_switcher_should_not_expose_the_workspace_path_as_a_description(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
-    pin_on_the_server(&manager, 1, "/project/Ångström", cx);
+    pin_on_the_machine(&manager, 1, "/project/Ångström", cx);
     manager.update(cx, |manager, _| {
         manager
             .workspaces
@@ -5853,7 +5848,7 @@ fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) 
     let (manager, _, cx) = workspace_manager(cx);
     publish_workspace(cx);
     cx.run_until_parked();
-    pin_on_the_server(&manager, 1, "/project/Ångström", cx);
+    pin_on_the_machine(&manager, 1, "/project/Ångström", cx);
     manager.update(cx, |manager, _| {
         manager
             .workspaces
@@ -7028,9 +7023,9 @@ fn workspace_manager_with_terminal_nodes(
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(records.clone()).with_fallback_title("zsh"));
+        Rc::new(core_sessions(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        local_server_manager(
+        local_core_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -7315,7 +7310,7 @@ fn closing_an_inactive_tab_from_its_close_button_by_assistive_technology_keeps_f
         manager.close_confirmation.pending().is_none()
     }));
     assert_eq!(
-        server_closes(cx),
+        core_closes(cx),
         1,
         "the idle Tab closes without confirmation"
     );
@@ -7346,7 +7341,7 @@ fn closing_the_active_tab_from_its_close_button_by_assistive_technology_keeps_fo
         manager.close_confirmation.pending().is_none()
     }));
     assert_eq!(
-        server_closes(cx),
+        core_closes(cx),
         1,
         "the idle Tab closes without confirmation"
     );
@@ -7361,7 +7356,7 @@ fn cancelling_a_tab_close_pressed_by_assistive_technology_returns_focus_to_its_b
     use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
 
     let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
-    local_server(cx).edits.run_shells();
+    local_core(cx).edits.run_shells();
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     let tree = A11yTree::read(cx);
@@ -7393,7 +7388,7 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
 
     let (_manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
-    local_server(cx).edits.run_shells();
+    local_core(cx).edits.run_shells();
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     A11yTree::read(cx);
@@ -7529,11 +7524,11 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
 ) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Inventory, Mutation, Pane, Side, Tab, Workspace};
+    use spaceterm_core::hierarchy::{Inventory, Mutation, Pane, Side, Tab, Workspace};
 
-    const SERVER_WORKSPACE: [u8; 32] = [1; 32];
-    const SERVER_TAB: [u8; 32] = [2; 32];
-    const SERVER_PANE: [u8; 32] = [3; 32];
+    const CORE_WORKSPACE: [u8; 32] = [1; 32];
+    const CORE_TAB: [u8; 32] = [2; 32];
+    const CORE_PANE: [u8; 32] = [3; 32];
 
     // One server Workspace at `pin_version`, with the Pinned Directory it published.
     let published = |revision: u64, pin_version: u64, pinned: Option<PathBuf>| Inventory {
@@ -7541,20 +7536,20 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
         revision,
         close: None,
         workspaces: vec![Workspace {
-            id: SERVER_WORKSPACE,
+            id: CORE_WORKSPACE,
             name: "Build".to_owned(),
             name_version: 0,
             pin_version,
             pinned_directory: pinned,
-            root_tab: SERVER_TAB,
+            root_tab: CORE_TAB,
             tabs: vec![Tab {
                 worktree: None,
-                worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
                 worktree_repository: None,
-                id: SERVER_TAB,
-                root_pane: SERVER_PANE,
+                id: CORE_TAB,
+                root_pane: CORE_PANE,
                 panes: vec![Pane {
-                    id: SERVER_PANE,
+                    id: CORE_PANE,
                     source: None,
                     side: Side::Right,
                     starting_directory: PathBuf::from("/server/work"),
@@ -7579,8 +7574,8 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
     let edits = Rc::new(ScriptedEdits::new(Some(published(1, 0, None))));
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
-                server_sessions(TestTerminalSessionRecords::default()),
+            let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
+                core_sessions(TestTerminalSessionRecords::default()),
             ));
             manager.present_workspaces(
                 WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
@@ -7591,11 +7586,11 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
                 window,
                 cx,
             );
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
-    let server_workspace_id = manager
+    let core_workspace_id = manager
         .read_with(cx, |manager, _| {
             manager
                 .workspaces
@@ -7609,17 +7604,13 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
     // system chooser from it.
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.choose_pin_directory(server_workspace_id, window, cx);
+            manager.choose_pin_directory(core_workspace_id, window, cx);
         });
     });
     cx.run_until_parked();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.choose_local_pin_directory(
-                PinTarget::Workspace(server_workspace_id),
-                window,
-                cx,
-            );
+            manager.choose_local_pin_directory(PinTarget::Workspace(core_workspace_id), window, cx);
         });
     });
 
@@ -7628,7 +7619,7 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
     edits.set_inventory(published(2, 1, Some(PathBuf::from("/server/theirs"))));
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx)
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx)
         });
     });
     cx.run_until_parked();
@@ -7636,7 +7627,7 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
     assert_eq!(
         edits.submitted().last(),
         Some(&Mutation::PinWorkspace {
-            workspace: SERVER_WORKSPACE,
+            workspace: CORE_WORKSPACE,
             version: 0,
             directory: Some(chosen),
         }),
@@ -7649,12 +7640,12 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
 /// that owns the Workspace, a folder on this computer never becomes another computer's pin, and
 /// disconnecting from one server leaves the other's Workspaces in place.
 #[gpui::test]
-fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_server(
+fn each_machines_workspaces_should_take_edits_and_withdrawal_only_from_their_own_machine(
     cx: &mut TestAppContext,
 ) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Inventory, Mutation, Pane, Side, Tab, Workspace};
+    use spaceterm_core::hierarchy::{Inventory, Mutation, Pane, Side, Tab, Workspace};
 
     // Both servers name their only Workspace, Tab, and Pane with the same identities.
     let published = |name: &str| Inventory {
@@ -7670,7 +7661,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
             root_tab: [2; 32],
             tabs: vec![Tab {
                 worktree: None,
-                worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
                 worktree_repository: None,
                 id: [2; 32],
                 root_pane: [3; 32],
@@ -7700,8 +7691,8 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
         manager.update(cx, |manager, cx| {
             let sessions = || {
                 WorkspacePaneSessions::with_opener(
-                    ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_server(Rc::new(
-                        server_sessions(TestTerminalSessionRecords::default()),
+                    ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_core(Rc::new(
+                        core_sessions(TestTerminalSessionRecords::default()),
                     ))) as Rc<_>,
                     &PaneConstruction::testing(),
                 )
@@ -7712,8 +7703,8 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
                 window,
                 cx,
             );
-            let remote_key = manager.present_server_workspaces(
-                ServerOrigin::Direct(crate::ui::workspaces::DirectServer {
+            let remote_key = manager.present_core_workspaces(
+                MachineOrigin::Direct(crate::ui::workspaces::DirectMachine {
                     route: named_route("penguin"),
                     name: "penguin".into(),
                 }),
@@ -7722,7 +7713,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
                 window,
                 cx,
             );
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx);
             manager.sync_workspaces(remote_key, window, cx);
             remote_key
         })
@@ -7777,7 +7768,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.withdraw_server_workspaces(remote_key, window, cx);
+            manager.withdraw_core_workspaces(remote_key, window, cx);
         });
     });
     cx.run_until_parked();
@@ -7794,11 +7785,11 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
 }
 
 /// One inventory at `revision` publishing each named Workspace, identified by its number below 50.
-fn server_inventory(
+fn core_inventory(
     revision: u64,
     workspaces: &[(&str, u8)],
-) -> spaceterm_server::hierarchy::Inventory {
-    use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
+) -> spaceterm_core::hierarchy::Inventory {
+    use spaceterm_core::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
     Inventory {
         repositories: None,
@@ -7815,7 +7806,7 @@ fn server_inventory(
                 root_tab: [number + 50; 32],
                 tabs: vec![Tab {
                     worktree: None,
-                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                    worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
                     worktree_repository: None,
                     id: [number + 50; 32],
                     root_pane: [number + 100; 32],
@@ -7839,18 +7830,18 @@ fn server_inventory(
 
 use crate::ui::workspaces::testing::FixedOwner;
 
-/// The account-local presentation's owner in [`MultiServerHarness`].
-const LOCAL_OWNER: spaceterm_server::hierarchy::Id = [0xA0; 32];
+/// The account-local presentation's owner in [`MultiMachineHarness`].
+const LOCAL_OWNER: spaceterm_core::hierarchy::Id = [0xA0; 32];
 
 /// A window presenting the account-local server beside paired servers, each with scripted edits.
-struct MultiServerHarness {
+struct MultiMachineHarness {
     manager: Entity<WorkspaceManager>,
     local: Rc<crate::ui::workspaces::testing::ScriptedEdits>,
     /// The revision the next publication carries, so every server reads it as new.
     revision: std::cell::Cell<u64>,
 }
 
-impl MultiServerHarness {
+impl MultiMachineHarness {
     fn new(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
         Self::using(workspace_adapters(), cx)
     }
@@ -7865,7 +7856,7 @@ impl MultiServerHarness {
 
         // A test installs the paired registry its machines need.
         let (manager, _records, cx) = open_workspace_window(adapters, false, cx);
-        let local = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[]))));
+        let local = Rc::new(ScriptedEdits::new(Some(core_inventory(1, &[]))));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.present_workspaces(
@@ -7880,7 +7871,7 @@ impl MultiServerHarness {
                 if let Some(binding) = manager.binding.local_mut() {
                     binding.identify(Rc::new(FixedOwner(LOCAL_OWNER)));
                 }
-                manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+                manager.sync_workspaces(MachineKey::LOCAL, window, cx);
             });
         });
         cx.run_until_parked();
@@ -7895,7 +7886,7 @@ impl MultiServerHarness {
     }
 
     fn session_factory() -> WorkspaceTerminalSessionFactory {
-        server_session_factory()
+        core_session_factory()
     }
 
     /// Presents the paired server `name` at `route`, publishing `workspaces`, and attaches each
@@ -7906,7 +7897,10 @@ impl MultiServerHarness {
         route: crate::direct_connections::DirectRouteId,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
-    ) -> (ServerKey, Rc<crate::ui::workspaces::testing::ScriptedEdits>) {
+    ) -> (
+        MachineKey,
+        Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+    ) {
         let (key, edits, _) = self.present_direct_panes(name, route, workspaces, cx);
         (key, edits)
     }
@@ -7920,12 +7914,12 @@ impl MultiServerHarness {
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
     ) -> (
-        ServerKey,
+        MachineKey,
         Rc<crate::ui::workspaces::testing::ScriptedEdits>,
         Rc<crate::ui::workspaces::testing::ScriptedPanes>,
     ) {
         let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(Some(
-            server_inventory(self.next_revision(), workspaces),
+            core_inventory(self.next_revision(), workspaces),
         )));
         let (key, panes) = self.present_direct_edits(name, route, &edits, cx);
         self.attach(key, workspaces, cx);
@@ -7939,7 +7933,10 @@ impl MultiServerHarness {
         route: crate::direct_connections::DirectRouteId,
         edits: &Rc<crate::ui::workspaces::testing::ScriptedEdits>,
         cx: &mut VisualTestContext,
-    ) -> (ServerKey, Rc<crate::ui::workspaces::testing::ScriptedPanes>) {
+    ) -> (
+        MachineKey,
+        Rc<crate::ui::workspaces::testing::ScriptedPanes>,
+    ) {
         // Each route has its own owner, which keeps its identity across reconnects.
         self.present_direct_edits_identified(name, route, Rc::new(FixedOwner(route)), edits, cx)
     }
@@ -7953,9 +7950,12 @@ impl MultiServerHarness {
         identity: Rc<dyn crate::ui::workspaces::WorkspaceOwner>,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
-    ) -> (ServerKey, Rc<crate::ui::workspaces::testing::ScriptedEdits>) {
+    ) -> (
+        MachineKey,
+        Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+    ) {
         let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(Some(
-            server_inventory(self.next_revision(), workspaces),
+            core_inventory(self.next_revision(), workspaces),
         )));
         let (key, _) = self.present_direct_edits_identified(name, route, identity, &edits, cx);
         self.attach(key, workspaces, cx);
@@ -7970,21 +7970,24 @@ impl MultiServerHarness {
         identity: Rc<dyn crate::ui::workspaces::WorkspaceOwner>,
         edits: &Rc<crate::ui::workspaces::testing::ScriptedEdits>,
         cx: &mut VisualTestContext,
-    ) -> (ServerKey, Rc<crate::ui::workspaces::testing::ScriptedPanes>) {
+    ) -> (
+        MachineKey,
+        Rc<crate::ui::workspaces::testing::ScriptedPanes>,
+    ) {
         use crate::ui::workspaces::testing::ScriptedPanes;
-        use crate::ui::workspaces::{DirectServer, WorkspaceEditSource, WorkspacePaneSessions};
+        use crate::ui::workspaces::{DirectMachine, WorkspaceEditSource, WorkspacePaneSessions};
 
         let panes = ScriptedPanes::new(Self::session_factory());
         let key = cx.update(|window, cx| {
-            crate::ui::server_worktrees::testing::present_direct(
+            crate::ui::core_worktrees::testing::present_direct(
                 route,
                 Rc::clone(edits),
-                crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}"),
+                crate::ui::core_worktrees::testing::ScriptedReads::new("~/{branch}"),
                 cx,
             );
             self.manager.update(cx, |manager, cx| {
-                let key = manager.present_server_workspaces(
-                    ServerOrigin::Direct(DirectServer {
+                let key = manager.present_core_workspaces(
+                    MachineOrigin::Direct(DirectMachine {
                         route,
                         name: name.to_owned().into(),
                     }),
@@ -8010,12 +8013,12 @@ impl MultiServerHarness {
     /// Publishes `workspaces` from the server at `key` and attaches each one.
     fn publish(
         &self,
-        key: ServerKey,
+        key: MachineKey,
         edits: &crate::ui::workspaces::testing::ScriptedEdits,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
     ) {
-        edits.set_inventory(server_inventory(self.next_revision(), workspaces));
+        edits.set_inventory(core_inventory(self.next_revision(), workspaces));
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
                 manager.sync_workspaces(key, window, cx);
@@ -8026,17 +8029,17 @@ impl MultiServerHarness {
 
     /// Attaches each of `workspaces` this client does not present yet, as choosing it in the
     /// Workspace Switcher does.
-    fn attach(&self, key: ServerKey, workspaces: &[(&str, u8)], cx: &mut VisualTestContext) {
+    fn attach(&self, key: MachineKey, workspaces: &[(&str, u8)], cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
                 for (_, number) in workspaces {
-                    let server = [*number; 32];
+                    let core = [*number; 32];
                     if manager
                         .binding
                         .get(key)
-                        .is_some_and(|binding| binding.local(server).is_none())
+                        .is_some_and(|binding| binding.local(core).is_none())
                     {
-                        manager.attach_detached_workspace(key, server, window, cx);
+                        manager.attach_detached_workspace(key, core, window, cx);
                     }
                 }
             });
@@ -8101,12 +8104,12 @@ impl MultiServerHarness {
 /// Workspaces join the end of Workspace order as their servers publish them, whichever server
 /// owns them, so no server's Workspaces are gathered together.
 #[gpui::test]
-fn workspaces_from_several_servers_should_keep_the_order_they_arrived_in(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+fn workspaces_from_several_machines_should_keep_the_order_they_arrived_in(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     let (zeta, zeta_edits) = harness.present_direct("zeta", named_route("zeta"), &[("Far", 1)], cx);
     harness.publish(
-        ServerKey::LOCAL,
+        MachineKey::LOCAL,
         &harness.local,
         &[("Here", 1), ("Also Here", 2)],
         cx,
@@ -8122,9 +8125,9 @@ fn workspaces_from_several_servers_should_keep_the_order_they_arrived_in(cx: &mu
 
 /// A Workspace moves to any place in the list, between other servers' Workspaces too.
 #[gpui::test]
-fn moving_a_workspace_should_interleave_it_with_other_servers_workspaces(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+fn moving_a_workspace_should_interleave_it_with_other_machines_workspaces(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     harness.present_direct(
         "penguin",
         named_route("penguin"),
@@ -8149,11 +8152,11 @@ fn moving_a_workspace_should_interleave_it_with_other_servers_workspaces(cx: &mu
 /// servers, the same order the sidebar shows.
 #[gpui::test]
 fn the_switcher_and_shortcuts_should_follow_the_interleaved_order(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
     harness.publish(
-        ServerKey::LOCAL,
+        MachineKey::LOCAL,
         &harness.local,
         &[("Here", 1), ("Also Here", 2)],
         cx,
@@ -8183,12 +8186,12 @@ fn the_switcher_and_shortcuts_should_follow_the_interleaved_order(cx: &mut TestA
 /// Disconnecting from one server removes only its Workspaces. The Active Workspace and the order
 /// of the others stay as the person left them.
 #[gpui::test]
-fn withdrawing_one_server_should_keep_the_other_servers_workspaces_and_active_workspace(
+fn withdrawing_one_machine_should_keep_the_other_machines_workspaces_and_active_workspace(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     harness.publish(
-        ServerKey::LOCAL,
+        MachineKey::LOCAL,
         &harness.local,
         &[("Here", 1), ("Also Here", 2)],
         cx,
@@ -8204,7 +8207,7 @@ fn withdrawing_one_server_should_keep_the_other_servers_workspaces_and_active_wo
 
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.withdraw_server_workspaces(penguin, window, cx);
+            manager.withdraw_core_workspaces(penguin, window, cx);
         });
     });
     cx.run_until_parked();
@@ -8221,10 +8224,10 @@ fn withdrawing_one_server_should_keep_the_other_servers_workspaces_and_active_wo
 /// A server that reconnects returns each of its Workspaces to the place the person gave it among
 /// other servers' Workspaces, rather than adding them at the end.
 #[gpui::test]
-fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+fn a_reconnected_core_should_return_its_workspaces_to_their_places(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiMachineHarness::new(cx);
     harness.publish(
-        ServerKey::LOCAL,
+        MachineKey::LOCAL,
         &harness.local,
         &[("Here", 1), ("Also Here", 2)],
         cx,
@@ -8234,7 +8237,7 @@ fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut Te
     harness.move_workspace("Far", 1, cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.withdraw_server_workspaces(penguin, window, cx);
+            manager.withdraw_core_workspaces(penguin, window, cx);
         });
     });
     cx.run_until_parked();
@@ -8251,19 +8254,19 @@ fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut Te
 /// across a reconnect, and the edits it submits stay with that route, even while the other route
 /// is offline.
 #[gpui::test]
-fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+fn routes_paired_separately_to_one_machine_should_stay_independent(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
 
     // The registry connects each route on its own thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MultiServerHarness::new(cx);
-    let (direct, routes) = crate::direct_connections::tests::connected_routes_to_one_server(
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    let (direct, routes) = crate::direct_connections::tests::connected_routes_to_one_core(
         &["penguin", "penguin new"],
         [0x5E; 32],
     );
-    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
+    cx.update(|_, cx| crate::ui::direct_machines::install(direct.clone(), cx));
     let connection = |route| {
-        Rc::new(direct.server(route).expect("the route is connected"))
+        Rc::new(direct.core(route).expect("the route is connected"))
             as Rc<dyn crate::ui::workspaces::WorkspaceOwner>
     };
     let owners = |cx: &mut VisualTestContext| {
@@ -8306,7 +8309,7 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
                 window,
                 cx,
             );
-            manager.withdraw_server_workspaces(newer, window, cx);
+            manager.withdraw_core_workspaces(newer, window, cx);
         });
     });
     cx.run_until_parked();
@@ -8335,7 +8338,7 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.create_workspace_on(
-                &crate::ui::ServerTarget::Direct(routes[1]),
+                &crate::ui::MachineTarget::Direct(routes[1]),
                 String::new(),
                 window,
                 cx,
@@ -8358,7 +8361,7 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(earlier_edits.submitted(), Vec::new());
@@ -8368,19 +8371,19 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
 /// once the server confirms it.
 #[gpui::test]
 fn a_pending_creation_should_keep_the_place_it_was_moved_to(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_core::hierarchy::Outcome;
 
-    let (harness, cx) = MultiServerHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("A", 1), ("B", 2)], cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("A", 1), ("B", 2)], cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.create_workspace_on(
-                &crate::ui::ServerTarget::Local,
+                &crate::ui::MachineTarget::Local,
                 "C".to_owned(),
                 window,
                 cx,
             );
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -8389,7 +8392,7 @@ fn a_pending_creation_should_keep_the_place_it_was_moved_to(cx: &mut TestAppCont
 
     harness.local.answer(Outcome::Accepted { target: [3; 32] });
     harness.publish(
-        ServerKey::LOCAL,
+        MachineKey::LOCAL,
         &harness.local,
         &[("A", 1), ("B", 2), ("C", 3)],
         cx,
@@ -8403,9 +8406,9 @@ fn a_pending_creation_should_keep_the_place_it_was_moved_to(cx: &mut TestAppCont
 /// headings, and a paired server's row names its machine on its first line. A presented server
 /// with no attached Workspaces adds nothing to the list.
 #[gpui::test]
-fn the_sidebar_should_list_every_servers_workspaces_together(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+fn the_sidebar_should_list_every_machines_workspaces_together(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
     harness.present_direct("studio", named_route("studio"), &[], cx);
     harness.move_workspace("Far", 0, cx);
@@ -8447,7 +8450,7 @@ fn the_sidebar_should_list_every_servers_workspaces_together(cx: &mut TestAppCon
 fn same_named_remote_rows_should_each_name_their_machine(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     harness.present_direct("penguin", named_route("penguin"), &[("SpaceTerm", 1)], cx);
     harness.present_direct("studio", named_route("studio"), &[("SpaceTerm", 1)], cx);
     redraw(cx);
@@ -8475,9 +8478,9 @@ fn same_named_remote_rows_should_each_name_their_machine(cx: &mut TestAppContext
 
 /// Dragging a paired server's Workspace onto this computer's lands it there.
 #[gpui::test]
-fn dragging_a_workspace_should_land_it_among_other_servers_workspaces(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+fn dragging_a_workspace_should_land_it_among_other_machines_workspaces(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     harness.present_direct(
         "penguin",
         named_route("penguin"),
@@ -8531,12 +8534,12 @@ fn reconnecting_a_remote_workspace_should_resume_its_route_alone(cx: &mut TestAp
 
     // Reconnect starts the route's native job, which reports from its own thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
         ("studio", "quic://192.168.1.2:9231"),
         ("penguin", "quic://192.168.1.3:9231"),
     ]);
-    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
+    cx.update(|_, cx| crate::ui::direct_machines::install(direct.clone(), cx));
     harness.present_direct("studio", routes[0], &[("Far", 1)], cx);
     let far = harness.named("Far", cx);
 
@@ -8582,7 +8585,7 @@ const WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(1);
 fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTestContext) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-    use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
+    use spaceterm_core::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
     let (manager, _records, cx) = serverless_workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
@@ -8601,7 +8604,7 @@ fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTe
                 root_tab: FOCUS_TAB,
                 tabs: vec![Tab {
                     worktree: None,
-                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                    worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
                     worktree_repository: None,
                     id: FOCUS_TAB,
                     root_pane: FOCUS_PANE,
@@ -8623,7 +8626,7 @@ fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTe
         ],
     };
     let edits = Rc::new(ScriptedEdits::new(Some(published)));
-    let session_factory = server_session_factory();
+    let session_factory = core_session_factory();
     let panes = ScriptedPanes::new(session_factory);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
@@ -8636,7 +8639,7 @@ fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTe
                 window,
                 cx,
             );
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -8650,7 +8653,7 @@ fn pane_harness(cx: &mut TestAppContext) -> (WorkspacePaneHarness, &mut VisualTe
     // The person attaches the server's other Workspace, then returns to this one.
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.attach_detached_workspace(ServerKey::LOCAL, CLOSE_OTHER_WORKSPACE, window, cx);
+            manager.attach_detached_workspace(MachineKey::LOCAL, CLOSE_OTHER_WORKSPACE, window, cx);
             manager.activate_workspace(WORKSPACE_ROW, window, cx);
         });
     });
@@ -8718,13 +8721,13 @@ fn start_sidebar_rename(harness: &WorkspacePaneHarness, cx: &mut VisualTestConte
 /// the Pane that already held it.
 #[gpui::test]
 fn a_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(cx: &mut TestAppContext) {
-    use crate::terminal::server_session::ServerPaneStatus;
+    use crate::terminal::core_session::CorePaneStatus;
 
     let (harness, cx) = pane_harness(cx);
     let pane = harness.panes.pane(FOCUS_PANE);
     start_sidebar_rename(&harness, cx);
 
-    pane.set(ServerPaneStatus::Reconnecting);
+    pane.set(CorePaneStatus::Reconnecting);
     settle_panes(cx);
     pane.reconnect();
     settle_panes(cx);
@@ -8743,7 +8746,7 @@ fn a_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(cx: &mu
     cx.run_until_parked();
     click("workspace-row-1-active", cx);
     assert!(terminal_is_focused(&harness, cx));
-    pane.set(ServerPaneStatus::Reconnecting);
+    pane.set(CorePaneStatus::Reconnecting);
     settle_panes(cx);
     pane.reconnect();
     settle_panes(cx);
@@ -8758,12 +8761,12 @@ fn a_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(cx: &mu
 /// that explains the change, and nothing else loses the keyboard.
 #[gpui::test]
 fn a_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(cx: &mut TestAppContext) {
-    use crate::terminal::server_session::ServerPaneStatus;
+    use crate::terminal::core_session::CorePaneStatus;
 
     let (harness, cx) = pane_harness(cx);
     let pane = harness.panes.pane(FOCUS_PANE);
 
-    pane.set(ServerPaneStatus::Takeover);
+    pane.set(CorePaneStatus::Takeover);
     settle_panes(cx);
 
     assert!(
@@ -8785,7 +8788,7 @@ fn a_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(cx: &mut Te
 
     // The same takeover while a person types in the sidebar leaves that editor alone.
     start_sidebar_rename(&harness, cx);
-    pane.set(ServerPaneStatus::Takeover);
+    pane.set(CorePaneStatus::Takeover);
     settle_panes(cx);
 
     assert!(
@@ -8802,14 +8805,14 @@ fn a_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(cx: &mut Te
 /// action that recovers the Pane.
 #[gpui::test]
 fn a_pane_notice_should_never_cover_its_screen_actions(cx: &mut TestAppContext) {
-    use crate::server_connection::ServerError;
-    use crate::terminal::server_session::ServerPaneStatus;
+    use crate::machine_connection::CoreError;
+    use crate::terminal::core_session::CorePaneStatus;
 
     let (harness, cx) = pane_harness(cx);
     let pane = harness.panes.pane(FOCUS_PANE);
-    pane.set(ServerPaneStatus::Restored);
+    pane.set(CorePaneStatus::Restored);
     settle_panes(cx);
-    pane.set(ServerPaneStatus::Failed(ServerError::Protocol));
+    pane.set(CorePaneStatus::Failed(CoreError::Protocol));
     cx.simulate_resize(gpui::size(px(640.0), px(260.0)));
     settle_panes(cx);
 
@@ -8851,8 +8854,8 @@ const CLOSE_OTHER_PANE: [u8; 32] = [43; 32];
 type WorkspaceClosePane = ([u8; 32], Option<[u8; 32]>);
 
 /// The other Workspace the server publishes, whose one Pane runs no shell.
-fn close_other() -> spaceterm_server::hierarchy::Workspace {
-    use spaceterm_server::hierarchy::{Pane, Side, Tab, Workspace};
+fn close_other() -> spaceterm_core::hierarchy::Workspace {
+    use spaceterm_core::hierarchy::{Pane, Side, Tab, Workspace};
 
     Workspace {
         id: CLOSE_OTHER_WORKSPACE,
@@ -8863,7 +8866,7 @@ fn close_other() -> spaceterm_server::hierarchy::Workspace {
         root_tab: CLOSE_OTHER_TAB,
         tabs: vec![Tab {
             worktree: None,
-            worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+            worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
             worktree_repository: None,
             id: CLOSE_OTHER_TAB,
             root_pane: CLOSE_OTHER_PANE,
@@ -8884,8 +8887,8 @@ fn close_other() -> spaceterm_server::hierarchy::Workspace {
 }
 
 /// The published inventory once the closed Workspace is gone, leaving only the other one.
-fn close_remaining(revision: u64) -> spaceterm_server::hierarchy::Inventory {
-    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Inventory};
+fn close_remaining(revision: u64) -> spaceterm_core::hierarchy::Inventory {
+    use spaceterm_core::hierarchy::{CloseInventory, ConfirmedPane, Inventory};
 
     Inventory {
         repositories: None,
@@ -8907,8 +8910,8 @@ fn close_remaining(revision: u64) -> spaceterm_server::hierarchy::Inventory {
 fn close_inventory(
     revision: u64,
     tabs: &[([u8; 32], &[WorkspaceClosePane])],
-) -> spaceterm_server::hierarchy::Inventory {
-    use spaceterm_server::hierarchy::{
+) -> spaceterm_core::hierarchy::Inventory {
+    use spaceterm_core::hierarchy::{
         CloseInventory, ConfirmedPane, Inventory, Pane, Side, Tab, Workspace,
     };
 
@@ -8928,7 +8931,7 @@ fn close_inventory(
         .iter()
         .map(|(tab, panes)| Tab {
             worktree: None,
-            worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+            worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
             worktree_repository: None,
             id: *tab,
             root_pane: panes[0].0,
@@ -8973,7 +8976,7 @@ fn close_inventory(
     }
 }
 
-fn close_published() -> spaceterm_server::hierarchy::Inventory {
+fn close_published() -> spaceterm_core::hierarchy::Inventory {
     close_inventory(
         1,
         &[
@@ -8999,7 +9002,7 @@ fn close_harness(cx: &mut TestAppContext) -> (WorkspaceCloseHarness, &mut Visual
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let edits = Rc::new(ScriptedEdits::new(Some(close_published())));
-    let panes = ScriptedPanes::new(server_session_factory());
+    let panes = ScriptedPanes::new(core_session_factory());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.present_workspaces(
@@ -9011,7 +9014,7 @@ fn close_harness(cx: &mut TestAppContext) -> (WorkspaceCloseHarness, &mut Visual
                 window,
                 cx,
             );
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -9023,7 +9026,7 @@ fn close_harness(cx: &mut TestAppContext) -> (WorkspaceCloseHarness, &mut Visual
     // The person attaches the other Workspace, then returns to the one they started in.
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.attach_detached_workspace(ServerKey::LOCAL, CLOSE_OTHER_WORKSPACE, window, cx);
+            manager.attach_detached_workspace(MachineKey::LOCAL, CLOSE_OTHER_WORKSPACE, window, cx);
             manager.activate_workspace(WORKSPACE_ROW, window, cx);
         });
     });
@@ -9036,11 +9039,7 @@ fn close_harness(cx: &mut TestAppContext) -> (WorkspaceCloseHarness, &mut Visual
 
 impl WorkspaceCloseHarness {
     /// The server publishes `inventory`, and the window reads it.
-    fn publish(
-        &self,
-        inventory: spaceterm_server::hierarchy::Inventory,
-        cx: &mut VisualTestContext,
-    ) {
+    fn publish(&self, inventory: spaceterm_core::hierarchy::Inventory, cx: &mut VisualTestContext) {
         self.edits.set_inventory(inventory);
         self.sync(cx);
     }
@@ -9048,21 +9047,18 @@ impl WorkspaceCloseHarness {
     fn sync(&self, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
-                manager.sync_workspaces(ServerKey::LOCAL, window, cx)
+                manager.sync_workspaces(MachineKey::LOCAL, window, cx)
             });
         });
         redraw(cx);
     }
 
-    fn closes(&self) -> Vec<spaceterm_server::hierarchy::Mutation> {
+    fn closes(&self) -> Vec<spaceterm_core::hierarchy::Mutation> {
         self.edits
             .submitted()
             .into_iter()
             .filter(|mutation| {
-                matches!(
-                    mutation,
-                    spaceterm_server::hierarchy::Mutation::Close { .. }
-                )
+                matches!(mutation, spaceterm_core::hierarchy::Mutation::Close { .. })
             })
             .collect()
     }
@@ -9110,11 +9106,11 @@ enum WorkspaceCloseRemoves {
 }
 
 fn close_mutation(
-    target: spaceterm_server::hierarchy::CloseTarget,
+    target: spaceterm_core::hierarchy::CloseTarget,
     panes: &[WorkspaceClosePane],
     removes: WorkspaceCloseRemoves,
-) -> spaceterm_server::hierarchy::Mutation {
-    use spaceterm_server::hierarchy::{CloseConfirmation, ConfirmedPane, Mutation};
+) -> spaceterm_core::hierarchy::Mutation {
+    use spaceterm_core::hierarchy::{CloseConfirmation, ConfirmedPane, Mutation};
 
     Mutation::Close {
         target,
@@ -9141,7 +9137,7 @@ fn close_mutation(
 fn kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_every_client(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Outcome};
+    use spaceterm_core::hierarchy::{CloseTarget as MachineCloseTarget, Outcome};
 
     let (harness, cx) = close_harness(cx);
     right_click("workspace-row-1-active", cx);
@@ -9164,7 +9160,7 @@ fn kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_every_clien
     assert_eq!(
         harness.closes(),
         vec![close_mutation(
-            ServerCloseTarget::KillWorkspace {
+            MachineCloseTarget::KillWorkspace {
                 workspace: CLOSE_WORKSPACE,
             },
             &[
@@ -9234,14 +9230,14 @@ fn control_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
 /// Closing a Tab ends Panes another client controls without taking them over first.
 #[gpui::test]
 fn tab_close_should_end_panes_another_client_controls_without_taking_over(cx: &mut TestAppContext) {
-    use crate::terminal::server_session::ServerPaneStatus;
-    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+    use crate::terminal::core_session::CorePaneStatus;
+    use spaceterm_core::hierarchy::CloseTarget as MachineCloseTarget;
 
     let (harness, cx) = close_harness(cx);
     harness
         .panes
         .pane(CLOSE_ROOT_PANE)
-        .set(ServerPaneStatus::Takeover);
+        .set(CorePaneStatus::Takeover);
     settle_panes(cx);
 
     cx.dispatch_action(crate::ui::CloseTab);
@@ -9252,7 +9248,7 @@ fn tab_close_should_end_panes_another_client_controls_without_taking_over(cx: &m
     assert_eq!(
         harness.closes(),
         vec![close_mutation(
-            ServerCloseTarget::Tab {
+            MachineCloseTarget::Tab {
                 workspace: CLOSE_WORKSPACE,
                 tab: CLOSE_ROOT_TAB,
             },
@@ -9276,7 +9272,7 @@ fn tab_close_should_end_panes_another_client_controls_without_taking_over(cx: &m
 fn close_made_stale_by_another_client_should_end_nothing_until_reviewed_again(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+    use spaceterm_core::hierarchy::CloseTarget as MachineCloseTarget;
 
     let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -9314,7 +9310,7 @@ fn close_made_stale_by_another_client_should_end_nothing_until_reviewed_again(
     assert_eq!(
         harness.closes(),
         vec![close_mutation(
-            ServerCloseTarget::Tab {
+            MachineCloseTarget::Tab {
                 workspace: CLOSE_WORKSPACE,
                 tab: CLOSE_ROOT_TAB,
             },
@@ -9332,7 +9328,7 @@ fn close_made_stale_by_another_client_should_end_nothing_until_reviewed_again(
 fn tab_close_made_final_by_a_sibling_close_should_end_nothing_until_reviewed_again(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+    use spaceterm_core::hierarchy::CloseTarget as MachineCloseTarget;
 
     let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -9358,7 +9354,7 @@ fn tab_close_made_final_by_a_sibling_close_should_end_nothing_until_reviewed_aga
     assert_eq!(
         harness.closes(),
         vec![close_mutation(
-            ServerCloseTarget::Tab {
+            MachineCloseTarget::Tab {
                 workspace: CLOSE_WORKSPACE,
                 tab: CLOSE_ROOT_TAB,
             },
@@ -9373,7 +9369,7 @@ fn tab_close_made_final_by_a_sibling_close_should_end_nothing_until_reviewed_aga
 /// again on its own, and Review stays a person's choice.
 #[gpui::test]
 fn close_stale_answer_should_offer_review_without_retrying(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_core::hierarchy::Outcome;
 
     let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -9441,8 +9437,8 @@ fn close_offline_should_close_nothing_and_say_why(cx: &mut TestAppContext) {
 
 /// Close Pane on a split Pane closes that Pane only, after confirmation.
 #[gpui::test]
-fn pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+fn pane_close_should_ask_the_core_for_that_pane_only(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::CloseTarget as MachineCloseTarget;
 
     let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::ClosePane);
@@ -9453,7 +9449,7 @@ fn pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppContext) 
     assert_eq!(
         harness.closes(),
         vec![close_mutation(
-            ServerCloseTarget::Pane {
+            MachineCloseTarget::Pane {
                 workspace: CLOSE_WORKSPACE,
                 tab: CLOSE_ROOT_TAB,
                 pane: CLOSE_ROOT_PANE,
@@ -9469,7 +9465,7 @@ fn pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppContext) 
 /// and Cancel returns it there.
 #[gpui::test]
 fn caption_close_should_confirm_a_retained_pane_without_starting_it(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+    use spaceterm_core::hierarchy::CloseTarget as MachineCloseTarget;
 
     let (harness, cx) = close_harness(cx);
     // After a server restart the split Pane is retained without a shell.
@@ -9522,7 +9518,7 @@ fn caption_close_should_confirm_a_retained_pane_without_starting_it(cx: &mut Tes
     assert_eq!(
         harness.closes(),
         vec![close_mutation(
-            ServerCloseTarget::Pane {
+            MachineCloseTarget::Pane {
                 workspace: CLOSE_WORKSPACE,
                 tab: CLOSE_ROOT_TAB,
                 pane: CLOSE_SPLIT_PANE,
@@ -9588,7 +9584,7 @@ fn close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut TestAppC
 /// The final Tab's close hides the Workspace while the server decides the operation.
 #[gpui::test]
 fn tab_closes_should_reconcile_through_publication_down_to_the_final_tab(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Outcome};
+    use spaceterm_core::hierarchy::{CloseTarget as MachineCloseTarget, Outcome};
 
     let (harness, cx) = close_harness(cx);
     harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
@@ -9602,7 +9598,7 @@ fn tab_closes_should_reconcile_through_publication_down_to_the_final_tab(cx: &mu
     assert_eq!(
         harness.closes(),
         [close_mutation(
-            ServerCloseTarget::Tab {
+            MachineCloseTarget::Tab {
                 workspace: CLOSE_WORKSPACE,
                 tab: CLOSE_ROOT_TAB,
             },
@@ -9649,7 +9645,7 @@ fn tab_closes_should_reconcile_through_publication_down_to_the_final_tab(cx: &mu
     assert_eq!(
         harness.closes().last(),
         Some(&close_mutation(
-            ServerCloseTarget::Tab {
+            MachineCloseTarget::Tab {
                 workspace: CLOSE_WORKSPACE,
                 tab: CLOSE_SECOND_TAB,
             },
@@ -9805,8 +9801,8 @@ struct AttachmentHarness {
     panes: Rc<crate::ui::workspaces::testing::ScriptedPanes>,
 }
 
-fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
-    use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
+fn attachment_inventory() -> spaceterm_core::hierarchy::Inventory {
+    use spaceterm_core::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
     let workspace = |id, name: &str, tab, pane| Workspace {
         id,
@@ -9817,7 +9813,7 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
         root_tab: tab,
         tabs: vec![Tab {
             worktree: None,
-            worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+            worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
             worktree_repository: None,
             id: tab,
             root_pane: pane,
@@ -9838,11 +9834,11 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
     Inventory {
         repositories: None,
         revision: 1,
-        close: Some(spaceterm_server::hierarchy::CloseInventory {
+        close: Some(spaceterm_core::hierarchy::CloseInventory {
             boot: [27; 32],
             controls: Vec::new(),
             sessions: [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE]
-                .map(|id| spaceterm_server::hierarchy::ConfirmedPane { id, session: None })
+                .map(|id| spaceterm_core::hierarchy::ConfirmedPane { id, session: None })
                 .to_vec(),
         }),
         workspaces: vec![
@@ -9865,7 +9861,7 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let edits = Rc::new(ScriptedEdits::new(Some(attachment_inventory())));
-    let panes = ScriptedPanes::new(server_session_factory());
+    let panes = ScriptedPanes::new(core_session_factory());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.present_workspaces(
@@ -9893,7 +9889,7 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
     // The person attaches the other Workspace, then returns to the one they started in.
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.attach_detached_workspace(ServerKey::LOCAL, ATTACHED_DOCS, window, cx);
+            manager.attach_detached_workspace(MachineKey::LOCAL, ATTACHED_DOCS, window, cx);
             manager.activate_workspace(WorkspaceId::new(1), window, cx);
             manager.focus(window, cx);
         });
@@ -9907,7 +9903,7 @@ impl AttachmentHarness {
     fn sync(&self, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
-                manager.sync_workspaces(ServerKey::LOCAL, window, cx)
+                manager.sync_workspaces(MachineKey::LOCAL, window, cx)
             });
         });
         settle_panes(cx);
@@ -10089,8 +10085,8 @@ fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_p
 fn returning_to_an_ended_pane_should_keep_session_ended_without_starting_a_shell(
     cx: &mut TestAppContext,
 ) {
-    use crate::terminal::server_session::ServerPaneStatus;
-    use spaceterm_server::pane::SessionEnd;
+    use crate::terminal::core_session::CorePaneStatus;
+    use spaceterm_core::pane::SessionEnd;
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = attachment_harness(cx);
@@ -10104,9 +10100,7 @@ fn returning_to_an_ended_pane_should_keep_session_ended_without_starting_a_shell
         settle_panes(cx);
     };
     activate(1, cx);
-    pane.set(ServerPaneStatus::SessionEnded(SessionEnd::Exited {
-        code: 1,
-    }));
+    pane.set(CorePaneStatus::SessionEnded(SessionEnd::Exited { code: 1 }));
     settle_panes(cx);
     let cause = "Session Ended. The shell exited with code 1.";
     assert!(A11yTree::read(cx).find(cause).is_some());
@@ -10135,7 +10129,7 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
         harness
             .panes
             .pane(pane)
-            .set(crate::terminal::server_session::ServerPaneStatus::Restored);
+            .set(crate::terminal::core_session::CorePaneStatus::Restored);
     }
     settle_panes(cx);
     let selections = harness.panes.pane(ATTACHED_DOCS_PANE).selections();
@@ -10144,7 +10138,7 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
     let landing = A11yTree::read(cx)
         .focused()
         .map(|node| node["aria"]["label"].clone());
-    assert_eq!(landing, Some(serde_json::json!("Server Restarted")));
+    assert_eq!(landing, Some(serde_json::json!("SpaceTerm Core Restarted")));
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     let focused = A11yTree::read(cx)
@@ -10345,7 +10339,7 @@ fn offline_detach_should_still_stop_presenting_while_edits_stay_unavailable(
 }
 
 #[gpui::test]
-fn the_offline_empty_view_should_name_the_unreachable_server_and_offer_a_way_back(
+fn the_offline_empty_view_should_name_the_unreachable_machine_and_offer_a_way_back(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_ui::a11y_testing::A11yTree;
@@ -10404,10 +10398,10 @@ fn try_again_on_the_offline_empty_view_should_reconnect_now_and_say_when_it_fail
         .is_some();
     harness
         .edits
-        .fail_attempt(spaceterm_server::ServerError::NotRunning);
+        .fail_attempt(spaceterm_core::CoreError::NotRunning);
     harness.sync(cx);
     let failed = A11yTree::read(cx)
-        .find_text("Still not connected. The server is not running.")
+        .find_text("Still not connected. SpaceTerm Core is not running.")
         .is_some();
 
     assert_eq!(retries, 1, "Try Again asks the connection to reconnect now");
@@ -10416,19 +10410,17 @@ fn try_again_on_the_offline_empty_view_should_reconnect_now_and_say_when_it_fail
 }
 
 #[gpui::test]
-fn a_stopped_server_offers_start_server_on_the_empty_view(cx: &mut TestAppContext) {
+fn a_stopped_core_offers_start_core_on_the_empty_view(cx: &mut TestAppContext) {
     let (harness, cx) = attachment_harness(cx);
     harness.edits.set_connected(false);
-    harness
-        .edits
-        .set_error(spaceterm_server::ServerError::Stopped);
+    harness.edits.set_error(spaceterm_core::CoreError::Stopped);
     harness.sync(cx);
     harness.detach(1, cx);
     harness.detach(2, cx);
 
     assert!(
         cx.debug_bounds("server-launch-start").is_some(),
-        "Start Server"
+        "Start SpaceTerm Core"
     );
     assert!(
         cx.debug_bounds(super::empty::RECONNECT_SELECTOR).is_none(),
@@ -10677,8 +10669,8 @@ mod workspace_repositories {
     use std::rc::Rc;
 
     use gpui::{Entity, TestAppContext, VisualTestContext};
-    use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
-    use spaceterm_server::repository::{
+    use spaceterm_core::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
+    use spaceterm_core::repository::{
         ChangeSummary, ChangeTotal, DirectoryFacts, GitToolStatus, Repository, RepositoryHead,
         RepositoryReadError, Snapshot, ToolVersion, WorktreeHead, WorktreeInventory,
         WorktreeRecord,
@@ -10770,7 +10762,7 @@ mod workspace_repositories {
                 }),
                 directories,
                 pinned_worktrees: Vec::new(),
-                pin_check: spaceterm_server::repository::PinCheckState::Ready,
+                pin_check: spaceterm_core::repository::PinCheckState::Ready,
             }),
             revision: 1,
             close: None,
@@ -10785,7 +10777,7 @@ mod workspace_repositories {
                     Tab {
                         worktree: Some(MAIN_ROOT.into()),
                         worktree_membership:
-                            spaceterm_server::hierarchy::WorktreeMembership::Following,
+                            spaceterm_core::hierarchy::WorktreeMembership::Following,
                         worktree_repository: Some(MAIN_ROOT.into()),
                         id: ROOT_TAB,
                         root_pane: ROOT_PANE,
@@ -10794,7 +10786,7 @@ mod workspace_repositories {
                     Tab {
                         worktree: Some(FEATURE_ROOT.into()),
                         worktree_membership:
-                            spaceterm_server::hierarchy::WorktreeMembership::Following,
+                            spaceterm_core::hierarchy::WorktreeMembership::Following,
                         worktree_repository: Some(MAIN_ROOT.into()),
                         id: FEATURE_TAB,
                         root_pane: FEATURE_PANE,
@@ -10842,7 +10834,7 @@ mod workspace_repositories {
     /// selected.
     mod reveal {
         use super::*;
-        use spaceterm_server::hierarchy::{Placement, WorktreeMembership};
+        use spaceterm_core::hierarchy::{Placement, WorktreeMembership};
 
         const NEW_TAB: [u8; 32] = [26; 32];
         const NEW_PANE: [u8; 32] = [27; 32];
@@ -10894,7 +10886,7 @@ mod workspace_repositories {
 
         fn focused(harness: &Harness, cx: &mut VisualTestContext) -> Option<[u8; 32]> {
             let tabs = tabs(harness, cx);
-            tabs.read_with(cx, |tabs, cx| tabs.focused_server_pane(cx))
+            tabs.read_with(cx, |tabs, cx| tabs.focused_core_pane(cx))
         }
 
         fn reveal(harness: &Harness, origin: (TabId, PaneId), cx: &mut VisualTestContext) {
@@ -10959,7 +10951,7 @@ mod workspace_repositories {
             FilePreviewError, FilePreviewFactory, FilePreviewPanel,
         };
         use crate::ui::workspace_manager::desktop_requests::DesktopRequests;
-        use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+        use spaceterm_core::hierarchy::{CloseInventory, ConfirmedPane};
         use std::cell::RefCell;
         use std::path::Path;
         use std::time::{Duration, Instant};
@@ -10969,10 +10961,10 @@ mod workspace_repositories {
         const SESSION: [u8; 32] = [42; 32];
         const DESKTOP_WORKSPACE: WorkspaceId = WorkspaceId::new(1);
 
-        fn server_of(origin: &ServerOrigin, _: &App) -> Option<[u8; 32]> {
+        fn core_of(origin: &MachineOrigin, _: &App) -> Option<[u8; 32]> {
             Some(match origin {
-                ServerOrigin::Local => LOCAL,
-                ServerOrigin::Direct(_) => PENGUIN,
+                MachineOrigin::Local => LOCAL,
+                MachineOrigin::Direct(_) => PENGUIN,
             })
         }
 
@@ -10993,7 +10985,7 @@ mod workspace_repositories {
         }
 
         fn context() -> DesktopRequests {
-            DesktopRequests::new(Rc::new(server_of))
+            DesktopRequests::new(Rc::new(core_of))
         }
 
         /// Asks `manager` and returns its answer once it settles. File validation runs on a
@@ -11056,10 +11048,10 @@ mod workspace_repositories {
             ask_with(&harness.manager, request, &context(), cx).expect("an answer")
         }
 
-        fn open(server: [u8; 32], pane: [u8; 32], path: &Path, preview: bool) -> Request {
+        fn open(core: [u8; 32], pane: [u8; 32], path: &Path, preview: bool) -> Request {
             Request::Open {
                 session: SessionContext {
-                    server,
+                    core,
                     pane,
                     session: SESSION,
                 },
@@ -11078,7 +11070,7 @@ mod workspace_repositories {
                 let focused = manager
                     .workspaces
                     .workspace(harness.binding)
-                    .and_then(|entry| entry.payload().read(cx).focused_server_pane(cx));
+                    .and_then(|entry| entry.payload().read(cx).focused_core_pane(cx));
                 (active, focused)
             })
         }
@@ -11115,7 +11107,7 @@ mod workspace_repositories {
             let reply = ask(
                 &harness,
                 Request::Show {
-                    server: LOCAL,
+                    core: LOCAL,
                     workspace: WORKSPACE,
                     tab: Some(FEATURE_TAB),
                     pane: Some(FEATURE_PANE),
@@ -11132,14 +11124,14 @@ mod workspace_repositories {
         #[gpui::test]
         fn show_refuses_what_this_window_does_not_present_without_moving(cx: &mut TestAppContext) {
             let (harness, cx) = harness(cx, live());
-            for (server, workspace, tab, pane) in [
+            for (core, workspace, tab, pane) in [
                 (PENGUIN, WORKSPACE, None, None),
                 (LOCAL, [77; 32], None, None),
                 (LOCAL, WORKSPACE, Some([77; 32]), None),
                 (LOCAL, WORKSPACE, Some(ROOT_TAB), Some(FEATURE_PANE)),
             ] {
                 let request = Request::Show {
-                    server,
+                    core,
                     workspace,
                     tab,
                     pane,
@@ -11171,7 +11163,7 @@ mod workspace_repositories {
         }
 
         #[gpui::test]
-        fn open_refuses_another_server_pane_or_session(cx: &mut TestAppContext) {
+        fn open_refuses_another_core_pane_or_session(cx: &mut TestAppContext) {
             let files = Files::new();
             let (harness, cx) = harness(cx, live());
             for request in [
@@ -11179,7 +11171,7 @@ mod workspace_repositories {
                 open(LOCAL, [77; 32], &files.file(), false),
                 Request::Open {
                     session: SessionContext {
-                        server: LOCAL,
+                        core: LOCAL,
                         pane: ROOT_PANE,
                         session: [43; 32],
                     },
@@ -11277,7 +11269,7 @@ mod workspace_repositories {
             let shown = ask_with(
                 &harness.manager,
                 Request::Show {
-                    server: LOCAL,
+                    core: LOCAL,
                     workspace: WORKSPACE,
                     tab: None,
                     pane: Some(FEATURE_PANE),
@@ -11552,13 +11544,13 @@ mod workspace_repositories {
             cx.update(|window, cx| {
                 manager.update(cx, |manager, cx| {
                     let penguin = super::super::named_route("penguin");
-                    let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
+                    let source = crate::ui::core_worktrees::Client::route_source(penguin, cx);
                     source.replace_transport(Rc::clone(&edits) as Rc<_>);
-                    let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+                    let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
                         TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
                     ));
-                    let key = manager.present_server_workspaces(
-                        ServerOrigin::Direct(crate::ui::workspaces::DirectServer {
+                    let key = manager.present_core_workspaces(
+                        MachineOrigin::Direct(crate::ui::workspaces::DirectMachine {
                             route: penguin,
                             name: "penguin".into(),
                         }),
@@ -11612,7 +11604,7 @@ mod workspace_repositories {
                 root_tab: OTHER_TAB,
                 tabs: vec![Tab {
                     worktree: None,
-                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                    worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
                     worktree_repository: None,
                     id: OTHER_TAB,
                     root_pane: OTHER_PANE,
@@ -11623,7 +11615,7 @@ mod workspace_repositories {
         if let Some(close) = inventory.close.as_mut() {
             close
                 .sessions
-                .push(spaceterm_server::hierarchy::ConfirmedPane {
+                .push(spaceterm_core::hierarchy::ConfirmedPane {
                     id: OTHER_PANE,
                     session: None,
                 });
@@ -11637,7 +11629,7 @@ mod workspace_repositories {
             self.edits.set_inventory(with_other(inventory));
             cx.update(|window, cx| {
                 self.manager.update(cx, |manager, cx| {
-                    manager.sync_workspaces(ServerKey::LOCAL, window, cx)
+                    manager.sync_workspaces(MachineKey::LOCAL, window, cx)
                 });
             });
             cx.run_until_parked();
@@ -11713,7 +11705,7 @@ mod workspace_repositories {
     ) -> (Harness, &'a mut VisualTestContext) {
         let (manager, _, cx) = serverless_workspace_manager(cx);
         let edits = Rc::new(ScriptedEdits::new(Some(with_other(initial))));
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(sessions));
+        let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(sessions));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.present_workspaces(
@@ -11725,10 +11717,10 @@ mod workspace_repositories {
                     window,
                     cx,
                 );
-                manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+                manager.sync_workspaces(MachineKey::LOCAL, window, cx);
                 // The person attaches this Workspace, then returns to the other one, so this
                 // one is inactive.
-                manager.attach_detached_workspace(ServerKey::LOCAL, WORKSPACE, window, cx);
+                manager.attach_detached_workspace(MachineKey::LOCAL, WORKSPACE, window, cx);
                 manager.activate_workspace(WorkspaceId::new(1), window, cx);
             });
         });
@@ -11760,14 +11752,14 @@ mod workspace_repositories {
     ) -> (
         Harness,
         Rc<ScriptedEdits>,
-        Arc<crate::ui::server_worktrees::testing::ScriptedReads>,
+        Arc<crate::ui::core_worktrees::testing::ScriptedReads>,
         &mut VisualTestContext,
     ) {
         let (manager, sessions, cx) = workspace_manager(cx);
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
-        let reads = crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}");
+        let reads = crate::ui::core_worktrees::testing::ScriptedReads::new("~/{branch}");
         cx.update(|window, cx| {
-            crate::ui::server_worktrees::testing::present_direct(
+            crate::ui::core_worktrees::testing::present_direct(
                 super::named_route("penguin"),
                 Rc::clone(&edits),
                 Arc::clone(&reads),
@@ -11784,9 +11776,7 @@ mod workspace_repositories {
                     .workspaces
                     .iter()
                     .map(|workspace| workspace.id())
-                    .find(|id| {
-                        manager.has_workspace(*id) && !manager.is_local_server_workspace(*id)
-                    })
+                    .find(|id| manager.has_workspace(*id) && !manager.is_local_core_workspace(*id))
             })
             .expect("penguin's Workspace joins the sidebar");
         (
@@ -11811,14 +11801,14 @@ mod workspace_repositories {
         cx: &mut Context<WorkspaceManager>,
     ) {
         let penguin = super::named_route("penguin");
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
+        let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
             TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
         ));
         // As launch does, the window presents the route through its one source.
-        let source = crate::ui::server_worktrees::Client::route_source(penguin, cx);
+        let source = crate::ui::core_worktrees::Client::route_source(penguin, cx);
         source.replace_transport(Rc::clone(edits) as Rc<_>);
-        let key = manager.present_server_workspaces(
-            ServerOrigin::Direct(crate::ui::workspaces::DirectServer {
+        let key = manager.present_core_workspaces(
+            MachineOrigin::Direct(crate::ui::workspaces::DirectMachine {
                 route: penguin,
                 name: "penguin".into(),
             }),
@@ -11844,10 +11834,10 @@ mod workspace_repositories {
     fn reopened_window(edits: &Rc<ScriptedEdits>, cx: &VisualTestContext) -> VisualTestContext {
         let mut app = cx.cx.clone();
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-            server_sessions(TestTerminalSessionRecords::default()).with_fallback_title("zsh"),
+            core_sessions(TestTerminalSessionRecords::default()).with_fallback_title("zsh"),
         );
         let handle = app.add_window(|window, cx| {
-            local_server_manager(
+            local_core_manager(
                 session_factory,
                 std::env::temp_dir(),
                 workspace_adapters(),
@@ -11871,7 +11861,7 @@ mod workspace_repositories {
     /// routes, over `edits`, which is [`ScriptedEdits::relaunched`].
     fn relaunched_window(edits: &Rc<ScriptedEdits>, cx: &VisualTestContext) -> VisualTestContext {
         cx.cx
-            .update(crate::ui::server_worktrees::testing::forget_routes);
+            .update(crate::ui::core_worktrees::testing::forget_routes);
         reopened_window(edits, cx)
     }
 
@@ -11892,7 +11882,7 @@ mod workspace_repositories {
     /// A paired server's Workspace offers New Worktree and Remove Worktree, because that server
     /// runs Git on its own computer.
     #[gpui::test]
-    fn a_paired_server_workspace_should_offer_worktree_writes_through_its_server(
+    fn a_paired_machine_workspace_should_offer_worktree_writes_through_its_machine(
         cx: &mut TestAppContext,
     ) {
         let (harness, _, _, cx) = paired_harness(cx, published(1, "main", true));
@@ -11916,10 +11906,10 @@ mod workspace_repositories {
     /// own route, about its own paths. This computer's server is never asked and no client-local
     /// Git or filesystem check runs on the other computer's paths.
     #[gpui::test]
-    fn paired_server_worktree_operations_should_read_only_through_that_server(
+    fn paired_machine_worktree_operations_should_read_only_through_that_machine(
         cx: &mut TestAppContext,
     ) {
-        use spaceterm_server::worktree::Read;
+        use spaceterm_core::worktree::Read;
 
         let (harness, edits, reads, cx) = paired_harness(cx, published(1, "main", true));
         let feature = harness
@@ -11936,7 +11926,7 @@ mod workspace_repositories {
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
                 assert!(manager.new_worktree(harness.binding, window, cx));
-                manager.request_server_worktree_removal(harness.binding, feature, window, cx);
+                manager.request_machine_worktree_removal(harness.binding, feature, window, cx);
             })
         });
         cx.run_until_parked();
@@ -11962,7 +11952,7 @@ mod workspace_repositories {
         );
         assert!(
             cx.update(|_, cx| cx
-                .try_global::<crate::ui::server_worktrees::Client>()
+                .try_global::<crate::ui::core_worktrees::Client>()
                 .is_none()),
             "this computer's server writer is never created for penguin's Worktrees"
         );
@@ -11974,9 +11964,9 @@ mod workspace_repositories {
     }
 
     #[gpui::test]
-    fn a_new_worktree_uses_the_owning_servers_location(cx: &mut TestAppContext) {
-        use spaceterm_server::hierarchy::Mutation;
-        use spaceterm_server::worktree::{Branch, BranchName, Operation};
+    fn a_new_worktree_uses_the_owning_machines_location(cx: &mut TestAppContext) {
+        use spaceterm_core::hierarchy::Mutation;
+        use spaceterm_core::worktree::{Branch, BranchName, Operation};
         use spaceterm_ui::a11y_testing::A11yTree;
 
         // This server uses ~/{branch}; the client's retained default is ~/.worktrees/....
@@ -12000,7 +11990,7 @@ mod workspace_repositories {
         assert_eq!(
             edits.submitted(),
             [Mutation::Worktree(Operation::Create {
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
                 workspace: WORKSPACE,
                 root: MAIN_ROOT.into(),
                 path: "/srv/home/topic-new".into(),
@@ -12058,10 +12048,10 @@ mod workspace_repositories {
     /// Answers the form's Create, which reads the answer on its next poll.
     fn answer_worktree(
         edits: &ScriptedEdits,
-        error: spaceterm_server::worktree::Error,
+        error: spaceterm_core::worktree::Error,
         cx: &mut VisualTestContext,
     ) {
-        edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(error));
+        edits.answer(spaceterm_core::hierarchy::Outcome::WorktreeFailed(error));
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(50));
         cx.run_until_parked();
@@ -12074,7 +12064,7 @@ mod workspace_repositories {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_worktree(&harness, cx);
 
-        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::BranchExists, cx);
 
         let tree = A11yTree::read(cx);
         assert!(
@@ -12091,7 +12081,7 @@ mod workspace_repositories {
     fn a_failure_the_form_presented_should_never_alert(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_worktree(&harness, cx);
-        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::BranchExists, cx);
         let reported = form_reports("Branch name already exists.", cx);
         click("modal-action-new-worktree-cancel", cx);
         let alerted = alerts_worktree_failure(cx);
@@ -12118,8 +12108,8 @@ mod workspace_repositories {
     fn an_answer_a_crash_interrupted_should_alert_once_after_the_relaunch(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_worktree(&harness, cx);
-        edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(
-            spaceterm_server::worktree::Error::BranchExists,
+        edits.answer(spaceterm_core::hierarchy::Outcome::WorktreeFailed(
+            spaceterm_core::worktree::Error::BranchExists,
         ));
         let relaunched = Rc::new(edits.relaunched());
         close_window(cx);
@@ -12153,8 +12143,8 @@ mod workspace_repositories {
         create_and_abandon(&harness, &edits, "topic/one", cx);
         create_named_worktree(&harness, "topic/two", cx);
 
-        answer_worktree(&edits, spaceterm_server::worktree::Error::Location, cx);
-        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::Location, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::BranchExists, cx);
         let reported = form_reports("Branch name already exists.", cx);
         let alerted_behind_the_form = alerts_worktree_failure(cx);
         click("modal-action-new-worktree-cancel", cx);
@@ -12184,7 +12174,7 @@ mod workspace_repositories {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_and_abandon(&harness, &edits, "topic/one", cx);
         open_worktree_form(&harness, "topic/two", cx);
-        answer_worktree(&edits, spaceterm_server::worktree::Error::Location, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::Location, cx);
         let queued = !alerts_worktree_failure(cx) && edits.unseen().len() == 1;
 
         close_window(cx);
@@ -12212,7 +12202,7 @@ mod workspace_repositories {
     fn an_interrupted_create_should_ask_for_a_check_once(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_worktree(&harness, cx);
-        answer_worktree(&edits, spaceterm_server::worktree::Error::Interrupted, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::Interrupted, cx);
         let form_closed = cx
             .debug_bounds("modal-action-new-worktree-create")
             .is_none();
@@ -12238,12 +12228,12 @@ mod workspace_repositories {
     /// so the failure shows again, once.
     #[gpui::test]
     fn an_unanswered_alert_should_show_again_after_a_relaunch(cx: &mut TestAppContext) {
-        use spaceterm_server::worktree::{Branch, BranchName, Operation};
+        use spaceterm_core::worktree::{Branch, BranchName, Operation};
 
         let (_, edits, _, cx) = paired_harness(cx, published(1, "main", true));
-        edits.submit_for_recovery(spaceterm_server::hierarchy::Mutation::Worktree(
+        edits.submit_for_recovery(spaceterm_core::hierarchy::Mutation::Worktree(
             Operation::Create {
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
                 workspace: WORKSPACE,
                 root: MAIN_ROOT.into(),
                 path: "/srv/home/topic-unanswered".into(),
@@ -12253,8 +12243,8 @@ mod workspace_repositories {
                 },
             },
         ));
-        edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(
-            spaceterm_server::worktree::Error::BranchExists,
+        edits.answer(spaceterm_core::hierarchy::Outcome::WorktreeFailed(
+            spaceterm_core::worktree::Error::BranchExists,
         ));
         let opened = alerts_worktree_failure(cx);
         close_window(cx);
@@ -12283,7 +12273,7 @@ mod workspace_repositories {
     fn a_form_closed_without_a_response_should_hand_its_failure_back(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_worktree(&harness, cx);
-        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::BranchExists, cx);
         let reported = form_reports("Branch name already exists.", cx);
 
         close_window(cx);
@@ -12310,14 +12300,14 @@ mod workspace_repositories {
     #[gpui::test]
     fn a_location_failure_settings_never_showed_should_alert_once(cx: &mut TestAppContext) {
         let (_, edits, _, cx) = paired_harness(cx, published(1, "main", true));
-        edits.submit_for_recovery(spaceterm_server::hierarchy::Mutation::Worktree(
-            spaceterm_server::worktree::Operation::SetLocation {
+        edits.submit_for_recovery(spaceterm_core::hierarchy::Mutation::Worktree(
+            spaceterm_core::worktree::Operation::SetLocation {
                 version: 0,
                 template: "~/elsewhere/{branch}".into(),
             },
         ));
-        edits.answer(spaceterm_server::hierarchy::Outcome::WorktreeFailed(
-            spaceterm_server::worktree::Error::Changed,
+        edits.answer(spaceterm_core::hierarchy::Outcome::WorktreeFailed(
+            spaceterm_core::worktree::Error::Changed,
         ));
         cx.run_until_parked();
         let alerted = cx
@@ -12343,7 +12333,7 @@ mod workspace_repositories {
     fn a_retry_whose_form_closed_should_alert_its_own_failure_once(cx: &mut TestAppContext) {
         let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         create_worktree(&harness, cx);
-        answer_worktree(&edits, spaceterm_server::worktree::Error::BranchExists, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::BranchExists, cx);
         click("modal-action-new-worktree-create", cx);
         edits.set_connected(false);
         cx.executor()
@@ -12352,7 +12342,7 @@ mod workspace_repositories {
         click("modal-action-new-worktree-cancel", cx);
         edits.set_connected(true);
 
-        answer_worktree(&edits, spaceterm_server::worktree::Error::Branch, cx);
+        answer_worktree(&edits, spaceterm_core::worktree::Error::Branch, cx);
         let alerted = alerts_worktree_failure(cx);
         click("modal-action-server-worktree-operation-failed-ok", cx);
         close_window(cx);
@@ -12411,7 +12401,7 @@ mod workspace_repositories {
 
     /// Worktree actions follow the owning server's availability and existing Tab membership.
     #[gpui::test]
-    fn worktree_rows_should_follow_server_membership_and_available_actions(
+    fn worktree_rows_should_follow_machine_membership_and_available_actions(
         cx: &mut TestAppContext,
     ) {
         let (harness, cx) = harness(cx, published(1, "main", true));
@@ -12434,14 +12424,14 @@ mod workspace_repositories {
         );
         assert_eq!(rows[0].removal, WorktreeRemoval::Main);
         // This window has no writer for the server, so nothing can remove the Worktree yet.
-        assert_eq!(rows[1].removal, WorktreeRemoval::NeedsServer);
+        assert_eq!(rows[1].removal, WorktreeRemoval::NeedsCore);
         assert!(rows.iter().all(|row| !row.opens_tabs() && row.closes_tabs));
         assert!(!creates_worktrees, "New Worktree stays unavailable");
     }
 
     /// A second Workspace pinned through a server-side alias of the feature Worktree, which the
     /// server reports as holding a pin once its check of `state` publishes.
-    fn pinned_through_an_alias(state: spaceterm_server::repository::PinCheckState) -> Inventory {
+    fn pinned_through_an_alias(state: spaceterm_core::repository::PinCheckState) -> Inventory {
         let mut initial = published(1, "main", true);
         // This path is an opaque alias on the server. The client cannot resolve it locally.
         let mut other = initial.workspaces[0].clone();
@@ -12488,8 +12478,8 @@ mod workspace_repositories {
     }
 
     #[gpui::test]
-    fn a_server_physical_pin_should_disable_removal_across_workspaces(cx: &mut TestAppContext) {
-        use spaceterm_server::repository::PinCheckState;
+    fn a_machine_physical_pin_should_disable_removal_across_workspaces(cx: &mut TestAppContext) {
+        use spaceterm_core::repository::PinCheckState;
 
         let removal = feature_removal_reads(
             pinned_through_an_alias(PinCheckState::Ready),
@@ -12501,8 +12491,8 @@ mod workspace_repositories {
 
     /// A pin list from before the current check confirms nothing, and removal waits for it.
     #[gpui::test]
-    fn removal_should_wait_while_the_server_checks_pinned_directories(cx: &mut TestAppContext) {
-        use spaceterm_server::repository::PinCheckState;
+    fn removal_should_wait_while_the_machine_checks_pinned_directories(cx: &mut TestAppContext) {
+        use spaceterm_core::repository::PinCheckState;
 
         let removal = feature_removal_reads(
             pinned_through_an_alias(PinCheckState::Checking),
@@ -12513,8 +12503,8 @@ mod workspace_repositories {
     }
 
     #[gpui::test]
-    fn removal_should_stay_unavailable_when_the_server_cannot_check_pins(cx: &mut TestAppContext) {
-        use spaceterm_server::repository::PinCheckState;
+    fn removal_should_stay_unavailable_when_the_machine_cannot_check_pins(cx: &mut TestAppContext) {
+        use spaceterm_core::repository::PinCheckState;
 
         let mut initial = published(1, "main", true);
         initial.repositories.as_mut().unwrap().pin_check = PinCheckState::Unavailable;
@@ -12674,7 +12664,7 @@ mod workspace_repositories {
     /// Tab still stays in the saved repository as a Missing Worktree, and the rows follow what git
     /// lists from the Main Worktree: an addition and a prune.
     #[gpui::test]
-    fn a_fresh_window_should_find_the_repository_of_a_removed_worktree_after_a_server_restart(
+    fn a_fresh_window_should_find_the_repository_of_a_removed_worktree_after_a_machine_restart(
         cx: &mut TestAppContext,
     ) {
         let mut unread = restarted_in_removed_feature(1, &[]);
@@ -12773,9 +12763,7 @@ mod workspace_repositories {
 
     /// Activating a Worktree row shows its Tab, and one without Tabs opens nothing.
     #[gpui::test]
-    fn activating_a_worktree_should_show_its_tab_without_asking_the_server(
-        cx: &mut TestAppContext,
-    ) {
+    fn activating_a_worktree_should_show_its_tab_without_asking_the_core(cx: &mut TestAppContext) {
         let (harness, cx) = harness(cx, published(1, "main", true));
         let feature = harness
             .row(cx)
@@ -13013,7 +13001,7 @@ mod workspace_repositories {
     /// Worktree's Tabs in the strip and opens the latest new Tab there, even when a reading that
     /// does not yet carry the new Tabs arrives in between.
     #[gpui::test]
-    fn new_tabs_in_a_worktree_should_stay_in_its_strip_before_the_server_answers(
+    fn new_tabs_in_a_worktree_should_stay_in_its_strip_before_the_core_answers(
         cx: &mut TestAppContext,
     ) {
         let with_second_main_tab = |revision| {
@@ -13081,8 +13069,8 @@ mod workspace_repositories {
 
     #[gpui::test]
     fn worktree_menu_new_tab_uses_its_recent_tabs_focused_pane(cx: &mut TestAppContext) {
-        use spaceterm_server::hierarchy::Mutation;
-        use spaceterm_server::worktree::Operation;
+        use spaceterm_core::hierarchy::Mutation;
+        use spaceterm_core::worktree::Operation;
 
         let mut initial = published(1, "main", true);
         let mut recent = initial.workspaces[0].tabs[1].clone();
@@ -13132,15 +13120,15 @@ mod workspace_repositories {
                 source: Some([72; 32]),
                 root: MAIN_ROOT.into(),
                 path: FEATURE_ROOT.into(),
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             })]
         );
     }
 
     #[gpui::test]
-    fn worktree_rows_copy_the_path_and_confirm_their_server_tabs(cx: &mut TestAppContext) {
-        use spaceterm_server::hierarchy::{
-            CloseInventory, CloseTarget as ServerCloseTarget, ConfirmedPane, Mutation, Outcome,
+    fn worktree_rows_copy_the_path_and_confirm_their_machine_tabs(cx: &mut TestAppContext) {
+        use spaceterm_core::hierarchy::{
+            CloseInventory, CloseTarget as MachineCloseTarget, ConfirmedPane, Mutation, Outcome,
         };
         let mut initial = published(1, "main", true);
         let mut second = initial.workspaces[0].tabs[1].clone();
@@ -13188,7 +13176,7 @@ mod workspace_repositories {
                 .is_some()
         );
         click("modal-action-close-confirm", cx);
-        let target = ServerCloseTarget::Worktree {
+        let target = MachineCloseTarget::Worktree {
             workspace: WORKSPACE,
             tab: FEATURE_TAB,
         };
@@ -14548,15 +14536,15 @@ fn named_route(name: &str) -> crate::direct_connections::DirectRouteId {
 
 /// Two saved paired servers, "penguin" presented in the window and "studio" not connected,
 /// with penguin's scripted edits. Neither route runs a connection job.
-fn saved_servers(
-    harness: &MultiServerHarness,
+fn saved_machines(
+    harness: &MultiMachineHarness,
     cx: &mut VisualTestContext,
 ) -> Rc<crate::ui::workspaces::testing::ScriptedEdits> {
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
         ("penguin", "quic://192.168.1.2:9231"),
         ("studio", "quic://192.168.1.3:9231"),
     ]);
-    cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
+    cx.update(|_, cx| crate::ui::direct_machines::install(direct, cx));
     let (_, edits) = harness.present_direct("penguin", routes[0], &[], cx);
     redraw(cx);
     edits
@@ -14565,11 +14553,11 @@ fn saved_servers(
 /// The sidebar's New Workspace menu offers remote creation only on saved servers, one row each,
 /// and ends each list with Add Server, the one journey that adds a server.
 #[gpui::test]
-fn sidebar_new_workspace_menu_should_offer_saved_servers_and_add_server(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+fn sidebar_new_workspace_menu_should_offer_saved_machines_and_add_machine(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
 
-    let (harness, cx) = MultiServerHarness::new(cx);
-    let edits = saved_servers(&harness, cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    let edits = saved_machines(&harness, cx);
 
     click("new-workspace-button", cx);
     let rows = [
@@ -14607,7 +14595,7 @@ fn sidebar_new_workspace_menu_should_offer_saved_servers_and_add_server(cx: &mut
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14616,13 +14604,13 @@ fn sidebar_new_workspace_menu_should_offer_saved_servers_and_add_server(cx: &mut
 /// The Workspace Switcher offers New Workspace and Open Directory on each saved server, and its
 /// query names the Workspace it creates there.
 #[gpui::test]
-fn the_switcher_should_create_on_a_saved_server_with_its_query_as_the_name(
+fn the_switcher_should_create_on_a_saved_machine_with_its_query_as_the_name(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_core::hierarchy::Mutation;
 
-    let (harness, cx) = MultiServerHarness::new(cx);
-    let edits = saved_servers(&harness, cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    let edits = saved_machines(&harness, cx);
     open_workspace_switcher_for_creation(cx);
     let rows = [
         "workspace-switcher-create-local",
@@ -14655,7 +14643,7 @@ fn the_switcher_should_create_on_a_saved_server_with_its_query_as_the_name(
         vec![Mutation::CreateWorkspace {
             name: "fresh workspace".to_owned(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14664,16 +14652,16 @@ fn the_switcher_should_create_on_a_saved_server_with_its_query_as_the_name(
 /// Two saved servers that give one name read apart by the address each route reaches, in the
 /// sidebar's submenus and in the Workspace Switcher, and each row reaches its own route.
 #[gpui::test]
-fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+fn same_named_saved_machines_should_read_apart_in_both_creation_surfaces(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
         ("studio", "quic://192.168.1.3:9231"),
         ("studio", "quic://192.168.1.2:9231"),
     ]);
-    cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
+    cx.update(|_, cx| crate::ui::direct_machines::install(direct, cx));
     // Only the route at .3 is presented, so only its rows take a Workspace.
     let (_, edits) = harness.present_direct("studio", routes[0], &[], cx);
     redraw(cx);
@@ -14693,7 +14681,7 @@ fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
 
@@ -14721,13 +14709,13 @@ fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut
 /// Without a saved server, both remote submenus offer only Add Server, which opens Settings' Add
 /// Server journey, and the switcher offers no remote rows, so nothing enters a host here.
 #[gpui::test]
-fn remote_creation_without_saved_servers_should_offer_only_add_server(cx: &mut TestAppContext) {
+fn remote_creation_without_saved_machines_should_offer_only_add_machine(cx: &mut TestAppContext) {
     let (_, _, cx) = workspace_manager(cx);
     let requests = Rc::new(std::cell::Cell::new(0usize));
     cx.update(|_, cx| {
         let requests = requests.clone();
         cx.on_action(
-            move |_: &crate::ui::settings_window::AddServer, _: &mut gpui::App| {
+            move |_: &crate::ui::settings_window::AddMachine, _: &mut gpui::App| {
                 requests.set(requests.get() + 1);
             },
         );
@@ -14752,11 +14740,11 @@ fn remote_creation_without_saved_servers_should_offer_only_add_server(cx: &mut T
 
 /// Open Remote Directory on a saved server opens the Directory Picker browsing that server.
 #[gpui::test]
-fn open_remote_directory_should_browse_the_chosen_server(cx: &mut TestAppContext) {
+fn open_remote_directory_should_browse_the_chosen_machine(cx: &mut TestAppContext) {
     // The picker reads penguin's directories over a channel whose worker answers from its own
     // thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     harness.present_direct("penguin", route, &[], cx);
 
@@ -14790,9 +14778,9 @@ fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focu
     // The picker reads penguin's directories over a channel whose worker answers from its own
     // thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MultiServerHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    let edits = saved_servers(&harness, cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    let edits = saved_machines(&harness, cx);
     cx.update(|window, cx| {
         harness
             .manager
@@ -14837,19 +14825,19 @@ fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focu
 /// A directory chosen on penguin's server is the new Workspace's pin there. Choosing a directory
 /// one of that server's Workspaces is already pinned to opens that Workspace instead.
 #[gpui::test]
-fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_there(
+fn open_remote_directory_should_pin_on_its_machine_and_reuse_a_workspace_pinned_there(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_core::hierarchy::Mutation;
 
     // The harness's server matches only a directory spelled the same as the pin. The native
     // adapter test covers a server matching one directory through a symbolic link. Its directory
     // channel answers from its own thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let route = named_route("penguin");
     let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
-    let mut inventory = server_inventory(harness.next_revision(), &[("Far", 7)]);
+    let mut inventory = core_inventory(harness.next_revision(), &[("Far", 7)]);
     inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
     penguin_edits.set_inventory(inventory);
     cx.update(|window, cx| {
@@ -14861,7 +14849,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
     let open = |directory: &str, cx: &mut VisualTestContext| {
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
-                manager.open_server_directory(
+                manager.open_core_directory(
                     key,
                     String::new(),
                     PathBuf::from(directory),
@@ -14874,7 +14862,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         while harness
             .manager
-            .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
+            .read_with(cx, |manager, _| manager.pending_core_directory.is_some())
         {
             assert!(Instant::now() < deadline, "the server answers");
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -14887,7 +14875,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
         let active = manager.workspaces.active_workspace_id()?;
         let on_penguin = matches!(
             manager.binding.owner(active).and_then(|key| manager.binding.origin(key)),
-            Some(ServerOrigin::Direct(direct)) if direct.route == route
+            Some(MachineOrigin::Direct(direct)) if direct.route == route
         );
         on_penguin.then(|| manager.workspaces.active().name().to_owned())
     });
@@ -14900,7 +14888,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(PathBuf::from("/srv/other")),
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
@@ -14938,7 +14926,7 @@ fn a_late_directory_answer_should_never_override_navigation_that_returned(cx: &m
 /// penguin's server, which joins the sidebar without overriding the newer selection.
 #[gpui::test]
 fn a_late_directory_creation_should_never_override_newer_navigation(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_core::hierarchy::Mutation;
 
     assert_eq!(
         late_directory_answer_after("/srv/new", &[Navigation::Workspace("There")], cx),
@@ -14947,7 +14935,7 @@ fn a_late_directory_creation_should_never_override_newer_navigation(cx: &mut Tes
             vec![Mutation::CreateWorkspace {
                 name: String::new(),
                 directory: Some(PathBuf::from("/srv/new")),
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             }]
         )
     );
@@ -15020,25 +15008,25 @@ fn late_directory_answer_after(
     directory: &str,
     navigation: &[Navigation],
     cx: &mut TestAppContext,
-) -> (String, Vec<spaceterm_server::hierarchy::Mutation>) {
+) -> (String, Vec<spaceterm_core::hierarchy::Mutation>) {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     // The held answer arrives from the directory worker's own thread.
     cx.executor().allow_parking();
     let open = Arc::new(AtomicBool::new(false));
     let adapters = WorkspaceManagerAdapters {
-        server_directories: crate::ui::directory_picker::server_directory_testing::gated(
-            Arc::clone(&open),
-        ),
+        core_directories: crate::ui::directory_picker::core_directory_testing::gated(Arc::clone(
+            &open,
+        )),
         ..workspace_adapters()
     };
-    let (harness, cx) = MultiServerHarness::using(adapters, cx);
+    let (harness, cx) = MultiMachineHarness::using(adapters, cx);
     // An active window reports each keyboard owner the person leaves.
     cx.update(|window, _| window.activate_window());
     let local = [("Here", 1), ("There", 2)];
-    harness.publish(ServerKey::LOCAL, &harness.local, &local, cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &local, cx);
     // "Here" gains a second Tab and a Pane split from its first.
-    let mut inventory = server_inventory(harness.next_revision(), &local);
+    let mut inventory = core_inventory(harness.next_revision(), &local);
     let here = &mut inventory.workspaces[0];
     let mut tab = here.tabs[0].clone();
     tab.id = [180; 32];
@@ -15052,12 +15040,12 @@ fn late_directory_answer_after(
     harness.local.set_inventory(inventory);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx);
         })
     });
     let route = named_route("penguin");
     let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
-    let mut inventory = server_inventory(harness.next_revision(), &[("Far", 7)]);
+    let mut inventory = core_inventory(harness.next_revision(), &[("Far", 7)]);
     inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
     penguin_edits.set_inventory(inventory);
     cx.update(|window, cx| {
@@ -15076,14 +15064,14 @@ fn late_directory_answer_after(
     redraw(cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.open_server_directory(key, String::new(), PathBuf::from(directory), window, cx);
+            manager.open_core_directory(key, String::new(), PathBuf::from(directory), window, cx);
         })
     });
     redraw(cx);
     assert!(
         harness
             .manager
-            .read_with(cx, |manager, _| manager.pending_server_directory.is_some()),
+            .read_with(cx, |manager, _| manager.pending_core_directory.is_some()),
         "the server's answer is held back"
     );
 
@@ -15142,7 +15130,7 @@ fn late_directory_answer_after(
     let deadline = Instant::now() + std::time::Duration::from_secs(5);
     while harness
         .manager
-        .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
+        .read_with(cx, |manager, _| manager.pending_core_directory.is_some())
     {
         assert!(Instant::now() < deadline, "the server answers");
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -15159,23 +15147,17 @@ fn late_directory_answer_after(
 /// A server whose edits are still connecting holds the chosen directory until it reads its first
 /// inventory, then takes the Workspace.
 #[gpui::test]
-fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+fn open_remote_directory_should_wait_for_the_machines_edits(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
 
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(None));
     edits.set_connected(false);
     let (key, _) = harness.present_direct_edits("penguin", named_route("penguin"), &edits, cx);
 
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.open_server_directory(
-                key,
-                String::new(),
-                PathBuf::from("/srv/app"),
-                window,
-                cx,
-            );
+            manager.open_core_directory(key, String::new(), PathBuf::from("/srv/app"), window, cx);
         })
     });
     cx.run_until_parked();
@@ -15187,11 +15169,11 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
     assert!(
         harness
             .manager
-            .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
+            .read_with(cx, |manager, _| manager.pending_core_directory.is_some())
     );
 
     edits.set_connected(true);
-    edits.set_inventory(server_inventory(harness.next_revision(), &[]));
+    edits.set_inventory(core_inventory(harness.next_revision(), &[]));
     cx.update(|window, cx| {
         harness
             .manager
@@ -15204,13 +15186,13 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
         vec![Mutation::CreateWorkspace {
             name: String::new(),
             directory: Some(PathBuf::from("/srv/app")),
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
     assert!(
         harness
             .manager
-            .read_with(cx, |manager, _| manager.pending_server_directory.is_none())
+            .read_with(cx, |manager, _| manager.pending_core_directory.is_none())
     );
     assert_eq!(harness.local.submitted(), Vec::new());
 }
@@ -15218,20 +15200,14 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
 /// A server withdrawn while a chosen directory waits for its edits ends that request and says the
 /// Workspace couldn't open, so a later connection never creates it unasked.
 #[gpui::test]
-fn open_remote_directory_should_end_when_its_server_is_withdrawn(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+fn open_remote_directory_should_end_when_its_machine_is_withdrawn(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(None));
     edits.set_connected(false);
     let (key, _) = harness.present_direct_edits("penguin", named_route("penguin"), &edits, cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.open_server_directory(
-                key,
-                String::new(),
-                PathBuf::from("/srv/app"),
-                window,
-                cx,
-            );
+            manager.open_core_directory(key, String::new(), PathBuf::from("/srv/app"), window, cx);
         })
     });
     cx.run_until_parked();
@@ -15239,7 +15215,7 @@ fn open_remote_directory_should_end_when_its_server_is_withdrawn(cx: &mut TestAp
 
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.withdraw_server_workspaces(key, window, cx);
+            manager.withdraw_core_workspaces(key, window, cx);
         })
     });
     cx.run_until_parked();
@@ -15247,7 +15223,7 @@ fn open_remote_directory_should_end_when_its_server_is_withdrawn(cx: &mut TestAp
     assert!(
         harness
             .manager
-            .read_with(cx, |manager, _| manager.pending_server_directory.is_none())
+            .read_with(cx, |manager, _| manager.pending_core_directory.is_none())
     );
     assert!(cx.update(|window, cx| window_modal_is_open(window, cx)));
     assert_eq!(edits.submitted(), Vec::new());

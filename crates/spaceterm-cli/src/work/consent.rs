@@ -2,7 +2,7 @@
 //! authenticated client's existing ability to submit that review to the server.
 use crate::contract::{Code, Failure};
 use serde::{Deserialize, Serialize};
-use spaceterm_server::{
+use spaceterm_core::{
     hierarchy::{CloseConfirmation, CloseTarget, Id},
     worktree::Removal,
 };
@@ -21,23 +21,18 @@ pub enum Review {
 
 #[derive(Serialize, Deserialize)]
 struct Token {
-    server: Id,
+    core: Id,
     client: Id,
     expires: i64,
     review: Review,
 }
 
-pub fn issue(
-    server: Id,
-    client: Id,
-    review: Review,
-    now: i64,
-) -> Result<(String, String), Failure> {
+pub fn issue(core: Id, client: Id, review: Review, now: i64) -> Result<(String, String), Failure> {
     let expires = now
         .checked_add(LIFETIME)
         .ok_or_else(|| Failure::new(Code::StorageUnavailable))?;
     let bytes = postcard::to_allocvec(&Token {
-        server,
+        core,
         client,
         expires,
         review,
@@ -53,7 +48,7 @@ pub fn issue(
     Ok((format!("c1-{value}"), expires_at))
 }
 
-pub fn verify(value: &str, server: Id, client: Id, now: i64) -> Result<Review, Failure> {
+pub fn verify(value: &str, core: Id, client: Id, now: i64) -> Result<Review, Failure> {
     let changed = || Failure::new(Code::Changed);
     let text = value.strip_prefix("c1-").ok_or_else(changed)?;
     if text.len() > MAX_TOKEN_BYTES * 2
@@ -68,7 +63,7 @@ pub fn verify(value: &str, server: Id, client: Id, now: i64) -> Result<Review, F
         .collect::<Result<_, _>>()?;
     let (token, rest): (Token, _) = postcard::take_from_bytes(&bytes).map_err(|_| changed())?;
     if !rest.is_empty()
-        || token.server != server
+        || token.core != core
         || token.client != client
         || now >= token.expires
         || token.expires > now.saturating_add(LIFETIME)
@@ -81,10 +76,10 @@ pub fn verify(value: &str, server: Id, client: Id, now: i64) -> Result<Review, F
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spaceterm_server::hierarchy::ConfirmedPane;
+    use spaceterm_core::hierarchy::ConfirmedPane;
 
     #[test]
-    fn exact_review_is_scoped_to_actor_server_and_expiry() {
+    fn exact_review_is_scoped_to_actor_core_and_expiry() {
         let target = CloseTarget::KillWorkspace { workspace: [3; 32] };
         let review = Review::Close {
             target,
@@ -103,13 +98,13 @@ mod tests {
         assert!(
             matches!(verify(&token,[1;32],[2;32],101).unwrap(), Review::Close { target: t, .. } if t == target)
         );
-        for (server, client, time) in [
+        for (core, client, time) in [
             ([9; 32], [2; 32], 101),
             ([1; 32], [9; 32], 101),
             ([1; 32], [2; 32], 400),
         ] {
             assert!(matches!(
-                verify(&token, server, client, time),
+                verify(&token, core, client, time),
                 Err(Failure {
                     code: Code::Changed,
                     ..

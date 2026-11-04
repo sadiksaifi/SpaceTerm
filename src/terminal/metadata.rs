@@ -68,7 +68,7 @@ pub(crate) struct OwnedPrompt {
 /// One marker a pending run follows, in the order the shell wrote it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RunMarker {
-    pub(crate) marker: spaceterm_server::pane::run::Marker,
+    pub(crate) marker: spaceterm_core::pane::run::Marker,
     /// The Terminal Session's finished-command count once the marker applied.
     pub(crate) finished_commands: u64,
     pub(crate) at: Instant,
@@ -198,15 +198,15 @@ pub enum TerminalOrigin<'a> {
 /// The directory retains its exact remote spelling for presentation and startup. It is not local
 /// filesystem authority and must never be converted to `PathBuf` or locally validated.
 pub struct RemoteTerminalMetadataContext {
-    server_display: String,
+    machine_display: String,
     initial_directory: RemoteDirectory,
     machine: RemoteMachine,
 }
 
 impl RemoteTerminalMetadataContext {
-    pub const fn new(server_display: String, initial_directory: RemoteDirectory) -> Self {
+    pub const fn new(machine_display: String, initial_directory: RemoteDirectory) -> Self {
         Self {
-            server_display,
+            machine_display,
             initial_directory,
             machine: RemoteMachine {
                 user: None,
@@ -221,8 +221,8 @@ impl RemoteTerminalMetadataContext {
         self
     }
 
-    pub fn server_display(&self) -> &str {
-        &self.server_display
+    pub fn machine_display(&self) -> &str {
+        &self.machine_display
     }
 
     pub const fn initial_directory(&self) -> &RemoteDirectory {
@@ -420,7 +420,7 @@ impl TerminalMetadataContext {
             },
             Self::Remote(context) => TerminalOrigin::Remote {
                 user: context.machine.user(),
-                host: context.server_display(),
+                host: context.machine_display(),
             },
         }
     }
@@ -583,7 +583,7 @@ impl MetadataTracker {
         let mut markers = std::mem::take(&mut run.markers);
         if std::mem::take(&mut run.overflowed) {
             markers.push(RunMarker {
-                marker: spaceterm_server::pane::run::Marker::Unowned,
+                marker: spaceterm_core::pane::run::Marker::Unowned,
                 finished_commands: self.snapshot.finished_commands,
                 at: Instant::now(),
             });
@@ -594,8 +594,8 @@ impl MetadataTracker {
         markers
     }
 
-    fn record_run_marker(&mut self, marker: spaceterm_server::pane::run::Marker, now: Instant) {
-        use spaceterm_server::pane::run::Marker;
+    fn record_run_marker(&mut self, marker: spaceterm_core::pane::run::Marker, now: Instant) {
+        use spaceterm_core::pane::run::Marker;
         let finished_commands = self.snapshot.finished_commands;
         let Some(run) = self.run.as_mut().filter(|run| !run.finished) else {
             return;
@@ -770,7 +770,7 @@ impl MetadataTracker {
         owned: Option<bool>,
         now: Instant,
     ) {
-        use spaceterm_server::pane::run::Marker;
+        use spaceterm_core::pane::run::Marker;
         let marker = match (action, owned) {
             ("A" | "P", Some(fresh)) => {
                 self.owned_prompt.zone = Some(PromptZone::Prompt);
@@ -1043,7 +1043,7 @@ mod tests {
     use crate::local_path::LocalPathSemantics;
 
     #[test]
-    fn remote_metadata_context_should_preserve_server_display_and_directory() {
+    fn remote_metadata_context_should_preserve_machine_display_and_directory() {
         let remote = RemoteTerminalMetadataContext::new(
             "user@remote".to_owned(),
             RemoteDirectory::new("~/project".to_owned()).unwrap(),
@@ -1684,7 +1684,7 @@ mod tests {
 
     #[test]
     fn a_followed_run_records_owned_markers_until_its_finish() {
-        use spaceterm_server::pane::run::Marker;
+        use spaceterm_core::pane::run::Marker;
         let now = Instant::now();
         let mut tracker = owned_local_tracker(now);
         fresh_prompt(&mut tracker, now);

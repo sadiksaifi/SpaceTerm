@@ -1,5 +1,5 @@
 use super::*;
-use spaceterm_server::client_view::{Layout, LayoutNode, TabView, WorkspaceView};
+use spaceterm_core::client_view::{Layout, LayoutNode, TabView, WorkspaceView};
 
 #[gpui::test]
 fn a_returning_desktop_restores_its_arrangement_without_changing_a_new_desktops_default(

@@ -29,9 +29,9 @@ use crate::{
 };
 #[cfg(all(test, feature = "native-tests"))]
 use sha2::{Digest, Sha256};
-use spaceterm_server::{
-    ServerError,
-    direct::{DirectError, DirectStatus, NetworkPolicy, ServerPin},
+use spaceterm_core::{
+    CoreError,
+    direct::{DirectError, DirectStatus, MachinePin, NetworkPolicy},
     pane::control::ClientName,
     provisioning::{
         AccountDiscovery, SetupCancellation, SetupCancellationReply,
@@ -44,7 +44,7 @@ const OBSERVATION: Duration = Duration::from_secs(15);
 const MAX_DISCOVERY: usize = 16 * 1024;
 const MAX_ARTIFACT: u64 = 256 * 1024 * 1024;
 
-pub(crate) use spaceterm_server::direct::Endpoint as SetupAddress;
+pub(crate) use spaceterm_core::direct::Endpoint as SetupAddress;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SetupOffer {
@@ -111,7 +111,7 @@ pub(crate) enum RefusalKind {
     InstallRefused,
     MissingArtifact,
     InvalidArtifact,
-    ServerChanged,
+    MachineChanged,
     InvalidEndpoint,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,12 +144,12 @@ pub(crate) trait SshSetupBackend: Send + Sync {
 pub(crate) struct NativeSshSetupConfig<A: SshProcessAdapter> {
     pub paths: Arc<AppPaths>,
     pub filesystem: Arc<dyn HostConfigFilesystem>,
-    pub bootstrap: Arc<dyn SshServerBootstrap>,
+    pub bootstrap: Arc<dyn SshCoreBootstrap>,
     pub home: PathBuf,
     pub startup: StartupSshEnvironment,
     pub executable: OpenSshExecutable,
     pub adapter: A,
-    pub artifacts: ServerArtifactCatalog,
+    pub artifacts: CoreArtifactCatalog,
 }
 
 pub(crate) struct NativeSshSetup<A: SshProcessAdapter> {
@@ -363,11 +363,11 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                             if discovery.installed
                                 && discovery.account == account
                                 && discovery.target == target
-                                && discovery.server.is_some()
+                                && discovery.core.is_some()
                                 && discovery.version == artifact.version
                                 && discovery.commit == artifact.commit
                                 && retained.as_ref().is_none_or(|previous| {
-                                    discovery.server == previous.server
+                                    discovery.core == previous.core
                                         && discovery.stopped == previous.stopped
                                         && discovery.version == previous.version
                                         && discovery.commit == previous.commit
@@ -391,7 +391,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             let current = match session.discover(&ssh_cancellation)? {
                 Discovery::Existing(current) => current,
                 Discovery::NeedsInstallation { .. } => {
-                    return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+                    return Err(SetupFailure::Refused(RefusalKind::MachineChanged));
                 }
             };
             if current.start_observation.as_ref() != Some(&observation) {
@@ -400,7 +400,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             }
             progress.report(SetupPhase::Starting);
             let input = serde_json::to_vec(&observation)
-                .map_err(|_| SetupFailure::Refused(RefusalKind::ServerChanged))?;
+                .map_err(|_| SetupFailure::Refused(RefusalKind::MachineChanged))?;
             session.effect(
                 "setup-start",
                 input,
@@ -411,11 +411,11 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                 Ok(Discovery::Existing(current))
                     if current.running
                         && current.account == discovery.account
-                        && current.server == discovery.server
+                        && current.core == discovery.core
                         && current.start_observation.as_ref().is_some_and(|current| {
                             current.account == observation.account
                                 && current.build == observation.build
-                                && current.server == observation.server
+                                && current.core == observation.core
                                 && current.installation == observation.installation
                                 && current.version == observation.version
                                 && current.commit == observation.commit
@@ -429,8 +429,8 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         }
         let (status, bind) = loop {
             let status = session.direct_status(&ssh_cancellation)?;
-            if status.pin.build != identity() || Some(status.pin.server) != discovery.server {
-                return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+            if status.pin.build != identity() || Some(status.pin.core) != discovery.core {
+                return Err(SetupFailure::Refused(RefusalKind::MachineChanged));
             }
             let bind_ip = status
                 .policy
@@ -478,7 +478,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                     || current.enabled != status.enabled
                 {
                     if current.pin != status.pin {
-                        return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+                        return Err(SetupFailure::Refused(RefusalKind::MachineChanged));
                     }
                     continue;
                 }
@@ -555,7 +555,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                     || response.endpoint != endpoint
                     || response.paired.pin != status.pin
                 {
-                    return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+                    return Err(SetupFailure::Refused(RefusalKind::MachineChanged));
                 }
                 Ok(response)
             });
@@ -588,7 +588,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             .complete_setup(
                 &prepared,
                 enrolled.paired,
-                enrolled.server_name,
+                enrolled.machine_name,
                 cancellation,
             )
             .map_err(|error| {
@@ -666,7 +666,7 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         Ok(())
     }
     fn command(&self, script: &str) -> Result<super::command::SshCommandSpec, SetupFailure> {
-        let command = ValidatedRemoteShellCommand::server_script(script)
+        let command = ValidatedRemoteShellCommand::core_script(script)
             .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
         SshCommandContext::setup_channel(
             self.config.executable.clone(),
@@ -704,13 +704,12 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         }
         Ok(output)
     }
-    fn cancel_enrollment(&self, operation: [u8; 32], pin: &ServerPin) -> bool {
-        let Ok(command) = ValidatedRemoteShellCommand::server_script(
-            &self
-                .config
-                .bootstrap
-                .locator(identity(), "setup-direct-cancel", false),
-        ) else {
+    fn cancel_enrollment(&self, operation: [u8; 32], pin: &MachinePin) -> bool {
+        let Ok(command) = ValidatedRemoteShellCommand::core_script(&self.config.bootstrap.locator(
+            identity(),
+            "setup-direct-cancel",
+            false,
+        )) else {
             return false;
         };
         let Ok(command) = SshCommandContext::setup_channel(
@@ -850,13 +849,13 @@ fn startup_observation(
     let observation = discovery
         .start_observation
         .as_ref()
-        .ok_or(SetupFailure::Refused(RefusalKind::ServerChanged))?;
+        .ok_or(SetupFailure::Refused(RefusalKind::MachineChanged))?;
     if observation.account != discovery.account
         || observation.build != discovery.build
-        || Some(observation.server) != discovery.server
+        || Some(observation.core) != discovery.core
         || observation.stopped != discovery.stopped
     {
-        return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+        return Err(SetupFailure::Refused(RefusalKind::MachineChanged));
     }
     Ok(observation.clone())
 }
@@ -912,26 +911,26 @@ fn map_direct_error(error: DirectError) -> SetupFailure {
             SetupFailure::Incompatible(IncompatibilityKind::Protocol)
         }
         DirectError::PinMismatch
-        | DirectError::WrongServer
+        | DirectError::WrongMachine
         | DirectError::AuthenticationRefused
         | DirectError::Substituted
-        | DirectError::Revoked => SetupFailure::Refused(RefusalKind::ServerChanged),
+        | DirectError::Revoked => SetupFailure::Refused(RefusalKind::MachineChanged),
         _ => SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable),
     }
 }
-fn map_server_error(error: ServerError) -> SetupFailure {
+fn map_core_error(error: CoreError) -> SetupFailure {
     match error {
-        ServerError::IncompatibleProtocol => {
+        CoreError::IncompatibleProtocol => {
             SetupFailure::Incompatible(IncompatibilityKind::Protocol)
         }
-        ServerError::AuthorizationRequired => {
+        CoreError::AuthorizationRequired => {
             SetupFailure::Refused(RefusalKind::AuthorizationRefused)
         }
         _ => SetupFailure::Refused(RefusalKind::InvalidArtifact),
     }
 }
 
-pub(crate) trait SshServerBootstrap: Send + Sync {
+pub(crate) trait SshCoreBootstrap: Send + Sync {
     fn locator(&self, identity: &str, action: &str, missing: bool) -> String;
     fn install(
         &self,
@@ -945,10 +944,10 @@ pub(crate) trait SshServerBootstrap: Send + Sync {
 
 /// Signed server packages captured by host composition.
 #[derive(Clone)]
-pub(crate) struct ServerArtifactCatalog {
+pub(crate) struct CoreArtifactCatalog {
     root: Option<PathBuf>,
 }
-impl ServerArtifactCatalog {
+impl CoreArtifactCatalog {
     pub(crate) fn new(root: Option<PathBuf>) -> Self {
         Self { root }
     }
@@ -994,9 +993,9 @@ impl ServerArtifactCatalog {
             &signature,
             &digest,
             target,
-            spaceterm_server::protocol::MAJOR,
+            spaceterm_core::protocol::MAJOR,
         )
-        .map_err(map_server_error)?;
+        .map_err(map_core_error)?;
         Ok(VerifiedArtifact {
             bytes,
             signature,
@@ -1097,12 +1096,12 @@ fn parse_discovery(bytes: &[u8]) -> Result<Discovery, SetupFailure> {
 }
 fn validate_discovery(discovery: &AccountDiscovery) -> Result<(), SetupFailure> {
     if discovery.schema != 1 || discovery.account == 0 || discovery.build != identity() {
-        return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+        return Err(SetupFailure::Refused(RefusalKind::MachineChanged));
     }
     platform(&discovery.target)?;
     if !discovery
         .protocol_majors
-        .contains(&spaceterm_server::protocol::MAJOR)
+        .contains(&spaceterm_core::protocol::MAJOR)
     {
         return Err(SetupFailure::Incompatible(IncompatibilityKind::Protocol));
     }
@@ -1114,5 +1113,5 @@ fn validate_discovery(discovery: &AccountDiscovery) -> Result<(), SetupFailure> 
     any(target_os = "macos", target_os = "linux"),
     feature = "native-tests"
 ))]
-#[path = "../platform/unix_adapter_tests/server_setup.rs"]
+#[path = "../platform/unix_adapter_tests/core_setup.rs"]
 mod unix_adapter_tests;

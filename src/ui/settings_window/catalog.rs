@@ -24,7 +24,7 @@ pub(crate) enum SettingsSectionId {
     Git,
     /// The servers this desktop presents, and the selected server's state, connection and
     /// Server Settings.
-    Servers,
+    Machines,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
     /// Settings as a whole: the settings file, export and import, and Reset All.
@@ -40,7 +40,7 @@ impl SettingsSectionId {
         Self::Keybindings,
         Self::Privacy,
         Self::Git,
-        Self::Servers,
+        Self::Machines,
         Self::Updates,
         Self::Advanced,
     ];
@@ -53,7 +53,7 @@ impl SettingsSectionId {
             Self::Keybindings => "Keybindings",
             Self::Privacy => "Privacy",
             Self::Git => "Git",
-            Self::Servers => "Servers",
+            Self::Machines => "Machines",
             Self::Updates => "Updates",
             Self::Advanced => "Advanced",
         }
@@ -77,7 +77,7 @@ impl SettingsSectionId {
             }
             Self::Privacy => "Clipboard access.",
             Self::Git => "Repository Status, Pull Requests, and Worktrees.",
-            Self::Servers => "Servers run Workspaces and Terminal Sessions.",
+            Self::Machines => "Machines run Workspaces and Terminal Sessions.",
             Self::Updates => "SpaceTerm updates in the background.",
             Self::Advanced => {
                 "Every setting at once: edit them as JSON, export or import them, or start over."
@@ -93,7 +93,7 @@ impl SettingsSectionId {
             Self::Keybindings => "settings-section-keybindings",
             Self::Privacy => "settings-section-privacy",
             Self::Git => "settings-section-git",
-            Self::Servers => "settings-section-servers",
+            Self::Machines => "settings-section-servers",
             Self::Updates => "settings-section-updates",
             Self::Advanced => "settings-section-advanced",
         }
@@ -142,9 +142,9 @@ pub(super) enum SettingsRowId {
     /// Whether the GitHub CLI is installed and logged in.
     GitHubCli,
     /// The selected server: its state, version and update, and the steps they allow.
-    ServerStatus,
+    CoreStatus,
     /// Whether the selected server starts on its own when its computer or account starts.
-    ServerAutoStart,
+    CoreAutoStart,
     /// Ends every live Terminal Session on the selected server, keeping its organization.
     EndAllSessions,
     /// Whether the selected server lets other devices connect over the network, and where.
@@ -152,13 +152,13 @@ pub(super) enum SettingsRowId {
     /// The devices paired with the selected server, and inviting another.
     PairedDevices,
     /// Every server this desktop presents. Choosing one selects it, as the server picker does.
-    AllServers,
+    AllMachines,
     /// Adds a server over SSH or with an invitation.
-    AddServer,
+    AddMachine,
     /// This build's command in the account's own bin directory, and installing it.
     CommandLineTool,
     /// The selected server's New Worktree Location, a Server Setting.
-    ServerWorktreeLocation,
+    MachineWorktreeLocation,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -214,15 +214,15 @@ impl SettingsRowId {
             | Self::GitTool
             | Self::ShowPullRequests
             | Self::GitHubCli
-            | Self::ServerWorktreeLocation
+            | Self::MachineWorktreeLocation
             // The server rows hold status and actions, not a preference of this client.
-            | Self::ServerStatus
-            | Self::ServerAutoStart
+            | Self::CoreStatus
+            | Self::CoreAutoStart
             | Self::EndAllSessions
             | Self::NetworkAccess
             | Self::PairedDevices
-            | Self::AllServers
-            | Self::AddServer
+            | Self::AllMachines
+            | Self::AddMachine
             | Self::CommandLineTool
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
@@ -659,18 +659,18 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-github-cli",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::ServerStatus,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::SERVER_GROUP,
-        label: "Server",
+        id: SettingsRowId::CoreStatus,
+        section: SettingsSectionId::Machines,
+        group: super::machine_list::CORE_GROUP,
+        label: "Machine",
         keywords: &[
-            "server",
-            "spaceterm server",
+            "core",
+            "spaceterm core",
             "status",
             "version",
             "update",
-            "update server",
-            "server update",
+            "update spaceterm core",
+            "core update",
             "upgrade",
             "check now",
             "needs update",
@@ -679,10 +679,10 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "return to previous version",
             "finish update",
             "running",
-            "start server",
-            "stop server",
-            "restart server",
-            "uninstall server",
+            "start spaceterm core",
+            "stop spaceterm core",
+            "restart spaceterm core",
+            "uninstall spaceterm core",
             "install",
             "connect",
             "disconnect",
@@ -698,9 +698,9 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-server-status",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::ServerAutoStart,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::SERVER_GROUP,
+        id: SettingsRowId::CoreAutoStart,
+        section: SettingsSectionId::Machines,
+        group: super::machine_list::CORE_GROUP,
         label: "Start automatically",
         keywords: &[
             "start automatically",
@@ -718,8 +718,8 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     },
     SettingsRowDescriptor {
         id: SettingsRowId::EndAllSessions,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::SERVER_GROUP,
+        section: SettingsSectionId::Machines,
+        group: super::machine_list::CORE_GROUP,
         label: "Terminal Sessions",
         keywords: &[
             "end all sessions",
@@ -737,8 +737,8 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     },
     SettingsRowDescriptor {
         id: SettingsRowId::NetworkAccess,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::NETWORK_GROUP,
+        section: SettingsSectionId::Machines,
+        group: super::machine_list::NETWORK_GROUP,
         label: "Network access",
         keywords: &[
             "network",
@@ -757,8 +757,8 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     },
     SettingsRowDescriptor {
         id: SettingsRowId::PairedDevices,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::NETWORK_GROUP,
+        section: SettingsSectionId::Machines,
+        group: super::machine_list::NETWORK_GROUP,
         label: "Devices",
         keywords: &[
             "devices",
@@ -776,13 +776,13 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-paired-devices",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::AllServers,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::ALL_SERVERS_GROUP,
-        label: "All Servers",
+        id: SettingsRowId::AllMachines,
+        section: SettingsSectionId::Machines,
+        group: super::machine_list::ALL_MACHINES_GROUP,
+        label: "All Machines",
         keywords: &[
-            "servers",
-            "server list",
+            "machines",
+            "machine list",
             "computer",
             "machine",
             "select",
@@ -792,14 +792,14 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-all-servers",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::AddServer,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::ALL_SERVERS_GROUP,
-        label: "Add Server\u{2026}",
+        id: SettingsRowId::AddMachine,
+        section: SettingsSectionId::Machines,
+        group: super::machine_list::ALL_MACHINES_GROUP,
+        label: "Add Machine\u{2026}",
         keywords: &[
-            "add server",
+            "add machine",
             "add",
-            "new server",
+            "new machine",
             "ssh",
             "openssh",
             "set up",
@@ -815,8 +815,8 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     },
     SettingsRowDescriptor {
         id: SettingsRowId::CommandLineTool,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::COMMAND_LINE_GROUP,
+        section: SettingsSectionId::Machines,
+        group: super::machine_list::COMMAND_LINE_GROUP,
         label: "Command Line Tool",
         keywords: &[
             "command line tool",
@@ -838,7 +838,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::GitTool,
         section: SettingsSectionId::Git,
         // The heading names the selected server, whose Git this is.
-        group: super::server_list::GIT_SERVER_GROUP,
+        group: super::machine_list::GIT_CORE_GROUP,
         label: "Git",
         keywords: &[
             "version",
@@ -847,18 +847,18 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "not found",
             "xcode",
             "command line tools",
-            "server",
+            "core",
         ],
         selector: "settings-row-git-tool",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::ServerWorktreeLocation,
+        id: SettingsRowId::MachineWorktreeLocation,
         section: SettingsSectionId::Git,
-        group: super::server_list::GIT_SERVER_GROUP,
+        group: super::machine_list::GIT_CORE_GROUP,
         label: "New Worktree Location",
         keywords: &[
-            "server",
-            "server settings",
+            "core",
+            "machine settings",
             "worktree",
             "worktrees",
             "path",
@@ -1167,15 +1167,15 @@ mod tests {
         GitTool,
         ShowPullRequests,
         GitHubCli,
-        ServerStatus,
-        ServerAutoStart,
+        CoreStatus,
+        CoreAutoStart,
         EndAllSessions,
         NetworkAccess,
         PairedDevices,
-        AllServers,
-        AddServer,
+        AllMachines,
+        AddMachine,
         CommandLineTool,
-        ServerWorktreeLocation,
+        MachineWorktreeLocation,
         UpdateStatus,
         AutomaticUpdateDownloads,
         UpdateCheckInterval,
@@ -1499,7 +1499,7 @@ mod tests {
             ("command line tools", SettingsRowId::GitTool),
             // "login" also means the GitHub CLI's sign in, so it reaches both rows.
             ("login", SettingsRowId::GitHubCli),
-            ("login", SettingsRowId::ServerAutoStart),
+            ("login", SettingsRowId::CoreAutoStart),
         ] {
             assert!(
                 matching_rows(query).contains(&row),
@@ -1509,12 +1509,9 @@ mod tests {
     }
 
     #[test]
-    fn a_server_query_reaches_the_server_rows() {
+    fn a_machine_query_reaches_the_machine_rows() {
         for (query, row) in [
-            ("stop server", SettingsRowId::ServerStatus),
-            ("uninstall server", SettingsRowId::ServerStatus),
-            ("update server", SettingsRowId::ServerStatus),
-            ("start at login", SettingsRowId::ServerAutoStart),
+            ("start at login", SettingsRowId::CoreAutoStart),
             ("end all", SettingsRowId::EndAllSessions),
             ("invite device", SettingsRowId::PairedDevices),
             ("other devices", SettingsRowId::NetworkAccess),
@@ -1527,15 +1524,34 @@ mod tests {
         }
     }
 
-    /// Settings Search is one of the ways in to Add Server, for a person who never opens the
-    /// server picker.
+    /// A person searches for an action by the name its button or menu entry shows.
     #[test]
-    fn an_add_server_query_reaches_add_server_first() {
-        for query in ["add server", "join"] {
+    fn a_search_for_a_visible_core_action_reaches_the_machine_row() {
+        for query in [
+            "Start SpaceTerm Core",
+            "Stop SpaceTerm Core",
+            "Restart SpaceTerm Core",
+            "Update SpaceTerm Core",
+            "Uninstall SpaceTerm Core",
+        ] {
             assert_eq!(
                 matching_rows(query).first(),
-                Some(&SettingsRowId::AddServer),
-                "{query:?} should rank Add Server first"
+                Some(&SettingsRowId::CoreStatus),
+                "{query:?} should rank {:?} first",
+                SettingsRowId::CoreStatus
+            );
+        }
+    }
+
+    /// Settings Search is one of the ways in to Add Machine, for a person who never opens the
+    /// machine picker.
+    #[test]
+    fn an_add_machine_query_reaches_add_machine_first() {
+        for query in ["add machine", "join"] {
+            assert_eq!(
+                matching_rows(query).first(),
+                Some(&SettingsRowId::AddMachine),
+                "{query:?} should rank Add Machine first"
             );
         }
     }

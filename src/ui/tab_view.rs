@@ -437,7 +437,7 @@ pub(crate) enum TabViewEvent {
     RevealRequested {
         tab_id: TabId,
         origin: PaneId,
-        target: spaceterm_server::hierarchy::Placement,
+        target: spaceterm_core::hierarchy::Placement,
     },
     /// A Pane drag ended outside every Pane that could take it. The Tab strip that holds this
     /// Tab decides whether the drop moves the Pane into a new Tab.
@@ -709,7 +709,7 @@ pub(crate) struct TabView {
     /// The server Tab this Tab presents.
     binding: WorkspacePaneBinding,
     parked_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
-    directory_recovery: Option<Entity<super::server_pane::DirectoryRecovery>>,
+    directory_recovery: Option<Entity<super::core_pane::DirectoryRecovery>>,
     /// Reads every Pane's connection status while the Tab lives.
     _workspace_status: gpui::Task<()>,
 }
@@ -721,8 +721,8 @@ impl TabView {
         pane_construction: PaneConstruction,
         mut binding: WorkspacePaneBinding,
         root: (
-            spaceterm_server::hierarchy::Id,
-            std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
+            spaceterm_core::hierarchy::Id,
+            std::sync::Arc<dyn crate::ui::core_pane::MachinePaneConnection>,
         ),
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -886,7 +886,7 @@ impl TabView {
         if let Some(focus) = self
             .binding
             .view(pane_id)
-            .and_then(crate::ui::server_pane::ServerPaneView::screen)
+            .and_then(crate::ui::core_pane::CorePaneView::screen)
             .and_then(|_| self.binding.screen_focus(pane_id))
         {
             focus.focus(window, cx);
@@ -1099,16 +1099,16 @@ impl TabView {
                 .tab
                 .focus_history()
                 .iter()
-                .filter_map(|pane_id| binding.server_pane(*pane_id))
+                .filter_map(|pane_id| binding.core_pane(*pane_id))
                 .collect(),
-            focused: binding.server_pane(self.tab.focused_pane_id())?,
+            focused: binding.core_pane(self.tab.focused_pane_id())?,
             zoomed: matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)),
             panes: self
                 .tab
                 .panes_with_ids()
                 .filter_map(|(pane_id, terminal)| {
                     Some((
-                        binding.server_pane(pane_id)?,
+                        binding.core_pane(pane_id)?,
                         terminal.read(cx).remembered(cx),
                     ))
                 })
@@ -1129,7 +1129,7 @@ impl TabView {
         let panes: Vec<_> = remembered
             .panes
             .iter()
-            .filter_map(|(server, pane)| Some((binding.local_pane(*server)?, pane)))
+            .filter_map(|(core, pane)| Some((binding.local_pane(*core)?, pane)))
             .collect();
         for (pane_id, pane) in panes {
             if let Some(terminal) = self.tab.pane(pane_id).cloned() {
@@ -1151,7 +1151,7 @@ impl TabView {
         let history: Vec<PaneId> = remembered
             .history
             .iter()
-            .filter_map(|server| binding.local_pane(*server))
+            .filter_map(|core| binding.local_pane(*core))
             .collect();
         let focused = binding.local_pane(remembered.focused);
         self.tab.restore_focus(&history, focused, remembered.zoomed);
@@ -2462,9 +2462,9 @@ impl TabView {
         self.binding.canonicalize_panes();
     }
 
-    pub(crate) fn layout(&self) -> Option<spaceterm_server::client_view::Layout> {
-        use spaceterm_server::client_view::{Layout, LayoutNode};
-        use spaceterm_server::hierarchy::Axis;
+    pub(crate) fn layout(&self) -> Option<spaceterm_core::client_view::Layout> {
+        use spaceterm_core::client_view::{Layout, LayoutNode};
+        use spaceterm_core::hierarchy::Axis;
         fn collect(
             tree: PaneTreeRef<'_>,
             binding: &super::workspaces::WorkspacePanes,
@@ -2473,7 +2473,7 @@ impl TabView {
             let index = nodes.len();
             nodes.push(LayoutNode::Pane([0; 32]));
             nodes[index] = match tree.node() {
-                PaneNodeRef::Leaf { pane_id } => LayoutNode::Pane(binding.server_pane(pane_id)?),
+                PaneNodeRef::Leaf { pane_id } => LayoutNode::Pane(binding.core_pane(pane_id)?),
                 PaneNodeRef::Split {
                     axis,
                     ratio,
@@ -2499,12 +2499,12 @@ impl TabView {
 
     pub(crate) fn restore_layout(
         &mut self,
-        layout: &spaceterm_server::client_view::Layout,
+        layout: &spaceterm_core::client_view::Layout,
         cx: &mut Context<Self>,
     ) {
         use crate::domain::tab::PaneArrangement;
-        use spaceterm_server::client_view::{Layout, LayoutNode};
-        use spaceterm_server::hierarchy::Axis;
+        use spaceterm_core::client_view::{Layout, LayoutNode};
+        use spaceterm_core::hierarchy::Axis;
         fn convert(
             layout: &Layout,
             index: usize,
@@ -2554,7 +2554,7 @@ impl TabView {
     /// because another client's creation is membership and not a view change here.
     pub(crate) fn reconcile(
         &mut self,
-        server_tab: &spaceterm_server::hierarchy::Tab,
+        core_tab: &spaceterm_core::hierarchy::Tab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -2564,7 +2564,7 @@ impl TabView {
         // carry both a creation and the removal of what it was created beside, and a Tab that
         // lost its last known Pane first would lose the Panes that replaced it.
         let mut changed = false;
-        for pane in &server_tab.panes {
+        for pane in &core_tab.panes {
             let binding = &self.binding;
             if let Some(pane_id) = binding.local_pane(pane.id) {
                 if self.tab.pane(pane_id).is_none()
@@ -2596,9 +2596,9 @@ impl TabView {
                     if let Some(terminal) = self.tab.pane(pane_id) {
                         terminal.update(cx, |terminal, cx| {
                             if reopened {
-                                terminal.rebind_server(factory, cx);
+                                terminal.rebind_core(factory, cx);
                             } else {
-                                terminal.bind_pending_server(factory, cx);
+                                terminal.bind_pending_core(factory, cx);
                             }
                         });
                     }
@@ -2647,7 +2647,7 @@ impl TabView {
                 Err(error) => eprintln!("failed to present a Pane: {error}"),
             }
         }
-        let observers = server_tab
+        let observers = core_tab
             .panes
             .iter()
             .filter_map(|pane| {
@@ -2667,7 +2667,7 @@ impl TabView {
             changed = true;
             cx.notify();
         }
-        changed |= self.remove_absent_panes(server_tab, window, cx);
+        changed |= self.remove_absent_panes(core_tab, window, cx);
         let retired = self
             .parked_panes
             .keys()
@@ -2693,7 +2693,7 @@ impl TabView {
     /// Session reporting its own end.
     fn remove_absent_panes(
         &mut self,
-        server_tab: &spaceterm_server::hierarchy::Tab,
+        core_tab: &spaceterm_core::hierarchy::Tab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -2703,9 +2703,9 @@ impl TabView {
             .into_iter()
             .filter(|&pane_id| {
                 self.tab.pane(pane_id).is_some()
-                    && binding.server_pane(pane_id).is_some_and(|server| {
-                        !server_tab.panes.iter().any(|pane| pane.id == server)
-                    })
+                    && binding
+                        .core_pane(pane_id)
+                        .is_some_and(|core| !core_tab.panes.iter().any(|pane| pane.id == core))
             })
             .collect();
         let mut removed = false;
@@ -2779,9 +2779,9 @@ impl TabView {
             return;
         };
         terminal.update(cx, |terminal, cx| {
-            terminal.set_server_connection_interrupted(true, window, cx);
-            terminal.clear_server_presentation(cx);
-            terminal.present_server_metadata(None, cx);
+            terminal.set_machine_connection_interrupted(true, window, cx);
+            terminal.clear_core_presentation(cx);
+            terminal.present_core_metadata(None, cx);
         });
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
@@ -2798,25 +2798,25 @@ impl TabView {
     }
 
     /// The server identity of one Pane this Tab presents.
-    pub(crate) fn server_pane(&self, pane_id: PaneId) -> Option<spaceterm_server::hierarchy::Id> {
-        self.binding.server_pane(pane_id)
+    pub(crate) fn core_pane(&self, pane_id: PaneId) -> Option<spaceterm_core::hierarchy::Id> {
+        self.binding.core_pane(pane_id)
     }
 
     /// Presents the Repository Status the server read for each Pane's directory.
     pub(crate) fn present_repositories(
         &mut self,
-        view: &dyn Fn(spaceterm_server::hierarchy::Id) -> crate::repository_status::RepositoryView,
+        view: &dyn Fn(spaceterm_core::hierarchy::Id) -> crate::repository_status::RepositoryView,
         cx: &mut Context<Self>,
     ) {
         let panes: Vec<_> = self
             .tab
             .panes_with_ids()
-            .filter_map(|(pane_id, terminal)| Some((self.server_pane(pane_id)?, terminal.clone())))
+            .filter_map(|(pane_id, terminal)| Some((self.core_pane(pane_id)?, terminal.clone())))
             .collect();
-        for (server, terminal) in panes {
-            let presented = view(server);
+        for (core, terminal) in panes {
+            let presented = view(core);
             terminal.update(cx, |terminal, cx| {
-                terminal.present_server_repository(presented, cx);
+                terminal.present_core_repository(presented, cx);
             });
         }
     }
@@ -2827,10 +2827,10 @@ impl TabView {
     pub(crate) fn present_metadata<'p>(
         &mut self,
         published: &dyn Fn(
-            spaceterm_server::hierarchy::Id,
+            spaceterm_core::hierarchy::Id,
         ) -> Option<(
-            crate::ui::terminal_pane::ServerSessionRun,
-            &'p spaceterm_server::pane::metadata::Snapshot,
+            crate::ui::terminal_pane::CoreSessionRun,
+            &'p spaceterm_core::pane::metadata::Snapshot,
         )>,
         cx: &mut Context<Self>,
     ) {
@@ -2838,17 +2838,12 @@ impl TabView {
         let panes: Vec<_> = self
             .tab
             .panes_with_ids()
-            .filter_map(|(pane_id, terminal)| {
-                Some((binding.server_pane(pane_id)?, terminal.clone()))
-            })
+            .filter_map(|(pane_id, terminal)| Some((binding.core_pane(pane_id)?, terminal.clone())))
             .collect();
-        for (server, terminal) in panes {
-            let presented = match published(server) {
+        for (core, terminal) in panes {
+            let presented = match published(core) {
                 Some((run, wire)) => {
-                    if terminal
-                        .read(cx)
-                        .presents_server_metadata(run, wire.revision)
-                    {
+                    if terminal.read(cx).presents_core_metadata(run, wire.revision) {
                         continue;
                     }
                     // A publication this route cannot decode changes nothing.
@@ -2860,7 +2855,7 @@ impl TabView {
                 None => None,
             };
             terminal.update(cx, |terminal, cx| {
-                terminal.present_server_metadata(presented, cx);
+                terminal.present_core_metadata(presented, cx);
             });
         }
     }
@@ -2873,31 +2868,31 @@ impl TabView {
     }
 
     /// Whether this Tab presents the server Pane.
-    pub(crate) fn holds_pane(&self, server: spaceterm_server::hierarchy::Id) -> bool {
-        self.binding.holds(server)
+    pub(crate) fn holds_pane(&self, core: spaceterm_core::hierarchy::Id) -> bool {
+        self.binding.holds(core)
     }
 
     pub(crate) fn pane_closes_directly(
         &self,
-        server: spaceterm_server::hierarchy::Id,
+        core: spaceterm_core::hierarchy::Id,
         live_session: bool,
         cx: &App,
     ) -> Option<bool> {
-        use crate::terminal::server_session::ServerPaneStatus;
+        use crate::terminal::core_session::CorePaneStatus;
         let binding = &self.binding;
-        let pane = binding.local_pane(server)?;
+        let pane = binding.local_pane(core)?;
         let status = binding.view(pane)?.connection().status();
         if matches!(
             status,
-            ServerPaneStatus::Takeover
-                | ServerPaneStatus::TakeoverReconnecting
-                | ServerPaneStatus::TakeoverFailed(_)
-                | ServerPaneStatus::TakingOver
+            CorePaneStatus::Takeover
+                | CorePaneStatus::TakeoverReconnecting
+                | CorePaneStatus::TakeoverFailed(_)
+                | CorePaneStatus::TakingOver
         ) {
             return Some(false);
         }
         Some(if live_session {
-            status == ServerPaneStatus::Connected
+            status == CorePaneStatus::Connected
                 && !self
                     .tab
                     .pane(pane)?
@@ -2907,10 +2902,10 @@ impl TabView {
         } else {
             matches!(
                 status,
-                ServerPaneStatus::Connected
-                    | ServerPaneStatus::Restored
-                    | ServerPaneStatus::SessionEnded(_)
-                    | ServerPaneStatus::Ended
+                CorePaneStatus::Connected
+                    | CorePaneStatus::Restored
+                    | CorePaneStatus::SessionEnded(_)
+                    | CorePaneStatus::Ended
             )
         })
     }
@@ -2929,14 +2924,14 @@ impl TabView {
     /// holds no such Pane or the Pane cannot preview a local file.
     pub(crate) fn preview_local_file(
         &mut self,
-        server: spaceterm_server::hierarchy::Id,
+        core: spaceterm_core::hierarchy::Id,
         prepared: crate::terminal::native_services::PreparedFilePreview,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(terminal) = self
             .binding
-            .local_pane(server)
+            .local_pane(core)
             .and_then(|pane_id| self.tab.pane(pane_id))
             .cloned()
         else {
@@ -2951,11 +2946,11 @@ impl TabView {
     /// it. Only the client that asked for the split does this.
     pub(crate) fn focus_pane_explicitly(
         &mut self,
-        server: spaceterm_server::hierarchy::Id,
+        core: spaceterm_core::hierarchy::Id,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.binding.local_pane(server) else {
+        let Some(pane_id) = self.binding.local_pane(core) else {
             return;
         };
         self.select_pane(pane_id);
@@ -3003,7 +2998,7 @@ impl TabView {
         cx: &mut Context<Self>,
     ) {
         use super::workspaces::WorkspaceSubmission;
-        use spaceterm_server::hierarchy::Axis;
+        use spaceterm_core::hierarchy::Axis;
 
         let binding = &self.binding;
         let axis = match axis {
@@ -3069,7 +3064,7 @@ impl TabView {
             let Some(sync) = self
                 .binding
                 .view_mut(pane_id)
-                .map(crate::ui::server_pane::ServerPaneView::sync)
+                .map(crate::ui::core_pane::CorePaneView::sync)
             else {
                 continue;
             };
@@ -3087,7 +3082,7 @@ impl TabView {
     fn apply_sync(
         &mut self,
         pane_id: PaneId,
-        sync: crate::ui::server_pane::ServerPaneSync,
+        sync: crate::ui::core_pane::CorePaneSync,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3099,9 +3094,9 @@ impl TabView {
         // Terminal Find keep the keys a person is typing, whatever the server publishes here.
         let pane_holds_focus = self.pane_holds_focus(pane_id, &terminal, window, cx);
         terminal.update(cx, |terminal, cx| {
-            terminal.set_server_connection_interrupted(sync.interrupted, window, cx);
+            terminal.set_machine_connection_interrupted(sync.interrupted, window, cx);
             if sync.clear_presentation {
-                terminal.clear_server_presentation(cx);
+                terminal.clear_core_presentation(cx);
             }
         });
         if !self.active || self.tab.focused_pane_id() != pane_id || !pane_holds_focus {
@@ -3110,7 +3105,7 @@ impl TabView {
         let screen = self
             .binding
             .view(pane_id)
-            .and_then(crate::ui::server_pane::ServerPaneView::screen);
+            .and_then(crate::ui::core_pane::CorePaneView::screen);
         match screen {
             // Focus rests on the screen, so typing meant for a former shell reaches nothing and
             // never takes control back by accident. Tab from here reaches the screen's action.
@@ -3145,7 +3140,7 @@ impl TabView {
 
     fn caption_controls(&self, pane_id: PaneId) -> Option<WorkspaceCaptionControls> {
         let binding = &self.binding;
-        binding.server_pane(pane_id)?;
+        binding.core_pane(pane_id)?;
         let editability = binding.editability();
         Some(WorkspaceCaptionControls {
             edits: editability.available(),
@@ -3161,7 +3156,7 @@ impl TabView {
         view: &gpui::WeakEntity<Self>,
         cx: &App,
     ) -> WorkspacePaneSurface {
-        use crate::ui::server_pane::{self, ServerPaneScreen};
+        use crate::ui::core_pane::{self, CorePaneScreen};
         use spaceterm_ui::Button;
 
         let Some(pane) = self.binding.view(pane_id) else {
@@ -3171,7 +3166,7 @@ impl TabView {
             |suffix: &str| gpui::SharedString::from(format!("pane-{suffix}-{}", pane_id.get()));
         let screen_focus = self.binding.screen_focus(pane_id).cloned();
         let screen = pane.screen().map(|screen| match screen {
-            ServerPaneScreen::Takeover {
+            CorePaneScreen::Takeover {
                 taking_over,
                 unconfirmed,
                 offered,
@@ -3179,16 +3174,16 @@ impl TabView {
                 controller,
             } => {
                 let status = if taking_over {
-                    Some(server_pane::progress_status(
+                    Some(core_pane::progress_status(
                         selector("take-over-status"),
                         selector("take-over-progress"),
-                        server_pane::TAKING_OVER.into(),
+                        core_pane::TAKING_OVER.into(),
                         cx,
                     ))
                 } else if unconfirmed {
-                    Some(server_pane::note_status(
+                    Some(core_pane::note_status(
                         selector("take-over-status"),
-                        server_pane::TAKE_OVER_UNCONFIRMED.into(),
+                        core_pane::TAKE_OVER_UNCONFIRMED.into(),
                         cx,
                     ))
                 } else {
@@ -3196,17 +3191,17 @@ impl TabView {
                 };
                 let (title, detail) = if ended {
                     (
-                        server_pane::SESSION_ENDED_TITLE.into(),
-                        server_pane::SESSION_ENDED_DETAIL,
+                        core_pane::SESSION_ENDED_TITLE.into(),
+                        core_pane::SESSION_ENDED_DETAIL,
                     )
                 } else if offered || taking_over {
-                    server_pane::takeover_copy(controller.as_ref())
+                    core_pane::takeover_copy(controller.as_ref())
                 } else {
                     // SpaceTerm stopped reconnecting, so the screen claims nothing about the shell
                     // or who controls it.
                     (
-                        server_pane::TAKEOVER_TITLE.into(),
-                        server_pane::TAKEOVER_FAILED_DETAIL,
+                        core_pane::TAKEOVER_TITLE.into(),
+                        core_pane::TAKEOVER_FAILED_DETAIL,
                     )
                 };
                 // The Session already ended, so nothing here can take it over.
@@ -3223,13 +3218,13 @@ impl TabView {
                             });
                         })
                 });
-                server_pane::render_screen(
+                core_pane::render_screen(
                     selector("takeover"),
-                    server_pane::ScreenCopy::new(title, detail.into()),
+                    core_pane::ScreenCopy::new(title, detail.into()),
                     // Losing control, a new Controlling Client, and the end of a Session all happen
                     // without any action here, so assistive technology announces them.
                     true,
-                    server_pane::ScreenActions {
+                    core_pane::ScreenActions {
                         primary: action,
                         link: None,
                     },
@@ -3238,22 +3233,22 @@ impl TabView {
                     cx,
                 )
             }
-            ServerPaneScreen::Restored {
+            CorePaneScreen::Restored {
                 starting,
                 unconfirmed,
                 offered,
                 ended,
             } => {
-                let copy = server_pane::DormantCopy::of(ended);
+                let copy = core_pane::DormantCopy::of(ended);
                 let status = if starting {
-                    Some(server_pane::progress_status(
+                    Some(core_pane::progress_status(
                         selector(&format!("{}-status", copy.action)),
                         selector(&format!("{}-progress", copy.action)),
                         copy.progress.into(),
                         cx,
                     ))
                 } else if unconfirmed {
-                    Some(server_pane::note_status(
+                    Some(core_pane::note_status(
                         selector(&format!("{}-status", copy.action)),
                         copy.unconfirmed.into(),
                         cx,
@@ -3275,7 +3270,7 @@ impl TabView {
                 // A Pane without a shell can also go: Close Pane asks as the Close Pane command
                 // does.
                 let close_owner = view.clone();
-                let close = Button::new(selector("close-pane"), server_pane::CLOSE_PANE)
+                let close = Button::new(selector("close-pane"), core_pane::CLOSE_PANE)
                     .tab_stop(true)
                     .debug_selector(selector("close-pane"))
                     .on_activate(move |_, _, cx| {
@@ -3283,12 +3278,12 @@ impl TabView {
                             view.request_close_pane(pane_id, cx);
                         });
                     });
-                server_pane::render_screen(
+                core_pane::render_screen(
                     selector(copy.screen),
-                    server_pane::ScreenCopy::new(copy.title.into(), copy.detail)
-                        .glyph(server_pane::DORMANT_GLYPH),
+                    core_pane::ScreenCopy::new(copy.title.into(), copy.detail)
+                        .glyph(core_pane::DORMANT_GLYPH),
                     true,
-                    server_pane::ScreenActions {
+                    core_pane::ScreenActions {
                         primary: Some(action),
                         link: Some(close),
                     },
@@ -3297,7 +3292,7 @@ impl TabView {
                     cx,
                 )
             }
-            ServerPaneScreen::StartUnknown {
+            CorePaneScreen::StartUnknown {
                 checking,
                 unanswered,
             } => {
@@ -3308,12 +3303,12 @@ impl TabView {
                     .sessions()
                     .remote_name()
                     .is_none()
-                    .then_some(crate::ui::ServerTarget::Local);
+                    .then_some(crate::ui::MachineTarget::Local);
                 let owner = view.clone();
-                server_pane::StartUnknownScreen {
+                core_pane::StartUnknownScreen {
                     screen: selector("start-unknown"),
                     retry: selector("check-start"),
-                    server_settings: restart_target
+                    machine_settings: restart_target
                         .as_ref()
                         .map(|_| selector("start-unknown-server-settings")),
                     checking,
@@ -3323,29 +3318,29 @@ impl TabView {
                             view.retry_pane(pane_id, window, cx);
                         });
                     },
-                    // Settings reads the server again, and Restart Server asks before it ends
+                    // Settings reads the server again, and Restart SpaceTerm Core asks before it ends
                     // anything. Nothing here restarts it.
-                    on_server_settings: move |_: &mut Window, cx: &mut App| {
+                    on_machine_settings: move |_: &mut Window, cx: &mut App| {
                         if let Some(target) = restart_target.clone() {
-                            crate::ui::settings_window::open_server_settings(target, cx);
+                            crate::ui::settings_window::open_machine_settings(target, cx);
                         }
                     },
                 }
                 .render(pane.announcements(), cx)
             }
-            ServerPaneScreen::DirectoryUnavailable { starting, offered } => {
+            CorePaneScreen::DirectoryUnavailable { starting, offered } => {
                 let target = pane.connection().recovery_target();
                 let editability = self.binding.editability();
                 let retry_owner = view.clone();
                 let choose_owner = view.clone();
-                let actions = server_pane::DirectoryActions {
+                let actions = core_pane::DirectoryActions {
                     retry: selector("directory-retry"),
                     choose: selector("choose-directory"),
                     enabled: offered && !starting && !self.directory_recovery_is_open(cx),
                     offer: if editability.available() {
-                        server_pane::ChooseDirectory::Offered
+                        core_pane::ChooseDirectory::Offered
                     } else {
-                        server_pane::ChooseDirectory::Withheld(editability.explanation())
+                        core_pane::ChooseDirectory::Withheld(editability.explanation())
                     },
                     on_retry: move |window: &mut Window, cx: &mut App| {
                         let _ = retry_owner
@@ -3357,7 +3352,7 @@ impl TabView {
                         });
                     },
                 };
-                let status = server_pane::directory_status(
+                let status = core_pane::directory_status(
                     selector("directory-status"),
                     selector("directory-progress"),
                     starting,
@@ -3368,7 +3363,7 @@ impl TabView {
                     self.binding
                         .missing_worktree_for_directory(&target.original)
                 });
-                server_pane::render_directory_screen(
+                core_pane::render_directory_screen(
                     selector("directory-unavailable"),
                     target.and_then(|target| {
                         target
@@ -3385,27 +3380,27 @@ impl TabView {
             }
         });
         let has_screen = screen.is_some();
-        // Start Server reaches only this computer's server. Another computer's stopped server
+        // Start SpaceTerm Core reaches only this computer's server. Another computer's stopped server
         // is started there, so its Pane explains that and offers nothing.
         let remote = self.binding.sessions().remote_name();
         let notice = pane.notice().map(|(title, detail, intent)| {
             let detail = match &remote {
-                Some(name) if pane.server_stopped() => gpui::SharedString::from(format!(
-                    "Start the server on \u{201C}{name}\u{201D} to use this Pane again."
+                Some(name) if pane.core_stopped() => gpui::SharedString::from(format!(
+                    "Start SpaceTerm Core on \u{201C}{name}\u{201D} to use this Pane again."
                 )),
                 _ => detail,
             };
-            let retry = if pane.server_stopped() {
+            let retry = if pane.core_stopped() {
                 remote.is_none().then(|| {
-                    server_pane::start_server_button(
+                    core_pane::start_core_button(
                         selector("start-server"),
-                        crate::ui::workspace_manager::start_local_server,
+                        crate::ui::workspace_manager::start_local_core,
                     )
                 })
             } else {
                 pane.notice_offers_retry().then(|| {
                     let owner = view.clone();
-                    server_pane::retry_button(selector("retry"), move |window, cx| {
+                    core_pane::retry_button(selector("retry"), move |window, cx| {
                         let _ = owner.update(cx, |view, cx| {
                             view.retry_pane(pane_id, window, cx);
                         });
@@ -3414,7 +3409,7 @@ impl TabView {
             };
             // Over a screen, the notice follows the screen's content instead of floating over its
             // actions.
-            server_pane::render_notice(
+            core_pane::render_notice(
                 selector("notice"),
                 title,
                 detail,
@@ -3425,7 +3420,7 @@ impl TabView {
             )
         });
         let (screen, notice) = match screen {
-            Some(screen) => (Some(server_pane::with_notice(screen, notice, cx)), None),
+            Some(screen) => (Some(core_pane::with_notice(screen, notice, cx)), None),
             None => (None, notice),
         };
         // The screen's labeled Group rests on its own focus, so assistive technology announces
@@ -3433,7 +3428,7 @@ impl TabView {
         // while terminal input is paused.
         let screen = screen.map(|screen| match &screen_focus {
             Some(focus) => {
-                server_pane::with_tab_traversal(screen.track_focus(focus)).into_any_element()
+                core_pane::with_tab_traversal(screen.track_focus(focus)).into_any_element()
             }
             None => screen.into_any_element(),
         });
@@ -3444,7 +3439,7 @@ impl TabView {
         let Some(sync) = self
             .binding
             .view_mut(pane_id)
-            .map(crate::ui::server_pane::ServerPaneView::take_over)
+            .map(crate::ui::core_pane::CorePaneView::take_over)
         else {
             return;
         };
@@ -3459,7 +3454,7 @@ impl TabView {
         let Some(sync) = self
             .binding
             .view_mut(pane_id)
-            .map(crate::ui::server_pane::ServerPaneView::start_shell)
+            .map(crate::ui::core_pane::CorePaneView::start_shell)
         else {
             return;
         };
@@ -3488,8 +3483,8 @@ impl TabView {
             return;
         };
         let connection = view.connection();
-        let (Some(server), Some(target), Some(_focus)) = (
-            connection.directory_server(),
+        let (Some(core), Some(target), Some(_focus)) = (
+            connection.directory_core(),
             connection.recovery_target(),
             binding.screen_focus(pane_id).cloned(),
         ) else {
@@ -3502,7 +3497,7 @@ impl TabView {
         let current_owner = cx.weak_entity();
         let restore_owner = cx.weak_entity();
         let expected_target = target.clone();
-        let actions = super::server_pane::RecoveryActions {
+        let actions = super::core_pane::RecoveryActions {
             current: std::rc::Rc::new(move |cx| {
                 current_owner.upgrade().is_some_and(|owner| {
                     let view = owner.read(cx);
@@ -3510,15 +3505,15 @@ impl TabView {
                 }) && current.recovery_target().as_ref() == Some(&expected)
                     && matches!(
                         current.status(),
-                        crate::terminal::server_session::ServerPaneStatus::Failed(
-                            crate::server_connection::ServerError::DirectoryUnavailable
-                        ) | crate::terminal::server_session::ServerPaneStatus::Reconnecting
+                        crate::terminal::core_session::CorePaneStatus::Failed(
+                            crate::machine_connection::CoreError::DirectoryUnavailable
+                        ) | crate::terminal::core_session::CorePaneStatus::Reconnecting
                     )
             }),
             online: std::rc::Rc::new(move || {
                 online.status()
-                    == crate::terminal::server_session::ServerPaneStatus::Failed(
-                        crate::server_connection::ServerError::DirectoryUnavailable,
+                    == crate::terminal::core_session::CorePaneStatus::Failed(
+                        crate::machine_connection::CoreError::DirectoryUnavailable,
                     )
             }),
             confirm: std::rc::Rc::new(move |replacement| {
@@ -3530,7 +3525,7 @@ impl TabView {
             }),
         };
         let recovery = cx.new(|cx| {
-            super::server_pane::DirectoryRecovery::new(server, expected_target, actions, window, cx)
+            super::core_pane::DirectoryRecovery::new(core, expected_target, actions, window, cx)
         });
         cx.observe(&recovery, |view, _, cx| {
             cx.emit(TabViewEvent::PresentationChanged {
@@ -3556,7 +3551,7 @@ impl TabView {
     pub(crate) fn directory_recovery(
         &self,
         cx: &App,
-    ) -> Option<Entity<super::server_pane::DirectoryRecovery>> {
+    ) -> Option<Entity<super::core_pane::DirectoryRecovery>> {
         self.directory_recovery
             .clone()
             .filter(|recovery| recovery.read(cx).is_open())
@@ -3578,11 +3573,11 @@ impl TabView {
         }
     }
     /// Reconnects each Pane the person's stop interrupted, once they started the server.
-    pub(crate) fn server_started(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn core_started(&mut self, cx: &mut Context<Self>) {
         let binding = &mut self.binding;
         for pane_id in binding.pane_ids() {
             if let Some(view) = binding.view_mut(pane_id) {
-                view.server_started();
+                view.core_started();
             }
         }
         cx.notify();
@@ -3597,7 +3592,7 @@ impl TabView {
             .sessions()
             .direct_route()
             .map(|direct| direct.route)
-            && let Some(connections) = crate::ui::direct_servers::installed(cx)
+            && let Some(connections) = crate::ui::direct_machines::installed(cx)
             && connections.status(&route)
                 != Some(crate::direct_connections::DirectRouteStatus::Connected)
         {
@@ -3606,7 +3601,7 @@ impl TabView {
         if self
             .binding
             .view_mut(pane_id)
-            .map(crate::ui::server_pane::ServerPaneView::retry)
+            .map(crate::ui::core_pane::CorePaneView::retry)
             .is_some()
         {
             // A check waits disabled while the server answers, and a disabled control gives up
@@ -3614,8 +3609,8 @@ impl TabView {
             if matches!(
                 self.binding
                     .view(pane_id)
-                    .and_then(crate::ui::server_pane::ServerPaneView::screen),
-                Some(crate::ui::server_pane::ServerPaneScreen::StartUnknown { checking: true, .. })
+                    .and_then(crate::ui::core_pane::CorePaneView::screen),
+                Some(crate::ui::core_pane::CorePaneScreen::StartUnknown { checking: true, .. })
             ) {
                 self.focus_screen(pane_id, window, cx);
             }
@@ -3906,7 +3901,7 @@ impl TabIdentity {
         } else {
             (caption.label.as_ref(), caption.name.as_ref())
         };
-        let label = spaceterm_server::labels::Label::from_parts(
+        let label = spaceterm_core::labels::Label::from_parts(
             if activity.is_empty() {
                 title.as_ref()
             } else {
@@ -4831,8 +4826,8 @@ fn render_pane_corner_surface(
 }
 
 /// The edge of its source Pane a Pane on the server's `side` takes.
-pub(super) fn side_edge(side: spaceterm_server::hierarchy::Side) -> PaneEdge {
-    use spaceterm_server::hierarchy::Side;
+pub(super) fn side_edge(side: spaceterm_core::hierarchy::Side) -> PaneEdge {
+    use spaceterm_core::hierarchy::Side;
     match side {
         Side::Right => PaneEdge::Right,
         Side::Down => PaneEdge::Bottom,
@@ -4842,8 +4837,8 @@ pub(super) fn side_edge(side: spaceterm_server::hierarchy::Side) -> PaneEdge {
 }
 
 /// The server's side for a Pane placed on `edge` of another Pane.
-pub(super) fn edge_side(edge: PaneEdge) -> spaceterm_server::hierarchy::Side {
-    use spaceterm_server::hierarchy::Side;
+pub(super) fn edge_side(edge: PaneEdge) -> spaceterm_core::hierarchy::Side {
+    use spaceterm_core::hierarchy::Side;
     match edge {
         PaneEdge::Right => Side::Right,
         PaneEdge::Bottom => Side::Down,
@@ -5352,46 +5347,46 @@ mod tests {
     }
 
     /// Server-backed Panes over `terminal`.
-    fn server_session_factory(
+    fn core_session_factory(
         terminal: Rc<dyn TerminalSessionFactory>,
     ) -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::new_server(terminal)
+        WorkspaceTerminalSessionFactory::new_core(terminal)
     }
 
     /// Terminal Sessions of a server whose connection presents what it reads.
-    fn server_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
+    fn core_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
         TestTerminalSessionFactory::new(records).with_reading_available(true)
     }
 
     /// One server Tab's membership as a scripted server owns it. It accepts every split.
-    struct ScriptedServer {
+    struct ScriptedCore {
         edits: Rc<crate::ui::workspaces::testing::ScriptedEdits>,
         panes: Rc<crate::ui::workspaces::testing::ScriptedPanes>,
         factory: WorkspaceTerminalSessionFactory,
         source: crate::ui::workspaces::WorkspaceEditSource,
-        layout: RefCell<spaceterm_server::hierarchy::Tab>,
+        layout: RefCell<spaceterm_core::hierarchy::Tab>,
         revision: Cell<u64>,
         answered: Cell<usize>,
     }
 
-    impl ScriptedServer {
+    impl ScriptedCore {
         /// A server whose Tab holds the Root Pane and then `layout`, over Terminal Sessions from
         /// `terminal`.
         fn new(
-            layout: Vec<spaceterm_server::hierarchy::Pane>,
+            layout: Vec<spaceterm_core::hierarchy::Pane>,
             terminal: TestTerminalSessionFactory,
         ) -> Rc<Self> {
             use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
-            use crate::ui::workspaces::tests as server;
-            let factory = server_session_factory(Rc::new(terminal));
-            let mut members = vec![server::pane(
-                server::ROOT_PANE,
+            use crate::ui::workspaces::tests as workspace_tests;
+            let factory = core_session_factory(Rc::new(terminal));
+            let mut members = vec![workspace_tests::pane(
+                workspace_tests::ROOT_PANE,
                 None,
-                spaceterm_server::hierarchy::Axis::Right,
+                spaceterm_core::hierarchy::Axis::Right,
             )];
             members.extend(layout);
-            let layout = server::tab(server::ROOT_TAB, members);
-            let edits = Rc::new(ScriptedEdits::new(Some(server::inventory(
+            let layout = workspace_tests::tab(workspace_tests::ROOT_TAB, members);
+            let edits = Rc::new(ScriptedEdits::new(Some(workspace_tests::inventory(
                 1,
                 vec![layout.clone()],
             ))));
@@ -5410,8 +5405,8 @@ mod tests {
         /// Accepts every split asked for since the last answer, and reports whether membership
         /// changed.
         fn accept_splits(&self) -> bool {
-            use crate::ui::workspaces::tests as server;
-            use spaceterm_server::hierarchy::{Mutation, Outcome};
+            use crate::ui::workspaces::tests as workspace_tests;
+            use spaceterm_core::hierarchy::{Mutation, Outcome};
             let mut changed = false;
             while let Some(mutation) = self.edits.submitted().get(self.answered.get()).cloned() {
                 self.answered.set(self.answered.get() + 1);
@@ -5422,7 +5417,7 @@ mod tests {
                 self.layout
                     .borrow_mut()
                     .panes
-                    .push(server::pane(id, Some(source), axis));
+                    .push(workspace_tests::pane(id, Some(source), axis));
                 self.publish();
                 self.edits.answer(Outcome::Accepted { target: id });
                 changed = true;
@@ -5431,9 +5426,9 @@ mod tests {
         }
 
         fn publish(&self) {
-            use crate::ui::workspaces::tests as server;
+            use crate::ui::workspaces::tests as workspace_tests;
             self.revision.set(self.revision.get() + 1);
-            self.edits.set_inventory(server::inventory(
+            self.edits.set_inventory(workspace_tests::inventory(
                 self.revision.get(),
                 vec![self.layout.borrow().clone()],
             ));
@@ -5446,7 +5441,7 @@ mod tests {
             window: &mut Window,
             cx: &mut Context<TabView>,
         ) -> TabView {
-            use crate::ui::workspaces::tests as server;
+            use crate::ui::workspaces::tests as workspace_tests;
             use crate::ui::workspaces::{
                 WorkspacePaneOpener, WorkspacePaneSessions, WorkspacePanes,
             };
@@ -5457,14 +5452,19 @@ mod tests {
             let source = self.source.clone();
             let (_, state) = self
                 .panes
-                .open(server::ROOT_PANE)
+                .open(workspace_tests::ROOT_PANE)
                 .expect("the Root Pane subscription must open");
             TabView::with_pane_construction(
                 TabId::new(1),
                 self.factory.clone(),
                 construction,
-                WorkspacePanes::new(source, sessions, server::WORKSPACE, server::ROOT_TAB),
-                (server::ROOT_PANE, state),
+                WorkspacePanes::new(
+                    source,
+                    sessions,
+                    workspace_tests::WORKSPACE,
+                    workspace_tests::ROOT_TAB,
+                ),
+                (workspace_tests::ROOT_PANE, state),
                 window,
                 cx,
             )
@@ -5487,7 +5487,7 @@ mod tests {
         /// the test runs until parked.
         fn bind(self: &Rc<Self>, view: &Entity<TabView>, cx: &mut VisualTestContext) {
             use crate::ui::workspaces::WorkspaceEdits as _;
-            use crate::ui::workspaces::tests as server;
+            use crate::ui::workspaces::tests as workspace_tests;
             let source = self.source.clone();
             let changes = self.edits.subscribe();
             let layout = self.layout.borrow().clone();
@@ -5497,12 +5497,12 @@ mod tests {
                     view.reconcile(&layout, window, cx);
                     view.focus(window, cx);
                 });
-                let server = Rc::clone(self);
+                let core = Rc::clone(self);
                 let bound = view.downgrade();
                 window
                     .spawn(cx, async move |cx| {
                         while changes.recv().await.is_ok() {
-                            if !server.accept_splits() {
+                            if !core.accept_splits() {
                                 continue;
                             }
                             // The Workspace Window reads the answer, then presents the
@@ -5514,7 +5514,7 @@ mod tests {
                                         .pop()?
                                         .tabs
                                         .into_iter()
-                                        .find(|tab| tab.id == server::ROOT_TAB)
+                                        .find(|tab| tab.id == workspace_tests::ROOT_TAB)
                                 })
                             else {
                                 continue;
@@ -5560,42 +5560,42 @@ mod tests {
     fn layout_pane(
         index: u8,
         source: u8,
-        axis: spaceterm_server::hierarchy::Axis,
-    ) -> spaceterm_server::hierarchy::Pane {
-        use crate::ui::workspaces::tests as server;
+        axis: spaceterm_core::hierarchy::Axis,
+    ) -> spaceterm_core::hierarchy::Pane {
+        use crate::ui::workspaces::tests as workspace_tests;
         let id = |index| {
             if index == 0 {
-                server::ROOT_PANE
+                workspace_tests::ROOT_PANE
             } else {
                 [0x40 + index; 32]
             }
         };
-        server::pane(id(index), Some(id(source)), axis)
+        workspace_tests::pane(id(index), Some(id(source)), axis)
     }
 
     /// Presents one server Tab whose Panes are the Root Pane and then `layout`, as the
     /// Workspace Window binds it, over Terminal Sessions from `terminal`.
     fn tab_view_over(
-        layout: Vec<spaceterm_server::hierarchy::Pane>,
+        layout: Vec<spaceterm_core::hierarchy::Pane>,
         terminal: TestTerminalSessionFactory,
         cx: &mut TestAppContext,
     ) -> (Entity<TabView>, &mut VisualTestContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let server = ScriptedServer::new(layout, terminal);
-        let (view, cx) = server.window(PaneConstruction::testing(), cx);
-        server.bind(&view, cx);
+        let core = ScriptedCore::new(layout, terminal);
+        let (view, cx) = core.window(PaneConstruction::testing(), cx);
+        core.bind(&view, cx);
         (view, cx)
     }
 
     /// Presents one server Tab whose Panes are the Root Pane and then `layout`.
-    fn server_tab_view(
-        layout: Vec<spaceterm_server::hierarchy::Pane>,
+    fn core_tab_view(
+        layout: Vec<spaceterm_core::hierarchy::Pane>,
         cx: &mut TestAppContext,
     ) -> (Entity<TabView>, &mut VisualTestContext) {
         tab_view_over(
             layout,
-            server_sessions(TestTerminalSessionRecords::default())
+            core_sessions(TestTerminalSessionRecords::default())
                 .with_selection_copy_response(Ok(None)),
             cx,
         )
@@ -5624,8 +5624,8 @@ mod tests {
         settle_terminal_readiness(cx);
     }
     fn four_pane_view(cx: &mut TestAppContext) -> (Entity<TabView>, &mut VisualTestContext) {
-        use spaceterm_server::hierarchy::Axis;
-        let (view, cx) = server_tab_view(
+        use spaceterm_core::hierarchy::Axis;
+        let (view, cx) = core_tab_view(
             vec![
                 layout_pane(2, 0, Axis::Right),
                 layout_pane(3, 0, Axis::Down),
@@ -5671,7 +5671,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let (view, cx) = tab_view_over(
             Vec::new(),
-            server_sessions(records.clone()).with_selection_copy_response(Ok(None)),
+            core_sessions(records.clone()).with_selection_copy_response(Ok(None)),
             cx,
         );
         cx.run_until_parked();
@@ -5729,7 +5729,7 @@ mod tests {
     fn a_closed_pane_should_close_its_place_as_its_neighbor_takes_it(cx: &mut TestAppContext) {
         use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
 
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         let whole = cx.debug_bounds("pane-surface-1").unwrap();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -5776,7 +5776,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let (view, cx) = tab_view_over(
             Vec::new(),
-            server_sessions(records.clone()).with_selection_copy_response(Ok(None)),
+            core_sessions(records.clone()).with_selection_copy_response(Ok(None)),
             cx,
         );
         cx.simulate_resize(gpui::size(px(1001.0), px(701.0)));
@@ -5822,7 +5822,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         cx.simulate_resize(gpui::size(px(1001.0), px(701.0)));
         cx.run_until_parked();
@@ -5848,7 +5848,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
 
         cx.update(|_, cx| cx.set_global(AnimatePresence));
@@ -5884,7 +5884,7 @@ mod tests {
         Bounds<Pixels>,
         &mut VisualTestContext,
     ) {
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         let whole = cx.debug_bounds("pane-surface-1").unwrap();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -6012,7 +6012,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         for _ in 0..4 {
             split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -6056,7 +6056,7 @@ mod tests {
     fn a_pane_dropped_where_moving_panes_overlap_should_land_on_the_one_drawn_on_top(
         cx: &mut TestAppContext,
     ) {
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         split_test_pane(&view, PaneId::new(2), SplitAxis::Horizontal, cx);
@@ -6080,7 +6080,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
 
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
 
         cx.update(|_, cx| cx.set_global(AnimatePresence));
@@ -6128,7 +6128,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let (view, cx) = tab_view_over(
             Vec::new(),
-            server_sessions(records.clone()).with_selection_copy_response(Ok(None)),
+            core_sessions(records.clone()).with_selection_copy_response(Ok(None)),
             cx,
         );
         cx.run_until_parked();
@@ -6221,7 +6221,7 @@ mod tests {
     ) {
         use crate::ui::drag_and_drop::AnimatePresence;
 
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         cx.update(|_, cx| cx.set_global(AnimatePresence));
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
@@ -6294,8 +6294,8 @@ mod tests {
     fn panes_inserted_into_a_narrow_layout_should_each_keep_their_minimum_width(
         cx: &mut TestAppContext,
     ) {
-        use spaceterm_server::hierarchy::Axis;
-        let (view, cx) = server_tab_view(
+        use spaceterm_core::hierarchy::Axis;
+        let (view, cx) = core_tab_view(
             vec![
                 layout_pane(2, 0, Axis::Right),
                 layout_pane(3, 2, Axis::Right),
@@ -6341,7 +6341,7 @@ mod tests {
     fn a_pane_drag_should_offer_only_drops_that_change_two_side_by_side_panes(
         cx: &mut TestAppContext,
     ) {
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         cx.run_until_parked();
@@ -6777,17 +6777,17 @@ mod tests {
             });
         });
         let records = TestTerminalSessionRecords::default();
-        let server = ScriptedServer::new(
+        let core = ScriptedCore::new(
             Vec::new(),
-            server_sessions(records.clone()).with_fallback_title("zsh"),
+            core_sessions(records.clone()).with_fallback_title("zsh"),
         );
         let (root, cx) = cx.add_window_view(|window, cx| CaptionTestView {
-            view: cx.new(|cx| server.tab_view(PaneConstruction::testing(), window, cx)),
+            view: cx.new(|cx| core.tab_view(PaneConstruction::testing(), window, cx)),
             width: px(1000.0),
             activity,
         });
         let view = root.read_with(cx, |root, _| root.view.clone());
-        server.bind(&view, cx);
+        core.bind(&view, cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| view.activate(window, cx));
         });
@@ -6804,8 +6804,8 @@ mod tests {
         screen: Arc<ScreenSnapshot>,
         cx: &mut VisualTestContext,
     ) {
-        const RUN: crate::ui::terminal_pane::ServerSessionRun =
-            crate::ui::terminal_pane::ServerSessionRun {
+        const RUN: crate::ui::terminal_pane::CoreSessionRun =
+            crate::ui::terminal_pane::CoreSessionRun {
                 boot: [9; 32],
                 session: [10; 32],
             };
@@ -6820,7 +6820,7 @@ mod tests {
             })
             .expect("the Pane must exist");
         terminal.update(cx, |terminal, cx| {
-            terminal.present_server_metadata(Some((RUN, Arc::clone(&screen.metadata))), cx);
+            terminal.present_core_metadata(Some((RUN, Arc::clone(&screen.metadata))), cx);
         });
         cx.run_until_parked();
     }
@@ -6940,9 +6940,9 @@ mod tests {
         use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
 
         cx.update(crate::ui::init).unwrap();
-        let server = ScriptedServer::new(
+        let core = ScriptedCore::new(
             Vec::new(),
-            server_sessions(TestTerminalSessionRecords::default())
+            core_sessions(TestTerminalSessionRecords::default())
                 .with_selection_copy_response(Ok(None)),
         );
         let construction = PaneConstruction::new(
@@ -6951,8 +6951,8 @@ mod tests {
             crate::terminal::native_services::testing::adapters(),
             crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
         );
-        let (view, cx) = server.window(construction, cx);
-        server.bind(&view, cx);
+        let (view, cx) = core.window(construction, cx);
+        core.bind(&view, cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| view.activate(window, cx));
         });
@@ -7773,7 +7773,7 @@ mod tests {
     fn single_pane_should_float_as_one_rounded_surface_holding_its_caption(
         cx: &mut TestAppContext,
     ) {
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.run_until_parked();
 
         let root = gpui::Bounds::new(
@@ -8494,7 +8494,7 @@ mod tests {
 
     #[gpui::test]
     fn a_split_after_layout_should_skip_a_pane_closed_before_the_layout(cx: &mut TestAppContext) {
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
@@ -8519,7 +8519,7 @@ mod tests {
     #[gpui::test]
     fn native_service_return_is_rejected_after_pane_changes_away_and_back(cx: &mut TestAppContext) {
         let records = TestTerminalSessionRecords::default();
-        let (view, cx) = tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
+        let (view, cx) = tab_view_over(Vec::new(), core_sessions(records.clone()), cx);
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -8568,7 +8568,7 @@ mod tests {
     #[gpui::test]
     fn closing_a_nonfocused_pane_invalidates_the_service_hierarchy(cx: &mut TestAppContext) {
         let records = TestTerminalSessionRecords::default();
-        let (view, cx) = tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
+        let (view, cx) = tab_view_over(Vec::new(), core_sessions(records.clone()), cx);
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -8617,7 +8617,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let (view, cx) = tab_view_over(
             Vec::new(),
-            server_sessions(records.clone()).with_client_filesystem(
+            core_sessions(records.clone()).with_client_filesystem(
                 crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
             ),
             cx,
@@ -8675,7 +8675,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let (view, cx) = tab_view_over(
             Vec::new(),
-            server_sessions(records.clone()).with_fallback_title("zsh"),
+            core_sessions(records.clone()).with_fallback_title("zsh"),
             cx,
         );
         cx.update(|window, cx| {
@@ -8795,7 +8795,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let (view, cx) = tab_view_over(
             Vec::new(),
-            server_sessions(records.clone()).with_fallback_title("zsh"),
+            core_sessions(records.clone()).with_fallback_title("zsh"),
             cx,
         );
 
@@ -8828,7 +8828,7 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let presentation_changes = Rc::new(Cell::new(0));
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
         view.update(cx, |_, cx| {
             cx.subscribe(&view, move |_, _, event: &TabViewEvent, _| {
@@ -8852,7 +8852,7 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let presentation_changes = Rc::new(Cell::new(0));
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
         let presentation_changes_for_subscription = Rc::clone(&presentation_changes);
         view.update(cx, |_, cx| {
@@ -8877,7 +8877,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let records = TestTerminalSessionRecords::default();
-        let (view, cx) = tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
+        let (view, cx) = tab_view_over(Vec::new(), core_sessions(records.clone()), cx);
 
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -8904,7 +8904,7 @@ mod tests {
     #[gpui::test]
     fn pane_split_resize_states_should_keep_the_handle_inside_its_gap(cx: &mut TestAppContext) {
         let records = TestTerminalSessionRecords::default();
-        let (view, cx) = tab_view_over(Vec::new(), server_sessions(records), cx);
+        let (view, cx) = tab_view_over(Vec::new(), core_sessions(records), cx);
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
@@ -8950,7 +8950,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let records = TestTerminalSessionRecords::default();
-        let (view, cx) = tab_view_over(Vec::new(), server_sessions(records), cx);
+        let (view, cx) = tab_view_over(Vec::new(), core_sessions(records), cx);
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -8986,7 +8986,7 @@ mod tests {
     #[gpui::test]
     fn integrated_split_resize_handle_should_own_both_outer_hitbox_edges(cx: &mut TestAppContext) {
         let records = TestTerminalSessionRecords::default();
-        let (view, cx) = tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
+        let (view, cx) = tab_view_over(Vec::new(), core_sessions(records.clone()), cx);
         cx.update(|window, cx| {
             window.activate_window();
             view.update(cx, |view, cx| {
@@ -9057,7 +9057,7 @@ mod tests {
     }
 
     fn split_gap_view(cx: &mut TestAppContext) -> (Entity<TabView>, &mut VisualTestContext) {
-        let (view, cx) = server_tab_view(Vec::new(), cx);
+        let (view, cx) = core_tab_view(Vec::new(), cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (view, cx)
@@ -9396,7 +9396,7 @@ mod tests {
     #[gpui::test]
     fn unpainted_split_gap_should_resize_and_reset_without_terminal_input(cx: &mut TestAppContext) {
         let records = TestTerminalSessionRecords::default();
-        let (view, cx) = tab_view_over(Vec::new(), server_sessions(records.clone()), cx);
+        let (view, cx) = tab_view_over(Vec::new(), core_sessions(records.clone()), cx);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.update(|window, cx| {

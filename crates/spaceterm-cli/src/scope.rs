@@ -5,7 +5,7 @@ use crate::contract::{
     Actual, Candidate, CandidatesData, Code, Details, Failure, Level, MismatchData, Source,
     TargetDetails,
 };
-use spaceterm_server::hierarchy::{Id, Inventory};
+use spaceterm_core::hierarchy::{Id, Inventory};
 use std::path::PathBuf;
 
 /// A full ID or a unique prefix of at least 6 lowercase hex characters.
@@ -85,23 +85,23 @@ pub struct ScopeArgs {
 /// only this.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
-    pub server: [u8; 32],
+    pub core: [u8; 32],
     pub inventory: Inventory,
-    pub repositories: Option<spaceterm_server::repository::Snapshot>,
+    pub repositories: Option<spaceterm_core::repository::Snapshot>,
 }
 
-/// The calling Pane, when `SPACETERM_PANE`, `SPACETERM_SERVER_ID` and `SPACETERM_IDENTITY`
+/// The calling Pane, when `SPACETERM_PANE`, `SPACETERM_MACHINE_ID` and `SPACETERM_IDENTITY`
 /// match this executable and the snapshot's server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Current {
-    pub server: [u8; 32],
+    pub core: [u8; 32],
     pub pane: Id,
 }
 
 /// The level a command acts on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Want {
-    Server,
+    Core,
     Workspace,
     Worktree,
     Tab,
@@ -129,7 +129,7 @@ pub struct Sources {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
-    pub server: [u8; 32],
+    pub core: [u8; 32],
     pub workspace: Option<Id>,
     /// Worktrees have path identity.
     pub worktree: Option<PathBuf>,
@@ -207,7 +207,7 @@ impl TargetError {
     }
 }
 
-use spaceterm_server::{labels, organize, repository};
+use spaceterm_core::{labels, organize, repository};
 use std::path::Path;
 
 #[derive(Clone)]
@@ -581,10 +581,10 @@ pub fn resolve(
     let selectors = [&args.workspace, &args.worktree, &args.tab, &args.pane];
     let explicit = selectors.map(|selector| selector.is_some());
     let current = current
-        .filter(|c| c.server == snapshot.server)
+        .filter(|c| c.core == snapshot.core)
         .and_then(|c| nodes.iter().position(|n| n.pane == Some(c.pane)));
     let acted = match want {
-        Want::Server => None,
+        Want::Core => None,
         Want::Workspace => Some(0),
         Want::Worktree => Some(1),
         Want::Tab => Some(2),
@@ -743,7 +743,7 @@ pub fn resolve(
         }
     }
     Ok(Resolved {
-        server: snapshot.server,
+        core: snapshot.core,
         workspace: fixed[0].map(|i| nodes[i].workspace),
         worktree: fixed[1].and_then(|i| nodes[i].worktree.clone()),
         tab: fixed[2].and_then(|i| nodes[i].tab),
@@ -827,10 +827,10 @@ pub fn current_from_context(
     snapshot: &Snapshot,
     executable_identity: &str,
     identity: Option<&str>,
-    server: Option<&str>,
+    core: Option<&str>,
     pane: Option<&str>,
 ) -> Option<Current> {
-    current::from_context(snapshot, executable_identity, identity, server, pane)
+    current::from_context(snapshot, executable_identity, identity, core, pane)
 }
 pub fn verbose(steps: &[crate::contract::TargetStep]) -> String {
     output::verbose(steps)

@@ -3,7 +3,7 @@ use super::publication::PublicationSchedule;
 use super::*;
 use crate::terminal::paste::PasteConfirmationSchedule;
 use libghostty_vt::terminal::{CompressionActivity, CompressionResult};
-use spaceterm_server::pane::{LineMode, LineState};
+use spaceterm_core::pane::{LineMode, LineState};
 use std::sync::{Mutex, MutexGuard};
 
 const LINE_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
@@ -347,7 +347,7 @@ impl WorkerSchedules {
         }
     }
 
-    pub(super) fn note_hidden_server_content_changed(&mut self) {
+    pub(super) fn note_hidden_machine_content_changed(&mut self) {
         if !self.presentation.is_presentable()
             && self.accessibility_presentation.demand_request.is_some()
         {

@@ -1,12 +1,12 @@
-//! Status, Stop, Restart and Update of a paired server from its Servers card.
+//! Status, Restart and Update of a paired Machine from its Machines card.
 //!
 //! The card takes the CLI's steps over the server's service lane:
-//! [`spaceterm_server::service::lane::admin`] settles what this desktop left pending, previews
+//! [`spaceterm_core::service::lane::admin`] settles what this desktop left pending, previews
 //! each change, and follows a confirmed one until it settles. A confirmation binds the server's
 //! own preview, so the server refuses a change whose Terminal Sessions or service changed since.
-//! Start stays on the server's own computer, because a stopped server accepts no connection.
+//! Start and Stop stay on the Machine itself, because a stopped SpaceTerm Core accepts no connection.
 //!
-//! Nothing here connects on its own: Check Now, Stop, Restart and Update each open a lane
+//! Nothing here connects on its own: Check Now, Restart and Update each open a lane
 //! connection only when the person asks. Each route keeps its work and its last outcome while
 //! this window is open, so selecting another server and back shows them again.
 
@@ -14,10 +14,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{AnyWindowHandle, App, AppContext as _, Context, Global, SharedString, Task};
-use spaceterm_server::service::control::{self, BuildName, UpdateChange, UpdateWording, Wording};
-use spaceterm_server::service::lane::admin::{self, Preview, UpdatePlan, Verdict};
-use spaceterm_server::service::lane::client::{LaneError, Outcome};
-use spaceterm_server::service::lane::{
+use spaceterm_core::service::control::{self, BuildName, UpdateChange, UpdateWording, Wording};
+use spaceterm_core::service::lane::admin::{self, Preview, UpdatePlan, Verdict};
+use spaceterm_core::service::lane::client::{LaneError, Outcome};
+use spaceterm_core::service::lane::{
     LaneAction, LaneCheck, LaneReceipt, LaneStatus, LaneUpdateKind, LaneVersion,
 };
 use spaceterm_ui::{
@@ -27,19 +27,18 @@ use spaceterm_ui::{
 
 use super::SettingsWindow;
 use crate::direct_connections::{DirectRouteId, DirectRouteStatus, RefusalReason};
-use crate::server_connection::{ServerConnection, ServerError};
+use crate::machine_connection::{CoreError, MachineConnection};
 use crate::ui::sidebar_window::form::CaptionTone;
 
-pub(super) const STOP_SELECTOR: &str = "settings-remote-server-stop";
 pub(super) const RESTART_SELECTOR: &str = "settings-remote-server-restart";
 pub(super) const UPDATE_SELECTOR: &str = "settings-remote-server-update";
 pub(super) const CONFIRM_SELECTOR: &str = "settings-remote-server-confirm";
 pub(super) const CANCEL_SELECTOR: &str = "settings-remote-server-cancel";
 
-/// A change the person can ask of a paired server.
+/// A change the person can ask of a paired Machine. Start and Stop run only on the Machine
+/// itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Change {
-    Stop,
     Restart,
     /// Updates to the server's newest signed release, or returns to its previous version when
     /// the server offers that instead.
@@ -49,15 +48,13 @@ pub(crate) enum Change {
 impl Change {
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Stop => "Stop Server",
-            Self::Restart => "Restart Server",
+            Self::Restart => "Restart SpaceTerm Core\u{2026}",
             Self::Update => "Update\u{2026}",
         }
     }
 
     pub(super) const fn selector(self) -> &'static str {
         match self {
-            Self::Stop => STOP_SELECTOR,
             Self::Restart => RESTART_SELECTOR,
             Self::Update => UPDATE_SELECTOR,
         }
@@ -128,8 +125,8 @@ impl RemoteFailure {
             "startup_failed" => Self::StartupFailed,
             "authentication_refused"
             | "revoked"
-            | "server_identity_changed"
-            | "wrong_server"
+            | "machine_identity_changed"
+            | "wrong_machine"
             | "credential_unavailable"
             | "credential_interaction_required" => Self::Refused,
             "protocol_error" | "incompatible_protocol" => Self::Protocol,
@@ -137,14 +134,14 @@ impl RemoteFailure {
         }
     }
 
-    pub(crate) fn of_server(error: ServerError) -> Self {
-        Self::of_code(spaceterm_server::service::lane_codes::code(&error))
+    pub(crate) fn of_core(error: CoreError) -> Self {
+        Self::of_code(spaceterm_core::service::lane_codes::code(&error))
     }
 
     pub(crate) fn of_lane(error: LaneError) -> Self {
         match error {
             LaneError::Code(code) => Self::of_code(&code),
-            LaneError::Server(error) => Self::of_server(error),
+            LaneError::Core(error) => Self::of_core(error),
             LaneError::Interrupted => Self::Failed,
         }
     }
@@ -171,7 +168,7 @@ impl RemoteFailure {
                 format!("{name} couldn\u{2019}t verify the update, so nothing changed.")
             }
             Self::ActivationUnresolved => format!(
-                "An earlier update of {name} hasn\u{2019}t finished. Finish it on its own computer with \u{201C}spaceterm server update\u{201D}."
+                "An earlier update of {name} hasn\u{2019}t finished. Finish it on its own computer with \u{201C}spaceterm update\u{201D}."
             ),
             Self::StartupFailed => format!("{name} didn\u{2019}t start after the change."),
             Self::Refused => {
@@ -192,7 +189,7 @@ type ReadAnswer<'a> = std::pin::Pin<
 /// The blocking service-lane steps for one paired server, which the card runs on the background
 /// executor. Each step opens its own lane connection and first settles what this desktop left
 /// pending on it.
-pub(crate) trait RemoteServerControl: Send + Sync {
+pub(crate) trait RemoteMachineControl: Send + Sync {
     /// Reads the server's Status and its update check. Changes nothing.
     fn read(&self) -> ReadAnswer<'_>;
     /// Asks the server to preview `change`. Update first has the server stage its newest signed
@@ -205,7 +202,7 @@ pub(crate) trait RemoteServerControl: Send + Sync {
 /// The steps over a paired server's own lane, with its pending operations kept beside this
 /// desktop's other records for the route.
 struct LaneControl {
-    server: ServerConnection,
+    core: MachineConnection,
 }
 
 impl LaneControl {
@@ -213,27 +210,24 @@ impl LaneControl {
         &self,
     ) -> Result<
         (
-            spaceterm_server::service::lane::client::Lane,
+            spaceterm_core::service::lane::client::Lane,
             admin::PendingOperations,
-            spaceterm_server::service::lane::client::Session,
+            spaceterm_core::service::lane::client::Session,
             Vec<LaneReceipt>,
         ),
         RemoteFailure,
     > {
-        let lane = self
-            .server
-            .service_lane()
-            .map_err(RemoteFailure::of_server)?;
+        let lane = self.core.service_lane().map_err(RemoteFailure::of_core)?;
         let pending = self
-            .server
+            .core
             .service_operations()
-            .map_err(RemoteFailure::of_server)?;
+            .map_err(RemoteFailure::of_core)?;
         let (session, settled) = admin::open(&lane, &pending).map_err(RemoteFailure::of_lane)?;
         Ok((lane, pending, session, settled))
     }
 }
 
-impl RemoteServerControl for LaneControl {
+impl RemoteMachineControl for LaneControl {
     fn read(&self) -> ReadAnswer<'_> {
         Box::pin(async move {
             let (_, _, mut session, settled) = self.open()?;
@@ -250,7 +244,6 @@ impl RemoteServerControl for LaneControl {
     fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure> {
         let (_, _, mut session, settled) = self.open()?;
         let preview = match change {
-            Change::Stop => admin::preview(&mut session, LaneAction::Stop),
             Change::Restart => admin::preview(&mut session, LaneAction::Restart),
             Change::Update => admin::plan_update(&mut session).map(|plan| match plan {
                 UpdatePlan::Return(preview) | UpdatePlan::Update { preview, .. } => preview,
@@ -282,7 +275,7 @@ impl RemoteServerControl for LaneControl {
 
 /// Builds the lane steps for a paired server's connection.
 pub(crate) type ControlSource =
-    Arc<dyn Fn(ServerConnection) -> Arc<dyn RemoteServerControl> + Send + Sync>;
+    Arc<dyn Fn(MachineConnection) -> Arc<dyn RemoteMachineControl> + Send + Sync>;
 
 struct InstalledSource(ControlSource);
 impl Global for InstalledSource {}
@@ -295,7 +288,7 @@ pub(crate) fn install(source: ControlSource, cx: &mut App) {
 
 /// The lane steps the desktop takes in production.
 pub(crate) fn lane_source() -> ControlSource {
-    Arc::new(|server| Arc::new(LaneControl { server }) as Arc<dyn RemoteServerControl>)
+    Arc::new(|core| Arc::new(LaneControl { core }) as Arc<dyn RemoteMachineControl>)
 }
 
 pub(super) fn installed(cx: &App) -> Option<ControlSource> {
@@ -403,7 +396,7 @@ struct RouteAdmin {
     check: Option<LaneCheck>,
     /// The connection and its link generation when `status` and `check` were read. A reconnect
     /// may reach a server that restarted or updated since, so a reading belongs to that link.
-    read_over: Option<(ServerConnection, u64)>,
+    read_over: Option<(MachineConnection, u64)>,
     work: Option<Work>,
     ended: Option<Ended>,
     /// The last earlier operation a connection settled, until the person asks something else.
@@ -454,7 +447,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
     let ends = sessions_end(effects.ends_sessions);
     // A server stopped or restarted from here starts again on its own computer, so the shared
     // wording's startup clause never shows.
-    let startup = spaceterm_server::service::ServiceStartup::AtLogin;
+    let startup = spaceterm_core::service::ServiceStartup::AtLogin;
     match &preview.action {
         LaneAction::Stop | LaneAction::Restart => {
             let (action, detail) = if preview.action == LaneAction::Stop {
@@ -474,7 +467,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
                     ),
                 )
             };
-            let wording = Wording::for_server(name, action, true, startup);
+            let wording = Wording::for_machine(name, action, true, startup);
             RemoteConfirmation {
                 title: wording.title(),
                 message: wording.message(),
@@ -502,7 +495,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
                 || preview.action == LaneAction::Return;
             // A return names the version it returns to as the previous one.
             let wording = if returning {
-                UpdateWording::for_server(
+                UpdateWording::for_machine(
                     name,
                     UpdateChange::Return,
                     build(to),
@@ -511,7 +504,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
                     false,
                 )
             } else {
-                UpdateWording::for_server(
+                UpdateWording::for_machine(
                     name,
                     UpdateChange::Update,
                     build(from),
@@ -522,13 +515,13 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
             };
             let (previous, candidate) = control::build_labels(build(from), build(to));
             let mut detail = format!(
-                "It changes from {previous} to {candidate}, replacing the running server. {ends} \
+                "It changes from {previous} to {candidate}, replacing the running SpaceTerm Core. {ends} \
                  Every client connected to it disconnects until it starts again, and Workspaces \
                  are kept."
             );
             if effects
                 .to_major
-                .is_some_and(|major| major != spaceterm_server::protocol::MAJOR)
+                .is_some_and(|major| major != spaceterm_core::protocol::MAJOR)
             {
                 detail.push_str(&format!(
                     " Afterward, SpaceTerm here needs its own update to open {name}\u{2019}s \
@@ -562,8 +555,7 @@ pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) 
         Ended::Changed(_, Settlement::Shutdown) => (
             format!(
                 "{name} closed its connection while stopping, so SpaceTerm can\u{2019}t confirm \
-                 the stop finished. Check on its own computer with \u{201C}spaceterm server \
-                 status\u{201D}, and start it again there."
+                 the stop finished. Check on its own computer with \u{201C}spaceterm status\u{201D}, and start it again there."
             ),
             CaptionTone::Warning,
         ),
@@ -666,10 +658,10 @@ impl SettingsWindow {
         &self,
         route: &DirectRouteId,
         cx: &App,
-    ) -> Option<(Arc<dyn RemoteServerControl>, ServerConnection)> {
+    ) -> Option<(Arc<dyn RemoteMachineControl>, MachineConnection)> {
         let source = installed(cx)?;
-        let server = self.direct_routes.as_ref()?.connections.server(route)?;
-        Some((source(server.clone()), server))
+        let core = self.direct_routes.as_ref()?.connections.core(route)?;
+        Some((source(core.clone()), core))
     }
 
     /// Whether `route` can take a lane step now: SpaceTerm holds a connection to it that is
@@ -677,7 +669,7 @@ impl SettingsWindow {
     /// lane still speaks.
     pub(super) fn remote_ready(&self, route: &DirectRouteId, cx: &App) -> bool {
         let status = self
-            .saved_direct_servers()
+            .saved_direct_machines()
             .into_iter()
             .find(|(saved, _, _)| saved == route)
             .map(|(_, status, _)| status);
@@ -694,7 +686,7 @@ impl SettingsWindow {
             && self
                 .direct_routes
                 .as_ref()
-                .is_some_and(|rows| rows.connections.server(route).is_some())
+                .is_some_and(|rows| rows.connections.core(route).is_some())
     }
 
     /// The step underway on `route`, if any.
@@ -708,7 +700,7 @@ impl SettingsWindow {
     fn current_reading(&self, route: &DirectRouteId) -> Option<&RouteAdmin> {
         let admin = self.remote(route)?;
         let (read_over, link) = admin.read_over.as_ref()?;
-        let current = self.direct_routes.as_ref()?.connections.server(route)?;
+        let current = self.direct_routes.as_ref()?.connections.core(route)?;
         (read_over.same_handle(&current) && *link == current.link_generation()).then_some(admin)
     }
 
@@ -756,7 +748,7 @@ impl SettingsWindow {
     pub(super) fn remote_reading(&self, route: &DirectRouteId) -> bool {
         matches!(
             self.remote_work(route),
-            Some(Work::Reading | Work::Preparing(Change::Stop | Change::Restart))
+            Some(Work::Reading | Work::Preparing(Change::Restart))
         )
     }
 
@@ -769,10 +761,10 @@ impl SettingsWindow {
             )
         };
         let text = match self.remote_work(route)? {
-            Work::Performing(Act::Stop) => "Stopping the server\u{2026}".to_owned(),
-            Work::Performing(Act::Restart) => "Restarting the server\u{2026}".to_owned(),
+            Work::Performing(Act::Stop) => "Stopping SpaceTerm Core\u{2026}".to_owned(),
+            Work::Performing(Act::Restart) => "Restarting SpaceTerm Core\u{2026}".to_owned(),
             Work::Performing(Act::Update(to)) => {
-                named(to, "Updating to", "Updating the server\u{2026}")
+                named(to, "Updating to", "Updating SpaceTerm Core\u{2026}")
             }
             Work::Performing(Act::Return(to)) => {
                 named(to, "Restoring", "Restoring the previous version\u{2026}")
@@ -808,7 +800,7 @@ impl SettingsWindow {
     /// was started on its own computer, so the stop no longer needs explaining.
     pub(super) fn follow_remote_routes(&mut self) {
         let statuses: HashMap<DirectRouteId, DirectRouteStatus> = self
-            .saved_direct_servers()
+            .saved_direct_machines()
             .into_iter()
             .map(|(route, status, _)| (route, status))
             .collect();
@@ -839,11 +831,11 @@ impl SettingsWindow {
         if !self.remote_ready(&route, cx) {
             return;
         }
-        let Some((control, server)) = self.remote_control(&route, cx) else {
+        let Some((control, core)) = self.remote_control(&route, cx) else {
             return;
         };
         // Taken before the read, so a link that changes while it runs leaves it stale.
-        let read_over = (server.clone(), server.link_generation());
+        let read_over = (core.clone(), core.link_generation());
         let task = cx.spawn(async move |settings, cx| {
             let read = cx
                 .background_spawn(async move { control.read().await })
@@ -923,7 +915,7 @@ impl SettingsWindow {
         window: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let name = self.server_name(&super::server_list::ServerChoice::Direct(route));
+        let name = self.machine_name(&super::machine_list::MachineChoice::Direct(route));
         let confirmation = confirmation(&name, &preview);
         let owner = cx.weak_entity();
         let entity = cx.entity();
@@ -972,7 +964,7 @@ impl SettingsWindow {
                         });
                     });
                     if result.is_err() {
-                        eprintln!("failed to present the paired server change confirmation");
+                        eprintln!("failed to present the paired machine change confirmation");
                     }
                     result.is_ok()
                 })
@@ -1038,7 +1030,7 @@ pub(super) mod testing {
     pub(in crate::ui::settings_window) struct ScriptedRemote {
         pub(in crate::ui::settings_window) read: Mutex<Result<Reading, RemoteFailure>>,
         pending_read: Mutex<
-            Option<super::super::servers::testing::PendingAnswer<Result<Reading, RemoteFailure>>>,
+            Option<super::super::machines::testing::PendingAnswer<Result<Reading, RemoteFailure>>>,
         >,
         pub(in crate::ui::settings_window) prepare: Mutex<Result<Prepared, RemoteFailure>>,
         pub(in crate::ui::settings_window) perform: Mutex<Result<Performed, RemoteFailure>>,
@@ -1060,8 +1052,8 @@ pub(super) mod testing {
 
         pub(in crate::ui::settings_window) fn hold_read(
             &self,
-        ) -> super::super::servers::testing::HeldAnswer<Result<Reading, RemoteFailure>> {
-            let (held, pending) = super::super::servers::testing::HeldAnswer::new();
+        ) -> super::super::machines::testing::HeldAnswer<Result<Reading, RemoteFailure>> {
+            let (held, pending) = super::super::machines::testing::HeldAnswer::new();
             *self.pending_read.lock().unwrap() = Some(pending);
             held
         }
@@ -1070,13 +1062,13 @@ pub(super) mod testing {
         pub(in crate::ui::settings_window) fn install(self: &Arc<Self>, cx: &mut App) {
             let scripted = Arc::clone(self);
             install(
-                Arc::new(move |_| Arc::clone(&scripted) as Arc<dyn RemoteServerControl>),
+                Arc::new(move |_| Arc::clone(&scripted) as Arc<dyn RemoteMachineControl>),
                 cx,
             );
         }
     }
 
-    impl RemoteServerControl for ScriptedRemote {
+    impl RemoteMachineControl for ScriptedRemote {
         fn read(&self) -> ReadAnswer<'_> {
             Box::pin(async move {
                 let pending = self.pending_read.lock().unwrap().take();

@@ -23,16 +23,16 @@ mod exercise {
     use super::{
         lifecycle, presentation, repository, support, terminal_semantics::*, worktree_fixture,
     };
-    use spaceterm_server::{
-        ServerConnection,
-        connection::link::ServerLink,
+    use spaceterm_core::{
+        MachineConnection,
+        connection::link::CoreLink,
         hierarchy::{CloseTarget, Id, Mutation, Outcome},
     };
     const IDENTITY: &str = "spaceterm-development";
     type Result<T> = std::result::Result<T, Failure>;
 
     struct Options {
-        server: Id,
+        core: Id,
         boot: Option<Id>,
     }
     fn id(text: &str) -> Result<Id> {
@@ -52,7 +52,7 @@ mod exercise {
     impl Options {
         fn parse(args: &[String]) -> Result<Option<Self>> {
             let mut run = false;
-            let (mut server, mut boot) = (None, None);
+            let (mut core, mut boot) = (None, None);
             let mut args = args.iter();
             while let Some(arg) = args.next() {
                 let mut next = || {
@@ -63,7 +63,7 @@ mod exercise {
                 match arg.as_str() {
                     "--run" => run = true,
                     "--help" => return Ok(None),
-                    "--expect-server" => server = Some(id(next()?)?),
+                    "--expect-machine" => core = Some(id(next()?)?),
                     "--expect-boot" => boot = Some(id(next()?)?),
                     _ => return Err("unknown argument".into()),
                 }
@@ -72,14 +72,14 @@ mod exercise {
                 return Ok(None);
             }
             Ok(Some(Self {
-                server: server.ok_or("--expect-server is required")?,
+                core: core.ok_or("--expect-machine is required")?,
                 boot,
             }))
         }
     }
 
     struct Scope<'a> {
-        server: &'a ServerConnection,
+        core: &'a MachineConnection,
         boot: Id,
         workspace: Option<(Id, Option<Id>)>,
     }
@@ -88,7 +88,7 @@ mod exercise {
             let Some((workspace, pane)) = self.workspace else {
                 return Ok(());
             };
-            let connection = stage("cleanup-connect", support::connect(self.server))?;
+            let connection = stage("cleanup-connect", support::connect(self.core))?;
             let inventory = stage("cleanup-inventory", repository::inventory(&connection))?.0;
             if inventory.close.as_ref().map(|close| close.boot) != Some(self.boot) {
                 return Err("cleanup refused replacement server boot".into());
@@ -109,7 +109,7 @@ mod exercise {
                     .close_confirmation(target)
                     .ok_or("cleanup confirmation missing")?;
                 accepted(
-                    self.server,
+                    self.core,
                     &connection,
                     Mutation::Close {
                         target,
@@ -128,21 +128,17 @@ mod exercise {
             }
         }
     }
-    fn accepted(
-        server: &ServerConnection,
-        connection: &ServerLink,
-        mutation: Mutation,
-    ) -> Result<Id> {
+    fn accepted(core: &MachineConnection, connection: &CoreLink, mutation: Mutation) -> Result<Id> {
         let outcome = stage(
             "presentation-mutation",
-            worktree_fixture::journaled_mutation(server, connection, mutation),
+            worktree_fixture::journaled_mutation(core, connection, mutation),
         )?;
         match outcome.outcome {
             Outcome::Accepted { target } => Ok(target),
             _ => Err("test Workspace mutation refused".into()),
         }
     }
-    fn select(connection: &ServerLink, pane: Id) -> Result<support::Pane> {
+    fn select(connection: &CoreLink, pane: Id) -> Result<support::Pane> {
         stage(
             "presentation-select",
             support::select(connection, pane, true, lifecycle::size()),
@@ -153,7 +149,7 @@ mod exercise {
     pub fn run() -> Result<()> {
         let Some(options) = Options::parse(&std::env::args().skip(1).collect::<Vec<_>>())? else {
             println!("Dry run: no storage or server access performed.");
-            println!("Use --run --expect-server HEX [--expect-boot HEX] for IPC.");
+            println!("Use --run --expect-machine HEX [--expect-boot HEX] for IPC.");
             println!(
                 "Requires an existing foreground Development server and python3 on its host. Creates and closes one test Workspace; never starts, installs or resets a server."
             );
@@ -167,23 +163,23 @@ mod exercise {
         let name = format!("p612-{nonce:x}");
         if stage(
             "expected-local-server",
-            spaceterm_server::provisioning::discover(IDENTITY),
+            spaceterm_core::provisioning::discover(IDENTITY),
         )?
-        .server
-            != Some(options.server)
+        .core
+            != Some(options.core)
         {
             return Err("expected server identity changed".into());
         }
-        let server = stage(
+        let core = stage(
             "ipc-client",
-            ServerConnection::for_development_client(&name),
+            MachineConnection::for_development_client(&name),
         )?;
         let observer = stage(
             "ipc-observer",
-            ServerConnection::for_development_client(&format!("{name}-observer")),
+            MachineConnection::for_development_client(&format!("{name}-observer")),
         )?;
         // Client credentials are created by admission, without service registration or setup/reset.
-        let connection = stage("presentation-connect", support::connect(&server))?;
+        let connection = stage("presentation-connect", support::connect(&core))?;
         let observer = stage("observer-connect", support::connect(&observer))?;
         let inventory = stage("presentation-inventory", repository::inventory(&connection))?.0;
         let boot = inventory.close.as_ref().ok_or("server boot missing")?.boot;
@@ -191,16 +187,16 @@ mod exercise {
             return Err("expected server boot changed".into());
         }
         let workspace = accepted(
-            &server,
+            &core,
             &connection,
             Mutation::CreateWorkspace {
                 name: "Presentation acceptance 612".into(),
                 directory: None,
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             },
         )?;
         let mut scope = Scope {
-            server: &server,
+            core: &core,
             boot,
             workspace: Some((workspace, None)),
         };
@@ -219,7 +215,7 @@ mod exercise {
         let lease = started.lease();
         connection.close();
         drop(started);
-        let connection = stage("presentation-reconnect", support::connect(&server))?;
+        let connection = stage("presentation-reconnect", support::connect(&core))?;
         let resumed = select(&connection, pane)?;
         presentation::observe_hidden_inventory(&observer, pane)?;
         presentation::finish(&resumed, lease, witness)?;
@@ -237,12 +233,12 @@ mod exercise {
             Options::parse(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
         }
         #[test]
-        fn mutation_requires_explicit_run_and_exact_server_identity() {
+        fn mutation_requires_explicit_run_and_exact_machine_identity() {
             assert!(parse(&[]).unwrap().is_none());
             assert!(parse(&["--run"]).is_err());
-            assert!(parse(&["--run", "--expect-server", &"00".repeat(32)]).is_err());
+            assert!(parse(&["--run", "--expect-machine", &"00".repeat(32)]).is_err());
             assert!(
-                parse(&["--run", "--expect-server", &"12".repeat(32)])
+                parse(&["--run", "--expect-machine", &"12".repeat(32)])
                     .unwrap()
                     .is_some()
             );

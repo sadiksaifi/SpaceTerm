@@ -1,0 +1,50 @@
+{
+  "command": "update",
+  "data": {
+    "confirmation": {
+      "effects": {
+        "ends_sessions": 1,
+        "from": {
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "version": "0.7.0"
+        },
+        "kind": "update",
+        "sessions": [
+          "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+        ],
+        "to": {
+          "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "version": "0.8.0"
+        }
+      },
+      "expires_at": "2026-10-30T12:10:00Z",
+      "token": "c1-cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    }
+  },
+  "error": {
+    "class": "action_required",
+    "code": "confirmation_required",
+    "details": {},
+    "message": "Review the effects, then repeat the command with --confirm.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "confirmation_required",
+  "warnings": [
+    {
+      "code": "client_major_differs",
+      "details": {
+        "client_major": 1,
+        "core_major": 2
+      },
+      "message": "After this update, work commands need a CLI with SpaceTerm Core's protocol major."
+    }
+  ]
+}

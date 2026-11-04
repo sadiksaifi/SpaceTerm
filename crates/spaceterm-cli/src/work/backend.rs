@@ -4,8 +4,8 @@ use crate::{
     list::PaneFacts,
     scope::{Resolved, Snapshot},
 };
-use spaceterm_server::{
-    connection::link::ServerLink,
+use spaceterm_core::{
+    connection::link::CoreLink,
     hierarchy::{Id, Inventory},
     pane::directories,
     protocol::{Operation, ReplyBody},
@@ -24,7 +24,7 @@ pub trait Read {
 }
 
 pub struct Connected {
-    pub link: ServerLink,
+    pub link: CoreLink,
     pub actor: Id,
     pub deadline: Instant,
 }
@@ -34,9 +34,9 @@ impl Connected {
         let request = self
             .link
             .request(operation)
-            .map_err(|e| from_server_error(e.into()))?;
+            .map_err(|e| from_core_error(e.into()))?;
         match request.wait_for(self.deadline.saturating_duration_since(Instant::now())) {
-            Some(reply) => reply.map_err(|e| from_server_error(e.into())),
+            Some(reply) => reply.map_err(|e| from_core_error(e.into())),
             None => {
                 request.cancel();
                 Err(Failure::new(Code::Timeout))
@@ -51,8 +51,8 @@ impl Read for Connected {
             if let Some((_, revision)) = self.link.inventory() {
                 return Ok(revision.inventory.clone());
             }
-            if let spaceterm_server::connection::link::Health::Closed(error) = self.link.health() {
-                return Err(from_server_error(error.into()));
+            if let spaceterm_core::connection::link::Health::Closed(error) = self.link.health() {
+                return Err(from_core_error(error.into()));
             }
             let remaining = self.deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {

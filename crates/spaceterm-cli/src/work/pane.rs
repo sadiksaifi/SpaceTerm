@@ -1,6 +1,6 @@
 use super::*;
 use crate::scope::{self, Effect, ScopeArgs, Want};
-use spaceterm_server::{
+use spaceterm_core::{
     hierarchy::{Axis, CloseTarget},
     organize,
 };

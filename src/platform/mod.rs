@@ -78,7 +78,7 @@ pub(crate) mod unix_desktop_channel;
 
 /// The watch sets a server's Git facts reader uses: kqueue on macOS, which needs no FSEvents, and
 /// inotify through `notify` on Linux.
-pub(crate) fn server_watch_sets() -> std::sync::Arc<dyn crate::repository_status::WatchSets> {
+pub(crate) fn core_watch_sets() -> std::sync::Arc<dyn crate::repository_status::WatchSets> {
     #[cfg(target_os = "macos")]
     return std::sync::Arc::new(kqueue_watch::KqueueWatchSets);
     #[cfg(target_os = "linux")]
@@ -239,10 +239,10 @@ pub(crate) mod macos_services;
 
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
-mod macos_system_settings;
+pub(crate) mod core_permission_access;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
-pub(crate) mod server_permission_access;
+mod macos_system_settings;
 
 #[cfg(all(target_os = "macos", not(test)))]
 #[cfg(feature = "desktop")]
@@ -622,7 +622,7 @@ mod linux_updates;
 /// Composes the existing native PTY adapter without opening a graphical session. Its PTYs count
 /// their native reads in `counters`.
 pub(crate) fn runtime_pty_factory(
-    counters: std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters>,
+    counters: std::sync::Arc<spaceterm_core::diagnostics::TerminalCounters>,
 ) -> std::sync::Arc<dyn native_pty::NativePtyAdapterFactory> {
     #[cfg(target_os = "macos")]
     let host = std::sync::Arc::new(macos_pty_host::MacosPtyHost);
@@ -632,7 +632,7 @@ pub(crate) fn runtime_pty_factory(
 }
 
 pub(crate) fn service_pty_factory(
-    counters: std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters>,
+    counters: std::sync::Arc<spaceterm_core::diagnostics::TerminalCounters>,
 ) -> std::sync::Arc<dyn native_pty::NativePtyAdapterFactory> {
     let factory = runtime_pty_factory(counters);
     #[cfg(target_os = "linux")]

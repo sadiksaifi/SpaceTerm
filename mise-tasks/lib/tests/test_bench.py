@@ -1,4 +1,4 @@
-"""Check the bench:desktop:macos and bench:server measurement, budget and receipt code."""
+"""Check the bench:desktop:macos and bench:core measurement, budget and receipt code."""
 
 import importlib.util
 import json
@@ -15,7 +15,7 @@ from spaceterm_tasks import ROOT, TaskError, bench
 
 PS = """    1     0 /sbin/launchd
   100     1 /Applications/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight
-  200     1 /Users/me/.local/share/spaceterm-preflight/server/installations/a/SpaceTerm Preflight.app/Contents/MacOS/spaceterm
+  200     1 /Users/me/.local/share/spaceterm-preflight/core/installations/a/SpaceTerm Core Preflight.app/Contents/MacOS/spaceterm
   201   200 /bin/zsh
   202   201 /bin/cat
   300     1 /usr/bin/yes
@@ -138,14 +138,12 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["S6/yes/off"]["values"]["rows"], 10)
         self.assertEqual(summary["S6/yes/on"]["roles"]["product"]["cpu_s"], 9.0)
 
-    def test_server_summary_takes_medians_per_workload_and_condition(self):
+    def test_core_summary_takes_medians_per_workload_and_condition(self):
         def run(cpu, condition="plain"):
-            values = dict.fromkeys(bench.SERVER_METRICS, 5) | {"cpu_s": cpu}
+            values = dict.fromkeys(bench.CORE_METRICS, 5) | {"cpu_s": cpu}
             return {"workload": "yes", "condition": condition, "values": values}
 
-        summary = bench.summarize_server(
-            [run(100.0), run(1.0), run(2.0), run(7.0, "accessibility")]
-        )
+        summary = bench.summarize_core([run(100.0), run(1.0), run(2.0), run(7.0, "accessibility")])
         self.assertEqual(summary["yes/plain"]["cpu_s"], 2.0)
         self.assertEqual(summary["yes/plain"]["bytes_sent"], 5)
         self.assertEqual(summary["yes/accessibility"]["cpu_s"], 7.0)
@@ -261,11 +259,11 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(verdict["missing"], "S8/filled/on")
         self.assertEqual(bench.evaluate({}, self.budgets(rows), scenarios=["S6"]), [])
 
-    def test_compare_server_refuses_incomparable_or_incomplete_baselines(self):
-        server = {"regression": 0.1, "floor": {}}
-        environment = {key: "same" for key in bench.SERVER_ENVIRONMENT}
+    def test_compare_core_refuses_incomparable_or_incomplete_baselines(self):
+        core = {"regression": 0.1, "floor": {}}
+        environment = {key: "same" for key in bench.CORE_ENVIRONMENT}
         settings = {"seconds": 20, "columns": 120, "rows": 40, "max_hz": 60, "runs": 3}
-        values = dict.fromkeys(bench.SERVER_METRICS, 10.0)
+        values = dict.fromkeys(bench.CORE_METRICS, 10.0)
 
         def run(summary, **changes):
             return {
@@ -277,31 +275,31 @@ class BudgetTests(unittest.TestCase):
         baseline = run({"yes/plain": values})
         # Half the CPU in half the time is 60% more CPU per second, not an improvement.
         faster = run({"yes/plain": values | {"cpu_s": 8.0}}, settings={"seconds": 10})
-        result = bench.compare_server(baseline, faster, server)
+        result = bench.compare_core(baseline, faster, core)
         self.assertEqual(result["status"], "incomparable")
         self.assertEqual(result["reasons"], ["setting seconds differs"])
         other = run({"yes/plain": values}, environment={"hardware": "other"})
-        self.assertEqual(bench.compare_server(baseline, other, server)["status"], "incomparable")
+        self.assertEqual(bench.compare_core(baseline, other, core)["status"], "incomparable")
         wider = run({"yes/plain": values, "cat/plain": values})
         self.assertEqual(
-            bench.compare_server(baseline, wider, server)["reasons"], ["baseline lacks cat/plain"]
+            bench.compare_core(baseline, wider, core)["reasons"], ["baseline lacks cat/plain"]
         )
         partial = run(
             {"yes/plain": {key: value for key, value in values.items() if key != "cpu_s"}}
         )
         self.assertEqual(
-            bench.compare_server(partial, baseline, server)["reasons"],
+            bench.compare_core(partial, baseline, core)["reasons"],
             ["baseline lacks yes/plain cpu_s"],
         )
-        self.assertEqual(bench.compare_server(None, baseline, server)["status"], "incomparable")
+        self.assertEqual(bench.compare_core(None, baseline, core)["status"], "incomparable")
         self.assertEqual(
-            bench.compare_server(
-                baseline, run({"yes/plain": values}, settings={"runs": 1}), server
-            )["status"],
+            bench.compare_core(baseline, run({"yes/plain": values}, settings={"runs": 1}), core)[
+                "status"
+            ],
             "within",
         )
         slower = run({"yes/plain": values | {"cpu_s": 12.0}})
-        self.assertEqual(bench.compare_server(baseline, slower, server)["status"], "regressed")
+        self.assertEqual(bench.compare_core(baseline, slower, core)["status"], "regressed")
 
     def test_a_desktop_reference_must_measure_the_same_work_on_the_same_mac(self):
         scroll = {"name": "scroll", "measurement": "S7/scroll", "role": "product"}
@@ -358,13 +356,13 @@ class BudgetTests(unittest.TestCase):
         # Only ratio budgets of requested scenarios need the reference.
         self.assertEqual(reasons(reference([]), scenarios=("S1",)), [])
 
-    def test_server_regressions_respect_the_fraction_and_noise_floor(self):
-        server = {"regression": 0.1, "floor": {"cpu_s": 0.05}}
+    def test_core_regressions_respect_the_fraction_and_noise_floor(self):
+        core = {"regression": 0.1, "floor": {"cpu_s": 0.05}}
         baseline = {"yes/plain": {"cpu_s": 10.0, "bytes_sent": 100}, "cat/plain": {"cpu_s": 0.1}}
         current = {"yes/plain": {"cpu_s": 11.5, "bytes_sent": 109}, "cat/plain": {"cpu_s": 0.14}}
         found = {
             (r["measurement"], r["metric"]): r["regressed"]
-            for r in bench.regressions(baseline, current, server)
+            for r in bench.regressions(baseline, current, core)
         }
         self.assertEqual(
             found,
@@ -537,7 +535,7 @@ def golden(name):
 
 
 def command_words(envelope):
-    """The CLI arguments that name an envelope's command: `server.status` is `server status`."""
+    """The CLI arguments that name an envelope's command: `machine.list` is `machine list`."""
     return envelope["command"].split(".")
 
 
@@ -578,13 +576,13 @@ class CounterReadTests(unittest.TestCase):
         self.assertEqual(json.loads(self.argv.read_text()), ["--json", *command_words(reply)])
         self.assertEqual(counters, reply["data"]["terminal_counters"])
 
-    def test_the_desktop_reads_the_local_servers_counters_from_server_status(self):
-        reply = golden("server_status")
+    def test_the_desktop_reads_the_local_machines_counters_from_machine_status(self):
+        reply = golden("status")
         self.answer(reply)
-        counters = self.current_desktop().server_counters()
+        counters = self.current_desktop().core_counters()
         self.assertEqual(
             json.loads(self.argv.read_text()),
-            ["--server", "local", "--json", *command_words(reply)],
+            ["--machine", "local", "--json", *command_words(reply)],
         )
         self.assertEqual(counters, reply["data"]["terminal_counters"])
 
@@ -604,24 +602,24 @@ class CounterReadTests(unittest.TestCase):
                 with self.assertRaisesRegex(TaskError, message):
                     desktop.client_counters()
                 with self.assertRaisesRegex(TaskError, message):
-                    desktop.server_counters()
+                    desktop.core_counters()
         self.cli.write_text("#!/bin/sh\nexit 2\n")
         with self.assertRaisesRegex(TaskError, "no JSON envelope"):
             desktop.client_counters()
 
-    def test_bench_server_fails_when_its_server_reports_no_counters(self):
+    def test_bench_core_fails_when_its_core_reports_no_counters(self):
         specification = importlib.util.spec_from_file_location(
-            "bench_server", ROOT / "mise-tasks" / "bench" / "server.py"
+            "bench_core", ROOT / "mise-tasks" / "bench" / "core.py"
         )
         assert specification is not None and specification.loader is not None
         task = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(task)
         context = {"cli": str(self.cli), "jail": SimpleNamespace(wrap=list), "env": None}
-        reply = golden("server_status")
+        reply = golden("status")
         self.answer(reply)
         self.assertEqual(task.counters(context), reply["data"]["terminal_counters"])
         self.answer(reply | {"data": reply["data"] | {"terminal_counters": None}})
-        with self.assertRaisesRegex(TaskError, "spaceterm server status reported no"):
+        with self.assertRaisesRegex(TaskError, "spaceterm status reported no"):
             task.counters(context)
 
 
@@ -663,7 +661,7 @@ class FakeApp:
         self.client = None
         self.window = "closed"
         self.front = False
-        self.server = not legacy
+        self.core = not legacy
         self.demand = set()
         self.reads = []
         self.lag = False
@@ -680,7 +678,7 @@ class FakeApp:
 
     def running(self):
         """Whether the Panes' shells run: in the server, or in a legacy app's own process."""
-        return self.client is not None if self.legacy else self.server
+        return self.client is not None if self.legacy else self.core
 
     def new_pane(self):
         self.next_pane += 1
@@ -838,7 +836,7 @@ def fake_desktop(task, app, accessibility, clock, reference=False):
             if role == "client":
                 return [app.client] if app.client else []
             if role == "server":
-                return [1] if app.server else []
+                return [1] if app.core else []
             return list(range(len(app.panes()))) if app.running() else []
 
         def client(self):
@@ -877,11 +875,11 @@ def fake_desktop(task, app, accessibility, clock, reference=False):
             pass
 
     class Cli(Gui):
-        def has_server(self):
+        def has_core(self):
             return True
 
         def service(self, action):
-            app.server = action == "start"
+            app.core = action == "start"
 
         def close_panes(self, panes):
             for pane in panes:
@@ -895,7 +893,7 @@ def fake_desktop(task, app, accessibility, clock, reference=False):
             app.rows_asked = receipt["pane"]
             return 10_040
 
-        def server_counters(self):
+        def core_counters(self):
             app.counter_reads.append("server")
             reads = app.counter_reads.count("server")
             return {"pty_read_attempts": reads, "pane_worker_waits": {"input": 2 * reads}}
@@ -1036,7 +1034,7 @@ class DesktopScenarioTests(unittest.TestCase):
                 self.assertEqual(app.keys, [])
                 self.assertEqual(app.workspaces, before)
 
-    def test_the_reference_runs_every_scenario_without_a_server_or_pane_environment(self):
+    def test_the_reference_runs_every_scenario_without_a_core_or_pane_environment(self):
         compared = {
             tuple(budget["measurement"].split("/"))
             for budget in bench.load_budgets()["desktop"]["budget"]
@@ -1150,12 +1148,16 @@ class DesktopScenarioTests(unittest.TestCase):
 
 
 class BaselineFileTests(unittest.TestCase):
-    def test_checked_in_server_baselines_carry_every_metric(self):
-        for path in sorted((bench.BASELINES / "server").glob("*.json")):
+    def test_checked_in_core_baselines_carry_every_metric(self):
+        paths = sorted((bench.BASELINES / "core").glob("*.json"))
+        self.assertEqual(
+            [path.stem for path in paths], ["macbook-pro-personal", "penguin"], "checked-in hosts"
+        )
+        for path in paths:
             with self.subTest(host=path.stem):
                 data = json.loads(path.read_text())
                 for values in data["summary"].values():
-                    self.assertEqual(set(values), set(bench.SERVER_METRICS))
+                    self.assertEqual(set(values), set(bench.CORE_METRICS))
 
 
 if __name__ == "__main__":

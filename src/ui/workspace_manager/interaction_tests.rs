@@ -4,7 +4,7 @@ use super::*;
 fn rapid_idle_tab_closes_park_the_final_workspace_and_restore_the_refused_tab(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::{ConfirmedControl, Mutation, Outcome};
+    use spaceterm_core::hierarchy::{ConfirmedControl, Mutation, Outcome};
     let (harness, cx) = close_harness(cx);
     let mut inventory = close_inventory(
         2,
@@ -115,7 +115,7 @@ fn rapid_idle_tab_closes_park_the_final_workspace_and_restore_the_refused_tab(
 fn batched_conflict_notices_are_reviewed_one_at_a_time_beyond_the_modal_queue_limit(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_core::hierarchy::Outcome;
     let (harness, cx) = attachment_harness(cx);
     cx.update(|_, cx| {
         let source = harness.manager.update(cx, |manager, _| {
@@ -178,16 +178,16 @@ fn batched_conflict_notices_are_reviewed_one_at_a_time_beyond_the_modal_queue_li
 }
 
 #[gpui::test]
-fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
+fn disconnect_drops_a_parked_remote_presentation_without_closing_other_machines(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = MultiServerHarness::new(cx);
+    let (harness, cx) = MultiMachineHarness::new(cx);
     let (remote, edits) = harness.present_direct("penguin", [9; 32], &[("Far", 1)], cx);
-    let mut inventory = server_inventory(900, &[("Far", 1)]);
-    inventory.close = Some(spaceterm_server::hierarchy::CloseInventory {
+    let mut inventory = core_inventory(900, &[("Far", 1)]);
+    inventory.close = Some(spaceterm_core::hierarchy::CloseInventory {
         controls: Vec::new(),
         boot: [1; 32],
-        sessions: vec![spaceterm_server::hierarchy::ConfirmedPane {
+        sessions: vec![spaceterm_core::hierarchy::ConfirmedPane {
             id: [101; 32],
             session: None,
         }],
@@ -197,7 +197,7 @@ fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.sync_workspaces(remote, window, cx);
-            manager.request_server_close(
+            manager.request_core_close(
                 crate::close_confirmation::CloseTarget::KillWorkspace(far),
                 window,
                 cx,
@@ -210,7 +210,7 @@ fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
     });
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.withdraw_server_workspaces(remote, window, cx);
+            manager.withdraw_core_workspaces(remote, window, cx);
         });
     });
     harness.manager.read_with(cx, |manager, _| {
@@ -245,7 +245,7 @@ fn a_refused_workspace_close_restores_its_views_without_overwriting_newer_focus(
     click("workspace-menu-row-rename", cx);
     harness
         .edits
-        .answer(spaceterm_server::hierarchy::Outcome::StaleConfirmation);
+        .answer(spaceterm_core::hierarchy::Outcome::StaleConfirmation);
     harness.sync(cx);
     assert_eq!(harness.rows(cx), 1);
     assert_eq!(
@@ -267,7 +267,7 @@ fn a_refused_workspace_close_restores_its_views_without_overwriting_newer_focus(
 /// at once to the Workspace that takes its place, and the server's answer leaves it there.
 #[gpui::test]
 fn a_reviewed_workspace_close_moves_the_keyboard_to_the_rendered_survivor(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_core::hierarchy::Outcome;
 
     let (harness, cx) = close_harness(cx);
     assert!(close_terminal_is_focused(&harness, cx));
@@ -317,7 +317,7 @@ fn a_reviewed_workspace_close_moves_the_keyboard_to_the_rendered_survivor(cx: &m
 fn a_reviewed_close_keeps_a_newer_rename_through_confirmation_and_acceptance(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::{Mutation, Outcome};
+    use spaceterm_core::hierarchy::{Mutation, Outcome};
 
     let (harness, cx) = close_harness(cx);
     cx.dispatch_action(crate::ui::KillWorkspace);
@@ -390,7 +390,7 @@ fn a_reviewed_close_keeps_a_newer_rename_through_confirmation_and_acceptance(
 /// draft stays open and unsent beneath the notice and takes the keyboard back after it.
 #[gpui::test]
 fn a_disconnect_notice_keeps_a_newer_rename_draft_and_its_focus(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_core::hierarchy::Mutation;
 
     let (harness, cx) = close_harness(cx);
     cx.update(|window, cx| {
@@ -449,7 +449,7 @@ fn a_disconnect_notice_keeps_a_newer_rename_draft_and_its_focus(cx: &mut TestApp
 fn close_frames_hide_retired_pane_status_and_completion_preserves_sidebar_editing(
     cx: &mut TestAppContext,
 ) {
-    use crate::terminal::server_session::ServerPaneStatus;
+    use crate::terminal::core_session::CorePaneStatus;
     let (harness, cx) = close_harness(cx);
     harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
     settle_panes(cx);
@@ -458,9 +458,9 @@ fn close_frames_hide_retired_pane_status_and_completion_preserves_sidebar_editin
     click("modal-action-close-confirm", cx);
     assert_eq!(close_counts(&harness, cx), (1, 1));
     for status in [
-        ServerPaneStatus::Takeover,
-        ServerPaneStatus::TakeoverReconnecting,
-        ServerPaneStatus::Ended,
+        CorePaneStatus::Takeover,
+        CorePaneStatus::TakeoverReconnecting,
+        CorePaneStatus::Ended,
     ] {
         harness.panes.pane(CLOSE_ROOT_PANE).set(status);
         settle_panes(cx);
@@ -472,7 +472,7 @@ fn close_frames_hide_retired_pane_status_and_completion_preserves_sidebar_editin
     click("workspace-menu-row-rename", cx);
     harness
         .edits
-        .answer(spaceterm_server::hierarchy::Outcome::Accepted {
+        .answer(spaceterm_core::hierarchy::Outcome::Accepted {
             target: CLOSE_ROOT_TAB,
         });
     harness.publish(
@@ -484,7 +484,7 @@ fn close_frames_hide_retired_pane_status_and_completion_preserves_sidebar_editin
 
 #[gpui::test]
 fn final_workspace_close_dismisses_on_publication_without_acknowledgement(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Inventory;
+    use spaceterm_core::hierarchy::Inventory;
     let (harness, cx) = close_harness(cx);
     harness.detach_other(cx);
     cx.dispatch_action(crate::ui::KillWorkspace);
@@ -500,7 +500,7 @@ fn final_workspace_close_dismisses_on_publication_without_acknowledgement(cx: &m
     });
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.sync_workspaces(ServerKey::LOCAL, window, cx)
+            manager.sync_workspaces(MachineKey::LOCAL, window, cx)
         })
     });
     cx.run_until_parked();
@@ -514,7 +514,7 @@ fn final_workspace_close_dismisses_on_publication_without_acknowledgement(cx: &m
 fn explicit_sidebar_open_selects_the_restored_focused_pane(cx: &mut TestAppContext) {
     let (harness, cx) = pane_harness(cx);
     let pane = harness.panes.pane(FOCUS_PANE);
-    pane.set(crate::terminal::server_session::ServerPaneStatus::Restored);
+    pane.set(crate::terminal::core_session::CorePaneStatus::Restored);
     settle_panes(cx);
     let before = pane.selections();
     cx.update(|window, cx| {
@@ -570,7 +570,7 @@ fn an_idle_tab_controlled_by_another_client_still_requires_confirmation(cx: &mut
     harness
         .panes
         .pane(CLOSE_SECOND_PANE)
-        .set(crate::terminal::server_session::ServerPaneStatus::Takeover);
+        .set(crate::terminal::core_session::CorePaneStatus::Takeover);
     settle_panes(cx);
     cx.dispatch_action(crate::ui::ActivateTab2);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -587,7 +587,7 @@ fn unavailable_commands_on_a_replacement_screen_terminate_without_redispatch(
     harness
         .panes
         .pane(FOCUS_PANE)
-        .set(crate::terminal::server_session::ServerPaneStatus::Takeover);
+        .set(crate::terminal::core_session::CorePaneStatus::Takeover);
     settle_panes(cx);
     for action in [
         crate::ui::OpenTerminalFind.boxed_clone(),
@@ -605,7 +605,7 @@ fn unavailable_commands_on_a_replacement_screen_terminate_without_redispatch(
 fn closing_an_idle_own_tab_submits_without_repetitive_confirmation(cx: &mut TestAppContext) {
     let (harness, cx) = close_harness(cx);
     let mut inventory = close_published();
-    let control = spaceterm_server::hierarchy::ConfirmedControl {
+    let control = spaceterm_core::hierarchy::ConfirmedControl {
         pane: CLOSE_SECOND_PANE,
         session: None,
         owner: [1; 32],
@@ -621,7 +621,7 @@ fn closing_an_idle_own_tab_submits_without_repetitive_confirmation(cx: &mut Test
     cx.run_until_parked();
     assert_eq!(harness.closes().len(), 1, "idle own Tab closes directly");
     assert!(matches!(harness.closes().as_slice(),
-        [spaceterm_server::hierarchy::Mutation::Close { confirmation, .. }]
+        [spaceterm_core::hierarchy::Mutation::Close { confirmation, .. }]
             if confirmation.own_controls.as_deref() == Some(&[control][..])
     ));
     assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
@@ -642,7 +642,7 @@ fn an_idle_own_tab_with_a_reconnecting_pane_requires_explicit_confirmation(
     assert!(cx.debug_bounds("modal-action-close-confirm").is_some());
     click("modal-action-close-confirm", cx);
     assert!(matches!(harness.closes().as_slice(),
-        [spaceterm_server::hierarchy::Mutation::Close { confirmation, .. }]
+        [spaceterm_core::hierarchy::Mutation::Close { confirmation, .. }]
             if confirmation.own_controls.is_none()
     ));
 }
@@ -650,7 +650,7 @@ fn an_idle_own_tab_with_a_reconnecting_pane_requires_explicit_confirmation(
 const PENDING_CLOSE_TAB: [u8; 32] = [80; 32];
 const PENDING_CLOSE_PANE: [u8; 32] = [81; 32];
 
-fn pending_close_inventory() -> spaceterm_server::hierarchy::Inventory {
+fn pending_close_inventory() -> spaceterm_core::hierarchy::Inventory {
     close_inventory(
         2,
         &[
@@ -671,7 +671,7 @@ fn pending_close_inventory() -> spaceterm_server::hierarchy::Inventory {
 fn closing_a_pending_tab_waits_for_its_creation_then_reviews_authoritative_sessions(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
+    use spaceterm_core::hierarchy::{CloseTarget, Mutation, Outcome};
     let (harness, cx) = close_harness(cx);
     click("create-tab-button", cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -719,7 +719,7 @@ fn closing_a_pending_tab_waits_for_its_creation_then_reviews_authoritative_sessi
 
 #[gpui::test]
 fn a_pending_tab_close_preserves_later_tab_selection_and_terminal_find(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::{CloseTarget, Outcome};
+    use spaceterm_core::hierarchy::{CloseTarget, Outcome};
     let (harness, cx) = close_harness(cx);
     click("create-tab-button", cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -772,7 +772,7 @@ fn a_pending_tab_close_preserves_later_tab_selection_and_terminal_find(cx: &mut 
 fn a_refused_creation_discards_its_pending_close_without_targeting_a_surviving_tab(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_core::hierarchy::Outcome;
     let (harness, cx) = close_harness(cx);
     click("create-tab-button", cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -788,7 +788,7 @@ fn a_refused_creation_discards_its_pending_close_without_targeting_a_surviving_t
 fn disconnect_during_creation_cancels_the_unapproved_close_and_keeps_the_original_creation(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_core::hierarchy::Outcome;
     let (harness, cx) = close_harness(cx);
     click("create-tab-button", cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -815,7 +815,7 @@ fn disconnect_during_creation_cancels_the_unapproved_close_and_keeps_the_origina
 fn an_unresolved_creation_outcome_blocks_its_close_until_that_same_creation_settles(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_core::hierarchy::Outcome;
     let (harness, cx) = close_harness(cx);
     click("create-tab-button", cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -840,7 +840,7 @@ fn an_unresolved_creation_outcome_blocks_its_close_until_that_same_creation_sett
 fn changed_session_facts_after_pending_creation_require_explicit_review_again(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::Outcome;
+    use spaceterm_core::hierarchy::Outcome;
     let (harness, cx) = close_harness(cx);
     click("create-tab-button", cx);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -870,11 +870,11 @@ fn changed_session_facts_after_pending_creation_require_explicit_review_again(
 
 #[gpui::test]
 fn confirming_a_tab_close_opens_the_replacement_dormant_pane_once(cx: &mut TestAppContext) {
-    use crate::terminal::server_session::ServerPaneStatus;
-    use spaceterm_server::hierarchy::Outcome;
+    use crate::terminal::core_session::CorePaneStatus;
+    use spaceterm_core::hierarchy::Outcome;
     let (harness, cx) = close_harness(cx);
     let replacement = harness.panes.pane(CLOSE_SECOND_PANE);
-    replacement.set(ServerPaneStatus::Restored);
+    replacement.set(CorePaneStatus::Restored);
     settle_panes(cx);
     assert_eq!(replacement.selections(), 0);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -901,8 +901,8 @@ fn confirming_a_tab_close_opens_the_replacement_dormant_pane_once(cx: &mut TestA
 
 #[gpui::test]
 fn directly_closing_a_tab_opens_the_replacement_dormant_pane_once(cx: &mut TestAppContext) {
-    use crate::terminal::server_session::ServerPaneStatus;
-    use spaceterm_server::hierarchy::ConfirmedControl;
+    use crate::terminal::core_session::CorePaneStatus;
+    use spaceterm_core::hierarchy::ConfirmedControl;
     let (harness, cx) = close_harness(cx);
     let mut idle = close_inventory(
         2,
@@ -919,7 +919,7 @@ fn directly_closing_a_tab_opens_the_replacement_dormant_pane_once(cx: &mut TestA
     }];
     harness.publish(idle, cx);
     let replacement = harness.panes.pane(CLOSE_SECOND_PANE);
-    replacement.set(ServerPaneStatus::Restored);
+    replacement.set(CorePaneStatus::Restored);
     settle_panes(cx);
     assert_eq!(replacement.selections(), 0);
     cx.dispatch_action(crate::ui::CloseTab);
@@ -937,7 +937,7 @@ fn directly_closing_a_tab_opens_the_replacement_dormant_pane_once(cx: &mut TestA
 fn a_changed_control_grant_refuses_the_original_direct_close_without_renewing_it(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_server::hierarchy::{ConfirmedControl, Mutation, Outcome};
+    use spaceterm_core::hierarchy::{ConfirmedControl, Mutation, Outcome};
     let (harness, cx) = close_harness(cx);
     let mut idle = close_inventory(
         2,
@@ -975,7 +975,7 @@ fn a_changed_control_grant_refuses_the_original_direct_close_without_renewing_it
 
 #[gpui::test]
 fn a_close_in_a_creation_burst_follows_only_the_last_requested_tab(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::{CloseTarget, Outcome};
+    use spaceterm_core::hierarchy::{CloseTarget, Outcome};
     let (harness, cx) = close_harness(cx);
     for _ in 0..3 {
         click("create-tab-button", cx);
@@ -992,12 +992,15 @@ fn a_close_in_a_creation_burst_follows_only_the_last_requested_tab(cx: &mut Test
         tab.root_pane = pane;
         tab.panes[0].id = pane;
         authority.workspaces[0].tabs.push(tab);
-        authority.close.as_mut().unwrap().sessions.push(
-            spaceterm_server::hierarchy::ConfirmedPane {
+        authority
+            .close
+            .as_mut()
+            .unwrap()
+            .sessions
+            .push(spaceterm_core::hierarchy::ConfirmedPane {
                 id: pane,
                 session: None,
-            },
-        );
+            });
         authority.revision += 1;
         harness.edits.answer(Outcome::Accepted { target: id });
         harness.publish(authority.clone(), cx);

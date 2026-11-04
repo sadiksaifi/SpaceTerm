@@ -48,7 +48,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Sadik Saifi</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>SpaceTerm uses your local network to connect to servers you add and devices you pair.</string>
+	<string>SpaceTerm uses your local network to connect to Machines you add and devices you pair.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>SpaceTerm opens and previews local files on network volumes.</string>
 	<key>NSRemovableVolumesUsageDescription</key>

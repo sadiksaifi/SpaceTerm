@@ -1,0 +1,41 @@
+{
+  "command": "restart",
+  "data": {
+    "observed": "restarted",
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "action": "restart",
+      "boot": "2222222222222222222222222222222222222222222222222222222222222222",
+      "code": null,
+      "operation": "0123456789abcdef0123456789abcdef",
+      "state": "done"
+    },
+    "recovered_operations": [
+      {
+        "identity": "base",
+        "kind": "service",
+        "operation": "fedcba9876543210fedcba9876543210",
+        "outcome": {
+          "state": "applied"
+        }
+      }
+    ]
+  },
+  "error": null,
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": [
+    {
+      "code": "recovered_operation",
+      "details": {
+        "count": 1
+      },
+      "message": "SpaceTerm settled an earlier command first. See data.recovered_operations."
+    }
+  ]
+}

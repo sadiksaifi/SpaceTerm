@@ -31,7 +31,7 @@ pub(super) const EMPTY_ACTION: &str = "Choose Workspace\u{2026}";
 pub(super) const EMPTY_CREATE: &str = "New Local Workspace";
 /// The title while this computer's server is unreachable, so the switcher lists none of its
 /// Workspaces.
-pub(super) const OFFLINE_TITLE: &str = "Server Not Connected";
+pub(super) const OFFLINE_TITLE: &str = "Machine Not Connected";
 
 /// Where the sidebar stands while the empty view lays out beside it.
 pub(super) struct EmptySidebar {
@@ -281,11 +281,11 @@ impl WorkspaceManager {
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let reachable = self.local_server_reachable();
+        let reachable = self.local_core_reachable();
         let place = presentation.wording().this_computer_phrase;
         let local = self.binding.local();
         let stopped = local.and_then(|binding| binding.connection_error())
-            == Some(spaceterm_server::ServerError::Stopped);
+            == Some(spaceterm_core::CoreError::Stopped);
         let (title, detail): (&'static str, SharedString) = if reachable {
             // A reachable server ends any reconnect the person asked for.
             self.launch.reconnect_from.set(None);
@@ -417,7 +417,7 @@ const RECONNECTING: &str = "Reconnecting\u{2026}";
 enum Reconnect {
     Trying,
     /// The attempt ended without a connection, for the reason the connection gave.
-    Failed(Option<spaceterm_server::ServerError>),
+    Failed(Option<spaceterm_core::CoreError>),
 }
 
 impl Reconnect {
@@ -464,13 +464,13 @@ impl Reconnect {
 /// Why the window shows no Workspace while this computer's server is stopped. `place` is the
 /// host's phrase for this computer.
 pub(super) fn stopped_detail(place: &str) -> SharedString {
-    format!("You stopped the server on {place}. Start it to use its Workspaces.").into()
+    format!("You stopped SpaceTerm Core on {place}. Start it to use its Workspaces.").into()
 }
 
 /// `place` is the host's phrase for this computer, such as "this Mac".
 pub(super) fn offline_detail(place: &str) -> SharedString {
     format!(
-        "SpaceTerm can\u{2019}t reach the server on {place}, so its Workspaces aren\u{2019}t \
+        "SpaceTerm can\u{2019}t reach SpaceTerm Core on {place}, so its Workspaces aren\u{2019}t \
          available."
     )
     .into()

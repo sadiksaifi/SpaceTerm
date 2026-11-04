@@ -22,7 +22,7 @@ const MAXIMUM_TITLE_CHARS: usize = 256;
 const BASE_REMOTE: &str = "upstream";
 const DEFAULT_REMOTE: &str = "origin";
 
-pub(crate) use spaceterm_server::repository::PullRequestQuery;
+pub(crate) use spaceterm_core::repository::PullRequestQuery;
 
 /// The query for the current branch, or `None` when `HEAD` names no published branch or the base
 /// remote is not a GitHub-shaped URL.

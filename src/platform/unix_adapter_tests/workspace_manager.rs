@@ -13,15 +13,15 @@ fn workspace_manager_with_directory_selection(
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     cx.update(|cx| {
-        crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+        crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
     });
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(server_sessions(records.clone()).with_fallback_title("zsh"));
+        Rc::new(core_sessions(records.clone()).with_fallback_title("zsh"));
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        local_server_manager(
+        local_core_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -32,8 +32,8 @@ fn workspace_manager_with_directory_selection(
                 lifecycle: PaneLifecycleDependencies::testing(),
                 directory_selection,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                local_server: crate::ui::launch_testing::unanswered(),
-                server_directories: crate::ui::directory_picker::server_directory_testing::matching(),
+                local_core: crate::ui::launch_testing::unanswered(),
+                core_directories: crate::ui::directory_picker::core_directory_testing::matching(),
             },
             SidebarState::Expanded,
             window,
@@ -61,7 +61,7 @@ fn changing_pin_to_equivalent_directory_should_preserve_selected_spelling(cx: &m
     choose_pin_directory(&manager, cx);
 
     let workspaces = manager.read_with(cx, |manager, _| manager.workspaces.len());
-    let pinned = local_server(cx).edits.applied_inventory().workspaces[0]
+    let pinned = local_core(cx).edits.applied_inventory().workspaces[0]
         .pinned_directory
         .clone();
     assert_eq!((workspaces, pinned), (1, Some(equivalent.clone())));
@@ -119,12 +119,12 @@ fn replaced_pinned_directory_is_rejected_between_picker_validation_and_activatio
 /// The paired server compares a selected symbolic link with its own pins before the client
 /// creates another Workspace.
 #[gpui::test]
-fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
+fn open_paired_machine_directory_reuses_the_workspace_pinned_through_a_symlink(
     cx: &mut TestAppContext,
 ) {
-    use crate::ui::server_worktrees::testing::{ScriptedReads, present_direct};
+    use crate::ui::core_worktrees::testing::{ScriptedReads, present_direct};
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::workspaces::{DirectServer, WorkspaceEditSource, WorkspacePaneSessions};
+    use crate::ui::workspaces::{DirectMachine, WorkspaceEditSource, WorkspacePaneSessions};
 
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!(
@@ -136,13 +136,13 @@ fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
     std::fs::create_dir(root.join("elsewhere")).unwrap();
     symlink(root.join("project"), root.join("alias")).unwrap();
     let adapters = WorkspaceManagerAdapters {
-        server_directories: crate::ui::directory_picker::server_directory_testing::in_process(),
+        core_directories: crate::ui::directory_picker::core_directory_testing::in_process(),
         ..workspace_adapters()
     };
-    let (harness, cx) = MultiServerHarness::using(adapters, cx);
+    let (harness, cx) = MultiMachineHarness::using(adapters, cx);
     let route = [9; 32];
     let workspaces = [("Other", 6), ("Far", 7)];
-    let mut inventory = server_inventory(harness.next_revision(), &workspaces);
+    let mut inventory = core_inventory(harness.next_revision(), &workspaces);
     inventory.workspaces[0].pinned_directory = Some(root.join("elsewhere"));
     inventory.workspaces[1].pinned_directory = Some(root.join("project"));
     let edits = Rc::new(ScriptedEdits::new(Some(inventory)));
@@ -154,14 +154,14 @@ fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
             cx,
         );
         harness.manager.update(cx, |manager, cx| {
-            let key = manager.present_server_workspaces(
-                ServerOrigin::Direct(DirectServer {
+            let key = manager.present_core_workspaces(
+                MachineOrigin::Direct(DirectMachine {
                     route,
                     name: "Penguin".into(),
                 }),
                 WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
                 WorkspacePaneSessions::with_opener(
-                    ScriptedPanes::new(MultiServerHarness::session_factory()) as Rc<_>,
+                    ScriptedPanes::new(MultiMachineHarness::session_factory()) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,
@@ -174,14 +174,14 @@ fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
     harness.attach(key, &workspaces, cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.open_server_directory(key, String::new(), root.join("alias"), window, cx);
+            manager.open_core_directory(key, String::new(), root.join("alias"), window, cx);
         })
     });
     cx.run_until_parked();
     let deadline = Instant::now() + std::time::Duration::from_secs(5);
     while harness
         .manager
-        .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
+        .read_with(cx, |manager, _| manager.pending_core_directory.is_some())
     {
         assert!(
             Instant::now() < deadline,

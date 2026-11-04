@@ -13,9 +13,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use spaceterm_server::ServerConnection;
-use spaceterm_server::direct::{self, DeviceCredential, DirectError, PairedDevice, PairingId};
-use spaceterm_server::pane::control::ClientName;
+use spaceterm_core::MachineConnection;
+use spaceterm_core::direct::{self, DeviceCredential, DirectError, PairedDevice, PairingId};
+use spaceterm_core::pane::control::ClientName;
 use zeroize::Zeroizing;
 
 pub use credentials::{CredentialStore, Interaction};
@@ -28,7 +28,7 @@ pub struct SetupEnrollment {
     operation: JoinId,
     public_key: [u8; 32],
     endpoint: String,
-    pin: direct::ServerPin,
+    pin: direct::MachinePin,
     settled: std::sync::atomic::AtomicBool,
 }
 
@@ -108,12 +108,12 @@ pub enum UnpairProgress {
 #[derive(Clone, Debug)]
 pub struct PendingUnpair {
     pub key: UnpairKey,
-    pub server_label: String,
+    pub machine_label: String,
     pub state: UnpairProgress,
     pub dismissed: bool,
     pub enrollment_cleanup: bool,
     pub self_unpair: bool,
-    pub server_confirmed: bool,
+    pub core_confirmed: bool,
 }
 
 /// Refuses every connection, so a handle built on it reaches only client storage.
@@ -137,7 +137,7 @@ struct Inner {
     changes: Mutex<Vec<async_channel::Sender<()>>>,
     /// The account-local server. It alone carries out a revocation recorded with
     /// [`DirectConnections::revoke_other`].
-    local: Option<ServerConnection>,
+    local: Option<MachineConnection>,
     /// Removes what the client retained for a route once the person removes the route.
     route_removed: Mutex<Option<Arc<RouteCleanup>>>,
     /// Wakes the worker thread. The worker holds only this and a weak owner while it waits.
@@ -167,11 +167,11 @@ struct State {
 
 struct RouteState {
     status: DirectRouteStatus,
-    server: Option<ServerConnection>,
+    core: Option<MachineConnection>,
     gate: Arc<std::sync::atomic::AtomicBool>,
     retry: Retry,
     /// Follows the connected route's link, so its end, not a timer, makes the route due.
-    health: Option<Arc<dyn spaceterm_server::connection::link::LinkSink>>,
+    health: Option<Arc<dyn spaceterm_core::connection::link::LinkSink>>,
 }
 
 struct JoinState {
@@ -210,12 +210,12 @@ impl DirectConnections {
             records,
             credentials,
             Arc::new(worker::NativeNetwork),
-            ServerConnection::for_identity(identity).ok(),
+            MachineConnection::for_identity(identity).ok(),
         );
         let owner = identity.to_owned();
         registry.on_route_removed(Arc::new(move |route: &DirectRouteId| {
             // A copy that stays behind names a route nothing presents again.
-            let _ = ServerConnection::discard_retained_inventory(&owner, *route);
+            let _ = MachineConnection::discard_retained_inventory(&owner, *route);
         }));
         registry
     }
@@ -234,7 +234,7 @@ impl DirectConnections {
         records: Arc<dyn Records>,
         credentials: Arc<dyn CredentialStore>,
         network: Arc<dyn worker::DirectNetwork>,
-        local: Option<ServerConnection>,
+        local: Option<MachineConnection>,
     ) -> Self {
         Self(Arc::new(Inner {
             identity: identity.to_owned(),
@@ -272,7 +272,7 @@ impl DirectConnections {
                             } else {
                                 DirectRouteStatus::Disconnected
                             },
-                            server: None,
+                            core: None,
                             gate: Arc::new(std::sync::atomic::AtomicBool::new(saved.active)),
                             // The person left this route connected. Its first attempt after
                             // launch may let the credential store ask them, so a store that no
@@ -366,9 +366,9 @@ impl DirectConnections {
 
     /// A handle to this route's client storage, which holds its client views and the
     /// Workspaces it retained. It never connects, so reading it needs no network or credential.
-    pub fn storage(&self, id: &DirectRouteId) -> Option<ServerConnection> {
+    pub fn storage(&self, id: &DirectRouteId) -> Option<MachineConnection> {
         let route = self.route(id)?;
-        ServerConnection::direct(
+        MachineConnection::direct(
             &self.0.identity,
             route.id,
             route.paired,
@@ -378,14 +378,14 @@ impl DirectConnections {
     }
 
     /// A retained handle keeps interrupted screens frozen until reconciliation succeeds.
-    pub fn server(&self, id: &DirectRouteId) -> Option<ServerConnection> {
+    pub fn core(&self, id: &DirectRouteId) -> Option<MachineConnection> {
         self.0
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .routes
             .get(id)?
-            .server
+            .core
             .clone()
     }
 
@@ -407,12 +407,12 @@ impl DirectConnections {
         };
         saved.active = true;
         if let Some(route) = state.routes.get_mut(id) {
-            if let Some(server) = route.server.take() {
+            if let Some(core) = route.core.take() {
                 // The old link's connector stays disabled; the worker follows the new link.
                 route
                     .gate
                     .store(false, std::sync::atomic::Ordering::Release);
-                disconnected = Some(server);
+                disconnected = Some(core);
                 route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 route.health = None;
             }
@@ -422,8 +422,8 @@ impl DirectConnections {
         }
         self.0.save(&mut state);
         drop(state);
-        if let Some(server) = disconnected {
-            server.disconnect();
+        if let Some(core) = disconnected {
+            core.disconnect();
         }
         self.start_worker();
         self.0.notify();
@@ -444,7 +444,7 @@ impl DirectConnections {
             route
                 .gate
                 .store(false, std::sync::atomic::Ordering::Release);
-            disconnected = route.server.take();
+            disconnected = route.core.take();
             // Old connectors stay disabled even if the person reconnects before an
             // in-flight attempt returns. Its result belongs to the previous gate.
             route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -454,8 +454,8 @@ impl DirectConnections {
         }
         self.0.save(&mut state);
         drop(state);
-        if let Some(server) = disconnected {
-            server.disconnect();
+        if let Some(core) = disconnected {
+            core.disconnect();
         }
         self.0.notify();
     }
@@ -498,7 +498,7 @@ impl DirectConnections {
     /// Failed retention leaves the request in memory and authorizes no network effect.
     pub fn cancel_join(&self, id: JoinId) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        let server = state.routes.get(&id).and_then(|route| route.server.clone());
+        let core = state.routes.get(&id).and_then(|route| route.core.clone());
         if let Some(join) = state.joins.get_mut(&id) {
             join.cancelled = true;
             join.status = JoinStatus::Rejected;
@@ -537,8 +537,8 @@ impl DirectConnections {
         };
         let removed = !state.routes.contains_key(&id);
         drop(state);
-        if removed && let Some(server) = server {
-            server.disconnect();
+        if removed && let Some(core) = core {
+            core.disconnect();
         }
         self.start_worker();
         self.0.notify();
@@ -549,12 +549,12 @@ impl DirectConnections {
         let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.document.pending.iter().filter(|p| !matches!(p.authority, records::Authority::Enrollment { .. }) || p.cancel_requested).map(|pending| PendingUnpair {
             key: pending.operation,
-            server_label: pending.label.clone(),
+            machine_label: pending.label.clone(),
             state: state.pending.get(&pending.operation).map_or(UnpairProgress::Unconfirmed, |r| r.state),
             dismissed: pending.dismissed,
             enrollment_cleanup: matches!(pending.authority, records::Authority::Enrollment { .. }),
             self_unpair: matches!(&pending.authority, records::Authority::Direct(actor) if actor.route.paired.pairing == pending.target),
-            server_confirmed: pending.confirmed,
+            core_confirmed: pending.confirmed,
         }).collect()
     }
 
@@ -590,12 +590,12 @@ impl DirectConnections {
 
     pub fn unpair(&self, id: &DirectRouteId, target: PairingId) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        let server = state.routes.get(id).and_then(|route| route.server.clone());
+        let core = state.routes.get(id).and_then(|route| route.core.clone());
         let result = self.unpair_locked(&mut state, id, target);
         let removed = !state.document.routes.iter().any(|r| &r.route.id == id);
         drop(state);
-        if removed && let Some(server) = server {
-            server.disconnect();
+        if removed && let Some(core) = core {
+            core.disconnect();
         }
         if removed
             && let Some(cleanup) = self
@@ -653,15 +653,15 @@ impl DirectConnections {
 
     pub fn revoke_other(
         &self,
-        server: ServerConnection,
+        core: MachineConnection,
         target: PairingId,
         label: String,
     ) -> Result<(), DirectError> {
-        let pin = server.direct_status()?.pin;
+        let pin = core.direct_status()?.pin;
         if self.0.local.is_none() {
             return Err(DirectError::Transport);
         }
-        if !server.is_account_local() {
+        if !core.is_account_local() {
             return Err(DirectError::AuthenticationRefused);
         }
         let operation = random_id()?;

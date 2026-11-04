@@ -1,0 +1,51 @@
+{
+  "command": "setup",
+  "data": {
+    "automatic_start": true,
+    "launcher": "linked",
+    "network": {
+      "addresses": [
+        "192.0.2.10"
+      ],
+      "bind": "0.0.0.0:9231",
+      "enabled": true
+    },
+    "path_ok": true,
+    "runtime": {
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "version": "0.7.0"
+    },
+    "steps": [
+      {
+        "result": "done",
+        "step": "install_service"
+      },
+      {
+        "result": "already_done",
+        "step": "linger"
+      },
+      {
+        "result": "done",
+        "step": "start"
+      },
+      {
+        "result": "done",
+        "step": "network"
+      },
+      {
+        "result": "skipped",
+        "step": "automatic_start"
+      }
+    ]
+  },
+  "error": null,
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "local",
+    "route": "local"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": []
+}

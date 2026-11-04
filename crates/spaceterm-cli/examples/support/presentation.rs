@@ -2,9 +2,9 @@
 //! The producer writes metadata without cell output while hidden and exits on request.
 use super::support::{self, Pane, Screen, has_row, text_key};
 use super::terminal_semantics::{Failure, stage};
-use spaceterm_server::{
-    ServerError,
-    connection::link::ServerLink,
+use spaceterm_core::{
+    CoreError,
+    connection::link::CoreLink,
     hierarchy::{Id, Inventory},
     pane::{
         FocusTarget, Lease,
@@ -53,7 +53,7 @@ pub struct Witness {
 }
 
 /// A separate admitted client observes the Pane without selecting or painting it.
-pub fn observe_hidden_inventory(link: &ServerLink, pane: Id) -> Result<()> {
+pub fn observe_hidden_inventory(link: &CoreLink, pane: Id) -> Result<()> {
     let until = Instant::now() + WAIT;
     loop {
         let (inventory, _) = stage("observer-inventory", support::inventory(link))?;
@@ -123,7 +123,7 @@ fn metadata(
         let pane = inventory
             .close
             .as_ref()
-            .filter(|close| close.boot == lease.server)
+            .filter(|close| close.boot == lease.core)
             .and_then(|close| {
                 close
                     .sessions
@@ -218,7 +218,7 @@ pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
             pane.request(Operation::ClearScrollback {
                 channel: Channel(u32::MAX),
             }),
-            Err(ServerError::StaleControl)
+            Err(CoreError::StaleControl)
         ),
         "unbound channel admitted clear",
     )?;

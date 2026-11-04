@@ -18,8 +18,8 @@ mod terminal_semantics;
     reason = "this exercise uses only journaled hierarchy mutations"
 )]
 mod worktree_fixture;
-use spaceterm_server::{
-    ServerConnection, ServerError,
+use spaceterm_core::{
+    CoreError, MachineConnection,
     hierarchy::{CloseTarget, Mutation, Outcome},
     pane::*,
     protocol::{Channel, Operation},
@@ -32,14 +32,14 @@ use support::Claimed;
 use terminal_semantics::{Failure, stage};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    if !spaceterm_server::service::Service::for_identity("spaceterm-development")?
+    if !spaceterm_core::service::Service::for_identity("spaceterm-development")?
         .status()?
         .installed
     {
-        return Err(ServerError::NotInstalled.into());
+        return Err(CoreError::NotInstalled.into());
     }
-    let server = ServerConnection::for_development_client("persistent-pane-native")?;
-    let first = repository::connect(&server)?;
+    let core = MachineConnection::for_development_client("persistent-pane-native")?;
+    let first = repository::connect(&core)?;
     let baseline = repository::inventory(&first)?.0;
     let shutdown = std::env::args().any(|argument| argument == "--shutdown");
     if shutdown
@@ -51,12 +51,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("shutdown fixture refuses existing terminal work".into());
     }
     let created = worktree_fixture::journaled_mutation(
-        &server,
+        &core,
         &first,
         Mutation::CreateWorkspace {
             name: "IPC native semantics".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )
     .map_err(|_| "fixture Workspace creation unavailable; preserve any original")?;
@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         first.close();
         drop(started);
         std::thread::sleep(Duration::from_secs(3));
-        let second = stage("ipc-reconnect-transport", repository::connect(&server))?;
+        let second = stage("ipc-reconnect-transport", repository::connect(&core))?;
         let Claimed::Attached(resumed) = stage(
             "ipc-resume-fixture-pane",
             support::select(&second, pane, true, size),
@@ -105,8 +105,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("fixture Pane did not resume".into());
         };
         let lease = resumed.lease();
-        if (original.server, original.session, original.control)
-            != (lease.server, lease.session, lease.control)
+        if (original.core, original.session, original.control)
+            != (lease.core, lease.session, lease.control)
         {
             return Err("reconnect changed the running fixture Session".into());
         }
@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     channel: Channel(u32::MAX),
                 },
             ),
-            Err(ServerError::StaleControl)
+            Err(CoreError::StaleControl)
         ) {
             return Err("stale fixture channel was accepted".into());
         }
@@ -141,17 +141,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("IPC fixture exercise failed: {failure}");
     }
     // Never erase an unresolved original or close its Workspace while a write may still run.
-    if server.operation_journal()?.pending().is_some() {
+    if core.operation_journal()?.pending().is_some() {
         return Err("fixture cleanup waits for original-operation recovery".into());
     }
-    let cleanup = repository::connect(&server)?;
+    let cleanup = repository::connect(&core)?;
     let current = repository::inventory(&cleanup)?.0;
     let target = CloseTarget::KillWorkspace { workspace };
     let confirmation = current
         .close_confirmation(target)
         .ok_or("fixture close target missing")?;
     let closed = worktree_fixture::journaled_mutation(
-        &server,
+        &core,
         &cleanup,
         Mutation::Close {
             target,

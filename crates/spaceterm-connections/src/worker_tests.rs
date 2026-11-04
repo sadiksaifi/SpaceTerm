@@ -10,7 +10,7 @@ use super::*;
 #[derive(Default)]
 struct MemoryRecords(Mutex<Document>);
 impl Records for MemoryRecords {
-    fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
+    fn load(&self) -> Result<Document, spaceterm_core::direct::DirectError> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, document: &Document) -> Result<Durability, SaveError> {
@@ -93,7 +93,7 @@ impl DirectNetwork for Network {
         route: &DirectRoute,
         _: DeviceCredential,
         _: Arc<AtomicBool>,
-    ) -> Result<ServerConnection, DirectError> {
+    ) -> Result<MachineConnection, DirectError> {
         self.events.send(Event::Connect(route.id[0])).unwrap();
         if route.id[0] <= self.blocked_through {
             self.release.wait();
@@ -110,7 +110,7 @@ impl DirectNetwork for Network {
     ) -> Result<direct::RevocationReceipt, DirectError> {
         self.events.send(Event::Revoke).unwrap();
         Ok(direct::RevocationReceipt {
-            server: actor.pin.server,
+            core: actor.pin.core,
             operation,
             target,
         })
@@ -118,7 +118,7 @@ impl DirectNetwork for Network {
     fn cancel_enrollment(
         &self,
         _: &str,
-        _: &direct::ServerPin,
+        _: &direct::MachinePin,
         _: [u8; 32],
         _: &DeviceCredential,
     ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -133,9 +133,9 @@ fn saved(id: u8) -> SavedRoute {
             label: format!("Server {id}"),
             endpoint: "quic://127.0.0.1:9231".into(),
             paired: PairedDevice {
-                pin: direct::ServerPin {
+                pin: direct::MachinePin {
                     build: "spaceterm-development".into(),
-                    server: [id; 32],
+                    core: [id; 32],
                     public_key: [3; 32],
                     certificate: [4; 32],
                 },

@@ -6,7 +6,7 @@ use super::linux_peer_credentials as peer_credentials;
 #[cfg(target_os = "macos")]
 use super::macos_peer_credentials as peer_credentials;
 use crate::desktop_channel::{ChannelError, Deadline};
-use spaceterm_server::{Directory, ServerError};
+use spaceterm_core::{CoreError, Directory};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -92,8 +92,8 @@ pub(crate) fn connect(identity: &str, deadline: Deadline<'_>) -> Result<UnixStre
 
 fn connect_at(path: &std::path::Path, deadline: Deadline<'_>) -> Result<UnixStream, ChannelError> {
     let retained = Directory::open(path, false).map_err(|error| match error {
-        ServerError::NotSetUp => ChannelError::Unavailable,
-        ServerError::UnsafeStorage => ChannelError::UnsafeEndpoint,
+        CoreError::NotSetUp => ChannelError::Unavailable,
+        CoreError::UnsafeStorage => ChannelError::UnsafeEndpoint,
         _ => ChannelError::Unavailable,
     })?;
     let wait = deadline().saturating_duration_since(std::time::Instant::now());
@@ -125,7 +125,7 @@ pub(crate) use listener::DesktopChannelListener;
 #[cfg(feature = "desktop")]
 mod listener {
     use super::*;
-    use spaceterm_server::Lock;
+    use spaceterm_core::Lock;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
 
@@ -147,7 +147,7 @@ mod listener {
 
         pub(super) fn bind_at(path: &std::path::Path) -> Result<Self, ChannelError> {
             let retained = Directory::open(path, true).map_err(|error| match error {
-                ServerError::UnsafeStorage => ChannelError::UnsafeEndpoint,
+                CoreError::UnsafeStorage => ChannelError::UnsafeEndpoint,
                 _ => ChannelError::Unavailable,
             })?;
             let lock = retained
@@ -287,7 +287,7 @@ mod tests {
 
         fn show() -> Request {
             Request::Show {
-                server: [1; 32],
+                core: [1; 32],
                 workspace: [2; 32],
                 tab: None,
                 pane: None,
@@ -354,7 +354,7 @@ mod tests {
             });
             std::thread::sleep(Duration::from_millis(100));
             let queued = Request::Show {
-                server: [1; 32],
+                core: [1; 32],
                 workspace: [3; 32],
                 tab: None,
                 pane: None,
@@ -397,7 +397,7 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let request = Request::Open {
                 session: SessionContext {
-                    server: [1; 32],
+                    core: [1; 32],
                     pane: [2; 32],
                     session: [3; 32],
                 },

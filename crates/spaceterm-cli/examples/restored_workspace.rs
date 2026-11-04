@@ -6,15 +6,15 @@ mod lifecycle;
     reason = "the restart exercise claims only the inventory's first Pane"
 )]
 mod support;
-use lifecycle::{Server, connect, require_idle, size};
-use spaceterm_server::{
-    ServerConnection, ServerError, connection::link::ServerLink, pane::*, protocol::Operation,
+use lifecycle::{Core, connect, require_idle, size};
+use spaceterm_core::{
+    CoreError, MachineConnection, connection::link::CoreLink, pane::*, protocol::Operation,
 };
 use std::{error::Error, time::Duration};
 use support::{Claimed, attach};
 
 /// Selects the inventory's first Pane. Without `create`, an empty inventory has no Pane.
-fn select(link: &ServerLink, create: bool) -> Result<Claimed, ServerError> {
+fn select(link: &CoreLink, create: bool) -> Result<Claimed, CoreError> {
     let pane = support::first_pane(link, create)?;
     support::select(link, pane, create, size())
 }
@@ -25,9 +25,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         faults::FLAG
             .set(std::env::args_os().nth(2).map(std::path::PathBuf::from))
             .map_err(|_| "fault setup")?;
-        return spaceterm_server::run_local_with_panes(
+        return spaceterm_core::run_local_with_panes(
             "spaceterm-development",
-            spaceterm_server::panes(std::sync::Arc::default(), |sync| {
+            spaceterm_core::panes(std::sync::Arc::default(), |sync| {
                 Ok(spaceterm::runtime::Served::new(
                     spaceterm::runtime::WorkspaceHost::local(sync, std::sync::Arc::default())?,
                 ))
@@ -35,12 +35,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .map_err(Into::into);
     }
-    let major = spaceterm_server::protocol::MAJOR;
+    let major = spaceterm_core::protocol::MAJOR;
     let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
-    let client = ServerConnection::for_development_client(&name)?;
+    let client = MachineConnection::for_development_client(&name)?;
     require_idle(&client)?;
     client.setup()?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let setup = connect(&client)?;
     // The server creates an initial Workspace at startup. A host whose only work is that one
     // Workspace, with one Pane and no running Session, is empty.
@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         || !initial
         || !matches!(
             select(&setup, false),
-            Err(ServerError::SessionUnavailable) | Ok(Claimed::Restored(_))
+            Err(CoreError::SessionUnavailable) | Ok(Claimed::Restored(_))
         )
     {
         return Err(
@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     host.0.wait()?;
     #[cfg(target_os = "linux")]
     let uncertain_ids = faults::exercise(&client)?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let connection = connect(&client)?;
     let original = attach(&connection, true, size())?;
     original.command(
@@ -83,15 +83,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     host.kill()?;
     connection.close();
     let original = original.lease();
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let connection = connect(&client)?;
     // A claim names a Pane, not a prior lease, so this passive selection stands in for resuming
     // `original`. Only an explicit selection may start a shell.
     let Claimed::Restored(restored) = select(&connection, false)? else {
         return Err("retained Pane missing".into());
     };
-    let (server, workspace, tab, pane) = (
-        restored.server,
+    let (core, workspace, tab, pane) = (
+        restored.core,
         restored.workspace,
         restored.tab,
         restored.pane,
@@ -104,12 +104,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     let Claimed::Attached(fresh) =
-        support::claim(&connection, pane, AttachmentClaim::Start { server }, size())?
+        support::claim(&connection, pane, AttachmentClaim::Start { core }, size())?
     else {
         return Err("fresh shell missing".into());
     };
     let lease = fresh.lease();
-    assert_ne!(original.server, lease.server);
+    assert_ne!(original.core, lease.core);
     assert_ne!(original.session, lease.session);
     fresh.command("printf '\\033[2J\\033[HFRESH-SHELL\\n'; pwd; stty size")?;
     let output = fresh.await_output("24 80")?;
@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     host.0.wait()?;
     drop(fresh);
     drop(connection);
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let connection = connect(&client)?;
     assert!(
         matches!(select(&connection, false)?, Claimed::Restored(r) if (r.workspace, r.tab, r.pane) == (workspace, tab, pane))
@@ -189,7 +189,7 @@ mod faults {
     }
     type OrganizationIds = ([u8; 32], [u8; 32], [u8; 32]);
 
-    pub fn exercise(client: &ServerConnection) -> Result<OrganizationIds, Box<dyn Error>> {
+    pub fn exercise(client: &MachineConnection) -> Result<OrganizationIds, Box<dyn Error>> {
         let root = std::env::temp_dir().join(format!(
             "spaceterm-533-faults-{}-{}",
             std::process::id(),
@@ -199,7 +199,7 @@ mod faults {
         ));
         std::fs::create_dir(&root)?;
         let flag = root.join("fail");
-        let mut host = Server(
+        let mut host = Core(
             Command::new(std::env::current_exe()?)
                 .arg("--fault-server")
                 .arg(&flag)
@@ -213,17 +213,17 @@ mod faults {
             std::fs::write(&flag, mode)?;
             assert_eq!(
                 select(&connection, true).err(),
-                Some(ServerError::StorageUnavailable)
+                Some(CoreError::StorageUnavailable)
             );
             assert_eq!(
                 select(&connection, true).err(),
-                Some(ServerError::StorageUnavailable)
+                Some(CoreError::StorageUnavailable)
             );
             std::fs::remove_file(&flag)?;
             if mode == b"file" {
                 assert_eq!(
                     select(&connection, false).err(),
-                    Some(ServerError::SessionUnavailable)
+                    Some(CoreError::SessionUnavailable)
                 );
             }
         }

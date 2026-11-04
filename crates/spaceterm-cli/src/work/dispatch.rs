@@ -1,20 +1,20 @@
 //! The one mutation boundary. The journal owns sequence allocation, recovery and
 //! acknowledgement under one writer lock.
 use crate::{
-    contract::{Code, Failure, RecoveredOperation, from_server_error},
+    contract::{Code, Failure, RecoveredOperation, from_core_error},
     journal::{self, Editor},
     state::{CliState, RouteKey},
 };
-use spaceterm_server::{
-    ServerConnection, ServerError,
-    connection::link::ServerLink,
+use spaceterm_core::{
+    CoreError, MachineConnection,
+    connection::link::CoreLink,
     hierarchy::{Id, Mutation, Outcome},
     protocol::AgentName,
 };
 use std::time::Instant;
 
 pub trait Dispatch {
-    fn server_id(&self) -> Id;
+    fn machine_id(&self) -> Id;
     fn client_id(&self) -> Id;
     fn resolve_leftovers(&mut self) -> Result<Vec<RecoveredOperation>, Failure>;
     fn submit(&mut self, mutation: Mutation) -> Result<Outcome, Failure>;
@@ -32,18 +32,18 @@ pub struct Configuration<'a> {
     pub mutating: bool,
 }
 
-type Connect<'a> = dyn FnMut(Option<&AgentName>) -> Result<ServerConnection, ServerError> + 'a;
+type Connect<'a> = dyn FnMut(Option<&AgentName>) -> Result<MachineConnection, CoreError> + 'a;
 
 pub fn open<'a>(
-    connection: &'a ServerConnection,
-    link: &'a ServerLink,
+    connection: &'a MachineConnection,
+    link: &'a CoreLink,
     configuration: &Configuration<'_>,
     connect: &'a mut Connect<'a>,
 ) -> Result<Box<dyn Dispatch + 'a>, Failure> {
     Ok(Box::new(Journal {
-        server: connection.admitted_server_id().map_err(from_server_error)?,
-        client: connection.admitted_client_id().map_err(from_server_error)?,
-        state: CliState::open(configuration.identity).map_err(from_server_error)?,
+        core: connection.admitted_machine_id().map_err(from_core_error)?,
+        client: connection.admitted_client_id().map_err(from_core_error)?,
+        state: CliState::open(configuration.identity).map_err(from_core_error)?,
         route: configuration.route,
         agent: configuration.agent.cloned(),
         connection,
@@ -57,13 +57,13 @@ pub fn open<'a>(
 }
 
 struct Journal<'a> {
-    server: Id,
+    core: Id,
     client: Id,
     state: CliState,
     route: RouteKey,
     agent: Option<AgentName>,
-    connection: &'a ServerConnection,
-    link: &'a ServerLink,
+    connection: &'a MachineConnection,
+    link: &'a CoreLink,
     connect: &'a mut Connect<'a>,
     deadline: Instant,
     mutating: bool,
@@ -72,8 +72,8 @@ struct Journal<'a> {
 }
 
 impl Dispatch for Journal<'_> {
-    fn server_id(&self) -> Id {
-        self.server
+    fn machine_id(&self) -> Id {
+        self.core
     }
     fn client_id(&self) -> Id {
         self.client

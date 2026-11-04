@@ -1248,7 +1248,7 @@ impl WorkspaceSidebar {
         let new_workspace_menu = Menu::new(
             "new-workspace-menu",
             "New Workspace",
-            new_workspace_menu_entries(presentation, &self.remote_servers),
+            new_workspace_menu_entries(presentation, &self.remote_machines),
         )
         .size(MenuSize::Wide)
         .placement(AnchoredPlacementConfig::new(
@@ -1281,8 +1281,8 @@ impl WorkspaceSidebar {
                 });
             }
             // Settings owns adding a server; the menu only opens that journey.
-            NewWorkspaceItem::AddServer => {
-                window.dispatch_action(Box::new(crate::ui::settings_window::AddServer), cx);
+            NewWorkspaceItem::AddMachine => {
+                window.dispatch_action(Box::new(crate::ui::settings_window::AddMachine), cx);
             }
             NewWorkspaceItem::Create(creation) => {
                 let sidebar = menu_sidebar.clone();
@@ -1917,7 +1917,7 @@ fn remove_worktree_entry<A: Clone>(
 ) -> Option<MenuEntry<A>> {
     let reason = match removal {
         WorktreeRemoval::Allowed => None,
-        WorktreeRemoval::NeedsServer => Some("Remove Worktree…"),
+        WorktreeRemoval::NeedsCore => Some("Remove Worktree…"),
         WorktreeRemoval::Main => Some("Can\u{2019}t Remove Main Worktree"),
         WorktreeRemoval::Locked => Some("Can\u{2019}t Remove Locked Worktree"),
         WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin Directory to Remove"),
@@ -2028,7 +2028,7 @@ fn new_worktree_button(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ApplicationMenuCommand {
     CommandPalette,
-    AddServer,
+    AddMachine,
     KeyboardShortcuts,
     About,
 }
@@ -2036,7 +2036,7 @@ enum ApplicationMenuCommand {
 impl ApplicationMenuCommand {
     const ALL: [Self; 4] = [
         Self::CommandPalette,
-        Self::AddServer,
+        Self::AddMachine,
         Self::KeyboardShortcuts,
         Self::About,
     ];
@@ -2044,7 +2044,7 @@ impl ApplicationMenuCommand {
     const fn label(self) -> &'static str {
         match self {
             Self::CommandPalette => "Command Palette\u{2026}",
-            Self::AddServer => "Add Server\u{2026}",
+            Self::AddMachine => "Add Machine\u{2026}",
             Self::KeyboardShortcuts => crate::keybindings::Command::KeyboardShortcuts.label(),
             Self::About => crate::keybindings::Command::About.label(),
         }
@@ -2053,7 +2053,7 @@ impl ApplicationMenuCommand {
     const fn selector(self) -> &'static str {
         match self {
             Self::CommandPalette => "application-menu-command-palette",
-            Self::AddServer => "application-menu-add-server",
+            Self::AddMachine => "application-menu-add-server",
             Self::KeyboardShortcuts => "application-menu-keyboard-shortcuts",
             Self::About => "application-menu-about",
         }
@@ -2063,7 +2063,7 @@ impl ApplicationMenuCommand {
     fn action(self) -> Box<dyn gpui::Action> {
         match self {
             Self::CommandPalette => Box::new(crate::ui::application_commands::OpenCommandPalette),
-            Self::AddServer => Box::new(crate::ui::settings_window::AddServer),
+            Self::AddMachine => Box::new(crate::ui::settings_window::AddMachine),
             Self::KeyboardShortcuts => crate::keybindings::Command::KeyboardShortcuts.action(),
             Self::About => crate::keybindings::Command::About.action(),
         }
@@ -2116,7 +2116,7 @@ fn application_menu(
 enum NewWorkspaceItem {
     Create(WorkspaceCreation),
     /// Opens Settings > Servers > Add Server, the one journey that adds a server.
-    AddServer,
+    AddMachine,
 }
 
 fn creation_entry(
@@ -2140,18 +2140,18 @@ fn creation_entry(
 /// One saved server per row, then Add Server, so a person without the server they want reaches
 /// the journey that adds it.
 fn remote_submenu(
-    servers: &[crate::ui::workspace_creation::RemoteCreationServer],
+    machines: &[crate::ui::workspace_creation::RemoteCreationMachine],
     creation: fn(crate::direct_connections::DirectRouteId) -> WorkspaceCreation,
     selector: &str,
 ) -> Vec<MenuEntry<NewWorkspaceItem>> {
-    let mut entries: Vec<_> = servers
+    let mut entries: Vec<_> = machines
         .iter()
         .enumerate()
-        .map(|(position, server)| {
-            let creation = creation(server.route);
+        .map(|(position, core)| {
+            let creation = creation(core.route);
             // A server this window doesn't present can't take a Workspace until it connects.
-            MenuEntry::action(server.display_name(), NewWorkspaceItem::Create(creation))
-                .disabled(!server.available)
+            MenuEntry::action(core.display_name(), NewWorkspaceItem::Create(creation))
+                .disabled(!core.available)
                 .debug_selector(format!(
                     "new-workspace-menu-{}",
                     creation.selector(position)
@@ -2162,7 +2162,7 @@ fn remote_submenu(
         entries.push(MenuEntry::separator());
     }
     entries.push(
-        MenuEntry::action("Add Server\u{2026}", NewWorkspaceItem::AddServer)
+        MenuEntry::action("Add Machine\u{2026}", NewWorkspaceItem::AddMachine)
             .debug_selector(format!("new-workspace-menu-{selector}-add-server")),
     );
     entries
@@ -2170,14 +2170,14 @@ fn remote_submenu(
 
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
-    servers: &[crate::ui::workspace_creation::RemoteCreationServer],
+    machines: &[crate::ui::workspace_creation::RemoteCreationMachine],
 ) -> Vec<MenuEntry<NewWorkspaceItem>> {
     let [local, open_local] = WorkspaceCreation::LOCAL;
     vec![
         creation_entry(local, local.label(None), local.selector(0), presentation),
         MenuEntry::submenu(
             "Remote Workspace",
-            remote_submenu(servers, WorkspaceCreation::Remote, "create-remote"),
+            remote_submenu(machines, WorkspaceCreation::Remote, "create-remote"),
         )
         .icon(|foreground, size| {
             Icon::custom(spaceterm_ui::CustomIconName::GlobePlus, size, foreground)
@@ -2194,7 +2194,7 @@ fn new_workspace_menu_entries(
         MenuEntry::submenu(
             "Open Remote Directory",
             remote_submenu(
-                servers,
+                machines,
                 WorkspaceCreation::OpenRemoteDirectory,
                 "open-remote-directory",
             ),
@@ -2217,7 +2217,7 @@ fn workspace_menu_entries(
     new_worktree: bool,
     active_worktree: Option<(WorktreeId, SharedString, WorktreeRemoval)>,
     pinned: bool,
-    remote_connection_phase: Option<ServerConnectionPhase>,
+    remote_connection_phase: Option<MachineConnectionPhase>,
     binding: Option<&WorkspaceRow>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<RowMenuCommand>> {
@@ -2280,7 +2280,7 @@ fn workspace_menu_entries(
     }
     if matches!(
         remote_connection_phase,
-        Some(ServerConnectionPhase::Disconnected | ServerConnectionPhase::Failed)
+        Some(MachineConnectionPhase::Disconnected | MachineConnectionPhase::Failed)
     ) {
         entries.push(
             MenuEntry::action(

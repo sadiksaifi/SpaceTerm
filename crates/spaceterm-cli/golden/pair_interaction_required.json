@@ -1,0 +1,15 @@
+{
+  "command": "pair",
+  "data": {},
+  "error": {
+    "class": "action_required",
+    "code": "interaction_required",
+    "details": {},
+    "message": "This command needs a terminal.",
+    "retryable": false
+  },
+  "machine": null,
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

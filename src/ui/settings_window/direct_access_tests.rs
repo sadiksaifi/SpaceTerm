@@ -15,25 +15,25 @@ use spaceterm_ui::a11y_testing::A11yTree;
 use zeroize::Zeroizing;
 
 use super::super::direct_routes::{UNPAIR_SELF_CONFIRM_SELECTOR, UNSAVED_CHANGES};
+use super::super::machine_card::MENU_SELECTOR;
+use super::super::machine_list::LIST_SELECTOR;
+use super::super::machine_selection;
+use super::super::machines::testing::connected;
+use super::super::machines::{ConnectedCore, LocalCoreControl, OfferedMachine};
 use super::super::notices::NOTICE_SELECTOR;
-use super::super::server_card::MENU_SELECTOR;
-use super::super::server_list::LIST_SELECTOR;
-use super::super::server_selection;
-use super::super::servers::testing::connected;
-use super::super::servers::{ConnectedServer, LocalServerControl, OfferedServer};
 use super::{
     ACCESS_SELECTOR, ADDRESS_SELECTOR, DEVICE_SELECTOR, INVITE_SELECTOR, REMOVE_CANCEL_SELECTOR,
     REMOVE_CONFIRM_SELECTOR, TURN_OFF_CONFIRM_SELECTOR,
 };
 use crate::appearance::Appearance;
+use crate::core_context::{
+    LastKnownFacts, MachineKey, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts,
+    PairedDevicesFacts,
+};
 use crate::direct_connections::{DirectConnections, DirectRouteStatus, UnpairProgress};
+use crate::machine_connection::direct::{ClaimId, NetworkAddresses, NetworkPolicy, PairingClaim};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::server_connection::direct::{ClaimId, NetworkAddresses, NetworkPolicy, PairingClaim};
-use crate::server_context::{
-    LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts,
-    PairedDevicesFacts, ServerKey,
-};
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
@@ -44,7 +44,7 @@ use crate::ui::direct_access::{
 use crate::ui::settings_window::SettingsWindow;
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
-const SERVER: &str = "studio";
+const CORE: &str = "studio";
 const INVITATION: &str = "spaceterm://pair/test-invitation";
 const INVITATION_ID: ClaimId = [7; 32];
 
@@ -70,7 +70,7 @@ impl ScriptedAccess {
             _ => None,
         };
         Self::with_state(AccessState {
-            server_name: SERVER.into(),
+            machine_name: CORE.into(),
             policy,
             configured: policy,
             listener,
@@ -141,7 +141,7 @@ impl ScriptedAccess {
         let claim = PairingClaim {
             id: [id; 32],
             invitation_id: INVITATION_ID,
-            server: [1; 32],
+            core: [1; 32],
             device_public_key: [id; 32],
             device_name: name.into(),
             expires_at_unix_seconds: unix_now() + 300,
@@ -227,12 +227,12 @@ impl DirectAccessControl for ScriptedAccess {
 /// offers no account connection, so nothing here reaches a real server.
 struct ScriptedLocal(Arc<ScriptedAccess>);
 
-impl LocalServerControl for ScriptedLocal {
+impl LocalCoreControl for ScriptedLocal {
     fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
         Some(Arc::clone(&self.0) as Arc<dyn DirectAccessControl>)
     }
 
-    fn refresh(&self) -> super::super::servers::ServerAnswer<'_, ConnectedServer> {
+    fn refresh(&self) -> super::super::machines::CoreAnswer<'_, ConnectedCore> {
         Box::pin(async move { Ok(connected(2)) })
     }
 }
@@ -277,7 +277,7 @@ fn retained_on() -> LastKnownFacts {
     LastKnownFacts {
         network_access: Some(NetworkAccessFacts {
             observed_at,
-            server_name: SERVER.to_owned(),
+            machine_name: CORE.to_owned(),
             policy: Some(address("192.168.1.20:9231")),
             listener: NetworkListenerFacts::Listening(address("192.168.1.20:9231")),
             addresses: None,
@@ -296,8 +296,8 @@ fn retained_on() -> LastKnownFacts {
 }
 
 /// Retains `facts` for `key`, as a previous launch's record does once it loads.
-fn retain(key: ServerKey, facts: LastKnownFacts, cx: &mut gpui::App) {
-    server_selection::remember(key, facts, cx);
+fn retain(key: MachineKey, facts: LastKnownFacts, cx: &mut gpui::App) {
+    machine_selection::remember(key, facts, cx);
 }
 
 /// Saved paired servers named `labels`, disconnected, so nothing reaches any computer.
@@ -316,20 +316,20 @@ fn paired(
 
 /// What SpaceTerm retains about this computer's server for the next launch.
 fn retained_here(cx: &mut VisualTestContext) -> LastKnownFacts {
-    cx.update(|_, cx| server_selection::facts(&ServerKey::Local, cx))
+    cx.update(|_, cx| machine_selection::facts(&MachineKey::Local, cx))
         .unwrap_or_default()
 }
 
 /// Opens Settings on the Servers section, presenting the local server's direct network access.
-fn open_servers<'a>(
+fn open_machines<'a>(
     access: &Arc<ScriptedAccess>,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
-    open_servers_with(access, None, cx)
+    open_machines_with(access, None, cx)
 }
 
 /// Opens Settings on the Servers section with `direct` as the desktop's direct registry.
-fn open_servers_with<'a>(
+fn open_machines_with<'a>(
     access: &Arc<ScriptedAccess>,
     direct: Option<DirectConnections>,
     cx: &'a mut TestAppContext,
@@ -343,11 +343,11 @@ fn open_servers_with<'a>(
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
         if let Some(direct) = direct {
-            crate::ui::direct_servers::install(direct, cx);
+            crate::ui::direct_machines::install(direct, cx);
         }
     });
-    let local = Some(OfferedServer {
-        connection: Ok(Arc::new(ScriptedLocal(Arc::clone(access))) as Arc<dyn LocalServerControl>),
+    let local = Some(OfferedMachine {
+        connection: Ok(Arc::new(ScriptedLocal(Arc::clone(access))) as Arc<dyn LocalCoreControl>),
         service: None,
         update: None,
         command_line_tool: None,
@@ -409,7 +409,7 @@ fn reread(cx: &mut VisualTestContext) {
 /// Repaints until `done` holds, while the registry's worker runs on its own threads.
 #[track_caller]
 fn settle(cx: &mut VisualTestContext, done: impl FnMut(&mut VisualTestContext) -> bool) {
-    super::super::server_list::tests::settle(cx, done);
+    super::super::machine_list::tests::settle(cx, done);
 }
 
 /// Whether assistive technology reads `text` anywhere in the window: in a label, an error under
@@ -443,18 +443,16 @@ fn unpair_notice(direct: &DirectConnections) -> String {
 }
 
 /// Selects the paired server the offline registry saved, after this computer's server.
-fn select_paired_server(cx: &mut VisualTestContext) {
+fn select_paired_machine(cx: &mut VisualTestContext) {
     let paired = format!("{LIST_SELECTOR}-1");
     settle(cx, |cx| open(&paired, cx));
     click(&paired, cx);
 }
 
 #[gpui::test]
-fn turning_on_listens_at_the_address_the_server_suggests_on_spaceterms_port(
-    cx: &mut TestAppContext,
-) {
+fn turning_on_listens_at_the_address_the_core_suggests_on_spaceterms_port(cx: &mut TestAppContext) {
     let access = ScriptedAccess::off();
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
 
     click(ACCESS_SELECTOR, cx);
 
@@ -464,10 +462,10 @@ fn turning_on_listens_at_the_address_the_server_suggests_on_spaceterms_port(
 }
 
 #[gpui::test]
-fn a_change_the_server_couldnt_save_leaves_access_off_and_says_why(cx: &mut TestAppContext) {
+fn a_change_the_core_couldnt_save_leaves_access_off_and_says_why(cx: &mut TestAppContext) {
     let access = ScriptedAccess::off();
     *access.refusal.lock().expect("refusal") = Some(AccessFailure::Storage);
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
 
     click(ACCESS_SELECTOR, cx);
 
@@ -482,9 +480,9 @@ fn a_change_the_server_couldnt_save_leaves_access_off_and_says_why(cx: &mut Test
 }
 
 #[gpui::test]
-fn a_server_without_a_reachable_address_cant_be_turned_on_and_says_so(cx: &mut TestAppContext) {
+fn a_core_without_a_reachable_address_cant_be_turned_on_and_says_so(cx: &mut TestAppContext) {
     let access = ScriptedAccess::new(Listener::Off, Some(addresses(&[], None)));
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
 
     click(ACCESS_SELECTOR, cx);
 
@@ -493,9 +491,9 @@ fn a_server_without_a_reachable_address_cant_be_turned_on_and_says_so(cx: &mut T
 }
 
 #[gpui::test]
-fn addresses_the_server_couldnt_read_offer_no_guess_and_say_so(cx: &mut TestAppContext) {
+fn addresses_the_core_couldnt_read_offer_no_guess_and_say_so(cx: &mut TestAppContext) {
     let access = ScriptedAccess::new(Listener::Off, None);
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
 
     click(ACCESS_SELECTOR, cx);
 
@@ -514,7 +512,7 @@ fn a_listening_address_that_disappeared_asks_for_another_and_keeps_the_port(
     cx: &mut TestAppContext,
 ) {
     let access = ScriptedAccess::with_state(AccessState {
-        server_name: SERVER.into(),
+        machine_name: CORE.into(),
         policy: Some(address("192.168.1.20:9300")),
         configured: Some(address("192.168.1.20:9300")),
         listener: Listener::AddressGone,
@@ -523,7 +521,7 @@ fn a_listening_address_that_disappeared_asks_for_another_and_keeps_the_port(
             Some("192.168.1.21"),
         )),
     });
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
     assert!(reads(
         "192.168.1.20 is no longer on studio. Choose another.",
         cx
@@ -541,7 +539,7 @@ fn a_listening_address_that_disappeared_asks_for_another_and_keeps_the_port(
 #[gpui::test]
 fn an_address_chosen_while_off_keeps_its_port_for_turning_on(cx: &mut TestAppContext) {
     let access = ScriptedAccess::with_state(AccessState {
-        server_name: SERVER.into(),
+        machine_name: CORE.into(),
         policy: None,
         configured: Some(address("192.168.1.20:9300")),
         listener: Listener::Off,
@@ -550,7 +548,7 @@ fn an_address_chosen_while_off_keeps_its_port_for_turning_on(cx: &mut TestAppCon
             Some("192.168.1.20"),
         )),
     });
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
 
     click(ADDRESS_SELECTOR, cx);
     click("192.168.1.21", cx);
@@ -575,7 +573,7 @@ fn an_address_chosen_while_off_keeps_its_port_for_turning_on(cx: &mut TestAppCon
 #[gpui::test]
 fn all_interfaces_listens_on_every_interface_at_the_same_port(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
 
     click(ADDRESS_SELECTOR, cx);
     click("All Interfaces", cx);
@@ -598,7 +596,7 @@ fn all_interfaces_listens_on_every_interface_at_the_same_port(cx: &mut TestAppCo
 /// without choosing an address listens on every interface again, at the same port.
 fn turning_on_keeps_a_wildcard_listener(kept: &str, cx: &mut TestAppContext) {
     let access = ScriptedAccess::with_state(AccessState {
-        server_name: SERVER.into(),
+        machine_name: CORE.into(),
         policy: None,
         configured: Some(address(kept)),
         listener: Listener::Off,
@@ -607,7 +605,7 @@ fn turning_on_keeps_a_wildcard_listener(kept: &str, cx: &mut TestAppContext) {
             Some("192.168.1.20"),
         )),
     });
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
 
     click(ACCESS_SELECTOR, cx);
 
@@ -631,7 +629,7 @@ fn turning_on_keeps_an_ipv6_wildcard_listener(cx: &mut TestAppContext) {
 #[gpui::test]
 fn turning_off_asks_first_and_escape_changes_nothing(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
 
     click(ACCESS_SELECTOR, cx);
     assert!(open(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx));
@@ -649,10 +647,10 @@ fn turning_off_asks_first_and_escape_changes_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_server_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestAppContext) {
+fn a_machine_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestAppContext) {
     let access = ScriptedAccess::off();
     access.become_unreachable();
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
 
     assert!(
         !open(ACCESS_SELECTOR, cx),
@@ -660,7 +658,7 @@ fn a_server_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestAp
     );
     assert!(!access_on(&window, cx));
     assert!(reads("Unknown", cx));
-    assert!(reads("Can\u{2019}t reach the server.", cx));
+    assert!(reads("Can\u{2019}t reach SpaceTerm Core.", cx));
     assert!(
         !reads(
             "SpaceTerm can\u{2019}t reach This Computer. Last known Network Access settings:",
@@ -674,7 +672,7 @@ fn a_server_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestAp
 fn navigation_keeps_network_access_live_until_a_read_actually_fails(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", None);
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
 
     click("settings-navigation-settings-section-interface", cx);
     assert!(
@@ -699,10 +697,10 @@ fn navigation_keeps_network_access_live_until_a_read_actually_fails(cx: &mut Tes
 }
 
 #[gpui::test]
-fn a_server_spaceterm_loses_keeps_its_last_known_access_and_devices(cx: &mut TestAppContext) {
+fn a_machine_spaceterm_loses_keeps_its_last_known_access_and_devices(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", None);
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
     assert!(reads("Devices: 1 paired", cx));
 
     access.become_unreachable();
@@ -726,9 +724,9 @@ fn a_server_spaceterm_loses_keeps_its_last_known_access_and_devices(cx: &mut Tes
 }
 
 #[gpui::test]
-fn a_server_last_read_as_off_stays_off_and_says_when(cx: &mut TestAppContext) {
+fn a_core_last_read_as_off_stays_off_and_says_when(cx: &mut TestAppContext) {
     let access = ScriptedAccess::off();
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
 
     access.become_unreachable();
     reread(cx);
@@ -745,25 +743,23 @@ fn a_server_last_read_as_off_stays_off_and_says_when(cx: &mut TestAppContext) {
 fn an_incompatible_account_local_protocol_explains_the_version_mismatch(cx: &mut TestAppContext) {
     let access = ScriptedAccess::off();
     *access.status.lock().expect("status") =
-        Err(crate::server_connection::direct::DirectError::IncompatibleProtocol.into());
-    let (_, cx) = open_servers(&access, cx);
+        Err(crate::machine_connection::direct::DirectError::IncompatibleProtocol.into());
+    let (_, cx) = open_machines(&access, cx);
 
     assert!(reads(
-        "This SpaceTerm Client and the SpaceTerm Server on \"This Computer\" use incompatible SpaceTerm Protocol versions.",
+        "This SpaceTerm Client and SpaceTerm Core on \u{201C}This Computer\u{201D} use incompatible SpaceTerm Protocol versions.",
         cx,
     ));
-    assert!(!reads("Can\u{2019}t reach the server.", cx));
+    assert!(!reads("Can\u{2019}t reach SpaceTerm Core.", cx));
     assert!(!open(ACCESS_SELECTOR, cx));
     assert!(access.policies().is_empty());
 }
 
 #[gpui::test]
-fn network_access_controls_change_nothing_while_the_server_is_out_of_reach(
-    cx: &mut TestAppContext,
-) {
+fn network_access_controls_change_nothing_while_the_core_is_out_of_reach(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", None);
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
     access.become_unreachable();
     reread(cx);
 
@@ -786,9 +782,9 @@ fn network_access_controls_change_nothing_while_the_server_is_out_of_reach(
 }
 
 #[gpui::test]
-fn turning_off_after_the_server_went_out_of_reach_is_refused(cx: &mut TestAppContext) {
+fn turning_off_after_the_core_went_out_of_reach_is_refused(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
 
     click(ACCESS_SELECTOR, cx);
     access.become_unreachable();
@@ -806,7 +802,7 @@ fn turning_off_after_the_server_went_out_of_reach_is_refused(cx: &mut TestAppCon
 fn a_reading_is_retained_for_the_next_launch(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", None);
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
 
     let retained = retained_here(cx);
 
@@ -814,7 +810,7 @@ fn a_reading_is_retained_for_the_next_launch(cx: &mut TestAppContext) {
         .network_access
         .expect("the access reading is retained");
     assert_eq!(network.policy, Some(address("192.168.1.20:9231")));
-    assert_eq!(network.server_name, SERVER);
+    assert_eq!(network.machine_name, CORE);
     let devices = retained
         .paired_devices
         .expect("the device list is retained");
@@ -829,10 +825,10 @@ fn a_reading_is_retained_for_the_next_launch(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn losing_the_server_keeps_what_was_retained_about_it(cx: &mut TestAppContext) {
+fn losing_the_core_keeps_what_was_retained_about_it(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", None);
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
     let before = retained_here(cx);
 
     access.become_unreachable();
@@ -844,10 +840,10 @@ fn losing_the_server_keeps_what_was_retained_about_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_device_list_the_server_couldnt_read_keeps_the_retained_one(cx: &mut TestAppContext) {
+fn a_device_list_the_machine_couldnt_read_keeps_the_retained_one(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", None);
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
     let before = retained_here(cx).paired_devices;
 
     access.unpair("MacBook");
@@ -862,11 +858,11 @@ fn a_device_list_the_server_couldnt_read_keeps_the_retained_one(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn after_relaunch_a_server_out_of_reach_shows_its_retained_access(cx: &mut TestAppContext) {
-    cx.update(|cx| retain(ServerKey::Local, retained_on(), cx));
+fn after_relaunch_a_core_out_of_reach_shows_its_retained_access(cx: &mut TestAppContext) {
+    cx.update(|cx| retain(MachineKey::Local, retained_on(), cx));
     let access = ScriptedAccess::listening();
     access.become_unreachable();
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
 
     assert!(access_on(&window, cx));
     assert!(open(ACCESS_SELECTOR, cx));
@@ -883,10 +879,10 @@ fn after_relaunch_a_server_out_of_reach_shows_its_retained_access(cx: &mut TestA
 fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     access.become_unreachable();
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_machines(&access, cx);
     assert!(reads("Unknown", cx));
 
-    cx.update(|_, cx| retain(ServerKey::Local, retained_on(), cx));
+    cx.update(|_, cx| retain(MachineKey::Local, retained_on(), cx));
     reread(cx);
 
     assert!(access_on(&window, cx));
@@ -897,12 +893,12 @@ fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut Tes
 }
 
 #[gpui::test]
-fn another_servers_retained_access_never_shows_for_this_one(cx: &mut TestAppContext) {
+fn another_machines_retained_access_never_shows_for_this_one(cx: &mut TestAppContext) {
     let (direct, routes) = paired(&["penguin"]);
-    let penguin = ServerKey::Direct(routes[0]);
+    let penguin = MachineKey::Direct(routes[0]);
     let mut foreign = retained_on();
     foreign.network_access.as_mut().unwrap().policy = Some("10.20.30.40:4567".parse().unwrap());
-    foreign.network_access.as_mut().unwrap().server_name = "Foreign computer".into();
+    foreign.network_access.as_mut().unwrap().machine_name = "Foreign computer".into();
     foreign.network_access.as_mut().unwrap().listener =
         NetworkListenerFacts::Listening("10.20.30.40:4567".parse().unwrap());
     foreign.paired_devices.as_mut().unwrap().devices[0].name = "Foreign device".into();
@@ -912,14 +908,14 @@ fn another_servers_retained_access_never_shows_for_this_one(cx: &mut TestAppCont
     local.paired_devices.as_mut().unwrap().devices[0].name = "Local device".into();
     cx.update(|cx| {
         retain(penguin.clone(), foreign.clone(), cx);
-        retain(ServerKey::Local, local, cx);
+        retain(MachineKey::Local, local, cx);
     });
     let access = ScriptedAccess::listening();
     access.become_unreachable();
-    let (window, cx) = open_servers_with(&access, Some(direct), cx);
+    let (window, cx) = open_machines_with(&access, Some(direct), cx);
 
     assert_eq!(
-        cx.update(|_, cx| server_selection::facts(&penguin, cx))
+        cx.update(|_, cx| machine_selection::facts(&penguin, cx))
             .unwrap()
             .network_access,
         foreign.network_access
@@ -938,19 +934,19 @@ fn a_retained_empty_device_list_reads_as_none(cx: &mut TestAppContext) {
     if let Some(devices) = facts.paired_devices.as_mut() {
         devices.devices.clear();
     }
-    cx.update(|cx| retain(ServerKey::Local, facts, cx));
+    cx.update(|cx| retain(MachineKey::Local, facts, cx));
     let access = ScriptedAccess::listening();
     access.become_unreachable();
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
 
     assert!(reads("Devices: None", cx));
 }
 
 #[gpui::test]
-fn devices_the_server_couldnt_list_read_as_unknown_rather_than_none(cx: &mut TestAppContext) {
+fn devices_the_machine_couldnt_list_read_as_unknown_rather_than_none(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
     *access.devices_failure.lock().expect("devices failure") = Some(AccessFailure::Refused);
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
 
     assert!(reads("Devices: Unknown", cx));
     assert!(!reads("Devices: None", cx));
@@ -988,17 +984,17 @@ fn open_paired_studio(
             last_connected_at: None,
         });
     }
-    cx.update(|cx| retain(ServerKey::Direct(routes[0]), facts, cx));
+    cx.update(|cx| retain(MachineKey::Direct(routes[0]), facts, cx));
     let access = ScriptedAccess::off();
-    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
-    select_paired_server(cx);
+    let (window, cx) = open_machines_with(&access, Some(direct.clone()), cx);
+    select_paired_machine(cx);
     (window, direct, cx)
 }
 
 /// A paired server is administered on its own computer, so Servers shows none of its network
 /// access or devices, even what it last reported, and offers no step that would change them.
 #[gpui::test]
-fn a_paired_server_presents_no_network_access_or_devices(cx: &mut TestAppContext) {
+fn a_paired_machine_presents_no_network_access_or_devices(cx: &mut TestAppContext) {
     let (window, direct, cx) = open_paired_studio(cx);
 
     assert!(!open(ACCESS_SELECTOR, cx), "no Network Access switch");
@@ -1014,16 +1010,16 @@ fn a_paired_server_presents_no_network_access_or_devices(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn invite_device_waits_while_the_server_cant_listen(cx: &mut TestAppContext) {
+fn invite_device_waits_while_the_core_cant_listen(cx: &mut TestAppContext) {
     // Access is on, so Devices shows, but the server couldn't listen at the chosen address.
     let access = ScriptedAccess::with_state(AccessState {
-        server_name: SERVER.into(),
+        machine_name: CORE.into(),
         policy: Some(address("192.168.1.20:9231")),
         configured: Some(address("192.168.1.20:9231")),
         listener: Listener::Failed,
         addresses: Some(addresses(&["192.168.1.20"], Some("192.168.1.20"))),
     });
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
     assert!(open(INVITE_SELECTOR, cx), "Devices offers Invite Device");
 
     click(INVITE_SELECTOR, cx);
@@ -1037,7 +1033,7 @@ fn invite_device_waits_while_the_server_cant_listen(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_device_allowed_in_invite_device_joins_the_devices_list_at_once(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
     assert!(reads("Devices: None", cx));
 
     click(INVITE_SELECTOR, cx);
@@ -1061,7 +1057,7 @@ fn a_device_removed_elsewhere_leaves_the_list_at_the_next_reading(cx: &mut TestA
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", Some(unix_now()));
     access.pair(4, "iPad", None);
-    let (_, cx) = open_servers(&access, cx);
+    let (_, cx) = open_machines(&access, cx);
     assert!(reads("Devices: 2 paired", cx));
 
     access.unpair("iPad");
@@ -1077,7 +1073,7 @@ fn cancelling_a_device_removal_keeps_the_device_and_records_nothing(cx: &mut Tes
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", None);
     let (direct, _) = crate::direct_connections::tests::offline("studio");
-    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let (_, cx) = open_machines_with(&access, Some(direct.clone()), cx);
 
     click(&format!("{DEVICE_SELECTOR}-0-remove"), cx);
     click(&modal_action(REMOVE_CANCEL_SELECTOR), cx);
@@ -1093,7 +1089,7 @@ fn a_removal_spaceterm_cant_record_keeps_the_device_and_says_why(cx: &mut TestAp
     let access = ScriptedAccess::listening();
     access.pair(3, "MacBook", None);
     let (direct, _) = crate::direct_connections::tests::offline("studio");
-    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let (_, cx) = open_machines_with(&access, Some(direct.clone()), cx);
 
     click(&format!("{DEVICE_SELECTOR}-0-remove"), cx);
     click(&modal_action(REMOVE_CONFIRM_SELECTOR), cx);
@@ -1121,9 +1117,9 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
     cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, route) = crate::direct_connections::tests::offline("studio");
-    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let (_, cx) = open_machines_with(&access, Some(direct.clone()), cx);
 
-    select_paired_server(cx);
+    select_paired_machine(cx);
     click(MENU_SELECTOR, cx);
     click("settings-server-unpair", cx);
     click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
@@ -1135,7 +1131,7 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
     );
     assert!(
         !open(&format!("{LIST_SELECTOR}-1"), cx),
-        "All Servers no longer offers the unpaired server"
+        "All Machines no longer offers the unpaired server"
     );
     // The offline server's first revocation attempt fails, which leaves the unpair unconfirmed
     // until the person retries it.
@@ -1148,19 +1144,19 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
 }
 
 #[gpui::test]
-fn connect_on_a_disconnected_paired_server_reaches_only_that_route(cx: &mut TestAppContext) {
+fn connect_on_a_disconnected_paired_machine_reaches_only_that_route(cx: &mut TestAppContext) {
     // Connect starts the registry's worker, which tries the offline server on its own thread.
     cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, route) = crate::direct_connections::tests::offline("studio");
     direct.disconnect(&route);
-    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let (_, cx) = open_machines_with(&access, Some(direct.clone()), cx);
 
-    select_paired_server(cx);
+    select_paired_machine(cx);
     // Connect lives in the Server row's ⋯ menu.
     click(MENU_SELECTOR, cx);
     click(
-        crate::ui::direct_servers::DirectServerAction::Connect.selector(),
+        crate::ui::direct_machines::DirectMachineAction::Connect.selector(),
         cx,
     );
 
@@ -1180,7 +1176,7 @@ fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_
     cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, _, credentials) = crate::direct_connections::tests::offline_with_lock("studio");
-    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let (_, cx) = open_machines_with(&access, Some(direct.clone()), cx);
     let state = |direct: &DirectConnections| {
         direct
             .pending_unpairs()
@@ -1188,7 +1184,7 @@ fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_
             .map(|pending| pending.state)
     };
 
-    select_paired_server(cx);
+    select_paired_machine(cx);
     click(MENU_SELECTOR, cx);
     click("settings-server-unpair", cx);
     click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
@@ -1239,7 +1235,7 @@ fn hiding_an_unpair_that_waits_for_the_person_hides_it_here_and_cancels_nothing(
     cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, _, credentials) = crate::direct_connections::tests::offline_with_lock("studio");
-    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let (_, cx) = open_machines_with(&access, Some(direct.clone()), cx);
     let state = |direct: &DirectConnections| {
         direct
             .pending_unpairs()
@@ -1247,7 +1243,7 @@ fn hiding_an_unpair_that_waits_for_the_person_hides_it_here_and_cancels_nothing(
             .map(|pending| pending.state)
     };
 
-    select_paired_server(cx);
+    select_paired_machine(cx);
     click(MENU_SELECTOR, cx);
     click("settings-server-unpair", cx);
     click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
@@ -1281,7 +1277,7 @@ fn dismissing_the_unsaved_direct_record_notice_hides_it_without_claiming_a_save(
     cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, route, storage) = crate::direct_connections::tests::offline_with_storage("studio");
-    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let (_, cx) = open_machines_with(&access, Some(direct.clone()), cx);
     let notice = format!("{NOTICE_SELECTOR}-direct-record");
 
     // This computer can't save the registry's change.

@@ -23,8 +23,8 @@ use objc2_app_kit::{
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSString, ns_string};
-use spaceterm_server::{
-    ServerError,
+use spaceterm_core::{
+    CoreError,
     service::{
         Service,
         control::{Action, Confirmation, Controller},
@@ -63,7 +63,6 @@ pub(crate) fn install(
     };
     let offered = service.clone();
     let controller = Controller::new(service);
-    let name = controller.display_name().to_owned();
     let (sender, messages) = async_channel::unbounded();
     let worker = {
         let sender = sender.clone();
@@ -92,10 +91,10 @@ pub(crate) fn install(
         }),
     );
     status_menu::set_available(cx, true);
-    let item = StatusItem::new(mtm, name, worker, sender);
+    let item = StatusItem::new(mtm, identity, worker, sender);
     item.render();
     item.worker.send(Request::Refresh);
-    status_menu::follow_local_server(item.worker.changes(), cx);
+    status_menu::follow_local_core(item.worker.changes(), cx);
     cx.spawn(async move |cx| {
         while let Ok(message) = messages.recv().await {
             cx.update(|cx| item.handle(message, cx));
@@ -106,7 +105,7 @@ pub(crate) fn install(
 
 struct StatusItem {
     mtm: MainThreadMarker,
-    name: String,
+    identity: crate::application_identity::ApplicationIdentity,
     worker: Worker,
     sender: Sender,
     state: Cell<State>,
@@ -128,7 +127,12 @@ struct Rows {
 }
 
 impl StatusItem {
-    fn new(mtm: MainThreadMarker, name: String, worker: Worker, sender: Sender) -> Rc<Self> {
+    fn new(
+        mtm: MainThreadMarker,
+        identity: crate::application_identity::ApplicationIdentity,
+        worker: Worker,
+        sender: Sender,
+    ) -> Rc<Self> {
         let target = MenuTarget::new(mtm, sender.clone());
         let menu = NSMenu::new(mtm);
         // Each row's availability follows the server's state, not AppKit's responder chain.
@@ -175,7 +179,7 @@ impl StatusItem {
         item.setMenu(Some(&menu));
         Rc::new(Self {
             mtm,
-            name,
+            identity,
             worker,
             sender,
             state: Cell::new(State::default()),
@@ -188,10 +192,10 @@ impl StatusItem {
     }
 
     fn render(&self) {
-        let presentation = Presentation::of(&self.name, self.state.get());
+        let presentation = Presentation::of(self.identity, self.state.get());
         let rows = &self.rows;
         rows.header
-            .setTitle(&NSString::from_str(&presentation.server));
+            .setTitle(&NSString::from_str(&presentation.core));
         rows.state.setTitle(&NSString::from_str(presentation.state));
         rows.state.setSubtitle(
             presentation
@@ -282,7 +286,7 @@ impl StatusItem {
 
     fn perform(&self, command: Command, cx: &mut App) {
         // A menu drawn before the state changed can still deliver a row it no longer offers.
-        let presentation = Presentation::of(&self.name, self.state.get());
+        let presentation = Presentation::of(self.identity, self.state.get());
         let offered = std::iter::once(&presentation.open)
             .chain(&presentation.controls)
             .chain(&presentation.update)
@@ -302,7 +306,7 @@ impl StatusItem {
             // Settings owns the one journey, which reads the server again and asks first.
             Command::Update => {
                 crate::app::leave_menu_only(cx);
-                crate::ui::settings_window::open_server_update(cx);
+                crate::ui::settings_window::open_core_update(cx);
                 cx.activate(true);
             }
             // The client's own quit policy decides, including its confirmation and saving.
@@ -327,7 +331,7 @@ impl StatusItem {
     /// Cancel, so it never ends Sessions by accident.
     fn confirm(&self, command: Command, confirmation: Confirmation, cx: &App) {
         let sender = self.sender.clone();
-        let alert = server_alert(
+        let alert = core_alert(
             &confirmation.message(),
             &confirmation.detail(),
             Some(confirmation.confirm_label()),
@@ -344,21 +348,21 @@ impl StatusItem {
         );
     }
 
-    fn report(&self, command: Command, error: ServerError, cx: &App) {
+    fn report(&self, command: Command, error: CoreError, cx: &App) {
         let operation = match command {
             Command::Start => "start",
             Command::Stop => "stop",
             _ => "restart",
         };
-        let message = format!("The {} server couldn\u{2019}t {operation}.", self.name);
-        let alert = server_alert(&message, &error.to_string(), None, self.mtm);
+        let message = format!("{} couldn\u{2019}t {operation}.", self.identity.core_name());
+        let alert = core_alert(&message, &error.to_string(), None, self.mtm);
         present(alert, self.activation, cx.windows().is_empty(), |_| {});
     }
 }
 
 /// Builds a server alert. A confirmation offers Cancel, then its `destructive` button; a report
 /// offers OK.
-fn server_alert(
+fn core_alert(
     message: &str,
     detail: &str,
     destructive: Option<&str>,
@@ -414,7 +418,7 @@ fn present(
         let confirming = alert.buttons().count() > 1;
         let application = NSApplication::sharedApplication(mtm);
         let escape = confirming.then(cancel_on_escape).flatten();
-        let response = run_modal_alert(alert, activation, bind_server_keys);
+        let response = run_modal_alert(alert, activation, bind_machine_keys);
         if let Some(escape) = escape {
             // SAFETY: The monitor came from addLocalMonitorForEventsMatchingMask and is removed
             // once.
@@ -430,7 +434,7 @@ fn present(
 
 /// Return chooses the first button, Cancel or OK. A confirmation's destructive button has no
 /// key, so it needs a deliberate click or Space.
-fn bind_server_keys(alert: &NSAlert) {
+fn bind_machine_keys(alert: &NSAlert) {
     for (index, button) in alert.buttons().iter().enumerate() {
         button.setKeyEquivalent(if index == 0 {
             ns_string!("\r")
@@ -548,8 +552,8 @@ pub(in crate::platform) mod tests {
 
     const ANSWER_CASES: [AnswerCase; 3] = [
         (
-            Some("Stop Server"),
-            &[("Cancel", "\r"), ("Stop Server", "")],
+            Some("Stop SpaceTerm Core"),
+            &[("Cancel", "\r"), ("Stop SpaceTerm Core", "")],
             0,
             &[
                 (Answering::Click(0), Some(false)),
@@ -561,8 +565,8 @@ pub(in crate::platform) mod tests {
             ],
         ),
         (
-            Some("Restart Server"),
-            &[("Cancel", "\r"), ("Restart Server", "")],
+            Some("Restart SpaceTerm Core"),
+            &[("Cancel", "\r"), ("Restart SpaceTerm Core", "")],
             0,
             &[
                 (Answering::Click(0), Some(false)),
@@ -591,12 +595,12 @@ pub(in crate::platform) mod tests {
     /// instead of activating, so the test process never takes the keyboard. Inside each alert's
     /// modal loop the test answers it by a click or a key. The alert stays transparent, so
     /// nothing appears on screen.
-    pub(in crate::platform) fn server_alerts_take_the_keyboard_and_bind_their_keys() {
+    pub(in crate::platform) fn machine_alerts_take_the_keyboard_and_bind_their_keys() {
         let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
         for (destructive, keys, focused, answers) in ANSWER_CASES {
             for &(answering, expected) in answers {
-                let alert = server_alert(
-                    "Stop the server?",
+                let alert = core_alert(
+                    "Stop SpaceTerm Core?",
                     "Stopping ends every Terminal Session.",
                     destructive,
                     mtm,

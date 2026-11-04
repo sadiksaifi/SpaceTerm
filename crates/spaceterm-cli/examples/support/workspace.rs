@@ -1,13 +1,13 @@
 //! Cleanup authority for a disposable Workspace, fenced by the server boot that created it.
-use spaceterm_server::{
-    ServerConnection,
-    connection::link::ServerLink,
+use spaceterm_core::{
+    MachineConnection,
+    connection::link::CoreLink,
     hierarchy::{CloseTarget, Id, Mutation, Outcome},
 };
 use std::error::Error;
 
 pub struct Workspace<'a> {
-    client: &'a ServerConnection,
+    client: &'a MachineConnection,
     boot: Id,
     workspace: Option<Id>,
     pub pane: Id,
@@ -15,8 +15,8 @@ pub struct Workspace<'a> {
 impl<'a> Workspace<'a> {
     /// Tracks only a Workspace this exercise just created, fenced by the server's boot.
     pub fn track(
-        client: &'a ServerConnection,
-        link: &ServerLink,
+        client: &'a MachineConnection,
+        link: &CoreLink,
         workspace: Id,
     ) -> Result<Self, Box<dyn Error>> {
         let (inventory, _) = super::support::inventory(link)?;

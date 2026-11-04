@@ -108,7 +108,7 @@ fn start(
             OpenSshExecutable::new("/fixture/ssh".into()).unwrap(),
             Path::new("/fixture/config"),
             &SshDestination::new("configured-server".into()).unwrap(),
-            ValidatedRemoteShellCommand::server_script("exec observed-command").unwrap(),
+            ValidatedRemoteShellCommand::core_script("exec observed-command").unwrap(),
         )
         .unwrap();
         let environment =

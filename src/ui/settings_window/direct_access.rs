@@ -25,14 +25,14 @@ use spaceterm_ui::{
 
 use super::SettingsWindow;
 use super::catalog::SettingsSectionId;
-use super::server_list::ServerChoice;
-use super::server_selection;
-use super::servers::LocalServerStatus;
-use crate::server_connection::direct::{DEFAULT_PORT, NetworkPolicy, PairingId};
-use crate::server_connection::{ServerConnection, ServerError};
-use crate::server_context::{
+use super::machine_list::MachineChoice;
+use super::machine_selection;
+use super::machines::LocalCoreStatus;
+use crate::core_context::{
     LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts, PairedDevicesFacts,
 };
+use crate::machine_connection::direct::{DEFAULT_PORT, NetworkPolicy, PairingId};
+use crate::machine_connection::{CoreError, MachineConnection};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -93,7 +93,7 @@ impl LastKnown {
                     NetworkListenerFacts::Failed => Listener::Failed,
                 };
                 let state = AccessState {
-                    server_name: access.server_name.clone().into(),
+                    machine_name: access.machine_name.clone().into(),
                     policy: access.policy,
                     configured: access.policy,
                     listener,
@@ -122,7 +122,7 @@ impl LastKnown {
 fn access_facts(observed_at: u64, state: &AccessState) -> NetworkAccessFacts {
     NetworkAccessFacts {
         observed_at,
-        server_name: state.server_name.to_string(),
+        machine_name: state.machine_name.to_string(),
         policy: state.policy,
         listener: match state.listener {
             Listener::Off => NetworkListenerFacts::Off,
@@ -167,7 +167,7 @@ struct Shown<'a> {
 /// What the rows know about the selected server's network access.
 pub(super) struct DirectAccess {
     /// The server the rows present.
-    target: Option<ServerChoice>,
+    target: Option<MachineChoice>,
     /// Counts the times the rows started over, so an answer for an earlier server lands nowhere.
     generation: u64,
     /// The latest reading. `None` until the server answers, or while SpaceTerm can't ask it.
@@ -201,7 +201,7 @@ impl DirectAccess {
         }
     }
 
-    fn start_over(&mut self, target: Option<ServerChoice>) {
+    fn start_over(&mut self, target: Option<MachineChoice>) {
         self.target = target;
         self.generation = self.generation.wrapping_add(1);
         self.reading = None;
@@ -294,7 +294,7 @@ fn listening_address(address: SocketAddr) -> String {
 }
 
 /// What the Allow row says under its control, if anything is wrong.
-pub(super) fn access_problem(state: &AccessState, server: &str) -> Option<String> {
+pub(super) fn access_problem(state: &AccessState, core: &str) -> Option<String> {
     let address = state.policy.map(|policy| policy.ip());
     match (state.listener, &state.addresses) {
         (Listener::Failed, _) if address.is_some_and(|address| address.is_unspecified()) => {
@@ -302,19 +302,19 @@ pub(super) fn access_problem(state: &AccessState, server: &str) -> Option<String
         }
         (Listener::AddressGone, _) => Some(match address {
             Some(address) => {
-                format!("{address} is no longer on {server}. Choose another.")
+                format!("{address} is no longer on {core}. Choose another.")
             }
-            None => format!("Address no longer on {server}. Choose another."),
+            None => format!("Address no longer on {core}. Choose another."),
         }),
         (Listener::Failed, _) => Some(match address {
             Some(address) => format!("Couldn\u{2019}t listen at {address}."),
             None => "Couldn\u{2019}t listen on the network.".to_owned(),
         }),
         (Listener::Off, Some(addresses)) if addresses.available.is_empty() => {
-            Some(format!("No reachable network address on {server}."))
+            Some(format!("No reachable network address on {core}."))
         }
         (_, None) => Some(format!(
-            "Couldn\u{2019}t read {server}\u{2019}s network addresses."
+            "Couldn\u{2019}t read {core}\u{2019}s network addresses."
         )),
         _ => None,
     }
@@ -346,33 +346,36 @@ pub(super) fn last_connected(at: Option<u64>, now: u64) -> String {
 
 impl SettingsWindow {
     /// The server's direct network operations over SpaceTerm's existing connection to it.
-    fn direct_access_control(&self, target: &ServerChoice) -> Option<Arc<dyn DirectAccessControl>> {
+    fn direct_access_control(
+        &self,
+        target: &MachineChoice,
+    ) -> Option<Arc<dyn DirectAccessControl>> {
         match target {
-            ServerChoice::Local => self.local_server.as_ref()?.direct_access(),
-            ServerChoice::Direct(_) => None,
+            MachineChoice::Local => self.local_core.as_ref()?.direct_access(),
+            MachineChoice::Direct(_) => None,
         }
     }
 
     /// The connection a removal is recorded against, so its retries keep that exact route and
     /// authority.
-    fn direct_access_server(&self, target: &ServerChoice) -> Option<ServerConnection> {
+    fn direct_access_machine(&self, target: &MachineChoice) -> Option<MachineConnection> {
         match target {
-            ServerChoice::Local => self.local_server.as_ref()?.worktree_server(),
-            ServerChoice::Direct(_) => None,
+            MachineChoice::Local => self.local_core.as_ref()?.worktree_core(),
+            MachineChoice::Direct(_) => None,
         }
     }
 
     /// The selected server's name as the rows say it: the name the server gave, once it has.
-    fn direct_access_server_name(&self) -> SharedString {
+    fn direct_access_machine_name(&self) -> SharedString {
         self.direct_access
             .state()
             .or_else(|| {
                 let (_, access) = self.direct_access.known.access.as_ref()?;
                 Some(access)
             })
-            .map(|state| state.server_name.clone())
+            .map(|state| state.machine_name.clone())
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.selected_server_name())
+            .unwrap_or_else(|| self.selected_machine_name())
     }
 
     /// Shows what SpaceTerm retained about the presented server, including a record that loaded
@@ -382,7 +385,7 @@ impl SettingsWindow {
             .direct_access
             .target
             .as_ref()
-            .and_then(|target| server_selection::facts(&target.key(), cx))
+            .and_then(|target| machine_selection::facts(&target.key(), cx))
             .map(|facts| LastKnown::from_facts(&facts))
             .unwrap_or_default();
     }
@@ -396,7 +399,7 @@ impl SettingsWindow {
         devices: Option<&[Device]>,
         cx: &mut App,
     ) {
-        let Some(key) = self.direct_access.target.as_ref().map(ServerChoice::key) else {
+        let Some(key) = self.direct_access.target.as_ref().map(MachineChoice::key) else {
             return;
         };
         let now = crate::ui::direct_access::unix_now();
@@ -404,7 +407,7 @@ impl SettingsWindow {
         // retained time is old enough to renew.
         let renew = |at: u64| now.saturating_sub(at) >= UNCHANGED_RETENTION;
         // With no record yet the general facts stay unobserved: status Unknown, time zero.
-        let mut facts = server_selection::facts(&key, cx).unwrap_or_default();
+        let mut facts = machine_selection::facts(&key, cx).unwrap_or_default();
         let mut changed = false;
         if let Some(state) = state
             && facts.network_access.as_ref().is_none_or(|known| {
@@ -423,7 +426,7 @@ impl SettingsWindow {
             changed = true;
         }
         if changed {
-            server_selection::remember(key, facts, cx);
+            machine_selection::remember(key, facts, cx);
         }
     }
 
@@ -446,26 +449,26 @@ impl SettingsWindow {
             return None;
         }
         let stopped = match self.direct_access.target.as_ref()? {
-            ServerChoice::Local => {
-                self.server_service
+            MachineChoice::Local => {
+                self.core_service
                     .as_ref()
                     .and_then(|row| row.state.status)
                     .is_some_and(|status| status.stopped)
-                    || self.local_server.as_ref().is_some_and(|row| {
+                    || self.local_core.as_ref().is_some_and(|row| {
                         matches!(
                             row.current_status(),
-                            LocalServerStatus::Failed(ServerError::Stopped)
+                            LocalCoreStatus::Failed(CoreError::Stopped)
                         )
                     })
             }
-            ServerChoice::Direct(_) => false,
+            MachineChoice::Direct(_) => false,
         };
-        let name = self.selected_server_name();
+        let name = self.selected_machine_name();
         // Only a stopped server is started to change its access. A running server that SpaceTerm
         // couldn't read says why under its row, so the card adds nothing.
         if stopped {
             return Some(
-                format!("Start the server on {name} to change its network access.").into(),
+                format!("Start SpaceTerm Core on {name} to change its network access.").into(),
             );
         }
         if matches!(
@@ -479,12 +482,12 @@ impl SettingsWindow {
                 .map(|at| {
                     format!(
                         "SpaceTerm can\u{2019}t reach {name}. Last known Network Access settings: {}.",
-                        super::server_card::observed_time(at, cx)
+                        super::machine_card::observed_time(at, cx)
                     )
                 });
             return Some(
                 observed
-                    .unwrap_or_else(|| "Can\u{2019}t reach the server.".to_owned())
+                    .unwrap_or_else(|| "Can\u{2019}t reach SpaceTerm Core.".to_owned())
                     .into(),
             );
         }
@@ -495,13 +498,13 @@ impl SettingsWindow {
     /// and connection changes call this; rendering never does.
     pub(super) fn sync_direct_access(&mut self, cx: &mut Context<Self>) {
         let target = self
-            .selected_server()
-            .filter(|target| matches!(target, ServerChoice::Local));
+            .selected_machine()
+            .filter(|target| matches!(target, MachineChoice::Local));
         if self.direct_access.target != target {
             self.direct_access.start_over(target.clone());
             self.reload_known_access(cx);
         }
-        if self.active_section != SettingsSectionId::Servers {
+        if self.active_section != SettingsSectionId::Machines {
             self.direct_access.poll = None;
             return;
         }
@@ -570,9 +573,9 @@ impl SettingsWindow {
         }) = self.direct_access.state()
         {
             if address.ip().is_unspecified() {
-                let server = self.direct_access_server_name();
+                let core = self.direct_access_machine_name();
                 return SharedString::from(format!(
-                    "Listening on {}, including public networks and any network {server} \
+                    "Listening on {}, including public networks and any network {core} \
                      joins later. Only paired devices are admitted.",
                     listening_address(*address)
                 ));
@@ -596,15 +599,15 @@ impl SettingsWindow {
 
     /// Why the Allow row's control can't do what it shows, under the control.
     pub(super) fn network_access_error(&self) -> Option<SharedString> {
-        let server = self.direct_access_server_name();
+        let core = self.direct_access_machine_name();
         if let Some(problem) = self.direct_access.problem {
-            return Some(problem.explanation(&server).into());
+            return Some(problem.explanation(&core).into());
         }
         match &self.direct_access.reading {
-            Some(Ok(state)) => access_problem(state, &server).map(SharedString::from),
+            Some(Ok(state)) => access_problem(state, &core).map(SharedString::from),
             Some(Err(AccessFailure::Unreachable)) | None => None,
             // A failed reading changed nothing, so it says what couldn't be read.
-            Some(Err(failure)) => Some(failure.read_explanation(&server).into()),
+            Some(Err(failure)) => Some(failure.read_explanation(&core).into()),
         }
     }
 
@@ -615,8 +618,8 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let server = self.direct_access_server_name();
-        let name = SharedString::from(format!("Allow other devices to connect to {server}"));
+        let core = self.direct_access_machine_name();
+        let name = SharedString::from(format!("Allow other devices to connect to {core}"));
         if self.direct_access.shown().is_none() {
             // Nothing says whether the server lets devices connect, so no switch claims it's off.
             let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
@@ -671,7 +674,7 @@ impl SettingsWindow {
                 .collect();
             super::settings_selector(
                 ADDRESS_SELECTOR.to_owned(),
-                SharedString::from(format!("Address on {server}")),
+                SharedString::from(format!("Address on {core}")),
                 chosen
                     .map(|address| {
                         if address.is_unspecified() {
@@ -909,7 +912,7 @@ impl SettingsWindow {
         devices.is_empty().then(|| {
             format!(
                 "No devices are paired with {}. Invite a device to work from another computer.",
-                self.direct_access_server_name()
+                self.direct_access_machine_name()
             )
             .into()
         })
@@ -922,7 +925,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-        let server = self.direct_access_server_name();
+        let core = self.direct_access_machine_name();
         let listening = self
             .direct_access
             .state()
@@ -952,7 +955,7 @@ impl SettingsWindow {
                     .tab_stop(true)
                     .debug_selector(INVITE_SELECTOR)
                     .accessibility_description(SharedString::from(format!(
-                        "Invite another device to connect to {server}."
+                        "Invite another device to connect to {core}."
                     )))
                     .on_activate(move |_, window, cx| {
                         let _ = owner.update(cx, |settings, cx| settings.invite_device(window, cx));
@@ -1078,7 +1081,7 @@ impl SettingsWindow {
             .unwrap_or_default();
         let presented = crate::ui::direct_pairing::InviteDevice::present(
             control,
-            self.direct_access_server_name(),
+            self.direct_access_machine_name(),
             addresses,
             move |settings: &mut SettingsWindow, cx| settings.reread_devices(generation, cx),
             window,
@@ -1186,7 +1189,7 @@ impl SettingsWindow {
     fn remove_device(
         &mut self,
         generation: u64,
-        target: &ServerChoice,
+        target: &MachineChoice,
         pairing: PairingId,
         cx: &mut Context<Self>,
     ) {
@@ -1201,23 +1204,23 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
-        let Some(registry) = crate::ui::direct_servers::installed(cx) else {
+        let Some(registry) = crate::ui::direct_machines::installed(cx) else {
             self.direct_access.problem = Some(AccessFailure::Unreachable);
             cx.notify();
             return;
         };
-        let Some(server) = self.direct_access_server(target) else {
+        let Some(core) = self.direct_access_machine(target) else {
             self.direct_access.problem = Some(AccessFailure::Unreachable);
             cx.notify();
             return;
         };
-        let label = self.direct_access_server_name().to_string();
+        let label = self.direct_access_machine_name().to_string();
         self.direct_access.unpairing.push(pairing);
         self.direct_access.problem = None;
         self.direct_access.work = Some(cx.spawn(async move |settings, cx| {
             let recorded = cx
                 .background_executor()
-                .spawn(async move { registry.revoke_other(server, pairing, label) })
+                .spawn(async move { registry.revoke_other(core, pairing, label) })
                 .await;
             let _ = settings.update(cx, |settings, cx| {
                 let state = &mut settings.direct_access;

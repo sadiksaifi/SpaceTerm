@@ -3,14 +3,14 @@
 use super::*;
 use crate::domain::{PaneId, TabId};
 use crate::terminal::workspace_client::WorkspaceSnapshot;
-use spaceterm_server::hierarchy::{RetainedOutcome, State};
+use spaceterm_core::hierarchy::{RetainedOutcome, State};
 use std::cell::RefCell;
 
 const DEVICE: Id = [21; 32];
 const OTHER_DEVICE: Id = [22; 32];
 
 struct Delivery {
-    server: State,
+    core: State,
     snapshot: WorkspaceSnapshot,
     original: Option<(u64, Mutation)>,
     dispatched: Vec<Mutation>,
@@ -18,20 +18,19 @@ struct Delivery {
     presented: Vec<u64>,
 }
 /// Hints its readers after each change, as the real client does.
-struct DelayedServer(RefCell<Delivery>, crate::terminal::changes::Changes);
+struct DelayedCore(RefCell<Delivery>, crate::terminal::changes::Changes);
 
-impl DelayedServer {
+impl DelayedCore {
     fn new() -> Rc<Self> {
-        let mut server = State::empty();
-        server.begin_boot(BOOT);
-        server
-            .ensure_first_workspace(DEVICE, std::path::Path::new("/fixture/home"))
+        let mut core = State::empty();
+        core.begin_boot(BOOT);
+        core.ensure_first_workspace(DEVICE, std::path::Path::new("/fixture/home"))
             .unwrap();
-        let inventory = live_inventory(&server);
-        server.inventory.close.clone_from(&inventory.close);
+        let inventory = live_inventory(&core);
+        core.inventory.close.clone_from(&inventory.close);
         Rc::new(Self(
             RefCell::new(Delivery {
-                server,
+                core,
                 snapshot: WorkspaceSnapshot {
                     inventory: Some(inventory),
                     connected: true,
@@ -72,7 +71,7 @@ impl DelayedServer {
             .expect("an Original Operation was dispatched");
         // Repeating this same identity resolves an admitted operation; it creates no replacement.
         delivery
-            .server
+            .core
             .apply(
                 DEVICE,
                 sequence,
@@ -81,9 +80,9 @@ impl DelayedServer {
                 |_| valid_directory,
             )
             .unwrap();
-        let result = delivery.server.outcome(DEVICE, sequence).unwrap().clone();
-        let inventory = live_inventory(&delivery.server);
-        delivery.server.inventory.close.clone_from(&inventory.close);
+        let result = delivery.core.outcome(DEVICE, sequence).unwrap().clone();
+        let inventory = live_inventory(&delivery.core);
+        delivery.core.inventory.close.clone_from(&inventory.close);
         delivery.snapshot.inventory = Some(inventory);
         // The client journal keeps an answer it must present until a surface presents it.
         if result.outcome.needs_presentation()
@@ -98,7 +97,7 @@ impl DelayedServer {
         }
         delivery.snapshot.outcome = Some(result.clone());
         if acknowledge {
-            delivery.server.acknowledge(DEVICE, sequence).unwrap();
+            delivery.core.acknowledge(DEVICE, sequence).unwrap();
             delivery.snapshot.pending = false;
             delivery.snapshot.pending_operation = None;
             delivery.original = None;
@@ -124,21 +123,21 @@ impl DelayedServer {
     /// Another client's accepted close removes `tab`, and the server publishes the result.
     fn remove_tab_elsewhere(&self, tab: Id) {
         let mut delivery = self.0.borrow_mut();
-        delivery.server.inventory.revision += 1;
-        delivery.server.inventory.workspaces[0]
+        delivery.core.inventory.revision += 1;
+        delivery.core.inventory.workspaces[0]
             .tabs
             .retain(|candidate| candidate.id != tab);
-        let inventory = live_inventory(&delivery.server);
-        delivery.server.inventory.close.clone_from(&inventory.close);
+        let inventory = live_inventory(&delivery.core);
+        delivery.core.inventory.close.clone_from(&inventory.close);
         delivery.snapshot.inventory = Some(inventory);
         self.1.publish();
     }
 
     fn rename_elsewhere(&self, workspace: Id, name: &str) {
         let mut delivery = self.0.borrow_mut();
-        let sequence = delivery.server.next_sequence(OTHER_DEVICE);
+        let sequence = delivery.core.next_sequence(OTHER_DEVICE);
         let version = delivery
-            .server
+            .core
             .inventory
             .workspaces
             .iter()
@@ -146,7 +145,7 @@ impl DelayedServer {
             .unwrap()
             .name_version;
         delivery
-            .server
+            .core
             .apply(
                 OTHER_DEVICE,
                 sequence,
@@ -159,16 +158,16 @@ impl DelayedServer {
                 |_| true,
             )
             .unwrap();
-        delivery.server.acknowledge(OTHER_DEVICE, sequence).unwrap();
-        let inventory = live_inventory(&delivery.server);
-        delivery.server.inventory.close.clone_from(&inventory.close);
+        delivery.core.acknowledge(OTHER_DEVICE, sequence).unwrap();
+        let inventory = live_inventory(&delivery.core);
+        delivery.core.inventory.close.clone_from(&inventory.close);
         delivery.snapshot.inventory = Some(inventory);
         self.1.publish();
     }
 }
 
-fn live_inventory(server: &State) -> Inventory {
-    let mut inventory = server.inventory.clone();
+fn live_inventory(core: &State) -> Inventory {
+    let mut inventory = core.inventory.clone();
     let previous = inventory.close.take();
     inventory.close = Some(CloseInventory {
         controls: previous
@@ -193,7 +192,7 @@ fn live_inventory(server: &State) -> Inventory {
     inventory
 }
 
-impl WorkspaceEdits for DelayedServer {
+impl WorkspaceEdits for DelayedCore {
     fn snapshot(&self) -> WorkspaceSnapshot {
         self.0.borrow().snapshot.clone()
     }
@@ -206,7 +205,7 @@ impl WorkspaceEdits for DelayedServer {
         if !delivery.snapshot.connected || delivery.snapshot.pending {
             return false;
         }
-        let sequence = delivery.server.next_sequence(DEVICE);
+        let sequence = delivery.core.next_sequence(DEVICE);
         delivery.original = Some((sequence, mutation.clone()));
         delivery.dispatched.push(mutation.clone());
         delivery.snapshot.pending = true;
@@ -239,7 +238,7 @@ fn sessions() -> (
         crate::terminal::testing::TestTerminalSessionFactory::new(records.clone())
             .with_reading_available(true),
     );
-    let factory = WorkspaceTerminalSessionFactory::new_server(factory);
+    let factory = WorkspaceTerminalSessionFactory::new_core(factory);
     let panes = ScriptedPanes::new(factory.clone());
     let sessions = WorkspacePaneSessions::with_opener(
         Rc::clone(&panes) as Rc<dyn WorkspacePaneOpener>,
@@ -248,34 +247,34 @@ fn sessions() -> (
     (sessions, panes, factory, records)
 }
 
-fn model(server: &Rc<DelayedServer>) -> (WorkspaceEditSource, Workspaces) {
-    let source = WorkspaceEditSource::new(Rc::clone(server) as Rc<dyn WorkspaceEdits>);
+fn model(core: &Rc<DelayedCore>) -> (WorkspaceEditSource, Workspaces) {
+    let source = WorkspaceEditSource::new(Rc::clone(core) as Rc<dyn WorkspaceEdits>);
     let (sessions, _, _, _) = sessions();
     let mut model = Workspaces::new(source.clone(), sessions);
     let inventory = model.poll().inventory.unwrap();
     model.register(
         first_workspace_id(),
-        WorkspaceFacts::from_server(&inventory.workspaces[0]),
+        WorkspaceFacts::from_core(&inventory.workspaces[0]),
     );
     (source, model)
 }
 
 #[test]
 fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_after_takeover() {
-    use spaceterm_server::hierarchy::{CloseTarget, ConfirmedControl};
+    use spaceterm_core::hierarchy::{CloseTarget, ConfirmedControl};
     for close_tab in [false, true] {
-        let server = DelayedServer::new();
-        let (source, mut model) = model(&server);
-        let inventory = server.inventory();
+        let core = DelayedCore::new();
+        let (source, mut model) = model(&core);
+        let inventory = core.inventory();
         let workspace = inventory.workspaces[0].id;
         let tab = inventory.workspaces[0].root_tab;
         let pane = inventory.workspaces[0].tabs[0].root_pane;
         source.submit(Mutation::CreateTab {
             workspace,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         });
-        server.finish(true, true);
+        core.finish(true, true);
         model.poll();
         let control = ConfirmedControl {
             pane,
@@ -284,15 +283,15 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             epoch: 1,
         };
         {
-            let mut delivery = server.0.borrow_mut();
-            let live = delivery.server.inventory.close.as_mut().unwrap();
+            let mut delivery = core.0.borrow_mut();
+            let live = delivery.core.inventory.close.as_mut().unwrap();
             live.sessions
                 .iter_mut()
                 .find(|known| known.id == pane)
                 .unwrap()
                 .session = control.session;
             live.controls = vec![control.clone()];
-            delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
+            delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
         }
         model.poll();
         assert_eq!(
@@ -331,7 +330,7 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             .unwrap();
         assert_eq!(model.close(approval, local), WorkspaceSubmission::Submitted);
         assert_eq!(
-            server.dispatched().len(),
+            core.dispatched().len(),
             2,
             "the close waits behind the rename"
         );
@@ -342,45 +341,42 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
         );
         {
             // A server publication reports Take Over without changing the Terminal Session.
-            let mut delivery = server.0.borrow_mut();
-            delivery.server.inventory.close.as_mut().unwrap().controls = vec![ConfirmedControl {
+            let mut delivery = core.0.borrow_mut();
+            delivery.core.inventory.close.as_mut().unwrap().controls = vec![ConfirmedControl {
                 owner: OTHER_DEVICE,
                 epoch: 2,
                 ..control.clone()
             }];
-            delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
+            delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
         }
         model.poll();
         assert_eq!(
-            server.finish(true, true).outcome,
+            core.finish(true, true).outcome,
             Outcome::Accepted { target: workspace }
         );
         model.poll();
         assert!(
-            matches!(server.dispatched().last(), Some(Mutation::Close { confirmation, .. })
+            matches!(core.dispatched().last(), Some(Mutation::Close { confirmation, .. })
             if confirmation.own_controls.as_deref() == Some(&[control][..]))
         );
-        assert_eq!(
-            server.finish(true, true).outcome,
-            Outcome::StaleConfirmation
-        );
+        assert_eq!(core.finish(true, true).outcome, Outcome::StaleConfirmation);
         let restored = model.poll().inventory.unwrap();
         assert_eq!(restored.workspaces[0].tabs.len(), 2);
         assert_eq!(restored.close.unwrap().sessions[0].session, Some([30; 32]));
         assert_eq!(model.take_stale_close(), Some((target, Some(local))));
         assert_eq!(
-            server.dispatched().len(),
+            core.dispatched().len(),
             3,
             "stale consent never submits a replacement"
         );
         let explicit = model.close_approval(target).unwrap();
         assert_eq!(model.close(explicit, local), WorkspaceSubmission::Submitted);
         assert!(
-            matches!(server.dispatched().last(), Some(Mutation::Close { confirmation, .. })
+            matches!(core.dispatched().last(), Some(Mutation::Close { confirmation, .. })
             if confirmation.own_controls.is_none())
         );
         assert!(matches!(
-            server.finish(true, true).outcome,
+            core.finish(true, true).outcome,
             Outcome::Accepted { .. }
         ));
     }
@@ -388,21 +384,21 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
 
 #[test]
 fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_reviewed() {
-    use spaceterm_server::hierarchy::{CloseTarget, ConfirmedControl};
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
+    use spaceterm_core::hierarchy::{CloseTarget, ConfirmedControl};
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
-    server.finish(true, true);
+    core.finish(true, true);
     model.poll();
-    let tabs = server.inventory().workspaces[0].tabs.clone();
+    let tabs = core.inventory().workspaces[0].tabs.clone();
     {
-        let mut delivery = server.0.borrow_mut();
-        delivery.server.inventory.close.as_mut().unwrap().controls = tabs
+        let mut delivery = core.0.borrow_mut();
+        delivery.core.inventory.close.as_mut().unwrap().controls = tabs
             .iter()
             .map(|tab| ConfirmedControl {
                 pane: tab.root_pane,
@@ -411,7 +407,7 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
                 epoch: 0,
             })
             .collect();
-        delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
+        delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
     }
     model.poll();
     for (index, tab) in tabs.iter().enumerate() {
@@ -435,18 +431,18 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
         );
     }
     assert!(model.poll().inventory.unwrap().workspaces.is_empty());
-    assert_eq!(server.inventory().workspaces[0].tabs.len(), 2);
+    assert_eq!(core.inventory().workspaces[0].tabs.len(), 2);
     assert!(
         model.optimistically_closing(first_workspace_id()),
         "the Workspace must keep its rollback owner while the two closes are pending"
     );
     assert_eq!(
-        server.dispatched().len(),
+        core.dispatched().len(),
         2,
         "the second close still waits for the first"
     );
     assert_eq!(
-        server.finish(true, true).outcome,
+        core.finish(true, true).outcome,
         Outcome::Accepted { target: tabs[0].id }
     );
     model.poll();
@@ -459,18 +455,15 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
             .is_empty()
     );
     assert!(
-        matches!(server.dispatched().last(), Some(Mutation::Close { confirmation, .. })
+        matches!(core.dispatched().last(), Some(Mutation::Close { confirmation, .. })
         if !confirmation.removes_workspace)
     );
-    assert_eq!(
-        server.finish(true, true).outcome,
-        Outcome::StaleConfirmation
-    );
+    assert_eq!(core.finish(true, true).outcome, Outcome::StaleConfirmation);
     let restored = model.poll().inventory.unwrap();
     assert_eq!(restored.workspaces[0].tabs[0].id, tabs[1].id);
     assert!(!model.optimistically_closing(first_workspace_id()));
     assert_eq!(
-        server.dispatched().len(),
+        core.dispatched().len(),
         3,
         "a final Tab is never closed with renewed consent"
     );
@@ -488,18 +481,18 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
 }
 
 #[test]
-fn optimistic_rapid_identical_actions_keep_distinct_server_identities_and_results() {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
+fn optimistic_rapid_identical_actions_keep_distinct_core_identities_and_results() {
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
     let mutation = Mutation::CreateTab {
         workspace,
         source: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     };
     let first = source.submit_waiting(mutation.clone()).unwrap();
     let second = source.submit_waiting(mutation).unwrap();
-    assert_eq!(server.dispatched().len(), 1);
+    assert_eq!(core.dispatched().len(), 1);
     let projected = model.poll().inventory.unwrap();
     assert_eq!(
         projected.workspaces[0].tabs.len(),
@@ -509,27 +502,27 @@ fn optimistic_rapid_identical_actions_keep_distinct_server_identities_and_result
     assert!(first.try_recv().is_err());
     assert!(second.try_recv().is_err());
 
-    let accepted_first = server.finish(true, true);
+    let accepted_first = core.finish(true, true);
     model.poll();
     assert_eq!(first.try_recv().unwrap().unwrap(), accepted_first);
     assert!(
         second.try_recv().is_err(),
         "identical mutations still have separate receivers"
     );
-    assert_eq!(server.dispatched().len(), 2);
-    let accepted_second = server.finish(true, true);
+    assert_eq!(core.dispatched().len(), 2);
+    let accepted_second = core.finish(true, true);
     model.poll();
     assert_eq!(second.try_recv().unwrap().unwrap(), accepted_second);
     assert_ne!(accepted_first.outcome, accepted_second.outcome);
-    assert_eq!(server.inventory().workspaces[0].tabs.len(), 3);
+    assert_eq!(core.inventory().workspaces[0].tabs.len(), 3);
 }
 
 #[test]
 fn optimistic_split_preserves_published_repository_and_close_control_facts() {
-    use spaceterm_server::hierarchy::ConfirmedControl;
-    let server = DelayedServer::new();
-    let workspace = server.inventory().workspaces[0].id;
-    let tab = server.inventory().workspaces[0].tabs[0].clone();
+    use spaceterm_core::hierarchy::ConfirmedControl;
+    let core = DelayedCore::new();
+    let workspace = core.inventory().workspaces[0].id;
+    let tab = core.inventory().workspaces[0].tabs[0].clone();
     let control = ConfirmedControl {
         pane: tab.root_pane,
         session: None,
@@ -537,27 +530,27 @@ fn optimistic_split_preserves_published_repository_and_close_control_facts() {
         epoch: 7,
     };
     {
-        let mut delivery = server.0.borrow_mut();
-        delivery.server.present_repository_directory(
+        let mut delivery = core.0.borrow_mut();
+        delivery.core.present_repository_directory(
             tab.root_pane,
             std::path::PathBuf::from("/server/protected-repository"),
         );
-        delivery.server.inventory.close.as_mut().unwrap().controls = vec![control.clone()];
-        delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
+        delivery.core.inventory.close.as_mut().unwrap().controls = vec![control.clone()];
+        delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
     }
-    let (source, mut model) = model(&server);
+    let (source, mut model) = model(&core);
     assert_eq!(
         source.submit(Mutation::SplitPane {
             workspace,
             tab: tab.id,
             source: tab.root_pane,
             axis: Axis::Right,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }),
         WorkspaceSubmission::Submitted
     );
     for inventory in [source.presentation_inventory().unwrap(), {
-        server.finish(true, true);
+        core.finish(true, true);
         model.poll().inventory.unwrap()
     }] {
         let decoded: Inventory =
@@ -575,14 +568,14 @@ fn optimistic_split_preserves_published_repository_and_close_control_facts() {
 
 #[test]
 fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exists() {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
     assert_eq!(
         source.submit(Mutation::CreateTab {
             workspace,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }),
         WorkspaceSubmission::Submitted
     );
@@ -596,7 +589,7 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
             tab: provisional_tab,
             source: provisional_pane,
             axis: Axis::Down,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }),
         WorkspaceSubmission::Submitted
     );
@@ -610,37 +603,37 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
         2
     );
     assert_eq!(
-        server.dispatched().len(),
+        core.dispatched().len(),
         1,
         "no provisional identity can cross dispatch"
     );
 
-    let created = server.finish(true, true);
+    let created = core.finish(true, true);
     model.poll();
     let Outcome::Accepted { target } = created.outcome else {
         panic!("the server must accept the Tab");
     };
-    let real = server.inventory().workspaces[0]
+    let real = core.inventory().workspaces[0]
         .tabs
         .iter()
         .find(|t| t.id == target)
         .unwrap()
         .clone();
     assert_eq!(
-        server.dispatched()[1],
+        core.dispatched()[1],
         Mutation::SplitPane {
             workspace,
             tab: real.id,
             source: real.root_pane,
             axis: Axis::Down,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }
     );
     assert_ne!(real.id, provisional_tab);
-    server.finish(true, true);
+    core.finish(true, true);
     model.poll();
     assert_eq!(
-        server.inventory().workspaces[0]
+        core.inventory().workspaces[0]
             .tabs
             .last()
             .unwrap()
@@ -652,25 +645,25 @@ fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exist
 
 #[test]
 fn optimistic_pane_move_presents_its_tab_at_once_and_keeps_the_pane_identity() {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
-    let tab = server.inventory().workspaces[0].tabs[0].clone();
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
+    let tab = core.inventory().workspaces[0].tabs[0].clone();
     source.submit(Mutation::SplitPane {
         workspace,
         tab: tab.id,
         source: tab.root_pane,
         axis: Axis::Right,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
-    server.finish(true, true);
+    core.finish(true, true);
     model.poll();
-    let moved = server.inventory().workspaces[0].tabs[0].panes[1].id;
+    let moved = core.inventory().workspaces[0].tabs[0].panes[1].id;
     let mutation = Mutation::MovePane {
         workspace,
         tab: tab.id,
         pane: moved,
-        destination: spaceterm_server::hierarchy::PaneDestination::NewTab,
+        destination: spaceterm_core::hierarchy::PaneDestination::NewTab,
     };
 
     assert_eq!(
@@ -684,7 +677,7 @@ fn optimistic_pane_move_presents_its_tab_at_once_and_keeps_the_pane_identity() {
         tab: pending.id,
         source: moved,
         axis: Axis::Down,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
     assert_eq!(
         (
@@ -695,26 +688,26 @@ fn optimistic_pane_move_presents_its_tab_at_once_and_keeps_the_pane_identity() {
                 .collect::<Vec<_>>(),
             pending.panes.iter().map(|p| p.id).collect::<Vec<_>>(),
             source.provisional(moved),
-            server.dispatched().last(),
+            core.dispatched().last(),
         ),
         (vec![tab.root_pane], vec![moved], false, Some(&mutation)),
         "the moved Pane keeps its identity, so the move dispatches at once"
     );
 
-    let accepted = server.finish(true, true);
+    let accepted = core.finish(true, true);
     model.poll();
     let Outcome::Accepted { target } = accepted.outcome else {
         panic!("the server must accept the move");
     };
     assert_ne!(target, pending.id);
     assert_eq!(
-        server.dispatched().last(),
+        core.dispatched().last(),
         Some(&Mutation::SplitPane {
             workspace,
             tab: target,
             source: moved,
             axis: Axis::Down,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }),
         "the split in the pending Tab waits for the Tab the server created"
     );
@@ -722,29 +715,29 @@ fn optimistic_pane_move_presents_its_tab_at_once_and_keeps_the_pane_identity() {
 
 #[test]
 fn an_accepted_move_or_merge_never_reopens_what_its_interaction_already_opened() {
-    use spaceterm_server::hierarchy::{PaneDestination, Side};
+    use spaceterm_core::hierarchy::{PaneDestination, Side};
 
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
-    let first = server.inventory().workspaces[0].tabs[0].clone();
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
+    let first = core.inventory().workspaces[0].tabs[0].clone();
     source.submit(Mutation::SplitPane {
         workspace,
         tab: first.id,
         source: first.root_pane,
         axis: Axis::Right,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
-    server.finish(true, true);
+    core.finish(true, true);
     model.poll();
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
-    server.finish(true, true);
+    core.finish(true, true);
     model.poll();
-    let inventory = server.inventory();
+    let inventory = core.inventory();
     let moved = inventory.workspaces[0].tabs[0].panes[1].id;
     let second = inventory.workspaces[0].tabs[1].clone();
 
@@ -769,12 +762,12 @@ fn an_accepted_move_or_merge_never_reopens_what_its_interaction_already_opened()
         },
     ] {
         assert_eq!(source.submit(mutation), WorkspaceSubmission::Submitted);
-        server.finish(true, true);
+        core.finish(true, true);
         accepted.push(model.poll().accepted.is_some());
     }
 
     assert_eq!(
-        (accepted, server.inventory().workspaces[0].tabs.len()),
+        (accepted, core.inventory().workspaces[0].tabs.len()),
         (vec![false, false], 1),
         "the drop opened the destination already, so a later answer must not take the person \
          back there"
@@ -783,13 +776,13 @@ fn an_accepted_move_or_merge_never_reopens_what_its_interaction_already_opened()
 
 #[test]
 fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
     let projected = source.presentation_inventory().unwrap();
     let tab = projected.workspaces[0].tabs.last().unwrap();
@@ -799,7 +792,7 @@ fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
             tab: tab.id,
             source: tab.root_pane,
             axis: Axis::Right,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         })
         .unwrap();
     source.submit(Mutation::RenameWorkspace {
@@ -807,7 +800,7 @@ fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
         version: 0,
         name: "Later work".into(),
     });
-    assert_eq!(server.finish(true, false).outcome, Outcome::Invalid);
+    assert_eq!(core.finish(true, false).outcome, Outcome::Invalid);
     let rollback = model.poll().inventory.unwrap();
     assert_eq!(rollback.workspaces[0].tabs.len(), 1);
     assert_eq!(rollback.workspaces[0].name, "Later work");
@@ -815,29 +808,29 @@ fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
         dependent.try_recv().unwrap().is_err(),
         "the refused parent cannot silently drop its split"
     );
-    assert_eq!(server.dispatched().len(), 2);
+    assert_eq!(core.dispatched().len(), 2);
     assert!(
-        matches!(&server.dispatched()[1], Mutation::RenameWorkspace { name, .. } if name == "Later work")
+        matches!(&core.dispatched()[1], Mutation::RenameWorkspace { name, .. } if name == "Later work")
     );
-    server.finish(true, true);
+    core.finish(true, true);
     model.poll();
-    assert_eq!(server.inventory().workspaces[0].name, "Later work");
+    assert_eq!(core.inventory().workspaces[0].name, "Later work");
 }
 
 #[test]
 fn batched_independent_conflicts_keep_both_drafts_and_their_reviewed_values() {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
     source.submit(Mutation::CreateWorkspace {
         name: "Second".into(),
         directory: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
-    server.finish(true, true);
+    core.finish(true, true);
     model.poll();
-    let workspaces = server.inventory().workspaces;
+    let workspaces = core.inventory().workspaces;
     let second = crate::domain::WorkspaceId::new(2);
-    model.register(second, WorkspaceFacts::from_server(&workspaces[1]));
+    model.register(second, WorkspaceFacts::from_core(&workspaces[1]));
     for (workspace, draft) in [
         (&workspaces[0], "First draft"),
         (&workspaces[1], "Second draft"),
@@ -851,11 +844,11 @@ fn batched_independent_conflicts_keep_both_drafts_and_their_reviewed_values() {
             WorkspaceSubmission::Submitted
         );
     }
-    server.rename_elsewhere(workspaces[0].id, "First server value");
-    server.rename_elsewhere(workspaces[1].id, "Second server value");
-    assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+    core.rename_elsewhere(workspaces[0].id, "First server value");
+    core.rename_elsewhere(workspaces[1].id, "Second server value");
+    assert_eq!(core.finish(true, true).outcome, Outcome::Conflict);
     source.snapshot();
-    assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+    assert_eq!(core.finish(true, true).outcome, Outcome::Conflict);
     source.snapshot();
     // Tab and split presentation can advance delivery without a Workspace Window poll.
     model.poll();
@@ -875,10 +868,10 @@ fn batched_independent_conflicts_keep_both_drafts_and_their_reviewed_values() {
 
 #[test]
 fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
-    server.rename_elsewhere(workspace, "Server value");
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
+    core.rename_elsewhere(workspace, "Server value");
     let mut retained = 0;
     for index in 0..128 {
         let submission = source.submit(Mutation::RenameWorkspace {
@@ -890,7 +883,7 @@ fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
             break;
         }
         assert_eq!(submission, WorkspaceSubmission::Submitted);
-        assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+        assert_eq!(core.finish(true, true).outcome, Outcome::Conflict);
         model.poll();
         retained += 1;
     }
@@ -908,7 +901,7 @@ fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
         source.submit(Mutation::CreateTab {
             workspace,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }),
         WorkspaceSubmission::Submitted,
         "reviewing the retained drafts releases admission capacity"
@@ -917,9 +910,9 @@ fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
 
 #[test]
 fn optimistic_conflict_preserves_its_snapshot_and_draft_beside_a_later_pin() {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
     source.submit(Mutation::RenameWorkspace {
         workspace,
         version: 0,
@@ -936,8 +929,8 @@ fn optimistic_conflict_preserves_its_snapshot_and_draft_beside_a_later_pin() {
         pending.workspaces[0].pinned_directory,
         Some("/fixture/later".into())
     );
-    server.rename_elsewhere(workspace, "Their name");
-    assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+    core.rename_elsewhere(workspace, "Their name");
+    assert_eq!(core.finish(true, true).outcome, Outcome::Conflict);
     let restored = model.poll().inventory.unwrap();
     assert_eq!(restored.workspaces[0].name, "Their name");
     assert_eq!(
@@ -951,16 +944,16 @@ fn optimistic_conflict_preserves_its_snapshot_and_draft_beside_a_later_pin() {
 
 #[test]
 fn optimistic_lost_ack_binds_committed_membership_and_keeps_the_original() {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
     model.poll();
-    let committed = server.finish(false, true);
+    let committed = core.finish(false, true);
     let binding = model.poll();
     assert!(
         binding.accepted.is_none(),
@@ -972,44 +965,44 @@ fn optimistic_lost_ack_binds_committed_membership_and_keeps_the_original() {
         "never render the real and provisional Tab together"
     );
     assert!(
-        server.0.borrow().original.is_some(),
+        core.0.borrow().original.is_some(),
         "the validated outcome has not retired its Original Operation"
     );
     source.submit(Mutation::CreateTab {
         workspace,
         source: None,
-        control: spaceterm_server::hierarchy::CreateControl::Creator,
+        control: spaceterm_core::hierarchy::CreateControl::Creator,
     });
     assert_eq!(
-        server.dispatched().len(),
+        core.dispatched().len(),
         1,
         "the transport still owns the unacknowledged original"
     );
-    server.connected(false);
+    core.connected(false);
     model.poll();
     assert!(!source.has_pending(), "unsent work is not an offline queue");
-    server.connected(true);
+    core.connected(true);
     assert_eq!(
-        server.finish(true, true),
+        core.finish(true, true),
         committed,
         "resolution uses the same operation identity"
     );
     model.poll();
-    assert_eq!(server.dispatched().len(), 1);
-    assert_eq!(server.inventory().workspaces[0].tabs.len(), 2);
+    assert_eq!(core.dispatched().len(), 1);
+    assert_eq!(core.inventory().workspaces[0].tabs.len(), 2);
 }
 
 #[test]
 fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
-    let server = DelayedServer::new();
-    let (source, _) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
+    let core = DelayedCore::new();
+    let (source, _) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
     for _ in 0..32 {
         assert_eq!(
             source.submit(Mutation::CreateTab {
                 workspace,
                 source: None,
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             }),
             WorkspaceSubmission::Submitted
         );
@@ -1018,17 +1011,17 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
         source.submit(Mutation::CreateTab {
             workspace,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }),
         WorkspaceSubmission::Refused(WorkspaceRefusalReason::Pending)
     );
-    assert_eq!(server.dispatched().len(), 1);
-    server.connected(false);
+    assert_eq!(core.dispatched().len(), 1);
+    core.connected(false);
     assert_eq!(
         source.submit(Mutation::CreateTab {
             workspace,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         }),
         WorkspaceSubmission::Refused(WorkspaceRefusalReason::Offline)
     );
@@ -1043,7 +1036,7 @@ fn optimistic_queue_is_bounded_and_offline_submissions_never_enter_it() {
 
 struct WindowHarness {
     manager: Entity<TabManager>,
-    server: Rc<DelayedServer>,
+    core: Rc<DelayedCore>,
     source: WorkspaceEditSource,
     panes: Rc<ScriptedPanes>,
     model: RefCell<Workspaces>,
@@ -1051,16 +1044,16 @@ struct WindowHarness {
 }
 fn window_harness(cx: &mut TestAppContext) -> (WindowHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init).unwrap();
-    let server = DelayedServer::new();
-    let inventory = server.inventory();
+    let core = DelayedCore::new();
+    let inventory = core.inventory();
     let workspace = &inventory.workspaces[0];
     let root = &workspace.tabs[0];
-    let source = WorkspaceEditSource::new(Rc::clone(&server) as Rc<dyn WorkspaceEdits>);
+    let source = WorkspaceEditSource::new(Rc::clone(&core) as Rc<dyn WorkspaceEdits>);
     let (sessions, panes, factory, records) = sessions();
     let (_, state) = panes.open(root.root_pane).unwrap();
     let mut model = Workspaces::new(source.clone(), sessions.clone());
     model.poll();
-    model.register(first_workspace_id(), WorkspaceFacts::from_server(workspace));
+    model.register(first_workspace_id(), WorkspaceFacts::from_core(workspace));
     let (manager, cx) = cx.add_window_view(|window, cx| {
         TabManager::new(
             WorkspaceTabs::new(source.clone(), sessions, workspace.id),
@@ -1085,7 +1078,7 @@ fn window_harness(cx: &mut TestAppContext) -> (WindowHarness, &mut VisualTestCon
     (
         WindowHarness {
             manager,
-            server,
+            core,
             source,
             panes,
             model: RefCell::new(model),
@@ -1101,7 +1094,7 @@ fn project_window(harness: &WindowHarness, cx: &mut VisualTestContext) {
         harness.manager.update(cx, |manager, cx| {
             manager.reconcile(
                 &projected.workspaces[0],
-                super::super::server::WorkspaceRemoval::Published,
+                super::super::core_workspaces::WorkspaceRemoval::Published,
                 window,
                 cx,
             );
@@ -1116,10 +1109,10 @@ fn project_window(harness: &WindowHarness, cx: &mut VisualTestContext) {
 fn close_own_tab(harness: &WindowHarness, tab_id: TabId, cx: &mut VisualTestContext) {
     let tab = harness
         .manager
-        .read_with(cx, |manager, _| manager.server_tab(tab_id))
+        .read_with(cx, |manager, _| manager.core_tab(tab_id))
         .unwrap();
-    let workspace = harness.server.inventory().workspaces[0].id;
-    let target = spaceterm_server::hierarchy::CloseTarget::Tab { workspace, tab };
+    let workspace = harness.core.inventory().workspaces[0].id;
+    let target = spaceterm_core::hierarchy::CloseTarget::Tab { workspace, tab };
     let approval = harness.model.borrow().close_approval(target).unwrap();
     assert_eq!(
         harness.model.borrow_mut().close(
@@ -1164,7 +1157,7 @@ fn optimistic_pending_tab_split_and_later_navigation_keep_the_frame_and_keyboard
             .pane_count()),
         2
     );
-    assert_eq!(harness.server.dispatched().len(), 1);
+    assert_eq!(harness.core.dispatched().len(), 1);
     assert_eq!(
         harness.panes.opened().len(),
         1,
@@ -1176,16 +1169,16 @@ fn optimistic_pending_tab_split_and_later_navigation_keep_the_frame_and_keyboard
     let navigated = local_view(&harness, cx);
     assert_eq!(navigated.0, original.0);
     let focus = cx.update(|window, cx| window.focused(cx));
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
     assert_eq!(local_view(&harness, cx), navigated);
     assert_eq!(cx.update(|window, cx| window.focused(cx)), focus);
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
     assert_eq!(local_view(&harness, cx), navigated);
     assert_eq!(cx.update(|window, cx| window.focused(cx)), focus);
     assert!(cx.debug_bounds("workspace-tab-unavailable-ok").is_none());
-    let inventory = harness.server.inventory();
+    let inventory = harness.core.inventory();
     let created = inventory.workspaces[0].tabs.last().unwrap();
     for pane in &created.panes {
         assert_eq!(
@@ -1200,24 +1193,24 @@ fn optimistic_pending_tab_split_and_later_navigation_keep_the_frame_and_keyboard
 fn optimistic_tab_created_after_commit_before_ack_keeps_its_bound_source(cx: &mut TestAppContext) {
     let (harness, cx) = window_harness(cx);
     cx.dispatch_action(crate::ui::NewTab);
-    let committed = harness.server.finish(false, true);
+    let committed = harness.core.finish(false, true);
     assert!(matches!(committed.outcome, Outcome::Accepted { .. }));
-    let bound_source = harness.server.inventory().workspaces[0].tabs[1].root_pane;
+    let bound_source = harness.core.inventory().workspaces[0].tabs[1].root_pane;
     // The worker published accepted membership, but its original is still awaiting ack. The
     // next key event observes that outcome before the regular window membership poll binds it.
     cx.dispatch_action(crate::ui::NewTab);
     assert_eq!(
-        harness.server.dispatched().len(),
+        harness.core.dispatched().len(),
         1,
         "a queued dependent waits for the original acknowledgement"
     );
     assert_eq!(
-        harness.server.finish(true, true),
+        harness.core.finish(true, true),
         committed,
         "settlement must acknowledge the original creation identity"
     );
     project_window(&harness, cx);
-    let dependent = harness.server.finish(true, true);
+    let dependent = harness.core.finish(true, true);
     assert!(
         matches!(dependent.outcome, Outcome::Accepted { .. }),
         "a committed source Pane still on the server must not produce refusal: {:?}",
@@ -1226,20 +1219,20 @@ fn optimistic_tab_created_after_commit_before_ack_keeps_its_bound_source(cx: &mu
     assert_eq!(
         dependent.mutation,
         Mutation::CreateTab {
-            workspace: harness.server.inventory().workspaces[0].id,
+            workspace: harness.core.inventory().workspaces[0].id,
             source: Some(bound_source),
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
         "binding may retire the view alias only after queued intent owns its canonical source"
     );
     project_window(&harness, cx);
     cx.dispatch_action(crate::ui::NewTab);
     assert!(matches!(
-        harness.server.finish(true, true).outcome,
+        harness.core.finish(true, true).outcome,
         Outcome::Accepted { .. }
     ));
     project_window(&harness, cx);
-    assert_eq!(harness.server.inventory().workspaces[0].tabs.len(), 4);
+    assert_eq!(harness.core.inventory().workspaces[0].tabs.len(), 4);
     assert!(harness.model.borrow_mut().take_refusal().is_none());
 }
 
@@ -1253,13 +1246,13 @@ fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut 
     let selected = local_view(&harness, cx);
     let focus = cx.update(|window, cx| window.focused(cx));
     for _ in 0..15 {
-        harness.server.finish(true, true);
+        harness.core.finish(true, true);
         project_window(&harness, cx);
         for pane in harness.panes.opened() {
             pane.admitted();
             assert_eq!(
-                crate::ui::server_pane::ServerPaneConnection::status(pane.as_ref()),
-                crate::terminal::server_session::ServerPaneStatus::Connecting,
+                crate::ui::core_pane::MachinePaneConnection::status(pane.as_ref()),
+                crate::terminal::core_session::CorePaneStatus::Connecting,
                 "hidden admission must release capacity without fabricating a first screen"
             );
         }
@@ -1267,7 +1260,7 @@ fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut 
             .advance_clock(std::time::Duration::from_millis(16));
         cx.run_until_parked();
     }
-    let inventory = harness.server.inventory();
+    let inventory = harness.core.inventory();
     assert_eq!(inventory.workspaces[0].tabs.len(), 16);
     assert_eq!(
         harness.records.starts().len(),
@@ -1299,7 +1292,7 @@ fn readiness_reserves_foreground_start_capacity_during_a_hidden_creation_burst(
     }
     cx.dispatch_action(crate::ui::ActivateTab1);
     for _ in 0..15 {
-        harness.server.finish(true, true);
+        harness.core.finish(true, true);
         project_window(&harness, cx);
     }
     cx.executor()
@@ -1342,7 +1335,7 @@ fn readiness_hidden_split_uses_current_window_geometry_without_resize_on_first_v
     cx.simulate_resize(gpui::size(gpui::px(1001.0), gpui::px(701.0)));
     cx.run_until_parked();
     for _ in 0..2 {
-        harness.server.finish(true, true);
+        harness.core.finish(true, true);
         project_window(&harness, cx);
         for pane in harness.panes.opened() {
             pane.reconnect();
@@ -1418,7 +1411,7 @@ fn accept_hidden_layout_wider_than_the_stage(
     cx.simulate_resize(gpui::size(gpui::px(460.0), gpui::px(600.0)));
     cx.run_until_parked();
     for _ in 0..3 {
-        harness.server.finish(true, true);
+        harness.core.finish(true, true);
         project_window(harness, cx);
         for pane in harness.panes.opened() {
             pane.reconnect();
@@ -1428,7 +1421,7 @@ fn accept_hidden_layout_wider_than_the_stage(
         cx.run_until_parked();
     }
     assert_eq!(
-        harness.server.inventory().workspaces[0].tabs[1].panes.len(),
+        harness.core.inventory().workspaces[0].tabs[1].panes.len(),
         3
     );
 }
@@ -1518,14 +1511,14 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
 ) {
     let (harness, cx) = window_harness(cx);
     click("pane-split-down-1", cx);
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
     let closed_view = local_view(&harness, cx);
-    let inventory = harness.server.inventory();
+    let inventory = harness.core.inventory();
     let workspace = &inventory.workspaces[0];
     let tab = &workspace.tabs[0];
     let closing = tab.panes.last().unwrap().id;
-    let target = spaceterm_server::hierarchy::CloseTarget::Pane {
+    let target = spaceterm_core::hierarchy::CloseTarget::Pane {
         workspace: workspace.id,
         tab: tab.id,
         pane: closing,
@@ -1554,18 +1547,18 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
     harness
         .panes
         .pane(closing)
-        .set(ServerPaneStatus::TakeoverReconnecting);
+        .set(CorePaneStatus::TakeoverReconnecting);
     cx.run_until_parked();
     assert!(cx.debug_bounds("pane-takeover-2").is_none());
     assert!(cx.debug_bounds("pane-notice-2").is_none());
     // A changed server confirmation definitely refuses the original close.
-    harness.server.0.borrow_mut().server.inventory.close = Some(CloseInventory {
+    harness.core.0.borrow_mut().core.inventory.close = Some(CloseInventory {
         controls: Vec::new(),
         boot: [99; 32],
         sessions: vec![],
     });
     assert_eq!(
-        harness.server.finish(true, true).outcome,
+        harness.core.finish(true, true).outcome,
         Outcome::StaleConfirmation
     );
     let focus = cx.update(|window, cx| window.focused(cx));
@@ -1595,7 +1588,7 @@ fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mu
 
     let (harness, cx) = window_harness(cx);
     click("pane-split-down-1", cx);
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
     let handle = cx.debug_bounds("split-resize-1-hitbox").unwrap().center();
     cx.simulate_mouse_move(handle, None, Modifiers::none());
@@ -1614,7 +1607,7 @@ fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mu
         !before.contains(":0.5("),
         "the Split left its default ratio: {before}"
     );
-    let moved = harness.server.inventory().workspaces[0].tabs[0].panes[1].id;
+    let moved = harness.core.inventory().workspaces[0].tabs[0].panes[1].id;
     let opens = harness.panes.opens(moved);
 
     let caption = cx.debug_bounds("pane-caption-2-focused").unwrap();
@@ -1634,7 +1627,7 @@ fn a_refused_pane_move_restores_the_pane_where_it_was_and_opens_it_again(cx: &mu
             manager.active_tab_view().read(cx).pane_count(),
         )
     });
-    harness.server.reject();
+    harness.core.reject();
     project_window(&harness, cx);
 
     assert_eq!(
@@ -1678,9 +1671,9 @@ fn a_refused_move_of_a_split_accepted_meanwhile_restores_the_same_pane(cx: &mut 
     cx.run_until_parked();
 
     // The split settles first, so the pending move now names the Pane's server identity.
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
-    harness.server.reject();
+    harness.core.reject();
     project_window(&harness, cx);
 
     assert_eq!(
@@ -1701,9 +1694,9 @@ fn a_refused_tab_merge_restores_the_tab_and_opens_its_pane_again(cx: &mut TestAp
 
     let (harness, cx) = window_harness(cx);
     click("create-tab-button", cx);
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
-    let merged = harness.server.inventory().workspaces[0].tabs[0].root_pane;
+    let merged = harness.core.inventory().workspaces[0].tabs[0].root_pane;
     let opens = harness.panes.opens(merged);
     let tab = cx.debug_bounds("tab-item-1-inactive").unwrap();
     let pane = cx.debug_bounds("pane-surface-1").unwrap();
@@ -1730,7 +1723,7 @@ fn a_refused_tab_merge_restores_the_tab_and_opens_its_pane_again(cx: &mut TestAp
         })
     };
     let pending = counts(cx);
-    harness.server.reject();
+    harness.core.reject();
     project_window(&harness, cx);
 
     assert_eq!(
@@ -1742,10 +1735,10 @@ fn a_refused_tab_merge_restores_the_tab_and_opens_its_pane_again(cx: &mut TestAp
 
 #[test]
 fn optimistic_workspace_close_keeps_its_host_through_a_lost_ack() {
-    let server = DelayedServer::new();
-    let (_, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
-    let target = spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace };
+    let core = DelayedCore::new();
+    let (_, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
+    let target = spaceterm_core::hierarchy::CloseTarget::KillWorkspace { workspace };
     let approval = model.close_approval(target).unwrap();
     assert_eq!(
         model.close(
@@ -1756,41 +1749,41 @@ fn optimistic_workspace_close_keeps_its_host_through_a_lost_ack() {
     );
     assert!(model.optimistically_closing(first_workspace_id()));
     assert!(model.poll().inventory.unwrap().workspaces.is_empty());
-    server.finish(false, true);
+    core.finish(false, true);
     model.poll();
     assert!(model.latest_inventory().unwrap().workspaces.is_empty());
     assert!(
         model.optimistically_closing(first_workspace_id()),
         "published deletion does not retire an unacknowledged Original Operation"
     );
-    server.connected(false);
+    core.connected(false);
     model.poll();
     assert!(model.optimistically_closing(first_workspace_id()));
-    server.connected(true);
-    server.finish(true, true);
+    core.connected(true);
+    core.finish(true, true);
     model.poll();
     assert!(!model.optimistically_closing(first_workspace_id()));
 }
 
 #[gpui::test]
 fn a_committed_original_keeps_resolving_without_a_workspace_window(cx: &mut TestAppContext) {
-    let server = DelayedServer::new();
-    let (source, mut model) = model(&server);
-    let workspace = server.inventory().workspaces[0].id;
+    let core = DelayedCore::new();
+    let (source, mut model) = model(&core);
+    let workspace = core.inventory().workspaces[0].id;
     let approval = model
-        .close_approval(spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace })
+        .close_approval(spaceterm_core::hierarchy::CloseTarget::KillWorkspace { workspace })
         .unwrap();
     model.close(
         approval,
         crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id()),
     );
-    server.finish(false, true);
+    core.finish(false, true);
     model.poll();
     cx.update(|cx| source.retain_until_settled(cx));
-    let retained = Rc::downgrade(&server);
+    let retained = Rc::downgrade(&core);
     drop(model);
     drop(source);
-    drop(server);
+    drop(core);
     cx.run_until_parked();
     let original = retained
         .upgrade()
@@ -1810,19 +1803,19 @@ fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppCont
     let (harness, cx) = window_harness(cx);
     for _ in 0..3 {
         click("create-tab-button", cx);
-        harness.server.finish(true, true);
+        harness.core.finish(true, true);
         project_window(&harness, cx);
     }
     let original = harness
         .manager
         .read_with(cx, |manager, _| manager.tab_ids());
-    let inventory = harness.server.inventory();
+    let inventory = harness.core.inventory();
     let workspace = &inventory.workspaces[0];
     for index in [1, 2] {
         let approval = harness
             .model
             .borrow()
-            .close_approval(spaceterm_server::hierarchy::CloseTarget::Tab {
+            .close_approval(spaceterm_core::hierarchy::CloseTarget::Tab {
                 workspace: workspace.id,
                 tab: workspace.tabs[index].id,
             })
@@ -1840,13 +1833,13 @@ fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppCont
         project_window(&harness, cx);
     }
     for _ in 0..2 {
-        harness.server.0.borrow_mut().server.inventory.close = Some(CloseInventory {
+        harness.core.0.borrow_mut().core.inventory.close = Some(CloseInventory {
             controls: Vec::new(),
             boot: [99; 32],
             sessions: vec![],
         });
         assert_eq!(
-            harness.server.finish(true, true).outcome,
+            harness.core.finish(true, true).outcome,
             Outcome::StaleConfirmation
         );
         project_window(&harness, cx);
@@ -1863,14 +1856,14 @@ fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppCont
 fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
     let (harness, cx) = window_harness(cx);
     click("create-tab-button", cx);
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
     let closed = local_view(&harness, cx);
-    let inventory = harness.server.inventory();
+    let inventory = harness.core.inventory();
     let workspace = &inventory.workspaces[0];
     let tab = workspace.tabs.last().unwrap();
     let doomed_pane = tab.root_pane;
-    let target = spaceterm_server::hierarchy::CloseTarget::Tab {
+    let target = spaceterm_core::hierarchy::CloseTarget::Tab {
         workspace: workspace.id,
         tab: tab.id,
     };
@@ -1904,12 +1897,12 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
     harness
         .panes
         .pane(doomed_pane)
-        .set(ServerPaneStatus::TakeoverReconnecting);
+        .set(CorePaneStatus::TakeoverReconnecting);
     cx.run_until_parked();
     assert!(cx.debug_bounds("pane-takeover-1").is_none());
     assert!(cx.debug_bounds("pane-notice-1").is_none());
     assert!(matches!(
-        harness.server.finish(true, true).outcome,
+        harness.core.finish(true, true).outcome,
         Outcome::Accepted { .. }
     ));
     project_window(&harness, cx);
@@ -1930,12 +1923,12 @@ fn closing_the_active_tab_onto_a_running_pane_keeps_its_session_and_keyboard(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = window_harness(cx);
-    let survivor_id = harness.server.inventory().workspaces[0].tabs[0].root_pane;
+    let survivor_id = harness.core.inventory().workspaces[0].tabs[0].root_pane;
     let survivor = harness.panes.pane(survivor_id);
     survivor.reconnect();
     let survivor_view = local_view(&harness, cx);
     click("create-tab-button", cx);
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
     cx.run_until_parked();
     let opened = harness.panes.opened().len();
@@ -1981,16 +1974,16 @@ fn an_answer_published_before_the_close_reconciles_still_opens_the_successor_onc
     let successor_view = local_view(&harness, cx);
     let successor = harness
         .panes
-        .pane(harness.server.inventory().workspaces[0].tabs[0].root_pane);
-    successor.set(ServerPaneStatus::Restored);
+        .pane(harness.core.inventory().workspaces[0].tabs[0].root_pane);
+    successor.set(CorePaneStatus::Restored);
     click("create-tab-button", cx);
-    harness.server.finish(true, true);
+    harness.core.finish(true, true);
     project_window(&harness, cx);
     let before = successor.selections();
 
     close_own_tab(&harness, local_view(&harness, cx).0, cx);
     assert!(matches!(
-        harness.server.finish(true, true).outcome,
+        harness.core.finish(true, true).outcome,
         Outcome::Accepted { .. }
     ));
     project_window(&harness, cx);
@@ -2019,23 +2012,23 @@ fn another_clients_removal_of_the_active_tab_beside_an_own_close_selects_nothing
     let own_target = local_view(&harness, cx).0;
     for _ in 0..2 {
         click("create-tab-button", cx);
-        harness.server.finish(true, true);
+        harness.core.finish(true, true);
         project_window(&harness, cx);
     }
     cx.dispatch_action(crate::ui::PreviousTab);
     cx.run_until_parked();
     let removed = local_view(&harness, cx).0;
-    let removed_server = harness
+    let removed_machine = harness
         .manager
-        .read_with(cx, |manager, _| manager.server_tab(removed))
+        .read_with(cx, |manager, _| manager.core_tab(removed))
         .unwrap();
     let successor = harness
         .panes
-        .pane(harness.server.inventory().workspaces[0].tabs[2].root_pane);
+        .pane(harness.core.inventory().workspaces[0].tabs[2].root_pane);
     let before = successor.selections();
 
     close_own_tab(&harness, own_target, cx);
-    harness.server.remove_tab_elsewhere(removed_server);
+    harness.core.remove_tab_elsewhere(removed_machine);
     project_window(&harness, cx);
 
     assert_ne!(local_view(&harness, cx).0, removed);
@@ -2048,29 +2041,26 @@ fn another_clients_removal_of_the_active_tab_beside_an_own_close_selects_nothing
 
 #[test]
 fn optimistic_field_presentation_never_renews_an_unseen_conflicting_version() {
-    let server = DelayedServer::new();
-    let (_, mut model) = model(&server);
+    let core = DelayedCore::new();
+    let (_, mut model) = model(&core);
     let local = first_workspace_id();
-    let workspace = server.inventory().workspaces[0].id;
+    let workspace = core.inventory().workspaces[0].id;
     model.rename(local, "First draft".into(), Some(0));
-    server.rename_elsewhere(workspace, "Their name");
+    core.rename_elsewhere(workspace, "Their name");
     let projection = model.poll().inventory.unwrap();
     assert_eq!(projection.workspaces[0].name, "First draft");
     assert_eq!(
         projection.workspaces[0].name_version, 0,
         "an optimistic value still carries the version its editor actually observed"
     );
-    model.register(
-        local,
-        WorkspaceFacts::from_server(&projection.workspaces[0]),
-    );
+    model.register(local, WorkspaceFacts::from_core(&projection.workspaces[0]));
     let observed = model.facts(local).unwrap().name_version;
     model.rename(local, "Later draft".into(), Some(observed));
-    assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+    assert_eq!(core.finish(true, true).outcome, Outcome::Conflict);
     model.poll();
-    assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+    assert_eq!(core.finish(true, true).outcome, Outcome::Conflict);
     model.poll();
-    assert_eq!(server.inventory().workspaces[0].name, "Their name");
+    assert_eq!(core.inventory().workspaces[0].name, "Their name");
     for draft in ["First draft", "Later draft"] {
         let conflict = model.take_conflict().unwrap();
         assert_eq!(conflict.draft, WorkspaceDraft::Name(draft.into()));

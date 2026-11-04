@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(crate) use spaceterm_server::permissions::PermissionHolder;
+pub(crate) use spaceterm_core::permissions::PermissionHolder;
 
 /// One permission that programs in a Terminal Session inherit from their server and that only
 /// System Settings grants.
@@ -284,7 +284,7 @@ pub(crate) mod testing {
                 observers: Rc::default(),
                 reads: Cell::new(0),
                 naming: Cell::new(AccessibilityNaming::default()),
-                holder: RefCell::new(PermissionHolder::Server {
+                holder: RefCell::new(PermissionHolder::Core {
                     name: "SpaceTerm Development".into(),
                 }),
             })

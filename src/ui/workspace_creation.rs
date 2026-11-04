@@ -24,7 +24,7 @@ pub(crate) enum WorkspaceCreation {
 
 /// A saved paired server the remote creation rows offer.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RemoteCreationServer {
+pub(crate) struct RemoteCreationMachine {
     pub(crate) route: DirectRouteId,
     pub(crate) name: SharedString,
     /// The address the route reaches, kept only while another saved server shares the name.
@@ -33,7 +33,7 @@ pub(crate) struct RemoteCreationServer {
     pub(crate) available: bool,
 }
 
-impl RemoteCreationServer {
+impl RemoteCreationMachine {
     /// The name a creation row shows: the server's own, followed by its address when another
     /// saved server shares that name, so the person sees which one each row reaches.
     pub(crate) fn display_name(&self) -> SharedString {
@@ -60,13 +60,13 @@ impl WorkspaceCreation {
 
     /// The row label as the Workspace Switcher shows it, naming the server for a remote row.
     /// Open rows end in an ellipsis because a chooser opens before creation.
-    pub(crate) fn label(self, server: Option<&str>) -> SharedString {
-        match (self, server) {
+    pub(crate) fn label(self, core: Option<&str>) -> SharedString {
+        match (self, core) {
             (Self::Local, _) => "New Local Workspace".into(),
             (Self::OpenLocalDirectory, _) => "Open Local Directory\u{2026}".into(),
-            (Self::Remote(_), Some(server)) => format!("New Workspace on {server}").into(),
-            (Self::OpenRemoteDirectory(_), Some(server)) => {
-                format!("Open Directory on {server}\u{2026}").into()
+            (Self::Remote(_), Some(core)) => format!("New Workspace on {core}").into(),
+            (Self::OpenRemoteDirectory(_), Some(core)) => {
+                format!("Open Directory on {core}\u{2026}").into()
             }
             (Self::Remote(_), None) => "Remote Workspace".into(),
             (Self::OpenRemoteDirectory(_), None) => "Open Remote Directory\u{2026}".into(),

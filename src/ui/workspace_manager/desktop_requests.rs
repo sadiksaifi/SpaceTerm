@@ -8,14 +8,14 @@
 //! The main thread never touches the file. A worker thread validates it, because a network mount
 //! can block that work without bound, and the main thread checks again that the Session is still
 //! presented before it hands the file to the host. Nothing acts after the request's deadline.
-use super::{ServerKey, ServerOrigin, WorkspaceManager};
+use super::{MachineKey, MachineOrigin, WorkspaceManager};
 use crate::desktop_channel::{Refusal, Reply, Request, SessionContext};
 use crate::domain::WorkspaceId;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
 use crate::terminal::native_services::{FilePreviewTarget, PreparedFilePreview};
 use crate::terminal::{HyperlinkTarget, TerminalLocalFileCapabilities};
 use gpui::{App, Context, Task, Window};
-use spaceterm_server::hierarchy::Id;
+use spaceterm_core::hierarchy::Id;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -29,20 +29,20 @@ const MAX_VALIDATIONS: usize = 4;
 const VALIDATION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The server ID behind one presented server, or `None` while this desktop cannot tell it.
-pub(crate) type PresentedServer = Rc<dyn Fn(&ServerOrigin, &App) -> Option<Id>>;
+pub(crate) type PresentedCore = Rc<dyn Fn(&MachineOrigin, &App) -> Option<Id>>;
 
 /// What answering desktop requests needs beyond the window.
 #[derive(Clone)]
 pub(crate) struct DesktopRequests {
-    server_of: PresentedServer,
+    core_of: PresentedCore,
     /// File validations running now.
     validations: Arc<AtomicUsize>,
 }
 
 impl DesktopRequests {
-    pub(crate) fn new(server_of: PresentedServer) -> Self {
+    pub(crate) fn new(core_of: PresentedCore) -> Self {
         Self {
-            server_of,
+            core_of,
             validations: Arc::default(),
         }
     }
@@ -91,12 +91,12 @@ impl WorkspaceManager {
         self.person_input(cx);
         match request {
             Request::Show {
-                server,
+                core,
                 workspace,
                 tab,
                 pane,
             } => Task::ready(Some(reply(
-                self.presented_workspace(server, workspace, context, cx)
+                self.presented_workspace(core, workspace, context, cx)
                     .ok_or(Refusal::NotShown)
                     .and_then(|workspace_id| self.show(workspace_id, tab, pane, window, cx)),
             ))),
@@ -112,29 +112,29 @@ impl WorkspaceManager {
     /// The local Workspace presenting the server Workspace `workspace` of `server`.
     fn presented_workspace(
         &self,
-        server: Id,
+        core: Id,
         workspace: Id,
         context: &DesktopRequests,
         cx: &App,
     ) -> Option<WorkspaceId> {
         self.binding.iter().find_map(|(key, binding)| {
             let workspace_id = binding.local(workspace)?;
-            self.presents_server(key, server, context, cx)
+            self.presents_core(key, core, context, cx)
                 .then_some(workspace_id)
         })
     }
 
-    fn presents_server(
+    fn presents_core(
         &self,
-        key: ServerKey,
-        server: Id,
+        key: MachineKey,
+        core: Id,
         context: &DesktopRequests,
         cx: &App,
     ) -> bool {
         self.binding
             .origin(key)
-            .and_then(|origin| (context.server_of)(origin, cx))
-            == Some(server)
+            .and_then(|origin| (context.core_of)(origin, cx))
+            == Some(core)
     }
 
     /// The Workspace presenting the Session's live Terminal Session, and the local filesystem
@@ -157,7 +157,7 @@ impl WorkspaceManager {
                     .then_some((key, entry.id()))
             })
             .ok_or(Refusal::NotShown)?;
-        if !self.presents_server(key, session.server, context, cx) {
+        if !self.presents_core(key, session.core, context, cx) {
             return Err(Refusal::NotShown);
         }
         let binding = self.binding.get(key).ok_or(Refusal::NotShown)?;
@@ -370,7 +370,7 @@ fn validate(
 pub(crate) fn serve(
     endpoint: Arc<dyn crate::desktop_channel::DesktopChannelEndpoint>,
     identity: &'static str,
-    counters: Arc<spaceterm_server::diagnostics::TerminalCounters>,
+    counters: Arc<spaceterm_core::diagnostics::TerminalCounters>,
     cx: &mut App,
 ) {
     struct Exchange {
@@ -423,7 +423,7 @@ pub(crate) fn serve(
     if spawned.is_err() {
         return;
     }
-    let context = DesktopRequests::new(Rc::new(presented_server));
+    let context = DesktopRequests::new(Rc::new(presented_core));
     cx.spawn(async move |cx| {
         while let Ok(exchange) = received.recv().await {
             let answer = cx.update(|cx| {
@@ -457,16 +457,16 @@ pub(crate) fn serve(
 }
 
 /// The local server's admitted ID, or the server ID a paired route pins.
-fn presented_server(origin: &ServerOrigin, cx: &App) -> Option<Id> {
+fn presented_core(origin: &MachineOrigin, cx: &App) -> Option<Id> {
     match origin {
-        ServerOrigin::Local => cx
-            .try_global::<crate::ui::server_worktrees::Client>()?
-            .server
-            .admitted_server_id()
+        MachineOrigin::Local => cx
+            .try_global::<crate::ui::core_worktrees::Client>()?
+            .core
+            .admitted_machine_id()
             .ok(),
-        ServerOrigin::Direct(direct) => crate::ui::direct_servers::installed(cx)?
+        MachineOrigin::Direct(direct) => crate::ui::direct_machines::installed(cx)?
             .route(&direct.route)
-            .map(|route| route.paired.pin.server),
+            .map(|route| route.paired.pin.core),
     }
 }
 
@@ -476,7 +476,7 @@ mod tests {
     use crate::desktop_channel::{
         ChannelIo, ChannelStream, DesktopChannelEndpoint, TRANSFER_WINDOW,
     };
-    use spaceterm_server::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
+    use spaceterm_core::diagnostics::{TerminalCounterSnapshot, TerminalCounters};
     use std::io::{PipeReader, PipeWriter, Read, Write};
     use std::sync::Mutex;
     use std::time::Duration;

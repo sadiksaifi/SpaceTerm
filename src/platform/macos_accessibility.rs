@@ -1086,7 +1086,7 @@ pub(crate) mod tests {
         cx: &mut gpui::Context<crate::ui::TerminalPane>,
     ) -> crate::ui::TerminalPane {
         let session_factory =
-            crate::terminal::WorkspaceTerminalSessionFactory::new_server(std::rc::Rc::new(
+            crate::terminal::WorkspaceTerminalSessionFactory::new_core(std::rc::Rc::new(
                 crate::terminal::testing::TestTerminalSessionFactory::new(
                     crate::terminal::testing::TestTerminalSessionRecords::default(),
                 )

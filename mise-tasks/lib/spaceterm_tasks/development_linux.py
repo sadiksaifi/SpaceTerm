@@ -220,7 +220,7 @@ def register(prefix: Path, root: Path = ROOT) -> None:
 
 
 def stage_prefix(
-    executable: Path, server: Path, root: Path = ROOT, *, catalog: Path | None = None
+    executable: Path, core: Path, root: Path = ROOT, *, catalog: Path | None = None
 ) -> Path:
     """Stage an installed layout beside Cargo's artifact and rename it into place."""
     parent = executable.parent.parent / "development-apps"
@@ -230,7 +230,7 @@ def stage_prefix(
         (staging / "bin").mkdir()
         shutil.copyfile(executable, staging / "bin" / "spaceterm-desktop")
         (staging / "bin" / "spaceterm-desktop").chmod(0o755)
-        shutil.copyfile(server, staging / "bin" / "spaceterm")
+        shutil.copyfile(core, staging / "bin" / "spaceterm")
         (staging / "bin" / "spaceterm").chmod(0o755)
         resources = staging / "share" / "spaceterm"
         shutil.copytree(root / SHELL_INTEGRATION, resources / "shell-integration")
@@ -240,7 +240,7 @@ def stage_prefix(
         if compiled.returncode or not (resources / "terminfo" / "x" / "xterm-spaceterm").is_file():
             raise TaskError("tic did not produce the SpaceTerm terminfo entry")
         if catalog is not None:
-            shutil.copytree(catalog, resources / "server-artifacts")
+            shutil.copytree(catalog, resources / "core-artifacts")
         prefix = parent / "development"
         shutil.rmtree(prefix, ignore_errors=True)
         staging.rename(prefix)
@@ -252,7 +252,7 @@ def stage_prefix(
 
 def launch(backend: str | None = None) -> int | None:
     """Build and own the current client and foreground Server for this Development run."""
-    from spaceterm_tasks.server_builds import prepare
+    from spaceterm_tasks.core_builds import prepare
 
     with (
         development_run(),
@@ -269,7 +269,7 @@ def launch(backend: str | None = None) -> int | None:
             if shutil.which(tool) is None:
                 raise TaskError(f"{tool} is required; run mise doctor project")
         catalog = prepare(Path(temporary) / "catalog", "spaceterm-development")
-        server = build_executable(
+        core = build_executable(
             "--package",
             "spaceterm-cli",
             "--no-default-features",
@@ -277,9 +277,7 @@ def launch(backend: str | None = None) -> int | None:
             binary="spaceterm",
             env=environment,
         )
-        prefix = stage_prefix(
-            build_executable("--locked", env=environment), server, catalog=catalog
-        )
+        prefix = stage_prefix(build_executable("--locked", env=environment), core, catalog=catalog)
         try:
             register(prefix)
         except (OSError, ValueError, subprocess.CalledProcessError):
@@ -287,7 +285,7 @@ def launch(backend: str | None = None) -> int | None:
                 "could not register the Development desktop entry; run mise doctor project"
             ) from None
         return supervise(
-            [str(prefix / "bin/spaceterm"), "server", "run", "--owned"],
+            [str(prefix / "bin/spaceterm"), "internal", "serve", "--owned"],
             [str(prefix / "bin/spaceterm-desktop"), "--new-instance"],
             environment,
         )

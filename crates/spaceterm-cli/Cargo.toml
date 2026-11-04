@@ -24,7 +24,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "=1.0.151"
 spaceterm = { path = "../..", default-features = false }
 spaceterm-connections = { path = "../spaceterm-connections" }
-spaceterm-server = { path = "../spaceterm-server", features = ["client"] }
+spaceterm-core = { path = "../spaceterm-core", features = ["client"] }
 
 [dev-dependencies]
 quircs = "=0.10.3"

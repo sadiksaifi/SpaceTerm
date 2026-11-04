@@ -6,10 +6,10 @@ mod lifecycle;
     reason = "this exercise claims named Panes and never uses `support::attach`"
 )]
 mod support;
-use lifecycle::{Server, connect, require_idle, size};
-use spaceterm_server::{
-    ServerConnection, ServerError,
-    connection::link::ServerLink,
+use lifecycle::{Core, connect, require_idle, size};
+use spaceterm_core::{
+    CoreError, MachineConnection,
+    connection::link::CoreLink,
     hierarchy::{Mutation, Outcome},
     pane::*,
     protocol::Operation,
@@ -18,15 +18,11 @@ use std::{error::Error, path::PathBuf, time::Duration};
 use support::{Claimed, Pane};
 
 fn inventory(
-    link: &ServerLink,
-) -> Result<(spaceterm_server::hierarchy::Inventory, u64), Box<dyn Error>> {
+    link: &CoreLink,
+) -> Result<(spaceterm_core::hierarchy::Inventory, u64), Box<dyn Error>> {
     Ok(support::inventory(link)?)
 }
-fn mutate(
-    link: &ServerLink,
-    sequence: u64,
-    mutation: Mutation,
-) -> Result<[u8; 32], Box<dyn Error>> {
+fn mutate(link: &CoreLink, sequence: u64, mutation: Mutation) -> Result<[u8; 32], Box<dyn Error>> {
     let outcome = support::mutate(link, sequence, mutation)?;
     let Outcome::Accepted { target } = outcome.outcome else {
         return Err("mutation refused".into());
@@ -34,13 +30,13 @@ fn mutate(
     link.acknowledge(sequence)?;
     Ok(target)
 }
-fn select(link: &ServerLink, pane: [u8; 32], explicit: bool) -> Result<Claimed, ServerError> {
+fn select(link: &CoreLink, pane: [u8; 32], explicit: bool) -> Result<Claimed, CoreError> {
     support::select(link, pane, explicit, size())
 }
 fn attached(claimed: Claimed, failure: &'static str) -> Result<Pane, Box<dyn Error>> {
     claimed.attached().ok_or_else(|| failure.into())
 }
-fn target(link: &ServerLink, pane: [u8; 32]) -> Result<directories::Target, Box<dyn Error>> {
+fn target(link: &CoreLink, pane: [u8; 32]) -> Result<directories::Target, Box<dyn Error>> {
     match select(link, pane, false)? {
         Claimed::Restored(restored) => restored
             .recovery
@@ -49,10 +45,10 @@ fn target(link: &ServerLink, pane: [u8; 32]) -> Result<directories::Target, Box<
     }
 }
 fn repair(
-    link: &ServerLink,
+    link: &CoreLink,
     target: directories::Target,
     replacement: Option<PathBuf>,
-) -> Result<Claimed, ServerError> {
+) -> Result<Claimed, CoreError> {
     let pane = target.pane;
     support::claim(
         link,
@@ -64,7 +60,7 @@ fn repair(
         size(),
     )
 }
-fn cleanup_exercise(connection: &ServerLink) -> Result<(), Box<dyn Error>> {
+fn cleanup_exercise(connection: &CoreLink) -> Result<(), Box<dyn Error>> {
     let (inventory, sequence) = inventory(connection)?;
     if inventory.workspaces.len() != 1 {
         return Err("cleanup requires exactly the exercise Workspace".into());
@@ -85,7 +81,7 @@ fn cleanup_exercise(connection: &ServerLink) -> Result<(), Box<dyn Error>> {
     {
         return Err("unrelated Workspace was preserved".into());
     }
-    let target = spaceterm_server::hierarchy::CloseTarget::KillWorkspace {
+    let target = spaceterm_core::hierarchy::CloseTarget::KillWorkspace {
         workspace: workspace.id,
     };
     let confirmation = inventory
@@ -103,11 +99,11 @@ fn cleanup_exercise(connection: &ServerLink) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = spaceterm_server::protocol::MAJOR;
-    let client = ServerConnection::for_development_client("directory-recovery")?;
+    let major = spaceterm_core::protocol::MAJOR;
+    let client = MachineConnection::for_development_client("directory-recovery")?;
     require_idle(&client)?;
     client.setup()?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let connection = connect(&client)?;
     if std::env::args().any(|arg| arg == "--cleanup") {
         cleanup_exercise(&connection)?;
@@ -122,7 +118,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     support::done(&connection, Operation::Shutdown)?;
     drop(connection);
     host.0.wait()?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let connection = connect(&client)?;
     let root = std::env::temp_dir().join(format!(
         "spaceterm-directory-recovery-{}",
@@ -141,7 +137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateWorkspace {
             name: "Directory recovery".into(),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     mutate(
@@ -160,7 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Mutation::CreateTab {
             workspace,
             source: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         },
     )?;
     let before = inventory(&connection)?.0;
@@ -183,7 +179,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     connection.close();
     drop(shell);
     std::fs::remove_dir(&original)?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let connection = connect(&client)?;
     for _ in 0..3 {
         assert!(matches!(
@@ -193,18 +189,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     assert_eq!(
         select(&connection, pane, true).err(),
-        Some(ServerError::DirectoryUnavailable)
+        Some(CoreError::DirectoryUnavailable)
     );
     let retained = target(&connection, pane)?;
     assert_eq!(retained.original, original);
     assert_eq!(
         repair(&connection, retained.clone(), None).err(),
-        Some(ServerError::DirectoryUnavailable)
+        Some(CoreError::DirectoryUnavailable)
     );
     std::fs::write(&original, b"not a directory")?;
     assert_eq!(
         repair(&connection, retained.clone(), None).err(),
-        Some(ServerError::DirectoryUnavailable)
+        Some(CoreError::DirectoryUnavailable)
     );
     std::fs::remove_file(&original)?;
     // Retry only starts after an explicit request, even once the original returns.
@@ -251,12 +247,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(resumed);
     drop(connection);
     std::fs::remove_dir(&original)?;
-    let mut host = Server::start()?;
+    let mut host = Core::start()?;
     let connection = connect(&client)?;
     let retained = target(&connection, pane)?;
     assert_eq!(
         repair(&connection, retained.clone(), Some(original.clone())).err(),
-        Some(ServerError::DirectoryUnavailable)
+        Some(CoreError::DirectoryUnavailable)
     );
     assert!(!original.exists());
     let replaced = attached(
@@ -293,13 +289,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Cleanup removes only the Workspace created by this exercise.
     let (inventory, sequence) = inventory(&connection)?;
     let confirmation = inventory
-        .close_confirmation(spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace })
+        .close_confirmation(spaceterm_core::hierarchy::CloseTarget::KillWorkspace { workspace })
         .ok_or("close confirmation")?;
     mutate(
         &connection,
         sequence,
         Mutation::Close {
-            target: spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace },
+            target: spaceterm_core::hierarchy::CloseTarget::KillWorkspace { workspace },
             confirmation,
         },
     )?;

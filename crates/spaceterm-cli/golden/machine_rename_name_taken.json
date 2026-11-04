@@ -1,0 +1,18 @@
+{
+  "command": "machine.rename",
+  "data": {},
+  "error": {
+    "class": "usage",
+    "code": "invalid_arguments",
+    "details": {
+      "argument": "<NEW>",
+      "kind": "reserved_name"
+    },
+    "message": "Invalid arguments. See --help.",
+    "retryable": false
+  },
+  "machine": null,
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

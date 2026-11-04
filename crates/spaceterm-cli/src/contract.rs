@@ -10,7 +10,7 @@
 //! Within v1, fields are only added. Removing, renaming or retyping one creates
 //! `spaceterm.cli.v2`.
 use serde::{Serialize, Serializer};
-use spaceterm_server::{ServerError, direct::DirectError, hierarchy, protocol::Fatal, worktree};
+use spaceterm_core::{CoreError, direct::DirectError, hierarchy, protocol::Fatal, worktree};
 
 pub const SCHEMA: &str = "spaceterm.cli.v1";
 /// A broken stdout pipe stops output and exits with this status, without a message.
@@ -45,20 +45,20 @@ pub struct Envelope<D: Serialize = Empty> {
     /// The dotted command path, such as `pane.run`. Empty when parsing failed before a command.
     pub command: String,
     pub status: Status,
-    /// Null for store commands, and before the command identified its server.
-    pub server: Option<ServerRef>,
+    /// Null for `machine` commands, and before the command identified its machine.
+    pub machine: Option<MachineRef>,
     pub data: Data<D>,
     pub error: Option<ErrorBody>,
     pub warnings: Vec<Warning>,
 }
 
 impl<D: Serialize> Envelope<D> {
-    pub fn ok(command: impl Into<String>, server: Option<ServerRef>, data: D) -> Self {
+    pub fn ok(command: impl Into<String>, machine: Option<MachineRef>, data: D) -> Self {
         Self {
             schema: SCHEMA,
             command: command.into(),
             status: Status::Ok,
-            server,
+            machine,
             data: Data::new(data),
             error: None,
             warnings: Vec::new(),
@@ -68,7 +68,7 @@ impl<D: Serialize> Envelope<D> {
     /// An error. `data` may still hold operational results.
     pub fn error(
         command: impl Into<String>,
-        server: Option<ServerRef>,
+        machine: Option<MachineRef>,
         failure: Failure,
         data: D,
     ) -> Self {
@@ -76,7 +76,7 @@ impl<D: Serialize> Envelope<D> {
             schema: SCHEMA,
             command: command.into(),
             status: Status::Error,
-            server,
+            machine,
             data: Data::new(data),
             error: Some(ErrorBody::from(failure)),
             warnings: Vec::new(),
@@ -97,14 +97,14 @@ impl<E: Serialize> Envelope<ConfirmationData<E>> {
     /// The preview of a confirmed command. It exits 3, `confirmation_required`.
     pub fn confirmation(
         command: impl Into<String>,
-        server: Option<ServerRef>,
+        machine: Option<MachineRef>,
         confirmation: Confirmation<E>,
     ) -> Self {
         Self {
             schema: SCHEMA,
             command: command.into(),
             status: Status::ConfirmationRequired,
-            server,
+            machine,
             data: Data::new(ConfirmationData { confirmation }),
             error: Some(ErrorBody::from(Failure::new(Code::ConfirmationRequired))),
             warnings: Vec::new(),
@@ -120,7 +120,7 @@ impl<D: Serialize> Envelope<D> {
             schema: self.schema,
             command: self.command.clone(),
             status: self.status,
-            server: self.server.clone(),
+            machine: self.machine.clone(),
             data: Data {
                 body: serde_json::to_value(&self.data.body).unwrap_or_default(),
                 recovered_operations: self.data.recovered_operations.clone(),
@@ -237,12 +237,12 @@ pub enum Status {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ServerRef {
-    /// `local` or the Saved Connection name.
+pub struct MachineRef {
+    /// `local` or the machine's name in `machine list`.
     pub name: String,
     /// `local` or `id:<64 hex>`.
     pub route: String,
-    /// The server ID, 64 hex.
+    /// The Machine ID, 64 hex.
     pub id: String,
 }
 
@@ -278,7 +278,7 @@ pub struct RecoveredOperation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveredIdentity {
     Base,
-    Agent(spaceterm_server::protocol::AgentName),
+    Agent(spaceterm_core::protocol::AgentName),
 }
 
 impl Serialize for RecoveredIdentity {
@@ -461,7 +461,7 @@ pub enum UsageKind {
     WrongNumberOfValues,
     NoEquals,
     InvalidUtf8,
-    /// A path a remote server cannot resolve, such as a relative one.
+    /// A path a paired machine cannot resolve, such as a relative one.
     RelativePath,
     /// Command text with a newline or a control character.
     ControlCharacter,
@@ -473,7 +473,7 @@ pub enum UsageKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Level {
-    Server,
+    Machine,
     Workspace,
     Worktree,
     Tab,
@@ -481,7 +481,6 @@ pub enum Level {
     Session,
     Branch,
     Device,
-    Connection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -511,7 +510,7 @@ impl TargetDetails {
 
 const fn ambiguous_message(level: Level) -> &'static str {
     match level {
-        Level::Server => "More than one server matches.",
+        Level::Machine => "More than one machine matches.",
         Level::Workspace => "More than one Workspace matches.",
         Level::Worktree => "More than one Worktree matches.",
         Level::Tab => "More than one Tab matches.",
@@ -519,13 +518,12 @@ const fn ambiguous_message(level: Level) -> &'static str {
         Level::Session => "More than one Terminal Session matches.",
         Level::Branch => "More than one branch matches.",
         Level::Device => "More than one Paired Device matches.",
-        Level::Connection => "More than one Saved Connection matches.",
     }
 }
 
 const fn not_found_message(level: Level) -> &'static str {
     match level {
-        Level::Server => "No server matches.",
+        Level::Machine => "No machine matches.",
         Level::Workspace => "No Workspace matches.",
         Level::Worktree => "No Worktree matches.",
         Level::Tab => "No Tab matches.",
@@ -533,7 +531,6 @@ const fn not_found_message(level: Level) -> &'static str {
         Level::Session => "No Terminal Session matches.",
         Level::Branch => "No branch matches.",
         Level::Device => "No Paired Device matches.",
-        Level::Connection => "No Saved Connection matches.",
     }
 }
 
@@ -586,7 +583,7 @@ pub enum UnsupportedSessionReason {
     NoIntegration,
     /// Bracketed paste mode is off.
     NoBracketedPaste,
-    /// A Mac server needs a logged-in desktop session.
+    /// SpaceTerm Core on a Mac needs a logged-in desktop session.
     NoGuiSession,
 }
 
@@ -658,7 +655,7 @@ pub struct TimeoutDetails {
 pub struct ProtocolDetails {
     pub client_major: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub server_major: Option<u16>,
+    pub core_major: Option<u16>,
 }
 
 // Exit classes and codes
@@ -778,7 +775,7 @@ codes! {
     NotFound = "not_found", Target, false, "Nothing matches the target.";
     AmbiguousTarget = "ambiguous_target", Target, false, "More than one target matches.";
     ScopeMismatch = "scope_mismatch", Target, false, "The target is not in the given scope.";
-    ContextUnavailable = "context_unavailable", Target, false, "There is no current Pane on this server.";
+    ContextUnavailable = "context_unavailable", Target, false, "There is no current Pane on this machine.";
     // CLI-native: cursors.
     CursorMismatch = "cursor_mismatch", Target, false, "The cursor belongs to another Pane or Terminal Session.";
     HistoryReset = "history_reset", Target, true, "The Scrollback was reset since this cursor.";
@@ -799,8 +796,8 @@ codes! {
     PreviewUnavailable = "preview_unavailable", Unavailable, false, "This desktop has no File Preview.";
     DesktopBusy = "desktop_busy", Unavailable, true, "The desktop is still checking earlier files. Try again.";
     // CLI-native: route or environment.
-    LocalOnly = "local_only", Unavailable, false, "This command runs only on the server's own machine.";
-    DisconnectsEveryDevice = "disconnects_every_device", Unavailable, false, "This change would leave no connected device a route to the server. Make it on the server's own machine.";
+    LocalOnly = "local_only", Unavailable, false, "This command runs only on the machine itself. Run it there without --machine.";
+    DisconnectsEveryDevice = "disconnects_every_device", Unavailable, false, "This change would leave no connected device a route to that machine. Make it on the machine itself.";
     UnsupportedSession = "unsupported_session", Unavailable, false, "This session does not support the command.";
     IdentityBusy = "identity_busy", Unavailable, true, "Another command of this identity is running.";
     CredentialUnavailable = "credential_unavailable", Unavailable, false, "The pairing credential store is unavailable or unsafe.";
@@ -813,49 +810,49 @@ codes! {
     // CLI-native: failure.
     CommandFailed = "command_failed", Failed, false, "The command exited with a nonzero status.";
     OutputFailed = "output_failed", Failed, false, "SpaceTerm couldn\u{2019}t write the output.";
-    OperationFailed = "operation_failed", Failed, false, "The server did not perform the operation.";
+    OperationFailed = "operation_failed", Failed, false, "SpaceTerm Core did not perform the operation.";
     PermissionFailed = "permission_failed", Failed, false, "The system didn\u{2019}t complete the permission operation.";
     Interrupted = "interrupted", Interrupted, false, "Interrupted.";
-    // ServerError.
-    NotSetUp = "not_set_up", Unavailable, false, "The server is not set up.";
-    ServiceUnavailable = "service_unavailable", Unavailable, true, "The server service is unavailable.";
-    ServiceBusy = "service_busy", Unavailable, true, "Another server operation is running.";
-    NotInstalled = "not_installed", Unavailable, false, "The server service is not installed.";
-    Stopped = "stopped", Unavailable, false, "The server was stopped. Start it with: spaceterm server start.";
+    // CoreError.
+    NotSetUp = "not_set_up", Unavailable, false, "SpaceTerm Core is not set up on this machine. Set it up with: spaceterm setup.";
+    ServiceUnavailable = "service_unavailable", Unavailable, true, "The SpaceTerm Core service is unavailable.";
+    ServiceBusy = "service_busy", Unavailable, true, "Another SpaceTerm Core operation is running.";
+    NotInstalled = "not_installed", Unavailable, false, "The SpaceTerm Core service is not installed.";
+    Stopped = "stopped", Unavailable, false, "SpaceTerm Core was stopped. Start it with: spaceterm start.";
     Changed = "changed", Target, true, "The target changed. Review it and try again.";
-    ActivationUnresolved = "activation_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm whether the server update finished.";
-    ReturnUnavailable = "return_unavailable", Failed, false, "The previous server version can\u{2019}t be restored safely.";
-    CandidateUnverified = "candidate_unverified", Failed, false, "SpaceTerm couldn\u{2019}t verify the server package.";
-    NoCandidate = "no_candidate", Target, false, "There is no server package to install.";
+    ActivationUnresolved = "activation_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm whether SpaceTerm Core restarted on the new version.";
+    ReturnUnavailable = "return_unavailable", Failed, false, "The previous SpaceTerm Core version can\u{2019}t be restored safely.";
+    CandidateUnverified = "candidate_unverified", Failed, false, "SpaceTerm couldn\u{2019}t verify the SpaceTerm Core package.";
+    NoCandidate = "no_candidate", Target, false, "There is no SpaceTerm Core package to install.";
     AuthorizationRequired = "authorization_required", ActionRequired, false, "Administrator authorization is required.";
-    NotRunning = "not_running", Unavailable, true, "The server is not running.";
+    NotRunning = "not_running", Unavailable, true, "SpaceTerm Core is not running.";
     StorageUnavailable = "storage_unavailable", Unavailable, false, "Storage is unavailable.";
     IncompatibleState = "incompatible_state", Unavailable, false, "The saved state is from an incompatible SpaceTerm.";
     UnsafeStorage = "unsafe_storage", Unavailable, false, "Storage has unsafe permissions.";
-    AuthenticationRefused = "authentication_refused", ActionRequired, false, "SpaceTerm couldn\u{2019}t verify the server or account for this connection.";
-    IncompatibleProtocol = "incompatible_protocol", Unavailable, false, "This CLI and the server are incompatible. Update the older one.";
+    AuthenticationRefused = "authentication_refused", ActionRequired, false, "SpaceTerm couldn\u{2019}t verify the machine or account for this connection.";
+    IncompatibleProtocol = "incompatible_protocol", Unavailable, false, "This CLI and SpaceTerm Core on that machine are incompatible. Update the older one.";
     CandidateChanged = "candidate_changed", Unavailable, false, "The installation changed while the command ran.";
-    ProtocolError = "protocol_error", Unavailable, false, "The server connection did not complete.";
+    ProtocolError = "protocol_error", Unavailable, false, "The connection to SpaceTerm Core did not complete.";
     StartupFailed = "startup_failed", Failed, false, "The Terminal Session could not start.";
     Controlled = "controlled", ActionRequired, false, "Another client controls the Pane. Use --take-over to take it.";
     Unsupported = "unsupported", Unavailable, false, "This operation isn\u{2019}t supported.";
     DirectoryUnavailable = "directory_unavailable", Target, false, "The Terminal Session's directory is unavailable. Repair it with --directory.";
     CleanupUnresolved = "cleanup_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm the Terminal Sessions ended.";
-    Capacity = "capacity", Unavailable, true, "The server reached a capacity limit.";
+    Capacity = "capacity", Unavailable, true, "SpaceTerm Core reached a capacity limit.";
     // DirectError.
-    Unreachable = "unreachable", Unavailable, true, "The server is unreachable.";
+    Unreachable = "unreachable", Unavailable, true, "The machine is unreachable.";
     CredentialInteractionRequired = "credential_interaction_required", ActionRequired, false, "The credential store needs interaction. Run the command in a terminal.";
     InvalidInvitation = "invalid_invitation", Target, false, "This Invitation Link is invalid or used.";
     InvitationExpired = "invitation_expired", Target, false, "This Invitation Link expired.";
-    PairingRejected = "pairing_rejected", Failed, false, "The server owner rejected this pairing.";
-    ServerIdentityChanged = "server_identity_changed", ActionRequired, false, "The server no longer matches this connection.";
+    PairingRejected = "pairing_rejected", Failed, false, "The machine's owner rejected this pairing.";
+    MachineIdentityChanged = "machine_identity_changed", ActionRequired, false, "The machine no longer matches this connection.";
     Revoked = "revoked", ActionRequired, false, "This device was unpaired.";
-    NetworkOff = "network_off", Unavailable, false, "The server's Network Access is off.";
+    NetworkOff = "network_off", Unavailable, false, "Network Access is off on that machine.";
     InvalidAddress = "invalid_address", Target, false, "Enter a DNS name or IP address and an optional nonzero port.";
-    AddressUnavailable = "address_unavailable", Unavailable, true, "The server couldn\u{2019}t listen at this address and port. Nothing changed.";
+    AddressUnavailable = "address_unavailable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t listen at this address and port. Nothing changed.";
     ClaimDecided = "claim_decided", Target, false, "This pairing claim was already decided.";
     ComparisonMismatch = "comparison_mismatch", Failed, false, "The Comparison Code did not match.";
-    WrongServer = "wrong_server", Target, false, "This invitation or connection names another server.";
+    WrongMachine = "wrong_machine", Target, false, "This invitation or connection names another machine.";
     // worktree::Error.
     MainWorktree = "main_worktree", Target, false, "This is the Main Worktree.";
     WorktreeLocked = "worktree_locked", Failed, false, "The Worktree is locked.";
@@ -865,14 +862,14 @@ codes! {
     InvalidBranchName = "invalid_branch_name", Failed, false, "Git refuses this branch name.";
     BranchExists = "branch_exists", Target, false, "A branch with this name already exists.";
     BranchCheckedOut = "branch_checked_out", Target, false, "Another Worktree has this branch checked out.";
-    GitUnavailable = "git_unavailable", Unavailable, false, "Git is unavailable on the server.";
+    GitUnavailable = "git_unavailable", Unavailable, false, "Git is unavailable on that machine.";
     WorktreeInterrupted = "worktree_interrupted", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm the Worktree change finished.";
     // Fatal.
-    ServerStopping = "server_stopping", Unavailable, true, "The server is stopping.";
+    Stopping = "stopping", Unavailable, true, "SpaceTerm Core is stopping.";
     // hierarchy::Outcome.
     Conflict = "conflict", Target, true, "Another change came first. Review it and try again.";
     InvalidTarget = "invalid_target", Target, false, "The target can\u{2019}t take this change.";
-    LimitReached = "limit_reached", Failed, false, "The server reached a limit for this change.";
+    LimitReached = "limit_reached", Failed, false, "SpaceTerm Core reached a limit for this change.";
 }
 
 impl Code {
@@ -895,30 +892,30 @@ impl std::fmt::Display for Code {
 
 // Mappings
 
-pub fn from_server_error(error: ServerError) -> Failure {
+pub fn from_core_error(error: CoreError) -> Failure {
     let code = match error {
-        ServerError::Direct(error) => return from_direct_error(error),
-        ServerError::NotSetUp => Code::NotSetUp,
-        ServerError::ServiceUnavailable => Code::ServiceUnavailable,
-        ServerError::ServiceBusy => Code::ServiceBusy,
-        ServerError::NotInstalled => Code::NotInstalled,
-        ServerError::Stopped => Code::Stopped,
-        ServerError::Changed => Code::Changed,
-        ServerError::ActivationUnresolved => Code::ActivationUnresolved,
-        ServerError::ReturnUnavailable => Code::ReturnUnavailable,
-        ServerError::RuntimeUnavailable => Code::CandidateUnverified,
-        ServerError::CandidateMissing => Code::NoCandidate,
-        ServerError::AuthorizationRequired => Code::AuthorizationRequired,
-        ServerError::NotRunning => Code::NotRunning,
-        ServerError::StorageUnavailable => Code::StorageUnavailable,
-        ServerError::IncompatibleState => Code::IncompatibleState,
-        ServerError::UnsafeStorage => Code::UnsafeStorage,
-        ServerError::AuthenticationRefused => Code::AuthenticationRefused,
-        ServerError::IncompatibleProtocol => Code::IncompatibleProtocol,
-        ServerError::CandidateChanged => Code::CandidateChanged,
-        ServerError::Protocol => Code::ProtocolError,
-        ServerError::StartupFailed => Code::StartupFailed,
-        ServerError::Controlled => {
+        CoreError::Direct(error) => return from_direct_error(error),
+        CoreError::NotSetUp => Code::NotSetUp,
+        CoreError::ServiceUnavailable => Code::ServiceUnavailable,
+        CoreError::ServiceBusy => Code::ServiceBusy,
+        CoreError::NotInstalled => Code::NotInstalled,
+        CoreError::Stopped => Code::Stopped,
+        CoreError::Changed => Code::Changed,
+        CoreError::ActivationUnresolved => Code::ActivationUnresolved,
+        CoreError::ReturnUnavailable => Code::ReturnUnavailable,
+        CoreError::RuntimeUnavailable => Code::CandidateUnverified,
+        CoreError::CandidateMissing => Code::NoCandidate,
+        CoreError::AuthorizationRequired => Code::AuthorizationRequired,
+        CoreError::NotRunning => Code::NotRunning,
+        CoreError::StorageUnavailable => Code::StorageUnavailable,
+        CoreError::IncompatibleState => Code::IncompatibleState,
+        CoreError::UnsafeStorage => Code::UnsafeStorage,
+        CoreError::AuthenticationRefused => Code::AuthenticationRefused,
+        CoreError::IncompatibleProtocol => Code::IncompatibleProtocol,
+        CoreError::CandidateChanged => Code::CandidateChanged,
+        CoreError::Protocol => Code::ProtocolError,
+        CoreError::StartupFailed => Code::StartupFailed,
+        CoreError::Controlled => {
             return Failure::with(
                 Code::Controlled,
                 Details::Controlled(ControlledDetails {
@@ -926,8 +923,8 @@ pub fn from_server_error(error: ServerError) -> Failure {
                 }),
             );
         }
-        ServerError::SessionUnavailable => Code::SessionEnded,
-        ServerError::StaleControl => {
+        CoreError::SessionUnavailable => Code::SessionEnded,
+        CoreError::StaleControl => {
             return Failure::with(
                 Code::Controlled,
                 Details::Controlled(ControlledDetails {
@@ -935,10 +932,10 @@ pub fn from_server_error(error: ServerError) -> Failure {
                 }),
             );
         }
-        ServerError::Unsupported => Code::Unsupported,
-        ServerError::DirectoryUnavailable => Code::DirectoryUnavailable,
-        ServerError::CleanupUnresolved => Code::CleanupUnresolved,
-        ServerError::Capacity => Code::Capacity,
+        CoreError::Unsupported => Code::Unsupported,
+        CoreError::DirectoryUnavailable => Code::DirectoryUnavailable,
+        CoreError::CleanupUnresolved => Code::CleanupUnresolved,
+        CoreError::Capacity => Code::Capacity,
     };
     Failure::new(code)
 }
@@ -954,7 +951,7 @@ pub fn from_direct_error(error: DirectError) -> Failure {
         DirectError::Rejected => Code::PairingRejected,
         DirectError::ChangedClaim | DirectError::PolicyChanged => Code::Changed,
         DirectError::AuthenticationRefused => Code::AuthenticationRefused,
-        DirectError::PinMismatch => Code::ServerIdentityChanged,
+        DirectError::PinMismatch => Code::MachineIdentityChanged,
         DirectError::Revoked => Code::Revoked,
         DirectError::IncompatibleProtocol => Code::IncompatibleProtocol,
         DirectError::Capacity => Code::Capacity,
@@ -964,7 +961,7 @@ pub fn from_direct_error(error: DirectError) -> Failure {
         DirectError::AddressUnavailable => Code::AddressUnavailable,
         DirectError::AlreadyDecided => Code::ClaimDecided,
         DirectError::Substituted => Code::ComparisonMismatch,
-        DirectError::WrongServer => Code::WrongServer,
+        DirectError::WrongMachine => Code::WrongMachine,
     })
 }
 
@@ -1014,7 +1011,7 @@ pub fn from_fatal(fatal: Fatal) -> Failure {
         Fatal::Capacity => Code::Capacity,
         Fatal::Stalled => Code::Unreachable,
         Fatal::Revoked => Code::Revoked,
-        Fatal::Stopping => Code::ServerStopping,
+        Fatal::Stopping => Code::Stopping,
         Fatal::Incompatible => Code::IncompatibleProtocol,
     })
 }
@@ -1091,14 +1088,14 @@ impl WarningCode {
                 "This pairing uses a private credential file selected when Secret Service was unavailable."
             }
             Self::UnpairPending => {
-                "The server has not confirmed the unpairing yet. Later connection commands retry it."
+                "The machine has not confirmed the unpairing yet. Later machine commands retry it."
             }
             Self::InvitationWithdrawn => "The Invitation Link was withdrawn.",
             Self::HistoryGap => "Some rows were discarded before they could be read.",
             Self::CoverageCoalesced => "Some screen states were coalesced and are not shown.",
-            Self::CandidateOlder => "The server package is older than the running server.",
+            Self::CandidateOlder => "The SpaceTerm Core package is older than the running version.",
             Self::ClientMajorDiffers => {
-                "After this update, work commands need a CLI with the server's protocol major."
+                "After this update, work commands need a CLI with SpaceTerm Core's protocol major."
             }
         }
     }
@@ -1137,10 +1134,7 @@ pub enum WarningDetails {
     /// `history_gap`.
     Gap { missing_rows: u64 },
     /// `client_major_differs`.
-    Major {
-        client_major: u16,
-        server_major: u16,
-    },
+    Major { client_major: u16, core_major: u16 },
 }
 
 impl Serialize for WarningDetails {
@@ -1156,7 +1150,7 @@ impl Serialize for WarningDetails {
         #[derive(Serialize)]
         struct Major {
             client_major: u16,
-            server_major: u16,
+            core_major: u16,
         }
         match *self {
             Self::None => Empty {}.serialize(serializer),
@@ -1164,10 +1158,10 @@ impl Serialize for WarningDetails {
             Self::Gap { missing_rows } => Gap { missing_rows }.serialize(serializer),
             Self::Major {
                 client_major,
-                server_major,
+                core_major,
             } => Major {
                 client_major,
-                server_major,
+                core_major,
             }
             .serialize(serializer),
         }
@@ -1176,7 +1170,7 @@ impl Serialize for WarningDetails {
 
 // Confirmation
 
-/// A server-issued confirmation. On a terminal, answering "y" binds to this token.
+/// A confirmation SpaceTerm Core issued. On a terminal, answering "y" binds to this token.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Confirmation<E: Serialize> {
     /// `c1-<hex>`.
@@ -1192,12 +1186,11 @@ pub struct ConfirmationData<E: Serialize> {
     pub confirmation: Confirmation<E>,
 }
 
-/// `effects` of `server.stop` and `server.restart`.
+/// `effects` of `stop` and `restart`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceEffects {
     pub ends_sessions: u32,
     pub sessions: Vec<String>,
-    pub start_requires_machine: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1207,7 +1200,7 @@ pub enum UpdateKind {
     Return,
 }
 
-/// `effects` of `server.update`.
+/// `effects` of `update`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UpdateEffects {
     pub from: Version,
@@ -1451,9 +1444,9 @@ pub enum Launcher {
     Missing,
 }
 
-/// `server.setup`.
+/// `setup`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ServerSetup {
+pub struct CoreSetup {
     pub steps: Vec<SetupStep>,
     pub runtime: Version,
     pub network: SetupNetwork,
@@ -1498,9 +1491,9 @@ pub struct HeldOutcomes {
     pub count: u32,
 }
 
-/// `server.status`.
+/// `status`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ServerStatus {
+pub struct CoreStatus {
     pub running: bool,
     pub stopped: bool,
     pub installed: bool,
@@ -1514,43 +1507,43 @@ pub struct ServerStatus {
     pub devices: Vec<Device>,
     pub held_outcomes: Vec<HeldOutcomes>,
     pub lane_major: u16,
-    /// The running server's Terminal Diagnostics counters, totals since it started.
-    pub terminal_counters: Option<spaceterm_server::diagnostics::TerminalCounterSnapshot>,
+    /// SpaceTerm Core's Terminal Diagnostics counters, totals since it started.
+    pub terminal_counters: Option<spaceterm_core::diagnostics::TerminalCounterSnapshot>,
 }
 
-/// `server.permissions`.
+/// `permissions`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ServerPermissions {
-    pub permissions: Vec<spaceterm_server::permissions::PermissionReading>,
-    pub accessibility_naming: spaceterm_server::permissions::AccessibilityNaming,
+pub struct CorePermissions {
+    pub permissions: Vec<spaceterm_core::permissions::PermissionReading>,
+    pub accessibility_naming: spaceterm_core::permissions::AccessibilityNaming,
     /// Whose entry System Settings lists the permissions under.
-    pub holder: spaceterm_server::permissions::PermissionHolder,
+    pub holder: spaceterm_core::permissions::PermissionHolder,
 }
 
-/// `server.permissions.request`.
+/// `permissions.request`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PermissionRequested {
-    pub permission: spaceterm_server::permissions::SystemPermission,
+    pub permission: spaceterm_core::permissions::SystemPermission,
     #[serde(flatten)]
-    pub outcome: spaceterm_server::permissions::RequestOutcome,
+    pub outcome: spaceterm_core::permissions::RequestOutcome,
 }
 
-/// `server.permissions.settings`.
+/// `permissions.settings`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct PermissionSettings {
-    pub permission: spaceterm_server::permissions::SystemPermission,
+    pub permission: spaceterm_core::permissions::SystemPermission,
 }
 
-/// `data` of `unreachable` from `server.status`.
+/// `data` of `unreachable` from `status`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UnreachableData {
     /// RFC 3339, when known.
     pub last_connected_at: Option<String>,
 }
 
-/// `server.start`.
+/// `start`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct ServerStart {
+pub struct CoreStart {
     pub running: bool,
 }
 
@@ -1593,7 +1586,7 @@ pub enum Observed {
     Restarted,
 }
 
-/// `server.stop` and `server.restart` after confirmation.
+/// `stop` and `restart` after confirmation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceOperation {
     pub operation: String,
@@ -1617,29 +1610,29 @@ pub enum CallerEffect {
     Disconnected,
 }
 
-/// `effects` of `server.network`.
+/// `effects` of `network`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct NetworkEffects {
     pub from: NetworkSetting,
     pub to: NetworkSetting,
     /// Every paired connection ends, including the caller's.
     pub ends_connections: bool,
-    /// Null on the server's own machine.
+    /// Null on the machine itself.
     pub caller: Option<CallerEffect>,
     /// Connected Paired Devices whose route the change removes.
     pub disconnects: Vec<DeviceRef>,
 }
 
-/// `server.network`. `operation` and `receipt` are null when Network Access already matched.
+/// `network`. `operation` and `receipt` are null when Network Access already matched.
 /// `network` is null when this device could not read Network Access after the change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ServerNetwork {
+pub struct CoreNetwork {
     pub network: Option<NetworkSetting>,
     pub operation: Option<String>,
     pub receipt: Option<Receipt>,
 }
 
-/// `server.update --check`.
+/// `update --check`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UpdateCheck {
     pub approved: Version,
@@ -1647,7 +1640,7 @@ pub struct UpdateCheck {
     pub staged: Vec<Version>,
 }
 
-/// `server.update` after confirmation.
+/// `update` after confirmation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UpdateOperation {
     pub operation: String,
@@ -1661,22 +1654,22 @@ pub struct DeviceRef {
     pub name: String,
 }
 
-/// `effects` of `server.end-all-sessions`.
+/// `effects` of `end-all-sessions`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EndAllSessionsEffects {
     pub ends_sessions: u32,
     pub sessions: Vec<EndedSession>,
 }
 
-/// `server.end-all-sessions` after confirmation.
+/// `end-all-sessions` after confirmation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ServerEndAllSessions {
+pub struct CoreEndAllSessions {
     pub ended: Vec<EndedSession>,
 }
 
-/// `server.unpair`.
+/// `unpair`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ServerUnpair {
+pub struct CoreUnpair {
     pub revoked: DeviceRef,
 }
 
@@ -1689,30 +1682,33 @@ pub enum StoreKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Connection {
+pub struct SavedMachine {
+    /// The name `--machine` takes.
     pub name: String,
     /// `id:<64 hex>`.
     pub route: String,
+    /// The Machine ID, 64 hex. Two routes to one machine share it.
+    pub id: String,
     pub endpoint: String,
     pub fingerprint: String,
     pub store: StoreKind,
 }
 
-/// `connection.add`.
+/// `machine.add`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ConnectionAdd {
-    pub connection: Connection,
+pub struct MachineAdd {
+    pub machine: SavedMachine,
 }
 
-/// `connection.rename`.
+/// `machine.rename`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ConnectionRename {
+pub struct MachineRename {
     pub previous_name: String,
     pub name: String,
     pub route: String,
 }
 
-/// The first NDJSON line of `connection add --json`.
+/// The first NDJSON line of `machine add --json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ComparisonEvent {
     pub schema: &'static str,
@@ -1738,9 +1734,11 @@ pub struct ComparisonCode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ListedConnection {
+pub struct ListedMachine {
     pub name: String,
     pub route: String,
+    /// The Machine ID, 64 hex. Two routes to one machine share it.
+    pub id: String,
     pub endpoint: String,
     pub fingerprint: String,
     pub store: StoreKind,
@@ -1748,10 +1746,10 @@ pub struct ListedConnection {
     pub held_outcomes: u32,
 }
 
-/// `connection.list`.
+/// `machine.list`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ConnectionList {
-    pub connections: Vec<ListedConnection>,
+pub struct MachineList {
+    pub machines: Vec<ListedMachine>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1761,15 +1759,15 @@ pub enum Revocation {
     Pending,
 }
 
-/// `connection.remove`.
+/// `machine.remove`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ConnectionRemove {
+pub struct MachineRemove {
     pub removed: String,
     pub revocation: Revocation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ListServer {
+pub struct ListMachine {
     pub name: String,
     pub os: String,
     pub version: String,
@@ -1842,7 +1840,7 @@ pub struct ListWorkspace {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct List {
     pub revision: u64,
-    pub server: ListServer,
+    pub machine: ListMachine,
     pub workspaces: Vec<ListWorkspace>,
 }
 
@@ -1851,7 +1849,7 @@ pub struct List {
 pub struct WorkspaceChange {
     pub target: Vec<TargetStep>,
     pub workspace: Ref,
-    /// Present for Workspace creation, from its server-created Root Pane.
+    /// Present for Workspace creation, from the Root Pane SpaceTerm Core created.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
     pub revision: u64,
@@ -1862,7 +1860,7 @@ pub struct WorkspaceChange {
 pub struct WorkspacePin {
     pub target: Vec<TargetStep>,
     pub workspace: Ref,
-    /// The server's Pinned Directory after acceptance, or null after unpinning.
+    /// The Pinned Directory SpaceTerm Core accepted, or null after unpinning.
     pub pinned_directory: Option<String>,
     pub revision: u64,
 }
@@ -1907,7 +1905,7 @@ pub struct Created {
 pub struct WorktreeCreate {
     pub target: Vec<TargetStep>,
     pub directory: String,
-    /// Worktree Create opens one creator-controlled Tab on the server.
+    /// Worktree Create opens one creator-controlled Tab on the machine.
     pub control: CreatedControl,
     pub worktree: WorktreeRef,
     pub tab: Option<Ref>,
@@ -1998,7 +1996,7 @@ pub struct Opened {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DesktopDiagnostics {
     /// The desktop's Terminal Diagnostics counters, totals since it started.
-    pub terminal_counters: spaceterm_server::diagnostics::TerminalCounterSnapshot,
+    pub terminal_counters: spaceterm_core::diagnostics::TerminalCounterSnapshot,
 }
 
 /// `show`.
@@ -2053,7 +2051,7 @@ mod tests {
         timed_out.interrupt();
         assert_eq!(timed_out.exit(), 130);
         let mut unconfirmed = Envelope::error(
-            "server.restart",
+            "restart",
             None,
             Failure::new(Code::OutcomeUnconfirmed),
             Empty {},
@@ -2066,7 +2064,7 @@ mod tests {
     #[test]
     fn text_mode_writes_the_text_then_the_error_and_every_warning_on_stderr() {
         let mut envelope = Envelope::error(
-            "server.update",
+            "update",
             None,
             Failure::new(Code::ConfirmationRequired),
             Empty {},
@@ -2078,7 +2076,7 @@ mod tests {
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let exit = render(
             &envelope,
-            "Update Server?\n",
+            "Update SpaceTerm Core?\n",
             "diagnostics\n",
             Mode::default(),
             false,
@@ -2086,7 +2084,7 @@ mod tests {
             &mut stderr,
         );
         assert_eq!(exit, 3);
-        assert_eq!(stdout, b"Update Server?\n");
+        assert_eq!(stdout, b"Update SpaceTerm Core?\n");
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.starts_with(&format!(
             "{}\nwarning: {}\n",
@@ -2102,7 +2100,7 @@ mod tests {
         };
         render(
             &envelope,
-            "Update Server?\n",
+            "Update SpaceTerm Core?\n",
             "",
             json,
             false,
@@ -2186,8 +2184,8 @@ mod tests {
     }
 
     #[test]
-    fn server_errors_map_to_their_table_rows() {
-        use ServerError as E;
+    fn machine_errors_map_to_their_table_rows() {
+        use CoreError as E;
         for (error, code, exit) in [
             (E::NotSetUp, "not_set_up", 5),
             (E::ServiceUnavailable, "service_unavailable", 5),
@@ -2218,11 +2216,11 @@ mod tests {
             (E::Capacity, "capacity", 5),
             (E::Direct(DirectError::Transport), "unreachable", 5),
         ] {
-            let failure = from_server_error(error);
+            let failure = from_core_error(error);
             assert_eq!((failure.code.as_str(), failure.code.exit()), (code, exit));
         }
         assert_eq!(
-            from_server_error(E::StaleControl).details,
+            from_core_error(E::StaleControl).details,
             Details::Controlled(ControlledDetails {
                 reason: ControlledReason::Stale
             })
@@ -2243,7 +2241,7 @@ mod tests {
             (E::ChangedClaim, "changed", 4),
             (E::PolicyChanged, "changed", 4),
             (E::AuthenticationRefused, "authentication_refused", 3),
-            (E::PinMismatch, "server_identity_changed", 3),
+            (E::PinMismatch, "machine_identity_changed", 3),
             (E::Revoked, "revoked", 3),
             (E::IncompatibleProtocol, "incompatible_protocol", 5),
             (E::Capacity, "capacity", 5),
@@ -2252,7 +2250,7 @@ mod tests {
             (E::InvalidAddress, "invalid_address", 4),
             (E::AlreadyDecided, "claim_decided", 4),
             (E::Substituted, "comparison_mismatch", 1),
-            (E::WrongServer, "wrong_server", 4),
+            (E::WrongMachine, "wrong_machine", 4),
         ] {
             let failure = from_direct_error(error);
             assert_eq!((failure.code.as_str(), failure.code.exit()), (code, exit));
@@ -2300,7 +2298,7 @@ mod tests {
             (Fatal::Capacity, Code::Capacity),
             (Fatal::Stalled, Code::Unreachable),
             (Fatal::Revoked, Code::Revoked),
-            (Fatal::Stopping, Code::ServerStopping),
+            (Fatal::Stopping, Code::Stopping),
             (Fatal::Incompatible, Code::IncompatibleProtocol),
             (Fatal::Internal, Code::ProtocolError),
         ] {
@@ -2391,7 +2389,7 @@ mod tests {
     fn golden_ambiguous_target_envelope() {
         let mut envelope = Envelope::error(
             "pane.read",
-            Some(ServerRef {
+            Some(MachineRef {
                 name: "local".into(),
                 route: "local".into(),
                 id: "5b".repeat(32),
@@ -2438,7 +2436,7 @@ mod tests {
     #[test]
     fn golden_confirmation_envelope() {
         let envelope = Envelope::confirmation(
-            "server.stop",
+            "stop",
             None,
             Confirmation {
                 token: "c1-00".into(),
@@ -2446,7 +2444,6 @@ mod tests {
                 effects: ServiceEffects {
                     ends_sessions: 1,
                     sessions: vec!["0e".repeat(32)],
-                    start_requires_machine: true,
                 },
             },
         );

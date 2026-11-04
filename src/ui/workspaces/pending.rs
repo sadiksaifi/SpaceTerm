@@ -1,11 +1,11 @@
 //! The client's bounded connected intent, separate from the transport's durable Original Operation.
-use super::server::{WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason};
+use super::core_workspaces::{WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason};
 use crate::terminal::workspace_client::WorkspaceSnapshot;
-use spaceterm_server::hierarchy::{
+use spaceterm_core::hierarchy::{
     CloseTarget, Id, Inventory, Mutation, Outcome, Pane, PaneDestination, RetainedOutcome, Side,
     Tab, Workspace,
 };
-use spaceterm_server::worktree::Operation;
+use spaceterm_core::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
 
 const CAPACITY: usize = 32;
@@ -178,11 +178,11 @@ impl PendingEdits {
         if self
             .close_intents
             .iter()
-            .any(|pending| pending.server == intent.server)
+            .any(|pending| pending.core == intent.core)
         {
             return Ok(true);
         }
-        if !close_references(intent.server)
+        if !close_references(intent.core)
             .iter()
             .any(|id| self.provisional(*id))
         {
@@ -197,7 +197,7 @@ impl PendingEdits {
 
     pub fn take_close_intent(&mut self) -> Option<WorkspaceCloseIntent> {
         let intent = self.close_intents.front()?;
-        if close_references(intent.server)
+        if close_references(intent.core)
             .iter()
             .any(|id| self.provisional(*id))
         {
@@ -371,7 +371,7 @@ impl PendingEdits {
         // remain immutable, including the Sessions and control grants they name.
         for intent in &mut self.close_intents {
             let id = |id| aliases.get(&id).copied().unwrap_or(id);
-            intent.server = match intent.server {
+            intent.core = match intent.core {
                 CloseTarget::Pane {
                     workspace,
                     tab,
@@ -425,7 +425,7 @@ impl PendingEdits {
             }
         });
         self.close_intents.retain(|intent| {
-            !close_references(intent.server)
+            !close_references(intent.core)
                 .iter()
                 .any(|id| rejected.contains(id))
         });
@@ -650,7 +650,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                 tabs: vec![Tab {
                     id: tab,
                     root_pane: pane,
-                    worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                    worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
                     worktree: None,
                     worktree_repository: None,
                     panes: vec![new_pane(
@@ -734,7 +734,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
             workspace.tabs.push(Tab {
                 id: ids.tab.expect("a Tab projection has an identity"),
                 root_pane: pane,
-                worktree_membership: spaceterm_server::hierarchy::WorktreeMembership::Following,
+                worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
                 worktree: source_tab.and_then(|t| t.worktree.clone()),
                 worktree_repository: source_tab.and_then(|t| t.worktree_repository.clone()),
                 panes: vec![new_pane(pane, None, Side::Right, directory)],
@@ -802,11 +802,11 @@ pub(super) fn closes_workspace(mutation: &Mutation, workspace: Id) -> bool {
     else {
         return false;
     };
-    let server = match target {
-        spaceterm_server::hierarchy::CloseTarget::Pane { workspace, .. }
-        | spaceterm_server::hierarchy::CloseTarget::Tab { workspace, .. }
-        | spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace }
-        | spaceterm_server::hierarchy::CloseTarget::Worktree { workspace, .. } => *workspace,
+    let core = match target {
+        spaceterm_core::hierarchy::CloseTarget::Pane { workspace, .. }
+        | spaceterm_core::hierarchy::CloseTarget::Tab { workspace, .. }
+        | spaceterm_core::hierarchy::CloseTarget::KillWorkspace { workspace }
+        | spaceterm_core::hierarchy::CloseTarget::Worktree { workspace, .. } => *workspace,
     };
-    server == workspace && confirmation.removes_workspace
+    core == workspace && confirmation.removes_workspace
 }

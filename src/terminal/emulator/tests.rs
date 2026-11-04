@@ -3707,7 +3707,7 @@ fn snapshot_selection_presence_reflects_screen_switch_clearing() {
 }
 
 #[test]
-fn server_accessibility_selection_survives_pending_changes_to_other_rows() {
+fn machine_accessibility_selection_survives_pending_changes_to_other_rows() {
     let mut emulator = emulator(32, 3);
     emulator.feed(b"native-selection-target\r\n");
     let model = drain_accessibility(&mut emulator);
@@ -4479,7 +4479,7 @@ fn screen_snapshots_are_send_and_sync() {
 }
 
 #[test]
-fn restricted_server_runtime_accepts_graphics_and_advertises_the_routed_clipboard() {
+fn restricted_core_runtime_accepts_graphics_and_advertises_the_routed_clipboard() {
     let _guard = crate::terminal::graphics::test_lock();
     let mut emulator = emulator(8, 4);
     emulator.restrict_client_effects().unwrap();

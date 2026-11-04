@@ -3,11 +3,11 @@
 //! The server pushes each Workspace Inventory revision on the shared link. An edit takes one
 //! request: its reply carries the validated outcome after the revision that holds it, and the
 //! acknowledgement that retires the outcome needs no reply. Nothing here polls.
-use crate::server_connection::{ServerConnection, ServerError};
-use crate::terminal::server_session::PaneControls;
-use spaceterm_server::{
+use crate::machine_connection::{CoreError, MachineConnection};
+use crate::terminal::core_session::PaneControls;
+use spaceterm_core::{
     attachments::Attachments,
-    connection::link::{Health, LinkEvent, LinkSink, ServerLink},
+    connection::link::{CoreLink, Health, LinkEvent, LinkSink},
     hierarchy::{ClientJournal, ClientOperation, Inventory, Mutation, RetainedOutcome},
     protocol::{InventoryRevision, Operation, ReplyBody},
 };
@@ -22,15 +22,15 @@ use std::time::Duration;
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 /// What the edit loop needs from the owning server. Production reaches it through
-/// [`ServerConnection`].
-trait EditServer: Send + 'static {
+/// [`MachineConnection`].
+trait EditCore: Send + 'static {
     type Journal: EditJournal;
     /// The shared link. Paired followers read only their owner's admitted connection;
     /// account-local followers may connect. `cancelled` ends a server-operation wait early.
-    fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<ServerLink, ServerError>;
-    fn attachments(&self) -> Result<Attachments, ServerError>;
+    fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<CoreLink, CoreError>;
+    fn attachments(&self) -> Result<Attachments, CoreError>;
     /// This client's durable journal of Original Operations.
-    fn journal(&self) -> Result<Self::Journal, ServerError>;
+    fn journal(&self) -> Result<Self::Journal, CoreError>;
     /// Delivers the shared link's pushed inventory and health to `sink`, across reconnects.
     fn subscribe(&self, sink: Weak<dyn LinkSink>);
 }
@@ -44,33 +44,33 @@ trait EditJournal {
     /// How many unseen outcomes the bound forgot in total, and how many of those the client has
     /// said went unseen.
     fn forgotten(&self) -> (u64, u64);
-    fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError>;
-    fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError>;
-    fn presented(&mut self, sequence: u64) -> Result<(), ServerError>;
-    fn forgotten_presented(&mut self, total: u64) -> Result<(), ServerError>;
+    fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), CoreError>;
+    fn retire(&mut self, result: RetainedOutcome) -> Result<(), CoreError>;
+    fn presented(&mut self, sequence: u64) -> Result<(), CoreError>;
+    fn forgotten_presented(&mut self, total: u64) -> Result<(), CoreError>;
 }
 
-impl EditServer for ServerConnection {
+impl EditCore for MachineConnection {
     type Journal = ClientJournal;
-    fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<ServerLink, ServerError> {
+    fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<CoreLink, CoreError> {
         if self.is_account_local() {
-            ServerConnection::link_cancellable(self, cancelled)
+            MachineConnection::link_cancellable(self, cancelled)
         } else if cancelled() {
-            Err(ServerError::ServiceBusy)
+            Err(CoreError::ServiceBusy)
         } else {
-            self.live_link().ok_or(ServerError::Direct(
-                spaceterm_server::direct::DirectError::Transport,
+            self.live_link().ok_or(CoreError::Direct(
+                spaceterm_core::direct::DirectError::Transport,
             ))
         }
     }
-    fn attachments(&self) -> Result<Attachments, ServerError> {
-        ServerConnection::attachments(self)
+    fn attachments(&self) -> Result<Attachments, CoreError> {
+        MachineConnection::attachments(self)
     }
-    fn journal(&self) -> Result<ClientJournal, ServerError> {
+    fn journal(&self) -> Result<ClientJournal, CoreError> {
         self.operation_journal()
     }
     fn subscribe(&self, sink: Weak<dyn LinkSink>) {
-        ServerConnection::subscribe(self, sink);
+        MachineConnection::subscribe(self, sink);
     }
 }
 
@@ -87,16 +87,16 @@ impl EditJournal for ClientJournal {
     fn forgotten(&self) -> (u64, u64) {
         ClientJournal::forgotten(self)
     }
-    fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
+    fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), CoreError> {
         ClientJournal::submit(self, sequence, mutation)
     }
-    fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
+    fn retire(&mut self, result: RetainedOutcome) -> Result<(), CoreError> {
         ClientJournal::retire(self, result)
     }
-    fn presented(&mut self, sequence: u64) -> Result<(), ServerError> {
+    fn presented(&mut self, sequence: u64) -> Result<(), CoreError> {
         ClientJournal::presented(self, sequence)
     }
-    fn forgotten_presented(&mut self, total: u64) -> Result<(), ServerError> {
+    fn forgotten_presented(&mut self, total: u64) -> Result<(), CoreError> {
         ClientJournal::forgotten_presented(self, total)
     }
 }
@@ -159,7 +159,7 @@ pub(crate) struct WorkspaceSnapshot {
     /// surface has said went unseen. A notice is due while the first exceeds the second.
     pub forgotten: u64,
     pub forgotten_presented: u64,
-    pub error: Option<ServerError>,
+    pub error: Option<CoreError>,
     /// How many connection attempts have failed, so a reader can tell that an attempt it asked
     /// for has finished.
     pub failed_attempts: u64,
@@ -229,10 +229,10 @@ impl Drop for WorkspaceClient {
 }
 impl WorkspaceClient {
     /// Pane control records last only as long as the server lists their Panes.
-    pub(crate) fn new(server: ServerConnection, controls: Arc<PaneControls>) -> Self {
-        Self::start(server, controls)
+    pub(crate) fn new(core: MachineConnection, controls: Arc<PaneControls>) -> Self {
+        Self::start(core, controls)
     }
-    fn start(server: impl EditServer, controls: Arc<PaneControls>) -> Self {
+    fn start(core: impl EditCore, controls: Arc<PaneControls>) -> Self {
         let snapshot = Arc::new(PublishedSnapshot::new(WorkspaceSnapshot {
             inventory: None,
             connected: false,
@@ -266,10 +266,10 @@ impl WorkspaceClient {
         }
         if std::thread::Builder::new()
             .name("spaceterm-workspaces".into())
-            .spawn(move || run(server, controls, state, receiver, wakes, running))
+            .spawn(move || run(core, controls, state, receiver, wakes, running))
             .is_err()
         {
-            snapshot.publish(|snapshot| snapshot.error = Some(ServerError::StartupFailed));
+            snapshot.publish(|snapshot| snapshot.error = Some(CoreError::StartupFailed));
         }
         Self {
             snapshot,
@@ -327,7 +327,7 @@ impl WorkspaceClient {
                 return false;
             }
             if !mutation.is_bounded() {
-                state.error = Some(ServerError::Unsupported);
+                state.error = Some(CoreError::Unsupported);
                 return false;
             }
             state.pending = true;
@@ -346,7 +346,7 @@ impl WorkspaceClient {
 /// The newest inventory revision on `link`, after the `seen`th, with its Pane control records
 /// retained.
 fn newer(
-    link: &ServerLink,
+    link: &CoreLink,
     seen: u64,
     controls: &PaneControls,
 ) -> Option<(u64, Arc<InventoryRevision>)> {
@@ -364,12 +364,12 @@ struct FinishedOperation {
 /// after a lost reply. The server replays an outcome it already recorded, so a retry never
 /// repeats the edit, and its reply waits for any Worktree write the outcome depends on.
 fn finish(
-    link: &ServerLink,
+    link: &CoreLink,
     journal: &mut impl EditJournal,
     controls: &PaneControls,
     state: &PublishedSnapshot,
     seen: u64,
-) -> Result<FinishedOperation, ServerError> {
+) -> Result<FinishedOperation, CoreError> {
     let Some(pending) = journal.pending().cloned() else {
         return Ok(FinishedOperation {
             outcome: journal.last().cloned(),
@@ -383,11 +383,11 @@ fn finish(
         })?
         .wait()?
     else {
-        return Err(ServerError::Protocol);
+        return Err(CoreError::Protocol);
     };
     // Validation precedes acknowledgement.
     if result.sequence != pending.sequence || result.mutation != pending.mutation {
-        return Err(ServerError::Protocol);
+        return Err(CoreError::Protocol);
     }
     // The revision that holds the outcome arrived before its reply. Reconcile that membership
     // before retiring the operation identity.
@@ -411,14 +411,14 @@ fn finish(
 }
 
 fn run(
-    server: impl EditServer,
+    core: impl EditCore,
     controls: Arc<PaneControls>,
     state: Arc<PublishedSnapshot>,
     events: mpsc::Receiver<Event>,
     wakes: Arc<Wakes>,
     alive: Arc<AtomicBool>,
 ) {
-    server.subscribe(Arc::downgrade(&wakes) as Weak<dyn LinkSink>);
+    core.subscribe(Arc::downgrade(&wakes) as Weak<dyn LinkSink>);
     let released: Arc<dyn Fn() + Send + Sync> = Arc::new({
         let wakes = Arc::clone(&wakes);
         move || wakes.send(Event::Released)
@@ -431,13 +431,13 @@ fn run(
             // below. Clearing the hint lets the next event wake the loop again.
             wakes.link.store(false, Ordering::Release);
             // Validate the transport before opening this client's retained writers.
-            let link = server.link(&|| !alive.load(Ordering::Acquire))?;
-            let attachments = server.attachments()?;
+            let link = core.link(&|| !alive.load(Ordering::Acquire))?;
+            let attachments = core.attachments()?;
             if !watched {
                 attachments.watch(Arc::downgrade(&released));
                 watched = true;
             }
-            let mut journal = server.journal()?;
+            let mut journal = core.journal()?;
             // Authoritative reconciliation always precedes a retry of a previously submitted
             // edit. The server pushes the inventory when it admits the link.
             let (mut seen, initial) = link.next_inventory(0)?;
@@ -559,7 +559,7 @@ fn run(
                 // The journal needs no connection. A presentation it cannot record yet is
                 // recorded on the next connection.
                 Ok(Event::Presented(sequence)) => {
-                    if server
+                    if core
                         .journal()
                         .and_then(|mut journal| journal.presented(sequence))
                         .is_ok()
@@ -570,7 +570,7 @@ fn run(
                     }
                 }
                 Ok(Event::ForgottenPresented(total)) => {
-                    let _ = server
+                    let _ = core
                         .journal()
                         .and_then(|mut journal| journal.forgotten_presented(total));
                 }
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn a_paired_inventory_follower_leaves_reachability_probes_to_its_route_owner() {
-        use spaceterm_server::direct::{DirectConnection, DirectConnector, DirectError};
+        use spaceterm_core::direct::{DirectConnection, DirectConnector, DirectError};
         use std::sync::atomic::AtomicUsize;
         struct Route(AtomicUsize);
         impl DirectConnector for Route {
@@ -606,10 +606,10 @@ mod tests {
             }
         }
         let route = Arc::new(Route(AtomicUsize::new(0)));
-        let server = crate::terminal::server_session::push_tests::paired_connection(route.clone());
+        let core = crate::terminal::core_session::push_tests::paired_connection(route.clone());
         assert_eq!(
-            EditServer::link(&server, &|| false).err(),
-            Some(ServerError::Direct(DirectError::Transport))
+            EditCore::link(&core, &|| false).err(),
+            Some(CoreError::Direct(DirectError::Transport))
         );
         assert_eq!(
             route.0.load(Ordering::SeqCst),
@@ -645,7 +645,7 @@ mod tests {
         first.try_recv().unwrap();
         second.try_recv().unwrap();
         state.publish(|snapshot| snapshot.connected = false);
-        state.publish(|snapshot| snapshot.error = Some(ServerError::NotRunning));
+        state.publish(|snapshot| snapshot.error = Some(CoreError::NotRunning));
         for subscriber in [&first, &second] {
             subscriber
                 .try_recv()
@@ -653,7 +653,7 @@ mod tests {
             assert!(subscriber.try_recv().is_err(), "pending hints coalesce");
             let snapshot = client.snapshot();
             assert!(!snapshot.connected);
-            assert_eq!(snapshot.error, Some(ServerError::NotRunning));
+            assert_eq!(snapshot.error, Some(CoreError::NotRunning));
         }
         drop(second);
         state.publish(|snapshot| snapshot.connected = true);
@@ -683,7 +683,7 @@ mod tests {
             commands,
             alive: Arc::new(AtomicBool::new(true)),
         };
-        let operation = Mutation::Worktree(spaceterm_server::worktree::Operation::SetLocation {
+        let operation = Mutation::Worktree(spaceterm_core::worktree::Operation::SetLocation {
             version: 0,
             template: "~/.worktrees/{repository}/{branch}".into(),
         });
@@ -716,12 +716,12 @@ mod tests {
     /// in-memory carriers instead of admitted sockets.
     mod served {
         use super::*;
-        use spaceterm_server::connection::{
+        use spaceterm_core::connection::{
             Wake,
+            admitted::AdmittedConnection,
             io::{Waker, serve, spawn_link},
             loopback::Loopback,
             outbox::Outbox,
-            server::AdmittedConnection,
             service::{Peer, SharedPaneService},
             sync::SyncWorker,
         };
@@ -753,10 +753,10 @@ mod tests {
             fn forgotten(&self) -> (u64, u64) {
                 (0, 0)
             }
-            fn forgotten_presented(&mut self, _: u64) -> Result<(), ServerError> {
+            fn forgotten_presented(&mut self, _: u64) -> Result<(), CoreError> {
                 Ok(())
             }
-            fn presented(&mut self, sequence: u64) -> Result<(), ServerError> {
+            fn presented(&mut self, sequence: u64) -> Result<(), CoreError> {
                 self.record
                     .unseen
                     .retain(|unseen| unseen.sequence != sequence);
@@ -767,13 +767,13 @@ mod tests {
                     .retain(|unseen| unseen.sequence != sequence);
                 Ok(())
             }
-            fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), ServerError> {
+            fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), CoreError> {
                 let operation = ClientOperation { sequence, mutation };
                 self.record.pending = Some(operation.clone());
                 self.binding.lock().unwrap().pending = Some(operation);
                 Ok(())
             }
-            fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
+            fn retire(&mut self, result: RetainedOutcome) -> Result<(), CoreError> {
                 self.record.pending = None;
                 self.record.last = Some(result.clone());
                 if result.outcome.needs_presentation() {
@@ -789,16 +789,16 @@ mod tests {
 
         type Connection = (Arc<AtomicBool>, Arc<dyn Wake>);
 
-        pub(super) struct Server {
+        pub(super) struct Core {
             service: SharedPaneService,
             sync: SyncWorker,
             pub client: [u8; 32],
-            binding: Arc<Mutex<Option<(ServerLink, Connection)>>>,
+            binding: Arc<Mutex<Option<(CoreLink, Connection)>>>,
             subscribers: Arc<Mutex<Vec<Weak<dyn LinkSink>>>>,
             pub journal: Arc<Mutex<Record>>,
         }
 
-        impl Server {
+        impl Core {
             pub fn new(client: [u8; 32]) -> Self {
                 let (sync, _) = SyncWorker::spawn().unwrap();
                 let host =
@@ -829,7 +829,7 @@ mod tests {
                 &self,
                 client: [u8; 32],
                 events: Arc<dyn LinkSink>,
-            ) -> (ServerLink, Connection) {
+            ) -> (CoreLink, Connection) {
                 let (near, far) = Loopback::pair(1 << 20).unwrap();
                 let (waker, wake) = Waker::new().unwrap();
                 let outbox = Outbox::new(Arc::clone(&wake));
@@ -867,9 +867,9 @@ mod tests {
             }
         }
 
-        impl EditServer for Server {
+        impl EditCore for Core {
             type Journal = MemoryJournal;
-            fn link(&self, _: &dyn Fn() -> bool) -> Result<ServerLink, ServerError> {
+            fn link(&self, _: &dyn Fn() -> bool) -> Result<CoreLink, CoreError> {
                 let mut binding = self.binding.lock().unwrap();
                 if let Some((link, _)) = binding.as_ref()
                     && link.health() == Health::Live
@@ -897,10 +897,10 @@ mod tests {
                 *binding = Some((link.clone(), connection));
                 Ok(link)
             }
-            fn attachments(&self) -> Result<Attachments, ServerError> {
+            fn attachments(&self) -> Result<Attachments, CoreError> {
                 Ok(Attachments::memory())
             }
-            fn journal(&self) -> Result<MemoryJournal, ServerError> {
+            fn journal(&self) -> Result<MemoryJournal, CoreError> {
                 let binding = self.journal.lock().unwrap();
                 Ok(MemoryJournal {
                     record: Record {
@@ -925,7 +925,7 @@ mod tests {
         }
     }
 
-    fn create(link: &ServerLink, name: &str) -> RetainedOutcome {
+    fn create(link: &CoreLink, name: &str) -> RetainedOutcome {
         let (_, revision) = link.next_inventory(0).unwrap();
         match link
             .request(Operation::Mutate {
@@ -933,7 +933,7 @@ mod tests {
                 mutation: Mutation::CreateWorkspace {
                     name: name.into(),
                     directory: None,
-                    control: spaceterm_server::hierarchy::CreateControl::Creator,
+                    control: spaceterm_core::hierarchy::CreateControl::Creator,
                 },
             })
             .unwrap()
@@ -966,19 +966,19 @@ mod tests {
     #[test]
     fn unseen_outcomes_should_survive_later_edits_and_a_relaunch_until_presented() {
         let client = [7; 32];
-        let server = served::Server::new(client);
+        let core = served::Core::new(client);
         let ignore: Arc<dyn LinkSink> = Arc::new(|_: LinkEvent| {});
-        let edits = WorkspaceClient::start(server.handle(), Arc::default());
+        let edits = WorkspaceClient::start(core.handle(), Arc::default());
         eventually("the client connects", || edits.snapshot().connected);
         let created = edit(
             &edits,
             Mutation::CreateWorkspace {
                 name: "Kept".into(),
                 directory: None,
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             },
         );
-        let spaceterm_server::hierarchy::Outcome::Accepted { target } = created.outcome else {
+        let spaceterm_core::hierarchy::Outcome::Accepted { target } = created.outcome else {
             panic!("the Workspace is created");
         };
         let rename = |name: &str| Mutation::RenameWorkspace {
@@ -986,7 +986,7 @@ mod tests {
             version: 0,
             name: name.into(),
         };
-        let (other, _) = server.connect([8; 32], Arc::clone(&ignore));
+        let (other, _) = core.connect([8; 32], Arc::clone(&ignore));
         let (_, revision) = other.next_inventory(0).unwrap();
         other
             .request(Operation::Mutate {
@@ -1002,33 +1002,30 @@ mod tests {
             Mutation::CreateTab {
                 workspace: [9; 32],
                 source: None,
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             },
         );
         let published = edits.snapshot().unseen;
         drop(edits);
 
-        let relaunched = WorkspaceClient::start(server.handle(), Arc::default());
+        let relaunched = WorkspaceClient::start(core.handle(), Arc::default());
         eventually("the relaunched client connects", || {
             relaunched.snapshot().connected
         });
         let recovered = relaunched.snapshot().unseen;
         relaunched.presented(conflict.sequence);
         eventually("the presentation is recorded", || {
-            server.journal.lock().unwrap().unseen.len() == 1
+            core.journal.lock().unwrap().unseen.len() == 1
         });
         drop(relaunched);
-        let later = WorkspaceClient::start(server.handle(), Arc::default());
+        let later = WorkspaceClient::start(core.handle(), Arc::default());
         eventually("the later client connects", || later.snapshot().connected);
 
         assert_eq!(
             conflict.outcome,
-            spaceterm_server::hierarchy::Outcome::Conflict
+            spaceterm_core::hierarchy::Outcome::Conflict
         );
-        assert_eq!(
-            missing.outcome,
-            spaceterm_server::hierarchy::Outcome::Missing
-        );
+        assert_eq!(missing.outcome, spaceterm_core::hierarchy::Outcome::Missing);
         assert_eq!(published, vec![conflict.clone(), missing.clone()]);
         assert_eq!(recovered, vec![conflict, missing.clone()]);
         assert_eq!(later.snapshot().unseen, vec![missing]);
@@ -1038,15 +1035,15 @@ mod tests {
     fn the_edit_loop_repeats_its_acknowledgement_and_keeps_receiving_inventory_after_reconnecting()
     {
         let client = [7; 32];
-        let server = served::Server::new(client);
+        let core = served::Core::new(client);
         let ignore: Arc<dyn LinkSink> = Arc::new(|_: LinkEvent| {});
         // An earlier run retired this outcome, but its acknowledgement never arrived.
-        let (setup, _) = server.connect(client, Arc::clone(&ignore));
+        let (setup, _) = core.connect(client, Arc::clone(&ignore));
         let lost = create(&setup, "Kept");
         drop(setup);
-        server.journal.lock().unwrap().last = Some(lost.clone());
+        core.journal.lock().unwrap().last = Some(lost.clone());
 
-        let edits = WorkspaceClient::start(server.handle(), Arc::default());
+        let edits = WorkspaceClient::start(core.handle(), Arc::default());
         let workspaces = |edits: &WorkspaceClient| {
             edits
                 .snapshot()
@@ -1056,7 +1053,7 @@ mod tests {
         eventually("the client connects", || {
             edits.snapshot().connected && workspaces(&edits) == 1
         });
-        let (probe, _) = server.connect(client, Arc::clone(&ignore));
+        let (probe, _) = core.connect(client, Arc::clone(&ignore));
         eventually("the repeated acknowledgement retires the outcome", || {
             matches!(
                 probe
@@ -1065,21 +1062,21 @@ mod tests {
                     })
                     .unwrap()
                     .wait(),
-                Err(spaceterm_server::connection::link::RequestError::Refused(
-                    spaceterm_server::pane::Refusal::Missing
+                Err(spaceterm_core::connection::link::RequestError::Refused(
+                    spaceterm_core::pane::Refusal::Missing
                 ))
             )
         });
 
-        server.end();
+        core.end();
         eventually("the client sees the link end", || {
             !edits.snapshot().connected
         });
         // A Pane reconnects the shared link while the edit loop waits to reconnect, so its
         // admission revision arrives during that wait.
-        server.link(&|| false).unwrap();
+        core.link(&|| false).unwrap();
         eventually("the client reconnects", || edits.snapshot().connected);
-        let (other, _) = server.connect([8; 32], Arc::clone(&ignore));
+        let (other, _) = core.connect([8; 32], Arc::clone(&ignore));
         create(&other, "Another client's");
         eventually(
             "another client's edit reaches the reconnected client",

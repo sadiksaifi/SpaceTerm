@@ -21,10 +21,10 @@ READY = b"spaceterm-development-ready-v1\n"
 def source_environment(environment):
     result = dict(environment)
     for name in (
-        "SPACETERM_SERVER",
+        "SPACETERM_MACHINE",
         "SPACETERM_AS",
         "SPACETERM_IDENTITY",
-        "SPACETERM_SERVER_ID",
+        "SPACETERM_MACHINE_ID",
         "SPACETERM_PANE",
         "SPACETERM_SESSION",
         "SPACETERM_CLI",
@@ -64,17 +64,17 @@ def development_run():
         os.close(descriptor)
 
 
-def _ready(server):
-    assert server.stdout is not None
+def _ready(core):
+    assert core.stdout is not None
     with selectors.DefaultSelector() as selector:
-        selector.register(server.stdout, selectors.EVENT_READ)
+        selector.register(core.stdout, selectors.EVENT_READ)
         deadline = time.monotonic() + 10
         received = b""
         while received != READY:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not selector.select(timeout=max(0, remaining)):
                 raise TaskError("the foreground Development Server did not become ready")
-            chunk = os.read(server.stdout.fileno(), len(READY) + 1 - len(received))
+            chunk = os.read(core.stdout.fileno(), len(READY) + 1 - len(received))
             received += chunk
             if not chunk or not READY.startswith(received):
                 raise TaskError(
@@ -95,22 +95,22 @@ def _cleanup_signals():
             signal.signal(signum, handler)
 
 
-def _finish(server):
-    assert server.stdin is not None
-    server.stdin.close()
+def _finish(core):
+    assert core.stdin is not None
+    core.stdin.close()
     try:
         # Admitted Git writes have no deadline. The Server reconciles them before ending
         # Terminal Sessions, so only its completed exit proves cleanup has finished.
-        server.wait()
+        core.wait()
     finally:
-        assert server.stdout is not None
-        server.stdout.close()
+        assert core.stdout is not None
+        core.stdout.close()
     # The server performs PTY cleanup before reporting successful exit.
-    if server.returncode:
+    if core.returncode:
         raise TaskError("Development Server cleanup could not be confirmed")
 
 
-def supervise(server_command, client_command, environment):
+def supervise(core_command, client_command, environment):
     """Launch the client only after this exact child Server owns its endpoint.
 
     The Server owns PTY shutdown and retains organization. Its stdin is an owner pipe;
@@ -132,8 +132,8 @@ def supervise(server_command, client_command, environment):
                 "SPACETERM_DEVELOPMENT_FOREGROUND": "1",
                 "SPACETERM_DEVELOPMENT_OWNER_SOCKET": endpoint,
             }
-            server = subprocess.Popen(
-                server_command,
+            core = subprocess.Popen(
+                core_command,
                 env=environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -142,13 +142,13 @@ def supervise(server_command, client_command, environment):
             client = None
             connection = None
             try:
-                _ready(server)
+                _ready(core)
                 client = subprocess.Popen(
                     client_command, env=client_environment, start_new_session=OWN_GROUP
                 )
                 deadline = time.monotonic() + 30
                 while connection is None:
-                    if server.poll() is not None:
+                    if core.poll() is not None:
                         raise TaskError("the foreground Development Server exited")
                     if client.poll() is not None:
                         return client.returncode
@@ -160,7 +160,7 @@ def supervise(server_command, client_command, environment):
                         pass
                 connection.settimeout(0.1)
                 while True:
-                    if server.poll() is not None:
+                    if core.poll() is not None:
                         raise TaskError("the foreground Development Server exited")
                     if client.poll() is not None:
                         return client.returncode
@@ -185,4 +185,4 @@ def supervise(server_command, client_command, environment):
                     finally:
                         # Readiness may already be published even if _ready was interrupted.
                         # Close only this child's owner pipe and let its shutdown finish.
-                        _finish(server)
+                        _finish(core)

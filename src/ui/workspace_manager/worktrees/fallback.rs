@@ -1,7 +1,7 @@
 //! Establish server-owned membership before reviewing a close that would empty a Workspace.
 
-use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Mutation, Outcome};
-use spaceterm_server::worktree::Operation;
+use spaceterm_core::hierarchy::{CloseTarget as MachineCloseTarget, Mutation, Outcome};
+use spaceterm_core::worktree::Operation;
 use spaceterm_ui::{Alert, AlertIntent, ModalAction, ModalActionRole, ModalId};
 
 use super::*;
@@ -23,7 +23,7 @@ impl WorkspaceManager {
     pub(in crate::ui::workspace_manager) fn request_worktree_close_fallback(
         &mut self,
         target: CloseTarget,
-        server_target: ServerCloseTarget,
+        machine_target: MachineCloseTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -38,7 +38,7 @@ impl WorkspaceManager {
         {
             return true;
         }
-        let ServerCloseTarget::Worktree { workspace, tab } = server_target else {
+        let MachineCloseTarget::Worktree { workspace, tab } = machine_target else {
             return false;
         };
         let Some(binding) = self.binding.owning(workspace_id) else {
@@ -61,7 +61,7 @@ impl WorkspaceManager {
         let repository = anchor.worktree_repository.clone();
         let candidate = binding.latest_inventory().and_then(|inventory| {
             let repositories = inventory.repositories.as_ref()?;
-            spaceterm_server::organize::worktree_close_plan(inventory, repositories, workspace, tab)
+            spaceterm_core::organize::worktree_close_plan(inventory, repositories, workspace, tab)
                 .ok()
         });
         if candidate
@@ -102,7 +102,7 @@ impl WorkspaceManager {
             source: None,
             root: root.clone(),
             path: outside.clone(),
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         });
         // The fallback presents its own failure, so the window presents it only if the person
         // never answers that alert.
@@ -184,7 +184,7 @@ impl WorkspaceManager {
                     })
                 }) {
                     // Capture current exact targets and fresh consent through the original path.
-                    manager.request_server_close(target, window, cx);
+                    manager.request_core_close(target, window, cx);
                 }
             });
         })

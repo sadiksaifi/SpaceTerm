@@ -20,7 +20,7 @@ pub use crate::terminal::session::{
 /// Returns the native PTY adapter used by the desktop and headless hosts, whose PTYs count their
 /// native reads in `counters`.
 pub fn native_pty_factory(
-    counters: std::sync::Arc<spaceterm_server::diagnostics::TerminalCounters>,
+    counters: std::sync::Arc<spaceterm_core::diagnostics::TerminalCounters>,
 ) -> std::sync::Arc<dyn NativePtyAdapterFactory> {
     crate::platform::runtime_pty_factory(counters)
 }
@@ -30,20 +30,20 @@ pub fn local_filesystem() -> LocalFilesystemAuthority {
     crate::platform::runtime_local_filesystem()
 }
 
-mod server;
+mod core_host;
 #[cfg(all(test, feature = "desktop"))]
-pub(crate) use server::metadata::encode as encode_server_metadata;
+pub(crate) use core_host::metadata::encode as encode_core_metadata;
 #[cfg(all(test, feature = "desktop"))]
-pub(crate) use server::screen_encoder;
+pub(crate) use core_host::screen_encoder;
 #[cfg(all(test, feature = "desktop"))]
-pub(crate) use server::testing as directory_testing;
-pub use server::{Served, ServerSessionContext, WorkspaceHost};
+pub(crate) use core_host::testing as directory_testing;
+pub use core_host::{CoreSessionContext, Served, WorkspaceHost};
 
 #[cfg(all(test, feature = "desktop"))]
-pub(crate) use server::HostCommands;
+pub(crate) use core_host::HostCommands;
 
 #[cfg(all(test, feature = "desktop"))]
-pub(crate) use server::Observed;
+pub(crate) use core_host::Observed;
 
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) use crate::terminal::native_services::hyperlink::HyperlinkKind;

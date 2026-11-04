@@ -10,10 +10,10 @@ use crate::status_menu::{
     model::{Command, Item, Presentation, State},
     worker::{Event, Request, Worker},
 };
-use crate::ui::server_control_window::{self, Operation, Step};
+use crate::ui::core_control_window::{self, Operation, Step};
 use gpui::{App, AppContext as _};
-use spaceterm_server::{
-    ServerError,
+use spaceterm_core::{
+    CoreError,
     service::{
         Service,
         control::{Action, Controller},
@@ -65,9 +65,8 @@ pub(crate) fn install(
     };
     let offered = service.clone();
     let controller = Controller::new(service);
-    let name = controller.display_name().to_owned();
     let shared = Arc::new(Mutex::new(Published {
-        presentation: Presentation::of(&name, State::default()),
+        presentation: Presentation::of(identity, State::default()),
         revision: 1,
     }));
     let (sender, messages) = async_channel::unbounded();
@@ -119,9 +118,9 @@ pub(crate) fn install(
         });
     }
     worker.send(Request::Refresh);
-    crate::status_menu::follow_local_server(worker.changes(), cx);
+    crate::status_menu::follow_local_core(worker.changes(), cx);
     let item = Rc::new(LinuxStatusItem {
-        name,
+        identity,
         controller,
         worker,
         connection,
@@ -155,7 +154,7 @@ fn icon(identity: &str) -> String {
 }
 
 struct LinuxStatusItem {
-    name: String,
+    identity: crate::application_identity::ApplicationIdentity,
     controller: Controller,
     worker: Worker,
     connection: Connection,
@@ -192,7 +191,7 @@ impl LinuxStatusItem {
                 };
                 match result {
                     Ok(status) => status_menu::operation_succeeded(cx, status),
-                    Err(ServerError::AuthorizationRequired) => {
+                    Err(CoreError::AuthorizationRequired) => {
                         self.open_control(operation, Step::Authorize, cx);
                     }
                     Err(error) => self.open_control(operation, Step::Failed(error), cx),
@@ -224,7 +223,7 @@ impl LinuxStatusItem {
                     // Settings owns the one journey, which reads the server again and asks first.
                     Command::Update => {
                         crate::app::leave_menu_only(cx);
-                        crate::ui::settings_window::open_server_update(cx);
+                        crate::ui::settings_window::open_core_update(cx);
                     }
                     // The client's own quit policy decides, including its confirmation.
                     Command::Quit => cx.dispatch_action(&crate::app::QuitApplication),
@@ -260,7 +259,7 @@ impl LinuxStatusItem {
     fn open_control(self: &Rc<Self>, operation: Operation, step: Step, cx: &mut App) {
         self.set_asking(true);
         let item = Rc::clone(self);
-        let opened = server_control_window::open(
+        let opened = core_control_window::open(
             self.controller.clone(),
             operation,
             step,
@@ -285,7 +284,7 @@ impl LinuxStatusItem {
         publish(
             &self.connection,
             &self.shared,
-            Presentation::of(&self.name, self.state.get()),
+            Presentation::of(self.identity, self.state.get()),
         );
     }
 }
@@ -300,11 +299,11 @@ fn publish(connection: &Connection, shared: &Shared, presentation: Presentation)
         published.revision = published.revision.wrapping_add(1);
         published.revision
     };
-    let server = connection.object_server();
-    if let Ok(menu) = server.interface::<_, Menu>(MENU_PATH) {
+    let core = connection.object_server();
+    if let Ok(menu) = core.interface::<_, Menu>(MENU_PATH) {
         let _ = zbus::block_on(Menu::layout_updated(menu.signal_emitter(), revision, 0));
     }
-    if let Ok(item) = server.interface::<_, StatusItem>(ITEM_PATH) {
+    if let Ok(item) = core.interface::<_, StatusItem>(ITEM_PATH) {
         let emitter = item.signal_emitter();
         let _ = zbus::block_on(StatusItem::new_title(emitter));
         let _ = zbus::block_on(StatusItem::new_tool_tip(emitter));
@@ -331,7 +330,7 @@ impl StatusItem {
 
     #[zbus(property)]
     fn id(&self) -> String {
-        format!("{}-server-status", self.identity)
+        format!("{}-core-status", self.identity)
     }
 
     #[zbus(property)]
@@ -456,7 +455,7 @@ impl Menu {
         let published = lock(&self.shared);
         let presentation = &published.presentation;
         let mut rows = vec![
-            (HEADER, label(&presentation.server, false)),
+            (HEADER, label(&presentation.core, false)),
             (STATE, label(presentation.state, false)),
         ];
         if let Some(explanation) = &presentation.explanation {

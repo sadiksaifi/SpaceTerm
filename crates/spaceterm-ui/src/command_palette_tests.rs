@@ -4104,7 +4104,7 @@ fn settled_empty_results_explain_disabled_confirmation_without_moving_focus(
         &root,
         &palette,
         CommandPaletteEmpty::new("Directory doesn’t exist")
-            .description("Choose an existing directory on the server."),
+            .description("Choose an existing directory on the machine."),
         cx,
     );
     let tree = A11yTree::read(cx);
@@ -4120,7 +4120,7 @@ fn settled_empty_results_explain_disabled_confirmation_without_moving_focus(
     );
     cx.executor().advance_clock(Duration::from_millis(1));
     let tree = A11yTree::read(cx);
-    let message = "Directory doesn’t exist. Choose an existing directory on the server.";
+    let message = "Directory doesn’t exist. Choose an existing directory on the machine.";
     assert_eq!(tree.with_role("Status")[0]["aria"]["value"], message);
     assert_eq!(tree.with_role("Status")[0]["aria"]["label"], message);
     assert_eq!(tree.node("Choose")["aria"]["description"], message);

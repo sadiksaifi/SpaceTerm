@@ -287,7 +287,7 @@ mod tests {
     use crate::platform::unix_adapter_tests::short_temporary_root;
     use crate::ssh::askpass::AskPassCapabilityCopy;
 
-    use crate::ssh::provisioning::SshServerBootstrap as _;
+    use crate::ssh::provisioning::SshCoreBootstrap as _;
 
     const IDENTITY: &str = "spaceterm-development";
 
@@ -302,10 +302,16 @@ mod tests {
         ] {
             let script = adapter.locator(IDENTITY, action, action == "ssh-discover");
             assert!(
-                script.ends_with(&format!("exec \"$path\" server provision '{command}'\n")),
+                script.ends_with(&format!("exec \"$path\" internal '{command}'\n")),
                 "{script}"
             );
-            assert!(script.contains("Darwin) executable='SpaceTerm Development.app/Contents/MacOS/spaceterm';;\n*) executable='bin/spaceterm';;"), "{script}");
+            assert!(script.contains("Darwin) executable='SpaceTerm Core Development.app/Contents/MacOS/spaceterm';;\n*) executable='bin/spaceterm';;"), "{script}");
+            // The identity directory above the Core data root must not be a link either.
+            assert!(
+                script.contains("root=\"$HOME/.local/share/spaceterm-development/core\"\n"),
+                "{script}"
+            );
+            assert!(script.contains("[ ! -L \"${root%/core}\" ]"), "{script}");
         }
     }
 
@@ -821,7 +827,7 @@ fn quote(value: &str) -> String {
 /// of the machine the script runs on.
 #[cfg(feature = "desktop")]
 fn executable_case(identity: &str, variable: &str) -> String {
-    use spaceterm_server::service::Layout;
+    use spaceterm_core::service::Layout;
     let executable = |target| {
         Layout::for_target(target, identity)
             .map(|layout| quote(&layout.executable().to_string_lossy()))
@@ -834,7 +840,7 @@ fn executable_case(identity: &str, variable: &str) -> String {
     )
 }
 #[cfg(feature = "desktop")]
-impl crate::ssh::provisioning::SshServerBootstrap for UnixSshProcessAdapter {
+impl crate::ssh::provisioning::SshCoreBootstrap for UnixSshProcessAdapter {
     /// This script selects only the approved digest in a fixed account/build namespace.
     /// It never evaluates a path or an endpoint supplied by the remote protocol.
     fn locator(&self, identity: &str, action: &str, missing: bool) -> String {
@@ -847,10 +853,10 @@ impl crate::ssh::provisioning::SshServerBootstrap for UnixSshProcessAdapter {
             r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
-unset SPACETERM_SERVER SPACETERM_AS
+unset SPACETERM_MACHINE SPACETERM_AS
 uid=$(id -u)
 [ "$uid" -gt 0 ] || exit 71
-root="$HOME/.local/share/{}/server"
+root="$HOME/.local/share/{}/core"
 policy="$root/service.json"
 if [ ! -e "$policy" ]; then
 "#,
@@ -871,7 +877,7 @@ exit 0
             script.push_str("exit 73\n");
         }
         script.push_str(r#"fi
-[ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] && [ ! -L "${root%/server}" ] && [ ! -L "$root" ] && [ ! -L "$policy" ] || exit 74
+[ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] && [ ! -L "${root%/core}" ] && [ ! -L "$root" ] && [ ! -L "$policy" ] || exit 74
 case "$(uname -s)" in
 Darwin) owner=$(stat -f '%u:%Lp' "$policy"); dir_owner=$(stat -f '%u:%Lp' "$root");;
 Linux) owner=$(stat -c '%u:%a' "$policy"); dir_owner=$(stat -c '%u:%a' "$root");;
@@ -898,7 +904,7 @@ done
 "#,
         );
         script.push_str(&format!(
-            "exec \"$path\" server provision {}{}\n",
+            "exec \"$path\" internal {}{}\n",
             quote(match action {
                 "setup-start" => "ssh-start",
                 "setup-direct-status" => "ssh-direct-status",
@@ -954,10 +960,10 @@ fn transfer_script(
     let executable = executable_case(identity, "executable");
     let authorize = match linger {
         Some(true) => String::from(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/$executable\" server provision ssh-enable-linger --password-stdin || exit 77\nunset authorization\nfi\n",
+            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/core/$executable\" internal ssh-enable-linger --password-stdin || exit 77\nunset authorization\nfi\n",
         ),
         Some(false) => String::from(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/$executable\" server provision ssh-enable-linger || exit 77\nfi\n",
+            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/core/$executable\" internal ssh-enable-linger || exit 77\nfi\n",
         ),
         None => String::new(),
     };
@@ -965,7 +971,7 @@ fn transfer_script(
         r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
-unset SPACETERM_SERVER SPACETERM_AS
+unset SPACETERM_MACHINE SPACETERM_AS
 umask 077
 work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-{work}.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
@@ -974,7 +980,7 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
 mkdir "$work/runtime"
 tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
-{executable}{authorize}"$work/runtime/server/$executable" server provision {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
+{executable}{authorize}"$work/runtime/core/$executable" internal {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
 "#,
         quote(&signature),
         quote(action),

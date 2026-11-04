@@ -11,8 +11,8 @@
     "message": "Invalid arguments. See --help.",
     "retryable": false
   },
+  "machine": null,
   "schema": "spaceterm.cli.v1",
-  "server": null,
   "status": "error",
   "warnings": []
 }

@@ -1,7 +1,7 @@
 //! Shared owning-host Git fixtures and authenticated inventory checks.
-use spaceterm_server::{
-    ServerConnection, ServerError,
-    connection::link::ServerLink,
+use spaceterm_core::{
+    CoreError, MachineConnection,
+    connection::link::CoreLink,
     hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome},
     repository::DirectoryFacts,
 };
@@ -12,31 +12,31 @@ use std::{
     time::{Duration, Instant},
 };
 /// The handle's shared connection, once the server accepts it.
-pub fn connect(server: &ServerConnection) -> Result<ServerLink, Box<dyn Error>> {
+pub fn connect(core: &MachineConnection) -> Result<CoreLink, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(8);
     loop {
-        match server.link() {
+        match core.link() {
             Ok(link) => return Ok(link),
-            Err(ServerError::NotRunning) if Instant::now() < until => {
+            Err(CoreError::NotRunning) if Instant::now() < until => {
                 std::thread::sleep(Duration::from_millis(50))
             }
             Err(error) => return Err(error.into()),
         }
     }
 }
-pub fn inventory(link: &ServerLink) -> Result<(Inventory, u64), Box<dyn Error>> {
+pub fn inventory(link: &CoreLink) -> Result<(Inventory, u64), Box<dyn Error>> {
     Ok(super::support::inventory(link)?)
 }
-pub fn mutate(link: &ServerLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
+pub fn mutate(link: &CoreLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
     let (_, sequence) = inventory(link)?;
     let result = super::support::mutate(link, sequence, mutation)?;
     let Outcome::Accepted { target } = result.outcome else {
         return Err("mutation rejected".into());
     };
-    link.acknowledge(sequence).map_err(ServerError::from)?;
+    link.acknowledge(sequence).map_err(CoreError::from)?;
     Ok(target)
 }
-pub fn close(link: &ServerLink, target: CloseTarget) -> Result<(), Box<dyn Error>> {
+pub fn close(link: &CoreLink, target: CloseTarget) -> Result<(), Box<dyn Error>> {
     let current = inventory(link)?.0;
     let confirmation = current.close_confirmation(target).ok_or("close target")?;
     mutate(
@@ -49,7 +49,7 @@ pub fn close(link: &ServerLink, target: CloseTarget) -> Result<(), Box<dyn Error
     Ok(())
 }
 pub fn await_facts(
-    link: &ServerLink,
+    link: &CoreLink,
     directory: &Path,
     predicate: impl Fn(&DirectoryFacts) -> bool,
 ) -> Result<Inventory, Box<dyn Error>> {

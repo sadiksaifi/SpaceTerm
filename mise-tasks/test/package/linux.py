@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, server_package
-from tests.server_artifact_fixture import configure_trust, prepare
+from spaceterm_tasks import ROOT, core_package
+from tests.core_artifact_fixture import configure_trust, prepare
 
 FIXTURE = r"""
 #include <stdio.h>
@@ -71,9 +71,9 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
-        major = self.root / server_package.PROTOCOL_MAJOR_SOURCE
+        major = self.root / core_package.PROTOCOL_MAJOR_SOURCE
         major.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / server_package.PROTOCOL_MAJOR_SOURCE, major)
+        shutil.copyfile(ROOT / core_package.PROTOCOL_MAJOR_SOURCE, major)
         configure_trust(self.root)
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")
@@ -140,7 +140,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
                     "SpaceTerm Development": "spaceterm-development",
                 }[name],
                 "target": "x86_64-unknown-linux-gnu",
-                "server_candidate_sha256": candidate_digest,
+                "core_candidate_sha256": candidate_digest,
             }
         )
         self.artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -203,11 +203,11 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         identifier = "io.github.sadiksaifi.spaceterm-preflight"
         for name in (
             "spaceterm-preflight/bin/spaceterm-desktop",
-            "spaceterm-preflight/share/spaceterm/server-artifact/artifact.tar.gz",
-            "spaceterm-preflight/share/spaceterm/server-artifact/artifact.sig",
-            "spaceterm-preflight/share/spaceterm/server-artifacts/x86_64-unknown-linux-gnu/artifact.tar.gz",
-            "spaceterm-preflight/share/spaceterm/server-artifacts/x86_64-unknown-linux-gnu/artifact.sig",
-            "spaceterm-preflight/share/spaceterm/server-artifacts/x86_64-unknown-linux-gnu/artifact.sha256",
+            "spaceterm-preflight/share/spaceterm/core-artifact/artifact.tar.gz",
+            "spaceterm-preflight/share/spaceterm/core-artifact/artifact.sig",
+            "spaceterm-preflight/share/spaceterm/core-artifacts/x86_64-unknown-linux-gnu/artifact.tar.gz",
+            "spaceterm-preflight/share/spaceterm/core-artifacts/x86_64-unknown-linux-gnu/artifact.sig",
+            "spaceterm-preflight/share/spaceterm/core-artifacts/x86_64-unknown-linux-gnu/artifact.sha256",
             "spaceterm-preflight/share/spaceterm/THIRD-PARTY-NOTICES.txt",
             "spaceterm-preflight/share/spaceterm/shell-integration/elvish/rc.elv",
             "spaceterm-preflight/share/spaceterm/terminfo/x/xterm-spaceterm",

@@ -111,7 +111,7 @@ class FeedTests(unittest.TestCase):
                         verify_feed(feed, archive, "0.1.0")
 
 
-class ServerFeedTests(unittest.TestCase):
+class CoreFeedTests(unittest.TestCase):
     def test_standalone_cli_assets_bind_both_target_archives_and_feeds(self):
         seed = bytes(range(32))
         public = release.derived_public_key(seed)
@@ -127,7 +127,7 @@ class ServerFeedTests(unittest.TestCase):
                 with self.subTest(target=target):
                     directory = root / platform
                     directory.mkdir()
-                    assets = release.sign_server_release(
+                    assets = release.sign_core_release(
                         seed,
                         archive,
                         signature,

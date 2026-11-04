@@ -326,7 +326,7 @@ pub(crate) enum TabManagerEvent {
     RevealRequested {
         tab_id: TabId,
         origin: PaneId,
-        target: spaceterm_server::hierarchy::Placement,
+        target: spaceterm_core::hierarchy::Placement,
     },
 }
 
@@ -392,9 +392,9 @@ type WorkspaceTabBinding = super::workspaces::WorkspaceTabs;
 
 /// A server Workspace's Root Tab and Root Pane, and the connection the Root Pane reads.
 pub(crate) struct WorkspaceRoot {
-    pub(crate) tab: spaceterm_server::hierarchy::Id,
-    pub(crate) pane: spaceterm_server::hierarchy::Id,
-    pub(crate) state: std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
+    pub(crate) tab: spaceterm_core::hierarchy::Id,
+    pub(crate) pane: spaceterm_core::hierarchy::Id,
+    pub(crate) state: std::sync::Arc<dyn crate::ui::core_pane::MachinePaneConnection>,
 }
 
 /// What a server Workspace's Tab strip offers. Creating a Tab, splitting a Pane, and
@@ -546,8 +546,8 @@ impl TabManager {
         pane_construction: PaneConstruction,
         binding: super::workspaces::WorkspacePanes,
         root: (
-            spaceterm_server::hierarchy::Id,
-            std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
+            spaceterm_core::hierarchy::Id,
+            std::sync::Arc<dyn crate::ui::core_pane::MachinePaneConnection>,
         ),
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -706,9 +706,9 @@ impl TabManager {
     }
 
     /// Reconnects each Pane the person's stop interrupted, once they started the server.
-    pub(crate) fn server_started(&self, cx: &mut App) {
+    pub(crate) fn core_started(&self, cx: &mut App) {
         for (_, view) in self.tabs.iter() {
-            view.update(cx, |view, cx| view.server_started(cx));
+            view.update(cx, |view, cx| view.core_started(cx));
         }
     }
 
@@ -755,13 +755,13 @@ impl TabManager {
 
     /// The server identity of the Active Tab's Focused Pane, when the server owns it.
     #[cfg(test)]
-    pub(crate) fn focused_server_pane(&self, cx: &App) -> Option<spaceterm_server::hierarchy::Id> {
+    pub(crate) fn focused_core_pane(&self, cx: &App) -> Option<spaceterm_core::hierarchy::Id> {
         let view = self.tabs.active_tab().read(cx);
-        view.server_pane(view.focused_pane_id())
+        view.core_pane(view.focused_pane_id())
     }
 
     /// Whether a Tab of this strip holds the server Pane `pane`.
-    pub(crate) fn presents_pane(&self, pane: spaceterm_server::hierarchy::Id, cx: &App) -> bool {
+    pub(crate) fn presents_pane(&self, pane: spaceterm_core::hierarchy::Id, cx: &App) -> bool {
         self.tabs
             .iter()
             .any(|(_, view)| view.read(cx).holds_pane(pane))
@@ -771,8 +771,8 @@ impl TabManager {
     /// when both are given.
     pub(crate) fn presents_target(
         &self,
-        tab: Option<spaceterm_server::hierarchy::Id>,
-        pane: Option<spaceterm_server::hierarchy::Id>,
+        tab: Option<spaceterm_core::hierarchy::Id>,
+        pane: Option<spaceterm_core::hierarchy::Id>,
         cx: &App,
     ) -> bool {
         let tab_id = match tab {
@@ -793,7 +793,7 @@ impl TabManager {
     /// this strip holds the Pane or it cannot preview a local file.
     pub(crate) fn preview_local_file(
         &mut self,
-        pane: spaceterm_server::hierarchy::Id,
+        pane: spaceterm_core::hierarchy::Id,
         prepared: crate::terminal::native_services::PreparedFilePreview,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1310,10 +1310,10 @@ impl TabManager {
             return;
         };
         let (Some(tab), Some(into), Some(beside), Some(opened)) = (
-            self.binding.server_tab(tab_id),
-            self.binding.server_tab(into),
-            target.server_pane(pane_id),
-            merged.server_pane(merged.focused_pane_id()),
+            self.binding.core_tab(tab_id),
+            self.binding.core_tab(into),
+            target.core_pane(pane_id),
+            merged.core_pane(merged.focused_pane_id()),
         ) else {
             return;
         };
@@ -1377,7 +1377,7 @@ impl TabManager {
     pub(crate) fn directory_recovery(
         &self,
         cx: &App,
-    ) -> Option<Entity<super::server_pane::DirectoryRecovery>> {
+    ) -> Option<Entity<super::core_pane::DirectoryRecovery>> {
         self.tabs.active_tab().read(cx).directory_recovery(cx)
     }
 
@@ -3014,15 +3014,15 @@ impl TabManager {
     pub(crate) fn arrangement(
         &self,
         cx: &App,
-    ) -> Option<spaceterm_server::client_view::WorkspaceView> {
-        use spaceterm_server::client_view::{TabView, WorkspaceView};
+    ) -> Option<spaceterm_core::client_view::WorkspaceView> {
+        use spaceterm_core::client_view::{TabView, WorkspaceView};
         let binding = &self.binding;
         let tabs = self
             .tabs
             .iter()
             .map(|(id, view)| {
                 Some(TabView {
-                    tab: binding.server_tab(id)?,
+                    tab: binding.core_tab(id)?,
                     layout: view.read(cx).layout()?,
                 })
             })
@@ -3035,8 +3035,8 @@ impl TabManager {
 
     pub(crate) fn restore_arrangement(
         &mut self,
-        saved: &spaceterm_server::client_view::WorkspaceView,
-        workspace: &spaceterm_server::hierarchy::Workspace,
+        saved: &spaceterm_core::client_view::WorkspaceView,
+        workspace: &spaceterm_core::hierarchy::Workspace,
         cx: &mut Context<Self>,
     ) {
         let saved = saved.reconcile(workspace);
@@ -3060,12 +3060,12 @@ impl TabManager {
     ) -> Option<crate::ui::remembered_view::RememberedWorkspace> {
         let binding = &self.binding;
         Some(crate::ui::remembered_view::RememberedWorkspace {
-            active_tab: binding.server_tab(self.tabs.active_tab_id()),
+            active_tab: binding.core_tab(self.tabs.active_tab_id()),
             tabs: self
                 .tabs
                 .iter()
                 .filter_map(|(tab_id, view)| {
-                    Some((binding.server_tab(tab_id)?, view.read(cx).remember(cx)?))
+                    Some((binding.core_tab(tab_id)?, view.read(cx).remember(cx)?))
                 })
                 .collect(),
             worktrees_expanded: None,
@@ -3110,8 +3110,8 @@ impl TabManager {
         remembered
             .tabs
             .iter()
-            .filter_map(|(server, tab)| {
-                Some((self.tabs.tab(binding.local_tab(*server)?)?.clone(), tab))
+            .filter_map(|(core, tab)| {
+                Some((self.tabs.tab(binding.local_tab(*core)?)?.clone(), tab))
             })
             .collect()
     }
@@ -3125,7 +3125,7 @@ impl TabManager {
         let binding = &self.binding;
         let tab_id = remembered
             .active_tab
-            .and_then(|server| binding.local_tab(server))
+            .and_then(|core| binding.local_tab(core))
             .unwrap_or_else(|| self.tabs.root_tab_id());
         if tab_id != self.tabs.active_tab_id() {
             self.activate_tab_focusing(tab_id, false, window, cx);
@@ -3137,7 +3137,7 @@ impl TabManager {
     /// each Tab's Panes. A new Tab joins at the end of the strip and never takes the Active Tab.
     pub(crate) fn reconcile(
         &mut self,
-        workspace: &spaceterm_server::hierarchy::Workspace,
+        workspace: &spaceterm_core::hierarchy::Workspace,
         removal: super::workspaces::WorkspaceRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3156,8 +3156,8 @@ impl TabManager {
             .copied()
             .filter(|id| {
                 self.binding
-                    .server_tab(*id)
-                    .is_some_and(|server| workspace.tabs.iter().any(|tab| tab.id == server))
+                    .core_tab(*id)
+                    .is_some_and(|core| workspace.tabs.iter().any(|tab| tab.id == core))
             })
             .collect::<Vec<_>>();
         for id in restoring {
@@ -3243,7 +3243,7 @@ impl TabManager {
     /// removal, so no Pane of a Tab closing alongside it is selected.
     fn remove_absent_tabs(
         &mut self,
-        workspace: &spaceterm_server::hierarchy::Workspace,
+        workspace: &spaceterm_core::hierarchy::Workspace,
         removal: super::workspaces::WorkspaceRemoval,
         close_keyboard: Option<TabId>,
         window: &mut Window,
@@ -3256,8 +3256,8 @@ impl TabManager {
             .map(|(tab_id, _)| tab_id)
             .filter(|&tab_id| {
                 binding
-                    .server_tab(tab_id)
-                    .is_some_and(|server| !workspace.tabs.iter().any(|tab| tab.id == server))
+                    .core_tab(tab_id)
+                    .is_some_and(|core| !workspace.tabs.iter().any(|tab| tab.id == core))
             })
             .collect();
         let opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
@@ -3319,7 +3319,7 @@ impl TabManager {
     /// Activates the Tab or focuses the Pane one accepted creation of this client's own made.
     pub(crate) fn open_accepted(
         &mut self,
-        target: spaceterm_server::hierarchy::Id,
+        target: spaceterm_core::hierarchy::Id,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3352,8 +3352,8 @@ impl TabManager {
     /// it appears in that Worktree's strip before the server's Git facts name the Worktree.
     fn submit_tab_creation(
         &mut self,
-        workspace_tabs: &[spaceterm_server::hierarchy::Tab],
-        tab: &spaceterm_server::hierarchy::Tab,
+        workspace_tabs: &[spaceterm_core::hierarchy::Tab],
+        tab: &spaceterm_core::hierarchy::Tab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<TabId> {
@@ -3403,8 +3403,8 @@ impl TabManager {
     /// presented Tabs among `workspace_tabs` that share its Worktree.
     fn presented_worktree(
         &self,
-        workspace_tabs: &[spaceterm_server::hierarchy::Tab],
-        tab: &spaceterm_server::hierarchy::Tab,
+        workspace_tabs: &[spaceterm_core::hierarchy::Tab],
+        tab: &spaceterm_core::hierarchy::Tab,
     ) -> Option<WorktreeId> {
         let binding = &self.binding;
         tab.worktree.as_ref()?;
@@ -3428,7 +3428,7 @@ impl TabManager {
         let binding = &self.binding;
         self.tab_selector_pressed = None;
         let active = self.tabs.active_tab().read(cx);
-        let Some(source) = active.server_pane(active.focused_pane_id()) else {
+        let Some(source) = active.core_pane(active.focused_pane_id()) else {
             return;
         };
         let submission = binding.create_tab(source);
@@ -3584,9 +3584,9 @@ impl TabManager {
     /// The smallest room Tab `tab_id`'s Panes need once a merge places them, from the order and
     /// sides the server keeps for them, which is how every Tab receiving them arranges them.
     fn merged_minimum(&self, tab_id: TabId, cx: &App) -> Option<crate::domain::PaneSize> {
-        let server = self.binding.server_tab(tab_id)?;
+        let core = self.binding.core_tab(tab_id)?;
         let workspace = self.binding.presentation_workspace()?;
-        let panes = &workspace.tabs.iter().find(|tab| tab.id == server)?.panes;
+        let panes = &workspace.tabs.iter().find(|tab| tab.id == core)?.panes;
         let placements: Vec<_> = panes
             .iter()
             .enumerate()
@@ -3657,7 +3657,7 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use spaceterm_server::hierarchy::{PaneDestination, Side};
+        use spaceterm_core::hierarchy::{PaneDestination, Side};
 
         let ids = self.visible_tab_ids();
         // A release does what the strip shows under the release pointer now, which a strip
@@ -3679,8 +3679,8 @@ impl TabManager {
             return;
         };
         let (Some(tab), Some(pane)) = (
-            self.binding.server_tab(tab_id),
-            view.read(cx).server_pane(pane_id),
+            self.binding.core_tab(tab_id),
+            view.read(cx).core_pane(pane_id),
         ) else {
             return;
         };
@@ -3695,8 +3695,8 @@ impl TabManager {
                     return;
                 };
                 let (Some(into), Some(beside)) = (
-                    self.binding.server_tab(target),
-                    view.server_pane(view.focused_pane_id()),
+                    self.binding.core_tab(target),
+                    view.core_pane(view.focused_pane_id()),
                 ) else {
                     return;
                 };
@@ -3734,10 +3734,10 @@ impl TabManager {
         &mut self,
         submission: super::workspaces::WorkspaceSubmission,
         title: &'static str,
-        opened: Option<spaceterm_server::hierarchy::Id>,
+        opened: Option<spaceterm_core::hierarchy::Id>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<spaceterm_server::hierarchy::Id> {
+    ) -> Option<spaceterm_core::hierarchy::Id> {
         use super::workspaces::WorkspaceSubmission;
 
         let edits = self.binding.edits();
@@ -3809,14 +3809,14 @@ impl TabManager {
     /// Worktree it was presented in, so a pending new Tab never leaves its Worktree's strip.
     pub(crate) fn apply_worktrees(
         &mut self,
-        scope: &dyn Fn(spaceterm_server::hierarchy::Id) -> Option<Option<WorktreeId>>,
+        scope: &dyn Fn(spaceterm_core::hierarchy::Id) -> Option<Option<WorktreeId>>,
         cx: &mut Context<Self>,
     ) {
         let binding = &self.binding;
         let scopes: Vec<_> = self
             .tabs
             .iter()
-            .filter_map(|(tab_id, _)| Some((tab_id, scope(binding.server_tab(tab_id)?)?)))
+            .filter_map(|(tab_id, _)| Some((tab_id, scope(binding.core_tab(tab_id)?)?)))
             .collect();
         // Only the scope changes. A Tab's launch policy never takes the server's root,
         // which names no directory this client may validate or start in.
@@ -3860,19 +3860,19 @@ impl TabManager {
         &self,
         id: WorktreeId,
         cx: &App,
-    ) -> Option<spaceterm_server::hierarchy::Id> {
+    ) -> Option<spaceterm_core::hierarchy::Id> {
         let view = self
             .tabs
             .tab(self.tabs.most_recent_tab_in(Some(id))?)?
             .read(cx);
-        view.server_pane(view.focused_pane_id())
+        view.core_pane(view.focused_pane_id())
     }
 
     /// Presents the Repository Status the server read for every Pane in this strip,
     /// including Tabs outside the Active Worktree.
     pub(crate) fn present_repositories(
         &mut self,
-        view: &dyn Fn(spaceterm_server::hierarchy::Id) -> crate::repository_status::RepositoryView,
+        view: &dyn Fn(spaceterm_core::hierarchy::Id) -> crate::repository_status::RepositoryView,
         cx: &mut Context<Self>,
     ) {
         let tabs: Vec<_> = self.tabs.iter().map(|(_, tab)| tab.clone()).collect();
@@ -3886,10 +3886,10 @@ impl TabManager {
     pub(crate) fn present_metadata<'p>(
         &mut self,
         published: &dyn Fn(
-            spaceterm_server::hierarchy::Id,
+            spaceterm_core::hierarchy::Id,
         ) -> Option<(
-            crate::ui::terminal_pane::ServerSessionRun,
-            &'p spaceterm_server::pane::metadata::Snapshot,
+            crate::ui::terminal_pane::CoreSessionRun,
+            &'p spaceterm_core::pane::metadata::Snapshot,
         )>,
         cx: &mut Context<Self>,
     ) {
@@ -3900,29 +3900,29 @@ impl TabManager {
     }
 
     /// The server identity of one Tab this strip presents.
-    pub(crate) fn server_tab(&self, tab_id: TabId) -> Option<spaceterm_server::hierarchy::Id> {
-        self.binding.server_tab(tab_id)
+    pub(crate) fn core_tab(&self, tab_id: TabId) -> Option<spaceterm_core::hierarchy::Id> {
+        self.binding.core_tab(tab_id)
     }
 
     /// The server identity of one Pane in one of this strip's Tabs.
-    pub(crate) fn server_pane(
+    pub(crate) fn core_pane(
         &self,
         tab_id: TabId,
         pane_id: PaneId,
         cx: &App,
-    ) -> Option<spaceterm_server::hierarchy::Id> {
-        self.tabs.tab(tab_id)?.read(cx).server_pane(pane_id)
+    ) -> Option<spaceterm_core::hierarchy::Id> {
+        self.tabs.tab(tab_id)?.read(cx).core_pane(pane_id)
     }
 
     pub(crate) fn pane_closes_directly(
         &self,
-        server: spaceterm_server::hierarchy::Id,
+        core: spaceterm_core::hierarchy::Id,
         live_session: bool,
         cx: &App,
     ) -> bool {
         self.tabs
             .iter()
-            .find_map(|(_, view)| view.read(cx).pane_closes_directly(server, live_session, cx))
+            .find_map(|(_, view)| view.read(cx).pane_closes_directly(core, live_session, cx))
             .unwrap_or(false)
     }
 
@@ -4738,8 +4738,8 @@ mod tests {
         let inventory = edits.applied_inventory();
         let workspace = &inventory.workspaces[0];
         let root = &workspace.tabs[0];
-        let factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(
-            crate::ui::workspace_manager::tests::server_sessions(
+        let factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
+            crate::ui::workspace_manager::tests::core_sessions(
                 TestTerminalSessionRecords::default(),
             ),
         ));
@@ -4804,11 +4804,10 @@ mod tests {
         adapters: crate::ui::WorkspaceManagerAdapters,
         cx: &mut TestAppContext,
     ) -> (Entity<TabManager>, &mut VisualTestContext) {
-        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-            crate::ui::workspace_manager::tests::server_sessions(records),
-        );
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(crate::ui::workspace_manager::tests::core_sessions(records));
         let (window_manager, cx) = cx.add_window_view(|window, cx| {
-            crate::ui::workspace_manager::tests::local_server_manager(
+            crate::ui::workspace_manager::tests::local_core_manager(
                 session_factory,
                 PathBuf::from("/tmp/spaceterm-tab-manager-test"),
                 adapters,
@@ -5009,12 +5008,12 @@ mod tests {
     fn active_focus(
         manager: &Entity<TabManager>,
         cx: &mut VisualTestContext,
-    ) -> (TabId, Option<spaceterm_server::hierarchy::Id>) {
+    ) -> (TabId, Option<spaceterm_core::hierarchy::Id>) {
         manager.read_with(cx, |manager, cx| {
             let view = manager.tabs.active_tab().read(cx);
             (
                 manager.tabs.active_tab_id(),
-                view.server_pane(view.focused_pane_id()),
+                view.core_pane(view.focused_pane_id()),
             )
         })
     }
@@ -5430,7 +5429,7 @@ mod tests {
         click("create-tab-button", cx);
         let merged = manager.read_with(cx, |manager, cx| {
             let view = manager.tabs.tab(TabId::new(1)).unwrap().read(cx);
-            view.server_pane(view.focused_pane_id())
+            view.core_pane(view.focused_pane_id())
         });
         let tab = cx.debug_bounds("tab-item-1-inactive").unwrap();
         let pane = cx.debug_bounds("pane-surface-1").unwrap();
@@ -8469,15 +8468,14 @@ mod tests {
         let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
         change(metadata);
         metadata.revision = generation;
-        let snapshot = crate::runtime::encode_server_metadata(metadata);
-        let server = cx.update(|_, cx| {
-            cx.global::<crate::ui::workspace_manager::tests::LocalServer>()
+        let snapshot = crate::runtime::encode_core_metadata(metadata);
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
                 .clone()
         });
         // Only a running shell reports metadata.
-        server.edits.run_shells();
-        server
-            .edits
-            .present_metadata(server.panes.opened_at(session - 1), snapshot);
+        core.edits.run_shells();
+        core.edits
+            .present_metadata(core.panes.opened_at(session - 1), snapshot);
     }
 }

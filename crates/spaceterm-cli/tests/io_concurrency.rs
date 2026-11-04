@@ -14,7 +14,7 @@ mod support;
 #[path = "../examples/support/workspace.rs"]
 mod workspace;
 
-use spaceterm_server::{ServerConnection, protocol::AgentName};
+use spaceterm_core::{MachineConnection, protocol::AgentName};
 use std::{
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
@@ -39,8 +39,8 @@ impl Drop for Process {
 }
 
 struct Fixture {
-    _server: lifecycle::Server,
-    link: spaceterm_server::connection::link::ServerLink,
+    _core: lifecycle::Core,
+    link: spaceterm_core::connection::link::CoreLink,
     client_name: String,
     agent: AgentName,
 }
@@ -57,10 +57,10 @@ impl Fixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for name in [
-            "SPACETERM_SERVER",
+            "SPACETERM_MACHINE",
             "SPACETERM_AS",
             "SPACETERM_IDENTITY",
-            "SPACETERM_SERVER_ID",
+            "SPACETERM_MACHINE_ID",
             "SPACETERM_PANE",
             "SPACETERM_SESSION",
         ] {
@@ -109,7 +109,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.link.close();
-        if let Ok(root) = spaceterm_server::cli_state_root("spaceterm-development") {
+        if let Ok(root) = spaceterm_core::cli_state_root("spaceterm-development") {
             for agent in [
                 self.agent.as_str().to_owned(),
                 format!("{}-person", self.agent.as_str()),
@@ -129,13 +129,13 @@ impl Drop for Fixture {
 #[ignore = "owns a foreground Development server; run mise run cli:io:test"]
 fn waiting_reads_and_runs_allow_same_identity_tab_creation() {
     let client_name = format!("cli-concurrency-{}", std::process::id());
-    let client = ServerConnection::for_development_client(&client_name).unwrap();
+    let client = MachineConnection::for_development_client(&client_name).unwrap();
     lifecycle::require_idle(&client).unwrap();
     client.setup().unwrap();
-    let server = lifecycle::Server::start().unwrap();
+    let core = lifecycle::Core::start().unwrap();
     let link = lifecycle::connect(&client).unwrap();
     let fixture = Fixture {
-        _server: server,
+        _core: core,
         link,
         client_name,
         agent: format!("io-concurrency-{}", std::process::id())

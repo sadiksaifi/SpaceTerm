@@ -312,7 +312,7 @@ impl Fixture {
                 startup: StartupSshEnvironment::for_test(None),
                 executable: OpenSshExecutable::new("/fixture/ssh".into()).unwrap(),
                 adapter: adapter.clone(),
-                artifacts: ServerArtifactCatalog::new(Some(catalog.clone())),
+                artifacts: CoreArtifactCatalog::new(Some(catalog.clone())),
             },
             direct,
         );
@@ -403,26 +403,21 @@ fn write_signed_package(catalog: &Path, executable: &[u8]) {
     let target = "x86_64-unknown-linux-gnu";
     let directory = catalog.join(target);
     std::fs::create_dir_all(&directory).unwrap();
-    let manifest = serde_json::json!({"schema":1,"source_sha256":null,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":spaceterm_server::protocol::MAJOR}).to_string().into_bytes();
+    let manifest = serde_json::json!({"schema":1,"source_sha256":null,"identity":identity(),"target":target,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"1.0.0","protocol_major":spaceterm_core::protocol::MAJOR}).to_string().into_bytes();
     let mut entries = vec![
-        ("server/build.json".to_owned(), manifest, 0o644),
+        ("core/build.json".to_owned(), manifest, 0o644),
+        ("core/bin/spaceterm".to_owned(), executable.to_vec(), 0o755),
         (
-            "server/bin/spaceterm".to_owned(),
-            executable.to_vec(),
-            0o755,
-        ),
-        (
-            "server/share/spaceterm/terminfo/x/xterm-spaceterm".to_owned(),
+            "core/share/spaceterm/terminfo/x/xterm-spaceterm".to_owned(),
             b"terminfo".to_vec(),
             0o644,
         ),
     ];
-    for path in serde_json::from_str::<Vec<String>>(include_str!(
-        "../../../packaging/server-resources.json"
-    ))
-    .unwrap()
+    for path in
+        serde_json::from_str::<Vec<String>>(include_str!("../../../packaging/core-resources.json"))
+            .unwrap()
     {
-        entries.push((format!("server/{path}"), b"resource".to_vec(), 0o644));
+        entries.push((format!("core/{path}"), b"resource".to_vec(), 0o644));
     }
     let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),
@@ -439,7 +434,7 @@ fn write_signed_package(catalog: &Path, executable: &[u8]) {
     }
     let bytes = archive.into_inner().unwrap().finish().unwrap();
     let trust: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../packaging/server-nonproduction-trust.json"
+        "../../../packaging/core-nonproduction-trust.json"
     ))
     .unwrap();
     let seed = base64::engine::general_purpose::STANDARD
@@ -487,7 +482,7 @@ fn setup_reoffers_changed_signed_bytes_without_reauthenticating() {
 }
 
 #[test]
-fn uninstalled_stopped_server_offers_installation_before_startup_without_effects_on_decline() {
+fn uninstalled_stopped_core_offers_installation_before_startup_without_effects_on_decline() {
     let mut remote = discovery(false);
     remote.installed = false;
     remote.enabled = false;
@@ -519,7 +514,7 @@ fn uninstalled_stopped_server_offers_installation_before_startup_without_effects
 }
 
 #[test]
-fn uninstalled_stopped_server_reoffers_changed_retained_identity_or_stop() {
+fn uninstalled_stopped_machine_reoffers_changed_retained_identity_or_stop() {
     #[derive(Clone, Copy)]
     enum Change {
         Identity,
@@ -541,7 +536,7 @@ fn uninstalled_stopped_server_reoffers_changed_retained_identity_or_stop() {
             if observed.fetch_add(1, Ordering::SeqCst) == 0 {
                 let mut changed = remote.clone();
                 match change {
-                    Change::Identity => changed.server = Some([4; 32]),
+                    Change::Identity => changed.core = Some([4; 32]),
                     Change::Stop => changed.stopped = false,
                 }
                 *source.lock().unwrap() = serde_json::to_vec(&changed).unwrap();
@@ -563,7 +558,7 @@ fn uninstalled_stopped_server_reoffers_changed_retained_identity_or_stop() {
 }
 
 #[test]
-fn uninstalled_stopped_server_refuses_candidate_version_or_commit_mismatch_before_an_offer() {
+fn uninstalled_stopped_core_refuses_candidate_version_or_commit_mismatch_before_an_offer() {
     for change_commit in [false, true] {
         let mut remote = discovery(false);
         remote.installed = false;
@@ -597,7 +592,7 @@ fn uninstalled_stopped_server_refuses_candidate_version_or_commit_mismatch_befor
 }
 
 #[test]
-fn uninstalled_stopped_server_reinstall_then_start_then_network_uses_one_authentication() {
+fn uninstalled_stopped_core_reinstall_then_start_then_network_uses_one_authentication() {
     let mut remote = discovery(false);
     remote.installed = false;
     remote.enabled = false;
@@ -651,7 +646,7 @@ fn uninstalled_stopped_server_reinstall_then_start_then_network_uses_one_authent
 }
 
 #[test]
-fn uninstalled_stopped_server_refuses_changed_retained_facts_after_reinstallation() {
+fn uninstalled_stopped_machine_refuses_changed_retained_facts_after_reinstallation() {
     #[derive(Clone, Copy)]
     enum Change {
         Identity,
@@ -678,8 +673,8 @@ fn uninstalled_stopped_server_refuses_changed_retained_facts_after_reinstallatio
         let mut installed = discovery(false);
         match change {
             Change::Identity => {
-                installed.server = Some([4; 32]);
-                installed.start_observation.as_mut().unwrap().server = [4; 32];
+                installed.core = Some([4; 32]);
+                installed.start_observation.as_mut().unwrap().core = [4; 32];
             }
             Change::Stop => {
                 installed.stopped = false;
@@ -737,12 +732,12 @@ fn discovery(running: bool) -> AccountDiscovery {
         schema: 1,
         account: 501,
         build: identity().into(),
-        server: Some([1; 32]),
+        core: Some([1; 32]),
         installed: true,
         enabled: true,
         running,
         stopped: !running,
-        protocol_majors: vec![spaceterm_server::protocol::MAJOR],
+        protocol_majors: vec![spaceterm_core::protocol::MAJOR],
         target: "x86_64-unknown-linux-gnu".into(),
         version: "1.0.0".into(),
         commit: "a".repeat(40),
@@ -750,7 +745,7 @@ fn discovery(running: bool) -> AccountDiscovery {
         start_observation: Some(SetupStartObservation {
             account: 501,
             build: identity().into(),
-            server: [1; 32],
+            core: [1; 32],
             installation: "a".repeat(64),
             version: "1.0.0".into(),
             commit: "a".repeat(40),
@@ -761,16 +756,16 @@ fn discovery(running: bool) -> AccountDiscovery {
 
 fn status() -> DirectStatus {
     DirectStatus {
-        pin: ServerPin {
+        pin: MachinePin {
             build: identity().into(),
-            server: [1; 32],
+            core: [1; 32],
             public_key: [2; 32],
             certificate: [3; 32],
         },
         policy: None,
         enabled: false,
-        server_name: "Remote".into(),
-        listener: spaceterm_server::direct::ListenerState::Off,
+        machine_name: "Remote".into(),
+        listener: spaceterm_core::direct::ListenerState::Off,
         network_addresses: Err(DirectError::Transport),
         setup_generation: 0,
     }
@@ -788,8 +783,8 @@ fn setup_reoffers_a_replacement_before_starting_with_one_authentication() {
         assert_eq!(active.load(Ordering::SeqCst), 1);
         if observed.fetch_add(1, Ordering::SeqCst) == 0 {
             let mut replacement = discovery(false);
-            replacement.server = Some([4; 32]);
-            replacement.start_observation.as_mut().unwrap().server = [4; 32];
+            replacement.core = Some([4; 32]);
+            replacement.start_observation.as_mut().unwrap().core = [4; 32];
             *source.lock().unwrap() = serde_json::to_vec(&replacement).unwrap();
             true
         } else {
@@ -1049,12 +1044,12 @@ fn optional_custom_port_uses_the_requested_port_when_no_bind_is_configured() {
 }
 
 #[test]
-fn fresh_explicit_server_local_ip_uses_the_requested_interface_and_port() {
+fn fresh_explicit_core_local_ip_uses_the_requested_interface_and_port() {
     let mut remote = discovery(true);
     remote.ssh_local_address = Some("100.69.199.110".parse().unwrap());
     let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
     let mut current = status();
-    current.network_addresses = Ok(spaceterm_server::direct::NetworkAddresses {
+    current.network_addresses = Ok(spaceterm_core::direct::NetworkAddresses {
         available: vec![
             "100.69.199.110".parse().unwrap(),
             "192.168.1.41".parse().unwrap(),
@@ -1096,7 +1091,7 @@ fn fresh_explicit_nonlocal_ip_preserves_the_authenticated_bind_for_nat() {
     remote.ssh_local_address = Some("100.69.199.110".parse().unwrap());
     let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
     let mut current = status();
-    current.network_addresses = Ok(spaceterm_server::direct::NetworkAddresses {
+    current.network_addresses = Ok(spaceterm_core::direct::NetworkAddresses {
         available: vec![
             "100.69.199.110".parse().unwrap(),
             "192.168.1.41".parse().unwrap(),

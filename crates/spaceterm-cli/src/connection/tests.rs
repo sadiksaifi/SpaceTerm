@@ -1,9 +1,9 @@
 use super::*;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use connections::{Interaction, StoreKind, UnpairState};
-use spaceterm_server::direct::{
-    ComparisonCode, DeviceCredential, Enrollment, PairedDevice, PairingClaim, RevocationReceipt,
-    ServerPin,
+use spaceterm_core::direct::{
+    ComparisonCode, DeviceCredential, Enrollment, MachinePin, PairedDevice, PairingClaim,
+    RevocationReceipt,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -34,7 +34,7 @@ impl Fixture {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir(&root).unwrap();
-        let store = ConnectionStore::new(root.join("server/clients/cli"));
+        let store = ConnectionStore::new(root.join("core/clients/cli"));
         let interrupted = Arc::new(AtomicBool::new(false));
         Self {
             root,
@@ -57,10 +57,10 @@ impl Fixture {
             unavailable: false,
         }
     }
-    fn run(&mut self, command: &ConnectionCommand) -> CommandOutput {
+    fn run(&mut self, command: &MachineCommand) -> CommandOutput {
         self.run_with(command, global())
     }
-    fn run_with(&mut self, command: &ConnectionCommand, global: Global) -> CommandOutput {
+    fn run_with(&mut self, command: &MachineCommand, global: Global) -> CommandOutput {
         let provider = Provider {
             store: self.credentials.clone(),
             calls: AtomicUsize::new(0),
@@ -108,7 +108,7 @@ impl Drop for Fixture {
 }
 fn global() -> Global {
     Global {
-        server: None,
+        machine: None,
         agent: None,
         json: true,
         quiet: false,
@@ -117,10 +117,10 @@ fn global() -> Global {
         timeout: None,
     }
 }
-fn pin() -> ServerPin {
-    ServerPin {
+fn pin() -> MachinePin {
+    MachinePin {
         build: "spaceterm-development".into(),
-        server: [3; 32],
+        core: [3; 32],
         public_key: [4; 32],
         certificate: [5; 32],
     }
@@ -133,16 +133,16 @@ fn paired() -> PairedDevice {
     }
 }
 fn invitation() -> String {
-    let document = serde_json::json!({ "schema":1, "id":([2;32]), "endpoint":"quic://192.0.2.8:9231", "pin":pin(), "server_name":"Penguin Fixture", "token":([9;32]), "expires":2000000000u64, "valid_for_seconds":300 });
+    let document = serde_json::json!({ "schema":1, "id":([2;32]), "endpoint":"quic://192.0.2.8:9231", "pin":pin(), "machine_name":"Penguin Fixture", "token":([9;32]), "expires":2000000000u64, "valid_for_seconds":300 });
     format!(
         "spaceterm://pair/{}",
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&document).unwrap())
     )
 }
-fn add(name: &str) -> ConnectionCommand {
-    ConnectionCommand::Add {
+fn add(name: &str) -> MachineCommand {
+    MachineCommand::Add {
         name: Some(name.into()),
-        join: true,
+        trust: true,
         address: None,
     }
 }
@@ -258,7 +258,7 @@ impl PairingNetwork for Network {
         Ok(PairingClaim {
             id: enrollment.claim_id(),
             invitation_id: [2; 32],
-            server: pin().server,
+            core: pin().core,
             device_public_key: [8; 32],
             device_name: "Fixture CLI".into(),
             expires_at_unix_seconds: 2000000000,
@@ -298,7 +298,7 @@ impl PairingNetwork for Network {
             return Err(DirectError::Transport);
         }
         Ok(RevocationReceipt {
-            server: connection.paired.pin.server,
+            core: connection.paired.pin.core,
             operation: connection.route,
             target: connection.paired.pairing,
         })
@@ -348,9 +348,9 @@ fn connection_add_retries_the_same_claim_and_address_override_preserves_the_pin(
         .network
         .fail_submit_once
         .store(true, Ordering::Relaxed);
-    let command = ConnectionCommand::Add {
+    let command = MachineCommand::Add {
         name: Some("penguin".into()),
-        join: true,
+        trust: true,
         address: Some("Public.EXAMPLE:9443".into()),
     };
     let output = fixture.run(&command);
@@ -363,15 +363,12 @@ fn connection_add_retries_the_same_claim_and_address_override_preserves_the_pin(
     assert_eq!(fixture.io.events[0].data.code, "000000");
     let mut golden = output.envelope.clone();
     assert_eq!(
-        golden["data"]["connection"]["route"]
-            .as_str()
-            .unwrap()
-            .len(),
+        golden["data"]["machine"]["route"].as_str().unwrap().len(),
         67
     );
-    golden["data"]["connection"]["route"] = format!("id:{}", "ab".repeat(32)).into();
-    contract::golden::assert_golden("connection_add", &golden);
-    contract::golden::assert_golden("connection_add_comparison", &fixture.io.events[0]);
+    golden["data"]["machine"]["route"] = format!("id:{}", "ab".repeat(32)).into();
+    contract::golden::assert_golden("machine_add", &golden);
+    contract::golden::assert_golden("machine_add_comparison", &fixture.io.events[0]);
     let claims = fixture.network.submits.lock().unwrap();
     assert_eq!(claims.len(), 2);
     assert_eq!(claims[0], claims[1]);
@@ -431,7 +428,7 @@ fn interrupted_join_cancels_only_its_retained_claim_or_reports_unconfirmed() {
 fn remove_requires_the_exact_unexpired_record_then_keeps_offline_revocation_pending() {
     let mut fixture = Fixture::new();
     let saved = fixture.insert(1, "penguin");
-    let preview = fixture.run(&ConnectionCommand::Remove {
+    let preview = fixture.run(&MachineCommand::Remove {
         name: saved.name.clone(),
         confirm: None,
     });
@@ -449,7 +446,7 @@ fn remove_requires_the_exact_unexpired_record_then_keeps_offline_revocation_pend
         .network
         .fail_revocation
         .store(true, Ordering::Relaxed);
-    let removed = fixture.run(&ConnectionCommand::Remove {
+    let removed = fixture.run(&MachineCommand::Remove {
         name: saved.name.clone(),
         confirm: Some(token),
     });
@@ -465,9 +462,9 @@ fn remove_requires_the_exact_unexpired_record_then_keeps_offline_revocation_pend
             .contains_key(&saved.credential)
     );
     let attempts = fixture.network.revocations.lock().unwrap().len();
-    let listed = fixture.run(&ConnectionCommand::List);
+    let listed = fixture.run(&MachineCommand::List);
     assert_eq!(
-        listed.envelope["data"]["connections"][0]["unpair_pending"],
+        listed.envelope["data"]["machines"][0]["unpair_pending"],
         true
     );
     assert_eq!(
@@ -483,7 +480,7 @@ fn remove_requires_the_exact_unexpired_record_then_keeps_offline_revocation_pend
     let preview = transaction(&fixture.store)
         .preview_remove(&other.name, unix_now().unwrap())
         .unwrap();
-    let output = fixture.run(&ConnectionCommand::Remove {
+    let output = fixture.run(&MachineCommand::Remove {
         name: other.name,
         confirm: Some(format!("c1-{}", hex(&preview.token))),
     });
@@ -499,7 +496,7 @@ fn stale_and_expired_removal_tokens_change_nothing() {
     let preview = transaction(&fixture.store)
         .preview_remove(&saved.name, 1)
         .unwrap();
-    let output = fixture.run(&ConnectionCommand::Remove {
+    let output = fixture.run(&MachineCommand::Remove {
         name: saved.name.clone(),
         confirm: Some(format!("c1-{}", hex(&preview.token))),
     });
@@ -513,7 +510,7 @@ fn stale_and_expired_removal_tokens_change_nothing() {
             Ok(())
         })
         .unwrap();
-    let output = fixture.run(&ConnectionCommand::Remove {
+    let output = fixture.run(&MachineCommand::Remove {
         name: saved.name,
         confirm: Some(format!("c1-{}", hex(&preview.token))),
     });
@@ -526,8 +523,8 @@ fn stale_and_expired_removal_tokens_change_nothing() {
 #[test]
 fn list_never_constructs_a_credential_store_or_opens_a_connection() {
     for (kind, golden) in [
-        (StoreKind::Keychain, "connection_list_keychain"),
-        (StoreKind::SecretService, "connection_list_secret_service"),
+        (StoreKind::Keychain, "machine_list_keychain"),
+        (StoreKind::SecretService, "machine_list_secret_service"),
     ] {
         let mut fixture = Fixture::new();
         fixture.insert(1, "penguin");
@@ -551,12 +548,12 @@ fn list_never_constructs_a_credential_store_or_opens_a_connection() {
             network: &fixture.network,
             io: &mut fixture.io,
         }
-        .run(&ConnectionCommand::List);
+        .run(&MachineCommand::List);
         assert_eq!(output.exit, 0);
         assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
         assert!(fixture.network.submits.lock().unwrap().is_empty());
         assert!(fixture.network.revocations.lock().unwrap().is_empty());
-        assert_eq!(output.envelope["data"]["connections"][0]["name"], "penguin");
+        assert_eq!(output.envelope["data"]["machines"][0]["name"], "penguin");
         contract::golden::assert_golden(golden, &output.envelope);
     }
 }
@@ -621,29 +618,29 @@ fn no_store_and_locked_no_input_paths_have_bounded_errors_and_no_plaintext() {
 }
 impl Fixture {
     fn store_path(&self) -> PathBuf {
-        self.root.join("server/clients/cli/connections.json")
+        self.root.join("core/clients/cli/connections.json")
     }
 }
 
 #[test]
 fn invalid_usage_and_missing_consent_precede_every_effect_and_never_echo_input() {
     for command in [
-        ConnectionCommand::Add {
+        MachineCommand::Add {
             name: Some("local".into()),
-            join: true,
+            trust: true,
             address: None,
         },
-        ConnectionCommand::Add {
+        MachineCommand::Add {
             name: None,
-            join: true,
+            trust: true,
             address: Some("private-invalid-address/path".into()),
         },
-        ConnectionCommand::Add {
+        MachineCommand::Add {
             name: None,
-            join: false,
+            trust: false,
             address: None,
         },
-        ConnectionCommand::Remove {
+        MachineCommand::Remove {
             name: "penguin".into(),
             confirm: Some("private-invalid-token".into()),
         },
@@ -676,7 +673,7 @@ fn a_broken_comparison_pipe_cancels_the_unfinished_join_and_exits_silently() {
 }
 
 #[test]
-fn server_selection_is_local_without_state_and_remote_prefix_ambiguity_stays_in_data() {
+fn machine_selection_is_local_without_state_and_remote_prefix_ambiguity_stays_in_data() {
     let fixture = Fixture::new();
     assert_eq!(
         route::selected(Some("local"), Some("penguin")).unwrap(),
@@ -709,7 +706,7 @@ fn server_selection_is_local_without_state_and_remote_prefix_ambiguity_stays_in_
     assert!(json["data"].to_string().contains("private-first-label"));
     let selected = route::resolve("private-second-label", &fixture.store)
         .unwrap_or_else(|_| panic!("exact saved name"));
-    assert_eq!(selected.reference(&[0; 32]).id, hex(&pin().server));
+    assert_eq!(selected.reference(&[0; 32]).id, hex(&pin().core));
 }
 
 #[test]
@@ -719,12 +716,12 @@ fn confirmed_removal_has_the_frozen_envelope() {
     let preview = transaction(&fixture.store)
         .preview_remove(&connection.name, unix_now().unwrap())
         .unwrap();
-    let output = fixture.run(&ConnectionCommand::Remove {
+    let output = fixture.run(&MachineCommand::Remove {
         name: connection.name,
         confirm: Some(format!("c1-{}", hex(&preview.token))),
     });
     assert_eq!(output.exit, 0);
-    contract::golden::assert_golden("connection_remove", &output.envelope);
+    contract::golden::assert_golden("machine_remove", &output.envelope);
 }
 
 #[test]
@@ -774,7 +771,7 @@ fn connection_process_add() {
     let name = std::env::var("SPACETERM_TEST_CONNECTION_NAME").unwrap();
     let mut fixture = Fixture::new();
     let root = PathBuf::from(root);
-    fixture.store = ConnectionStore::new(root.join("server/clients/cli"));
+    fixture.store = ConnectionStore::new(root.join("core/clients/cli"));
     fixture.network.barrier = Some((root, name.clone()));
     let output = fixture.run(&add(&name));
     assert_eq!(output.exit, 0, "{}", output.envelope);
@@ -832,14 +829,9 @@ fn interruption_after_enrollment_cancels_before_publishing_the_saved_connection(
 #[test]
 fn rename_has_frozen_text_and_json_results_without_credential_access() {
     for (old, new, golden, exit) in [
-        ("penguin", "lab", "connection_rename", 0),
-        ("penguin", "other", "connection_rename_name_taken", 2),
-        (
-            "missing-private-name",
-            "lab",
-            "connection_rename_not_found",
-            4,
-        ),
+        ("penguin", "lab", "machine_rename", 0),
+        ("penguin", "other", "machine_rename_name_taken", 2),
+        ("missing-private-name", "lab", "machine_rename_not_found", 4),
     ] {
         let mut fixture = Fixture::new();
         let mut expected = fixture.insert(1, "penguin");
@@ -859,7 +851,7 @@ fn rename_has_frozen_text_and_json_results_without_credential_access() {
             network: &fixture.network,
             io: &mut fixture.io,
         }
-        .run(&ConnectionCommand::Rename {
+        .run(&MachineCommand::Rename {
             old: old.into(),
             new: new.into(),
         });
@@ -889,8 +881,8 @@ fn rename_has_frozen_text_and_json_results_without_credential_access() {
             assert!(stderr.is_empty());
             expected.name = "lab".into();
             assert_eq!(fixture.store.load().unwrap()[0], expected);
-            let listed = fixture.run(&ConnectionCommand::List);
-            assert_eq!(listed.envelope["data"]["connections"][0]["name"], "lab");
+            let listed = fixture.run(&MachineCommand::List);
+            assert_eq!(listed.envelope["data"]["machines"][0]["name"], "lab");
         } else {
             assert!(text.is_empty());
             assert_eq!(
@@ -899,7 +891,7 @@ fn rename_has_frozen_text_and_json_results_without_credential_access() {
                     b"error: Invalid arguments. See --help. (invalid_arguments)\nargument: <NEW>\n"
                         .as_slice()
                 } else {
-                    b"error: No Saved Connection matches. (not_found)\n".as_slice()
+                    b"error: No machine matches. (not_found)\n".as_slice()
                 }
             );
             assert_eq!(std::fs::read(fixture.store_path()).unwrap(), before);
@@ -921,7 +913,7 @@ fn renamed_pairing_keeps_its_identity_pin_and_valid_credential() {
         .unwrap()
         .public_key()
         .unwrap();
-    let output = fixture.run(&ConnectionCommand::Rename {
+    let output = fixture.run(&MachineCommand::Rename {
         old: "penguin".into(),
         new: "lab".into(),
     });
@@ -965,19 +957,19 @@ fn rename_rejects_invalid_names_remote_routes_and_interruption_before_effects() 
             "penguin",
             "lab",
             Global {
-                server: Some("remote".into()),
+                machine: Some("remote".into()),
                 ..global()
             },
             false,
             2,
-            Some("--server"),
+            Some("--machine"),
         ),
         ("penguin", "lab", global(), true, 130, None),
     ] {
         let mut fixture = Fixture::new();
         fixture.io.interrupted.store(interrupted, Ordering::Relaxed);
         let output = fixture.run_with(
-            &ConnectionCommand::Rename {
+            &MachineCommand::Rename {
                 old: old.into(),
                 new: new.into(),
             },
@@ -996,15 +988,15 @@ fn rename_rejects_invalid_names_remote_routes_and_interruption_before_effects() 
 #[test]
 fn contended_connection_commands_time_out_without_late_store_writes() {
     for command in [
-        ConnectionCommand::Rename {
+        MachineCommand::Rename {
             old: "penguin".into(),
             new: "lab".into(),
         },
-        ConnectionCommand::Remove {
+        MachineCommand::Remove {
             name: "penguin".into(),
             confirm: None,
         },
-        ConnectionCommand::Remove {
+        MachineCommand::Remove {
             name: "penguin".into(),
             confirm: Some(String::new()),
         },
@@ -1013,14 +1005,14 @@ fn contended_connection_commands_time_out_without_late_store_writes() {
         let mut fixture = Fixture::new();
         fixture.insert(1, "penguin");
         let command = match command {
-            ConnectionCommand::Remove {
+            MachineCommand::Remove {
                 name,
                 confirm: Some(_),
             } => {
                 let preview = transaction(&fixture.store)
                     .preview_remove(&name, unix_now().unwrap())
                     .unwrap();
-                ConnectionCommand::Remove {
+                MachineCommand::Remove {
                     name,
                     confirm: Some(format!("c1-{}", hex(&preview.token))),
                 }
@@ -1029,8 +1021,7 @@ fn contended_connection_commands_time_out_without_late_store_writes() {
         };
         let before = std::fs::read(fixture.store_path()).unwrap();
         let directory =
-            spaceterm_server::Directory::open(fixture.store_path().parent().unwrap(), false)
-                .unwrap();
+            spaceterm_core::Directory::open(fixture.store_path().parent().unwrap(), false).unwrap();
         let lock = directory.lock("connections.lock", false).unwrap();
         let holder = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(2));
@@ -1065,7 +1056,7 @@ fn contended_rename_observes_cancellation_without_a_late_write() {
     fixture.insert(1, "penguin");
     let before = std::fs::read(fixture.store_path()).unwrap();
     let directory =
-        spaceterm_server::Directory::open(fixture.store_path().parent().unwrap(), false).unwrap();
+        spaceterm_core::Directory::open(fixture.store_path().parent().unwrap(), false).unwrap();
     let lock = directory.lock("connections.lock", false).unwrap();
     let interrupted = fixture.io.interrupted.clone();
     let holder = std::thread::spawn(move || {
@@ -1074,7 +1065,7 @@ fn contended_rename_observes_cancellation_without_a_late_write() {
         std::thread::sleep(Duration::from_millis(400));
         drop(lock);
     });
-    let output = fixture.run(&ConnectionCommand::Rename {
+    let output = fixture.run(&MachineCommand::Rename {
         old: "penguin".into(),
         new: "lab".into(),
     });
@@ -1124,7 +1115,7 @@ impl CredentialProvider for ChangingProvider {
 fn using_provider(
     fixture: &mut Fixture,
     provider: &dyn CredentialProvider,
-    command: &ConnectionCommand,
+    command: &MachineCommand,
 ) -> CommandOutput {
     Connections {
         identity: "spaceterm-development",
@@ -1162,7 +1153,7 @@ fn file_pairing_still_reads_and_revokes_after_native_becomes_available() {
     let removed = using_provider(
         &mut fixture,
         &provider,
-        &ConnectionCommand::Remove {
+        &MachineCommand::Remove {
             name: saved.name.clone(),
             confirm: Some(format!("c1-{}", hex(&preview.token))),
         },
@@ -1198,7 +1189,7 @@ fn native_pairing_never_reads_or_removes_a_file_secret_when_native_disappears() 
     let removed = using_provider(
         &mut fixture,
         &provider,
-        &ConnectionCommand::Remove {
+        &MachineCommand::Remove {
             name: saved.name.clone(),
             confirm: Some(format!("c1-{}", hex(&preview.token))),
         },

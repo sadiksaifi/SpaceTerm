@@ -4,12 +4,12 @@ use crate::{
     ConnectionStore, CredentialError, Interaction, PendingEnrollment, PendingRevocation,
     SavedConnection, StoreError, UnpairState,
 };
-use spaceterm_server::Lock;
-use spaceterm_server::direct::{
+use spaceterm_core::Lock;
+use spaceterm_core::direct::{
     self, ComparisonCode, DeviceCredential, DirectError, Enrollment, Invitation, PairedDevice,
     RevocationReceipt,
 };
-use spaceterm_server::pane::control::ClientName;
+use spaceterm_core::pane::control::ClientName;
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,7 +117,7 @@ impl<'a> PairingClient<'a> {
             route,
             name,
             endpoint: invitation.endpoint().to_owned(),
-            pin: invitation.server_pin().clone(),
+            pin: invitation.machine_pin().clone(),
             claim: enrollment.claim_id(),
             credential: credential_key,
             credential_store: credentials.kind(),
@@ -271,7 +271,7 @@ impl<'a> PairingClient<'a> {
         if !record.confirmed {
             let credential = self.read_credential(&saved.credential, saved.credential_store)?;
             let receipt = self.network.revoke(saved, &credential, deadline)?;
-            if receipt.server != saved.paired.pin.server
+            if receipt.core != saved.paired.pin.core
                 || receipt.operation != saved.route
                 || receipt.target != saved.paired.pairing
             {

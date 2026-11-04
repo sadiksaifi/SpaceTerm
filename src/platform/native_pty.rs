@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use spaceterm_server::diagnostics::TerminalCounters;
-use spaceterm_server::pane::LineMode;
+use spaceterm_core::diagnostics::TerminalCounters;
+use spaceterm_core::pane::LineMode;
 use thiserror::Error;
 
 use super::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
@@ -854,7 +854,7 @@ mod tests {
 
         assert_eq!(
             counters.snapshot(),
-            spaceterm_server::diagnostics::TerminalCounterSnapshot {
+            spaceterm_core::diagnostics::TerminalCounterSnapshot {
                 line_mode_reads: 3,
                 ..Default::default()
             }

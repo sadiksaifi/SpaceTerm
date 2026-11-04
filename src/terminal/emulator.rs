@@ -831,7 +831,7 @@ pub(crate) struct TerminalEmulator {
     prompt_redraw: PromptRedraw,
     history: history::HistoryTracker,
     /// Owner-marked markers a pending run follows, with where each was observed.
-    run_observations: Vec<spaceterm_server::pane::run::Observation>,
+    run_observations: Vec<spaceterm_core::pane::run::Observation>,
     integration_expected: bool,
     applied_appearance: TerminalAppearanceUpdate,
     reported_appearance: Rc<Cell<Appearance>>,

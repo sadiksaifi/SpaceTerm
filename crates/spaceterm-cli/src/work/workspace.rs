@@ -74,13 +74,13 @@ pub fn kill(
     snapshot: &Snapshot,
     args: &ScopeArgs,
     current: Option<&Current>,
-) -> Result<(Resolved, spaceterm_server::hierarchy::CloseTarget), TargetError> {
+) -> Result<(Resolved, spaceterm_core::hierarchy::CloseTarget), TargetError> {
     let target = scope::resolve(snapshot, args, current, Want::Workspace, Effect::Confirmed)?;
     let workspace = target.workspace.ok_or(TargetError::NotFound {
         level: crate::contract::Level::Workspace,
     })?;
     Ok((
         target,
-        spaceterm_server::hierarchy::CloseTarget::KillWorkspace { workspace },
+        spaceterm_core::hierarchy::CloseTarget::KillWorkspace { workspace },
     ))
 }

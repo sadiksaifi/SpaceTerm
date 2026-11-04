@@ -251,7 +251,7 @@ impl SshCommandContext {
             executable,
             configuration,
             destination,
-            ValidatedRemoteShellCommand::server_script("exec /bin/cat >/dev/null")?,
+            ValidatedRemoteShellCommand::core_script("exec /bin/cat >/dev/null")?,
         )?;
         spec.arguments.splice(
             0..0,
@@ -414,7 +414,7 @@ impl SshCommandSpec {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum RemoteShellCommandError {
-    #[error("the remote server command is too long or contains NUL")]
+    #[error("the remote SpaceTerm Core command is too long or contains NUL")]
     CommandTooLong,
     #[error("the temporary SSH configuration path is unsafe")]
     UnsafeConfiguration,
@@ -425,7 +425,7 @@ pub(crate) struct ValidatedRemoteShellCommand {
 }
 
 impl ValidatedRemoteShellCommand {
-    pub(crate) fn server_script(script: &str) -> Result<Self, RemoteShellCommandError> {
+    pub(crate) fn core_script(script: &str) -> Result<Self, RemoteShellCommandError> {
         if script.len() > 64 * 1024 || script.contains('\0') {
             return Err(RemoteShellCommandError::CommandTooLong);
         }
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn setup_should_use_user_configuration_without_reusing_or_creating_a_master() {
         let destination = SshDestination::new("jump-alias".into()).unwrap();
-        let command = ValidatedRemoteShellCommand::server_script("exec server").unwrap();
+        let command = ValidatedRemoteShellCommand::core_script("exec server").unwrap();
         let spec = SshCommandContext::setup(
             executable(),
             Path::new("/fixture/config"),
@@ -728,7 +728,7 @@ mod tests {
             "/fixture/config;command",
             "/fixture/config%h",
         ] {
-            let command = ValidatedRemoteShellCommand::server_script("exec server").unwrap();
+            let command = ValidatedRemoteShellCommand::core_script("exec server").unwrap();
             assert!(
                 SshCommandContext::setup(
                     executable(),
@@ -739,7 +739,7 @@ mod tests {
                 .is_err()
             );
         }
-        let command = ValidatedRemoteShellCommand::server_script("exec server").unwrap();
+        let command = ValidatedRemoteShellCommand::core_script("exec server").unwrap();
         assert!(
             SshCommandContext::setup(
                 OpenSshExecutable::new("/fixture/ssh executable".into()).unwrap(),

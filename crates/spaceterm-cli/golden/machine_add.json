@@ -1,0 +1,18 @@
+{
+  "command": "machine.add",
+  "data": {
+    "machine": {
+      "endpoint": "quic://public.example:9443",
+      "fingerprint": "9F4FB68F 3E1DAC82 202F9AA5 81CE0BBF 1F765DF0 E9AC3C8C 57E20F68 5ABAB8ED",
+      "id": "0303030303030303030303030303030303030303030303030303030303030303",
+      "name": "penguin",
+      "route": "id:abababababababababababababababababababababababababababababababab",
+      "store": "keychain"
+    }
+  },
+  "error": null,
+  "machine": null,
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": []
+}

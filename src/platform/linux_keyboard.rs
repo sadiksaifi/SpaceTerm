@@ -541,7 +541,7 @@ mod tests {
         let records = TestTerminalSessionRecords::default();
         let factory: Rc<dyn TerminalSessionFactory> =
             Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let factory = WorkspaceTerminalSessionFactory::new_server(factory);
+        let factory = WorkspaceTerminalSessionFactory::new_core(factory);
         let (pane, cx) = cx.add_window_view(|window, cx| {
             crate::ui::TerminalPane::with_adapters(
                 factory, LinuxTerminalKeyInputAdapterFactory::new().create(),
@@ -969,7 +969,7 @@ mod native_compose_tests {
             let first_command = first_command.clone();
             move |cx| {
                 crate::ui::init(cx).unwrap();
-                let factory = WorkspaceTerminalSessionFactory::new_server(
+                let factory = WorkspaceTerminalSessionFactory::new_core(
                     Rc::new(TestTerminalSessionFactory::new(records.clone())));
                 let primary = cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let pane = cx.new(|cx| crate::ui::TerminalPane::with_adapters(

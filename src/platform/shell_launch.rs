@@ -47,7 +47,7 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
 /// always removed, so a shell started outside such a Session never names one.
 pub const SESSION_ENVIRONMENT: [&str; 5] = [
     "SPACETERM_IDENTITY",
-    "SPACETERM_SERVER_ID",
+    "SPACETERM_MACHINE_ID",
     "SPACETERM_PANE",
     "SPACETERM_SESSION",
     "SPACETERM_CLI",
@@ -59,7 +59,7 @@ pub const SESSION_ENVIRONMENT: [&str; 5] = [
 pub struct SessionEnvironment {
     /// The server's build identity, such as `spaceterm`.
     pub identity: String,
-    pub server: [u8; 32],
+    pub core: [u8; 32],
     pub pane: [u8; 32],
     pub session: [u8; 32],
     /// The server's own `spaceterm` executable. Shell integration puts its directory first on
@@ -217,10 +217,10 @@ impl PreparedShellLaunch {
 
     /// Names the server, Pane and Session this shell runs in, and the server's own CLI.
     pub fn with_session_environment(self, session: &SessionEnvironment) -> Self {
-        let [identity, server, pane, id, cli] = SESSION_ENVIRONMENT;
+        let [identity, core, pane, id, cli] = SESSION_ENVIRONMENT;
         let mut launch = self
             .with_environment_value(identity, &session.identity)
-            .with_environment_value(server, &hex(&session.server))
+            .with_environment_value(core, &hex(&session.core))
             .with_environment_value(pane, &hex(&session.pane))
             .with_environment_value(id, &hex(&session.session));
         launch
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn a_server_session_names_its_place_and_no_shell_inherits_another_sessions() {
+    fn a_machine_session_names_its_place_and_no_shell_inherits_another_sessions() {
         let resources = crate::terminal::testing::ShellResourcesFixture::new();
         let planner =
             ShellLaunchPlanner::for_test("/bin/zsh".into(), resources.path().to_path_buf());
@@ -547,7 +547,7 @@ mod tests {
         }
         let session = SessionEnvironment {
             identity: "spaceterm-development".into(),
-            server: [0xab; 32],
+            core: [0xab; 32],
             pane: [1; 32],
             session: [2; 32],
             cli: "/opt/space term/bin/spaceterm".into(),
@@ -557,8 +557,16 @@ mod tests {
             .local(&std::env::temp_dir())
             .unwrap()
             .with_session_environment(&session);
+        // The names are the CLI's contract, spelled out here rather than read from the constant.
         assert_eq!(
-            SESSION_ENVIRONMENT.map(|name| env_value(&launch, name).unwrap().to_owned()),
+            [
+                "SPACETERM_IDENTITY",
+                "SPACETERM_MACHINE_ID",
+                "SPACETERM_PANE",
+                "SPACETERM_SESSION",
+                "SPACETERM_CLI",
+            ]
+            .map(|name| env_value(&launch, name).unwrap().to_owned()),
             [
                 "spaceterm-development".into(),
                 "ab".repeat(32).into(),

@@ -369,13 +369,13 @@ install_linux() {
 # Checksums arrive over HTTPS before any downloaded executable runs. The retained CLI then
 # authenticates the original Ed25519 signature and every resource before publishing a runtime.
 # [Signing] Add the Developer ID requirement check with the signing and notarization rollout.
-# The identity's server executable within a package, in this machine's layout. A macOS package
+# The identity's SpaceTerm Core executable within a package, in this machine's layout. A macOS package
 # is an app-like bundle named for its identity, so System Permissions follow the bundle.
-server_executable() {
+core_executable() {
     case "$(uname -s):$headless_identity" in
-        Darwin:spaceterm) printf '%s' 'SpaceTerm.app/Contents/MacOS/spaceterm' ;;
-        Darwin:spaceterm-preflight) printf '%s' 'SpaceTerm Preflight.app/Contents/MacOS/spaceterm' ;;
-        Darwin:spaceterm-development) printf '%s' 'SpaceTerm Development.app/Contents/MacOS/spaceterm' ;;
+        Darwin:spaceterm) printf '%s' 'SpaceTerm Core.app/Contents/MacOS/spaceterm' ;;
+        Darwin:spaceterm-preflight) printf '%s' 'SpaceTerm Core Preflight.app/Contents/MacOS/spaceterm' ;;
+        Darwin:spaceterm-development) printf '%s' 'SpaceTerm Core Development.app/Contents/MacOS/spaceterm' ;;
         *) printf '%s' bin/spaceterm ;;
     esac
 }
@@ -385,7 +385,7 @@ retain_headless() {
     # Refuse links and parent paths before extraction. The Rust verifier enforces the complete
     # signed layout before retention; tar never writes outside this private staging directory.
     tar -tzf "$headless_archive" > "$work/members" 2>/dev/null || die "could not read the CLI archive"
-    if grep -Ev '^server(/|$)' "$work/members" >/dev/null \
+    if grep -Ev '^core(/|$)' "$work/members" >/dev/null \
         || grep -E '(^|/)\.\.?(/|$)' "$work/members" >/dev/null; then
         die "the CLI archive layout is invalid"
     fi
@@ -394,22 +394,22 @@ retain_headless() {
         die "the CLI archive must contain only files and directories"
     fi
     tar -xzf "$headless_archive" -C "$work/runtime" 2>/dev/null || die "could not unpack the CLI archive"
-    runtime="$work/runtime/server"
-    executable="$runtime/$(server_executable)"
+    runtime="$work/runtime/core"
+    executable="$runtime/$(core_executable)"
     [ -x "$executable" ] || die "the CLI executable is missing"
-    compiled_identity="$("$executable" server provision build-info | sed -n 's/.*"identity":"\([a-z-]*\)".*/\1/p')"
+    compiled_identity="$("$executable" internal build-info | sed -n 's/.*"identity":"\([a-z-]*\)".*/\1/p')"
     [ "$compiled_identity" = "$headless_identity" ] || die "the CLI archive has a different application identity"
     cp "$headless_archive" "$runtime/artifact.tar.gz" 2>/dev/null || die "could not stage the CLI archive"
     cp "$headless_signature" "$runtime/artifact.sig" 2>/dev/null || die "could not stage the CLI signature"
-    "$executable" server provision retain "$runtime" \
+    "$executable" internal retain "$runtime" \
         || die "the signed CLI installation could not be retained"
 }
 
 headless_uninstall() {
-    root="$HOME/.local/share/$headless_identity/server"
+    root="$HOME/.local/share/$headless_identity/core"
     launcher="$HOME/.local/bin/$headless_identity"
     runtime=""
-    relative="$(server_executable)"
+    relative="$(core_executable)"
     if [ -L "$launcher" ]; then
         linked="$(readlink "$launcher")"
         case "$linked" in
@@ -428,7 +428,7 @@ headless_uninstall() {
     digest="$(basename "$runtime")"
     [ "${#digest}" -eq 64 ] || die "the CLI launcher is unmanaged"
     case "$digest" in *[!0-9a-f]*) die "the CLI launcher is unmanaged" ;; esac
-    for directory in "$HOME/.local" "$HOME/.local/share" "${root%/server}" "$root" "$root/installations" "$runtime"; do
+    for directory in "$HOME/.local" "$HOME/.local/share" "${root%/core}" "$root" "$root/installations" "$runtime"; do
         [ ! -L "$directory" ] || die "the CLI installation has unsafe links"
     done
     executable="$runtime"
@@ -438,13 +438,13 @@ headless_uninstall() {
         [ ! -L "$executable" ] || die "the CLI installation has unsafe links"
         case "$rest" in */*) rest="${rest#*/}" ;; *) rest="" ;; esac
     done
-    [ -f "$executable" ] && [ -x "$executable" ] || die "the installed server executable is missing"
+    [ -f "$executable" ] && [ -x "$executable" ] || die "the installed SpaceTerm Core executable is missing"
     if [ -n "$headless_confirm" ]; then
-        "$executable" server provision uninstall --confirm "$headless_confirm"
+        "$executable" uninstall --confirm "$headless_confirm"
         return
     fi
     status=0
-    preview="$("$executable" server provision uninstall)" || status=$?
+    preview="$("$executable" uninstall)" || status=$?
     printf '%s\n' "$preview"
     case "$status" in
         0) return ;;
@@ -454,24 +454,24 @@ headless_uninstall() {
     token="$(printf '%s\n' "$preview" | sed -n 's/.*--confirm \(c1-[0-9a-f]\{64\}\).*/\1/p')"
     [ -n "$token" ] || die "the uninstall preview has no confirmation token"
     if [ -t 0 ]; then
-        printf 'Uninstall this server? [y/N] ' >&2
+        printf 'Uninstall SpaceTerm Core? [y/N] ' >&2
         IFS= read -r answer
     elif ( : </dev/tty ) 2>/dev/null; then
-        printf 'Uninstall this server? [y/N] ' >/dev/tty
+        printf 'Uninstall SpaceTerm Core? [y/N] ' >/dev/tty
         IFS= read -r answer </dev/tty
     else
         die "review the preview, then run this installer with --headless --uninstall --confirm $token"
     fi
     case "$answer" in
-        y|Y|yes|YES) "$executable" server provision uninstall --confirm "$token" ;;
+        y|Y|yes|YES) "$executable" uninstall --confirm "$token" ;;
         *) die "uninstall cancelled" ;;
     esac
 }
 
 install_headless() {
     # Installer steps always act on this account, independently of CLI work preferences.
-    SPACETERM_SERVER=local
-    export SPACETERM_SERVER
+    SPACETERM_MACHINE=local
+    export SPACETERM_MACHINE
     headless_archive=""
     headless_signature=""
     headless_identity=spaceterm
@@ -530,7 +530,7 @@ install_headless() {
         [ "$actual_signature" = "$expected_signature" ] || die "the CLI signature differs from the published checksum"
     fi
     retain_headless
-    step "Installed the $headless_identity CLI. Run $headless_identity server setup to configure the server."
+    step "Installed the $headless_identity CLI. Run $headless_identity setup to set up SpaceTerm Core."
 }
 
 trap cleanup EXIT

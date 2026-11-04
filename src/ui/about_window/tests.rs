@@ -150,13 +150,13 @@ fn client_decorated_about_offers_only_close_at_the_desktop_edge_inset(cx: &mut T
     install(cx);
     let opened = open(cx);
     let cx = &mut VisualTestContext::from_window(opened.into(), cx);
-    let server_size = cx.debug_bounds("about-window-surface").unwrap().size;
+    let core_size = cx.debug_bounds("about-window-surface").unwrap().size;
     // A client frame grows the window by its shadow inset and keeps the surface's size.
     let inset = px(crate::platform::window_chrome::CLIENT_FRAME_INSET * 2.0);
     cx.simulate_decorations(gpui::Decorations::Client {
         tiling: gpui::Tiling::default(),
     });
-    cx.simulate_resize(size(server_size.width + inset, server_size.height + inset));
+    cx.simulate_resize(size(core_size.width + inset, core_size.height + inset));
     cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
         left: [None; 3],
         right: [
@@ -168,7 +168,7 @@ fn client_decorated_about_offers_only_close_at_the_desktop_edge_inset(cx: &mut T
     cx.run_until_parked();
 
     let surface = cx.debug_bounds("about-window-surface").unwrap();
-    assert_eq!(surface.size, server_size);
+    assert_eq!(surface.size, core_size);
     let close = cx.debug_bounds("window-close").expect("About offers Close");
     let edge_margin = px(spaceterm_ui::DesktopWindowStyle::Adwaita
         .control_metrics()

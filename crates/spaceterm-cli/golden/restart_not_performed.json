@@ -1,0 +1,29 @@
+{
+  "command": "restart",
+  "data": {
+    "observed": "restarted",
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "action": "restart",
+      "boot": "2222222222222222222222222222222222222222222222222222222222222222",
+      "code": "operation_failed",
+      "operation": "0123456789abcdef0123456789abcdef",
+      "state": "not_performed"
+    }
+  },
+  "error": {
+    "class": "failed",
+    "code": "operation_failed",
+    "details": {},
+    "message": "SpaceTerm Core did not perform the operation.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

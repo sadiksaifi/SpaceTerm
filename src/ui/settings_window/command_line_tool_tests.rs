@@ -8,15 +8,15 @@ use super::{ACTION_SELECTOR, ToolCheck};
 use crate::appearance::Appearance;
 use crate::command_line_tool::testing::{DIRECTORY, RecordingViewer, ScriptedFiles, tool};
 use crate::command_line_tool::{Launcher, LinkOutcome, ToolAction, ToolFailure};
+use crate::machine_connection::CoreError;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::server_connection::ServerError;
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
-use crate::ui::settings_window::servers::testing::ScriptedServer;
-use crate::ui::settings_window::servers::{LocalServerControl, OfferedServer};
+use crate::ui::settings_window::machines::testing::ScriptedCore;
+use crate::ui::settings_window::machines::{LocalCoreControl, OfferedMachine};
 use crate::ui::sidebar_window::form::CaptionTone;
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
@@ -51,14 +51,14 @@ fn open_with_viewer(
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
-    let server = ScriptedServer::new(Err(ServerError::NotSetUp));
+    let core = ScriptedCore::new(Err(CoreError::NotSetUp));
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
             crate::theme_registry::testing::offline(),
-            Some(OfferedServer {
-                connection: Ok(server as Arc<dyn LocalServerControl>),
+            Some(OfferedMachine {
+                connection: Ok(core as Arc<dyn LocalCoreControl>),
                 service: None,
                 update: None,
                 command_line_tool,
@@ -94,7 +94,7 @@ fn presentation(
 }
 
 #[gpui::test]
-fn opening_servers_checks_the_command_and_install_then_shows_it(cx: &mut TestAppContext) {
+fn opening_machines_checks_the_command_and_install_then_shows_it(cx: &mut TestAppContext) {
     let (fixture, window, cx) = open_settings(Some(Launcher::Missing), cx);
     assert_eq!(
         window.read_with(cx, |settings, _| settings
@@ -164,7 +164,7 @@ fn a_file_that_appears_during_install_is_kept_and_read_again(cx: &mut TestAppCon
 fn a_refused_install_says_why_and_keeps_offering_install(cx: &mut TestAppContext) {
     let (fixture, window, cx) = open_settings(Some(Launcher::Missing), cx);
     click(NAVIGATION_SELECTOR, cx);
-    *fixture.files.link.lock().unwrap() = Err(ToolFailure::NoServerPackage);
+    *fixture.files.link.lock().unwrap() = Err(ToolFailure::NoCorePackage);
     click(ACTION_SELECTOR, cx);
     let refused = presentation(&window, cx);
     assert_eq!(
@@ -177,7 +177,7 @@ fn a_refused_install_says_why_and_keeps_offering_install(cx: &mut TestAppContext
             "Not installed",
             Some((ToolAction::Install, "Install")),
             Some((
-                "This SpaceTerm build doesn\u{2019}t include a server package.".to_owned(),
+                "This SpaceTerm build doesn\u{2019}t include a SpaceTerm Core package.".to_owned(),
                 CaptionTone::Error
             ))
         )
@@ -228,9 +228,9 @@ fn a_finished_service_operation_reads_the_command_again(cx: &mut TestAppContext)
     // An update couldn't repoint the launcher, which stays on the earlier server build.
     *fixture.files.launcher.lock().unwrap() = Ok(Launcher::Outdated);
     cx.update(|_, cx| {
-        crate::ui::settings_window::local_operations::LocalServerOperations::changed_elsewhere(
+        crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
             cx,
-            crate::server_connection::service::ServiceStatus::default(),
+            crate::machine_connection::service::ServiceStatus::default(),
         );
     });
     cx.run_until_parked();

@@ -1,25 +1,25 @@
 //! Account-local startup composition for the desktop host.
 //!
 //! The UI host runs this operation off its event thread and presents the typed outcome.
-use spaceterm_server::{LocalStartup, ServerError, StartupOutcome, service::Service};
+use spaceterm_core::{CoreError, LocalStartup, StartupOutcome, service::Service};
 use std::path::{Path, PathBuf};
 
 /// Prepare or reuse the account service. Only explicit Start reverses deliberate Stop.
 /// Existing service policy bypasses candidate discovery.
-pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, ServerError> {
+pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
     if owned_foreground() {
         if cancelled() {
             return Ok(StartupOutcome::Cancelled);
         }
-        let server = spaceterm_server::ServerConnection::for_identity(identity)?;
-        let status = server.refresh_cancellable(&cancelled)?;
-        return Ok(StartupOutcome::Ready { server, status });
+        let core = spaceterm_core::MachineConnection::for_identity(identity)?;
+        let status = core.refresh_cancellable(&cancelled)?;
+        return Ok(StartupOutcome::Ready { core, status });
     }
     LocalStartup::for_identity(identity)?.run(
         || {
             discover_candidate()
-                .map_err(ServerError::from)
+                .map_err(CoreError::from)
                 .and_then(|candidate| candidate.stage().map(|installation| installation.directory))
         },
         cancelled,
@@ -37,14 +37,14 @@ pub(crate) fn owned_foreground() -> bool {
 
 /// Called before graphical startup, including Workbench and update previews.
 /// LaunchServices need not make the client our child: the private owner connection controls exit.
-pub(crate) fn supervise_development_client() -> Result<(), ServerError> {
+pub(crate) fn supervise_development_client() -> Result<(), CoreError> {
     if !owned_foreground() {
         return Ok(());
     }
     let endpoint =
-        std::env::var_os("SPACETERM_DEVELOPMENT_OWNER_SOCKET").ok_or(ServerError::StartupFailed)?;
-    let mut owner = std::os::unix::net::UnixStream::connect(endpoint)
-        .map_err(|_| ServerError::StartupFailed)?;
+        std::env::var_os("SPACETERM_DEVELOPMENT_OWNER_SOCKET").ok_or(CoreError::StartupFailed)?;
+    let mut owner =
+        std::os::unix::net::UnixStream::connect(endpoint).map_err(|_| CoreError::StartupFailed)?;
     std::thread::spawn(move || {
         use std::io::Read;
         let _ = owner.read(&mut [0]);
@@ -56,7 +56,7 @@ pub(crate) fn supervise_development_client() -> Result<(), ServerError> {
 /// Authenticated candidate declarations and the exact source pair to revalidate during staging.
 #[derive(Clone, Debug)]
 pub struct Candidate {
-    metadata: spaceterm_server::service::CandidateMetadata,
+    metadata: spaceterm_core::service::CandidateMetadata,
     digest: String,
     paths: ArtifactPaths,
 }
@@ -73,7 +73,7 @@ impl Candidate {
     }
     pub fn is_approved(
         &self,
-        installation: &spaceterm_server::service::RetainedInstallation,
+        installation: &spaceterm_core::service::RetainedInstallation,
     ) -> bool {
         installation
             .directory
@@ -83,13 +83,13 @@ impl Candidate {
     }
 
     /// Revalidate and retain this exact candidate. No server starts and no policy changes.
-    pub fn stage(&self) -> Result<spaceterm_server::service::RetainedInstallation, ServerError> {
+    pub fn stage(&self) -> Result<spaceterm_core::service::RetainedInstallation, CoreError> {
         let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
         Service::for_identity(identity)?.provision_candidate(
             &self.paths.archive,
             &self.paths.signature,
             &self.digest,
-            spaceterm_server::protocol::MAJOR,
+            spaceterm_core::protocol::MAJOR,
         )
     }
 }
@@ -100,10 +100,10 @@ pub enum CandidateError {
     /// This build includes no candidate: no pinned digest or no artifact pair to read.
     Unavailable,
     ClientRestartRequired,
-    Verification(ServerError),
+    Verification(CoreError),
 }
 
-impl From<CandidateError> for ServerError {
+impl From<CandidateError> for CoreError {
     /// A missing candidate stays distinct from one that failed verification.
     fn from(error: CandidateError) -> Self {
         match error {
@@ -136,11 +136,11 @@ pub fn discover_candidate() -> Result<Candidate, CandidateError> {
                 &paths.archive,
                 &paths.signature,
                 digest,
-                spaceterm_server::protocol::MAJOR,
+                spaceterm_core::protocol::MAJOR,
             )
         })
         .map_err(|error| match error {
-            ServerError::CandidateChanged => CandidateError::ClientRestartRequired,
+            CoreError::CandidateChanged => CandidateError::ClientRestartRequired,
             other => CandidateError::Verification(other),
         })?;
     Ok(Candidate {
@@ -180,9 +180,9 @@ fn artifact_paths(
             .and_then(Path::parent)
             .ok_or(CandidateError::Unavailable)?;
         let resources = if macos {
-            root.join("Resources/server-artifact")
+            root.join("Resources/core-artifact")
         } else {
-            root.join("share/spaceterm/server-artifact")
+            root.join("share/spaceterm/core-artifact")
         };
         return Ok(ArtifactPaths {
             archive: resources.join("artifact.tar.gz"),
@@ -212,10 +212,9 @@ mod tests {
         assert_eq!(
             (paths.archive, paths.signature),
             (
-                "/Applications/SpaceTerm.app/Contents/Resources/server-artifact/artifact.tar.gz"
+                "/Applications/SpaceTerm.app/Contents/Resources/core-artifact/artifact.tar.gz"
                     .into(),
-                "/Applications/SpaceTerm.app/Contents/Resources/server-artifact/artifact.sig"
-                    .into(),
+                "/Applications/SpaceTerm.app/Contents/Resources/core-artifact/artifact.sig".into(),
             )
         );
     }
@@ -279,25 +278,23 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_unverified_candidates_stay_distinct_server_errors() {
+    fn missing_and_unverified_candidates_stay_distinct_core_errors() {
         assert_eq!(
-            ServerError::from(CandidateError::Unavailable),
-            ServerError::CandidateMissing
+            CoreError::from(CandidateError::Unavailable),
+            CoreError::CandidateMissing
         );
         assert_eq!(
-            ServerError::from(CandidateError::Verification(
-                ServerError::RuntimeUnavailable
-            )),
-            ServerError::RuntimeUnavailable
+            CoreError::from(CandidateError::Verification(CoreError::RuntimeUnavailable)),
+            CoreError::RuntimeUnavailable
         );
         assert_eq!(
-            ServerError::from(CandidateError::ClientRestartRequired),
-            ServerError::CandidateChanged
+            CoreError::from(CandidateError::ClientRestartRequired),
+            CoreError::CandidateChanged
         );
     }
 
     #[test]
-    fn linux_package_uses_its_independent_server_archive() {
+    fn linux_package_uses_its_independent_core_archive() {
         let paths = artifact_paths(
             true,
             false,
@@ -309,8 +306,8 @@ mod tests {
         assert_eq!(
             (paths.archive, paths.signature),
             (
-                "/opt/spaceterm/share/spaceterm/server-artifact/artifact.tar.gz".into(),
-                "/opt/spaceterm/share/spaceterm/server-artifact/artifact.sig".into(),
+                "/opt/spaceterm/share/spaceterm/core-artifact/artifact.tar.gz".into(),
+                "/opt/spaceterm/share/spaceterm/core-artifact/artifact.sig".into(),
             )
         );
     }

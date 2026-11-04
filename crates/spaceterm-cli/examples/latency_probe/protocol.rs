@@ -1,19 +1,19 @@
 //! Every protocol call the latency probe makes. When the client protocol changes, port this
 //! module and keep its public items: [`Owner`], [`Claim`], [`Route`] and [`EchoPane`].
 use spaceterm::runtime::PhysicalKey;
-use spaceterm_server::attachments::Attachment;
-use spaceterm_server::connection::link::{ChannelEvent, ChannelHandle, LinkEvent, ServerLink};
-use spaceterm_server::direct::{
+use spaceterm_core::attachments::Attachment;
+use spaceterm_core::connection::link::{ChannelEvent, ChannelHandle, CoreLink, LinkEvent};
+use spaceterm_core::direct::{
     ClaimId, DeviceCredential, DirectConnection, DirectConnector, DirectError, Enrollment,
     Invitation, NetworkPolicy, PairedDevice,
 };
-use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
-use spaceterm_server::pane::{AttachmentClaim, FocusTarget, Key, PaneSize, Refusal};
-use spaceterm_server::protocol::screen::{CursorPosition, History};
-use spaceterm_server::protocol::{
+use spaceterm_core::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
+use spaceterm_core::pane::{AttachmentClaim, FocusTarget, Key, PaneSize, Refusal};
+use spaceterm_core::protocol::screen::{CursorPosition, History};
+use spaceterm_core::protocol::{
     ClaimReply, Frame, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
 };
-use spaceterm_server::{ServerConnection, ServerError};
+use spaceterm_core::{CoreError, MachineConnection};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -59,7 +59,7 @@ pub fn name_client(name: &str) {
 
 /// The owning machine's account-local authority over Network Access and pairing.
 pub struct Owner {
-    server: ServerConnection,
+    core: MachineConnection,
     /// Invitations this owner issued and has not seen consumed by an approved claim.
     issued: RefCell<Vec<ClaimId>>,
 }
@@ -73,7 +73,7 @@ pub struct NetworkAccess {
 impl Owner {
     pub fn open(identity: &str) -> Result<Self> {
         Ok(Self {
-            server: at("owner", ServerConnection::for_identity(identity))?,
+            core: at("owner", MachineConnection::for_identity(identity))?,
             issued: RefCell::default(),
         })
     }
@@ -82,12 +82,12 @@ impl Owner {
     /// same port disconnects every paired client, so Network Access already enabled at `bind` stays
     /// untouched.
     pub fn expose(&self, bind: SocketAddr) -> Result<NetworkAccess> {
-        let status = at("Network Access status", self.server.direct_status())?;
+        let status = at("Network Access status", self.core.direct_status())?;
         if status.enabled && status.policy.as_ref().map(|policy| policy.bind) == Some(bind) {
             return Ok(NetworkAccess { previous: None });
         }
         let policy = at("Network Access address", NetworkPolicy::new(bind))?;
-        at("expose", self.server.set_direct_policy(Some(policy), true))?;
+        at("expose", self.core.set_direct_policy(Some(policy), true))?;
         Ok(NetworkAccess {
             previous: Some((status.policy, status.enabled)),
         })
@@ -101,13 +101,13 @@ impl Owner {
         };
         at(
             "restore Network Access",
-            self.server.set_direct_policy(policy, enabled),
+            self.core.set_direct_policy(policy, enabled),
         )
         .map(drop)
     }
 
     pub fn invite(&self) -> Result<String> {
-        let invitation = at("invite", self.server.invite_device(None))?;
+        let invitation = at("invite", self.core.invite_device(None))?;
         self.issued.borrow_mut().push(invitation.id());
         Ok(invitation.display_text().as_str().to_owned())
     }
@@ -115,11 +115,11 @@ impl Owner {
     /// Approves the pending claim from `device` on an invitation this owner issued. Returns
     /// false when no such claim exists.
     pub fn approve(&self, device: &str) -> Result<bool> {
-        for claim in at("claims", self.server.pairing_claims(None))? {
+        for claim in at("claims", self.core.pairing_claims(None))? {
             if claim.device_name.as_str() == device
                 && self.issued.borrow().contains(&claim.invitation_id)
             {
-                at("approve", self.server.approve_device(&claim))?;
+                at("approve", self.core.approve_device(&claim))?;
                 self.issued
                     .borrow_mut()
                     .retain(|issued| *issued != claim.invitation_id);
@@ -134,7 +134,7 @@ impl Owner {
     pub fn abandon(&self) -> Result<()> {
         let issued = std::mem::take(&mut *self.issued.borrow_mut());
         for id in issued {
-            at("withdraw invitation", self.server.withdraw_invitation(id))?;
+            at("withdraw invitation", self.core.withdraw_invitation(id))?;
         }
         Ok(())
     }
@@ -142,7 +142,7 @@ impl Owner {
     /// Revokes every pairing named `device` and returns how many it revoked.
     pub fn revoke(&self, device: &str) -> Result<usize> {
         let mut revoked = 0;
-        for paired in at("devices", self.server.paired_devices())? {
+        for paired in at("devices", self.core.paired_devices())? {
             if paired.name.as_str() == device {
                 let mut operation = [0; 32];
                 // SAFETY: getentropy writes exactly 32 bytes to this live writable array.
@@ -150,10 +150,7 @@ impl Owner {
                 {
                     return fail("randomness");
                 }
-                at(
-                    "revoke",
-                    self.server.revoke_device(operation, paired.pairing),
-                )?;
+                at("revoke", self.core.revoke_device(operation, paired.pairing))?;
                 revoked += 1;
             }
         }
@@ -218,8 +215,8 @@ pub enum Route {
 /// only a frame's input serial, cursor and replaced rows, so it keeps no screen to apply a frame
 /// to.
 pub struct EchoPane {
-    server: ServerConnection,
-    link: ServerLink,
+    core: MachineConnection,
+    link: CoreLink,
     boot: Id,
     workspace: Id,
     channel: Option<ChannelHandle>,
@@ -284,17 +281,17 @@ const PAGE_ROWS: usize = 30;
 /// never holds a newer generation for its Workspace.
 const GENERATION: u64 = 1;
 
-fn connect(server: &ServerConnection) -> std::result::Result<ServerLink, ServerError> {
-    server.connect(Arc::new(|_: LinkEvent| {}))
+fn connect(core: &MachineConnection) -> std::result::Result<CoreLink, CoreError> {
+    core.connect(Arc::new(|_: LinkEvent| {}))
 }
 
-fn request(link: &ServerLink, stage: &'static str, operation: Operation) -> Result<ReplyBody> {
+fn request(link: &CoreLink, stage: &'static str, operation: Operation) -> Result<ReplyBody> {
     let pending = at(stage, link.request(operation))?;
     at(stage, pending.wait())
 }
 
 /// The newest pushed inventory. The server pushes one when it admits the link.
-fn inventory(link: &ServerLink, stage: &'static str) -> Result<(Inventory, u64)> {
+fn inventory(link: &CoreLink, stage: &'static str) -> Result<(Inventory, u64)> {
     match link.next_inventory(0) {
         Ok((_, revision)) => Ok((revision.inventory.clone(), revision.next_sequence)),
         Err(_) => fail(stage),
@@ -303,11 +300,11 @@ fn inventory(link: &ServerLink, stage: &'static str) -> Result<(Inventory, u64)>
 
 impl EchoPane {
     pub fn open(identity: &str, route: &Route) -> Result<Self> {
-        let server = match route {
-            Route::Local => at("connect", ServerConnection::for_identity(identity))?,
+        let core = match route {
+            Route::Local => at("connect", MachineConnection::for_identity(identity))?,
             Route::Paired(paired) => at(
                 "connect",
-                ServerConnection::direct(
+                MachineConnection::direct(
                     identity,
                     paired.paired.client,
                     paired.paired.clone(),
@@ -315,7 +312,7 @@ impl EchoPane {
                 ),
             )?,
         };
-        let link = at("connect", connect(&server))?;
+        let link = at("connect", connect(&core))?;
         let (inventory, next_sequence) = inventory(&link, "inventory")?;
         let Some(boot) = inventory.close.as_ref().map(|close| close.boot) else {
             return fail("server boot");
@@ -323,14 +320,14 @@ impl EchoPane {
         let mutation = Mutation::CreateWorkspace {
             name: format!("Latency probe {}", std::process::id()),
             directory: None,
-            control: spaceterm_server::hierarchy::CreateControl::Creator,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
         };
         let outcome = mutate(&link, next_sequence, mutation)?;
         let Outcome::Accepted { target: workspace } = outcome else {
             return fail("Workspace creation refused");
         };
         let mut pane = Self {
-            server,
+            core,
             link,
             boot,
             workspace,
@@ -569,7 +566,7 @@ impl EchoPane {
         if let Some(channel) = self.channel.take() {
             channel.detach();
         }
-        let link = at("cleanup connect", connect(&self.server))?;
+        let link = at("cleanup connect", connect(&self.core))?;
         let (inventory, next_sequence) = inventory(&link, "cleanup inventory")?;
         if inventory.close.as_ref().map(|close| close.boot) != Some(self.boot) {
             return fail("the server restarted; nothing to close");
@@ -620,7 +617,7 @@ fn nothing() -> Operation {
 /// Applies one Workspace edit and retires its outcome. The server keeps every client's
 /// unretired outcomes and refuses edits from all of them with `Capacity` once 32 wait. A paired
 /// run is a new client each time, so a retirement lost with its link is never repeated.
-fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
+fn mutate(link: &CoreLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
     let reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
     let ReplyBody::Outcome(result) = reply else {
         return fail("mutation outcome");

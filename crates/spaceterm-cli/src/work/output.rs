@@ -12,43 +12,43 @@ pub struct Output {
 impl Output {
     pub fn ok<D: Serialize>(
         command: &str,
-        server: ServerRef,
+        core: MachineRef,
         data: D,
         text: String,
         target: &[TargetStep],
     ) -> Self {
         Self {
-            envelope: Envelope::ok(command, Some(server), value(data)),
+            envelope: Envelope::ok(command, Some(core), value(data)),
             text,
             diagnostics: scope::verbose(target),
         }
     }
     pub fn failed(
         command: &str,
-        server: Option<ServerRef>,
+        core: Option<MachineRef>,
         failure: Failure,
         data: Value,
         text: String,
     ) -> Self {
         Self {
-            envelope: Envelope::error(command, server, failure, data),
+            envelope: Envelope::error(command, core, failure, data),
             text,
             diagnostics: String::new(),
         }
     }
     pub fn confirmation(
         command: &str,
-        server: ServerRef,
+        core: MachineRef,
         confirmation: Confirmation<CloseEffects>,
         text: String,
     ) -> Self {
-        let envelope = Envelope::confirmation(command, Some(server), confirmation);
+        let envelope = Envelope::confirmation(command, Some(core), confirmation);
         Self {
             envelope: Envelope {
                 schema: envelope.schema,
                 command: envelope.command,
                 status: envelope.status,
-                server: envelope.server,
+                machine: envelope.machine,
                 data: Data::new(value(envelope.data.body)),
                 error: envelope.error,
                 warnings: envelope.warnings,

@@ -1,14 +1,14 @@
 //! Background persistence for this client's one Workspace order across servers, outside
 //! Settings.
-use spaceterm_server::workspace_order::WorkspaceOrder;
-use spaceterm_server::{ServerConnection, ServerError};
+use spaceterm_core::workspace_order::WorkspaceOrder;
+use spaceterm_core::{CoreError, MachineConnection};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct State {
-    loaded: Option<Result<WorkspaceOrder, ServerError>>,
+    loaded: Option<Result<WorkspaceOrder, CoreError>>,
     pending: Option<WorkspaceOrder>,
-    error: Option<ServerError>,
+    error: Option<CoreError>,
     closed: bool,
 }
 
@@ -24,7 +24,7 @@ pub(super) struct RetainedWorkspaceOrder {
 impl RetainedWorkspaceOrder {
     /// Opens the order `server`, the account-local connection, retains. Opening needs no
     /// running server.
-    pub(super) fn new(server: ServerConnection) -> Self {
+    pub(super) fn new(core: MachineConnection) -> Self {
         let state = Arc::new(Mutex::new(State::default()));
         let shared = Arc::clone(&state);
         let (wake, receiver) = std::sync::mpsc::sync_channel(1);
@@ -32,7 +32,7 @@ impl RetainedWorkspaceOrder {
         let worker = std::thread::Builder::new()
             .name("spaceterm-workspace-order".into())
             .spawn(move || {
-                let opened = server.workspace_order_store();
+                let opened = core.workspace_order_store();
                 shared.lock().unwrap_or_else(|e| e.into_inner()).loaded = Some(
                     opened
                         .as_ref()
@@ -66,7 +66,7 @@ impl RetainedWorkspaceOrder {
             Ok(worker) => Some(worker),
             Err(_) => {
                 state.lock().unwrap_or_else(|e| e.into_inner()).loaded =
-                    Some(Err(ServerError::StorageUnavailable));
+                    Some(Err(CoreError::StorageUnavailable));
                 None
             }
         };
@@ -87,7 +87,7 @@ impl RetainedWorkspaceOrder {
         }
     }
 
-    pub(super) fn loaded(&self) -> Option<Result<WorkspaceOrder, ServerError>> {
+    pub(super) fn loaded(&self) -> Option<Result<WorkspaceOrder, CoreError>> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -96,7 +96,7 @@ impl RetainedWorkspaceOrder {
     }
 
     /// Why the saved order couldn't be read, once reading ended.
-    pub(super) fn read_error(&self) -> Option<ServerError> {
+    pub(super) fn read_error(&self) -> Option<CoreError> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -106,7 +106,7 @@ impl RetainedWorkspaceOrder {
     }
 
     /// Why the worker stopped saving, after which nothing more is written.
-    pub(super) fn error(&self) -> Option<ServerError> {
+    pub(super) fn error(&self) -> Option<CoreError> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).error
     }
 

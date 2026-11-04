@@ -1,0 +1,12 @@
+{
+  "command": "machine.remove",
+  "data": {
+    "removed": "penguin",
+    "revocation": "confirmed"
+  },
+  "error": null,
+  "machine": null,
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": []
+}

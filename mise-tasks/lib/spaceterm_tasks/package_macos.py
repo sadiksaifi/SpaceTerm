@@ -75,14 +75,14 @@ def package_bundle(release_tag=None):
         updater = sparkle.directory()
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]
-    from spaceterm_tasks.server_package import prepare_desktop_artifact
+    from spaceterm_tasks.core_package import prepare_desktop_artifact
 
     environment.update(
         prepare_desktop_artifact(
-            STAGE / "server-artifact",
+            STAGE / "core-artifact",
             template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
             release_tag,
-            catalog_destination=STAGE / "server-artifacts",
+            catalog_destination=STAGE / "core-artifacts",
         )
     )
     print(f"Building the Apple Silicon {template['CFBundleName']} executable")
@@ -93,10 +93,8 @@ def package_bundle(release_tag=None):
     binaries.mkdir()
     shutil.copyfile(executable, binaries / template["CFBundleExecutable"])
     (binaries / template["CFBundleExecutable"]).chmod(0o755)
-    config["resources"].append({"src": str(STAGE / "server-artifact"), "target": "server-artifact"})
-    config["resources"].append(
-        {"src": str(STAGE / "server-artifacts"), "target": "server-artifacts"}
-    )
+    config["resources"].append({"src": str(STAGE / "core-artifact"), "target": "core-artifact"})
+    config["resources"].append({"src": str(STAGE / "core-artifacts"), "target": "core-artifacts"})
     config["version"] = version
     # cargo-packager stamps CFBundleVersion with the build time; the identity's Info.plist
     # entries override its generated ones, so add the tag-derived versions to them.
@@ -218,18 +216,18 @@ def verify_bundle(app, name, release_tag, label):
     ):
         raise TaskError(f"{label} asset catalog has no 1024-pixel {ICON_NAME} icon")
     verify_resources(resources, label)
-    from spaceterm_tasks.server_package import verify_desktop_artifact
+    from spaceterm_tasks.core_package import verify_desktop_artifact
 
     verify_desktop_artifact(
-        resources / "server-artifact",
+        resources / "core-artifact",
         template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
         release_tag,
         executable=executable,
     )
-    from spaceterm_tasks.server_catalog import verify_catalog
+    from spaceterm_tasks.core_catalog import verify_catalog
 
     verify_catalog(
-        resources / "server-artifacts",
+        resources / "core-artifacts",
         template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
         require_all=bool(release_tag),
     )

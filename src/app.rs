@@ -29,20 +29,20 @@ struct NativeLocalUpdates;
 impl crate::ui::updates::LocalUpdateObservation for NativeLocalUpdates {
     fn observe(&self) -> crate::ui::updates::LocalUpdateFacts {
         let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-        let service = spaceterm_server::service::Service::for_identity(identity);
-        let server = service
+        let service = spaceterm_core::service::Service::for_identity(identity);
+        let core = service
             .as_ref()
             .ok()
-            .and_then(|service| service.passive_server_id().ok().flatten());
+            .and_then(|service| service.passive_machine_id().ok().flatten());
         let update = if crate::local_startup::owned_foreground() {
-            Ok(("Development Server".into(), false))
+            Ok(("Development SpaceTerm Core".into(), false))
         } else {
             service
                 .as_ref()
                 .map_err(|error| *error)
-                .and_then(crate::ui::settings_window::server_update::passive_update)
+                .and_then(crate::ui::settings_window::core_update::passive_update)
         };
-        crate::ui::updates::LocalUpdateFacts { server, update }
+        crate::ui::updates::LocalUpdateFacts { core, update }
     }
 }
 
@@ -66,7 +66,7 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
 }
 
 impl<A: SshProcessAdapter> StartupDependencies<A> {
-    pub(crate) fn server_context_paths(&self) -> Arc<AppPaths> {
+    pub(crate) fn core_context_paths(&self) -> Arc<AppPaths> {
         Arc::clone(&self.paths)
     }
 
@@ -128,7 +128,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
 
     /// The desktop's direct network connections. Construction has no effects: nothing reads
     /// saved routes, asks for a credential, or connects until the first Workspace Window opens.
-    pub(crate) fn direct_servers(&self) -> crate::direct_connections::DirectConnections {
+    pub(crate) fn direct_machines(&self) -> crate::direct_connections::DirectConnections {
         crate::direct_connections::DirectConnections::with_credentials(
             crate::application_identity::ApplicationIdentity::current().directory_name(),
             Arc::new(spaceterm_connections::records::PrivateRecords::new(
@@ -151,7 +151,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         direct: crate::direct_connections::DirectConnections,
     ) -> Rc<dyn crate::ui::ssh_setup::SshSetupFactory>
     where
-        A: crate::ssh::provisioning::SshServerBootstrap + Clone + 'static,
+        A: crate::ssh::provisioning::SshCoreBootstrap + Clone + 'static,
     {
         Rc::new(NativeSshSetupFactory {
             paths: Arc::clone(&self.paths),
@@ -180,12 +180,10 @@ struct NativeSshSetupFactory<A: SshProcessAdapter> {
 }
 impl<A> crate::ui::ssh_setup::SshSetupFactory for NativeSshSetupFactory<A>
 where
-    A: SshProcessAdapter + crate::ssh::provisioning::SshServerBootstrap + Clone + 'static,
+    A: SshProcessAdapter + crate::ssh::provisioning::SshCoreBootstrap + Clone + 'static,
 {
     fn backend(&self) -> Option<Arc<dyn crate::ssh::provisioning::SshSetupBackend>> {
-        use crate::ssh::provisioning::{
-            NativeSshSetup, NativeSshSetupConfig, ServerArtifactCatalog,
-        };
+        use crate::ssh::provisioning::{CoreArtifactCatalog, NativeSshSetup, NativeSshSetupConfig};
         Some(Arc::new(NativeSshSetup::new(
             NativeSshSetupConfig {
                 paths: Arc::clone(&self.paths),
@@ -195,7 +193,7 @@ where
                 adapter: self.adapter.clone(),
                 filesystem: Arc::clone(&self.filesystem),
                 bootstrap: Arc::new(self.adapter.clone()),
-                artifacts: ServerArtifactCatalog::new(self.artifacts.clone()),
+                artifacts: CoreArtifactCatalog::new(self.artifacts.clone()),
             },
             self.direct.clone(),
         )))
@@ -515,7 +513,7 @@ struct ApplicationQuitCoordinator {
 trait QuitSessions: Send + Sync {
     fn observe(
         &self,
-    ) -> Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError>;
+    ) -> Result<spaceterm_core::hierarchy::CloseInventory, spaceterm_core::CoreError>;
 }
 
 struct DevelopmentQuitSessions;
@@ -523,24 +521,20 @@ struct DevelopmentQuitSessions;
 impl QuitSessions for DevelopmentQuitSessions {
     fn observe(
         &self,
-    ) -> Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError> {
-        use spaceterm_server::{ServerConnection, ServerError};
+    ) -> Result<spaceterm_core::hierarchy::CloseInventory, spaceterm_core::CoreError> {
+        use spaceterm_core::{CoreError, MachineConnection};
         let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-        let server = ServerConnection::for_identity(identity)?;
+        let core = MachineConnection::for_identity(identity)?;
         // The server pushes the inventory when it admits the link.
-        let (_, revision) = server.link()?.next_inventory(0)?;
-        revision
-            .inventory
-            .close
-            .clone()
-            .ok_or(ServerError::Protocol)
+        let (_, revision) = core.link()?.next_inventory(0)?;
+        revision.inventory.close.clone().ok_or(CoreError::Protocol)
     }
 }
 
 /// The Terminal Sessions a quit would end, as the server reported them.
 #[derive(Clone)]
 struct ApplicationQuitSnapshot {
-    sessions: Option<spaceterm_server::hierarchy::CloseInventory>,
+    sessions: Option<spaceterm_core::hierarchy::CloseInventory>,
 }
 
 impl ApplicationQuitSnapshot {
@@ -661,7 +655,7 @@ impl ApplicationQuitCoordinator {
         };
         let notice = QuitPrompt {
             title: "Couldn\u{2019}t check Terminal Sessions".to_owned(),
-            detail: "Reconnect to the development server, then try again.".to_owned(),
+            detail: "Reconnect to the development SpaceTerm Core, then try again.".to_owned(),
             buttons: QuitButtons::CancelOnly,
         };
         let Some((answer, place)) = present_quit_prompt(adapter.as_ref(), &notice, cx) else {
@@ -944,7 +938,7 @@ fn cancel_quit_prompt(place: QuitPromptPlace, cx: &mut App) {
 
 fn quit_prompt(
     status_area: StatusAreaName,
-    sessions: Option<&spaceterm_server::hierarchy::CloseInventory>,
+    sessions: Option<&spaceterm_core::hierarchy::CloseInventory>,
 ) -> QuitPrompt {
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
     let count = sessions.map_or(0, |sessions| {
@@ -960,11 +954,11 @@ fn quit_prompt(
             "{name} leaves the {place}. Your Terminal Sessions keep running, so everything is where you left it."
         ),
         (Some(_), 0) => format!(
-            "{name} leaves the {place} and stops its development server. No Terminal Sessions are running."
+            "{name} leaves the {place} and stops its development SpaceTerm Core. No Terminal Sessions are running."
         ),
-        (Some(_), 1) => "This development build runs its own server. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
+        (Some(_), 1) => "This development build runs its own SpaceTerm Core. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
         (Some(_), count) => format!(
-            "This development build runs its own server. Quitting ends its {count} Terminal Sessions and stops their running commands."
+            "This development build runs its own SpaceTerm Core. Quitting ends its {count} Terminal Sessions and stops their running commands."
         ),
     };
     QuitPrompt {
@@ -1009,8 +1003,8 @@ pub(crate) fn open(
         },
         directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
         window_drag: host.window_movement.create(),
-        local_server: host.adapters.local_server.clone(),
-        server_directories: crate::ui::directory_picker::owning_server_directories(),
+        local_core: host.adapters.local_core.clone(),
+        core_directories: crate::ui::directory_picker::owning_core_directories(),
     };
     let home_directory = host.home_directory.clone();
     let default_sidebar = cx
@@ -1018,7 +1012,7 @@ pub(crate) fn open(
         .map(|runtime| runtime.settings.snapshot().candidate.sidebar.default_state)
         .unwrap_or_default();
     let ssh_setup = host.adapters.ssh_setup.clone();
-    let direct_servers = host.adapters.direct_servers.clone();
+    let direct_machines = host.adapters.direct_machines.clone();
     // A window reopened while the client kept running presents the view the last one left.
     let remembered = crate::ui::remembered_view::take_workspace_window(cx);
     let mut options = workspace_window_options(host, cx);
@@ -1032,7 +1026,7 @@ pub(crate) fn open(
         }
         crate::ui::updates::install_local_updates(Arc::new(NativeLocalUpdates), cx);
         // Both enrollment methods publish into this paired connection registry.
-        crate::ui::direct_servers::install(direct_servers.clone(), cx);
+        crate::ui::direct_machines::install(direct_machines.clone(), cx);
         // Paired server cards stop, restart and update each server over its service lane.
         crate::ui::settings_window::remote_admin::install(
             crate::ui::settings_window::remote_admin::lane_source(),
@@ -1041,7 +1035,7 @@ pub(crate) fn open(
         // The Settings window supplies prompts for each explicit setup attempt.
         crate::ui::ssh_setup::install(ssh_setup.clone(), cx);
         // Resuming is quiet: a route or unpair that needs a credential prompt waits for Resume.
-        if let Some(direct) = crate::ui::direct_servers::installed(cx) {
+        if let Some(direct) = crate::ui::direct_machines::installed(cx) {
             direct.resume_retained();
         }
         let workspace_manager = cx.new(|cx| {
@@ -1159,7 +1153,7 @@ fn close_all_windows(cx: &mut App) {
                 manager.request_window_close(window, cx);
             });
         } else if !crate::ui::settings_window::request_window_close(window, cx)
-            && !crate::ui::server_control_window::request_window_close(window, cx)
+            && !crate::ui::core_control_window::request_window_close(window, cx)
             && !crate::ui::updates::request_launch_window_close(window, cx)
         {
             let _ = window.update(cx, |_, window, _| window.remove_window());
@@ -1343,13 +1337,13 @@ pub(crate) struct ApplicationCapabilities {
     /// Keeps the Background Image copies where Workspace windows can present one.
     pub(crate) background_images: Option<Arc<crate::background_image::BackgroundImageStore>>,
     /// Launches and presents the account-local SpaceTerm Server in the Workspace Window.
-    pub(crate) local_server: crate::ui::LocalServerAdapters,
+    pub(crate) local_core: crate::ui::LocalCoreAdapters,
     /// Supplies temporary SSH provisioning to Add Server.
     pub(crate) ssh_setup: Rc<dyn crate::ui::ssh_setup::SshSetupFactory>,
     /// The desktop's direct network connections, installed by its first Workspace Window.
-    pub(crate) direct_servers: crate::direct_connections::DirectConnections,
+    pub(crate) direct_machines: crate::direct_connections::DirectConnections,
     /// Private presentation context, independent of saved connection authority and Settings.
-    pub(crate) server_context_paths: Arc<AppPaths>,
+    pub(crate) core_context_paths: Arc<AppPaths>,
     /// Reads and installs this build's command for Settings. `None` omits its row.
     pub(crate) command_line_tool: Option<Arc<crate::command_line_tool::CommandLineTool>>,
     /// Answers `spaceterm open` and `spaceterm show` from this account. `None` listens nowhere,
@@ -1545,7 +1539,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                                 while let Ok(link) = receiver.recv().await {
                                     cx.update(|cx| {
                                         leave_menu_only(cx);
-                                        crate::ui::settings_window::open_add_server(
+                                        crate::ui::settings_window::open_add_machine(
                                             Some(link),
                                             None,
                                             cx,
@@ -1598,8 +1592,8 @@ pub(crate) fn initialize_application(
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::about_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
-    crate::ui::settings_window::configure_server_context(
-        Arc::clone(&host.adapters.server_context_paths),
+    crate::ui::settings_window::configure_core_context(
+        Arc::clone(&host.adapters.core_context_paths),
         cx,
     );
     if let Some(tool) = &host.adapters.command_line_tool {
@@ -1724,7 +1718,7 @@ mod tests {
         assert_eq!(
             idle.detail,
             format!(
-                "{name} leaves the menu bar and stops its development server. No Terminal Sessions are running."
+                "{name} leaves the menu bar and stops its development SpaceTerm Core. No Terminal Sessions are running."
             )
         );
         assert_eq!(
@@ -1737,13 +1731,13 @@ mod tests {
         assert_eq!(
             status_area_idle.detail,
             format!(
-                "{name} leaves the status area and stops its development server. No Terminal Sessions are running."
+                "{name} leaves the status area and stops its development SpaceTerm Core. No Terminal Sessions are running."
             )
         );
         let one = quit_prompt(StatusAreaName::MenuBar, Some(&quit_sessions(1, &[Some(1)])));
         assert_eq!(
             one.detail,
-            "This development build runs its own server. Quitting ends its 1 Terminal Session and stops its running commands."
+            "This development build runs its own SpaceTerm Core. Quitting ends its 1 Terminal Session and stops its running commands."
         );
         assert_eq!(one.buttons, QuitButtons::DestructiveQuit);
     }
@@ -1877,7 +1871,7 @@ mod tests {
     ) {
         let (quit, dock) = windowless_client_asking_alone(cx);
         let coordinator =
-            development_coordinator(&quit, vec![Err(spaceterm_server::ServerError::NotRunning)]);
+            development_coordinator(&quit, vec![Err(spaceterm_core::CoreError::NotRunning)]);
         cx.update(|cx| coordinator.exit(cx));
         cx.run_until_parked();
         let prompts = quit.windowless_prompts();
@@ -1901,7 +1895,7 @@ mod tests {
         let (quit, _) = windowless_client_asking_alone(cx);
         cx.add_window(|_, _| gpui::EmptyView);
         let coordinator =
-            development_coordinator(&quit, vec![Err(spaceterm_server::ServerError::NotRunning)]);
+            development_coordinator(&quit, vec![Err(spaceterm_core::CoreError::NotRunning)]);
         cx.update(|cx| coordinator.exit(cx));
         cx.run_until_parked();
         assert_eq!(
@@ -1915,8 +1909,7 @@ mod tests {
         assert_eq!(cx.update(|cx| cx.windows().len()), 1);
     }
 
-    type QuitReading =
-        Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError>;
+    type QuitReading = Result<spaceterm_core::hierarchy::CloseInventory, spaceterm_core::CoreError>;
 
     struct ScriptedQuitSessions(std::sync::Mutex<std::collections::VecDeque<QuitReading>>);
     impl QuitSessions for ScriptedQuitSessions {
@@ -1958,8 +1951,8 @@ mod tests {
     fn quit_sessions(
         boot: u8,
         sessions: &[Option<u8>],
-    ) -> spaceterm_server::hierarchy::CloseInventory {
-        use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+    ) -> spaceterm_core::hierarchy::CloseInventory {
+        use spaceterm_core::hierarchy::{CloseInventory, ConfirmedPane};
         CloseInventory {
             boot: [boot; 32],
             sessions: sessions
@@ -1975,7 +1968,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn development_quit_counts_live_server_sessions_without_windows(cx: &mut TestAppContext) {
+    fn development_quit_counts_live_core_sessions_without_windows(cx: &mut TestAppContext) {
         let sessions = quit_sessions(1, &[Some(1), None, Some(3), Some(4)]);
         let (coordinator, quit) =
             development_quit_coordinator(cx, vec![Ok(sessions.clone()), Ok(sessions)]);
@@ -1987,7 +1980,7 @@ mod tests {
             .expect("server-owned work confirms without windows");
         assert_eq!(
             detail,
-            "This development build runs its own server. Quitting ends its 3 Terminal Sessions and stops their running commands."
+            "This development build runs its own SpaceTerm Core. Quitting ends its 3 Terminal Sessions and stops their running commands."
         );
         cx.simulate_prompt_answer("Quit");
         cx.run_until_parked();
@@ -2017,12 +2010,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn development_quit_fails_safely_when_server_observation_fails(cx: &mut TestAppContext) {
+    fn development_quit_fails_safely_when_core_observation_fails(cx: &mut TestAppContext) {
         for readings in [
-            vec![Err(spaceterm_server::ServerError::NotRunning)],
+            vec![Err(spaceterm_core::CoreError::NotRunning)],
             vec![
                 Ok(quit_sessions(1, &[])),
-                Err(spaceterm_server::ServerError::NotRunning),
+                Err(spaceterm_core::CoreError::NotRunning),
             ],
         ] {
             let initial_succeeds = readings.len() > 1;
@@ -2264,7 +2257,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn quitting_waits_for_an_admitted_server_operation(cx: &mut TestAppContext) {
+    fn quitting_waits_for_an_admitted_core_operation(cx: &mut TestAppContext) {
         let quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         );
@@ -2331,7 +2324,7 @@ mod tests {
                 }),
             )),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new_server(session_factory);
+        let session_factory = WorkspaceTerminalSessionFactory::new_core(session_factory);
         let (pane, cx) =
             cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
         cx.update(|window, cx| {
@@ -2496,10 +2489,10 @@ mod runtime_tests {
                 theme_registry: Arc::new(crate::theme_registry::testing::MemoryTransport::default()),
                 repository_status: None,
                 background_images: None,
-                local_server: crate::ui::launch_testing::presenting(session_factory),
+                local_core: crate::ui::launch_testing::presenting(session_factory),
                 ssh_setup: Rc::new(NoSshSetup),
-                direct_servers: crate::direct_connections::tests::connected_routes(&[]).0,
-                server_context_paths: Arc::new(crate::platform::testing::resolve_app_paths(
+                direct_machines: crate::direct_connections::tests::connected_routes(&[]).0,
+                core_context_paths: Arc::new(crate::platform::testing::resolve_app_paths(
                     &crate::platform::app_directories::AppDirectoryEnvironment { home: Some("/test/home".into()), ..Default::default() }, Some("/test/runtime".into()), 104,
                     Arc::new(crate::platform::testing::RecordingFilesystem::default()),
                 ).unwrap()),
@@ -2669,7 +2662,7 @@ mod runtime_tests {
         let records = TestTerminalSessionRecords::default();
         let services = Rc::new(RecordingServices::default());
         let mut wiring = parts(Rc::clone(&services), Rc::default());
-        wiring.adapters.local_server = crate::ui::launch_testing::presenting(Rc::new(
+        wiring.adapters.local_core = crate::ui::launch_testing::presenting(Rc::new(
             TestTerminalSessionFactory::new(records.clone()),
         ));
         let host = Rc::new(HostComposition::new(wiring).unwrap());
@@ -2717,7 +2710,7 @@ mod runtime_tests {
         let records = TestTerminalSessionRecords::default();
         let services = Rc::new(RecordingServices::default());
         let mut wiring = parts(Rc::clone(&services), Rc::default());
-        wiring.adapters.local_server = crate::ui::launch_testing::presenting(Rc::new(
+        wiring.adapters.local_core = crate::ui::launch_testing::presenting(Rc::new(
             TestTerminalSessionFactory::new(records.clone()),
         ));
         let host = HostComposition::new(wiring).unwrap();
@@ -3390,7 +3383,7 @@ mod runtime_tests {
         let mut host = host_with_settings();
         let adapters = &mut Rc::get_mut(&mut host).unwrap().adapters;
         adapters.application_quit = quit.clone();
-        adapters.local_server = crate::ui::launch_testing::unanswered();
+        adapters.local_core = crate::ui::launch_testing::unanswered();
         let original = cx.update(|cx| {
             let original = start_application(cx, &host).unwrap();
             install_headless_window_actions(cx, Rc::clone(&host));
@@ -3455,7 +3448,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn application_and_dock_quit_close_server_windows_without_a_dialog(
+    fn application_and_dock_quit_close_core_windows_without_a_dialog(
         cx: &mut gpui::TestAppContext,
     ) {
         let quit = Rc::new(
@@ -3495,7 +3488,7 @@ mod runtime_tests {
         );
         let mut host = host_with_settings();
         Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
-        Rc::get_mut(&mut host).unwrap().adapters.local_server =
+        Rc::get_mut(&mut host).unwrap().adapters.local_core =
             crate::ui::launch_testing::unanswered();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
 
@@ -3525,7 +3518,7 @@ mod runtime_tests {
         );
         let mut host = host_with_settings();
         Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
-        Rc::get_mut(&mut host).unwrap().adapters.local_server =
+        Rc::get_mut(&mut host).unwrap().adapters.local_core =
             crate::ui::launch_testing::unanswered();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
@@ -3566,7 +3559,7 @@ mod runtime_tests {
         let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
         let mut host = host_with_settings();
         Rc::get_mut(&mut host).unwrap().adapters.updates = adapter.clone();
-        Rc::get_mut(&mut host).unwrap().adapters.local_server =
+        Rc::get_mut(&mut host).unwrap().adapters.local_core =
             crate::ui::launch_testing::unanswered();
         let _workspace = cx.update(|cx| start_application(cx, &host).unwrap());
         let service = cx.update(|cx| cx.global::<crate::updates::UpdateService>().0.clone());

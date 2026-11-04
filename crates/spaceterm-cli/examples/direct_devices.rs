@@ -25,16 +25,16 @@ mod exercise {
 
     use super::support::{self, Claimed, Ending, Pane};
     use serde_json::{Value, json};
-    use spaceterm_server::connection::link::ServerLink;
-    use spaceterm_server::direct::{
+    use spaceterm_core::connection::link::CoreLink;
+    use spaceterm_core::direct::{
         self, DeviceCredential, DirectConnection, DirectConnector, DirectError, Enrollment,
         Invitation, ListenerState, NetworkPolicy, PairedDevice,
     };
-    use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
-    use spaceterm_server::pane::control::Controller;
-    use spaceterm_server::pane::{AttachmentClaim, Lease, PaneSize, directories};
-    use spaceterm_server::protocol::{Operation, PaneEvent, ReplyBody};
-    use spaceterm_server::{ServerConnection, ServerError};
+    use spaceterm_core::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
+    use spaceterm_core::pane::control::Controller;
+    use spaceterm_core::pane::{AttachmentClaim, Lease, PaneSize, directories};
+    use spaceterm_core::protocol::{Operation, PaneEvent, ReplyBody};
+    use spaceterm_core::{CoreError, MachineConnection};
 
     type Result<T> = std::result::Result<T, &'static str>;
     const IDENTITY: &str = "spaceterm-development";
@@ -50,13 +50,13 @@ mod exercise {
         if condition { Ok(()) } else { Err(failure) }
     }
 
-    fn reply_classification<T>(reply: &std::result::Result<T, ServerError>) -> &'static str {
+    fn reply_classification<T>(reply: &std::result::Result<T, CoreError>) -> &'static str {
         match reply {
             Ok(_) => "unexpected-reply",
-            Err(ServerError::Protocol) => "protocol",
-            Err(ServerError::NotRunning) => "not-running",
-            Err(ServerError::SessionUnavailable) => "session-unavailable",
-            Err(ServerError::StaleControl) => "stale-control",
+            Err(CoreError::Protocol) => "protocol",
+            Err(CoreError::NotRunning) => "not-running",
+            Err(CoreError::SessionUnavailable) => "session-unavailable",
+            Err(CoreError::StaleControl) => "stale-control",
             Err(_) => "server-refusal",
         }
     }
@@ -98,7 +98,7 @@ mod exercise {
         }
     }
 
-    fn inventory(connection: &ServerLink) -> Result<(Inventory, u64)> {
+    fn inventory(connection: &CoreLink) -> Result<(Inventory, u64)> {
         support::inventory(connection).map_err(|_| "inventory response refused")
     }
 
@@ -112,12 +112,8 @@ mod exercise {
         )
     }
 
-    fn mutate(
-        server: &ServerConnection,
-        connection: &ServerLink,
-        mutation: Mutation,
-    ) -> Result<Id> {
-        let mut journal = api(server.operation_journal())?;
+    fn mutate(core: &MachineConnection, connection: &CoreLink, mutation: Mutation) -> Result<Id> {
+        let mut journal = api(core.operation_journal())?;
         require(
             journal.pending().is_none(),
             "resolve this test client's original mutation first",
@@ -137,7 +133,7 @@ mod exercise {
         }
     }
 
-    fn select(connection: &ServerLink, pane: Id, explicit: bool) -> Result<Claimed> {
+    fn select(connection: &CoreLink, pane: Id, explicit: bool) -> Result<Claimed> {
         api(support::select(connection, pane, explicit, size()))
     }
 
@@ -146,9 +142,9 @@ mod exercise {
     }
 
     fn take_over(
-        connection: &ServerLink,
+        connection: &CoreLink,
         pane: Id,
-        target: spaceterm_server::pane::PaneTarget,
+        target: spaceterm_core::pane::PaneTarget,
     ) -> Result<Pane> {
         attached(api(support::claim(
             connection,
@@ -158,7 +154,7 @@ mod exercise {
         ))?)
     }
 
-    fn take(connection: &ServerLink, pane: Id, named: &str) -> Result<Pane> {
+    fn take(connection: &CoreLink, pane: Id, named: &str) -> Result<Pane> {
         let Claimed::Takeover(takeover) = select(connection, pane, false)? else {
             return Err("expected another Controlling Client");
         };
@@ -176,7 +172,7 @@ mod exercise {
         take_over(connection, pane, takeover.target)
     }
 
-    fn reclaim_after_revocation(connection: &ServerLink, pane: Id) -> Result<Pane> {
+    fn reclaim_after_revocation(connection: &CoreLink, pane: Id) -> Result<Pane> {
         let Claimed::Takeover(takeover) = select(connection, pane, false)? else {
             return Err("revocation did not leave the running Pane without a controller");
         };
@@ -414,8 +410,8 @@ mod exercise {
         pane: Option<Id>,
     }
 
-    fn close_fixture_workspace(server: &ServerConnection, owned: &FixtureWorkspace) -> Result<()> {
-        let connection = api(support::connect(server))?;
+    fn close_fixture_workspace(core: &MachineConnection, owned: &FixtureWorkspace) -> Result<()> {
+        let connection = api(support::connect(core))?;
         let current = inventory(&connection)?.0;
         require(
             current.close.as_ref().map(|close| close.boot) == Some(owned.boot),
@@ -445,7 +441,7 @@ mod exercise {
             .close_confirmation(target)
             .ok_or("cleanup confirmation unavailable")?;
         mutate(
-            server,
+            core,
             &connection,
             Mutation::Close {
                 target,
@@ -456,13 +452,13 @@ mod exercise {
     }
 
     struct WorkspaceGuard<'a> {
-        server: &'a ServerConnection,
+        core: &'a MachineConnection,
         owned: Option<FixtureWorkspace>,
     }
     impl Drop for WorkspaceGuard<'_> {
         fn drop(&mut self) {
             if let Some(owned) = &self.owned
-                && let Err(classification) = close_fixture_workspace(self.server, owned)
+                && let Err(classification) = close_fixture_workspace(self.core, owned)
             {
                 eprintln!(
                     "direct_devices: exact Workspace {} cleanup incomplete: {classification}",
@@ -473,9 +469,9 @@ mod exercise {
     }
 
     struct Scope {
-        owner: ServerConnection,
+        owner: MachineConnection,
         policy: NetworkPolicy,
-        server: Id,
+        core: Id,
         baseline: Inventory,
         workspace: Option<FixtureWorkspace>,
         invitations: Vec<Id>,
@@ -486,7 +482,7 @@ mod exercise {
     impl Scope {
         fn cleanup(&mut self) -> Result<()> {
             require(
-                api(self.owner.direct_status())?.pin.server == self.server,
+                api(self.owner.direct_status())?.pin.core == self.core,
                 "cleanup server identity changed",
             )?;
             for invitation in &self.invitations {
@@ -538,7 +534,7 @@ mod exercise {
         fn enroll(&mut self, peer: &mut Peer) -> Result<PairedDevice> {
             let invitation = api(self.owner.invite_device(None))?;
             require(
-                invitation.server_pin().server == self.server,
+                invitation.machine_pin().core == self.core,
                 "invitation belongs to another server",
             )?;
             self.invitations.push(invitation.id());
@@ -567,11 +563,11 @@ mod exercise {
                 "owner and device comparison codes differ",
             )?;
             let mut wrong = claim.clone();
-            wrong.server[0] ^= 1;
+            wrong.core[0] ^= 1;
             require(
                 matches!(
                     self.owner.approve_device(&wrong),
-                    Err(DirectError::WrongServer)
+                    Err(DirectError::WrongMachine)
                 ),
                 "wrong server binding was accepted",
             )?;
@@ -595,7 +591,7 @@ mod exercise {
             let response = peer.message(json!({"approved": true}))?;
             let paired: PairedDevice = api(serde_json::from_value(response["paired"].clone()))?;
             require(
-                paired.pin == *invitation.server_pin()
+                paired.pin == *invitation.machine_pin()
                     && paired.pairing == approved.pairing
                     && paired.client == approved.client,
                 "approved device/server binding changed",
@@ -610,9 +606,9 @@ mod exercise {
             "two-host verification requires a reachable native host address",
         )?;
         let name = format!("direct541-owner-{}", &hex(&random()?)[..6]);
-        let owner = api(ServerConnection::for_development_client(&name))?;
+        let owner = api(MachineConnection::for_development_client(&name))?;
         require(
-            api(owner.refresh())?.protocol_major == spaceterm_server::protocol::MAJOR,
+            api(owner.refresh())?.protocol_major == spaceterm_core::protocol::MAJOR,
             "expected this build's protocol major",
         )?;
         let mut connection = api(support::connect(&owner))?;
@@ -620,7 +616,7 @@ mod exercise {
         idle(&baseline)?;
         let initial = api(owner.direct_status())?;
         require(
-            initial.pin.server == expected && initial.pin.build == IDENTITY,
+            initial.pin.core == expected && initial.pin.build == IDENTITY,
             "expected Development server identity changed",
         )?;
         require(
@@ -641,7 +637,7 @@ mod exercise {
         let mut scope = Scope {
             owner,
             policy,
-            server: expected,
+            core: expected,
             baseline,
             workspace: None,
             invitations: Vec::new(),
@@ -661,7 +657,7 @@ mod exercise {
             if restart {
                 idle(&inventory(&connection)?.0)?;
                 connection.close();
-                api(spaceterm_server::service::Service::for_identity(IDENTITY))?
+                api(spaceterm_core::service::Service::for_identity(IDENTITY))?
                     .restart()
                     .map_err(|_| "explicit idle service restart failed")?;
                 let until = Instant::now() + Duration::from_secs(15);
@@ -691,7 +687,7 @@ mod exercise {
             let paired = scope.enroll(&mut peer)?;
             println!(
                 "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major {}",
-                spaceterm_server::protocol::MAJOR
+                spaceterm_core::protocol::MAJOR
             );
             let failed = peer.message(json!({"create_workspace": format!("Direct devices cleanup {}", &hex(&random()?)[..12]), "fail_before_handoff": true}))?;
             scope.workspace = Some(api(serde_json::from_value(
@@ -795,7 +791,7 @@ mod exercise {
                 "hidden presentation phase missing",
             )?;
             let observer_name = format!("p612-observer-{}", &hex(&random()?)[..6]);
-            let observer = api(ServerConnection::for_development_client(&observer_name))?;
+            let observer = api(MachineConnection::for_development_client(&observer_name))?;
             let observer = api(support::connect(&observer))?;
             super::presentation::observe_hidden_inventory(&observer, pane).map_err(|failure| {
                 eprintln!("QUIC inventory observer: {failure}");
@@ -935,7 +931,7 @@ mod exercise {
     fn enroll_device<R: Read + AsRawFd, W: Write + AsRawFd>(
         input: &mut R,
         output: &mut W,
-    ) -> Result<(ServerConnection, Arc<MemoryConnector>)> {
+    ) -> Result<(MachineConnection, Arc<MemoryConnector>)> {
         let invitation = receive_invitation(input)?;
         let credential = api(DeviceCredential::generate())?;
         let mut enrollment = api(Enrollment::claim(
@@ -1001,11 +997,11 @@ mod exercise {
             "substituted TLS certificate pin was not refused",
         )?;
         let mut wrong = paired.clone();
-        wrong.pin.server[0] ^= 1;
+        wrong.pin.core[0] ^= 1;
         require(
             matches!(
                 DirectConnection::connect(&endpoint, &wrong, &credential),
-                Err(DirectError::WrongServer)
+                Err(DirectError::WrongMachine)
             ),
             "wrong server identity was not refused",
         )?;
@@ -1014,28 +1010,28 @@ mod exercise {
             paired: paired.clone(),
             credential,
         });
-        let server = api(ServerConnection::direct(
+        let core = api(MachineConnection::direct(
             IDENTITY,
             paired.client,
             paired.clone(),
             connector.clone(),
         ))?;
         require(
-            api(server.refresh())?.protocol_major == spaceterm_server::protocol::MAJOR,
+            api(core.refresh())?.protocol_major == spaceterm_core::protocol::MAJOR,
             "QUIC did not negotiate this build's protocol major",
         )?;
         send_json(output, json!({"paired": paired}))?;
-        Ok((server, connector))
+        Ok((core, connector))
     }
 
     /// One directory read. Its reply arrives when the read settles.
     fn directory_read(
-        connection: &ServerLink,
+        connection: &CoreLink,
         operation: directories::Operation,
     ) -> Result<directories::Value> {
         let pending = api(connection
             .request(Operation::DirectoryRead(operation))
-            .map_err(ServerError::from))?;
+            .map_err(CoreError::from))?;
         match pending.wait_for(Duration::from_secs(15)) {
             Some(Ok(ReplyBody::Directory(Ok(value)))) => Ok(value),
             _ => Err("QUIC directory read did not complete"),
@@ -1043,11 +1039,11 @@ mod exercise {
     }
 
     fn create_remote_workspace(
-        server: &ServerConnection,
+        core: &MachineConnection,
         name: String,
         handoff: impl FnOnce(&FixtureWorkspace) -> Result<()>,
     ) -> Result<Value> {
-        let connection = api(support::connect(server))?;
+        let connection = api(support::connect(core))?;
         let directories::Value::Directory(home) =
             directory_read(&connection, directories::Operation::Home)?
         else {
@@ -1096,16 +1092,16 @@ mod exercise {
             .ok_or("fixture boot missing")?
             .boot;
         let workspace = mutate(
-            server,
+            core,
             &connection,
             Mutation::CreateWorkspace {
                 name: name.clone(),
                 directory: Some(home.clone()),
-                control: spaceterm_server::hierarchy::CreateControl::Creator,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
             },
         )?;
         let mut cleanup = WorkspaceGuard {
-            server,
+            core,
             owned: Some(FixtureWorkspace {
                 workspace,
                 boot,
@@ -1131,7 +1127,7 @@ mod exercise {
             "QUIC Workspace pin did not retain its owning directory",
         )?;
         let pane = work.tabs.first().ok_or("QUIC root Tab missing")?.root_pane;
-        let attachments = api(server.attachments())?;
+        let attachments = api(core.attachments())?;
         api(attachments.initialize(&current, Some(workspace)))?;
         require(
             attachments.is_attached(workspace),
@@ -1139,7 +1135,7 @@ mod exercise {
         )?;
         drop(attachments);
         require(
-            api(server.attachments())?.is_attached(workspace),
+            api(core.attachments())?.is_attached(workspace),
             "QUIC attachment did not survive reopening",
         )?;
         cleanup.owned = None;
@@ -1164,7 +1160,7 @@ mod exercise {
         let mut input = File::from(api(input.try_clone_to_owned())?);
         let mut output_pipe = std::io::stdout().lock();
         send_json(&mut output_pipe, json!({"os": std::env::consts::OS}))?;
-        let (server, connector) = enroll_device(&mut input, &mut output_pipe)?;
+        let (core, connector) = enroll_device(&mut input, &mut output_pipe)?;
         loop {
             let request = receive_json(&mut input)?;
             let name = request["create_workspace"]
@@ -1172,7 +1168,7 @@ mod exercise {
                 .ok_or("QUIC Workspace creation phase missing")?;
             if request["fail_before_handoff"] == true {
                 let mut owned = None;
-                let result = create_remote_workspace(&server, name.to_owned(), |workspace| {
+                let result = create_remote_workspace(&core, name.to_owned(), |workspace| {
                     owned = Some(workspace.clone());
                     Err("injected failure before Workspace identity handoff")
                 });
@@ -1189,7 +1185,7 @@ mod exercise {
                 )?;
                 continue;
             }
-            let created = create_remote_workspace(&server, name.to_owned(), |owned| {
+            let created = create_remote_workspace(&core, name.to_owned(), |owned| {
                 send_json(&mut output_pipe, json!({"workspace_owner": owned}))?;
                 require(
                     receive_json(&mut input)?["workspace_owned"] == json!(owned.workspace),
@@ -1203,7 +1199,7 @@ mod exercise {
         let pane: Id = api(serde_json::from_value(scope["pane"].clone()))?;
         let session: Id = api(serde_json::from_value(scope["session"].clone()))?;
         let owner = scope["owner"].as_str().ok_or("owner identity missing")?;
-        let connection = api(support::connect(&server))?;
+        let connection = api(support::connect(&core))?;
         let taken = take(&connection, pane, owner)?;
         require(
             taken.lease().session == session,
@@ -1225,7 +1221,7 @@ mod exercise {
         let previous = taken.lease();
         connection.close();
         drop(taken);
-        let connection = api(support::connect(&server))?;
+        let connection = api(support::connect(&core))?;
         let resumed = attached(select(&connection, pane, false)?)?;
         require(
             resumed.lease().session == session,
@@ -1248,7 +1244,7 @@ mod exercise {
             "owner continuation changed",
         )?;
         let taken = take(&connection, pane, owner)?;
-        let second = api(support::connect(&server))?;
+        let second = api(support::connect(&core))?;
         send_json(&mut output_pipe, json!({"lease": taken.lease()}))?;
         require(
             receive_json(&mut input)?["revoked"] == true,
@@ -1272,7 +1268,7 @@ mod exercise {
             other_pairing,
         ))?;
         require(
-            confirmation.server == connector.paired.pin.server
+            confirmation.core == connector.paired.pin.core
                 && confirmation.operation == confirmation_operation
                 && confirmation.target == other_pairing,
             "owner-revokes-first self-confirmation changed its binding",
@@ -1280,20 +1276,20 @@ mod exercise {
         drop(taken);
         drop(connection);
         drop(second);
-        drop(server);
+        drop(core);
         drop(connector);
         send_json(
             &mut output_pipe,
             json!({"revoked": true, "self_confirmed": true}),
         )?;
-        let (server, connector) = enroll_device(&mut input, &mut output_pipe)?;
+        let (core, connector) = enroll_device(&mut input, &mut output_pipe)?;
         let scope = receive_json(&mut input)?;
         require(
             api(serde_json::from_value::<Id>(scope["pane"].clone()))? == pane
                 && api(serde_json::from_value::<Id>(scope["session"].clone()))? == session,
             "last-device fixture scope changed",
         )?;
-        let connection = api(support::connect(&server))?;
+        let connection = api(support::connect(&core))?;
         require(
             take(&connection, pane, owner)?.lease().session == session,
             "last device replaced the Session",
@@ -1321,7 +1317,7 @@ mod exercise {
             connector.paired.pairing,
         ))?;
         require(
-            retry.server == connector.paired.pin.server
+            retry.core == connector.paired.pin.core
                 && retry.operation == operation
                 && retry.target == connector.paired.pairing,
             "self-revocation original receipt changed",
@@ -1337,7 +1333,7 @@ mod exercise {
             connector.paired.pairing,
         ))?;
         require(
-            confirmation.server == connector.paired.pin.server
+            confirmation.core == connector.paired.pin.core
                 && confirmation.operation == confirmation_operation
                 && confirmation.target == connector.paired.pairing,
             "retired self-confirmation changed its server, operation or target",
@@ -1385,7 +1381,7 @@ mod exercise {
                         .ok_or("missing bind address")?
                         .parse::<SocketAddr>())?)
                 }
-                "--expect-server" => {
+                "--expect-machine" => {
                     expected = Some(id(args.next().ok_or("missing server identity")?)?)
                 }
                 "--confirm-idle-development" => confirmed = true,
@@ -1399,7 +1395,9 @@ mod exercise {
             println!(
                 "Requires a parent-prepared foreground Development server and signed native examples on macOS and Penguin."
             );
-            println!("Use --bind IP:PORT --expect-server SERVER_HEX --confirm-idle-development.");
+            println!(
+                "Use --bind IP:PORT --expect-machine MACHINE_ID_HEX --confirm-idle-development."
+            );
             println!(
                 "Confirms no user Terminal Sessions, paired devices, pending claims or outstanding invitations."
             );
@@ -1420,7 +1418,7 @@ mod exercise {
         )?;
         owner(
             bind.ok_or("--bind is required")?,
-            expected.ok_or("--expect-server is required")?,
+            expected.ok_or("--expect-machine is required")?,
             restart,
         )
     }

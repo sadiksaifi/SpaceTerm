@@ -1,8 +1,8 @@
 # Resolve application directories by XDG convention
 
-SpaceTerm resolves its application directories from XDG roots on macOS as well as Linux. The account-local server uses owning-account paths shared by the desktop and service, independently of client environment overrides.
+SpaceTerm resolves its application directories from XDG roots on macOS as well as Linux. SpaceTerm Core uses owning-account paths shared by the desktop and service, independently of client environment overrides.
 
-Stable nonsecret client identities and their views, attachments and operation journals live outside the Settings Document. [ADR 0030](0030-start-servers-at-boot-independently-of-clients.md) defines account-private server storage.
+Stable nonsecret client identities and their views, attachments and operation journals live outside the Settings Document. [ADR 0030](0030-start-servers-at-boot-independently-of-clients.md) defines SpaceTerm Core's account-private storage.
 
 The desktop stores direct-network client secrets only in native credential facilities. The CLI selects a private credential file for enrollment only on Linux when no native store is usable, such as an SSH shell without Secret Service or a CI runner. macOS always uses the Keychain. The desktop and CLI use [the shared credential interface](../../crates/spaceterm-connections/src/credentials.rs), with separate credential references for their pairings. A native item holds one immutable pairing secret; inserting an existing key cannot replace it. Connection records retain references, never secret bytes.
 
@@ -14,4 +14,4 @@ CLI pairing-secret access to an unavailable or unsafe store fails with `credenti
 
 The CLI fallback stores one immutable secret per file at `$XDG_DATA_HOME/<identity>/cli-credentials/<64-hex-credential-reference>`, defaulting to `~/.local/share/<identity>/cli-credentials/`. The identity is `spaceterm`, `spaceterm-preflight` or `spaceterm-development`. [The file adapter](../../crates/spaceterm-connections/src/credentials/file.rs) creates the directory with mode `0700` and files with mode `0600`, refuses different owners, loose permissions and symbolic links, and publishes complete files atomically without replacing an existing key. Enrollment records the selected backend alongside the credential reference in the Saved Connection and its restricted cleanup records. Reads and removal open only that recorded backend, without re-selection. A file-backed pairing remains file-backed when native availability returns, including after a transient native failure during enrollment. A native store requiring interaction never selects the fallback, and a native operation failure never retries against files. Each command using private credential files reports `private_credential_file` in JSON warnings or one sentence on stderr in text mode. No desktop path selects this store.
 
-The server role, account-local work, `connection list` and `connection rename` require no client credential or native credential store. Terminal programs retain their own credential access.
+SpaceTerm Core's account service, account-local work, `machine list` and `machine rename` require no client credential or native credential store. Terminal programs retain their own credential access.

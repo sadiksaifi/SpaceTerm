@@ -14,7 +14,7 @@ pub mod worktree;
 
 use crate::contract::{Code, Source};
 use crate::scope::{Current, Resolved, Snapshot, TargetError};
-use spaceterm_server::hierarchy::{CreateControl, Id, Mutation};
+use spaceterm_core::hierarchy::{CreateControl, Id, Mutation};
 
 pub fn create_control(
     agent: bool,
@@ -25,7 +25,7 @@ pub fn create_control(
         return CreateControl::Creator;
     }
     match current.filter(|c| {
-        c.server == snapshot.server
+        c.core == snapshot.core
             && snapshot
                 .inventory
                 .workspaces
@@ -60,10 +60,10 @@ pub struct Planned {
     pub mutation: Mutation,
 }
 
-pub(crate) fn organize_error(error: spaceterm_server::organize::OrganizeError) -> Code {
+pub(crate) fn organize_error(error: spaceterm_core::organize::OrganizeError) -> Code {
     match error {
-        spaceterm_server::organize::OrganizeError::Missing => Code::NotFound,
-        spaceterm_server::organize::OrganizeError::NoFallbackWorktree => Code::NoFallbackWorktree,
+        spaceterm_core::organize::OrganizeError::Missing => Code::NotFound,
+        spaceterm_core::organize::OrganizeError::NoFallbackWorktree => Code::NoFallbackWorktree,
     }
 }
 
@@ -97,7 +97,7 @@ mod tests {
         ScopeArgs, Selector,
         fixtures::{fixture, id},
     };
-    use spaceterm_server::{hierarchy::Axis, worktree::Operation};
+    use spaceterm_core::{hierarchy::Axis, worktree::Operation};
 
     fn args(workspace: Option<&str>, worktree: Option<&str>, tab: Option<&str>) -> ScopeArgs {
         ScopeArgs {
@@ -112,7 +112,7 @@ mod tests {
     fn tab_creation_in_the_current_workspace_keeps_its_worktree() {
         let snapshot = fixture();
         let current = Current {
-            server: id(9),
+            core: id(9),
             pane: id(22),
         };
         let plan = tab::create(
@@ -176,7 +176,7 @@ mod tests {
     fn creation_control_uses_agents_then_valid_current_context_then_unclaimed() {
         let snapshot = fixture();
         let current = Current {
-            server: id(9),
+            core: id(9),
             pane: id(22),
         };
         assert_eq!(
@@ -195,7 +195,7 @@ mod tests {
             create_control(
                 false,
                 Some(&Current {
-                    server: id(8),
+                    core: id(8),
                     pane: id(22)
                 }),
                 &snapshot

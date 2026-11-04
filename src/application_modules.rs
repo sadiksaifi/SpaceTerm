@@ -43,6 +43,8 @@ mod cancellation;
 mod close_confirmation;
 #[cfg(feature = "desktop")]
 mod command_line_tool;
+#[cfg(feature = "desktop")]
+mod core_context;
 #[cfg_attr(
     not(feature = "desktop"),
     allow(
@@ -58,6 +60,7 @@ mod host_fonts;
 mod invitation_links;
 #[cfg(feature = "desktop")]
 mod keybindings;
+mod machine_settings;
 mod platform;
 #[cfg_attr(
     not(feature = "desktop"),
@@ -68,9 +71,6 @@ mod platform;
     )
 )]
 mod repository_status;
-#[cfg(feature = "desktop")]
-mod server_context;
-mod server_settings;
 #[cfg(feature = "desktop")]
 mod settings;
 #[cfg(feature = "desktop")]
@@ -120,4 +120,4 @@ pub mod local_startup;
 pub mod runtime;
 
 #[cfg(feature = "desktop")]
-pub(crate) use spaceterm_server as server_connection;
+pub(crate) use spaceterm_core as machine_connection;

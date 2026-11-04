@@ -22,10 +22,10 @@ class HeadlessInstallerTests(unittest.TestCase):
             signature.write_bytes(bytes(64))
             archive = root / "candidate.tar.gz"
             for name, kind in (
-                ("server/bin/spaceterm", tarfile.SYMTYPE),
-                ("server/bin/spaceterm", tarfile.LNKTYPE),
+                ("core/bin/spaceterm", tarfile.SYMTYPE),
+                ("core/bin/spaceterm", tarfile.LNKTYPE),
                 ("../escaped", tarfile.REGTYPE),
-                ("server/../../escaped", tarfile.REGTYPE),
+                ("core/../../escaped", tarfile.REGTYPE),
             ):
                 with self.subTest(name=name, kind=kind):
                     with tarfile.open(archive, "w:gz") as output:

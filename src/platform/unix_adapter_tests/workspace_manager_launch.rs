@@ -25,7 +25,7 @@ fn open_local_directory_alias_activates_the_workspace_and_keeps_its_spelling(
     confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
 
     assert_eq!(created_names(&harness).len(), 1, "nothing new is created");
-    assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
+    assert_eq!(active_core_workspace(&harness, cx), Some(CREATED));
     assert_eq!(
         harness.manager.read_with(cx, |manager, _| manager
             .binding

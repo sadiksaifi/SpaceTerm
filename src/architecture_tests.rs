@@ -707,7 +707,7 @@ fn workspace_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() 
         let source = std::fs::read_to_string(&path).unwrap();
         let production = source.split(TEST_MODULE).next().unwrap();
         // Server cards name the remote operating system independently of the client's host.
-        let production = if path == root.join("ui/settings_window/server_card.rs") {
+        let production = if path == root.join("ui/settings_window/machine_card.rs") {
             production
                 .replace("\"macOS\"", "\"\"")
                 .replace("\"Linux\"", "\"\"")

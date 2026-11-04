@@ -142,12 +142,12 @@ mod linux_adapter_tests {
         assert_eq!(reveal(&absent), Err(ToolFailure::RevealUnavailable));
 
         let refusing = bus();
-        let (_server, shows) = serve(&refusing, true);
+        let (_core, shows) = serve(&refusing, true);
         assert_eq!(reveal(&refusing), Err(ToolFailure::RevealUnavailable));
         assert_eq!(shows.try_recv().unwrap().len(), 1);
 
         let showing = bus();
-        let (_server, shows) = serve(&showing, false);
+        let (_core, shows) = serve(&showing, false);
         assert_eq!(reveal(&showing), Ok(()));
         assert_eq!(
             shows.try_recv().unwrap(),

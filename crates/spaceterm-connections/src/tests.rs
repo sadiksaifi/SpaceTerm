@@ -40,7 +40,7 @@ pub fn waiting_invitation(
     let comparison_code = direct::PairingClaim {
         id: [9; 32],
         invitation_id: invitation,
-        server: pin.server,
+        core: pin.core,
         device_public_key: [3; 32],
         device_name: "Joining device".into(),
         expires_at_unix_seconds: expires,
@@ -50,7 +50,7 @@ pub fn waiting_invitation(
     let payload = Zeroizing::new(
         serde_json::to_vec(&serde_json::json!({
             "schema": 1, "id": invitation, "endpoint": "quic://127.0.0.1:9231",
-            "pin": pin, "server_name": label, "token": random_id().unwrap(),
+            "pin": pin, "machine_name": label, "token": random_id().unwrap(),
             "expires": expires, "valid_for_seconds": 300,
         }))
         .unwrap(),
@@ -93,7 +93,7 @@ impl DirectNetwork for WaitingNetwork {
     fn cancel_enrollment(
         &self,
         endpoint: &str,
-        pin: &direct::ServerPin,
+        pin: &direct::MachinePin,
         claim: [u8; 32],
         credential: &DeviceCredential,
     ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -106,7 +106,7 @@ impl DirectNetwork for WaitingNetwork {
         route: &DirectRoute,
         credential: DeviceCredential,
         gate: Arc<AtomicBool>,
-    ) -> Result<ServerConnection, DirectError> {
+    ) -> Result<MachineConnection, DirectError> {
         self.cleanup.connect(identity, route, credential, gate)
     }
     fn revoke(
@@ -127,7 +127,7 @@ impl DirectNetwork for WaitingNetwork {
 #[derive(Default)]
 pub(super) struct MemoryRecords(Mutex<Document>, AtomicBool);
 impl Records for MemoryRecords {
-    fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
+    fn load(&self) -> Result<Document, spaceterm_core::direct::DirectError> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, document: &Document) -> Result<Durability, SaveError> {
@@ -190,7 +190,7 @@ pub(super) enum Answer {
 pub(super) struct Network {
     answer: Answer,
     calls: Mutex<Vec<Call>>,
-    pub(super) cancellations: Mutex<Vec<(String, direct::ServerPin, [u8; 32])>>,
+    pub(super) cancellations: Mutex<Vec<(String, direct::MachinePin, [u8; 32])>>,
     other_ready: AtomicBool,
 }
 impl Network {
@@ -207,7 +207,7 @@ impl DirectNetwork for Network {
     fn cancel_enrollment(
         &self,
         endpoint: &str,
-        pin: &direct::ServerPin,
+        pin: &direct::MachinePin,
         claim: [u8; 32],
         _: &DeviceCredential,
     ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -223,7 +223,7 @@ impl DirectNetwork for Network {
         _: &DirectRoute,
         _: DeviceCredential,
         _: Arc<AtomicBool>,
-    ) -> Result<ServerConnection, DirectError> {
+    ) -> Result<MachineConnection, DirectError> {
         panic!("inactive or removed routes must not connect")
     }
     fn revoke(
@@ -249,7 +249,7 @@ impl DirectNetwork for Network {
             }
             Answer::Exact | Answer::WrongTarget | Answer::LoseOther => {
                 Ok(direct::RevocationReceipt {
-                    server: actor.pin.server,
+                    core: actor.pin.core,
                     operation,
                     target: if matches!(self.answer, Answer::WrongTarget) {
                         [99; 32]
@@ -269,9 +269,9 @@ pub fn saved(id: u8, key: u8) -> SavedRoute {
             label: format!("Server {id}"),
             endpoint: "quic://127.0.0.1:9231".into(),
             paired: PairedDevice {
-                pin: direct::ServerPin {
+                pin: direct::MachinePin {
                     build: "spaceterm-development".into(),
-                    server: [id; 32],
+                    core: [id; 32],
                     public_key: [3; 32],
                     certificate: [4; 32],
                 },
@@ -319,7 +319,7 @@ fn fixture(
 fn an_empty_saved_inventory_is_distinct_from_one_that_could_not_be_read() {
     struct Inventory(Option<Document>);
     impl Records for Inventory {
-        fn load(&self) -> Result<Document, spaceterm_server::direct::DirectError> {
+        fn load(&self) -> Result<Document, spaceterm_core::direct::DirectError> {
             self.0.clone().ok_or(DirectError::StorageUnavailable)
         }
         fn save(&self, _: &Document) -> Result<Durability, SaveError> {
@@ -387,16 +387,16 @@ pub fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteI
 
 /// Connected saved routes that all reach the server `server`, as an earlier pairing and a newer
 /// one to the same computer do.
-pub fn connected_routes_to_one_server(
+pub fn connected_routes_to_one_core(
     labels: &[&str],
-    server: [u8; 32],
+    core: [u8; 32],
 ) -> (DirectConnections, Vec<DirectRouteId>) {
-    connected_fixture(labels, Some(server))
+    connected_fixture(labels, Some(core))
 }
 
 fn connected_fixture(
     labels: &[&str],
-    server: Option<[u8; 32]>,
+    core: Option<[u8; 32]>,
 ) -> (DirectConnections, Vec<DirectRouteId>) {
     struct ConnectedNetwork;
     impl DirectNetwork for ConnectedNetwork {
@@ -406,14 +406,14 @@ fn connected_fixture(
             route: &DirectRoute,
             _: DeviceCredential,
             _: Arc<AtomicBool>,
-        ) -> Result<ServerConnection, DirectError> {
+        ) -> Result<MachineConnection, DirectError> {
             struct Unreachable;
             impl direct::DirectConnector for Unreachable {
                 fn connect(&self) -> Result<direct::DirectConnection, DirectError> {
                     Err(DirectError::Transport)
                 }
             }
-            ServerConnection::direct(
+            MachineConnection::direct(
                 identity,
                 route.id,
                 route.paired.clone(),
@@ -436,7 +436,7 @@ fn connected_fixture(
         fn cancel_enrollment(
             &self,
             _: &str,
-            _: &direct::ServerPin,
+            _: &direct::MachinePin,
             _: [u8; 32],
             _: &DeviceCredential,
         ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -458,8 +458,8 @@ fn connected_fixture(
         let mut saved = saved(1 + index, 5 + index);
         saved.route.label = (*label).to_owned();
         saved.active = true;
-        if let Some(server) = server {
-            saved.route.paired.pin.server = server;
+        if let Some(core) = core {
+            saved.route.paired.pin.core = core;
         }
         credentials
             .insert(
@@ -468,14 +468,14 @@ fn connected_fixture(
             )
             .unwrap();
         let gate = Arc::new(AtomicBool::new(true));
-        let server = worker::connect(&connections.0, &saved, Interaction::Quiet, gate.clone())
+        let core = worker::connect(&connections.0, &saved, Interaction::Quiet, gate.clone())
             .expect("the scripted route connects without network I/O");
         ids.push(saved.route.id);
         state.routes.insert(
             saved.route.id,
             RouteState {
                 status: DirectRouteStatus::Connected,
-                server: Some(server),
+                core: Some(core),
                 gate,
                 retry: Retry::new(Interaction::Quiet),
                 health: None,
@@ -543,7 +543,7 @@ fn offline_fixture_reached(
             _: &DirectRoute,
             _: DeviceCredential,
             _: Arc<AtomicBool>,
-        ) -> Result<ServerConnection, DirectError> {
+        ) -> Result<MachineConnection, DirectError> {
             Err(DirectError::Transport)
         }
         fn revoke(
@@ -559,7 +559,7 @@ fn offline_fixture_reached(
         fn cancel_enrollment(
             &self,
             _: &str,
-            _: &direct::ServerPin,
+            _: &direct::MachinePin,
             _: [u8; 32],
             _: &DeviceCredential,
         ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -572,7 +572,7 @@ fn offline_fixture_reached(
 fn retained_fixture_routes(
     routes: &[(&str, Option<&str>)],
     active: bool,
-    server: Option<[u8; 32]>,
+    core: Option<[u8; 32]>,
     network: Arc<dyn DirectNetwork>,
 ) -> (
     DirectConnections,
@@ -590,8 +590,8 @@ fn retained_fixture_routes(
             route.route.endpoint = (*endpoint).to_owned();
         }
         route.active = active;
-        if let Some(server) = server {
-            route.route.paired.pin.server = server;
+        if let Some(core) = core {
+            route.route.paired.pin.core = core;
         }
         ids.push(route.route.id);
         records.0.lock().unwrap().routes.push(route);
@@ -642,7 +642,7 @@ fn offline_self_unpair_removes_only_its_route_and_keeps_exact_recovery_after_rel
         fixture(vec![saved(1, 5), saved(2, 6)], Answer::Lost);
     connections.unpair_self(&[1; 32]).unwrap();
     assert!(connections.route(&[1; 32]).is_none());
-    assert!(connections.server(&[1; 32]).is_none());
+    assert!(connections.core(&[1; 32]).is_none());
     assert!(connections.route(&[2; 32]).is_some());
     await_condition(|| !network.calls.lock().unwrap().is_empty());
     let original = network.calls.lock().unwrap()[0].clone();
@@ -792,7 +792,7 @@ fn confirmed_self_unpair_retires_its_key_after_another_original_finishes_using_i
         connections
             .pending_unpairs()
             .iter()
-            .any(|p| p.self_unpair && p.server_confirmed)
+            .any(|p| p.self_unpair && p.core_confirmed)
     });
     assert!(credentials.values.lock().unwrap().contains_key(&[5; 32]));
     network.other_ready.store(true, Ordering::Release);
@@ -838,11 +838,11 @@ fn a_disconnected_route_stops_following_its_old_link() {
 fn reconnecting_a_connected_route_replaces_its_link() {
     let (connections, ids) = connected_routes(&["Studio"]);
     let id = ids[0];
-    let (old_gate, old_server) = {
+    let (old_gate, old_core) = {
         let state = connections.0.state.lock().unwrap();
         let route = &state.routes[&id];
         assert_eq!(route.status, DirectRouteStatus::Connected);
-        (Arc::clone(&route.gate), route.server.clone().unwrap())
+        (Arc::clone(&route.gate), route.core.clone().unwrap())
     };
     connections.connect(&id);
     assert!(
@@ -855,9 +855,9 @@ fn reconnecting_a_connected_route_replaces_its_link() {
         route.status == DirectRouteStatus::Connected
             && !Arc::ptr_eq(&route.gate, &old_gate)
             && route
-                .server
+                .core
                 .as_ref()
-                .is_some_and(|server| !server.same_handle(&old_server))
+                .is_some_and(|core| !core.same_handle(&old_core))
     });
 }
 
@@ -874,7 +874,7 @@ fn disconnect_then_connect_ignores_the_previous_attempt_and_never_reopens_its_ga
             _: &DirectRoute,
             _: DeviceCredential,
             gate: Arc<AtomicBool>,
-        ) -> Result<ServerConnection, DirectError> {
+        ) -> Result<MachineConnection, DirectError> {
             self.started.send(gate).unwrap();
             let _ = self
                 .finish
@@ -896,7 +896,7 @@ fn disconnect_then_connect_ignores_the_previous_attempt_and_never_reopens_its_ga
         fn cancel_enrollment(
             &self,
             _: &str,
-            _: &direct::ServerPin,
+            _: &direct::MachinePin,
             _: [u8; 32],
             _: &DeviceCredential,
         ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
@@ -1020,7 +1020,7 @@ fn full_recovery_capacity_refuses_new_operations_but_still_removes_its_own_route
 /// it goes with it. Disconnect keeps the route and what it retained.
 #[test]
 fn removing_a_route_should_discard_what_it_retained() {
-    let (connections, routes) = connected_routes_to_one_server(&["penguin"], [0x5E; 32]);
+    let (connections, routes) = connected_routes_to_one_core(&["penguin"], [0x5E; 32]);
     let removed = Arc::new(Mutex::new(Vec::new()));
     connections.on_route_removed(Arc::new({
         let removed = Arc::clone(&removed);
@@ -1073,8 +1073,8 @@ impl RecordingFile {
 impl records::RecordFile for RecordingFile {
     fn read(
         &self,
-        accept: &mut dyn FnMut(&[u8]) -> Result<(), spaceterm_server::direct::DirectError>,
-    ) -> Result<(), spaceterm_server::direct::DirectError> {
+        accept: &mut dyn FnMut(&[u8]) -> Result<(), spaceterm_core::direct::DirectError>,
+    ) -> Result<(), spaceterm_core::direct::DirectError> {
         self.blocked.store(true, Ordering::Release);
         if let Some(bytes) = &self.files.lock().unwrap().bytes {
             accept(bytes)?;

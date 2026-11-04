@@ -1230,7 +1230,7 @@ mod tests {
         let presentation = request
             .secret_presentation("this Mac")
             .expect("the request asks for a secret");
-        assert_eq!(presentation.title(), "Allow the Server to Keep Running");
+        assert_eq!(presentation.title(), "Allow SpaceTerm Core to Keep Running");
         assert_eq!(presentation.field_label(), "Remote sudo password");
     }
 

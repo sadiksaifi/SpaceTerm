@@ -1,8 +1,8 @@
 use super::*;
-use spaceterm_server::hierarchy::{
-    CloseInventory, CloseTarget as ServerCloseTarget, ConfirmedPane, Mutation, Outcome,
+use spaceterm_core::hierarchy::{
+    CloseInventory, CloseTarget as MachineCloseTarget, ConfirmedPane, Mutation, Outcome,
 };
-use spaceterm_server::worktree::{Error, Operation};
+use spaceterm_core::worktree::{Error, Operation};
 use std::path::Path;
 
 fn only_feature() -> Inventory {
@@ -46,7 +46,7 @@ fn request(harness: &Harness, cx: &mut VisualTestContext) {
     let (_, feature) = worktree_ids(harness, cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.request_server_close(
+            manager.request_core_close(
                 CloseTarget::Worktree {
                     workspace_id: harness.binding,
                     worktree_id: feature,
@@ -64,7 +64,7 @@ fn expected_open(path: &str) -> Mutation {
         workspace: WORKSPACE,
         source: None,
         root: MAIN_ROOT.into(),
-        path: path.into(), control: spaceterm_server::hierarchy::CreateControl::Creator,
+        path: path.into(), control: spaceterm_core::hierarchy::CreateControl::Creator,
     })
 }
 
@@ -125,17 +125,17 @@ fn worktree_fallback_acceptance_reviews_current_exact_targets_without_opening_th
             .read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
         active
     );
-    let active_server_tab = harness.manager.read_with(cx, |manager, cx| {
+    let active_core_tab = harness.manager.read_with(cx, |manager, cx| {
         let tabs = manager
             .workspaces
             .workspace(harness.binding)
             .unwrap()
             .payload()
             .read(cx);
-        tabs.server_tab(tabs.active_terminal_identity(cx).0)
+        tabs.core_tab(tabs.active_terminal_identity(cx).0)
     });
     assert_eq!(
-        active_server_tab,
+        active_core_tab,
         Some(FEATURE_TAB),
         "fallback membership does not activate it"
     );
@@ -144,7 +144,7 @@ fn worktree_fallback_acceptance_reviews_current_exact_targets_without_opening_th
             .is_some()
     );
     click("modal-action-close-confirm", cx);
-    let target = ServerCloseTarget::Worktree {
+    let target = MachineCloseTarget::Worktree {
         workspace: WORKSPACE,
         tab: FEATURE_TAB,
     };
@@ -311,7 +311,7 @@ fn worktree_fallback_never_closes_a_reassigned_original_anchor(cx: &mut TestAppC
 
 #[test]
 fn worktree_fallback_destination_prefers_main_and_excludes_bare_missing_and_target() {
-    use spaceterm_server::organize::fallback_destination as destination;
+    use spaceterm_core::organize::fallback_destination as destination;
     let mut listing = WorktreeInventory {
         main_root: MAIN_ROOT.into(),
         current: None,

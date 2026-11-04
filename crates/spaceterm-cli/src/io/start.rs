@@ -10,7 +10,7 @@ use crate::contract::*;
 use crate::scope::{self, Snapshot, TargetData};
 use crate::work::backend::{Connected, Read as _};
 use crate::work::{output::Output, paths};
-use spaceterm_server::protocol::AgentName;
+use spaceterm_core::protocol::AgentName;
 use std::time::{Duration, Instant};
 
 /// Connecting, admission and targeting give up after this long.
@@ -32,8 +32,8 @@ pub fn start(cli: &Cli) -> Option<Output> {
     Some(output)
 }
 
-fn failed(path: &str, server: Option<ServerRef>, failure: Failure) -> Output {
-    Output::failed(path, server, failure, serde_json::json!({}), String::new())
+fn failed(path: &str, core: Option<MachineRef>, failure: Failure) -> Output {
+    Output::failed(path, core, failure, serde_json::json!({}), String::new())
 }
 
 fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) -> Output {
@@ -57,7 +57,7 @@ fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) 
             let data = error.operational_data();
             return Output::failed(
                 path,
-                error.server.map(|server| *server),
+                error.machine.map(|machine| *machine),
                 error.failure,
                 data,
                 String::new(),
@@ -70,18 +70,18 @@ fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) 
             let failure = if Instant::now() >= connecting {
                 Failure::new(Code::Timeout)
             } else {
-                from_server_error(error)
+                from_core_error(error)
             };
             return failed(path, None, failure);
         }
     };
-    let server_id = match connection.admitted_server_id() {
-        Ok(server) => server,
-        Err(error) => return failed(path, None, from_server_error(error)),
+    let machine_id = match connection.admitted_machine_id() {
+        Ok(core) => core,
+        Err(error) => return failed(path, None, from_core_error(error)),
     };
-    let server = selected.reference(&server_id);
+    let core = selected.reference(&machine_id);
     let mut reconnect = |agent: Option<&AgentName>| {
-        selected.server_connection(
+        selected.machine_connection(
             identity,
             agent.cloned(),
             credentials,
@@ -91,7 +91,7 @@ fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) 
     };
     let state = match crate::state::CliState::open(identity) {
         Ok(state) => state,
-        Err(error) => return failed(path, Some(server), from_server_error(error)),
+        Err(error) => return failed(path, Some(core), from_core_error(error)),
     };
     let recovered = match crate::journal::settle(
         &state,
@@ -106,57 +106,56 @@ fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) 
         connecting,
     ) {
         Ok(recovered) => recovered,
-        Err(failure) => return failed(path, Some(server), failure),
+        Err(failure) => return failed(path, Some(core), failure),
     };
     let actor = match connection.admitted_client_id() {
         Ok(actor) => actor,
-        Err(error) => return failed(path, Some(server), from_server_error(error)),
+        Err(error) => return failed(path, Some(core), from_core_error(error)),
     };
     let mut reader = Connected {
         link: link.clone(),
         actor,
         deadline: connecting,
     };
-    let target = match target(cli, command, &mut reader, server_id) {
+    let target = match target(cli, command, &mut reader, machine_id) {
         Ok(target) => target,
         Err(output) => return *output,
     };
     let mut output = match command {
         PaneCommand::Read(args) => render(
             path,
-            &server,
+            &core,
             read::read(&link, &target, args, deadline),
             |data| data.rows.as_ref().map(rows_text).unwrap_or_default(),
         ),
         PaneCommand::Send(args) => render(
             path,
-            &server,
+            &core,
             send::send(&link, &target, args, &mut std::io::stdin().lock(), deadline),
             |_| String::new(),
         ),
-        PaneCommand::Release { .. } => render(
-            path,
-            &server,
-            send::release(&link, &target, deadline),
-            |_| String::new(),
-        ),
+        PaneCommand::Release { .. } => {
+            render(path, &core, send::release(&link, &target, deadline), |_| {
+                String::new()
+            })
+        }
         PaneCommand::Run(args) => {
             let directory = match &args.directory {
                 Some(directory) => {
                     match resolve_directory(&mut reader, directory, selected.key()) {
                         Ok(directory) => Some(directory),
-                        Err(failure) => return failed(path, Some(server), failure),
+                        Err(failure) => return failed(path, Some(core), failure),
                     }
                 }
                 None => None,
             };
             let mut runs = match state.runs(&selected.key(), agent.as_ref(), connecting) {
                 Ok(runs) => runs,
-                Err(code) => return failed(path, Some(server), Failure::new(code)),
+                Err(code) => return failed(path, Some(core), Failure::new(code)),
             };
             let mut connect = || {
                 selected
-                    .server_connection(
+                    .machine_connection(
                         identity,
                         agent.clone(),
                         credentials,
@@ -164,11 +163,11 @@ fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) 
                         Some(Instant::now() + CONNECT_TIMEOUT),
                     )
                     .and_then(|connection| connection.link())
-                    .map_err(from_server_error)
+                    .map_err(from_core_error)
             };
             render(
                 path,
-                &server,
+                &core,
                 run::run(
                     &link,
                     &mut connect,
@@ -197,7 +196,7 @@ fn target(
     cli: &Cli,
     command: &PaneCommand,
     reader: &mut Connected,
-    server: [u8; 32],
+    core: [u8; 32],
 ) -> Result<PaneTarget, Box<Output>> {
     let path = cli.command.path();
     let fail = |failure| Box::new(failed(path, None, failure));
@@ -210,7 +209,7 @@ fn target(
     };
     let inventory = reader.inventory().map_err(fail)?;
     let snapshot = Snapshot {
-        server,
+        core,
         repositories: inventory.repositories.clone(),
         inventory,
     };
@@ -218,7 +217,7 @@ fn target(
         &snapshot,
         env!("SPACETERM_CLI_IDENTITY"),
         std::env::var("SPACETERM_IDENTITY").ok().as_deref(),
-        std::env::var("SPACETERM_SERVER_ID").ok().as_deref(),
+        std::env::var("SPACETERM_MACHINE_ID").ok().as_deref(),
         std::env::var("SPACETERM_PANE").ok().as_deref(),
     );
     let home = reader.home().map_err(fail)?;
@@ -264,7 +263,7 @@ fn target(
             .and_then(|session| session.session)
     });
     Ok(PaneTarget {
-        server,
+        core,
         workspace: placement.workspace,
         pane,
         running: session.is_some(),
@@ -302,7 +301,7 @@ fn resolve_directory(
 /// The envelope of a terminal command, with its text.
 fn render<D: serde::Serialize>(
     path: &str,
-    server: &ServerRef,
+    core: &MachineRef,
     done: Done<D>,
     text: impl Fn(&D) -> String,
 ) -> Output {
@@ -315,14 +314,14 @@ fn render<D: serde::Serialize>(
     let mut output = match failure {
         None => Output::ok(
             path,
-            server.clone(),
+            core.clone(),
             data.expect("a successful command has data"),
             rendered,
             &[],
         ),
         Some(failure) => Output::failed(
             path,
-            Some(server.clone()),
+            Some(core.clone()),
             failure,
             data.map_or_else(
                 || serde_json::json!({}),

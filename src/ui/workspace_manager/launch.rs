@@ -15,8 +15,8 @@ use gpui::{App, Context, SharedString, Task, Window, div};
 use spaceterm_ui::{Button, ProgressRing, ProgressSize, ProgressState};
 
 use super::WorkspaceManager;
+use crate::machine_connection::{CoreError, MachineConnection};
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
-use crate::server_connection::{ServerConnection, ServerError};
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::settings_window::{AuthorizationPrompt, AuthorizedRequest};
 use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
@@ -53,52 +53,52 @@ pub(crate) enum LaunchOutcome {
 pub(crate) trait LocalLaunch: Send + Sync {
     /// Prepares or reuses the account's service and connects. Never reverses Stop and never
     /// asks for authorization.
-    fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, ServerError>;
+    fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError>;
     /// The person's explicit Start Server, which reverses their Stop.
-    fn start(&self) -> Result<(), ServerError>;
+    fn start(&self) -> Result<(), CoreError>;
     /// The person's explicit startup authorization. Cancelling the system prompt changes nothing.
-    fn authorize(&self) -> Result<(), ServerError>;
+    fn authorize(&self) -> Result<(), CoreError>;
     /// Waits for the service operation a run answered `ServiceBusy` for. It fails with
     /// `ServiceBusy` only when the operation outlasts the server's bounded wait.
-    fn wait_for_service(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<(), ServerError>;
+    fn wait_for_service(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<(), CoreError>;
     /// Whether this SpaceTerm includes a verified server build other than the approved one.
     /// Reads only: it stages, installs, and starts nothing.
     fn update_offered(&self) -> bool;
 }
 
 /// The Workspaces a ready server presents, and the connection that retains this client's views.
-pub(crate) struct WorkspaceServerConnection {
+pub(crate) struct WorkspaceMachineConnection {
     pub(crate) edits: WorkspaceEditSource,
     pub(crate) sessions: WorkspacePaneSessions,
     /// Retains attachments and arrangements across relaunch.
-    pub(crate) retained: Option<ServerConnection>,
+    pub(crate) retained: Option<MachineConnection>,
 }
 
 /// Connects the Workspace Window to a ready server on the event thread.
-pub(crate) trait WorkspaceServerConnector {
+pub(crate) trait WorkspaceCoreConnector {
     fn connect(
         &self,
         local_files: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         cx: &mut App,
-    ) -> Option<WorkspaceServerConnection>;
+    ) -> Option<WorkspaceMachineConnection>;
 
     /// The account-local connection whose client directory retains this desktop's Workspace
     /// order, or `None` to keep the order for the window's life. Opening it needs no running
     /// server.
-    fn workspace_order(&self) -> Option<ServerConnection> {
+    fn workspace_order(&self) -> Option<MachineConnection> {
         None
     }
 }
 
 /// The account-local server a Workspace Window launches and presents.
 #[derive(Clone)]
-pub(crate) struct LocalServerAdapters {
+pub(crate) struct LocalCoreAdapters {
     pub(crate) launch: Arc<dyn LocalLaunch>,
-    pub(crate) connector: Rc<dyn WorkspaceServerConnector>,
+    pub(crate) connector: Rc<dyn WorkspaceCoreConnector>,
 }
 
-impl LocalServerAdapters {
+impl LocalCoreAdapters {
     /// This build's own account server. Construction has no effects.
     pub(crate) fn account() -> Self {
         Self {
@@ -111,16 +111,16 @@ impl LocalServerAdapters {
 struct AccountLaunch;
 
 impl AccountLaunch {
-    fn service() -> Result<crate::server_connection::service::Service, ServerError> {
-        crate::server_connection::service::Service::for_identity(
+    fn service() -> Result<crate::machine_connection::service::Service, CoreError> {
+        crate::machine_connection::service::Service::for_identity(
             crate::application_identity::ApplicationIdentity::current().directory_name(),
         )
     }
 }
 
 impl LocalLaunch for AccountLaunch {
-    fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, ServerError> {
-        use spaceterm_server::StartupOutcome;
+    fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
+        use spaceterm_core::StartupOutcome;
         Ok(match crate::local_startup::run(cancelled)? {
             StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
             StartupOutcome::Stopped => LaunchOutcome::Stopped,
@@ -130,22 +130,22 @@ impl LocalLaunch for AccountLaunch {
         })
     }
 
-    fn wait_for_service(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<(), ServerError> {
-        spaceterm_server::LocalStartup::for_identity(
+    fn wait_for_service(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<(), CoreError> {
+        spaceterm_core::LocalStartup::for_identity(
             crate::application_identity::ApplicationIdentity::current().directory_name(),
         )?
         .wait_for_service(cancelled)
     }
 
-    fn start(&self) -> Result<(), ServerError> {
+    fn start(&self) -> Result<(), CoreError> {
         Self::service()?.start().map(drop)
     }
 
-    fn authorize(&self) -> Result<(), ServerError> {
+    fn authorize(&self) -> Result<(), CoreError> {
         // The service asks the operating system for its one fixed authorization, for this
         // account only. No SpaceTerm code runs as root.
         Self::service()?
-            .enable_linger(crate::server_connection::service::LingerAuthorization::Desktop)
+            .enable_linger(crate::machine_connection::service::LingerAuthorization::Desktop)
     }
 
     fn update_offered(&self) -> bool {
@@ -156,30 +156,25 @@ impl LocalLaunch for AccountLaunch {
 
 struct AccountConnector;
 
-impl WorkspaceServerConnector for AccountConnector {
+impl WorkspaceCoreConnector for AccountConnector {
     fn connect(
         &self,
         local_files: LocalFilesystemAuthority,
         panes: &PaneConstruction,
         cx: &mut App,
-    ) -> Option<WorkspaceServerConnection> {
+    ) -> Option<WorkspaceMachineConnection> {
         // Server Settings and the Workspace Window share one edit writer for this client.
-        let client = crate::ui::server_worktrees::Client::get(cx)?;
-        let server = client.server.clone();
-        Some(WorkspaceServerConnection {
+        let client = crate::ui::core_worktrees::Client::get(cx)?;
+        let core = client.core.clone();
+        Some(WorkspaceMachineConnection {
             edits: client.source,
-            sessions: WorkspacePaneSessions::new(
-                server.clone(),
-                client.controls,
-                local_files,
-                panes,
-            ),
-            retained: Some(server),
+            sessions: WorkspacePaneSessions::new(core.clone(), client.controls, local_files, panes),
+            retained: Some(core),
         })
     }
 
-    fn workspace_order(&self) -> Option<ServerConnection> {
-        ServerConnection::for_identity(
+    fn workspace_order(&self) -> Option<MachineConnection> {
+        MachineConnection::for_identity(
             crate::application_identity::ApplicationIdentity::current().directory_name(),
         )
         .ok()
@@ -207,11 +202,11 @@ pub(super) enum LaunchState {
     AuthorizationRequired {
         declined: bool,
     },
-    Failed(ServerError),
+    Failed(CoreError),
     /// This client refused the server, which keeps running with its Terminal Sessions.
     /// `update` is whether this SpaceTerm includes a verified server build to update it to.
     Incompatible {
-        reason: ServerError,
+        reason: CoreError,
         update: bool,
     },
     Ready,
@@ -231,11 +226,11 @@ pub(super) enum LaunchAction {
 impl LaunchAction {
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Start => "Start Server",
+            Self::Start => "Start SpaceTerm Core",
             Self::Authorize => "Authorize\u{2026}",
             Self::Retry => "Try Again",
-            Self::Settings => "Server Settings\u{2026}",
-            Self::Update => "Update Server\u{2026}",
+            Self::Settings => "Machine Settings\u{2026}",
+            Self::Update => "Update SpaceTerm Core\u{2026}",
         }
     }
 
@@ -291,72 +286,74 @@ pub(super) struct LaunchPresentation {
 
 pub(super) const OPENING_TITLE: &str = "Opening Workspaces";
 // Launch reuses a running server or starts it, so the detail claims neither.
-const OPENING_DETAIL: &str = "SpaceTerm is waiting for the server.";
-pub(super) const STOPPED_TITLE: &str = "Server Stopped";
-const STOPPED_DETAIL: &str = "Start the server to open your Workspaces.";
-pub(super) const AUTHORIZATION_TITLE: &str = "Run the Server at Startup";
+const OPENING_DETAIL: &str = "SpaceTerm is waiting for SpaceTerm Core.";
+pub(super) const STOPPED_TITLE: &str = "SpaceTerm Core Stopped";
+const STOPPED_DETAIL: &str = "Start SpaceTerm Core to open your Workspaces.";
+pub(super) const AUTHORIZATION_TITLE: &str = "Run SpaceTerm Core at Startup";
 const AUTHORIZATION_DECLINED: &str = "Authorization didn\u{2019}t finish.";
 const AUTHORIZING_DETAIL: &str =
     "Enter an administrator password in the system prompt to continue.";
-pub(super) const BUSY_TITLE: &str = "Waiting for the Server";
+pub(super) const BUSY_TITLE: &str = "Waiting for SpaceTerm Core";
 const BUSY_DETAIL: &str =
-    "Another server operation is running. Your Workspaces open when it finishes.";
+    "Another SpaceTerm Core operation is running. Your Workspaces open when it finishes.";
 
 /// The title for a launch that could not finish. The detail names the exact reason.
-const fn failure_title(error: ServerError) -> &'static str {
+const fn failure_title(error: CoreError) -> &'static str {
     match error {
-        ServerError::IncompatibleState | ServerError::IncompatibleProtocol => "Incompatible Server",
-        ServerError::ActivationUnresolved | ServerError::ReturnUnavailable => {
-            "Server Update Unfinished"
+        CoreError::IncompatibleState | CoreError::IncompatibleProtocol => {
+            "Incompatible SpaceTerm Core"
         }
-        ServerError::CandidateChanged => "Restart SpaceTerm",
-        ServerError::CandidateMissing => "Server Not Included",
-        ServerError::RuntimeUnavailable => "Couldn\u{2019}t Verify Server",
-        ServerError::UnsafeStorage => "Unsafe Server Storage",
-        ServerError::StorageUnavailable => "Server Storage Unavailable",
-        ServerError::NotInstalled => "Server Not Installed",
-        ServerError::AuthenticationRefused => "Connection Refused",
-        ServerError::ServiceBusy => "Server Busy",
+        CoreError::ActivationUnresolved | CoreError::ReturnUnavailable => {
+            "SpaceTerm Core Update Unfinished"
+        }
+        CoreError::CandidateChanged => "Restart SpaceTerm",
+        CoreError::CandidateMissing => "SpaceTerm Core Not Included",
+        CoreError::RuntimeUnavailable => "Couldn\u{2019}t Verify SpaceTerm Core",
+        CoreError::UnsafeStorage => "Unsafe SpaceTerm Core Storage",
+        CoreError::StorageUnavailable => "SpaceTerm Core Storage Unavailable",
+        CoreError::NotInstalled => "SpaceTerm Core Not Installed",
+        CoreError::AuthenticationRefused => "Connection Refused",
+        CoreError::ServiceBusy => "SpaceTerm Core Busy",
         _ => "Couldn\u{2019}t Open Workspaces",
     }
 }
 
 /// The detail for a launch that could not finish: the exact reason, and for a server package,
 /// whether this build lacks one or holds one that failed verification.
-fn failure_detail(error: ServerError) -> SharedString {
+fn failure_detail(error: CoreError) -> SharedString {
     match error {
-        ServerError::CandidateMissing => {
-            "This SpaceTerm build doesn\u{2019}t include a server. Reinstall SpaceTerm, then try \
+        CoreError::CandidateMissing => {
+            "This SpaceTerm build doesn\u{2019}t include SpaceTerm Core. Reinstall SpaceTerm, then try \
              again."
                 .into()
         }
-        ServerError::RuntimeUnavailable => "Reinstall SpaceTerm, then try again.".into(),
+        CoreError::RuntimeUnavailable => "Reinstall SpaceTerm, then try again.".into(),
         error => error.to_string().into(),
     }
 }
 
 /// Whether a connection failure before the first inventory needs the person, because
 /// reconnecting alone cannot open the Workspaces.
-const fn ends_opening(error: ServerError) -> bool {
+const fn ends_opening(error: CoreError) -> bool {
     matches!(
         error,
-        ServerError::IncompatibleProtocol
-            | ServerError::ActivationUnresolved
-            | ServerError::IncompatibleState
-            | ServerError::StorageUnavailable
-            | ServerError::UnsafeStorage
-            | ServerError::AuthenticationRefused
+        CoreError::IncompatibleProtocol
+            | CoreError::ActivationUnresolved
+            | CoreError::IncompatibleState
+            | CoreError::StorageUnavailable
+            | CoreError::UnsafeStorage
+            | CoreError::AuthenticationRefused
     )
 }
 
 /// Whether this client refused the server itself, which keeps running for its other clients.
-const fn incompatible(error: ServerError) -> bool {
-    matches!(error, ServerError::IncompatibleProtocol)
+const fn incompatible(error: CoreError) -> bool {
+    matches!(error, CoreError::IncompatibleProtocol)
 }
 
 /// What launch presents for a failure. A refused server offers the update journey only when a
 /// read found a verified build to update it to.
-const fn failed(error: ServerError, update: bool) -> LaunchState {
+const fn failed(error: CoreError, update: bool) -> LaunchState {
     if incompatible(error) {
         LaunchState::Incompatible {
             reason: error,
@@ -375,7 +372,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         LaunchState::Launching | LaunchState::Ready => LaunchPresentation {
             title: OPENING_TITLE,
             detail: fixed(OPENING_DETAIL),
-            progress: Some("Waiting for the server\u{2026}"),
+            progress: Some("Waiting for SpaceTerm Core\u{2026}"),
             actions: &[],
             icon: None,
             waiting: true,
@@ -383,7 +380,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
             title: STOPPED_TITLE,
             detail: fixed(STOPPED_DETAIL),
-            progress: Some("Starting the server\u{2026}"),
+            progress: Some("Starting SpaceTerm Core\u{2026}"),
             actions: &[],
             icon: None,
             waiting: false,
@@ -400,7 +397,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         LaunchState::Working(LaunchStep::WaitForService) => LaunchPresentation {
             title: BUSY_TITLE,
             detail: fixed(BUSY_DETAIL),
-            progress: Some("Waiting for the server\u{2026}"),
+            progress: Some("Waiting for SpaceTerm Core\u{2026}"),
             actions: &[],
             icon: None,
             waiting: false,
@@ -433,9 +430,9 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         },
         LaunchState::Incompatible { reason, update } => {
             let detail = if update {
-                "Updating the server ends its Terminal Sessions for every client."
+                "Updating SpaceTerm Core ends its Terminal Sessions for every client."
             } else {
-                "SpaceTerm and this server are incompatible."
+                "SpaceTerm and this SpaceTerm Core are incompatible."
             };
             LaunchPresentation {
                 title: failure_title(reason),
@@ -456,7 +453,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             progress: None,
             // Only another SpaceTerm build includes a server package, so trying again from this
             // one changes nothing, as Settings also treats it.
-            actions: if matches!(error, ServerError::CandidateMissing) {
+            actions: if matches!(error, CoreError::CandidateMissing) {
                 &[Settings]
             } else {
                 &[Retry, Settings]
@@ -469,7 +466,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
 
 /// One Workspace Window's launch: its adapters, where it stands, and the running step.
 pub(super) struct LocalLaunchState {
-    adapters: LocalServerAdapters,
+    adapters: LocalCoreAdapters,
     pub(super) state: LaunchState,
     cancelled: Arc<AtomicBool>,
     _task: Option<Task<()>>,
@@ -489,7 +486,7 @@ pub(super) struct LocalLaunchState {
     _views_read: Option<Task<()>>,
     /// The open connection's refusal and whether a verified build can update its server. Read
     /// once per refusal, off the event thread; `false` until the read answers.
-    refusal_offer: Option<(ServerError, bool)>,
+    refusal_offer: Option<(CoreError, bool)>,
     _refusal_offer: Option<Task<()>>,
     /// New Workspace was chosen with no Workspace Window open. The window opened for it creates
     /// the Workspace once this computer's server presents its Workspaces.
@@ -500,7 +497,7 @@ pub(super) struct LocalLaunchState {
 }
 
 impl LocalLaunchState {
-    pub(super) fn new(adapters: LocalServerAdapters) -> Self {
+    pub(super) fn new(adapters: LocalCoreAdapters) -> Self {
         Self {
             adapters,
             state: LaunchState::Launching,
@@ -520,7 +517,7 @@ impl LocalLaunchState {
     }
 
     /// The account-local connection that retains this desktop's Workspace order, if any.
-    pub(super) fn workspace_order_connection(&self) -> Option<ServerConnection> {
+    pub(super) fn workspace_order_connection(&self) -> Option<MachineConnection> {
         self.adapters.connector.workspace_order()
     }
 
@@ -551,16 +548,16 @@ impl Drop for LocalLaunchState {
 /// What one background run reports back to the window.
 enum StepResult {
     Outcome(LaunchOutcome),
-    Failed(ServerError),
+    Failed(CoreError),
     /// The client refused the server. `update` is whether a verified build can update it.
-    Incompatible(ServerError, bool),
+    Incompatible(CoreError, bool),
     /// The person's authorization did not complete.
     Declined,
 }
 
 /// The person's explicit Start Server from a Pane whose server they stopped. The window runs its
 /// Start step, then launch, and its Panes reconnect once the server answers.
-pub(crate) fn start_local_server(window: &mut Window, cx: &mut App) {
+pub(crate) fn start_local_core(window: &mut Window, cx: &mut App) {
     window.defer(cx, |window, cx| {
         if let Some(Some(manager)) = window.root::<WorkspaceManager>() {
             manager.update(cx, |manager, cx| {
@@ -592,7 +589,7 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
             } else if manager.launch._task.is_some() {
                 manager.launch.resume = true;
             } else if manager.launch.state == LaunchState::Ready {
-                manager.server_started(cx);
+                manager.core_started(cx);
             }
         });
     }
@@ -608,18 +605,18 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         self.launch.create_when_presented = true;
-        self.create_pending_workspace(super::ServerKey::LOCAL, window, cx);
+        self.create_pending_workspace(super::MachineKey::LOCAL, window, cx);
     }
 
     /// Creates the Workspace New Workspace asked for before this computer's server presented
     /// its Workspaces, once it has.
     pub(super) fn create_pending_workspace(
         &mut self,
-        key: super::ServerKey,
+        key: super::MachineKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if key != super::ServerKey::LOCAL
+        if key != super::MachineKey::LOCAL
             || !self.launch.create_when_presented
             || self.launch_presentation().is_some()
         {
@@ -659,7 +656,7 @@ impl WorkspaceManager {
                 // Only a cancelled or refused prompt leaves startup unchanged. Any other failure
                 // says what went wrong and claims nothing about what the system changed.
                 Some(LaunchStep::Authorize) => adapter.authorize().err().map(|error| match error {
-                    ServerError::AuthorizationRequired => StepResult::Declined,
+                    CoreError::AuthorizationRequired => StepResult::Declined,
                     error => StepResult::Failed(error),
                 }),
                 Some(LaunchStep::WaitForService) => adapter
@@ -696,7 +693,7 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         let state = match result {
-            StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_server(window, cx),
+            StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_core(window, cx),
             StepResult::Outcome(LaunchOutcome::Stopped) => LaunchState::Stopped,
             // The operation decides what launch finds next, so launch runs again once it ends.
             StepResult::Outcome(LaunchOutcome::ServiceBusy) => {
@@ -704,11 +701,11 @@ impl WorkspaceManager {
                 return;
             }
             StepResult::Outcome(LaunchOutcome::AuthorizationRequired)
-            | StepResult::Failed(ServerError::AuthorizationRequired) => {
+            | StepResult::Failed(CoreError::AuthorizationRequired) => {
                 LaunchState::AuthorizationRequired { declined: false }
             }
             StepResult::Declined => LaunchState::AuthorizationRequired { declined: true },
-            StepResult::Failed(ServerError::Stopped) => LaunchState::Stopped,
+            StepResult::Failed(CoreError::Stopped) => LaunchState::Stopped,
             StepResult::Failed(error) => LaunchState::Failed(error),
             StepResult::Incompatible(error, update) => failed(error, update),
             // Only a closing window cancels, so there is nothing left to present.
@@ -731,7 +728,7 @@ impl WorkspaceManager {
         // A running server answers the Panes a stop interrupted, so they connect again, and the
         // window's own connection reconnects without waiting for its delay.
         if state == LaunchState::Ready {
-            self.server_started(cx);
+            self.core_started(cx);
             if let Some(binding) = self.binding.local() {
                 binding.retry_connection();
             }
@@ -755,23 +752,23 @@ impl WorkspaceManager {
 
     /// Reconnects each Pane the person's stop interrupted, once this computer's server runs
     /// again. Another computer's Panes follow their own server.
-    fn server_started(&self, cx: &mut App) {
+    fn core_started(&self, cx: &mut App) {
         for workspace in self.workspaces.iter() {
             if self
                 .binding
                 .owner(workspace.id())
-                .is_some_and(|key| key != super::ServerKey::LOCAL)
+                .is_some_and(|key| key != super::MachineKey::LOCAL)
             {
                 continue;
             }
             workspace
                 .payload()
-                .update(cx, |manager, cx| manager.server_started(cx));
+                .update(cx, |manager, cx| manager.core_started(cx));
         }
     }
 
     /// Presents a ready server's Workspaces in this window.
-    fn connect_local_server(&mut self, window: &mut Window, cx: &mut Context<Self>) -> LaunchState {
+    fn connect_local_core(&mut self, window: &mut Window, cx: &mut Context<Self>) -> LaunchState {
         if self.binding.local().is_some() {
             return LaunchState::Ready;
         }
@@ -789,17 +786,17 @@ impl WorkspaceManager {
         let Some(connection) =
             connector.connect(self.local_filesystem.clone(), &self.pane_construction, cx)
         else {
-            return LaunchState::Failed(ServerError::Protocol);
+            return LaunchState::Failed(CoreError::Protocol);
         };
         self.present_workspaces(connection.edits, connection.sessions, window, cx);
-        if let (Some(binding), Some(server)) = (self.binding.local_mut(), connection.retained) {
-            binding.identify(Rc::new(server.clone()));
-            binding.retain_client_views(server);
+        if let (Some(binding), Some(core)) = (self.binding.local_mut(), connection.retained) {
+            binding.identify(Rc::new(core.clone()));
+            binding.retain_client_views(core);
             let read = binding.client_views_read();
             self.launch._views_read = Some(cx.spawn_in(window, async move |manager, cx| {
                 read.await;
                 let _ = manager.update_in(cx, |manager, window, cx| {
-                    manager.sync_workspaces(super::ServerKey::LOCAL, window, cx);
+                    manager.sync_workspaces(super::MachineKey::LOCAL, window, cx);
                 });
             }));
         }
@@ -845,9 +842,9 @@ impl WorkspaceManager {
                 Some(present(self.launch.state))
             }
             Some(binding) => Some(present(match binding.connection_error() {
-                Some(ServerError::Stopped) => LaunchState::Stopped,
+                Some(CoreError::Stopped) => LaunchState::Stopped,
                 // The connection waits for the operation again by itself.
-                Some(ServerError::ServiceBusy) => LaunchState::Working(LaunchStep::WaitForService),
+                Some(CoreError::ServiceBusy) => LaunchState::Working(LaunchStep::WaitForService),
                 // An open connection's refusal offers what the Server version row offers.
                 Some(error) if ends_opening(error) => failed(
                     error,
@@ -870,7 +867,7 @@ impl WorkspaceManager {
         self.workspaces.active_workspace_id().is_none()
             && self.launch_presentation().is_some()
             && !self.binding.iter().any(|(key, binding)| {
-                key != super::ServerKey::LOCAL && binding.latest_inventory().is_some()
+                key != super::MachineKey::LOCAL && binding.latest_inventory().is_some()
             })
     }
 
@@ -1054,12 +1051,12 @@ impl WorkspaceManager {
         let ready = self.launch._task.is_none();
         match action {
             LaunchAction::Settings => crate::ui::settings_window::open_or_activate(
-                Some(crate::ui::settings_window::SettingsSectionId::Servers),
+                Some(crate::ui::settings_window::SettingsSectionId::Machines),
                 cx,
             ),
             // The journey reads the server again and asks before it changes anything. A
             // finished update runs launch again in every waiting window.
-            LaunchAction::Update => crate::ui::settings_window::open_server_update(cx),
+            LaunchAction::Update => crate::ui::settings_window::open_core_update(cx),
             LaunchAction::Start if ready => {
                 self.run_local_launch(Some(LaunchStep::Start), window, cx);
             }
@@ -1078,25 +1075,25 @@ pub(crate) mod testing {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    use super::{LaunchOutcome, LocalLaunch, LocalServerAdapters, WorkspaceServerConnector};
-    use crate::server_connection::ServerError;
+    use super::{LaunchOutcome, LocalCoreAdapters, LocalLaunch, WorkspaceCoreConnector};
+    use crate::machine_connection::CoreError;
 
     /// A ready server presenting one Workspace, "Default", whose Panes run in `session_factory`.
     pub(crate) fn presenting(
         session_factory: Rc<dyn crate::terminal::TerminalSessionFactory>,
-    ) -> LocalServerAdapters {
+    ) -> LocalCoreAdapters {
         use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
         use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
-        use spaceterm_server::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
+        use spaceterm_core::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 
         struct Presenting(Rc<dyn crate::terminal::TerminalSessionFactory>);
-        impl WorkspaceServerConnector for Presenting {
+        impl WorkspaceCoreConnector for Presenting {
             fn connect(
                 &self,
                 _: crate::platform::local_filesystem::LocalFilesystemAuthority,
                 panes: &crate::ui::pane_lifecycle::PaneConstruction,
                 _: &mut gpui::App,
-            ) -> Option<super::WorkspaceServerConnection> {
+            ) -> Option<super::WorkspaceMachineConnection> {
                 let inventory = Inventory {
                     repositories: None,
                     revision: 1,
@@ -1111,7 +1108,7 @@ pub(crate) mod testing {
                         tabs: vec![Tab {
                             worktree: None,
                             worktree_membership:
-                                spaceterm_server::hierarchy::WorktreeMembership::Following,
+                                spaceterm_core::hierarchy::WorktreeMembership::Following,
                             worktree_repository: None,
                             id: [52; 32],
                             root_pane: [53; 32],
@@ -1131,18 +1128,16 @@ pub(crate) mod testing {
                     }],
                 };
                 let opener = ScriptedPanes::new(
-                    crate::terminal::WorkspaceTerminalSessionFactory::new_server(Rc::clone(
-                        &self.0,
-                    )),
+                    crate::terminal::WorkspaceTerminalSessionFactory::new_core(Rc::clone(&self.0)),
                 );
-                Some(super::WorkspaceServerConnection {
+                Some(super::WorkspaceMachineConnection {
                     edits: WorkspaceEditSource::new(Rc::new(ScriptedEdits::new(Some(inventory)))),
                     sessions: WorkspacePaneSessions::with_opener(opener, panes),
                     retained: None,
                 })
             }
         }
-        LocalServerAdapters {
+        LocalCoreAdapters {
             launch: Arc::new(ScriptedLaunch {
                 ready: true,
                 ..ScriptedLaunch::default()
@@ -1152,19 +1147,19 @@ pub(crate) mod testing {
     }
 
     /// A server whose launch never answers, for windows a test does not launch.
-    pub(crate) fn unanswered() -> LocalServerAdapters {
+    pub(crate) fn unanswered() -> LocalCoreAdapters {
         struct Unreachable;
-        impl WorkspaceServerConnector for Unreachable {
+        impl WorkspaceCoreConnector for Unreachable {
             fn connect(
                 &self,
                 _: crate::platform::local_filesystem::LocalFilesystemAuthority,
                 _: &crate::ui::pane_lifecycle::PaneConstruction,
                 _: &mut gpui::App,
-            ) -> Option<super::WorkspaceServerConnection> {
+            ) -> Option<super::WorkspaceMachineConnection> {
                 None
             }
         }
-        LocalServerAdapters {
+        LocalCoreAdapters {
             launch: Arc::new(ScriptedLaunch::default()),
             connector: Rc::new(Unreachable),
         }
@@ -1175,10 +1170,10 @@ pub(crate) mod testing {
     pub(crate) struct ScriptedLaunch {
         /// Answers every run with Ready once the queue is empty, instead of never answering.
         ready: bool,
-        runs: Mutex<VecDeque<Result<LaunchOutcome, ServerError>>>,
+        runs: Mutex<VecDeque<Result<LaunchOutcome, CoreError>>>,
         steps: Mutex<Vec<&'static str>>,
-        start: Mutex<Option<ServerError>>,
-        authorize: Mutex<Option<ServerError>>,
+        start: Mutex<Option<CoreError>>,
+        authorize: Mutex<Option<CoreError>>,
         /// Whether a verified build can update a refused server.
         update: Mutex<bool>,
     }
@@ -1188,15 +1183,15 @@ pub(crate) mod testing {
         pub(crate) fn offer_update(&self) {
             *self.update.lock().unwrap() = true;
         }
-        pub(crate) fn answer(&self, result: Result<LaunchOutcome, ServerError>) {
+        pub(crate) fn answer(&self, result: Result<LaunchOutcome, CoreError>) {
             self.runs.lock().unwrap().push_back(result);
         }
-        pub(crate) fn refuse_start(&self, error: ServerError) {
+        pub(crate) fn refuse_start(&self, error: CoreError) {
             *self.start.lock().unwrap() = Some(error);
         }
         /// Answers the next authorization with `error`. `AuthorizationRequired` is a prompt
         /// that was cancelled or refused.
-        pub(crate) fn refuse_authorization(&self, error: ServerError) {
+        pub(crate) fn refuse_authorization(&self, error: CoreError) {
             *self.authorize.lock().unwrap() = Some(error);
         }
         /// Every step in order: `run`, `start`, `authorize`, `wait_for_service`, and
@@ -1207,7 +1202,7 @@ pub(crate) mod testing {
     }
 
     impl LocalLaunch for ScriptedLaunch {
-        fn run(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, ServerError> {
+        fn run(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
             self.steps.lock().unwrap().push("run");
             self.runs
                 .lock()
@@ -1219,15 +1214,15 @@ pub(crate) mod testing {
                     LaunchOutcome::Cancelled
                 }))
         }
-        fn start(&self) -> Result<(), ServerError> {
+        fn start(&self) -> Result<(), CoreError> {
             self.steps.lock().unwrap().push("start");
             self.start.lock().unwrap().take().map_or(Ok(()), Err)
         }
-        fn authorize(&self) -> Result<(), ServerError> {
+        fn authorize(&self) -> Result<(), CoreError> {
             self.steps.lock().unwrap().push("authorize");
             self.authorize.lock().unwrap().take().map_or(Ok(()), Err)
         }
-        fn wait_for_service(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<(), ServerError> {
+        fn wait_for_service(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<(), CoreError> {
             self.steps.lock().unwrap().push("wait_for_service");
             Ok(())
         }

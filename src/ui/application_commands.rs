@@ -24,7 +24,7 @@ enum PaletteEntry {
     Command(Command),
     /// Opens the Add Server sheet. It is an application action rather than a Command, so it has
     /// no configurable Shortcut.
-    AddServer,
+    AddMachine,
 }
 
 /// The palette each Workspace Window presents, keyed by that window.
@@ -142,8 +142,8 @@ impl Render for ApplicationPalette {
 fn run(entry: PaletteEntry, window: &mut Window, cx: &mut App) {
     match entry {
         PaletteEntry::Command(command) => window.dispatch_action(command.action(), cx),
-        PaletteEntry::AddServer => {
-            cx.defer(|cx| crate::ui::settings_window::open_add_server(None, None, cx));
+        PaletteEntry::AddMachine => {
+            cx.defer(|cx| crate::ui::settings_window::open_add_machine(None, None, cx));
         }
     }
 }
@@ -159,7 +159,7 @@ fn entry_order() -> Vec<PaletteEntry> {
         .filter(|command| command.group() != CommandGroup::Workspace);
     workspace
         .map(PaletteEntry::Command)
-        .chain([PaletteEntry::AddServer])
+        .chain([PaletteEntry::AddMachine])
         .chain(others.map(PaletteEntry::Command))
         .collect()
 }
@@ -168,7 +168,7 @@ fn entries(cx: &App) -> Vec<CommandPaletteItem<PaletteEntry>> {
     entry_order()
         .into_iter()
         .map(|entry| match entry {
-            PaletteEntry::AddServer => add_server_entry(),
+            PaletteEntry::AddMachine => add_machine_entry(),
             PaletteEntry::Command(command) => {
                 let item = CommandPaletteItem::new(entry, command.label())
                     .section(section_title(command.group()))
@@ -182,9 +182,9 @@ fn entries(cx: &App) -> Vec<CommandPaletteItem<PaletteEntry>> {
         .collect()
 }
 
-fn add_server_entry() -> CommandPaletteItem<PaletteEntry> {
-    CommandPaletteItem::new(PaletteEntry::AddServer, "Add Server\u{2026}")
-        .section("Servers")
+fn add_machine_entry() -> CommandPaletteItem<PaletteEntry> {
+    CommandPaletteItem::new(PaletteEntry::AddMachine, "Add Machine\u{2026}")
+        .section("Machines")
         .keywords([
             "ssh",
             "remote",
@@ -242,8 +242,8 @@ mod tests {
             .expect("application initialization should succeed");
         });
         let (manager, cx) = cx.add_window_view(|window, cx| {
-            crate::ui::workspace_manager::tests::local_server_manager(
-                Rc::new(crate::ui::workspace_manager::tests::server_sessions(
+            crate::ui::workspace_manager::tests::local_core_manager(
+                Rc::new(crate::ui::workspace_manager::tests::core_sessions(
                     crate::terminal::testing::TestTerminalSessionRecords::default(),
                 )),
                 std::env::temp_dir(),
@@ -274,14 +274,14 @@ mod tests {
         let (_manager, cx) = workspace_window(cx);
         let created_tabs = |cx: &mut VisualTestContext| {
             cx.update(|_, cx| {
-                cx.global::<crate::ui::workspace_manager::tests::LocalServer>()
+                cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
                     .edits
                     .submitted()
                     .into_iter()
                     .filter(|mutation| {
                         matches!(
                             mutation,
-                            spaceterm_server::hierarchy::Mutation::CreateTab { .. }
+                            spaceterm_core::hierarchy::Mutation::CreateTab { .. }
                         )
                     })
                     .count()

@@ -30,7 +30,7 @@ const NUL_LIST_VERSION: ToolVersion = ToolVersion {
 /// Discovery prints a few short paths; a listing holds a few hundred bytes per Worktree.
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
-pub(crate) use spaceterm_server::worktree::{
+pub(crate) use spaceterm_core::worktree::{
     Branch as WorktreeBranch, BranchName, Branches as BranchList,
 };
 
@@ -40,8 +40,8 @@ pub(crate) use spaceterm_server::worktree::{
 pub(crate) enum WorktreeCreateError {
     #[error("the operation was not submitted")]
     NotSubmitted(&'static str),
-    #[error("the server could not complete the Worktree operation")]
-    Server(spaceterm_server::worktree::Error),
+    #[error("SpaceTerm Core could not complete the Worktree operation")]
+    Core(spaceterm_core::worktree::Error),
     #[error("git refuses the branch name")]
     InvalidName,
     #[error("a branch with the name already exists")]

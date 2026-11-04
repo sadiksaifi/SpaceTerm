@@ -167,9 +167,9 @@ pub(crate) fn installed(cx: &App) -> Option<Rc<dyn SshSetupFactory>> {
 pub(crate) const fn phase_detail(phase: SetupPhase) -> &'static str {
     match phase {
         SetupPhase::Authenticating => "Signing in\u{2026}",
-        SetupPhase::Discovering => "Looking for SpaceTerm Server\u{2026}",
-        SetupPhase::Installing => "Installing SpaceTerm Server\u{2026}",
-        SetupPhase::Starting => "Starting SpaceTerm Server\u{2026}",
+        SetupPhase::Discovering => "Looking for SpaceTerm Core\u{2026}",
+        SetupPhase::Installing => "Installing SpaceTerm Core\u{2026}",
+        SetupPhase::Starting => "Starting SpaceTerm Core\u{2026}",
         SetupPhase::Enrolling => "Pairing this device\u{2026}",
         SetupPhase::Connecting => "Connecting over the network\u{2026}",
     }
@@ -209,7 +209,7 @@ pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
         SetupFailure::Unreachable { address } => SetupProblem {
             state: "Not reachable",
             explanation: format!(
-                "SpaceTerm Server is running, but this computer couldn\u{2019}t reach it at {}. Check the address and that any firewall allows UDP, or enter the address this computer uses to reach it.",
+                "SpaceTerm Core is running, but this computer couldn\u{2019}t reach it at {}. Check the address and that any firewall allows UDP, or enter the address this computer uses to reach it.",
                 address.authority()
             )
             .into(),
@@ -227,7 +227,7 @@ pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
         // The sheet ends or returns to its form on a cancellation; these words only cover a
         // stray one.
         SetupFailure::Cancelled => {
-            fixed("Not added", "Setup stopped before the server was added.", true)
+            fixed("Not added", "Setup stopped before the machine was added.", true)
         }
     }
 }
@@ -245,12 +245,12 @@ pub(crate) fn start_failure() -> SetupProblem {
 
 const fn incompatibility_detail(kind: IncompatibilityKind) -> &'static str {
     match kind {
-        IncompatibilityKind::Protocol => "SpaceTerm and this server are incompatible.",
+        IncompatibilityKind::Protocol => "SpaceTerm and this SpaceTerm Core are incompatible.",
         IncompatibilityKind::Platform => {
-            "SpaceTerm Server is unavailable for this computer\u{2019}s operating system or processor."
+            "SpaceTerm Core is unavailable for this computer\u{2019}s operating system or processor."
         }
         IncompatibilityKind::Installation => {
-            "That computer keeps a SpaceTerm Server build that differs from the one this SpaceTerm includes, so nothing was installed. Set up with the matching version of SpaceTerm, or manage the server on that computer, then try again."
+            "That computer keeps a SpaceTerm Core build that differs from the one this SpaceTerm includes, so nothing was installed. Set up with the matching version of SpaceTerm, or manage SpaceTerm Core on that computer, then try again."
         }
     }
 }
@@ -258,17 +258,17 @@ const fn incompatibility_detail(kind: IncompatibilityKind) -> &'static str {
 const fn refusal_detail(kind: RefusalKind) -> &'static str {
     match kind {
         RefusalKind::AuthorizationRefused => {
-            "This computer didn\u{2019}t allow the server to run after logout."
+            "This computer didn\u{2019}t allow SpaceTerm Core to run after logout."
         }
         RefusalKind::InstallRefused => "The remote computer refused the installation.",
         RefusalKind::MissingArtifact => {
-            "This SpaceTerm installation doesn\u{2019}t include a server package for this computer. Reinstall SpaceTerm, then try again."
+            "This SpaceTerm installation doesn\u{2019}t include a SpaceTerm Core package for this computer. Reinstall SpaceTerm, then try again."
         }
-        RefusalKind::InvalidArtifact => "The server package failed verification.",
-        RefusalKind::ServerChanged => {
-            "The server changed during setup. Try again to set up the server now running there."
+        RefusalKind::InvalidArtifact => "The SpaceTerm Core package failed verification.",
+        RefusalKind::MachineChanged => {
+            "SpaceTerm Core changed during setup. Try again to set up the SpaceTerm Core now running there."
         }
-        RefusalKind::InvalidEndpoint => "The server didn\u{2019}t accept that network address.",
+        RefusalKind::InvalidEndpoint => "SpaceTerm Core didn\u{2019}t accept that network address.",
     }
 }
 
@@ -278,14 +278,14 @@ const fn unavailable_detail(kind: UnavailableKind) -> &'static str {
         UnavailableKind::HostUnreachable => {
             "Check that this computer is reachable over SSH, then try again."
         }
-        UnavailableKind::ServiceUnavailable => "SpaceTerm Server did not answer. Try again.",
+        UnavailableKind::ServiceUnavailable => "SpaceTerm Core did not answer. Try again.",
         UnavailableKind::EndpointUnreachable => {
-            "This computer couldn\u{2019}t reach the server at that address."
+            "This computer couldn\u{2019}t reach the machine at that address."
         }
         UnavailableKind::CredentialUnavailable => {
             "SpaceTerm couldn\u{2019}t store this device\u{2019}s key. Unlock your keychain or keyring, then try again."
         }
-        UnavailableKind::Storage => "SpaceTerm couldn\u{2019}t save the server on this computer.",
+        UnavailableKind::Storage => "SpaceTerm couldn\u{2019}t save the machine on this computer.",
     }
 }
 
@@ -295,13 +295,13 @@ const fn unconfirmed_detail(operation: SetupOperation) -> &'static str {
             "SpaceTerm couldn\u{2019}t confirm the installation. Try again to check whether it finished."
         }
         SetupOperation::Start => {
-            "SpaceTerm couldn\u{2019}t confirm that the server started. Try again to check."
+            "SpaceTerm couldn\u{2019}t confirm that SpaceTerm Core started. Try again to check."
         }
         SetupOperation::Enrollment => {
-            "SpaceTerm couldn\u{2019}t confirm that the server paired this device. Try again to check."
+            "SpaceTerm couldn\u{2019}t confirm that the machine paired this device. Try again to check."
         }
         SetupOperation::Save => {
-            "The server paired this device, but SpaceTerm couldn\u{2019}t confirm it saved the connection. Check Servers for it before trying again."
+            "The machine paired this device, but SpaceTerm couldn\u{2019}t confirm it saved the connection. Check Machines for it before trying again."
         }
     }
 }

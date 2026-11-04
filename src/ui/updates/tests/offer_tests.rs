@@ -8,24 +8,26 @@ use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
-/// Installs this computer's server offering Update Server, as its service reports an included
+/// Installs this computer's server offering Update SpaceTerm Core, as its service reports an included
 /// build newer than the approved one.
 fn local_offer(cx: &mut TestAppContext) {
-    cx.update(|cx| crate::ui::updates::server_rows::testing::install("Update Available", true, cx));
+    cx.update(|cx| {
+        crate::ui::updates::machine_rows::testing::install("Update Available", true, cx)
+    });
 }
 
 /// A paired server that reported a stopped update on its own computer. Its row only opens that
 /// server's Settings.
-fn paired_attention() -> ServerUpdateRow {
-    server(
+fn paired_attention() -> MachineUpdateRow {
+    core(
         "penguin",
-        ServerUpdateAction::Review(ServerTarget::Direct([3; 32])),
+        CoreUpdateAction::Review(MachineTarget::Direct([3; 32])),
     )
 }
 
 #[test]
-fn only_a_genuine_server_offer_raises_client_progress_and_retry() {
-    let offer = server("local", ServerUpdateAction::Local);
+fn only_a_genuine_core_offer_raises_client_progress_and_retry() {
+    let offer = core("local", CoreUpdateAction::Local);
     let attention = paired_attention();
     for state in [
         UpdateState::Downloading {
@@ -40,7 +42,7 @@ fn only_a_genuine_server_offer_raises_client_progress_and_retry() {
     ] {
         let baseline = pill(Some(state.clone()), None, &[]).unwrap();
         for (rows, tone) in [
-            (quiet_servers(), PillTone::Neutral),
+            (quiet_machines(), PillTone::Neutral),
             (vec![attention.clone()], PillTone::Neutral),
             (vec![offer.clone()], PillTone::Primary),
             (vec![attention.clone(), offer.clone()], PillTone::Primary),
@@ -58,7 +60,7 @@ fn only_a_genuine_server_offer_raises_client_progress_and_retry() {
                 rows.iter().any(|row| row
                     .action
                     .as_ref()
-                    .and_then(ServerUpdateAction::need)
+                    .and_then(CoreUpdateAction::need)
                     .is_some())
             );
         }
@@ -66,10 +68,10 @@ fn only_a_genuine_server_offer_raises_client_progress_and_retry() {
 }
 
 #[test]
-fn server_attention_counts_preserve_existing_warning_precedence() {
-    let attention = server("local", ServerUpdateAction::Review(ServerTarget::Local));
+fn core_attention_counts_preserve_existing_warning_precedence() {
+    let attention = core("local", CoreUpdateAction::Review(MachineTarget::Local));
     let other_attention = paired_attention();
-    let offer = server("local", ServerUpdateAction::Local);
+    let offer = core("local", CoreUpdateAction::Local);
     assert_eq!(
         pill(None, None, std::slice::from_ref(&attention))
             .unwrap()
@@ -79,7 +81,7 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
     assert_eq!(
         pill(None, None, &[attention.clone(), other_attention.clone()]).unwrap(),
         (
-            "Review 2 Servers".into(),
+            "Review 2 Machines".into(),
             PillTone::Neutral,
             None,
             PillCommand::Menu
@@ -88,7 +90,7 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
     assert_eq!(
         pill(None, None, &[other_attention.clone(), offer.clone()]).unwrap(),
         (
-            "Review 2 Servers".into(),
+            "Review 2 Machines".into(),
             PillTone::Primary,
             None,
             PillCommand::Menu
@@ -109,25 +111,22 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
     );
 
     assert_eq!(
-        pill(None, None, &[server("machine", ServerUpdateAction::Local)]),
+        pill(None, None, &[core("machine", CoreUpdateAction::Local)]),
         Some((
-            "Update Server".into(),
+            "Update SpaceTerm Core".into(),
             PillTone::Primary,
             None,
-            PillCommand::Server(ServerUpdateAction::Local)
+            PillCommand::Core(CoreUpdateAction::Local)
         ))
     );
     assert_eq!(
         pill(
             None,
             None,
-            &[
-                server("local", ServerUpdateAction::Local),
-                paired_attention()
-            ]
+            &[core("local", CoreUpdateAction::Local), paired_attention()]
         ),
         Some((
-            "Review 2 Servers".into(),
+            "Review 2 Machines".into(),
             PillTone::Primary,
             None,
             PillCommand::Menu
@@ -250,7 +249,7 @@ fn primary_fill(selector: &'static str, state: PointerState, cx: &mut VisualTest
 }
 
 #[gpui::test]
-fn server_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut TestAppContext) {
+fn core_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut TestAppContext) {
     for mode in [Appearance::Light, Appearance::Dark] {
         appearance(mode, cx);
         manual_updates(cx);
@@ -268,7 +267,7 @@ fn server_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut TestA
 }
 
 #[gpui::test]
-fn server_offer_behind_client_progress_retry_and_checking_paints_primary(cx: &mut TestAppContext) {
+fn core_offer_behind_client_progress_retry_and_checking_paints_primary(cx: &mut TestAppContext) {
     use crate::updates::UpdateEvent;
     use spaceterm_ui::a11y_testing::A11yTree;
     appearance(Appearance::Light, cx);
@@ -409,9 +408,9 @@ fn rendered_progress_rings_stay_readable_on_primary_and_keep_neutral_and_disable
             ApplicationUpdates::install(adapter.clone(), cx);
             crate::ui::init(cx).unwrap();
             if offered {
-                crate::ui::updates::server_rows::testing::install("Update Available", true, cx);
+                crate::ui::updates::machine_rows::testing::install("Update Available", true, cx);
             } else {
-                crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+                crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
             }
             let updates = service(cx).unwrap();
             updates.update(cx, |updates, cx| {

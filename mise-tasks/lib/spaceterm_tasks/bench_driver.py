@@ -1,6 +1,6 @@
 """Run one benchmark workload inside a SpaceTerm Pane and write a receipt when it finishes.
 
-bench:desktop:macos and bench:server type `sh DIRECTORY/go NUMBER` into a Pane, which runs this script
+bench:desktop:macos and bench:core type `sh DIRECTORY/go NUMBER` into a Pane, which runs this script
 with NUMBER and DIRECTORY. It reads `NUMBER.json`, clears the screen and Scrollback, writes `NUMBER.ready` and waits for the benchmark to create
 `NUMBER.go`. The benchmark creates it after SpaceTerm has presented the clear and gone idle and
 after its first measurement. Then it runs the workload on the Pane's terminal,

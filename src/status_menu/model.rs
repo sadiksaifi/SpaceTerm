@@ -1,5 +1,6 @@
 //! What the status item shows and offers, derived from the service's state alone.
-use spaceterm_server::{ServerError, service::ServiceStatus};
+use crate::application_identity::ApplicationIdentity;
+use spaceterm_core::{CoreError, service::ServiceStatus};
 
 /// One person-chosen operation the status menu offers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,7 +25,7 @@ pub(crate) enum Command {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct State {
     /// The last status read, or `None` before the first read finishes.
-    pub(crate) status: Option<Result<ServiceStatus, ServerError>>,
+    pub(crate) status: Option<Result<ServiceStatus, CoreError>>,
     /// The server operation awaiting its result. Menus withhold other server operations meanwhile.
     pub(crate) working: Option<Command>,
     /// A server control window is asking about or running an operation. Menus withhold the
@@ -45,7 +46,7 @@ pub(crate) struct Item {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Presentation {
     /// The section heading naming the server, such as "SpaceTerm Preflight Server".
-    pub(crate) server: String,
+    pub(crate) core: String,
     /// The short state, such as "Running".
     pub(crate) state: &'static str,
     /// A sentence explaining the state, when it needs one.
@@ -64,8 +65,9 @@ pub(crate) struct Presentation {
 }
 
 impl Presentation {
-    /// `name` is the build's display name, such as "SpaceTerm Preflight".
-    pub(crate) fn of(name: &str, state: State) -> Self {
+    /// Names the build and its SpaceTerm Core from `identity`.
+    pub(crate) fn of(identity: ApplicationIdentity, state: State) -> Self {
+        let name = identity.display_name();
         let phase = Phase::of(state.status);
         let (label, explanation) = match state.working {
             Some(Command::Start) => ("Starting\u{2026}", None),
@@ -80,10 +82,10 @@ impl Presentation {
             label: label.to_owned(),
             enabled: offered(command),
         };
-        let server = format!("{name} Server");
+        let core = identity.core_name().to_owned();
         Self {
-            summary: format!("{server}: {label}"),
-            server,
+            summary: format!("{core}: {label}"),
+            core,
             state: label,
             explanation,
             running: phase == Phase::Running,
@@ -93,13 +95,13 @@ impl Presentation {
                 enabled: true,
             },
             controls: [
-                control(Command::Start, "Start Server"),
-                control(Command::Stop, "Stop Server\u{2026}"),
-                control(Command::Restart, "Restart Server\u{2026}"),
+                control(Command::Start, "Start SpaceTerm Core"),
+                control(Command::Stop, "Stop SpaceTerm Core\u{2026}"),
+                control(Command::Restart, "Restart SpaceTerm Core\u{2026}"),
             ],
             update: state.update.then(|| Item {
                 command: Command::Update,
-                label: "Update Server\u{2026}".to_owned(),
+                label: "Update SpaceTerm Core\u{2026}".to_owned(),
                 enabled: idle && phase.offers(Command::Update),
             }),
             quit: Item {
@@ -120,15 +122,15 @@ enum Phase {
     /// Installed and not stopped by the person, yet not running, such as after a crash.
     NotRunning,
     NotInstalled,
-    Unavailable(ServerError),
+    Unavailable(CoreError),
 }
 
 impl Phase {
     /// A running process wins over a recorded Stop, since the process is what ends Sessions.
-    fn of(status: Option<Result<ServiceStatus, ServerError>>) -> Self {
+    fn of(status: Option<Result<ServiceStatus, CoreError>>) -> Self {
         match status {
             None => Self::Checking,
-            Some(Err(ServerError::NotInstalled | ServerError::NotSetUp)) => Self::NotInstalled,
+            Some(Err(CoreError::NotInstalled | CoreError::NotSetUp)) => Self::NotInstalled,
             Some(Err(error)) => Self::Unavailable(error),
             Some(Ok(status)) if !status.installed => Self::NotInstalled,
             Some(Ok(status)) if status.running => Self::Running,
@@ -142,7 +144,7 @@ impl Phase {
             Self::Running => matches!(command, Command::Stop | Command::Restart | Command::Update),
             Self::Stopped | Self::NotRunning => matches!(command, Command::Start | Command::Update),
             // A Stop whose cleanup was not confirmed is retried only by another explicit Stop.
-            Self::Unavailable(ServerError::CleanupUnresolved) => command == Command::Stop,
+            Self::Unavailable(CoreError::CleanupUnresolved) => command == Command::Stop,
             Self::Checking | Self::NotInstalled | Self::Unavailable(_) => false,
         }
     }
@@ -153,24 +155,24 @@ impl Phase {
             Self::Running => ("Running", None),
             Self::Stopped => (
                 "Stopped",
-                Some("The server stays stopped until you start it.".to_owned()),
+                Some("SpaceTerm Core stays stopped until you start it.".to_owned()),
             ),
             Self::NotRunning => ("Not running", Some("Installed but not running.".to_owned())),
             Self::NotInstalled => (
                 "Not installed",
-                Some(format!("Open {name} to set up the server.")),
+                Some(format!("Open {name} to set up SpaceTerm Core.")),
             ),
-            Self::Unavailable(ServerError::CleanupUnresolved) => (
-                badge(ServerError::CleanupUnresolved),
+            Self::Unavailable(CoreError::CleanupUnresolved) => (
+                badge(CoreError::CleanupUnresolved),
                 Some(
-                    "SpaceTerm couldn\u{2019}t confirm that the server\u{2019}s Terminal Sessions ended. \
-                     Choose Stop Server to try again."
+                    "SpaceTerm couldn\u{2019}t confirm that SpaceTerm Core\u{2019}s Terminal Sessions ended. \
+                     Choose Stop SpaceTerm Core to try again."
                         .to_owned(),
                 ),
             ),
-            Self::Unavailable(ServerError::Stopped) => (
-                badge(ServerError::Stopped),
-                Some("Choose Start Server.".to_owned()),
+            Self::Unavailable(CoreError::Stopped) => (
+                badge(CoreError::Stopped),
+                Some("Choose Start SpaceTerm Core.".to_owned()),
             ),
             Self::Unavailable(error) => (badge(error), Some(error.to_string())),
         }
@@ -178,13 +180,13 @@ impl Phase {
 }
 
 /// The short state for a status read that failed, matching Settings > Servers.
-fn badge(error: ServerError) -> &'static str {
+fn badge(error: CoreError) -> &'static str {
     match error {
-        ServerError::UnsafeStorage => "Unsafe storage",
-        ServerError::CleanupUnresolved => "Cleanup unresolved",
-        ServerError::IncompatibleState => "Incompatible state",
-        ServerError::RuntimeUnavailable => "Runtime unavailable",
-        ServerError::Unsupported => "Unsupported",
+        CoreError::UnsafeStorage => "Unsafe storage",
+        CoreError::CleanupUnresolved => "Cleanup unresolved",
+        CoreError::IncompatibleState => "Incompatible state",
+        CoreError::RuntimeUnavailable => "Runtime unavailable",
+        CoreError::Unsupported => "Unsupported",
         _ => "Unavailable",
     }
 }
@@ -207,8 +209,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn each_build_names_spaceterm_core_in_full_before_its_qualifier() {
+        for (identity, core) in [
+            (ApplicationIdentity::production(), "SpaceTerm Core"),
+            (ApplicationIdentity::preflight(), "SpaceTerm Core Preflight"),
+            (
+                ApplicationIdentity::development(),
+                "SpaceTerm Core Development",
+            ),
+        ] {
+            let presentation = Presentation::of(identity, status(true, true, false));
+            assert_eq!(presentation.core, core);
+            assert_eq!(presentation.summary, format!("{core}: Running"));
+        }
+    }
+
     fn offered(state: State) -> Vec<Command> {
-        Presentation::of("SpaceTerm Preflight", state)
+        Presentation::of(ApplicationIdentity::preflight(), state)
             .controls
             .into_iter()
             .filter(|item| item.enabled)
@@ -228,12 +246,12 @@ mod tests {
         assert!(offered(status(false, false, false)).is_empty());
         assert!(offered(State::default()).is_empty());
         let failed = State {
-            status: Some(Err(ServerError::StorageUnavailable)),
+            status: Some(Err(CoreError::StorageUnavailable)),
             ..State::default()
         };
         assert!(offered(failed).is_empty());
         let unresolved = State {
-            status: Some(Err(ServerError::CleanupUnresolved)),
+            status: Some(Err(CoreError::CleanupUnresolved)),
             ..State::default()
         };
         assert_eq!(offered(unresolved), [Stop]);
@@ -244,7 +262,7 @@ mod tests {
         assert!(offered(stopping).is_empty());
         // Exiting would abandon the admitted Stop before the service manager confirms it.
         assert!(
-            !Presentation::of("SpaceTerm Preflight", stopping)
+            !Presentation::of(ApplicationIdentity::preflight(), stopping)
                 .quit
                 .enabled
         );
@@ -254,12 +272,17 @@ mod tests {
             ..status(true, true, false)
         };
         assert!(offered(asking).is_empty());
-        assert!(!Presentation::of("SpaceTerm Preflight", asking).quit.enabled);
+        assert!(
+            !Presentation::of(ApplicationIdentity::preflight(), asking)
+                .quit
+                .enabled
+        );
     }
 
     #[test]
-    fn update_server_appears_only_while_a_verified_build_is_offered() {
-        let update = |state: State| Presentation::of("SpaceTerm Preflight", state).update;
+    fn update_machine_appears_only_while_a_verified_build_is_offered() {
+        let update =
+            |state: State| Presentation::of(ApplicationIdentity::preflight(), state).update;
         assert_eq!(update(status(true, true, false)), None);
         let offered = |state: State| State {
             update: true,
@@ -267,7 +290,7 @@ mod tests {
         };
         for state in [status(true, true, false), status(true, false, true)] {
             let item = update(offered(state)).expect("the row is shown");
-            assert_eq!(item.label, "Update Server\u{2026}");
+            assert_eq!(item.label, "Update SpaceTerm Core\u{2026}");
             assert!(item.enabled);
         }
         // Another operation, or a control window asking, holds it back.
@@ -281,7 +304,7 @@ mod tests {
                 ..offered(status(true, true, false))
             },
             State {
-                status: Some(Err(ServerError::StorageUnavailable)),
+                status: Some(Err(CoreError::StorageUnavailable)),
                 ..offered(State::default())
             },
         ] {

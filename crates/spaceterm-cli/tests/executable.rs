@@ -33,7 +33,7 @@ fn bad_values_are_usage_errors_without_the_value() {
 
 #[test]
 fn help_and_version_exit_successfully_on_stdout() {
-    for args in [&["--help"][..], &["server", "--help"], &["--version"]] {
+    for args in [&["--help"][..], &["machine", "--help"], &["--version"]] {
         let output = spaceterm(args);
         assert!(output.status.success(), "{args:?}");
         assert!(output.stderr.is_empty(), "{args:?}");
@@ -49,25 +49,25 @@ fn help_and_version_exit_successfully_on_stdout() {
 }
 
 #[test]
-fn connection_usage_is_validated_before_input_or_native_credentials() {
+fn machine_usage_is_validated_before_input_or_native_credentials() {
     for (args, exit, code, argument) in [
         (
-            &["connection", "add", "--json"][..],
+            &["machine", "add", "--json"][..],
             3,
             "interaction_required",
             None,
         ),
         (
-            &["--server", "remote-fixture", "connection", "list", "--json"],
+            &["--machine", "remote-fixture", "machine", "list", "--json"],
             2,
             "invalid_arguments",
-            Some("--server"),
+            Some("--machine"),
         ),
         (
             &[
-                "connection",
+                "machine",
                 "add",
-                "--join",
+                "--trust",
                 "--address",
                 "private-invalid/address",
                 "--json",
@@ -90,21 +90,31 @@ fn connection_usage_is_validated_before_input_or_native_credentials() {
 }
 
 #[test]
-fn machine_only_commands_reject_remote_routes_before_contacting_a_server() {
+fn local_only_commands_reject_a_paired_machine_before_contacting_it() {
     for (args, command) in [
-        (&["server", "start"][..], "server.start"),
-        (&["server", "permissions"][..], "server.permissions"),
+        (&["setup"][..], "setup"),
+        (&["start"][..], "start"),
+        (&["stop"][..], "stop"),
+        (&["stop", "--confirm", "c1-00"][..], "stop"),
+        (&["pair"][..], "pair"),
+        (&["unpair", "id:9c1d44e0"][..], "unpair"),
+        (&["end-all-sessions"][..], "end-all-sessions"),
+        (&["uninstall"][..], "uninstall"),
+        (&["permissions"][..], "permissions"),
         (
-            &["server", "permissions", "request", "microphone"][..],
-            "server.permissions.request",
+            &["permissions", "request", "microphone"][..],
+            "permissions.request",
         ),
         (
-            &["server", "permissions", "settings", "device-control"][..],
-            "server.permissions.settings",
+            &["permissions", "settings", "accessibility"][..],
+            "permissions.settings",
         ),
+        (&["internal", "build-info"][..], "internal.build-info"),
+        (&["open", "notes.md"][..], "open"),
+        (&["show"][..], "show"),
         (&["diagnostics"][..], "diagnostics"),
     ] {
-        let mut argv = vec!["--server", "remote-fixture"];
+        let mut argv = vec!["--machine", "remote-fixture"];
         argv.extend(args);
         argv.push("--json");
         let output = spaceterm(&argv);
@@ -112,14 +122,62 @@ fn machine_only_commands_reject_remote_routes_before_contacting_a_server() {
         let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(envelope["error"]["code"], "local_only");
         assert_eq!(envelope["command"], command);
-        assert_eq!(envelope["server"], serde_json::Value::Null);
+        assert_eq!(envelope["machine"], serde_json::Value::Null);
     }
+}
+
+#[test]
+fn remote_admin_verbs_and_work_commands_reach_machine_resolution() {
+    for (args, command) in [
+        (&["status"][..], "status"),
+        (&["restart"][..], "restart"),
+        (&["restart", "--confirm", "c1-00"][..], "restart"),
+        (&["update"][..], "update"),
+        (
+            &["update", "--archive", "a.tar", "--signature", "a.sig"][..],
+            "update",
+        ),
+        (&["network"][..], "network"),
+        (&["network", "off", "--confirm", "c1-00"][..], "network"),
+        (&["list"][..], "list"),
+        (
+            &["workspace", "create", "api", "--directory", "/srv/api"][..],
+            "workspace.create",
+        ),
+        (&["worktree", "create", "feature"][..], "worktree.create"),
+        (&["tab", "create"][..], "tab.create"),
+        (&["pane", "split"][..], "pane.split"),
+        (&["pane", "read"][..], "pane.read"),
+    ] {
+        let mut argv = vec!["--machine", "remote-fixture"];
+        argv.extend(args);
+        argv.push("--json");
+        let output = spaceterm(&argv);
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelope["command"], command);
+        assert_eq!(envelope["error"]["code"], "not_found", "{args:?}");
+        assert_eq!(envelope["error"]["details"]["level"], "machine", "{args:?}");
+        assert_eq!(output.status.code(), Some(4), "{args:?}");
+    }
+}
+
+#[test]
+fn spaceterm_machine_selects_the_route_like_the_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_spaceterm"))
+        .args(["stop", "--json"])
+        .env_clear()
+        .env("SPACETERM_MACHINE", "remote-fixture")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "local_only");
 }
 
 #[test]
 fn remote_work_paths_are_rejected_before_route_or_credential_access() {
     let output = spaceterm(&[
-        "--server",
+        "--machine",
         "remote-fixture",
         "workspace",
         "create",
@@ -135,17 +193,17 @@ fn remote_work_paths_are_rejected_before_route_or_credential_access() {
 }
 
 #[test]
-fn connection_rename_help_and_parse_failures_describe_only_cli_connections() {
-    let help = spaceterm(&["connection", "rename", "--help"]);
+fn machine_rename_help_and_parse_failures_describe_only_this_cli() {
+    let help = spaceterm(&["machine", "rename", "--help"]);
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.contains("CLI's saved connection only"));
+    assert!(help.contains("for this CLI only"));
     assert!(help.contains("<OLD> <NEW>"));
-    let output = spaceterm(&["connection", "rename", "private-name", "--json"]);
+    let output = spaceterm(&["machine", "rename", "private-name", "--json"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stderr.is_empty());
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["command"], "connection.rename");
+    assert_eq!(envelope["command"], "machine.rename");
     assert_eq!(envelope["error"]["details"]["argument"], "<NEW>");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("private-name"));
 }
@@ -154,7 +212,7 @@ fn connection_rename_help_and_parse_failures_describe_only_cli_connections() {
 fn workspace_pin_rejects_relative_remote_paths_before_route_or_credential_access() {
     for json in [false, true] {
         let mut args = vec![
-            "--server",
+            "--machine",
             "remote-fixture",
             "workspace",
             "pin",

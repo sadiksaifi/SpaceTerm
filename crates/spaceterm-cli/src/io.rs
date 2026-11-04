@@ -17,17 +17,17 @@ mod tests;
 
 use crate::contract::{
     Code, ControlledDetails, ControlledReason, Details, Failure, SessionDetails, SessionStateName,
-    TargetStep, Warning, from_fatal, from_server_error,
+    TargetStep, Warning, from_core_error, from_fatal,
 };
-use spaceterm_server::connection::link::{LinkError, RequestError, ServerLink};
-use spaceterm_server::hierarchy::Id;
+use spaceterm_core::connection::link::{CoreLink, LinkError, RequestError};
+use spaceterm_core::hierarchy::Id;
 use std::time::{Duration, Instant};
 
 /// The Pane a terminal command acts on, as targeting resolved it.
 #[derive(Clone, Debug)]
 pub struct PaneTarget {
     /// The server's ID.
-    pub server: Id,
+    pub core: Id,
     pub workspace: Id,
     pub pane: Id,
     /// Whether a Terminal Session runs in the Pane, as `list` reports it. `pane run` reports
@@ -148,14 +148,14 @@ pub(crate) fn link_failure(error: LinkError) -> Failure {
         LinkError::Closed | LinkError::Unresponsive | LinkError::Stalled => {
             Failure::new(Code::Unreachable)
         }
-        error => from_server_error(error.into()),
+        error => from_core_error(error.into()),
     }
 }
 
 pub(crate) fn request_failure(error: RequestError) -> Failure {
     match error {
         RequestError::Link(error) => link_failure(error),
-        RequestError::Refused(refusal) => from_server_error(refusal.into()),
+        RequestError::Refused(refusal) => from_core_error(refusal.into()),
     }
 }
 
@@ -172,26 +172,26 @@ pub(crate) fn controlled(reason: ControlledReason) -> Failure {
 
 /// Sends one request and waits for its reply until `deadline`.
 pub(crate) fn request(
-    link: &ServerLink,
-    operation: spaceterm_server::protocol::Operation,
+    link: &CoreLink,
+    operation: spaceterm_core::protocol::Operation,
     deadline: Deadline,
-) -> Result<spaceterm_server::protocol::ReplyBody, Failure> {
+) -> Result<spaceterm_core::protocol::ReplyBody, Failure> {
     let pending = link.request(operation).map_err(link_failure)?;
     wait(pending, deadline)
 }
 
 pub(crate) fn wait(
-    pending: spaceterm_server::connection::link::PendingReply,
+    pending: spaceterm_core::connection::link::PendingReply,
     deadline: Deadline,
-) -> Result<spaceterm_server::protocol::ReplyBody, Failure> {
+) -> Result<spaceterm_core::protocol::ReplyBody, Failure> {
     wait_raw(pending, deadline)?.map_err(request_failure)
 }
 
 /// The reply as the link gave it, or `timeout` once `deadline` passed.
 pub(crate) fn wait_raw(
-    pending: spaceterm_server::connection::link::PendingReply,
+    pending: spaceterm_core::connection::link::PendingReply,
     deadline: Deadline,
-) -> Result<Result<spaceterm_server::protocol::ReplyBody, RequestError>, Failure> {
+) -> Result<Result<spaceterm_core::protocol::ReplyBody, RequestError>, Failure> {
     loop {
         let slice = deadline.slice().ok_or_else(|| deadline.timeout())?;
         if let Some(reply) = pending.wait_for(slice) {

@@ -8,12 +8,12 @@
     "message": "The target can’t take this change.",
     "retryable": false
   },
-  "schema": "spaceterm.cli.v1",
-  "server": {
+  "machine": {
     "id": "0909090909090909090909090909090909090909090909090909090909090909",
     "name": "fixture",
     "route": "local"
   },
+  "schema": "spaceterm.cli.v1",
   "status": "error",
   "warnings": []
 }

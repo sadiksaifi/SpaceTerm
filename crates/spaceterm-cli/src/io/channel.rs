@@ -6,20 +6,20 @@
 //! terminal's effects.
 use super::{Deadline, link_failure};
 use crate::contract::{Failure, Format};
-use spaceterm_server::connection::link::{
-    ChannelEvent, ChannelHandle, ChannelSink, LinkError, PendingReply, ServerLink,
+use spaceterm_core::connection::link::{
+    ChannelEvent, ChannelHandle, ChannelSink, CoreLink, LinkError, PendingReply,
 };
-use spaceterm_server::pane::{Color, effects};
-use spaceterm_server::protocol::screen::{
+use spaceterm_core::pane::{Color, effects};
+use spaceterm_core::protocol::screen::{
     History, Row, ScreenUpdate, Style, StyleDefinition, StyleRef, flags,
 };
-use spaceterm_server::protocol::{PaneEvent, RunReceipt};
+use spaceterm_core::protocol::{PaneEvent, RunReceipt};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 /// The frame rate a command declares: the lowest a client may.
-const FRAME_RATE: u8 = spaceterm_server::protocol::limits::FRAME_RATES[0];
+const FRAME_RATE: u8 = spaceterm_core::protocol::limits::FRAME_RATES[0];
 
 /// Events the link delivered, waiting for the command's thread.
 #[derive(Default)]
@@ -48,7 +48,7 @@ pub(crate) enum Event {
     Run(RunReceipt),
     Input {
         serial: u32,
-        outcome: spaceterm_server::protocol::InputOutcome,
+        outcome: spaceterm_core::protocol::InputOutcome,
     },
     /// The channel's last event.
     Ended(PaneEvent),
@@ -192,7 +192,7 @@ fn sgr(style: Style) -> String {
 
 /// One channel and what it received.
 pub(crate) struct Channel {
-    link: ServerLink,
+    link: CoreLink,
     handle: Option<ChannelHandle>,
     inbox: Arc<Inbox>,
     pub(crate) screen: Screen,
@@ -205,7 +205,7 @@ pub(crate) struct Channel {
 }
 
 impl Channel {
-    pub(crate) fn open(link: &ServerLink) -> Result<Self, Failure> {
+    pub(crate) fn open(link: &CoreLink) -> Result<Self, Failure> {
         let inbox = Arc::new(Inbox::default());
         let handle = link
             .open_channel(Arc::clone(&inbox) as Arc<dyn ChannelSink>)
@@ -225,11 +225,11 @@ impl Channel {
         self.handle.as_ref().expect("the channel is open")
     }
 
-    pub(crate) fn link(&self) -> &ServerLink {
+    pub(crate) fn link(&self) -> &CoreLink {
         &self.link
     }
 
-    pub(crate) fn number(&self) -> spaceterm_server::protocol::Channel {
+    pub(crate) fn number(&self) -> spaceterm_core::protocol::Channel {
         self.handle().channel().expect("the channel was claimed")
     }
 
@@ -362,17 +362,17 @@ pub(crate) fn ended(event: &PaneEvent) -> Failure {
 /// What a claim reached.
 #[derive(Debug)]
 pub(crate) enum Claimed {
-    Attached(spaceterm_server::pane::Lease),
-    Takeover(spaceterm_server::protocol::Takeover),
-    Restored(Box<spaceterm_server::protocol::Restored>),
+    Attached(spaceterm_core::pane::Lease),
+    Takeover(spaceterm_core::protocol::Takeover),
+    Restored(Box<spaceterm_core::protocol::Restored>),
 }
 
 /// The cell size of a Session a command sizes. Commands read text, so any size serves.
 const CELL: (u16, u16) = (8, 16);
 
 /// A `--size` as a Pane size.
-pub(crate) fn pane_size(size: crate::args::TerminalSize) -> spaceterm_server::pane::PaneSize {
-    spaceterm_server::pane::PaneSize {
+pub(crate) fn pane_size(size: crate::args::TerminalSize) -> spaceterm_core::pane::PaneSize {
+    spaceterm_core::pane::PaneSize {
         columns: size.columns,
         rows: size.rows,
         cell_width: CELL.0,
@@ -382,11 +382,11 @@ pub(crate) fn pane_size(size: crate::args::TerminalSize) -> spaceterm_server::pa
 
 /// A new attachment of `workspace`. Its generation grows with the clock, so each command's
 /// claim follows the last one this identity made.
-fn attachment(workspace: [u8; 32]) -> spaceterm_server::attachments::Attachment {
+fn attachment(workspace: [u8; 32]) -> spaceterm_core::attachments::Attachment {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    spaceterm_server::attachments::Attachment {
+    spaceterm_core::attachments::Attachment {
         workspace,
         generation: u64::try_from(now.as_nanos()).unwrap_or(u64::MAX).max(1),
     }
@@ -397,11 +397,11 @@ impl Channel {
     pub(crate) fn claim(
         &self,
         target: &super::PaneTarget,
-        claim: spaceterm_server::pane::AttachmentClaim,
-        size: Option<spaceterm_server::pane::PaneSize>,
+        claim: spaceterm_core::pane::AttachmentClaim,
+        size: Option<spaceterm_core::pane::PaneSize>,
         deadline: Deadline,
     ) -> Result<Claimed, Failure> {
-        use spaceterm_server::protocol::{ClaimReply, ReplyBody};
+        use spaceterm_core::protocol::{ClaimReply, ReplyBody};
         let pending = self
             .handle()
             .claim(attachment(target.workspace), target.pane, claim, size, None)
@@ -417,10 +417,10 @@ impl Channel {
 
 /// Whether this identity holds the grant a Take Over offer names, through an earlier
 /// attachment. Resuming it takes nothing from anyone.
-pub(crate) fn own_grant(takeover: &spaceterm_server::protocol::Takeover) -> bool {
+pub(crate) fn own_grant(takeover: &spaceterm_core::protocol::Takeover) -> bool {
     matches!(
         takeover.controller,
-        spaceterm_server::pane::control::Controller::Client {
+        spaceterm_core::pane::control::Controller::Client {
             this_client: true,
             ..
         }
