@@ -557,8 +557,16 @@ mod tests {
             .local(&std::env::temp_dir())
             .unwrap()
             .with_session_environment(&session);
+        // The names are the CLI's contract, spelled out here rather than read from the constant.
         assert_eq!(
-            SESSION_ENVIRONMENT.map(|name| env_value(&launch, name).unwrap().to_owned()),
+            [
+                "SPACETERM_IDENTITY",
+                "SPACETERM_MACHINE_ID",
+                "SPACETERM_PANE",
+                "SPACETERM_SESSION",
+                "SPACETERM_CLI",
+            ]
+            .map(|name| env_value(&launch, name).unwrap().to_owned()),
             [
                 "spaceterm-development".into(),
                 "ab".repeat(32).into(),

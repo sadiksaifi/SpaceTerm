@@ -266,6 +266,31 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn the_agent_is_labelled_for_the_identity_core_and_runs_internal_serve() {
+        let paths = Paths {
+            identity: "spaceterm-preflight".into(),
+            data: "/Users/owner/.local/share/spaceterm-preflight/core".into(),
+            runtime: "/private/tmp/spaceterm-preflight-core-501".into(),
+        };
+        let agent = LaunchAgent::new(&paths, "spaceterm-preflight").unwrap();
+        assert_eq!(agent.label, "io.github.sadiksaifi.spaceterm-preflight.core");
+        assert_eq!(
+            agent.name,
+            "io.github.sadiksaifi.spaceterm-preflight.core.plist"
+        );
+        assert_eq!(
+            agent.directory,
+            Path::new("/Users/owner/Library/LaunchAgents")
+        );
+        let contents = String::from_utf8(agent.contents(Path::new("/runtime")).unwrap()).unwrap();
+        assert!(contents.contains(
+            "<string>/runtime/SpaceTerm Core Preflight.app/Contents/MacOS/spaceterm</string>\
+             <string>internal</string><string>serve</string><string>--service</string>\
+             <string>--identity</string><string>spaceterm-preflight</string>"
+        ));
+    }
+
+    #[test]
     fn one_observation_validates_the_approved_program_before_reporting_running() {
         let agent = LaunchAgent {
             directory: PathBuf::from("/unavailable-fixture"),
@@ -279,7 +304,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/SpaceTerm Development Core.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/approved-fixture/SpaceTerm Core Development.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Ok(true)
         );
@@ -287,7 +312,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/other-fixture/SpaceTerm Development Core.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/other-fixture/SpaceTerm Core Development.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Err(CoreError::CleanupUnresolved)
         );
@@ -295,7 +320,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/SpaceTerm Development Core.app/Contents/MacOS/spaceterm\";\n"
+                b"\"Program\" = \"/approved-fixture/SpaceTerm Core Development.app/Contents/MacOS/spaceterm\";\n"
             ),
             Ok(false)
         );

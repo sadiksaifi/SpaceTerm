@@ -451,6 +451,29 @@ impl Supervisor for UserService {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_unit_is_named_for_the_identity_core_and_runs_internal_serve() {
+        let paths = Paths {
+            identity: "spaceterm-preflight".into(),
+            data: "/home/owner/.local/share/spaceterm-preflight/core".into(),
+            runtime: "/tmp/spaceterm-preflight-core-1000".into(),
+        };
+        let service = UserService::new(&paths, "spaceterm-preflight").unwrap();
+        assert_eq!(
+            service.name,
+            "io.github.sadiksaifi.spaceterm-preflight.core.service"
+        );
+        assert_eq!(
+            service.directory,
+            Path::new("/home/owner/.config/systemd/user")
+        );
+        let contents = String::from_utf8(service.contents(Path::new("/runtime")).unwrap()).unwrap();
+        assert!(contents.contains("Description=SpaceTerm Core (spaceterm-preflight)\n"));
+        assert!(contents.contains(
+            "ExecStart=\"/runtime/bin/spaceterm\" internal serve --service --identity spaceterm-preflight\n"
+        ));
+    }
+
     const UNIT: &str = "spaceterm-test.service";
     const DEFINITION: &str = "/owned/spaceterm-test.service";
 
