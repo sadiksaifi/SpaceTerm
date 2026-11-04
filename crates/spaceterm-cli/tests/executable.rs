@@ -39,12 +39,36 @@ fn help_and_version_exit_successfully_on_stdout() {
         assert!(output.stderr.is_empty(), "{args:?}");
         assert!(!output.stdout.is_empty(), "{args:?}");
         if args == ["--version"] {
-            assert!(
-                String::from_utf8(output.stdout)
-                    .unwrap()
-                    .starts_with("spaceterm ")
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("spaceterm {}\n", env!("SPACETERM_CLI_VERSION"))
             );
         }
+    }
+}
+
+/// `--version` names the version of this executable, which the launcher keeps on the running
+/// SpaceTerm Core until a restart moves it to the Pending Version. It reaches no machine.
+#[test]
+fn version_names_this_executable_and_reaches_no_machine() {
+    for args in [
+        &["--version"][..],
+        &["--machine", "no-such-machine", "--version"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_spaceterm"))
+            .args(args)
+            .env_clear()
+            .env("HOME", "/nonexistent")
+            .env("SPACETERM_MACHINE", "no-such-machine")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        assert!(output.stderr.is_empty(), "{args:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("spaceterm {}\n", env!("SPACETERM_CLI_VERSION")),
+            "{args:?}"
+        );
     }
 }
 
