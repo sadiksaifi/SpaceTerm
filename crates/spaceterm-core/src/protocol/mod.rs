@@ -5,6 +5,7 @@
 //! postcard messages in `len:u32be | kind:u8 | body` frames ([`frame`]). Nothing after admission
 //! is JSON.
 mod admission;
+pub mod capability;
 pub mod frame;
 pub mod limits;
 mod major;
@@ -13,6 +14,7 @@ pub mod operation;
 pub mod screen;
 #[cfg(test)]
 mod tests;
+pub mod version;
 
 pub(crate) use admission::*;
 pub use admission::{AgentName, InvalidAgentName, Lane};

@@ -23,6 +23,7 @@ pub mod service;
 #[cfg(feature = "client")]
 mod startup;
 mod storage;
+pub mod update;
 pub mod workspace_order;
 pub mod worktree;
 
