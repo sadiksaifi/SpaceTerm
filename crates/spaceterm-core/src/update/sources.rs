@@ -39,15 +39,15 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 /// What the sources need from the update engine. [`Updates`] is the engine; tests use a fake.
 pub trait Engine: Send + Sync {
     type Installing: Installing;
-    type Checking<'a>: Checking
+    type Checking<'a>: Checking<Installing = Self::Installing>
     where
         Self: 'a;
     fn facts(&self) -> UpdateFacts;
-    fn admits(&self, version: &Version) -> Result<(), InstallError>;
     fn begin_install(&self, version: Version, total: u64)
     -> Result<Self::Installing, InstallError>;
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError>;
-    fn begin_check(&self) -> Self::Checking<'_>;
+    /// Busy while another install, check or restart owns the update operation.
+    fn begin_check(&self) -> Result<Self::Checking<'_>, InstallError>;
 }
 
 /// An install the engine reports as `Installing` until it ends. Dropping it records nothing.
@@ -57,9 +57,15 @@ pub trait Installing: Send {
     fn fail(self, failure: InstallFailure);
 }
 
-/// A feed check the engine reports as `Checking` until it ends.
+/// A feed check that owns the engine's update operation, which it reports as `Checking`, until
+/// it is dropped or becomes the install of the release it found.
 pub trait Checking {
-    fn finish(self, check: UpdateCheck);
+    type Installing;
+    /// Whether the check's own install of `version` would be admitted.
+    fn admits(&self, version: &Version) -> Result<(), InstallError>;
+    /// Records the check's outcome. The check keeps the operation.
+    fn finish(&self, check: UpdateCheck);
+    fn begin_install(self, version: Version, total: u64) -> Result<Self::Installing, InstallError>;
 }
 
 impl Engine for Updates {
@@ -68,9 +74,6 @@ impl Engine for Updates {
 
     fn facts(&self) -> UpdateFacts {
         FactsSource::facts(self)
-    }
-    fn admits(&self, version: &Version) -> Result<(), InstallError> {
-        Updates::admits(self, version)
     }
     fn begin_install(
         &self,
@@ -82,7 +85,7 @@ impl Engine for Updates {
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError> {
         Updates::install(self, archive)
     }
-    fn begin_check(&self) -> updates::Checking<'_> {
+    fn begin_check(&self) -> Result<updates::Checking<'_>, InstallError> {
         Updates::begin_check(self)
     }
 }
@@ -100,8 +103,19 @@ impl Installing for updates::Installing {
 }
 
 impl Checking for updates::Checking<'_> {
-    fn finish(self, check: UpdateCheck) {
+    type Installing = updates::Installing;
+    fn admits(&self, version: &Version) -> Result<(), InstallError> {
+        updates::Checking::admits(self, version)
+    }
+    fn finish(&self, check: UpdateCheck) {
         updates::Checking::finish(self, check);
+    }
+    fn begin_install(
+        self,
+        version: Version,
+        total: u64,
+    ) -> Result<updates::Installing, InstallError> {
+        updates::Checking::begin_install(self, version, total)
     }
 }
 
@@ -242,44 +256,44 @@ impl FeedCheck {
 
     /// Checks the feed once, and installs the release it names when the engine admits it.
     pub fn run<E: Engine>(&self, engine: &E) -> Result<Outcome, SourceError> {
-        let checking = engine.begin_check();
+        // The check owns the engine's update operation from here, so no push or other check can
+        // start until it ends or hands over to its own install.
+        let checking = engine.begin_check()?;
         let at = (self.clock)();
         // The previous state is read when the check ends, as the engine persists it.
-        let failed = |checking: E::Checking<'_>, reason| {
-            checking.finish(check::next(&engine.facts().check, at, Err(reason)));
-            SourceError::Check(reason)
-        };
-        let succeeded = |checking: E::Checking<'_>| {
-            checking.finish(check::next(&engine.facts().check, at, Ok(())));
+        let finish = |checking: &E::Checking<'_>, outcome: Result<(), CheckFailure>| {
+            checking.finish(check::next(&engine.facts().check, at, outcome));
+            outcome.map_err(SourceError::Check)
         };
         let proxy = proxy::read(&self.data)?;
         let source = (self.sources)(proxy.as_ref());
         let signed = match source.feed(self.target) {
             Ok(signed) => signed,
-            Err(error) => return Err(failed(checking, check_failure(error))),
+            Err(error) => {
+                return finish(&checking, Err(check_failure(error))).map(|()| Outcome::Current);
+            }
         };
         let verified = self.trust.as_ref().and_then(|trust| {
             feed::read(self.target, &signed.feed, &signed.signature, trust, at).ok()
         });
         let Some(verified) = verified else {
-            return Err(failed(checking, CheckFailure::Verification));
+            return finish(&checking, Err(CheckFailure::Verification)).map(|()| Outcome::Current);
         };
-        match engine.admits(&verified.version) {
+        match checking.admits(&verified.version) {
             Ok(()) => {}
             Err(InstallError::NotNewer | InstallError::Skipped) => {
-                succeeded(checking);
-                return Ok(Outcome::Current);
+                return finish(&checking, Ok(())).map(|()| Outcome::Current);
             }
             Err(error) => {
-                succeeded(checking);
+                finish(&checking, Ok(()))?;
                 return Err(error.into());
             }
         }
         if (self.system)().is_none_or(|host| host < verified.minimum_system) {
-            return Err(failed(checking, CheckFailure::SystemTooOld));
+            return finish(&checking, Err(CheckFailure::SystemTooOld)).map(|()| Outcome::Current);
         }
-        succeeded(checking);
-        let installing = engine.begin_install(verified.version.clone(), verified.archive.size)?;
+        finish(&checking, Ok(()))?;
+        let installing = checking.begin_install(verified.version.clone(), verified.archive.size)?;
         self.download(source.as_ref(), &verified, installing)
             .map(Outcome::Installed)
     }

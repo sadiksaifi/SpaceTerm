@@ -42,6 +42,7 @@ struct State {
     check: Option<UpdateCheck>,
     /// The engine's own verification refuses the next install.
     refuse: Option<InstallError>,
+    /// Another install, check or restart owns the update operation.
     busy: bool,
     events: Vec<Event>,
 }
@@ -104,7 +105,9 @@ struct FakeInstalling {
 
 struct FakeChecking {
     fake: Fake,
-    finished: bool,
+    finished: std::cell::Cell<bool>,
+    /// The check handed its operation to an install.
+    handed_over: bool,
 }
 
 impl Installing for FakeInstalling {
@@ -137,22 +140,67 @@ impl Drop for FakeInstalling {
         if !self.ended {
             self.fake.record(Event::Dropped);
         }
+        self.fake.state().busy = false;
     }
 }
 
 impl Checking for FakeChecking {
-    fn finish(mut self, check: UpdateCheck) {
-        self.finished = true;
+    type Installing = FakeInstalling;
+    fn admits(&self, version: &Version) -> Result<(), InstallError> {
+        self.fake.ordered(version)
+    }
+    fn finish(&self, check: UpdateCheck) {
+        self.finished.set(true);
         self.fake.state().check = Some(check.clone());
         self.fake.record(Event::Finish(check));
+    }
+    fn begin_install(
+        mut self,
+        version: Version,
+        total: u64,
+    ) -> Result<FakeInstalling, InstallError> {
+        self.fake.ordered(&version)?;
+        self.handed_over = true;
+        self.fake
+            .record(Event::BeginInstall(version.clone(), total));
+        Ok(FakeInstalling {
+            fake: self.fake.clone(),
+            version,
+            ended: false,
+        })
     }
 }
 
 impl Drop for FakeChecking {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished.get() {
             self.fake.record(Event::Unfinished);
         }
+        if !self.handed_over {
+            self.fake.state().busy = false;
+        }
+    }
+}
+
+impl Fake {
+    fn ordered(&self, version: &Version) -> Result<(), InstallError> {
+        let state = self.state();
+        super::super::ordering::admit(version, &state.installed, state.skipped.as_ref()).map_err(
+            |refusal| match refusal {
+                super::super::ordering::Refusal::NotNewer => InstallError::NotNewer,
+                super::super::ordering::Refusal::Skipped => InstallError::Skipped,
+            },
+        )
+    }
+
+    /// Takes the update operation, as the engine does, or refuses while another owns it.
+    fn take(&self) -> Result<(), InstallError> {
+        let mut state = self.state();
+        if state.busy {
+            return Err(InstallError::Busy);
+        }
+        state.busy = true;
+        Ok(())
     }
 }
 
@@ -175,21 +223,12 @@ impl Engine for Fake {
         }
     }
 
-    fn admits(&self, version: &Version) -> Result<(), InstallError> {
-        let state = self.state();
-        if state.busy {
+    fn begin_install(&self, version: Version, total: u64) -> Result<FakeInstalling, InstallError> {
+        if self.state().busy {
             return Err(InstallError::Busy);
         }
-        super::super::ordering::admit(version, &state.installed, state.skipped.as_ref()).map_err(
-            |refusal| match refusal {
-                super::super::ordering::Refusal::NotNewer => InstallError::NotNewer,
-                super::super::ordering::Refusal::Skipped => InstallError::Skipped,
-            },
-        )
-    }
-
-    fn begin_install(&self, version: Version, total: u64) -> Result<FakeInstalling, InstallError> {
-        self.admits(&version)?;
+        self.ordered(&version)?;
+        self.take()?;
         self.record(Event::BeginInstall(version.clone(), total));
         Ok(FakeInstalling {
             fake: self.clone(),
@@ -202,12 +241,14 @@ impl Engine for Fake {
         unreachable!("local archives install through the engine directly")
     }
 
-    fn begin_check(&self) -> FakeChecking {
+    fn begin_check(&self) -> Result<FakeChecking, InstallError> {
+        self.take()?;
         self.record(Event::BeginCheck);
-        FakeChecking {
+        Ok(FakeChecking {
             fake: self.clone(),
-            finished: false,
-        }
+            finished: std::cell::Cell::new(false),
+            handed_over: false,
+        })
     }
 }
 
@@ -615,12 +656,10 @@ fn the_engines_refusal_after_download_is_reported() {
     );
     assert_eq!(
         fake.events(),
-        [
-            Event::BeginCheck,
-            Event::Finish(UpdateCheck::Succeeded { at: NOW })
-        ],
-        "a busy engine downloads nothing, though the check itself succeeded"
+        [],
+        "a check never starts while another operation owns the engine"
     );
+    assert!(fake.state().busy, "and it leaves that operation alone");
 }
 
 #[test]

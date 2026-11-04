@@ -320,7 +320,8 @@ pub struct Installing {
     total: u64,
 }
 
-/// A feed check in progress. It reports `Checking` until it ends.
+/// A feed check in progress. It owns the Core's one update operation and reports `Checking`
+/// until it ends or becomes the install of the release it found.
 pub struct Checking<'a> {
     updates: &'a Updates,
 }
@@ -517,16 +518,21 @@ impl Updates {
         Ok(Restarting { to })
     }
 
-    /// Begin a feed check. Facts report `Checking` until [`Checking::finish`] or drop.
-    pub fn begin_check(&self) -> Checking<'_> {
+    /// Begin a feed check. Facts report `Checking` until the check is dropped or
+    /// [`Checking::begin_install`] turns it into an install.
+    ///
+    /// # Errors
+    /// Returns Busy while another install, check or restart owns the update operation.
+    pub fn begin_check(&self) -> Result<Checking<'_>, InstallError> {
         {
             let mut live = self.shared.lock();
-            if live.operation.is_none() {
-                live.operation = Some(Operation::Checking);
+            if live.operation.is_some() {
+                return Err(InstallError::Busy);
             }
+            live.operation = Some(Operation::Checking);
         }
         self.refresh();
-        Checking { updates: self }
+        Ok(Checking { updates: self })
     }
 
     /// The server's live Terminal Session count changed. At zero, a waiting Pending Version that
@@ -551,12 +557,10 @@ impl Updates {
         }
     }
 
-    fn end_operation(&self) {
+    /// Ends the update operation `owned` names, and leaves any other one.
+    fn end_operation(&self, owned: fn(&Operation) -> bool) {
         let mut live = self.shared.lock();
-        if matches!(
-            live.operation,
-            Some(Operation::Installing { .. } | Operation::Checking)
-        ) {
+        if live.operation.as_ref().is_some_and(owned) {
             live.operation = None;
         }
         drop(live);
@@ -751,7 +755,7 @@ impl Installing {
         {
             self.updates.record_failure(&self.version, failure);
         }
-        self.updates.end_operation();
+        self.updates.end_operation(INSTALLING);
         result?;
         self.updates
             .facts()
@@ -762,19 +766,55 @@ impl Installing {
     /// The source failed, for example its download broke off. A feed install records it.
     pub fn fail(self, failure: InstallFailure) {
         self.updates.record_failure(&self.version, failure);
-        self.updates.end_operation();
+        self.updates.end_operation(INSTALLING);
     }
 }
 
 impl Drop for Installing {
     fn drop(&mut self) {
-        self.updates.end_operation();
+        self.updates.end_operation(INSTALLING);
     }
 }
 
-impl Checking<'_> {
-    /// Record the check's outcome, which survives restarts.
-    pub fn finish(self, check: UpdateCheck) {
+impl<'a> Checking<'a> {
+    /// Whether an install of `version` would be admitted once this check hands over to it.
+    ///
+    /// # Errors
+    /// Returns NotNewer or Skipped.
+    pub fn admits(&self, version: &Version) -> Result<(), InstallError> {
+        let live = self.updates.shared.lock();
+        self.updates.shared.admits_version(&live, version)
+    }
+
+    /// Turns this check into the install of `version` of `total` archive bytes, with no moment
+    /// when another install could take the update operation.
+    ///
+    /// # Errors
+    /// Returns NotNewer or Skipped.
+    pub fn begin_install(self, version: Version, total: u64) -> Result<Installing, InstallError> {
+        {
+            let mut live = self.updates.shared.lock();
+            self.updates.shared.admits_version(&live, &version)?;
+            live.operation = Some(Operation::Installing {
+                version: version.clone(),
+                received: 0,
+                total,
+            });
+        }
+        let installing = Installing {
+            updates: self.updates.clone(),
+            version,
+            total,
+        };
+        // The install owns the operation now, so the check must not end it.
+        std::mem::forget(self);
+        installing.updates.refresh();
+        Ok(installing)
+    }
+
+    /// Record the check's outcome, which survives restarts. The check still owns the update
+    /// operation until it is dropped or begins an install.
+    pub fn finish(&self, check: UpdateCheck) {
         if let Ok(record) = change(&self.updates.shared.data, |record| {
             record.check = check;
             record.clone()
@@ -786,9 +826,14 @@ impl Checking<'_> {
 
 impl Drop for Checking<'_> {
     fn drop(&mut self) {
-        self.updates.end_operation();
+        self.updates
+            .end_operation(|operation| *operation == Operation::Checking);
     }
 }
+
+/// Whether an update operation is an install's.
+const INSTALLING: fn(&Operation) -> bool =
+    |operation| matches!(operation, Operation::Installing { .. });
 
 impl FactsSource for Updates {
     fn facts(&self) -> UpdateFacts {

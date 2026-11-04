@@ -397,7 +397,7 @@ fn a_stopped_core_reports_the_facts_it_persisted() {
         )
         .unwrap();
         updates.set_sessions(3);
-        let check = updates.begin_check();
+        let check = updates.begin_check().unwrap();
         check.finish(UpdateCheck::Succeeded { at: 10 });
         let facts = Updates::stored(&machine.service).unwrap();
         assert_eq!(facts.sessions, 0);
@@ -514,4 +514,134 @@ fn waiting_for_facts_returns_once_they_change() {
         let changed = waiter.join().unwrap();
         assert_eq!((changed.revision, changed.sessions), (2, 4));
     });
+}
+
+/// Feed checks against this engine: the check owns the update operation and hands it to its
+/// own install, and never takes or ends another install's.
+mod feed_checks {
+    use super::*;
+    use crate::update::feed::{Feed, FeedArchive, FeedTarget, SystemVersion};
+    use crate::update::fetch::{FeedSource, FetchError, Signed};
+    use crate::update::sources::{FeedCheck, Outcome, SourceError};
+    use crate::update::trust::testing::{TestKey, trust};
+
+    /// A release host serving one feed and its archive, or unreachable without a feed.
+    struct Host {
+        feed: Option<Signed>,
+        archive: Vec<u8>,
+    }
+
+    impl FeedSource for Host {
+        fn feed(&self, _: FeedTarget) -> Result<Signed, FetchError> {
+            self.feed.clone().ok_or(FetchError::Network)
+        }
+        fn archive(
+            &self,
+            _: FeedTarget,
+            _: &Version,
+            size: u64,
+            into: &mut dyn std::io::Write,
+        ) -> Result<(), FetchError> {
+            crate::update::fetch::copy_exactly(&mut self.archive.as_slice(), into, size)
+        }
+    }
+
+    /// A feed check of `machine` against a release host for the archive of `text`, signed with
+    /// fixture trust.
+    fn feed_check(machine: &Machine, text: &str, reachable: bool) -> FeedCheck {
+        let key = TestKey::generate();
+        let (archive, signature, _) = archive(machine, text, Protocols::CURRENT);
+        let bytes = std::fs::read(archive).unwrap();
+        let target = FeedTarget::core(crate::update::system::PLATFORM);
+        let feed = Feed {
+            target,
+            version: version(text),
+            published_at: now() - 60,
+            protocols: Protocols::CURRENT,
+            minimum_system: SystemVersion { major: 0, minor: 0 },
+            archive: FeedArchive {
+                name: target.archive(&version(text)),
+                size: bytes.len() as u64,
+                sha256: ring::digest::digest(&ring::digest::SHA256, &bytes)
+                    .as_ref()
+                    .try_into()
+                    .unwrap(),
+                signature: std::fs::read(signature).unwrap().try_into().unwrap(),
+            },
+        }
+        .to_bytes();
+        let host = Host {
+            feed: reachable.then(|| Signed {
+                signature: key.sign(&feed),
+                feed,
+            }),
+            archive: bytes,
+        };
+        FeedCheck::fixture(
+            machine.fixture.paths.data.clone(),
+            Some(trust(&key, &TestKey::generate())),
+            Arc::new(host),
+        )
+    }
+
+    #[test]
+    fn a_feed_check_installs_the_newer_release_it_finds() {
+        with_fixture_trust(|| {
+            let machine = machine("1.0.0");
+            let updates = Updates::open(machine.service.clone()).unwrap();
+            let outcome = feed_check(&machine, "1.1.0", true).run(&updates).unwrap();
+            let Outcome::Installed(pending) = outcome else {
+                panic!("expected an install, got {outcome:?}");
+            };
+            assert_eq!(pending.version, version("1.1.0"));
+            let facts = updates.facts();
+            assert_eq!(
+                facts.pending.map(|pending| pending.version),
+                Some(version("1.1.0"))
+            );
+            assert_eq!(facts.operation, None);
+            assert_eq!(installations(&machine), ["1.0.0", "1.1.0"]);
+            assert_eq!(
+                feed_check(&machine, "1.1.0", true).run(&updates),
+                Ok(Outcome::Current),
+                "the installed release is current"
+            );
+            assert_eq!(updates.facts().operation, None);
+        });
+    }
+
+    #[test]
+    fn a_feed_check_neither_takes_nor_ends_another_install() {
+        with_fixture_trust(|| {
+            let machine = machine("1.0.0");
+            let updates = Updates::open(machine.service.clone()).unwrap();
+            let installing = updates.begin_install(version("1.5.0"), 10).unwrap();
+            let pushing = Some(Operation::Installing {
+                version: version("1.5.0"),
+                received: 0,
+                total: 10,
+            });
+            for reachable in [false, true] {
+                assert_eq!(
+                    feed_check(&machine, "1.1.0", reachable).run(&updates),
+                    Err(SourceError::Install(InstallError::Busy))
+                );
+                assert_eq!(updates.facts().operation, pushing);
+            }
+            assert_eq!(
+                updates.begin_install(version("1.6.0"), 10).err(),
+                Some(InstallError::Busy)
+            );
+            drop(installing);
+            let checking = updates.begin_check().unwrap();
+            assert_eq!(updates.begin_check().err(), Some(InstallError::Busy));
+            assert_eq!(
+                updates.begin_install(version("1.6.0"), 10).err(),
+                Some(InstallError::Busy)
+            );
+            assert_eq!(updates.facts().operation, Some(Operation::Checking));
+            drop(checking);
+            assert_eq!(updates.facts().operation, None);
+        });
+    }
 }
