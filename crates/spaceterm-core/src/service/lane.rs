@@ -1354,6 +1354,24 @@ impl Offline {
         ))
     }
 
+    /// The HTTP proxy this Core checks its feed through, when one is set.
+    pub fn update_proxy(&self) -> Result<Option<crate::update::proxy::Proxy>, CoreError> {
+        crate::update::proxy::read(&self.service.paths.data)
+    }
+
+    /// Sets the HTTP proxy this Core checks its feed through, or removes it with `None`.
+    /// Returns whether the setting changed. The next check uses it.
+    pub fn set_update_proxy(
+        &self,
+        proxy: Option<&crate::update::proxy::Proxy>,
+    ) -> Result<bool, CoreError> {
+        if self.update_proxy()?.as_ref() == proxy {
+            return Ok(false);
+        }
+        crate::update::proxy::write(&self.service.paths.data, proxy)?;
+        Ok(true)
+    }
+
     /// Installs a signed local archive and its raw signature. Returns the facts after.
     pub fn install_archive(
         &self,

@@ -823,6 +823,15 @@ codes! {
     ActivationUnresolved = "activation_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm whether SpaceTerm Core restarted on the new version.";
     CandidateUnverified = "candidate_unverified", Failed, false, "SpaceTerm couldn\u{2019}t verify the SpaceTerm Core package.";
     NoCandidate = "no_candidate", Target, false, "There is no SpaceTerm Core package to install.";
+    // Update sources.
+    NotNewer = "not_newer", Target, false, "SpaceTerm Core on that machine already has this version or a newer one.";
+    VersionSkipped = "version_skipped", Target, false, "This SpaceTerm Core version failed to start on that machine, so it is skipped until a newer one appears.";
+    NoUpdateFeed = "no_update_feed", Unavailable, false, "This SpaceTerm Core build takes updates only from the desktop or a local archive.";
+    FeedUnreachable = "feed_unreachable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t reach its update feed. Check the network.";
+    ProxyUnreachable = "proxy_unreachable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t reach its update feed through the proxy. Check the proxy setting.";
+    SystemTooOld = "system_too_old", Unavailable, false, "The newest SpaceTerm Core needs a newer operating system on that machine.";
+    DiskFull = "disk_full", Failed, true, "SpaceTerm Core couldn\u{2019}t install the update because the disk is full. Nothing changed.";
+    DownloadFailed = "download_failed", Failed, true, "SpaceTerm Core couldn\u{2019}t download the update. Nothing changed.";
     AuthorizationRequired = "authorization_required", ActionRequired, false, "Administrator authorization is required.";
     NotRunning = "not_running", Unavailable, true, "SpaceTerm Core is not running.";
     StorageUnavailable = "storage_unavailable", Unavailable, false, "Storage is unavailable.";
@@ -1044,8 +1053,6 @@ pub enum WarningCode {
     InvitationWithdrawn,
     HistoryGap,
     CoverageCoalesced,
-    CandidateOlder,
-    ClientMajorDiffers,
     PrivateCredentialFile,
 }
 
@@ -1057,8 +1064,6 @@ impl WarningCode {
         Self::InvitationWithdrawn,
         Self::HistoryGap,
         Self::CoverageCoalesced,
-        Self::CandidateOlder,
-        Self::ClientMajorDiffers,
         Self::PrivateCredentialFile,
     ];
 
@@ -1070,8 +1075,6 @@ impl WarningCode {
             Self::InvitationWithdrawn => "invitation_withdrawn",
             Self::HistoryGap => "history_gap",
             Self::CoverageCoalesced => "coverage_coalesced",
-            Self::CandidateOlder => "candidate_older",
-            Self::ClientMajorDiffers => "client_major_differs",
             Self::PrivateCredentialFile => "private_credential_file",
         }
     }
@@ -1091,10 +1094,6 @@ impl WarningCode {
             Self::InvitationWithdrawn => "The Invitation Link was withdrawn.",
             Self::HistoryGap => "Some rows were discarded before they could be read.",
             Self::CoverageCoalesced => "Some screen states were coalesced and are not shown.",
-            Self::CandidateOlder => "The SpaceTerm Core package is older than the running version.",
-            Self::ClientMajorDiffers => {
-                "After this update, work commands need a CLI with SpaceTerm Core's protocol major."
-            }
         }
     }
 }
@@ -1131,8 +1130,6 @@ pub enum WarningDetails {
     Recovered { count: u32 },
     /// `history_gap`.
     Gap { missing_rows: u64 },
-    /// `client_major_differs`.
-    Major { client_major: u16, core_major: u16 },
 }
 
 impl Serialize for WarningDetails {
@@ -1145,23 +1142,10 @@ impl Serialize for WarningDetails {
         struct Gap {
             missing_rows: u64,
         }
-        #[derive(Serialize)]
-        struct Major {
-            client_major: u16,
-            core_major: u16,
-        }
         match *self {
             Self::None => Empty {}.serialize(serializer),
             Self::Recovered { count } => Recovered { count }.serialize(serializer),
             Self::Gap { missing_rows } => Gap { missing_rows }.serialize(serializer),
-            Self::Major {
-                client_major,
-                core_major,
-            } => Major {
-                client_major,
-                core_major,
-            }
-            .serialize(serializer),
         }
     }
 }
@@ -1187,22 +1171,6 @@ pub struct ConfirmationData<E: Serialize> {
 /// `effects` of `stop` and `restart`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceEffects {
-    pub ends_sessions: u32,
-    pub sessions: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdateKind {
-    Update,
-}
-
-/// `effects` of `update`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct UpdateEffects {
-    pub from: Version,
-    pub to: Version,
-    pub kind: UpdateKind,
     pub ends_sessions: u32,
     pub sessions: Vec<String>,
 }
@@ -1410,6 +1378,7 @@ pub enum SetupStepName {
     Start,
     Network,
     AutomaticStart,
+    UpdateProxy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1450,12 +1419,55 @@ pub struct CoreSetup {
     pub automatic_start: bool,
     pub launcher: Launcher,
     pub path_ok: bool,
+    /// The HTTP proxy SpaceTerm Core checks its update feed through. `null` for a direct
+    /// connection.
+    pub update_proxy: Option<String>,
 }
 
+/// `pending` of `status` and `update`: the installed version that waits for a restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct StagedVersion {
+pub struct PendingStatus {
     pub version: String,
-    pub sha256: String,
+    /// Its work or service protocol major differs from the running version's, so its restart
+    /// always asks and `stranded` devices stop working until they update.
+    pub breaking: bool,
+    /// RFC 3339.
+    pub installed_at: String,
+    /// RFC 3339, one day after `installed_at`. `null` before then.
+    pub overdue_since: Option<String>,
+    pub stranded: Vec<DeviceRef>,
+}
+
+/// `update_check` of `status`: the state of SpaceTerm Core's own feed checks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UpdateCheckStatus {
+    pub state: UpdateCheckState,
+    /// RFC 3339. `null` when no check has succeeded.
+    pub last_success_at: Option<String>,
+    /// RFC 3339. `null` unless `state` is `failing`.
+    pub failing_since: Option<String>,
+    /// `null` unless `state` is `failing`.
+    pub reason: Option<UpdateCheckReason>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckState {
+    /// Preflight and Development builds never check a feed.
+    Disabled,
+    Never,
+    Checking,
+    Succeeded,
+    Failing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckReason {
+    Network,
+    Proxy,
+    Verification,
+    SystemTooOld,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1497,7 +1509,8 @@ pub struct CoreStatus {
     pub automatic_start: bool,
     pub linger: Option<bool>,
     pub runtime: Version,
-    pub staged: Vec<StagedVersion>,
+    pub pending: Option<PendingStatus>,
+    pub update_check: UpdateCheckStatus,
     pub activation: Activation,
     pub sessions: u32,
     pub network: StatusNetwork,
@@ -1628,20 +1641,17 @@ pub struct CoreNetwork {
     pub receipt: Option<Receipt>,
 }
 
-/// `update --check`.
+/// `update`: what installing found, and the version that now waits for a restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct UpdateCheck {
-    pub approved: Version,
-    pub latest: Option<Version>,
-    pub staged: Vec<Version>,
-}
-
-/// `update` after confirmation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct UpdateOperation {
-    pub operation: String,
-    pub receipt: Receipt,
-    pub version: Version,
+pub struct CoreUpdate {
+    /// Whether this command installed a version. False when SpaceTerm Core already had it or
+    /// its feed named nothing newer.
+    pub installed: bool,
+    /// The version SpaceTerm Core runs.
+    pub running: String,
+    pub pending: Option<PendingStatus>,
+    /// The Terminal Sessions a restart into `pending` ends.
+    pub sessions: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

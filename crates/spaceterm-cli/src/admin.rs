@@ -40,6 +40,8 @@ pub struct Reply {
     envelope: Envelope<serde_json::Value>,
     /// Operational output for stdout in text mode. It may name machines, devices and paths.
     stdout: String,
+    /// The `notice:` line about a version that waits for a restart, for stderr after the result.
+    notice: Option<String>,
     broken_pipe: bool,
 }
 
@@ -48,6 +50,7 @@ impl Reply {
         Self {
             envelope: envelope.erased(),
             stdout,
+            notice: None,
             broken_pipe: false,
         }
     }
@@ -100,7 +103,7 @@ impl Reply {
         if self.broken_pipe {
             return contract::EXIT_BROKEN_PIPE;
         }
-        contract::render(
+        let exit = contract::render(
             &self.envelope,
             &self.stdout,
             "",
@@ -108,7 +111,14 @@ impl Reply {
             crate::interrupt::finish(self.envelope.exit()),
             stdout,
             stderr,
-        )
+        );
+        if let Some(notice) = &self.notice
+            && exit != contract::EXIT_BROKEN_PIPE
+            && crate::notice::shown(mode, terminal(libc::STDERR_FILENO))
+        {
+            let _ = writeln!(stderr, "{notice}");
+        }
+        exit
     }
 }
 
@@ -119,12 +129,19 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
         identity,
         global,
         credentials: crate::connection::CliCredentials::new(identity),
+        facts: std::cell::RefCell::new(None),
     };
     let mut reply = match command {
         CoreCommand::Setup {
             network,
             automatic_start,
-        } => setup::run(&context, network.as_ref(), *automatic_start),
+            update_proxy,
+        } => setup::run(
+            &context,
+            network.as_ref(),
+            *automatic_start,
+            update_proxy.as_ref(),
+        ),
         CoreCommand::Pair { address } => pair::run(&context, address.as_deref()),
         CoreCommand::Status => status::run(&context),
         CoreCommand::Start => lifecycle::start(&context),
@@ -136,17 +153,9 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
             lifecycle::Kind::Restart,
             confirm.confirm.as_deref(),
         ),
-        CoreCommand::Update {
-            check,
-            archive,
-            signature,
-            confirm,
-        } => update::run(
-            &context,
-            *check,
-            archive.as_deref().zip(signature.as_deref()),
-            confirm.as_deref(),
-        ),
+        CoreCommand::Update { archive, signature } => {
+            update::run(&context, archive.as_deref().zip(signature.as_deref()))
+        }
         CoreCommand::Network { access, confirm } => {
             network::run(&context, access.as_ref(), confirm.as_deref())
         }
@@ -160,7 +169,30 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
         CoreCommand::Uninstall(confirm) => uninstall::run(&context, confirm.confirm.as_deref()),
     };
     context.credentials.report(&mut reply.envelope);
+    reply.notice = notice(&context, command, &reply);
     reply
+}
+
+/// The notice about a version that waits for a restart on the Core this command reached.
+/// `status`, `update` and `restart` already report it.
+fn notice(context: &Context<'_>, command: &CoreCommand, reply: &Reply) -> Option<String> {
+    if matches!(
+        command,
+        CoreCommand::Status | CoreCommand::Update { .. } | CoreCommand::Restart(_)
+    ) {
+        return None;
+    }
+    let facts = context.facts.borrow_mut().take()?;
+    let machine = reply.envelope.machine.as_ref()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    crate::notice::line(
+        &facts,
+        display_name(machine),
+        &context.command_line(machine, &["restart"]),
+        now,
+    )
 }
 
 /// What every machine verb shares.
@@ -168,6 +200,8 @@ pub struct Context<'a> {
     pub identity: &'a str,
     pub global: &'a Global,
     pub credentials: crate::connection::CliCredentials<'a>,
+    /// The update facts of the Core this command reached, for its notice.
+    pub facts: std::cell::RefCell<Option<spaceterm_core::update::facts::UpdateFacts>>,
 }
 
 impl Context<'_> {
@@ -378,7 +412,13 @@ pub fn open_lane(
     let lane = connection
         .service_lane()
         .map_err(contract::from_core_error)?;
-    let (session, settled) = admin::open(&lane, &pending.operations).map_err(lane_failure)?;
+    let (mut session, settled) = admin::open(&lane, &pending.operations).map_err(lane_failure)?;
+    // Only a notice that can print costs the round trip.
+    if crate::notice::shown(context.global.into(), terminal(libc::STDERR_FILENO))
+        && let Ok((_, facts)) = admin::facts(&mut session)
+    {
+        context.facts.replace(Some(facts));
+    }
     let mut recovered: Vec<_> = settled
         .iter()
         .map(|receipt| recovered_operation(receipt, identity))

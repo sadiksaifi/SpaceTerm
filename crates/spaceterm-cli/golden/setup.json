@@ -36,8 +36,13 @@
       {
         "result": "skipped",
         "step": "automatic_start"
+      },
+      {
+        "result": "done",
+        "step": "update_proxy"
       }
-    ]
+    ],
+    "update_proxy": "http://proxy.example:3128"
   },
   "error": null,
   "machine": {

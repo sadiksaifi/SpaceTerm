@@ -1,0 +1,24 @@
+{
+  "command": "update",
+  "data": {
+    "installed": true,
+    "pending": {
+      "breaking": false,
+      "installed_at": "2026-11-03T09:12:00Z",
+      "overdue_since": null,
+      "stranded": [],
+      "version": "0.8.0"
+    },
+    "running": "0.7.0",
+    "sessions": 2
+  },
+  "error": null,
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": []
+}

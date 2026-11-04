@@ -37,7 +37,7 @@ SpaceTerm Core on this machine. [--machine] marks commands that also reach a pai
   start             Start SpaceTerm Core on this machine
   stop              Stop SpaceTerm Core on this machine. Every Terminal Session ends
   restart           Restart SpaceTerm Core. Every Terminal Session ends [--machine]
-  update            Update SpaceTerm Core. The desktop updates itself [--machine]
+  update            Install a SpaceTerm Core update beside the running version [--machine]
   network           Show or change Network Access [--machine]
   pair              Let another device pair with this machine
   unpair            Revoke another Paired Device
@@ -144,6 +144,9 @@ pub enum CoreCommand {
         /// Start SpaceTerm Core when you log in or the machine boots.
         #[arg(long, value_enum)]
         automatic_start: Option<Toggle>,
+        /// The HTTP proxy SpaceTerm Core checks its update feed through, or `off`.
+        #[arg(long, value_name = "http://HOST:PORT|off", value_parser = update_proxy)]
+        update_proxy: Option<UpdateProxy>,
     },
     /// Show SpaceTerm Core status.
     ///
@@ -156,20 +159,17 @@ pub enum CoreCommand {
     Stop(Confirm),
     /// Restart SpaceTerm Core. Every Terminal Session ends.
     Restart(Confirm),
-    /// Update SpaceTerm Core. The desktop updates itself.
+    /// Install a SpaceTerm Core update beside the running version.
     ///
-    /// Also returns to the previous version when that is still possible.
+    /// Installing ends nothing. Restart SpaceTerm Core to use the new version. The desktop
+    /// updates itself.
     Update {
-        /// Only check for an update.
-        #[arg(long, conflicts_with = "confirm")]
-        check: bool,
-        /// Install this SpaceTerm Core archive instead of the signed feed's.
+        /// Install this signed SpaceTerm Core archive instead of the release the feed names.
         #[arg(long, value_name = "FILE", requires = "signature")]
         archive: Option<PathBuf>,
+        /// The archive's raw 64-byte signature.
         #[arg(long, value_name = "FILE", requires = "archive")]
         signature: Option<PathBuf>,
-        #[arg(long, value_name = "TOKEN")]
-        confirm: Option<String>,
     },
     /// Show or change Network Access.
     Network {
@@ -340,6 +340,13 @@ impl InternalCommand {
             Self::PermissionRequest { .. } => "internal.permission-request",
         }
     }
+}
+
+/// `setup --update-proxy`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateProxy {
+    Off,
+    Proxy(spaceterm_core::update::proxy::Proxy),
 }
 
 #[derive(Debug, Args)]
@@ -767,6 +774,15 @@ fn idle(text: &str) -> Result<Duration, String> {
     positive_duration(text, Duration::from_millis(1))
 }
 
+fn update_proxy(text: &str) -> Result<UpdateProxy, String> {
+    match text {
+        "off" => Ok(UpdateProxy::Off),
+        proxy => spaceterm_core::update::proxy::Proxy::parse(proxy)
+            .map(UpdateProxy::Proxy)
+            .map_err(|_| String::new()),
+    }
+}
+
 fn network(text: &str) -> Result<Network, String> {
     match text {
         "all" => Ok(Network::All),
@@ -899,8 +915,10 @@ mod tests {
             &["start"],
             &["stop", "--confirm", "c1-00"],
             &["restart", "--machine", "penguin"],
-            &["update", "--check"],
+            &["update"],
             &["update", "--archive", "a", "--signature", "s"],
+            &["setup", "--update-proxy", "http://proxy.example:3128"],
+            &["setup", "--update-proxy", "off"],
             &["network"],
             &["network", "off", "--confirm", "c1-00"],
             &["unpair", "id:9c1d44e0"],
@@ -1040,8 +1058,15 @@ mod tests {
             &["pane", "read", "--wait-for", "x", "--wait-idle", "1s"],
             &["pane", "read", "--wait-regex", "x", "--wait-for", "y"],
             &["pane", "send", "--key", "Enter", "--paste"],
-            &["update", "--check", "--confirm", "c1-00"],
+            &["update", "--check"],
+            &["update", "--confirm", "c1-00"],
             &["update", "--archive", "a"],
+            &["setup", "--update-proxy", "https://proxy.example:3128"],
+            &[
+                "setup",
+                "--update-proxy",
+                "http://user:secret@proxy.example:3128",
+            ],
             &["network", "--confirm", "c1-00"],
             &["pane", "split", "--right", "--down"],
             &["--timeout", "0s", "list"],

@@ -2,11 +2,12 @@
 //!
 //! The steps run through the existing service code, in order: install the service from the
 //! installation the launcher points at, authorize boot startup on Linux, start the server
-//! unless it was deliberately stopped, and set Network Access. Each step reports `done` or
+//! unless it was deliberately stopped, set Network Access, automatic start and the proxy its
+//! update checks go through. Each step reports `done` or
 //! `already_done`, so a repeated setup changes only what its flags name. Setup never reverses a
 //! deliberate Stop, and it needs no credential store.
 use super::{Context, Reply};
-use crate::args::{Network, Toggle};
+use crate::args::{Network, Toggle, UpdateProxy};
 use crate::contract::{
     self, Code, CoreSetup, Details, Envelope, Failure, Launcher, SetupNetwork, SetupStep,
     SetupStepName, StepResult, UnsupportedSessionDetails, UnsupportedSessionReason, Version,
@@ -107,7 +108,12 @@ fn step(step: SetupStepName, result: StepResult) -> SetupStep {
     SetupStep { step, result }
 }
 
-pub fn run(context: &Context<'_>, network: Option<&Network>, automatic: Option<Toggle>) -> Reply {
+pub fn run(
+    context: &Context<'_>,
+    network: Option<&Network>,
+    automatic: Option<Toggle>,
+    proxy: Option<&UpdateProxy>,
+) -> Reply {
     if let Err(failure) = context.require_local() {
         return Reply::failure(COMMAND, None, failure);
     }
@@ -126,7 +132,7 @@ pub fn run(context: &Context<'_>, network: Option<&Network>, automatic: Option<T
     if network.is_none() && !context.interactive() {
         return Reply::failure(COMMAND, None, Failure::new(Code::InteractionRequired));
     }
-    match setup(context, network, automatic) {
+    match setup(context, network, automatic, proxy) {
         Ok((data, text)) => {
             let core = super::local_ref(context.identity).ok();
             Reply::new(&Envelope::ok(COMMAND, core, data), text)
@@ -139,6 +145,7 @@ fn setup(
     context: &Context<'_>,
     network: Option<&Network>,
     automatic: Option<Toggle>,
+    proxy: Option<&UpdateProxy>,
 ) -> Result<(CoreSetup, String), Failure> {
     let service = Service::for_identity(context.identity).map_err(contract::from_core_error)?;
     let installations = service.installations_directory();
@@ -214,8 +221,32 @@ fn setup(
     };
     steps.push(step(SetupStepName::AutomaticStart, automatic_step));
     let status = service.status().map_err(contract::from_core_error)?;
-    let lane = Offline::new(context.identity)
-        .and_then(|offline| offline.admin().status(None))
+    let offline = Offline::new(context.identity).map_err(contract::from_core_error)?;
+    let proxy_step = match proxy {
+        None => StepResult::Skipped,
+        Some(proxy) => {
+            let proxy = match proxy {
+                UpdateProxy::Off => None,
+                UpdateProxy::Proxy(proxy) => Some(proxy),
+            };
+            if offline
+                .set_update_proxy(proxy)
+                .map_err(contract::from_core_error)?
+            {
+                StepResult::Done
+            } else {
+                StepResult::AlreadyDone
+            }
+        }
+    };
+    steps.push(step(SetupStepName::UpdateProxy, proxy_step));
+    let update_proxy = offline
+        .update_proxy()
+        .map_err(contract::from_core_error)?
+        .map(|proxy| proxy.as_str().to_owned());
+    let lane = offline
+        .admin()
+        .status(None)
         .map_err(contract::from_core_error)?;
     let network = match connection.direct_status() {
         Ok(direct) => SetupNetwork {
@@ -243,6 +274,7 @@ fn setup(
         automatic_start: status.enabled,
         launcher: launcher.launcher,
         path_ok: path_ok(&home, std::env::var_os("PATH").as_deref()),
+        update_proxy,
     };
     let text = text(&data);
     Ok((data, text))
@@ -295,6 +327,7 @@ fn text(data: &CoreSetup) -> String {
             SetupStepName::Start => "Start SpaceTerm Core",
             SetupStepName::Network => "Network Access",
             SetupStepName::AutomaticStart => "Automatic start",
+            SetupStepName::UpdateProxy => "Update proxy",
         };
         let result = match step.result {
             StepResult::Done => "done",
@@ -307,6 +340,9 @@ fn text(data: &CoreSetup) -> String {
     match (&data.network.bind, data.network.enabled) {
         (Some(bind), true) => out.push_str(&format!("Network Access: on at {bind}\n")),
         _ => out.push_str("Network Access: off\n"),
+    }
+    if let Some(proxy) = &data.update_proxy {
+        out.push_str(&format!("Update checks go through the proxy {proxy}\n"));
     }
     if !data.path_ok {
         out.push_str("Add ~/.local/bin to PATH to run spaceterm by name.\n");

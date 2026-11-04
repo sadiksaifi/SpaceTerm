@@ -8,6 +8,7 @@ pub mod interrupt;
 pub mod io;
 pub mod journal;
 pub mod list;
+pub mod notice;
 pub mod scope;
 pub mod shell;
 pub mod state;
