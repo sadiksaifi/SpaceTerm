@@ -2366,8 +2366,13 @@ mod tests {
                                 .unwrap(),
                         );
                         service.stop().unwrap();
+                        let Ok(CliUninstall::Preview { token, .. }) =
+                            service.uninstall_cli(None, choice)
+                        else {
+                            panic!("an uninstall previews first");
+                        };
                         assert!(matches!(
-                            service.uninstall_cli(None, choice),
+                            service.uninstall_cli(Some(&token), choice),
                             Ok(CliUninstall::Completed)
                         ));
                         assert!(supervisor.registered.lock().unwrap().is_none());
@@ -2379,6 +2384,82 @@ mod tests {
                     },
                 );
             }
+        }
+
+        /// `spaceterm uninstall` without `--confirm` only previews, also while the Core is
+        /// stopped, and its token confirms only the previewed data choice.
+        #[test]
+        fn uninstalling_a_stopped_core_previews_and_removes_nothing_until_confirmed() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    service.stop().unwrap();
+                    let data = &fixture.paths.data;
+                    for _ in 0..2 {
+                        let Ok(CliUninstall::Preview { sessions, .. }) =
+                            service.uninstall_cli(None, Data::Keep)
+                        else {
+                            panic!("a stopped Core previews its uninstall");
+                        };
+                        assert!(sessions.is_empty());
+                        assert!(data.join("installations").exists());
+                        assert!(supervisor.registered.lock().unwrap().is_some());
+                    }
+                    let Ok(CliUninstall::Preview { token, .. }) =
+                        service.uninstall_cli(None, Data::Keep)
+                    else {
+                        panic!("a stopped Core previews its uninstall");
+                    };
+                    assert_eq!(
+                        service.uninstall_cli(Some(&token), Data::Delete).err(),
+                        Some(CoreError::Changed)
+                    );
+                    assert!(data.join("installations").exists());
+                    let Ok(CliUninstall::Preview { token, .. }) =
+                        service.uninstall_cli(None, Data::Keep)
+                    else {
+                        panic!("a stopped Core previews its uninstall");
+                    };
+                    assert!(matches!(
+                        service.uninstall_cli(Some(&token), Data::Keep),
+                        Ok(CliUninstall::Completed)
+                    ));
+                    assert!(supervisor.registered.lock().unwrap().is_none());
+                    assert!(!data.join("installations").exists());
+                },
+            );
+        }
+
+        /// With nothing set up, an uninstall still previews, and only a token of the form a
+        /// preview issues confirms it.
+        #[test]
+        fn uninstalling_with_nothing_set_up_previews_first() {
+            let fixture = Fixture::new();
+            std::fs::remove_dir_all(&fixture.paths.data).unwrap();
+            let service = AccountSupervisor::new(fixture.paths.clone()).service();
+            let Ok(CliUninstall::Preview { token, .. }) = service.uninstall_cli(None, Data::Keep)
+            else {
+                panic!("an uninstall with nothing set up previews first");
+            };
+            assert_eq!(
+                service.uninstall_cli(Some("c1-typed"), Data::Keep).err(),
+                Some(CoreError::Changed)
+            );
+            assert!(matches!(
+                service.uninstall_cli(Some(&token), Data::Keep),
+                Ok(CliUninstall::Completed)
+            ));
         }
 
         #[test]

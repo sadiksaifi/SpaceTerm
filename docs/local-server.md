@@ -81,7 +81,7 @@ The installer installs the Release build of SpaceTerm Core beside any version al
 spaceterm uninstall
 ```
 
-Uninstall previews any Terminal Sessions it would end. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk unless you add `--delete-data`. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. `install.sh --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
+Uninstall previews any Terminal Sessions it would end and changes nothing until you confirm, also while SpaceTerm Core is stopped. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk unless you add `--delete-data`. The preview prints the command that confirms it with `--confirm TOKEN`. `install.sh --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
 
 
 ## Cross-target artifact catalogs

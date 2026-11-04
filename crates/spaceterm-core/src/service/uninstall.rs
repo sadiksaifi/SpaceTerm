@@ -40,9 +40,7 @@ pub struct UninstallPreview {
 #[cfg(feature = "client")]
 #[derive(Clone, Copy)]
 enum Request<'a> {
-    /// Preview while SpaceTerm Core runs; otherwise uninstall now.
-    Auto,
-    /// Preview only.
+    /// Preview only, whether or not SpaceTerm Core runs.
     Preview,
     /// Uninstall with the token of an earlier preview.
     Confirm(&'a str),
@@ -70,6 +68,17 @@ fn token() -> Result<String, CoreError> {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     ))
+}
+
+/// Whether `token` has the form [`token`] issues.
+#[cfg(feature = "client")]
+fn issued(token: &str) -> bool {
+    token.strip_prefix("c1-").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 #[cfg(feature = "client")]
@@ -105,17 +114,17 @@ fn sessions(
 }
 
 impl Service {
-    /// Preview an uninstall or confirm its exact service, data choice and live Session
-    /// observation. A preview is retained for ten minutes. Neither preview nor retention starts
-    /// a server. A stopped Core uninstalls without a preview; use
-    /// [`Self::preview_uninstall`] to confirm first.
+    /// Preview an uninstall, or confirm its exact service, data choice and live Session
+    /// observation with the token of an earlier preview. Without a token it only previews, also
+    /// while SpaceTerm Core is stopped. A preview is retained for ten minutes. Neither preview
+    /// nor retention starts a server.
     #[cfg(feature = "client")]
     pub fn uninstall_cli(
         &self,
         confirmation: Option<&str>,
         choice: Data,
     ) -> Result<CliUninstall, CoreError> {
-        let request = confirmation.map_or(Request::Auto, Request::Confirm);
+        let request = confirmation.map_or(Request::Preview, Request::Confirm);
         self.uninstall_with(request, choice)
     }
 
@@ -158,7 +167,8 @@ impl Service {
         let data = match Directory::open(&self.paths.data, false) {
             Ok(data) => data,
             // Nothing was ever set up. Only a launcher can remain. A confirmation then needs
-            // no retained preview: if setup happens in between, the confirmation finds none.
+            // no retained preview, only a token a preview could have issued: if setup happens
+            // in between, the confirmation finds no preview there.
             Err(CoreError::NotSetUp) if matches!(request, Request::Preview) => {
                 return Ok(CliUninstall::Preview {
                     token: token()?,
@@ -167,6 +177,11 @@ impl Service {
                 });
             }
             Err(CoreError::NotSetUp) => {
+                if let Request::Confirm(token) = request
+                    && !issued(token)
+                {
+                    return Err(CoreError::Changed);
+                }
                 self.remove_files()?;
                 return Ok(CliUninstall::Completed);
             }
@@ -199,7 +214,7 @@ impl Service {
                 return Err(CoreError::Changed);
             }
             data.remove(c"uninstall.json")?;
-        } else if status.running || matches!(request, Request::Preview) {
+        } else {
             let token = token()?;
             let expires_at = now + PREVIEW_SECONDS;
             data.write_json(

@@ -2,8 +2,9 @@
 //! launcher and every installed version from this machine, then the SpaceTerm app as
 //! [`spaceterm::installed_app`] finds it. Workspaces, Machine Settings,
 //! pairings and saved machines remain unless `--delete-data` is given. Then SpaceTerm Core's
-//! data root, this CLI's state and its credential items go too. While SpaceTerm Core runs, a
-//! preview names the Terminal Sessions that end and takes a confirmation first.
+//! data root, this CLI's state and its credential items go too. Without `--confirm`, it only
+//! previews, also while SpaceTerm Core is stopped: the preview names the Terminal Sessions that
+//! end and the token that confirms it.
 use super::{Context, Reply};
 use crate::contract::{self, Code, Confirmation, Empty, Envelope, Failure, ServiceEffects};
 use spaceterm::installed_app::{Account, AppIdentity, InstalledApp};
