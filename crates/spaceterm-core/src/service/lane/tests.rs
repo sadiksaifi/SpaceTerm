@@ -1793,7 +1793,11 @@ fn facts_messages_keep_their_json_shape() {
     use crate::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
     assert_eq!(
         serde_json::from_str::<LaneRequest>(r#"{"request":"facts"}"#).unwrap(),
-        LaneRequest::Facts
+        LaneRequest::Facts {}
+    );
+    assert_eq!(
+        serde_json::to_value(LaneRequest::Facts {}).unwrap(),
+        serde_json::json!({ "request": "facts" })
     );
     assert_eq!(
         serde_json::from_str::<LaneRequest>(r#"{"request":"wait_facts","boot":"b1","revision":4}"#)
@@ -1833,5 +1837,22 @@ fn facts_messages_keep_their_json_shape() {
         },
     });
     assert_eq!(serde_json::to_value(&reply).unwrap(), json);
-    assert_eq!(serde_json::from_value::<LaneReply>(json).unwrap(), reply);
+    assert_eq!(
+        serde_json::from_value::<LaneReply>(json.clone()).unwrap(),
+        reply
+    );
+
+    assert!(serde_json::from_str::<LaneRequest>(r#"{"request":"facts","since":1}"#).is_err());
+    assert!(
+        serde_json::from_str::<LaneRequest>(
+            r#"{"request":"wait_facts","boot":"b1","revision":4,"since":1}"#
+        )
+        .is_err()
+    );
+    let mut envelope = json.clone();
+    envelope["staged"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<LaneReply>(envelope).is_err());
+    let mut nested = json;
+    nested["facts"]["staged"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<LaneReply>(nested).is_err());
 }

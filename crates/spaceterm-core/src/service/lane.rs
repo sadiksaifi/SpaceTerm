@@ -64,8 +64,8 @@ const FENCE_INTERVAL: Duration = Duration::from_millis(500);
 #[serde(tag = "request", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaneRequest {
     Status,
-    /// Reads the Core's update facts.
-    Facts,
+    /// Reads the Core's update facts. A struct variant, so unknown fields are refused.
+    Facts {},
     /// Answers with the facts once the Core's `boot` or facts `revision` differs from these, or
     /// after [`WAIT_FACTS_LIMIT`] with the unchanged facts. A client that shares no work major
     /// with the Core follows facts this way.
@@ -136,7 +136,7 @@ pub enum LaneAction {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reply", rename_all = "snake_case")]
+#[serde(tag = "reply", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaneReply {
     Status(LaneStatus),
     /// The update facts of the Core run `boot`.
@@ -548,7 +548,7 @@ impl LaneCore {
                 .map(LaneReply::Status),
             LaneRequest::Check => self.admin().check().map(LaneReply::Check),
             // #797's update engine answers these.
-            LaneRequest::Facts | LaneRequest::WaitFacts { .. } => Err(CoreError::Unsupported),
+            LaneRequest::Facts {} | LaneRequest::WaitFacts { .. } => Err(CoreError::Unsupported),
             LaneRequest::StageFetch => self
                 .admin()
                 .stage_fetch()
