@@ -447,7 +447,9 @@ fn prepare_ghostty(out_dir: &Path) -> PathBuf {
         inputs.extend_from_slice(patch.relative_path.as_bytes());
         inputs.extend_from_slice(patch.compiled_source);
     }
-    if std::fs::read(&stamp).is_ok_and(|existing| existing == inputs) {
+    if std::fs::read(&stamp).is_ok_and(|existing| existing == inputs)
+        && cached_clone_is_readable(&src_dir)
+    {
         return src_dir;
     }
     if src_dir.exists() {
@@ -473,6 +475,27 @@ fn prepare_ghostty(out_dir: &Path) -> PathBuf {
     apply_spaceterm_patch(&src_dir);
     std::fs::write(&stamp, inputs).unwrap_or_else(|e| panic!("failed to write source stamp: {e}"));
     src_dir
+}
+
+/// `git clone --shared` borrows objects from the submodule's git directory, which belongs to
+/// one worktree. Removing that worktree leaves the cached copy without objects, and a target
+/// directory copied into another worktree inherits the broken copy.
+fn cached_clone_is_readable(src_dir: &Path) -> bool {
+    let alternates = src_dir.join(".git/objects/info/alternates");
+    let borrowed_stores_exist = match std::fs::read_to_string(&alternates) {
+        Ok(contents) => contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .all(|line| src_dir.join(".git/objects").join(line).is_dir()),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    };
+    borrowed_stores_exist
+        && Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
+            .current_dir(src_dir)
+            .output()
+            .is_ok_and(|output| output.status.success())
 }
 
 fn git_output(directory: &Path, args: &[&str]) -> String {
