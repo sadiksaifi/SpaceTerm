@@ -723,9 +723,9 @@ impl Shared {
             // A follower just started reads its reach anyway.
             let sent = match listing {
                 Some(machines) => self.send_locked(MachineUpdatesEvent::Machines(machines)),
-                None => renamed.into_iter().all(|update| {
-                    self.send_locked(MachineUpdatesEvent::Changed(Box::new(update)))
-                }),
+                None => renamed
+                    .into_iter()
+                    .all(|update| self.send_locked(MachineUpdatesEvent::Changed(Box::new(update)))),
             };
             for (id, entry) in &state.entries {
                 if !started.contains(id) {
