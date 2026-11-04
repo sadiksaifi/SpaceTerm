@@ -976,9 +976,6 @@ pub(super) struct ServiceState {
     pub(super) authorization: Option<PendingAuthorization>,
     /// Whether the last read found SpaceTerm Core turned off in Login Items.
     pub(super) background_item_off: bool,
-    /// The service refused the person's Start because SpaceTerm Core was off in Login Items, and
-    /// no read has found it on since. The first read that does runs that Start.
-    pub(super) start_refused: bool,
 }
 
 impl ServiceState {
@@ -1413,7 +1410,6 @@ fn perform_service_operation(
                 declined: authorizing,
             }),
             background_item_off: turned_off || control.background_item_off(),
-            start_refused: turned_off && matches!(action, Action::Start | Action::AuthorizeStart),
         };
         if authorized {
             // Authorization continues only the request the person approved, including its exact build.
@@ -1898,7 +1894,7 @@ impl SettingsWindow {
                 .update(cx, |owner, cx| owner.run_service(state, result, cx));
         } else {
             row._operation = Some(cx.spawn(async move |settings, cx| {
-                let mut state = result.await;
+                let state = result.await;
                 let _ = settings.update(cx, |settings, cx| {
                     // An answer from before an outside change describes nothing current.
                     if let Some(row) = &mut settings.core_service
@@ -1908,17 +1904,6 @@ impl SettingsWindow {
                         settings.check_core_service(cx);
                         cx.notify();
                         return;
-                    }
-                    // A Start refused while the item was off waits for a read that finds it on,
-                    // then runs as the person asked.
-                    if let Some(row) = &mut settings.core_service
-                        && row.state.start_refused
-                    {
-                        if state.background_item_off {
-                            state.start_refused = true;
-                        } else {
-                            row.start_requested = true;
-                        }
                     }
                     settings
                         .local_operations

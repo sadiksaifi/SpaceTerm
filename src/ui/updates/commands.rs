@@ -221,15 +221,14 @@ pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
     let (Surface::Window, Err(failure)) = (notice.surface, notice.outcome) else {
         return;
     };
-    // The Core starts nothing that is off in Login Items, so Start opens that list, where the
-    // person turns it on. The window remembers the Start and runs it once the item is on, so the
-    // person need not choose Start again.
-    if failure == ActionFailure::LoginItemOff {
-        super::start_when_login_item_on(notice, cx);
-        return;
-    }
     // The Core refused its preview: the sessions or the Pending Version changed since. The
     // window previews again and always asks, so nothing runs again by itself.
+    // The Core starts nothing that is off in Login Items, so Start opens that list, where the
+    // person turns it on.
+    if failure == ActionFailure::LoginItemOff {
+        crate::local_startup::open_login_items();
+        return;
+    }
     if failure == ActionFailure::Changed {
         if matches!(notice.action, MachineAction::Restart | MachineAction::Stop) {
             request(

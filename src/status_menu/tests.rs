@@ -71,8 +71,6 @@ struct Host {
     open: RefCell<Option<Answered>>,
     /// How many times the menu opened Login Items.
     login_items: std::cell::Cell<u32>,
-    /// Whether SpaceTerm Core is off in Login Items.
-    login_item_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl StatusHost for Host {
@@ -92,11 +90,6 @@ impl StatusHost for Host {
 
     fn open_login_items(&self) {
         self.login_items.set(self.login_items.get() + 1);
-    }
-
-    fn login_item(&self) -> crate::local_startup::LoginItemRead {
-        let off = std::sync::Arc::clone(&self.login_item_off);
-        std::sync::Arc::new(move || off.load(std::sync::atomic::Ordering::SeqCst))
     }
 }
 
@@ -628,24 +621,11 @@ fn the_flat_menu_offers_start_for_a_stopped_local_core(cx: &mut TestAppContext) 
 
 /// This computer's SpaceTerm Core is off in Login Items, so the service refuses the menu's Start.
 /// The menu opens Login Items, where the person turns it on, instead of an alert with only OK.
-/// Once the person turns it on there, the menu runs that Start once, without being asked again.
 #[gpui::test]
-fn a_start_refused_by_login_items_opens_that_list_and_runs_once_turned_on(cx: &mut TestAppContext) {
+fn a_start_refused_by_login_items_opens_that_list(cx: &mut TestAppContext) {
     let mut stopped = machine(LOCAL, "This Computer", 0);
     stopped.link = MachineLink::Stopped;
     let fixture = start(vec![stopped], cx);
-    let off = |off: bool| {
-        fixture
-            .host
-            .login_item_off
-            .store(off, std::sync::atomic::Ordering::SeqCst);
-    };
-    let wait = |cx: &mut TestAppContext| {
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(10));
-        cx.run_until_parked();
-    };
-    off(true);
     let start_command = fixture
         .host
         .menu()
@@ -675,25 +655,6 @@ fn a_start_refused_by_login_items_opens_that_list_and_runs_once_turned_on(cx: &m
 
     assert_eq!(fixture.host.login_items.get(), 1);
     assert!(fixture.host.alerts.borrow().is_empty());
-    let start = (LOCAL, MachineAction::Start);
-    assert_eq!(fixture.machines.performed(), std::slice::from_ref(&start));
-
-    // The item stays off for a while, so nothing starts.
-    wait(cx);
-    assert_eq!(fixture.machines.performed(), std::slice::from_ref(&start));
-
-    // The person turns SpaceTerm Core on in System Settings.
-    off(false);
-    wait(cx);
-    assert_eq!(fixture.machines.performed(), [start.clone(), start.clone()]);
-    fixture.machines.emit(MachineUpdatesEvent::Finished {
-        machine: LOCAL,
-        action: MachineAction::Start,
-        outcome: Ok(()),
-    });
-    wait(cx);
-    assert_eq!(fixture.machines.performed(), [start.clone(), start]);
-    assert_eq!(fixture.host.login_items.get(), 1);
 }
 
 #[gpui::test]

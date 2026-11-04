@@ -1207,9 +1207,9 @@ fn start_restores_a_stopped_core_without_asking(cx: &mut TestAppContext) {
 /// The person turned SpaceTerm Core off in Login Items while Settings was open. Start, chosen
 /// after that, is refused by the service, which starts nothing: the row says the item is off and
 /// offers Login Items, with no failure. Once the person turns it on there and comes back, the row
-/// runs that Start once, without being asked again.
+/// offers Start again.
 #[gpui::test]
-fn start_after_turning_off_in_login_items_runs_once_turned_on(cx: &mut TestAppContext) {
+fn start_after_turning_off_in_login_items_offers_login_items_instead(cx: &mut TestAppContext) {
     let (window, _core, service, cx) = open_machines_with_service(Ok(not_running()), cx);
     assert!(rendered(START_SERVICE_SELECTOR, cx));
 
@@ -1236,20 +1236,14 @@ fn start_after_turning_off_in_login_items_runs_once_turned_on(cx: &mut TestAppCo
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
 
+    assert_eq!(status(&window, cx), "Not running");
+    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    click(START_SERVICE_SELECTOR, cx);
     assert_eq!(
         service.changes(),
         vec![ServiceCall::Start, ServiceCall::Start]
     );
     assert_eq!(service_presentation(&window, cx).state, "Running");
-
-    // The Start ran once: coming back again only reads.
-    cx.deactivate_window();
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-    assert_eq!(
-        service.changes(),
-        vec![ServiceCall::Start, ServiceCall::Start]
-    );
 }
 
 /// A read that finds a stopped SpaceTerm Core also off in Login Items presents Login Items, not

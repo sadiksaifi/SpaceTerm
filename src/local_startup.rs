@@ -34,54 +34,6 @@ pub fn background_item_off() -> bool {
     Service::for_identity(identity).is_ok_and(|service| service.login_item_off())
 }
 
-/// Reads, off the event thread, whether this account's SpaceTerm Core is off in Login Items.
-pub(crate) type LoginItemRead = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
-
-/// This account's SpaceTerm Core item in Login Items & Extensions, as a surface reaches it.
-#[derive(Clone)]
-pub(crate) struct LoginItems {
-    /// Reads whether the item is off. It runs off the event thread.
-    pub(crate) off: LoginItemRead,
-    /// Opens System Settings at Login Items. It runs on the event thread.
-    pub(crate) open: std::rc::Rc<dyn Fn()>,
-}
-
-impl LoginItems {
-    /// This account's own item. Construction has no effects.
-    pub(crate) fn account() -> Self {
-        Self {
-            off: std::sync::Arc::new(background_item_off),
-            open: std::rc::Rc::new(open_login_items),
-        }
-    }
-}
-
-/// How often a surface waiting on the person to turn SpaceTerm Core on reads its item again.
-const LOGIN_ITEM_READ_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Waits until `off` reads SpaceTerm Core on in Login Items, then runs `then` once on the event
-/// thread. macOS tells SpaceTerm nothing when the person turns the item on in System Settings, so
-/// the wait reads the item every two seconds, off the event thread. Reading changes nothing.
-/// Dropping the task ends the wait.
-pub(crate) fn when_login_item_on(
-    off: LoginItemRead,
-    cx: &gpui::App,
-    then: impl FnOnce(&mut gpui::App) + 'static,
-) -> gpui::Task<()> {
-    cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor()
-                .timer(LOGIN_ITEM_READ_INTERVAL)
-                .await;
-            let off = std::sync::Arc::clone(&off);
-            if !cx.background_executor().spawn(async move { off() }).await {
-                break;
-            }
-        }
-        cx.update(then);
-    })
-}
-
 /// Opens System Settings at Login Items & Extensions, where the person turns SpaceTerm Core on.
 /// Call it on the event thread, so macOS brings System Settings forward.
 pub fn open_login_items() {

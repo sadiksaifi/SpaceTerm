@@ -507,12 +507,10 @@ fn a_core_turned_off_in_login_items_while_open_says_so_until_turned_on(cx: &mut 
 }
 
 /// The person stopped SpaceTerm Core, then turned it off in Login Items. The service refuses the
-/// Start chosen after that, and the window says the item is off and offers that list. Once the
-/// person turns it on there and comes back, the window runs that Start, so the Workspaces open
-/// without a second Start.
+/// Start chosen after that, and the window says the item is off and offers that list.
 #[gpui::test]
-fn start_after_turning_off_in_login_items_runs_once_turned_on(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+fn start_after_turning_off_in_login_items_offers_login_items(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped)], cx);
     cx.run_until_parked();
     harness.launch.refuse_start(CoreError::LoginItemOff);
 
@@ -522,27 +520,6 @@ fn start_after_turning_off_in_login_items_runs_once_turned_on(cx: &mut TestAppCo
     assert_eq!(harness.launch_title(cx), Some(launch::LOGIN_ITEM_OFF_TITLE));
     harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
     assert_eq!(harness.launch.steps(), ["run", "start", "open_login_items"]);
-
-    // The person turns SpaceTerm Core on in System Settings and comes back.
-    cx.deactivate_window();
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-    sync(&harness, cx);
-    assert_eq!(
-        harness.launch.steps(),
-        ["run", "start", "open_login_items", "start", "run"]
-    );
-    assert_eq!(harness.rows(cx), 1);
-    assert_eq!(harness.launch_title(cx), None);
-
-    // The Start ran once: coming back again starts nothing.
-    cx.deactivate_window();
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-    assert_eq!(
-        harness.launch.steps(),
-        ["run", "start", "open_login_items", "start", "run"]
-    );
 }
 
 /// An item macOS blocked when launch installed it and an item the person turned off read the
