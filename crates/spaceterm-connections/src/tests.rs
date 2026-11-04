@@ -675,6 +675,44 @@ fn offline_self_unpair_removes_only_its_route_and_keeps_exact_recovery_after_rel
     );
 }
 
+/// A route whose Core already revoked this device, as Remove Machine's uninstall does, is
+/// removed here with its key and asks that Core nothing, so no unpair waits on a Core that's gone.
+#[test]
+fn forgetting_a_revoked_route_removes_it_and_its_key_without_asking_the_core() {
+    let (connections, records, credentials, network) =
+        fixture(vec![saved(1, 5), saved(2, 6)], Answer::Exact);
+    connections.forget(&[1; 32]).unwrap();
+    assert!(connections.route(&[1; 32]).is_none());
+    assert!(connections.core(&[1; 32]).is_none());
+    assert!(connections.route(&[2; 32]).is_some());
+    assert!(connections.pending_unpairs().is_empty());
+    assert!(!credentials.values.lock().unwrap().contains_key(&[5; 32]));
+    assert!(credentials.values.lock().unwrap().contains_key(&[6; 32]));
+    drop(connections);
+    let reopened = DirectConnections::new(
+        "spaceterm-development",
+        records,
+        credentials,
+        network.clone(),
+        None,
+    );
+    reopened.resume_retained();
+    assert!(reopened.route(&[1; 32]).is_none(), "the removal is saved");
+    assert!(
+        network.calls.lock().unwrap().is_empty(),
+        "the Core is asked nothing"
+    );
+}
+
+/// Forgetting keeps a key that a newer saved pairing still uses.
+#[test]
+fn forgetting_a_route_keeps_a_key_another_route_shares() {
+    let (connections, _, credentials, _) = fixture(vec![saved(1, 5), saved(2, 5)], Answer::Exact);
+    connections.forget(&[1; 32]).unwrap();
+    assert!(credentials.values.lock().unwrap().contains_key(&[5; 32]));
+    assert!(connections.route(&[2; 32]).is_some());
+}
+
 #[test]
 fn an_unrelated_revocation_receipt_never_completes_removal_or_retires_credentials() {
     let (connections, _, credentials, network) = fixture(vec![saved(1, 5)], Answer::WrongTarget);

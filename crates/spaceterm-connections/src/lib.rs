@@ -602,6 +602,60 @@ impl DirectConnections {
         self.unpair(id, target)
     }
 
+    /// Removes a route whose Core already revoked this device, as Remove Machine's uninstall
+    /// does, and deletes this device's key for it unless another record still uses that key. The
+    /// Core is asked nothing, so no unpair waits on a Core that is gone.
+    pub fn forget(&self, id: &DirectRouteId) -> Result<(), DirectError> {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let credential = state
+            .document
+            .routes
+            .iter()
+            .find(|r| &r.route.id == id)
+            .ok_or(DirectError::Revoked)?
+            .credential;
+        state.document.routes.retain(|r| &r.route.id != id);
+        let core = state.routes.remove(id).and_then(|route| {
+            route
+                .gate
+                .store(false, std::sync::atomic::Ordering::Release);
+            route.core
+        });
+        let shared = state
+            .document
+            .routes
+            .iter()
+            .any(|r| r.credential == credential)
+            || state
+                .document
+                .pending
+                .iter()
+                .any(|p| !p.confirmed && p.credential_key() == Some(credential));
+        let saved = self.0.save(&mut state);
+        drop(state);
+        if let Some(core) = core {
+            core.disconnect();
+        }
+        if let Some(cleanup) = self
+            .0
+            .route_removed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            cleanup(id);
+        }
+        if !shared {
+            let _ = self.0.credentials.remove(&credential, Interaction::Quiet);
+        }
+        self.0.notify();
+        if saved {
+            Ok(())
+        } else {
+            Err(DirectError::StorageUnavailable)
+        }
+    }
+
     pub fn unpair(&self, id: &DirectRouteId, target: PairingId) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         let core = state.routes.get(id).and_then(|route| route.core.clone());
