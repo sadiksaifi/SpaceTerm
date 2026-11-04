@@ -496,8 +496,6 @@ enum ApplicationQuitCoordinatorState {
     SessionEnding,
     WaitingForSettings,
     WaitingForUpdater,
-    /// Waiting for a Stop or Restart the status item admitted.
-    WaitingForOperations,
 }
 
 struct ApplicationQuitCoordinator {
@@ -719,22 +717,6 @@ impl ApplicationQuitCoordinator {
             }),
         ) {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForUpdater;
-            return;
-        }
-        // An admitted Stop or Restart finishes before the client exits. The client stays
-        // usable meanwhile, so the wait ends with the same checks and save as this one.
-        if crate::status_menu::operations_running(cx) {
-            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForOperations;
-            let coordinator = Rc::clone(self);
-            crate::status_menu::after_operations(cx, move |cx| {
-                if *coordinator.state.borrow()
-                    != ApplicationQuitCoordinatorState::WaitingForOperations
-                {
-                    return;
-                }
-                *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                coordinator.wait_for_settings(Some(current), cx);
-            });
             return;
         }
         if let Some(adapter) = self.adapter.upgrade() {
@@ -1153,7 +1135,6 @@ fn close_all_windows(cx: &mut App) {
                 manager.request_window_close(window, cx);
             });
         } else if !crate::ui::settings_window::request_window_close(window, cx)
-            && !crate::ui::core_control_window::request_window_close(window, cx)
             && !crate::ui::updates::request_launch_window_close(window, cx)
         {
             let _ = window.update(cx, |_, window, _| window.remove_window());
@@ -2254,26 +2235,6 @@ mod tests {
         cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
         assert_eq!(quit.confirmations(), 0);
-    }
-
-    #[gpui::test]
-    fn quitting_waits_for_an_admitted_core_operation(cx: &mut TestAppContext) {
-        let quit = Rc::new(
-            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
-        );
-        cx.update(crate::ui::init).unwrap();
-        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
-        cx.update(crate::status_menu::begin_operation);
-        cx.update(|cx| cx.dispatch_action(&QuitApplication));
-        cx.run_until_parked();
-        assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Quit");
-        cx.run_until_parked();
-        assert_eq!(quit.confirmations(), 0, "a running Stop is never cut off");
-
-        cx.update(crate::status_menu::end_operation);
-        cx.run_until_parked();
-        assert_eq!(quit.confirmations(), 1);
     }
 
     #[gpui::test]

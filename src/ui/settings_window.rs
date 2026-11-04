@@ -95,7 +95,7 @@ use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 pub(crate) use machine_selection::configure_core_context;
 /// The server control window shares the service row's progress and authorization wording.
-pub(crate) use machines::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
+pub(crate) use machines::{AuthorizationPrompt, AuthorizedRequest};
 use permission_access::{PermissionAccessChanges, PermissionAccessRows};
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;

@@ -5,6 +5,7 @@ pub(crate) mod preview;
 
 pub(crate) mod machines;
 pub(crate) mod policy;
+pub(crate) mod presentation;
 pub(crate) mod push;
 pub(crate) mod release_feed;
 pub(crate) mod release_notes;

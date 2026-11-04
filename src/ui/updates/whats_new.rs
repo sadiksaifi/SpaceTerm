@@ -43,10 +43,6 @@ pub(super) fn init(cx: &mut App) {
 
 /// Whether this build's release notes wait for the person: it came by an update, it carries
 /// notes, and the person has not opened them.
-#[expect(
-    dead_code,
-    reason = "the title-bar update control and the menu-bar menu offer What's new from this"
-)]
 pub(crate) fn release_notes_unread(cx: &App) -> bool {
     release_notes::embedded().is_some()
         && service(cx).is_some_and(|updates| updates.read(cx).release_notes_unread())

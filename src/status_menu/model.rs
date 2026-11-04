@@ -1,314 +1,195 @@
-//! What the status item shows and offers, derived from the service's state alone.
-use crate::application_identity::ApplicationIdentity;
-use spaceterm_core::{CoreError, service::ServiceStatus};
+//! What the status menu shows and offers, modeled on Apple's menu bar extras: a header with the
+//! desktop's own status, a Machines section with one row per Machine, Recent Updates, the actions
+//! that apply now, then Settings and Quit. There is no "Open SpaceTerm". Each row's wording comes
+//! from [`crate::updates::presentation`]; hosts render this tree natively.
+use crate::updates::machines::{MachineId, MachineUpdate};
+use crate::updates::presentation::{self, ExtraHeader, ExtraItem, ExtraRow, Tone};
+use spaceterm_core::update::facts::Platform;
 
-/// One person-chosen operation the status menu offers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) const HEADER_TITLE: &str = "SpaceTerm";
+pub(crate) const SETTINGS_TITLE: &str = "SpaceTerm Settings\u{2026}";
+pub(crate) const QUIT_TITLE: &str = "Quit SpaceTerm";
+
+/// One person-chosen operation the menu offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Command {
-    /// Restores this client's windows. It never starts, installs, or stops the server itself.
-    Open,
-    Start,
-    /// Asks first, since it ends every client's Terminal Sessions.
-    Stop,
-    /// Asks first, since it ends every client's Terminal Sessions.
-    Restart,
-    /// Opens Settings on Servers and starts the Update Server journey there, which reads the
-    /// server again and asks before it changes anything.
-    Update,
-    /// Exits the whole client, status item included. The server and its Terminal Sessions keep
-    /// running. Unavailable while a server operation runs, so exiting never abandons an admitted
-    /// operation's cleanup.
+    /// An update surface command: a Machine action, a confirmation, an explanation, or the
+    /// desktop's own update.
+    Update(presentation::Command),
+    Settings,
+    /// Exits the whole client, status item included. Every Core and its sessions keep running.
     Quit,
 }
 
-/// What the status item last learned and what it is doing.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct State {
-    /// The last status read, or `None` before the first read finishes.
-    pub(crate) status: Option<Result<ServiceStatus, CoreError>>,
-    /// The server operation awaiting its result. Menus withhold other server operations meanwhile.
-    pub(crate) working: Option<Command>,
-    /// A server control window is asking about or running an operation. Menus withhold the
-    /// server operations and Quit until it closes.
-    pub(crate) asking: bool,
-    /// The last read found a verified server build the Server version row offers to update to.
-    pub(crate) update: bool,
-}
-
-/// One menu row, in the order the menu shows it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Item {
-    pub(crate) command: Command,
-    pub(crate) label: String,
-    pub(crate) enabled: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Presentation {
-    /// The section heading naming the server, such as "SpaceTerm Preflight Server".
-    pub(crate) core: String,
-    /// The short state, such as "Running".
-    pub(crate) state: &'static str,
-    /// A sentence explaining the state, when it needs one.
-    pub(crate) explanation: Option<String>,
-    /// The icon's accessibility label and tooltip, which name the server and its state.
-    pub(crate) summary: String,
-    /// Whether the server is running. Other states dim the icon.
-    pub(crate) running: bool,
-    /// Open, then the server operations, then Quit. Hosts separate these three groups.
-    pub(crate) open: Item,
-    pub(crate) controls: [Item; 3],
-    /// Update Server, shown only while a verified build is offered. An approved build offers
-    /// nothing to update to, so the row is absent rather than dimmed.
-    pub(crate) update: Option<Item>,
-    pub(crate) quit: Item,
-}
-
-impl Presentation {
-    /// Names the build and its SpaceTerm Core from `identity`.
-    pub(crate) fn of(identity: ApplicationIdentity, state: State) -> Self {
-        let name = identity.display_name();
-        let phase = Phase::of(state.status);
-        let (label, explanation) = match state.working {
-            Some(Command::Start) => ("Starting\u{2026}", None),
-            Some(Command::Stop) => ("Stopping\u{2026}", None),
-            Some(Command::Restart) => ("Restarting\u{2026}", None),
-            _ => phase.describe(name),
-        };
-        let idle = state.working.is_none() && !state.asking;
-        let offered = |command| idle && phase.offers(command);
-        let control = |command, label: &str| Item {
-            command,
-            label: label.to_owned(),
-            enabled: offered(command),
-        };
-        let core = identity.core_name().to_owned();
-        Self {
-            summary: format!("{core}: {label}"),
-            core,
-            state: label,
-            explanation,
-            running: phase == Phase::Running,
-            open: Item {
-                command: Command::Open,
-                label: format!("Open {name}"),
-                enabled: true,
-            },
-            controls: [
-                control(Command::Start, "Start SpaceTerm Core"),
-                control(Command::Stop, "Stop SpaceTerm Core\u{2026}"),
-                control(Command::Restart, "Restart SpaceTerm Core\u{2026}"),
-            ],
-            update: state.update.then(|| Item {
-                command: Command::Update,
-                label: "Update SpaceTerm Core\u{2026}".to_owned(),
-                enabled: idle && phase.offers(Command::Update),
-            }),
-            quit: Item {
-                command: Command::Quit,
-                label: format!("Quit {name}"),
-                enabled: idle,
-            },
-        }
-    }
-}
-
+/// The kind of computer a Machine row's symbol shows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Phase {
-    Checking,
-    Running,
-    /// The person stopped it. It stays stopped until an explicit Start.
-    Stopped,
-    /// Installed and not stopped by the person, yet not running, such as after a crash.
-    NotRunning,
-    NotInstalled,
-    Unavailable(CoreError),
+pub(crate) enum MachineKind {
+    /// This Mac or This Computer.
+    Local,
+    Mac,
+    Linux,
 }
 
-impl Phase {
-    /// A running process wins over a recorded Stop, since the process is what ends Sessions.
-    fn of(status: Option<Result<ServiceStatus, CoreError>>) -> Self {
-        match status {
-            None => Self::Checking,
-            Some(Err(CoreError::NotInstalled | CoreError::NotSetUp)) => Self::NotInstalled,
-            Some(Err(error)) => Self::Unavailable(error),
-            Some(Ok(status)) if !status.installed => Self::NotInstalled,
-            Some(Ok(status)) if status.running => Self::Running,
-            Some(Ok(status)) if status.stopped => Self::Stopped,
-            Some(Ok(_)) => Self::NotRunning,
-        }
-    }
-
-    fn offers(self, command: Command) -> bool {
-        match self {
-            Self::Running => matches!(command, Command::Stop | Command::Restart | Command::Update),
-            Self::Stopped | Self::NotRunning => matches!(command, Command::Start | Command::Update),
-            // A Stop whose cleanup was not confirmed is retried only by another explicit Stop.
-            Self::Unavailable(CoreError::CleanupUnresolved) => command == Command::Stop,
-            Self::Checking | Self::NotInstalled | Self::Unavailable(_) => false,
-        }
-    }
-
-    fn describe(self, name: &str) -> (&'static str, Option<String>) {
-        match self {
-            Self::Checking => ("Checking\u{2026}", None),
-            Self::Running => ("Running", None),
-            Self::Stopped => (
-                "Stopped",
-                Some("SpaceTerm Core stays stopped until you start it.".to_owned()),
-            ),
-            Self::NotRunning => ("Not running", Some("Installed but not running.".to_owned())),
-            Self::NotInstalled => (
-                "Not installed",
-                Some(format!("Open {name} to set up SpaceTerm Core.")),
-            ),
-            Self::Unavailable(CoreError::CleanupUnresolved) => (
-                badge(CoreError::CleanupUnresolved),
-                Some(
-                    "SpaceTerm couldn\u{2019}t confirm that SpaceTerm Core\u{2019}s Terminal Sessions ended. \
-                     Choose Stop SpaceTerm Core to try again."
-                        .to_owned(),
-                ),
-            ),
-            Self::Unavailable(CoreError::Stopped) => (
-                badge(CoreError::Stopped),
-                Some("Choose Start SpaceTerm Core.".to_owned()),
-            ),
-            Self::Unavailable(error) => (badge(error), Some(error.to_string())),
-        }
-    }
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MachineRow {
+    pub(crate) row: ExtraRow,
+    pub(crate) kind: MachineKind,
+    /// The Machine waits on the person, as the title-bar control counts it.
+    pub(crate) pending: bool,
 }
 
-/// The short state for a status read that failed, matching Settings > Servers.
-fn badge(error: CoreError) -> &'static str {
-    match error {
-        CoreError::UnsafeStorage => "Unsafe storage",
-        CoreError::CleanupUnresolved => "Cleanup unresolved",
-        CoreError::IncompatibleState => "Incompatible state",
-        CoreError::RuntimeUnavailable => "Runtime unavailable",
-        CoreError::Unsupported => "Unsupported",
-        _ => "Unavailable",
-    }
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Menu {
+    /// The item's accessibility label and tooltip.
+    pub(crate) summary: String,
+    /// Something in the menu is a problem, so the item's symbol shows it.
+    pub(crate) attention: bool,
+    pub(crate) header: ExtraHeader,
+    pub(crate) machines: Vec<MachineRow>,
+    /// Recent history, newest first. Hosts show Recent Updates only when it has any.
+    pub(crate) recent: Vec<String>,
+    pub(crate) actions: Vec<ExtraItem>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// One row of a flat menu, for status areas whose menus have no subtitles or custom rows.
+#[cfg_attr(
+    not(any(target_os = "linux", test)),
+    allow(dead_code, reason = "only the Linux status area shows a flat menu")
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FlatRow {
+    Text(String),
+    Separator,
+    Action { title: String, command: Command },
+}
 
-    fn status(installed: bool, running: bool, stopped: bool) -> State {
-        State {
-            status: Some(Ok(ServiceStatus {
-                installed,
-                enabled: installed && !stopped,
-                running,
-                stopped,
-            })),
-            working: None,
-            asking: false,
-            update: false,
-        }
-    }
-
-    #[test]
-    fn each_build_names_spaceterm_core_in_full_before_its_qualifier() {
-        for (identity, core) in [
-            (ApplicationIdentity::production(), "SpaceTerm Core"),
-            (ApplicationIdentity::preflight(), "SpaceTerm Core Preflight"),
-            (
-                ApplicationIdentity::development(),
-                "SpaceTerm Core Development",
-            ),
-        ] {
-            let presentation = Presentation::of(identity, status(true, true, false));
-            assert_eq!(presentation.core, core);
-            assert_eq!(presentation.summary, format!("{core}: Running"));
-        }
-    }
-
-    fn offered(state: State) -> Vec<Command> {
-        Presentation::of(ApplicationIdentity::preflight(), state)
-            .controls
+impl Menu {
+    /// The menu for `update`, with each Machine row's symbol read from `machines`.
+    pub(crate) fn new(
+        update: &presentation::Presentation,
+        machines: &[MachineUpdate],
+        recent: Vec<String>,
+    ) -> Self {
+        let header = update.extra_header();
+        let machines: Vec<MachineRow> = update
+            .extra_rows()
             .into_iter()
-            .filter(|item| item.enabled)
-            .map(|item| item.command)
-            .collect()
+            .map(|row| MachineRow {
+                kind: kind(row.machine, row.local, machines),
+                pending: update
+                    .machine(row.machine)
+                    .is_some_and(|view| view.state.pending()),
+                row,
+            })
+            .collect();
+        let attention = header.tone == Tone::Problem
+            || machines
+                .iter()
+                .any(|machine| machine.row.tone == Tone::Problem);
+        Self {
+            summary: format!("{HEADER_TITLE}, {}", header.line),
+            attention,
+            header,
+            machines,
+            recent,
+            actions: update.extra_actions(),
+        }
     }
 
-    #[test]
-    fn offers_only_the_operations_the_state_allows() {
-        use Command::*;
-        assert_eq!(offered(status(true, true, false)), [Stop, Restart]);
-        // Only an explicit Start leaves a deliberate Stop.
-        assert_eq!(offered(status(true, false, true)), [Start]);
-        assert_eq!(offered(status(true, false, false)), [Start]);
-        // A process running against a recorded Stop is still what ends Sessions.
-        assert_eq!(offered(status(true, true, true)), [Stop, Restart]);
-        assert!(offered(status(false, false, false)).is_empty());
-        assert!(offered(State::default()).is_empty());
-        let failed = State {
-            status: Some(Err(CoreError::StorageUnavailable)),
-            ..State::default()
-        };
-        assert!(offered(failed).is_empty());
-        let unresolved = State {
-            status: Some(Err(CoreError::CleanupUnresolved)),
-            ..State::default()
-        };
-        assert_eq!(offered(unresolved), [Stop]);
-        let stopping = State {
-            working: Some(Stop),
-            ..status(true, true, false)
-        };
-        assert!(offered(stopping).is_empty());
-        // Exiting would abandon the admitted Stop before the service manager confirms it.
-        assert!(
-            !Presentation::of(ApplicationIdentity::preflight(), stopping)
-                .quit
-                .enabled
-        );
-        // A control window may be about to admit an operation, or already running one.
-        let asking = State {
-            asking: true,
-            ..status(true, true, false)
-        };
-        assert!(offered(asking).is_empty());
-        assert!(
-            !Presentation::of(ApplicationIdentity::preflight(), asking)
-                .quit
-                .enabled
-        );
+    /// Every command the menu offers, in menu order.
+    pub(crate) fn commands(&self) -> impl Iterator<Item = Command> + '_ {
+        self.machines
+            .iter()
+            .filter_map(|machine| machine.row.items.as_deref())
+            .flatten()
+            .chain(&self.actions)
+            .filter_map(|item| match item {
+                ExtraItem::Action { command, .. } => Some(Command::Update(command.clone())),
+                ExtraItem::Separator => None,
+            })
+            .chain([Command::Settings, Command::Quit])
     }
 
-    #[test]
-    fn update_machine_appears_only_while_a_verified_build_is_offered() {
-        let update =
-            |state: State| Presentation::of(ApplicationIdentity::preflight(), state).update;
-        assert_eq!(update(status(true, true, false)), None);
-        let offered = |state: State| State {
-            update: true,
-            ..state
-        };
-        for state in [status(true, true, false), status(true, false, true)] {
-            let item = update(offered(state)).expect("the row is shown");
-            assert_eq!(item.label, "Update SpaceTerm Core\u{2026}");
-            assert!(item.enabled);
+    /// Whether the menu still offers `command`. A host can deliver a row it drew before a change.
+    pub(crate) fn offers(&self, command: &Command) -> bool {
+        self.commands().any(|offered| offered == *command)
+    }
+
+    /// The same menu without submenus or subtitles: one status line each for the desktop and every
+    /// Machine, then each Machine's first action while it needs the person, naming the Machine,
+    /// then the actions group, Settings and Quit.
+    #[cfg_attr(
+        not(any(target_os = "linux", test)),
+        allow(dead_code, reason = "only the Linux status area shows a flat menu")
+    )]
+    pub(crate) fn flat(&self) -> Vec<FlatRow> {
+        let mut rows = vec![FlatRow::Text(format!(
+            "{HEADER_TITLE} \u{b7} {}",
+            self.header.line
+        ))];
+        rows.extend(self.machines.iter().map(|machine| {
+            FlatRow::Text(format!("{} \u{b7} {}", machine.row.name, machine.row.line))
+        }));
+        let machines = self
+            .machines
+            .iter()
+            .filter(|machine| machine.pending)
+            .filter_map(|machine| {
+                let (title, command) = first_action(machine.row.items.as_deref()?)?;
+                let (title, asks) = match title.strip_suffix('\u{2026}') {
+                    Some(title) => (title, "\u{2026}"),
+                    None => (title, ""),
+                };
+                Some(FlatRow::Action {
+                    title: format!("{title} on {}{asks}", machine.row.name),
+                    command: Command::Update(command.clone()),
+                })
+            });
+        let actions = self.actions.iter().filter_map(|item| {
+            let (title, command) = first_action(std::slice::from_ref(item))?;
+            Some(FlatRow::Action {
+                title: title.to_owned(),
+                command: Command::Update(command.clone()),
+            })
+        });
+        let actions: Vec<FlatRow> = machines.chain(actions).collect();
+        if !actions.is_empty() {
+            rows.push(FlatRow::Separator);
+            rows.extend(actions);
         }
-        // Another operation, or a control window asking, holds it back.
-        for state in [
-            State {
-                working: Some(Command::Stop),
-                ..offered(status(true, true, false))
+        rows.extend([
+            FlatRow::Separator,
+            FlatRow::Action {
+                title: SETTINGS_TITLE.to_owned(),
+                command: Command::Settings,
             },
-            State {
-                asking: true,
-                ..offered(status(true, true, false))
+            FlatRow::Action {
+                title: QUIT_TITLE.to_owned(),
+                command: Command::Quit,
             },
-            State {
-                status: Some(Err(CoreError::StorageUnavailable)),
-                ..offered(State::default())
-            },
-        ] {
-            assert!(!update(state).expect("the row is shown").enabled);
-        }
+        ]);
+        rows
+    }
+}
+
+fn first_action(items: &[ExtraItem]) -> Option<(&str, &presentation::Command)> {
+    items.iter().find_map(|item| match item {
+        ExtraItem::Action { title, command, .. } => Some((title.as_ref(), command)),
+        ExtraItem::Separator => None,
+    })
+}
+
+fn kind(machine: MachineId, local: bool, machines: &[MachineUpdate]) -> MachineKind {
+    if local {
+        return MachineKind::Local;
+    }
+    let platform = machines
+        .iter()
+        .find(|update| update.machine == machine)
+        .and_then(|update| update.facts.as_ref())
+        .map(|facts| facts.platform);
+    match platform {
+        Some(Platform::MacosArm64) => MachineKind::Mac,
+        Some(Platform::LinuxX86_64) | None => MachineKind::Linux,
     }
 }
