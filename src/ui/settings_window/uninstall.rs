@@ -1,10 +1,14 @@
 //! Settings > Advanced > Uninstall SpaceTerm. One confirmed step removes SpaceTerm Core and then
 //! the SpaceTerm app from this computer, and SpaceTerm quits. Workspaces, paired devices and
-//! settings stay unless the person opts in to deleting them.
+//! settings stay unless the person opts in to deleting them. Then the keys of every Machine that
+//! SpaceTerm or the command-line tool saved go too, before the app removes itself, so they go
+//! even when the app can't. The Machines themselves are asked nothing, so each keeps listing
+//! this device until someone removes it there.
 //!
 //! The alert names the Terminal Sessions that end, as SpaceTerm Core observed them. SpaceTerm
 //! Core refuses the uninstall when those sessions changed before the person confirmed.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +22,8 @@ use spaceterm_ui::{
 };
 
 use crate::application_identity::ApplicationIdentity;
+use crate::direct_connections::credentials::{self, CredentialError, CredentialStore};
+use crate::direct_connections::{ConnectionStore, DirectConnections, StoreKind};
 use crate::installed_app::{InstalledApp, remove_directory};
 use crate::machine_connection::CoreError;
 pub(crate) use crate::machine_connection::service::Data;
@@ -53,18 +59,38 @@ impl Observed {
     }
 }
 
-/// Why an uninstall step stopped.
+/// Why an uninstall stopped while SpaceTerm Core stayed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RemovalFailure {
     /// The Terminal Sessions changed after the person was asked, so nothing was removed.
     Changed,
     /// SpaceTerm Core couldn't be removed. Trying again finishes a partial removal.
     Core,
-    /// SpaceTerm Core is removed, and the app couldn't remove itself.
-    App,
-    /// SpaceTerm and SpaceTerm Core are removed, and some of the data the person asked to delete
-    /// stayed.
-    Data,
+}
+
+/// The app couldn't remove itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct AppKept;
+
+/// Some of the data the person asked to delete stayed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DataKept;
+
+/// The credential items of the command-line tool's saved Machines. SpaceTerm Core's data holds
+/// their records, so they are read before SpaceTerm Core goes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct CliCredentials {
+    items: Vec<(StoreKind, [u8; 32])>,
+    /// The records couldn't be read, so items they name may stay.
+    unread: bool,
+}
+
+/// How an uninstall ended once SpaceTerm Core was removed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Ended {
+    pub(super) data: Data,
+    pub(super) data_kept: bool,
+    pub(super) app_kept: bool,
 }
 
 impl RemovalFailure {
@@ -77,16 +103,26 @@ impl RemovalFailure {
 }
 
 /// The blocking steps of an uninstall, run on the background executor in this order.
+/// [`Self::cli_credentials`] and [`Self::delete_data`] run only with [`Data::Delete`].
 pub(super) trait SpaceTermRemoval: Send + Sync {
     /// Reads the Terminal Sessions an uninstall ends. Removes nothing.
     fn observe(&self) -> Result<Observed, RemovalFailure>;
+    /// Reads the credential items of the command-line tool's saved and pending Machines.
+    /// Removes nothing.
+    fn cli_credentials(&self) -> CliCredentials;
     /// Removes SpaceTerm Core and, with [`Data::Delete`], its data. Refuses with
     /// [`RemovalFailure::Changed`] when the sessions differ from `observed`.
     fn remove_core(&self, observed: &Observed, data: Data) -> Result<(), RemovalFailure>;
+    /// Removes `cli`'s items, every Machine `machines` saved or was enrolling with its key, and
+    /// this desktop's own settings, saved Machines and state. It tries each one. `machines` is
+    /// `None` when this desktop installed no registry, so its keys can't be found.
+    fn delete_data(
+        &self,
+        cli: CliCredentials,
+        machines: Option<DirectConnections>,
+    ) -> Result<(), DataKept>;
     /// Removes the SpaceTerm app this process runs from.
-    fn remove_app(&self) -> Result<(), RemovalFailure>;
-    /// Deletes this desktop's own settings, saved Machines and state.
-    fn delete_desktop_data(&self) -> Result<(), RemovalFailure>;
+    fn remove_app(&self) -> Result<(), AppKept>;
 }
 
 /// The row's removal and the work it has underway.
@@ -117,8 +153,8 @@ pub(super) fn confirmation_message(sessions: usize, here: &str) -> String {
     }
 }
 
-/// What the person reads when an uninstall step stops.
-pub(super) fn failure_message(failure: RemovalFailure, here: &str, mac: bool) -> String {
+/// What the person reads when an uninstall stops while SpaceTerm Core stays.
+pub(super) fn failure_message(failure: RemovalFailure, here: &str) -> String {
     match failure {
         RemovalFailure::Changed => format!(
             "The running sessions on {here} changed, so nothing was uninstalled. Try again."
@@ -126,29 +162,62 @@ pub(super) fn failure_message(failure: RemovalFailure, here: &str, mac: bool) ->
         RemovalFailure::Core => {
             format!("SpaceTerm couldn\u{2019}t remove SpaceTerm Core from {here}, so try again.")
         }
-        RemovalFailure::App if mac => "SpaceTerm Core was removed, but SpaceTerm couldn\u{2019}t \
-                                       remove itself, so move SpaceTerm to the Trash."
-            .to_owned(),
-        RemovalFailure::App => "SpaceTerm Core was removed, but SpaceTerm couldn\u{2019}t remove \
-                                itself, so run install.sh --uninstall."
-            .to_owned(),
-        RemovalFailure::Data => format!(
-            "SpaceTerm and SpaceTerm Core were removed from {here}, but SpaceTerm couldn\u{2019}t \
-             delete all of its Workspaces, paired devices and settings."
-        ),
     }
 }
 
-/// What the person reads once SpaceTerm and SpaceTerm Core are gone.
-pub(super) fn done_message(data: Data, here: &str) -> String {
-    let what = match data {
-        Data::Keep => "kept",
-        Data::Delete => "deleted",
+/// The last alert's title and message once SpaceTerm Core is gone.
+pub(super) fn ended_message(ended: Ended, here: &str, mac: bool) -> (&'static str, String) {
+    const PARTLY: &str = "Couldn\u{2019}t Uninstall SpaceTerm";
+    let app_remedy = if mac {
+        "move SpaceTerm to the Trash"
+    } else {
+        "run install.sh --uninstall"
     };
-    format!(
-        "SpaceTerm and SpaceTerm Core were removed from {here}. Workspaces, paired devices and \
-         settings were {what}."
-    )
+    match ended {
+        Ended {
+            app_kept: false,
+            data_kept: false,
+            data,
+        } => {
+            let what = match data {
+                Data::Keep => "kept",
+                Data::Delete => "deleted",
+            };
+            (
+                "SpaceTerm Was Uninstalled",
+                format!(
+                    "SpaceTerm and SpaceTerm Core were removed from {here}. Workspaces, paired \
+                     devices and settings were {what}."
+                ),
+            )
+        }
+        Ended {
+            app_kept: false,
+            data_kept: true,
+            ..
+        } => (
+            PARTLY,
+            format!(
+                "SpaceTerm and SpaceTerm Core were removed from {here}, but SpaceTerm \
+                 couldn\u{2019}t delete all of its Workspaces, paired devices and settings."
+            ),
+        ),
+        Ended {
+            app_kept: true,
+            data_kept,
+            ..
+        } => {
+            let mut message = format!(
+                "SpaceTerm Core was removed, but SpaceTerm couldn\u{2019}t remove itself, so \
+                 {app_remedy}."
+            );
+            if data_kept {
+                message
+                    .push_str(" Some of its Workspaces, paired devices and settings also remain.");
+            }
+            (PARTLY, message)
+        }
+    }
 }
 
 impl SettingsWindow {
@@ -268,6 +337,11 @@ impl SettingsWindow {
         };
         let removal = Arc::clone(&row.removal);
         let here = self.here();
+        // The registry is read here, on the window's thread, and used in the background.
+        let machines = self
+            .direct_routes
+            .as_ref()
+            .map(|rows| rows.connections.clone());
         let progress = ProgressDialog::<()>::new(
             ModalId::new("settings-uninstall-spaceterm-progress"),
             "Uninstalling SpaceTerm",
@@ -294,15 +368,23 @@ impl SettingsWindow {
             let core = {
                 let removal = Arc::clone(&removal);
                 cx.background_executor()
-                    .spawn(async move { removal.remove_core(&observed, data) })
+                    .spawn(async move {
+                        // SpaceTerm Core's data holds the command-line tool's records, so their
+                        // keys are read before it goes.
+                        let cli = (data == Data::Delete).then(|| removal.cli_credentials());
+                        removal.remove_core(&observed, data).map(|()| cli)
+                    })
                     .await
             };
-            if let Err(failure) = core {
-                let _ = settings.update_in(cx, |settings, window, cx| {
-                    settings.uninstall_stopped(failure, window, cx);
-                });
-                return;
-            }
+            let cli = match core {
+                Ok(cli) => cli,
+                Err(failure) => {
+                    let _ = settings.update_in(cx, |settings, window, cx| {
+                        settings.uninstall_stopped(failure, window, cx);
+                    });
+                    return;
+                }
+            };
             let _ = settings.update_in(cx, |settings, window, cx| {
                 settings.uninstall_progress(
                     format!("Removing SpaceTerm from {here}\u{2026}"),
@@ -310,29 +392,22 @@ impl SettingsWindow {
                     cx,
                 );
             });
-            let app = {
-                let removal = Arc::clone(&removal);
-                cx.background_executor()
-                    .spawn(async move { removal.remove_app() })
-                    .await
-            };
-            if let Err(failure) = app {
-                let _ = settings.update_in(cx, |settings, window, cx| {
-                    settings.uninstall_stopped(failure, window, cx);
-                });
-                return;
-            }
-            let mut deleted = Ok(());
-            if data == Data::Delete {
-                let _ = settings.update(cx, |settings, _| settings.forget_every_machine());
-                deleted = cx
-                    .background_executor()
-                    .spawn(async move { removal.delete_desktop_data() })
-                    .await;
-            }
-            let _ = settings.update_in(cx, |settings, window, cx| match deleted {
-                Ok(()) => settings.uninstalled(data, window, cx),
-                Err(failure) => settings.uninstall_stopped(failure, window, cx),
+            // The data goes before the app, so it goes even when the app can't, and the keys go
+            // while the app that saved them still exists.
+            let ended = cx
+                .background_executor()
+                .spawn(async move {
+                    let data_kept =
+                        cli.is_some_and(|cli| removal.delete_data(cli, machines).is_err());
+                    Ended {
+                        data,
+                        data_kept,
+                        app_kept: removal.remove_app().is_err(),
+                    }
+                })
+                .await;
+            let _ = settings.update_in(cx, |settings, window, cx| {
+                settings.uninstalled(ended, window, cx);
             });
         });
         if let Some(row) = self.uninstall.as_mut() {
@@ -358,16 +433,6 @@ impl SettingsWindow {
         }
     }
 
-    /// The desktop's saved Machines and their keys go with the data the person asked to delete.
-    fn forget_every_machine(&mut self) {
-        let Some(rows) = self.direct_routes.as_ref() else {
-            return;
-        };
-        for (route, _) in rows.connections.routes() {
-            let _ = rows.connections.forget(&route);
-        }
-    }
-
     fn uninstall_ended(&mut self, cx: &mut Context<Self>) {
         if let Some(row) = self.uninstall.as_mut() {
             row.working = false;
@@ -385,22 +450,22 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         self.close_uninstall_progress(window, cx);
-        let message = failure_message(failure, &self.here(), self.on_mac());
-        // Once SpaceTerm Core is gone, the app has nothing left to run.
-        let quits = matches!(failure, RemovalFailure::App | RemovalFailure::Data);
+        let message = failure_message(failure, &self.here());
         self.present_uninstall_end(
             "Couldn\u{2019}t Uninstall SpaceTerm",
             message,
-            quits,
+            false,
             window,
             cx,
         );
     }
 
-    fn uninstalled(&mut self, data: Data, window: &mut Window, cx: &mut Context<Self>) {
+    /// Says what was removed and what stayed. Once SpaceTerm Core is gone, the app has nothing
+    /// left to run, so it quits.
+    fn uninstalled(&mut self, ended: Ended, window: &mut Window, cx: &mut Context<Self>) {
         self.close_uninstall_progress(window, cx);
-        let message = done_message(data, &self.here());
-        self.present_uninstall_end("SpaceTerm Was Uninstalled", message, true, window, cx);
+        let (title, message) = ended_message(ended, &self.here(), self.on_mac());
+        self.present_uninstall_end(title, message, true, window, cx);
     }
 
     /// The last alert. With `quits`, its one action quits SpaceTerm.
@@ -460,12 +525,12 @@ fn in_window(
     });
 }
 
-/// The production removal: this account's SpaceTerm Core service, the installed app and this
-/// desktop's own directories.
+/// The production removal: this account's SpaceTerm Core service, the installed app and the
+/// data the person may ask to delete.
 struct InstalledSpaceTerm {
     service: Service,
     app: InstalledApp,
-    directories: Option<AppDirectories>,
+    data: DesktopData,
 }
 
 /// The removal this build offers, or `None` when it doesn't run from an installed app.
@@ -475,8 +540,74 @@ pub(super) fn installed(service: &Service) -> Option<Arc<dyn SpaceTermRemoval>> 
     Some(Arc::new(InstalledSpaceTerm {
         service: service.clone(),
         app,
-        directories: AppDirectories::resolve(identity).ok(),
+        data: DesktopData {
+            cli: spaceterm_core::cli_state_root(identity)
+                .ok()
+                .map(ConnectionStore::new),
+            open: Box::new(move |kind| credentials::for_cli_record(identity, kind)),
+            roots: AppDirectories::resolve(identity).ok().map(|directories| {
+                vec![
+                    directories.config,
+                    directories.data,
+                    directories.state,
+                    directories.cache,
+                ]
+            }),
+        },
     }))
+}
+
+/// Opens the credential store a command-line tool record names.
+type OpenStore =
+    dyn Fn(StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError> + Send + Sync;
+
+/// The data "Also delete..." deletes besides SpaceTerm Core's own.
+struct DesktopData {
+    /// The command-line tool's Saved Connections, or `None` when their place can't be found.
+    cli: Option<ConnectionStore>,
+    open: Box<OpenStore>,
+    /// This desktop's settings, data, state and cache directories, or `None` when they can't
+    /// be found.
+    roots: Option<Vec<PathBuf>>,
+}
+
+impl DesktopData {
+    fn cli_credentials(&self) -> CliCredentials {
+        match self.cli.as_ref().map(ConnectionStore::credential_items) {
+            Some(Ok(items)) => CliCredentials {
+                items,
+                unread: false,
+            },
+            _ => CliCredentials {
+                items: Vec::new(),
+                unread: true,
+            },
+        }
+    }
+
+    fn delete(
+        &self,
+        cli: CliCredentials,
+        machines: Option<DirectConnections>,
+    ) -> Result<(), DataKept> {
+        let mut kept = cli.unread;
+        for (kind, key) in &cli.items {
+            kept |= (self.open)(*kind)
+                .and_then(|store| credentials::remove_asked(store.as_ref(), key))
+                .is_err();
+        }
+        // The registry removes its keys before the directory that holds its records goes.
+        kept |= machines.is_none_or(|machines| machines.forget_every_machine().is_err());
+        match &self.roots {
+            Some(roots) => {
+                for root in roots {
+                    kept |= remove_directory(root).is_err();
+                }
+            }
+            None => kept = true,
+        }
+        if kept { Err(DataKept) } else { Ok(()) }
+    }
 }
 
 impl SpaceTermRemoval for InstalledSpaceTerm {
@@ -487,6 +618,10 @@ impl SpaceTermRemoval for InstalledSpaceTerm {
             .preview_uninstall(Data::Keep)
             .map_err(RemovalFailure::of_core)?;
         Ok(Observed::new(preview.sessions))
+    }
+
+    fn cli_credentials(&self) -> CliCredentials {
+        self.data.cli_credentials()
     }
 
     fn remove_core(&self, observed: &Observed, data: Data) -> Result<(), RemovalFailure> {
@@ -509,24 +644,16 @@ impl SpaceTermRemoval for InstalledSpaceTerm {
         }
     }
 
-    fn remove_app(&self) -> Result<(), RemovalFailure> {
-        self.app.remove().map_err(|_| RemovalFailure::App)
+    fn delete_data(
+        &self,
+        cli: CliCredentials,
+        machines: Option<DirectConnections>,
+    ) -> Result<(), DataKept> {
+        self.data.delete(cli, machines)
     }
 
-    fn delete_desktop_data(&self) -> Result<(), RemovalFailure> {
-        let directories = self.directories.as_ref().ok_or(RemovalFailure::Data)?;
-        let mut result = Ok(());
-        for root in [
-            &directories.config,
-            &directories.data,
-            &directories.state,
-            &directories.cache,
-        ] {
-            if remove_directory(root).is_err() {
-                result = Err(RemovalFailure::Data);
-            }
-        }
-        result
+    fn remove_app(&self) -> Result<(), AppKept> {
+        self.app.remove().map_err(|_| AppKept)
     }
 }
 
@@ -540,17 +667,21 @@ pub(super) mod testing {
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(in crate::ui::settings_window) enum Step {
         Observe,
+        ReadCliCredentials,
         RemoveCore(Observed, Data),
+        /// Deleting the data, and whether it was given the desktop's registry.
+        DeleteData {
+            machines: bool,
+        },
         RemoveApp,
-        DeleteDesktopData,
     }
 
     /// Removal steps whose answers a test sets and whose requests it records.
     pub(in crate::ui::settings_window) struct ScriptedRemoval {
         pub(in crate::ui::settings_window) observed: Mutex<Result<Observed, RemovalFailure>>,
         pub(in crate::ui::settings_window) core: Mutex<Result<(), RemovalFailure>>,
-        pub(in crate::ui::settings_window) app: Mutex<Result<(), RemovalFailure>>,
-        pub(in crate::ui::settings_window) data: Mutex<Result<(), RemovalFailure>>,
+        pub(in crate::ui::settings_window) app: Mutex<Result<(), AppKept>>,
+        pub(in crate::ui::settings_window) data: Mutex<Result<(), DataKept>>,
         pub(in crate::ui::settings_window) steps: Mutex<Vec<Step>>,
     }
 
@@ -583,19 +714,30 @@ pub(super) mod testing {
             self.observed.lock().unwrap().clone()
         }
 
+        fn cli_credentials(&self) -> CliCredentials {
+            self.record(Step::ReadCliCredentials);
+            CliCredentials::default()
+        }
+
         fn remove_core(&self, observed: &Observed, data: Data) -> Result<(), RemovalFailure> {
             self.record(Step::RemoveCore(observed.clone(), data));
             *self.core.lock().unwrap()
         }
 
-        fn remove_app(&self) -> Result<(), RemovalFailure> {
-            self.record(Step::RemoveApp);
-            *self.app.lock().unwrap()
+        fn delete_data(
+            &self,
+            _: CliCredentials,
+            machines: Option<DirectConnections>,
+        ) -> Result<(), DataKept> {
+            self.record(Step::DeleteData {
+                machines: machines.is_some(),
+            });
+            *self.data.lock().unwrap()
         }
 
-        fn delete_desktop_data(&self) -> Result<(), RemovalFailure> {
-            self.record(Step::DeleteDesktopData);
-            *self.data.lock().unwrap()
+        fn remove_app(&self) -> Result<(), AppKept> {
+            self.record(Step::RemoveApp);
+            *self.app.lock().unwrap()
         }
     }
 }

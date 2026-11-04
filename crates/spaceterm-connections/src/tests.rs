@@ -144,6 +144,9 @@ pub(super) struct Credentials {
     pub(super) values: Mutex<BTreeMap<[u8; 32], Zeroizing<Vec<u8>>>>,
     reads: Mutex<Vec<Interaction>>,
     pub(super) locked: AtomicBool,
+    /// Keys whose items the store keeps whatever the person answers.
+    refused: Mutex<Vec<[u8; 32]>>,
+    removals: Mutex<Vec<([u8; 32], Interaction)>>,
 }
 impl CredentialStore for Credentials {
     fn kind(&self) -> crate::StoreKind {
@@ -168,7 +171,11 @@ impl CredentialStore for Credentials {
         values.insert(*key, Zeroizing::new(secret.to_vec()));
         Ok(())
     }
-    fn remove(&self, key: &[u8; 32], _: Interaction) -> Result<(), CredentialError> {
+    fn remove(&self, key: &[u8; 32], interaction: Interaction) -> Result<(), CredentialError> {
+        self.removals.lock().unwrap().push((*key, interaction));
+        if self.refused.lock().unwrap().contains(key) {
+            return Err(CredentialError::InteractionRequired);
+        }
         self.values.lock().unwrap().remove(key);
         Ok(())
     }
@@ -1053,6 +1060,76 @@ fn full_recovery_capacity_refuses_new_operations_but_still_removes_its_own_route
     }
     await_condition(|| connections.pending_unpairs().len() < 128);
     assert!(!connections.persistence_error());
+}
+
+/// Uninstalling with the data deleted removes every route's key and every pending enrollment's
+/// key, tries them all, and fails when the store keeps one.
+#[test]
+fn forgetting_every_machine_removes_route_and_enrollment_keys_and_reports_a_kept_one() {
+    let records = Arc::new(MemoryRecords::default());
+    {
+        let mut document = records.0.lock().unwrap();
+        document.routes = vec![saved(1, 0x61), saved(2, 0x62)];
+        document.pending.push(PendingRecord::enrollment(
+            [0x70; 32],
+            "penguin".into(),
+            "quic://192.0.2.8:9231".into(),
+            saved(3, 0).route.paired.pin,
+            [0x71; 32],
+            [0x63; 32],
+            false,
+        ));
+    }
+    let credentials = Arc::new(Credentials::default());
+    for key in [[0x61; 32], [0x62; 32], [0x63; 32]] {
+        credentials
+            .values
+            .lock()
+            .unwrap()
+            .insert(key, Zeroizing::new(b"secret".to_vec()));
+    }
+    credentials.refused.lock().unwrap().push([0x62; 32]);
+    let connections = DirectConnections::new(
+        "spaceterm-development",
+        records.clone(),
+        credentials.clone(),
+        Network::new(Answer::Lost),
+        None,
+    );
+    connections.resume_retained();
+    let removed = Arc::new(Mutex::new(Vec::new()));
+    connections.on_route_removed(Arc::new({
+        let removed = Arc::clone(&removed);
+        move |route: &DirectRouteId| removed.lock().unwrap().push(*route)
+    }));
+
+    assert_eq!(
+        connections.forget_every_machine(),
+        Err(DirectError::CredentialUnavailable)
+    );
+
+    let values = credentials.values.lock().unwrap();
+    assert!(!values.contains_key(&[0x61; 32]), "a route's key goes");
+    assert!(
+        !values.contains_key(&[0x63; 32]),
+        "a pending enrollment's key goes"
+    );
+    assert!(values.contains_key(&[0x62; 32]));
+    drop(values);
+    let removals = credentials.removals.lock().unwrap().clone();
+    assert!(
+        removals.contains(&([0x62; 32], Interaction::Requested)),
+        "a key the store keeps quietly is asked for once"
+    );
+    assert!(
+        !removals.contains(&([0x61; 32], Interaction::Requested)),
+        "a key the store removes quietly asks nothing"
+    );
+    assert!(connections.routes().is_empty());
+    assert!(connections.pending_unpairs().is_empty());
+    assert_eq!(*removed.lock().unwrap(), vec![[1; 32], [2; 32]]);
+    let document = records.0.lock().unwrap();
+    assert!(document.routes.is_empty() && document.pending.is_empty());
 }
 
 /// Removing a route runs its cleanup once the removal is saved, so what the client retained for
