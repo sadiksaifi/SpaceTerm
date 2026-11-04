@@ -11,14 +11,10 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString,
 use spaceterm_core::update::facts::Version;
 
 use super::{
-    ActionFailure, MachineAction, MachineId, MachineUpdate, MachineUpdatesAdapter,
+    ActionFailure, MachineAction, MachineId, MachinePreview, MachineUpdate, MachineUpdatesAdapter,
     MachineUpdatesEvent,
 };
-use crate::updates::presentation::{Confirmation, Dismissed};
-
-/// The facts changed since the person approved a confirmation, so it authorizes nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Stale;
+use crate::updates::presentation::{self, Approval, Confirmation, Dismissed};
 
 /// Where the person asked for an action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +34,89 @@ pub(crate) struct MachineUpdatesNotice {
     pub(crate) action: MachineAction,
     pub(crate) surface: Surface,
     pub(crate) outcome: Result<(), ActionFailure>,
+}
+
+/// What a Restart or Stop needs next, from the Cores' own previews.
+enum Prepared {
+    /// Nothing asks: execute these previews.
+    Run(Vec<MachinePreview>),
+    /// Ask with this confirmation first; approving it executes these previews.
+    Ask(Confirmation, Vec<MachinePreview>),
+    /// Nothing is left to run: every preview failed, and its surface heard why, or the
+    /// approved work is gone.
+    Nothing,
+}
+
+/// Shows a confirmation on a surface and passes on whether the person approved it.
+pub(crate) type Ask = Rc<dyn Fn(Confirmation, Box<dyn FnOnce(bool, &mut App)>, &mut App)>;
+
+/// Restarts or stops `actions`' Machines only on their Cores' own previews: each Core previews
+/// first, the person confirms the sessions that Core reports through `ask`, and exactly those
+/// previews execute. A Machine whose Core reports no facts is previewed like any other. A
+/// preview that fails reports to `surface` for its Machine alone; the others still ask and run.
+/// `always` asks even when no session closes, as after a Core refused a preview: a refused
+/// action never runs again without a fresh confirmation. An approval that no longer holds
+/// against the facts previews again, and keeps only the work the person approved: a restart
+/// into a Pending Version that is gone now is dropped, and one into another version asks.
+pub(crate) fn request(
+    actions: Vec<(MachineId, MachineAction)>,
+    always: bool,
+    surface: Surface,
+    ask: Ask,
+    cx: &mut App,
+) {
+    request_approved(actions, always, None, surface, ask, cx);
+}
+
+fn request_approved(
+    actions: Vec<(MachineId, MachineAction)>,
+    always: bool,
+    stale: Option<Approval>,
+    surface: Surface,
+    ask: Ask,
+    cx: &mut App,
+) {
+    let Some(store) = MachineUpdates::global(cx) else {
+        return;
+    };
+    let prepared = store.update(cx, |store, cx| {
+        store.prepare(&actions, always, stale, surface, cx)
+    });
+    cx.spawn(async move |cx| {
+        let prepared = prepared.await;
+        cx.update(|cx| match prepared {
+            Prepared::Nothing => {}
+            Prepared::Run(previews) => execute_all(previews, surface, cx),
+            Prepared::Ask(confirmation, previews) => {
+                let approval = confirmation.approval.clone();
+                let again = Rc::clone(&ask);
+                let answered = Box::new(move |approved: bool, cx: &mut App| {
+                    if !approved {
+                        return;
+                    }
+                    let holds = MachineUpdates::global(cx)
+                        .is_some_and(|store| approval.holds(store.read(cx).machines()));
+                    if holds {
+                        execute_all(previews, surface, cx);
+                    } else {
+                        request_approved(actions, false, Some(approval), surface, again, cx);
+                    }
+                });
+                ask(confirmation, answered, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+fn execute_all(previews: Vec<MachinePreview>, surface: Surface, cx: &mut App) {
+    if let Some(store) = MachineUpdates::global(cx) {
+        store.update(cx, |store, _| {
+            for preview in previews {
+                store.execute(preview, surface);
+            }
+        });
+    }
 }
 
 pub(crate) struct MachineUpdates {
@@ -112,23 +191,89 @@ impl MachineUpdates {
         self.adapter.perform(machine, action);
     }
 
-    /// Performs every action `confirmation` asked about, if the person's approval still holds:
-    /// the affected Machines show the sessions, running Core and Pending Version the alert
-    /// described. Otherwise performs nothing and returns [`Stale`], and the surface asks again
-    /// with [`crate::updates::presentation::Presentation::ask_again`].
-    pub(crate) fn perform_approved(
-        &mut self,
-        confirmation: &Confirmation,
+    /// Asks each affected Core to preview its Restart or Stop, all at once. Each preview that
+    /// fails reports that failure to `surface` as its own action's outcome, as soon as it
+    /// fails; the rest are prepared together. After a `stale` approval, a restart whose Pending
+    /// Version is gone is dropped and one into another version asks.
+    fn prepare(
+        &self,
+        actions: &[(MachineId, MachineAction)],
+        always: bool,
+        stale: Option<Approval>,
         surface: Surface,
         cx: &mut Context<Self>,
-    ) -> Result<(), Stale> {
-        if !confirmation.approval.holds(&self.machines) {
-            return Err(Stale);
+    ) -> Task<Prepared> {
+        let (answered, answers) = async_channel::unbounded();
+        for (index, (machine, action)) in actions.iter().enumerate() {
+            let answer = self.adapter.preview(*machine, action.clone());
+            let answered = answered.clone();
+            let (machine, action) = (*machine, action.clone());
+            cx.background_executor()
+                .spawn(async move {
+                    let outcome = answer.recv().await.unwrap_or(Err(ActionFailure::Failed));
+                    let _ = answered.send((index, machine, action, outcome)).await;
+                })
+                .detach();
         }
-        for (machine, action) in confirmation.actions.iter().cloned() {
-            self.perform(machine, action, surface, cx);
-        }
-        Ok(())
+        drop(answered);
+        cx.spawn(async move |this, cx| {
+            let mut previews = Vec::new();
+            while let Ok((index, machine, action, outcome)) = answers.recv().await {
+                match outcome {
+                    Ok(preview) => previews.push((index, preview)),
+                    Err(failure) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.notify_outcome(machine, action, surface, Err(failure), cx);
+                        });
+                    }
+                }
+            }
+            previews.sort_by_key(|(index, _)| *index);
+            let mut previews: Vec<MachinePreview> =
+                previews.into_iter().map(|(_, preview)| preview).collect();
+            let mut always = always;
+            if let Some(stale) = stale {
+                previews.retain(|preview| stale.still_approves(preview));
+                always |= previews.iter().any(|preview| stale.retargets(preview));
+            }
+            if previews.is_empty() {
+                return Prepared::Nothing;
+            }
+            cx.update(
+                |cx| match presentation::current(cx).previewed(&previews, always) {
+                    Some(confirmation) => Prepared::Ask(confirmation, previews),
+                    None => Prepared::Run(previews),
+                },
+            )
+        })
+    }
+
+    /// Executes exactly `preview`, which the person confirmed on `surface`.
+    pub(crate) fn execute(&mut self, preview: MachinePreview, surface: Surface) {
+        self.performed
+            .push((preview.machine, preview.action.clone(), surface));
+        self.adapter.execute(preview);
+    }
+
+    fn notify_outcome(
+        &self,
+        machine: MachineId,
+        action: MachineAction,
+        surface: Surface,
+        outcome: Result<(), ActionFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(update) = self.machines.iter().find(|known| known.machine == machine) else {
+            return;
+        };
+        cx.emit(MachineUpdatesNotice {
+            machine,
+            name: update.name.clone(),
+            local: update.local,
+            action,
+            surface,
+            outcome,
+        });
     }
 
     fn receive(&mut self, event: MachineUpdatesEvent, cx: &mut Context<Self>) {
@@ -167,18 +312,7 @@ impl MachineUpdates {
                 if let MachineAction::DismissFailure(_) = action {
                     return;
                 }
-                let Some(update) = self.machines.iter().find(|known| known.machine == machine)
-                else {
-                    return;
-                };
-                cx.emit(MachineUpdatesNotice {
-                    machine,
-                    name: update.name.clone(),
-                    local: update.local,
-                    action,
-                    surface,
-                    outcome,
-                });
+                self.notify_outcome(machine, action, surface, outcome, cx);
             }
         }
         cx.notify();

@@ -2,13 +2,14 @@
 //! update service and the shared Machine updates, renders after each change, and performs each
 //! command, asking first wherever the update presentation says a command asks.
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::App;
 use spaceterm_core::service::ServiceStatus;
 
 use super::model::{Command, Menu};
-use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice, Surface};
+use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
 use crate::updates::presentation::{self, DesktopAction};
 use crate::updates::{UpdateService, UpdateState};
@@ -33,13 +34,24 @@ pub(crate) trait StatusHost {
 enum Message {
     /// The person closed an explanation that runs this command next.
     Answered(presentation::Command),
-    /// The person approved this confirmation.
-    Approved(presentation::Confirmation),
+    /// The person answered the confirmation with this ID.
+    Confirmed(u64, bool),
+}
+
+/// What an open confirmation does with the person's answer.
+type Answered = Box<dyn FnOnce(bool, &mut App)>;
+
+/// What each open confirmation does with its answer, by ID.
+#[derive(Default)]
+struct Confirmations {
+    next: u64,
+    open: HashMap<u64, Answered>,
 }
 
 pub(crate) struct StatusMenu {
     host: Rc<dyn StatusHost>,
     messages: async_channel::Sender<Message>,
+    confirmations: Rc<RefCell<Confirmations>>,
     /// The menu as last rendered.
     menu: RefCell<Option<Menu>>,
 }
@@ -52,6 +64,7 @@ impl StatusMenu {
         let menu = Rc::new(Self {
             host,
             messages,
+            confirmations: Rc::default(),
             menu: RefCell::default(),
         });
         if let Some(service) = cx
@@ -100,39 +113,55 @@ impl StatusMenu {
     fn receive(&self, message: Message, cx: &mut App) {
         match message {
             Message::Answered(command) => self.run(command, cx),
-            Message::Approved(approval) => self.approved(approval, cx),
+            Message::Confirmed(id, approved) => {
+                let answered = self.confirmations.borrow_mut().open.remove(&id);
+                if let Some(answered) = answered {
+                    answered(approved, cx);
+                }
+            }
         }
         self.render(cx);
     }
 
-    /// Performs an approved confirmation while its approval holds. Otherwise the menu runs
-    /// what it offers now, which asks again, or restarts at once at zero sessions.
-    fn approved(&self, confirmation: presentation::Confirmation, cx: &mut App) {
-        let Some(store) = MachineUpdates::global(cx) else {
-            return;
-        };
-        let approved = store.update(cx, |store, cx| {
-            store.perform_approved(&confirmation, Surface::StatusMenu, cx)
+    /// Restarts or stops on the Cores' own previews, confirming through this menu's alerts.
+    fn request(&self, actions: Vec<(MachineId, MachineAction)>, always: bool, cx: &mut App) {
+        let host = Rc::clone(&self.host);
+        let messages = self.messages.clone();
+        let confirmations = Rc::clone(&self.confirmations);
+        let ask: store::Ask = Rc::new(move |confirmation, answered, cx| {
+            let id = {
+                let mut confirmations = confirmations.borrow_mut();
+                confirmations.next += 1;
+                let id = confirmations.next;
+                confirmations.open.insert(id, answered);
+                id
+            };
+            let alert = Alert {
+                title: confirmation.title.to_string(),
+                message: confirmation.message.to_string(),
+                confirm: Some(confirmation.button.to_string()),
+            };
+            let messages = messages.clone();
+            host.alert(
+                alert,
+                Box::new(move |approved| {
+                    let _ = messages.send_blocking(Message::Confirmed(id, approved));
+                }),
+                cx,
+            );
         });
-        if approved.is_ok() {
-            return;
-        }
-        self.render(cx);
-        if let Some(command) = presentation::current(cx).ask_again(&confirmation) {
-            self.run(command, cx);
-        }
+        store::request(actions, always, Surface::StatusMenu, ask, cx);
     }
 
     /// An action this menu performed finished.
     fn finished(&self, notice: &MachineUpdatesNotice, cx: &mut App) {
         match notice.outcome {
             Ok(()) => self.succeeded(notice.local, &notice.action, cx),
-            // The sessions or the Pending Version changed since the person agreed, so the menu
-            // asks again with what is true now.
+            // The Core refused its preview: the sessions or the Pending Version changed since.
+            // The menu previews again and always asks, so nothing runs again by itself.
             Err(ActionFailure::Changed) => {
-                self.render(cx);
-                if let Some(command) = self.command_for(notice.machine, &notice.action) {
-                    self.run(command, cx);
+                if matches!(notice.action, MachineAction::Restart | MachineAction::Stop) {
+                    self.request(vec![(notice.machine, notice.action.clone())], true, cx);
                 }
             }
             Err(failure) => {
@@ -175,28 +204,6 @@ impl StatusMenu {
         }
     }
 
-    /// The command the menu now offers for `action` on `machine`.
-    fn command_for(
-        &self,
-        machine: MachineId,
-        action: &MachineAction,
-    ) -> Option<presentation::Command> {
-        let menu = self.menu.borrow();
-        menu.as_ref()?.commands().find_map(|command| match command {
-            Command::Update(presentation::Command::Machine(id, offered))
-                if id == machine && offered == *action =>
-            {
-                Some(presentation::Command::Machine(id, offered))
-            }
-            Command::Update(presentation::Command::Confirm(confirmation))
-                if confirmation.actions.contains(&(machine, action.clone())) =>
-            {
-                Some(presentation::Command::Confirm(confirmation))
-            }
-            _ => None,
-        })
-    }
-
     fn render(&self, cx: &App) {
         let update = presentation::current(cx);
         let machines: &[MachineUpdate] =
@@ -234,23 +241,14 @@ impl StatusMenu {
 
     fn run(&self, command: presentation::Command, cx: &mut App) {
         match command {
+            presentation::Command::Machine(
+                machine,
+                action @ (MachineAction::Restart | MachineAction::Stop),
+            ) => self.request(vec![(machine, action)], false, cx),
             presentation::Command::Machine(machine, action) => act(machine, action, cx),
+            // The confirmation is built again from the Cores' previews before it shows.
             presentation::Command::Confirm(confirmation) => {
-                let alert = Alert {
-                    title: confirmation.title.to_string(),
-                    message: confirmation.message.to_string(),
-                    confirm: Some(confirmation.button.to_string()),
-                };
-                let messages = self.messages.clone();
-                self.host.alert(
-                    alert,
-                    Box::new(move |approved| {
-                        if approved {
-                            let _ = messages.send_blocking(Message::Approved(confirmation));
-                        }
-                    }),
-                    cx,
-                );
+                self.request(confirmation.actions, false, cx);
             }
             presentation::Command::Explain(explanation) => {
                 let alert = Alert {

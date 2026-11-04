@@ -180,7 +180,7 @@ fn restarting_a_core_with_sessions_asks_first_with_the_agreed_alert(cx: &mut Tes
         }]
     );
     assert!(
-        fixture.machines.performed().is_empty(),
+        fixture.machines.executed_actions().is_empty(),
         "nothing restarts while the alert is open"
     );
 
@@ -188,7 +188,7 @@ fn restarting_a_core_with_sessions_asks_first_with_the_agreed_alert(cx: &mut Tes
     cx.update(|cx| fixture.menu.perform(restart.clone(), cx));
     cx.run_until_parked();
     assert!(
-        fixture.machines.performed().is_empty(),
+        fixture.machines.executed_actions().is_empty(),
         "Cancel restarts nothing"
     );
 
@@ -196,7 +196,7 @@ fn restarting_a_core_with_sessions_asks_first_with_the_agreed_alert(cx: &mut Tes
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
     assert_eq!(
-        fixture.machines.performed(),
+        fixture.machines.executed_actions(),
         [(PENGUIN, MachineAction::Restart)]
     );
 }
@@ -210,7 +210,7 @@ fn restarting_a_core_without_sessions_restarts_at_once(cx: &mut TestAppContext) 
     cx.run_until_parked();
     assert!(fixture.host.alerts.borrow().is_empty());
     assert_eq!(
-        fixture.machines.performed(),
+        fixture.machines.executed_actions(),
         [(PENGUIN, MachineAction::Restart)]
     );
 }
@@ -239,7 +239,7 @@ fn restart_all_asks_once_then_restarts_every_waiting_machine(cx: &mut TestAppCon
         }]
     );
     assert_eq!(
-        fixture.machines.performed(),
+        fixture.machines.executed_actions(),
         [
             (LOCAL, MachineAction::Restart),
             (PENGUIN, MachineAction::Restart)
@@ -279,7 +279,10 @@ fn only_this_mac_offers_stop_and_stopping_with_sessions_asks(cx: &mut TestAppCon
         fixture.host.alerts.borrow()[0].confirm.as_deref(),
         Some("Stop")
     );
-    assert_eq!(fixture.machines.performed(), [(LOCAL, MachineAction::Stop)]);
+    assert_eq!(
+        fixture.machines.executed_actions(),
+        [(LOCAL, MachineAction::Stop)]
+    );
 }
 
 #[gpui::test]
@@ -296,7 +299,7 @@ fn a_restart_drawn_before_sessions_opened_never_runs_without_asking(cx: &mut Tes
 
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
-    assert!(fixture.machines.performed().is_empty());
+    assert!(fixture.machines.executed_actions().is_empty());
     assert!(fixture.host.alerts.borrow().is_empty());
 }
 
@@ -305,6 +308,7 @@ fn a_failed_action_from_the_menu_opens_an_alert_and_others_stay_quiet(cx: &mut T
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
     let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
     cx.update(|cx| fixture.menu.perform(restart, cx));
+    cx.run_until_parked();
     // An action no surface performed fails too; nobody reports it.
     for _ in 0..2 {
         fixture.machines.emit(MachineUpdatesEvent::Finished {
@@ -445,7 +449,7 @@ fn sessions_that_change_while_the_alert_is_open_ask_again(cx: &mut TestAppContex
     fixture.host.answer(true);
     cx.run_until_parked();
     assert!(
-        fixture.machines.performed().is_empty(),
+        fixture.machines.executed_actions().is_empty(),
         "the approval covered 3 sessions, not 4"
     );
     assert_eq!(
@@ -456,7 +460,7 @@ fn sessions_that_change_while_the_alert_is_open_ask_again(cx: &mut TestAppContex
     fixture.host.answer(true);
     cx.run_until_parked();
     assert_eq!(
-        fixture.machines.performed(),
+        fixture.machines.executed_actions(),
         [(PENGUIN, MachineAction::Restart)]
     );
 }
@@ -480,12 +484,12 @@ fn a_new_pending_version_while_the_alert_is_open_asks_again(cx: &mut TestAppCont
 
     fixture.host.answer(true);
     cx.run_until_parked();
-    assert!(fixture.machines.performed().is_empty());
+    assert!(fixture.machines.executed_actions().is_empty());
     assert_eq!(fixture.host.alerts.borrow().len(), 2, "it asks again");
     fixture.host.answer(true);
     cx.run_until_parked();
     assert_eq!(
-        fixture.machines.performed(),
+        fixture.machines.executed_actions(),
         [(PENGUIN, MachineAction::Restart)]
     );
 }
@@ -502,7 +506,7 @@ fn sessions_that_all_close_while_the_alert_is_open_restart_at_once(cx: &mut Test
     cx.run_until_parked();
     assert_eq!(fixture.host.alerts.borrow().len(), 1);
     assert_eq!(
-        fixture.machines.performed(),
+        fixture.machines.executed_actions(),
         [(PENGUIN, MachineAction::Restart)]
     );
 }
@@ -526,7 +530,7 @@ fn restart_all_and_stop_ask_again_after_their_sessions_change(cx: &mut TestAppCo
     );
     fixture.host.answer(true);
     cx.run_until_parked();
-    assert!(fixture.machines.performed().is_empty());
+    assert!(fixture.machines.executed_actions().is_empty());
     assert_eq!(
         fixture.host.alerts.borrow().last().unwrap().message,
         "This will close 8 running sessions."
@@ -544,7 +548,7 @@ fn restart_all_and_stop_ask_again_after_their_sessions_change(cx: &mut TestAppCo
     );
     fixture.host.answer(true);
     cx.run_until_parked();
-    assert!(fixture.machines.performed().is_empty());
+    assert!(fixture.machines.executed_actions().is_empty());
     assert_eq!(
         fixture.host.alerts.borrow().last().unwrap().message,
         "This will close your 1 running session. SpaceTerm Core stays stopped until you start it again."
@@ -659,4 +663,250 @@ fn the_flat_menu_keeps_local_restart_and_stop_and_never_offers_remote_stop(
         titles(fixture.host.menu()),
         ["Restart SpaceTerm Core on penguin"],
     );
+}
+
+/// `machine` with a Core that reports no update facts.
+fn unreported(id: MachineId, name: &'static str) -> MachineUpdate {
+    let mut update = machine(id, name, 0);
+    update.link = MachineLink::Unreported;
+    update.facts = None;
+    update
+}
+
+/// A Core that reports no facts is asked to preview first, and the person confirms the
+/// sessions it reports. Nothing runs before the Core answers, and nothing runs through the
+/// unpreviewed path.
+#[gpui::test]
+fn a_machine_without_facts_restarts_and_stops_only_on_its_cores_preview(cx: &mut TestAppContext) {
+    let fixture = start(vec![unreported(LOCAL, "This Mac")], cx);
+    fixture.machines.hold_previews();
+    for (title, action, button) in [
+        ("Restart SpaceTerm Core", MachineAction::Restart, "Restart"),
+        ("Stop SpaceTerm Core", MachineAction::Stop, "Stop"),
+    ] {
+        let executed = fixture.machines.executed().len();
+        let command = submenu_command(&fixture.host.menu(), LOCAL, title);
+        cx.update(|cx| fixture.menu.perform(command, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            fixture.machines.asked().last(),
+            Some(&(LOCAL, action.clone()))
+        );
+        assert_eq!(
+            fixture.machines.executed().len(),
+            executed,
+            "nothing runs before the Core answers"
+        );
+
+        fixture.machines.answer_preview(|machine, action| {
+            Ok(crate::updates::machines::testing::preview(
+                machine, action, 3,
+            ))
+        });
+        cx.run_until_parked();
+        let alert = fixture
+            .host
+            .alerts
+            .borrow()
+            .last()
+            .cloned()
+            .expect("it asks");
+        assert_eq!(alert.confirm.as_deref(), Some(button));
+        assert!(
+            alert
+                .message
+                .starts_with("This will close your 3 running sessions."),
+            "the alert names the sessions the Core reports: {}",
+            alert.message
+        );
+        assert_eq!(
+            fixture.machines.executed().len(),
+            executed,
+            "nothing runs while it asks"
+        );
+        fixture.host.answer(true);
+        cx.run_until_parked();
+        assert_eq!(
+            fixture.machines.executed_actions().last(),
+            Some(&(LOCAL, action))
+        );
+    }
+    assert_eq!(fixture.machines.executed_actions().len(), 2);
+    assert!(
+        fixture.machines.performed().is_empty(),
+        "a Restart or Stop never runs without its preview"
+    );
+}
+
+/// When the Core refuses a preview it issued, the menu previews again and asks, even with no
+/// session open. It never runs the action again by itself.
+#[gpui::test]
+fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut TestAppContext) {
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
+    cx.update(|cx| fixture.menu.perform(restart, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.executed_actions(),
+        [(PENGUIN, MachineAction::Restart)],
+        "no session closes, so it restarts at once"
+    );
+
+    for approved in [true, false] {
+        fixture.machines.emit(MachineUpdatesEvent::Finished {
+            machine: PENGUIN,
+            action: MachineAction::Restart,
+            outcome: Err(ActionFailure::Changed),
+        });
+        cx.run_until_parked();
+        let executed = fixture.machines.executed().len();
+        let alert = fixture
+            .host
+            .alerts
+            .borrow()
+            .last()
+            .cloned()
+            .expect("it asks again");
+        assert_eq!(alert.confirm.as_deref(), Some("Restart"));
+        fixture.host.answer(approved);
+        cx.run_until_parked();
+        assert_eq!(
+            fixture.machines.executed().len(),
+            executed + usize::from(approved),
+            "only an approval runs it"
+        );
+    }
+    assert_eq!(
+        fixture.machines.asked().len(),
+        3,
+        "each round previews once"
+    );
+    assert!(fixture.machines.performed().is_empty());
+}
+
+/// The menu showed no sessions, so its restart asks nothing, but the Core's preview finds two:
+/// the menu asks with the Core's count before anything runs.
+#[gpui::test]
+fn sessions_the_core_previews_ask_even_when_the_menu_showed_none(cx: &mut TestAppContext) {
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
+    fixture.machines.hold_previews();
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
+    cx.update(|cx| fixture.menu.perform(restart, cx));
+    cx.run_until_parked();
+    fixture.machines.answer_preview(|machine, action| {
+        Ok(crate::updates::machines::testing::preview(
+            machine, action, 2,
+        ))
+    });
+    cx.run_until_parked();
+    assert!(fixture.machines.executed().is_empty());
+    assert_eq!(
+        fixture
+            .host
+            .alerts
+            .borrow()
+            .last()
+            .map(|alert| alert.message.clone()),
+        Some("This will close your 2 running sessions.".to_owned())
+    );
+    fixture.host.answer(false);
+    cx.run_until_parked();
+    assert!(
+        fixture.machines.executed().is_empty(),
+        "Cancel runs nothing"
+    );
+    assert_eq!(fixture.machines.asked().len(), 1);
+}
+
+/// One Machine's preview failing in Restart All reports that Machine alone, at once. The others
+/// still ask, with their own sessions, and run.
+#[gpui::test]
+fn a_failed_preview_in_restart_all_leaves_the_other_machines_to_restart(cx: &mut TestAppContext) {
+    use crate::updates::machines::testing::preview;
+
+    let fixture = start(
+        vec![
+            waiting(machine(LOCAL, "This Mac", 3)),
+            waiting(machine(PENGUIN, "penguin", 4)),
+            waiting(machine(BUILD_BOX, "build-box", 1)),
+        ],
+        cx,
+    );
+    fixture.machines.hold_previews();
+    let restart_all = action_command(&fixture.host.menu(), "Restart All\u{2026}");
+    cx.update(|cx| fixture.menu.perform(restart_all, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.asked().len(),
+        3,
+        "every Core previews at once"
+    );
+
+    // build-box answers first, with a failure, while the others still preview.
+    fixture.host.answers.borrow_mut().push(true);
+    fixture
+        .machines
+        .answer_preview_of(BUILD_BOX, |_| Err(ActionFailure::Unreachable));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.host.alerts.borrow().as_slice(),
+        [Alert {
+            title: "Couldn't restart SpaceTerm Core on build-box".to_owned(),
+            message: "SpaceTerm can't reach build-box. Try again when it is connected.".to_owned(),
+            confirm: None,
+        }],
+        "the failure reports at once, for build-box alone"
+    );
+
+    for (id, sessions) in [(LOCAL, 3), (PENGUIN, 4)] {
+        fixture
+            .machines
+            .answer_preview_of(id, |action| Ok(preview(id, action, sessions)));
+    }
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.host.alerts.borrow().last().cloned(),
+        Some(Alert {
+            title: "Restart SpaceTerm Core on 2 machines?".to_owned(),
+            message: "This will close 7 running sessions.".to_owned(),
+            confirm: Some("Restart".to_owned()),
+        })
+    );
+    assert!(fixture.machines.executed().is_empty());
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.executed_actions(),
+        [
+            (LOCAL, MachineAction::Restart),
+            (PENGUIN, MachineAction::Restart)
+        ]
+    );
+}
+
+/// The Core updated by itself while its alert was open, because its sessions closed. Approving
+/// the stale alert restarts nothing more: the update it asked for already ran.
+#[gpui::test]
+fn an_update_that_ran_while_the_alert_was_open_restarts_nothing_more(cx: &mut TestAppContext) {
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    cx.update(|cx| fixture.menu.perform(restart, cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.host.alerts.borrow().len(), 1);
+
+    let mut updated = machine(PENGUIN, "penguin", 0);
+    updated.facts.as_mut().unwrap().running = Version::parse("0.9.0").unwrap();
+    changed(&fixture, updated, cx);
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.asked().len(),
+        2,
+        "the stale approval previews again"
+    );
+    assert!(
+        fixture.machines.executed().is_empty(),
+        "a plain restart nobody asked for never runs"
+    );
+    assert_eq!(fixture.host.alerts.borrow().len(), 1, "and nothing asks");
 }

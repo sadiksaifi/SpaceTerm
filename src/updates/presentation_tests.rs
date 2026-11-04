@@ -560,22 +560,43 @@ fn an_approval_holds_only_while_the_described_work_is_unchanged() {
         !confirmation.approval.holds(&[]),
         "a removed Machine holds nothing"
     );
+}
 
-    // Asking again names what is true now.
-    let Some(Command::Confirm(again)) =
-        present(std::slice::from_ref(&more)).ask_again(&confirmation)
-    else {
-        panic!("four sessions still ask");
-    };
+#[test]
+fn a_confirmation_names_the_sessions_each_core_previews() {
+    use crate::updates::machines::testing::preview;
+
+    let described = waiting(machine(PENGUIN, "penguin", 3), NOW - 60);
+    let presentation = present(std::slice::from_ref(&described));
+    let asked = presentation
+        .previewed(&[preview(PENGUIN, MachineAction::Restart, 4)], false)
+        .expect("four sessions ask");
     assert_eq!(
-        again.message.as_ref(),
+        asked.message.as_ref(),
         "This will close your 4 running sessions."
     );
-    let mut closed = described.clone();
-    closed.facts.as_mut().unwrap().sessions = 0;
     assert_eq!(
-        present(&[closed]).ask_again(&confirmation),
-        Some(Command::Machine(PENGUIN, MachineAction::Restart)),
-        "with no sessions left, the restart needs no question"
+        presentation.previewed(&[preview(PENGUIN, MachineAction::Restart, 0)], false),
+        None,
+        "with no sessions to close, the restart needs no question"
     );
+    let again = presentation
+        .previewed(&[preview(PENGUIN, MachineAction::Restart, 0)], true)
+        .expect("a refused preview always asks");
+    assert_eq!(again.button.as_ref(), "Restart");
+
+    // A Core without facts is described by its preview alone, and its approval holds on the
+    // Core's token.
+    let mut unreported = machine(PENGUIN, "penguin", 0);
+    unreported.facts = None;
+    unreported.link = MachineLink::Unreported;
+    let presentation = present(std::slice::from_ref(&unreported));
+    let stop = presentation
+        .previewed(&[preview(PENGUIN, MachineAction::Stop, 2)], false)
+        .expect("two sessions ask");
+    assert!(
+        stop.message
+            .starts_with("This will close your 2 running sessions.")
+    );
+    assert!(stop.approval.holds(&[unreported]));
 }

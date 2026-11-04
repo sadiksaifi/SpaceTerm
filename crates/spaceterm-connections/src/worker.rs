@@ -25,6 +25,17 @@ pub(super) trait DirectNetwork: Send + Sync {
         credential: DeviceCredential,
         gate: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<MachineConnection, DirectError>;
+    /// A handle to `route` that skips work admission, for the service lane of a Core that
+    /// refused this client's work protocol. A network without one has none.
+    fn service(
+        &self,
+        _identity: &str,
+        _route: &DirectRoute,
+        _credential: DeviceCredential,
+        _gate: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Option<MachineConnection> {
+        None
+    }
     fn revoke(
         &self,
         endpoint: &str,
@@ -61,6 +72,21 @@ impl DirectNetwork for NativeNetwork {
         let core = MachineConnection::direct(identity, route.id, route.paired.clone(), connector)?;
         core.refresh()?;
         Ok(core)
+    }
+    fn service(
+        &self,
+        identity: &str,
+        route: &DirectRoute,
+        credential: DeviceCredential,
+        gate: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Option<MachineConnection> {
+        let connector = Arc::new(Connector {
+            endpoint: route.endpoint.clone(),
+            paired: route.paired.clone(),
+            credential,
+            gate,
+        });
+        MachineConnection::direct(identity, route.id, route.paired.clone(), connector).ok()
     }
     fn revoke(
         &self,
@@ -470,6 +496,20 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
         Some(core) => core.refresh().map(|_| core).map_err(DirectError::from),
         None => connect(owner, &job.saved, job.interaction, Arc::clone(&job.gate)),
     };
+    // A Core that refuses the work protocol still answers its service lane.
+    let service = match &result {
+        Err(DirectError::IncompatibleProtocol) => credential(owner, &job.saved, Interaction::Quiet)
+            .ok()
+            .and_then(|credential| {
+                owner.network.service(
+                    &owner.identity,
+                    &job.saved.route,
+                    credential,
+                    Arc::clone(&job.gate),
+                )
+            }),
+        _ => None,
+    };
     let mut state = owner.state.lock().unwrap_or_else(|e| e.into_inner());
     let Some(runtime) = state.routes.get_mut(&job.saved.route.id) else {
         return;
@@ -481,6 +521,7 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
         return;
     }
     runtime.retry.interaction = Interaction::Quiet;
+    runtime.service = service;
     match result {
         Ok(core) => {
             if runtime.core.is_none() {
@@ -927,6 +968,7 @@ fn complete_enrollment(owner: &DirectConnections, id: JoinId, saved: SavedRoute)
             RouteState {
                 status: DirectRouteStatus::Connecting,
                 core: None,
+                service: None,
                 gate: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 retry: Retry::new(Interaction::Quiet),
                 health: None,

@@ -168,6 +168,9 @@ struct State {
 struct RouteState {
     status: DirectRouteStatus,
     core: Option<MachineConnection>,
+    /// A handle whose service lane answers while work admission refuses this desktop's
+    /// protocol, so update facts and administration still reach the Core.
+    service: Option<MachineConnection>,
     gate: Arc<std::sync::atomic::AtomicBool>,
     retry: Retry,
     /// Follows the connected route's link, so its end, not a timer, makes the route due.
@@ -273,6 +276,7 @@ impl DirectConnections {
                                 DirectRouteStatus::Disconnected
                             },
                             core: None,
+                            service: None,
                             gate: Arc::new(std::sync::atomic::AtomicBool::new(saved.active)),
                             // The person left this route connected. Its first attempt after
                             // launch may let the credential store ask them, so a store that no
@@ -389,6 +393,14 @@ impl DirectConnections {
             .clone()
     }
 
+    /// A handle to this route's service lane: the connected handle, or the one SpaceTerm keeps
+    /// while the Core refuses this desktop's work protocol. The lane answers across majors.
+    pub fn service(&self, id: &DirectRouteId) -> Option<MachineConnection> {
+        let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let route = state.routes.get(id)?;
+        route.core.clone().or_else(|| route.service.clone())
+    }
+
     pub fn persistence_error(&self) -> bool {
         self.0
             .state
@@ -407,6 +419,7 @@ impl DirectConnections {
         };
         saved.active = true;
         if let Some(route) = state.routes.get_mut(id) {
+            route.service = None;
             if let Some(core) = route.core.take() {
                 // The old link's connector stays disabled; the worker follows the new link.
                 route
@@ -445,6 +458,7 @@ impl DirectConnections {
                 .gate
                 .store(false, std::sync::atomic::Ordering::Release);
             disconnected = route.core.take();
+            route.service = None;
             // Old connectors stay disabled even if the person reconnects before an
             // in-flight attempt returns. Its result belongs to the previous gate.
             route.gate = Arc::new(std::sync::atomic::AtomicBool::new(false));

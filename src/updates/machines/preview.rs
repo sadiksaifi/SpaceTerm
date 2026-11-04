@@ -18,8 +18,8 @@ use spaceterm_core::update::facts::{
 };
 
 use super::{
-    ActionFailure, MachineAction, MachineId, MachineLink, MachineUpdate, MachineUpdatesAdapter,
-    MachineUpdatesError, MachineUpdatesEvent,
+    ActionFailure, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
+    MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
 };
 
 const THIS_MACHINE: MachineId = [1; 32];
@@ -154,6 +154,19 @@ pub(crate) struct PreviewMachines {
 }
 
 impl PreviewMachines {
+    /// Plays `action`'s transitions, or finishes with why it can't run.
+    fn run(&self, machine: MachineId, action: MachineAction) {
+        let planned = self.shared.lock().ok().and_then(|shared| {
+            let update = shared.machines.iter().find(|m| m.machine == machine)?;
+            Some(plan(update, &action))
+        });
+        match planned {
+            Some(Ok(changes)) => self.play(machine, changes, Some(action)),
+            Some(Err(failure)) => self.finish_now(machine, Some(action), Err(failure)),
+            None => self.finish_now(machine, Some(action), Err(ActionFailure::Unreachable)),
+        }
+    }
+
     pub(crate) fn new(scenario: Scenario) -> Self {
         Self {
             scenario,
@@ -253,16 +266,43 @@ impl MachineUpdatesAdapter for PreviewMachines {
         Ok(())
     }
 
+    /// Restart and Stop run only through `execute`.
     fn perform(&self, machine: MachineId, action: MachineAction) {
-        let planned = self.shared.lock().ok().and_then(|shared| {
-            let update = shared.machines.iter().find(|m| m.machine == machine)?;
-            Some(plan(update, &action))
-        });
-        match planned {
-            Some(Ok(changes)) => self.play(machine, changes, Some(action)),
-            Some(Err(failure)) => self.finish_now(machine, Some(action), Err(failure)),
-            None => self.finish_now(machine, Some(action), Err(ActionFailure::Unreachable)),
+        if matches!(action, MachineAction::Restart | MachineAction::Stop) {
+            self.finish_now(machine, Some(action), Err(ActionFailure::Failed));
+            return;
         }
+        self.run(machine, action);
+    }
+
+    /// Previews from the scenario's facts. Executing runs the action's transitions.
+    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
+        let (answer, answered) = async_channel::bounded(1);
+        let previewed = self.shared.lock().ok().and_then(|shared| {
+            let update = shared.machines.iter().find(|m| m.machine == machine)?;
+            let facts = update.facts.as_ref()?;
+            Some(plan(update, &action).map(|_| {
+                MachinePreview {
+                    machine,
+                    action: action.clone(),
+                    sessions: facts.sessions,
+                    target: match action {
+                        MachineAction::Restart => facts
+                            .pending
+                            .as_ref()
+                            .map(|pending| pending.version.clone()),
+                        _ => None,
+                    },
+                    id: 0,
+                }
+            }))
+        });
+        let _ = answer.try_send(previewed.unwrap_or(Err(ActionFailure::Unreachable)));
+        answered
+    }
+
+    fn execute(&self, preview: MachinePreview) {
+        self.run(preview.machine, preview.action);
     }
 }
 
@@ -683,6 +723,17 @@ mod tests {
     }
 
     /// The last `Changed` before `action` finishes on `machine`, and its outcome.
+    /// Previews `action` and executes the preview, as a surface does once the person confirms.
+    fn confirmed(
+        preview: &PreviewMachines,
+        machine: MachineId,
+        action: MachineAction,
+    ) -> Result<(), ActionFailure> {
+        let previewed = preview.preview(machine, action).recv_blocking().unwrap()?;
+        preview.execute(previewed);
+        Ok(())
+    }
+
     fn finish(
         receiver: &async_channel::Receiver<MachineUpdatesEvent>,
         machine: MachineId,
@@ -734,7 +785,7 @@ mod tests {
         assert_eq!(facts.operation, None);
         assert_eq!(installed.push, None);
 
-        preview.perform(PENGUIN, MachineAction::Restart);
+        confirmed(&preview, PENGUIN, MachineAction::Restart).unwrap();
         let (restarted, outcome) = finish(&events, PENGUIN);
         assert_eq!(outcome, Ok(()));
         let facts = restarted.unwrap().facts.unwrap();
@@ -744,19 +795,28 @@ mod tests {
 
     #[test]
     fn refused_actions_finish_with_their_reason() {
-        let (preview, events, _) = started(Scenario::Offline);
-        preview.perform(BUILD_BOX, MachineAction::Restart);
+        let (preview, _events, _) = started(Scenario::Offline);
         assert_eq!(
-            finish(&events, BUILD_BOX),
-            (None, Err(ActionFailure::Unreachable))
+            confirmed(&preview, BUILD_BOX, MachineAction::Restart),
+            Err(ActionFailure::Unreachable)
         );
 
-        let (preview, events, _) = started(Scenario::Installing);
-        preview.perform(PENGUIN, MachineAction::Restart);
-        assert_eq!(finish(&events, PENGUIN).1, Err(ActionFailure::Busy));
+        let (preview, _events, _) = started(Scenario::Installing);
+        assert_eq!(
+            confirmed(&preview, PENGUIN, MachineAction::Restart),
+            Err(ActionFailure::Busy)
+        );
 
         let (preview, events, _) = started(Scenario::DesktopTooOld);
-        preview.perform(PENGUIN, MachineAction::Stop);
-        assert_eq!(finish(&events, PENGUIN), (None, Err(ActionFailure::Failed)));
+        assert_eq!(
+            confirmed(&preview, PENGUIN, MachineAction::Stop),
+            Err(ActionFailure::Failed)
+        );
+        preview.perform(PENGUIN, MachineAction::Restart);
+        assert_eq!(
+            finish(&events, PENGUIN),
+            (None, Err(ActionFailure::Failed)),
+            "Restart and Stop run only on a preview"
+        );
     }
 }

@@ -2,7 +2,7 @@
 //! its server's process. The watch thread sleeps in `kevent` between changes.
 use crate::updates::machines::live::service_changes::{Fired, Watch};
 use std::ffi::CString;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
@@ -14,7 +14,14 @@ struct KqueueWatch {
     missing: Option<usize>,
 }
 
-pub(crate) fn start(directories: &[PathBuf], process: Option<u32>) -> Option<Box<dyn Watch>> {
+/// Marks the stop pipe's event apart from each directory's index.
+const STOP: usize = usize::MAX;
+
+pub(crate) fn start(
+    directories: &[PathBuf],
+    process: Option<u32>,
+    stop: BorrowedFd<'_>,
+) -> Option<Box<dyn Watch>> {
     // SAFETY: `kqueue` takes no arguments and returns a new descriptor or -1.
     let queue = unsafe { libc::kqueue() };
     if queue < 0 {
@@ -60,6 +67,17 @@ pub(crate) fn start(directories: &[PathBuf], process: Option<u32>) -> Option<Box
             return None;
         }
         watch._directories.push(descriptor);
+    }
+    let event = libc::kevent {
+        ident: stop.as_raw_fd() as usize,
+        filter: libc::EVFILT_READ,
+        flags: libc::EV_ADD | libc::EV_CLEAR,
+        fflags: 0,
+        data: 0,
+        udata: STOP as *mut libc::c_void,
+    };
+    if !register(&watch.queue, &event) {
+        return None;
     }
     if let Some(process) = process {
         let event = libc::kevent {
@@ -125,6 +143,9 @@ impl Watch for KqueueWatch {
             }
             if received == 0 {
                 continue;
+            }
+            if event.filter == libc::EVFILT_READ && event.udata as usize == STOP {
+                return None;
             }
             return Some(if event.filter == libc::EVFILT_PROC {
                 Fired::Process
