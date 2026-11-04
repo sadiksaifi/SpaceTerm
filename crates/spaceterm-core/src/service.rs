@@ -19,9 +19,9 @@ pub use runtime::{
     CandidateMetadata, CliLauncher, CliLink, Layout, bundle_identifier, bundle_name,
     verify_candidate_bytes,
 };
-#[cfg(feature = "client")]
-pub use uninstall::CoreUninstall;
 pub use uninstall::Data;
+#[cfg(feature = "client")]
+pub use uninstall::{CliUninstall, UninstallPreview};
 
 use crate::{
     CoreError,
@@ -2366,8 +2366,8 @@ mod tests {
                         );
                         service.stop().unwrap();
                         assert!(matches!(
-                            service.uninstall_core(None, choice),
-                            Ok(CoreUninstall::Completed)
+                            service.uninstall_cli(None, choice),
+                            Ok(CliUninstall::Completed)
                         ));
                         assert!(supervisor.registered.lock().unwrap().is_none());
                         let data = &fixture.paths.data;
@@ -2378,6 +2378,48 @@ mod tests {
                     },
                 );
             }
+        }
+
+        #[test]
+        fn a_preview_of_a_stopped_core_removes_nothing_until_its_choice_is_confirmed() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    service.stop().unwrap();
+                    let preview = service.preview_uninstall(Data::Keep).unwrap();
+                    assert!(preview.sessions.is_empty());
+                    let data = &fixture.paths.data;
+                    assert!(data.join("installations").exists());
+                    assert!(supervisor.registered.lock().unwrap().is_some());
+                    // The token binds the data choice.
+                    assert_eq!(
+                        service
+                            .uninstall_cli(Some(&preview.token), Data::Delete)
+                            .err(),
+                        Some(CoreError::Changed)
+                    );
+                    assert!(data.join("installations").exists());
+                    let preview = service.preview_uninstall(Data::Keep).unwrap();
+                    assert!(matches!(
+                        service.uninstall_cli(Some(&preview.token), Data::Keep),
+                        Ok(CliUninstall::Completed)
+                    ));
+                    assert!(supervisor.registered.lock().unwrap().is_none());
+                    assert!(!data.join("installations").exists());
+                    assert!(data.join("identity.json").exists());
+                },
+            );
         }
 
         #[test]

@@ -9,7 +9,7 @@ use spaceterm_connections::{
     self as connections,
     credentials::{CredentialProvider, Interaction},
 };
-use spaceterm_core::service::{CoreUninstall, Data, Service};
+use spaceterm_core::service::{CliUninstall, Data, Service};
 
 const COMMAND: &str = "uninstall";
 const KEPT: &str = "Workspaces, Machine Settings, pairings and saved machines remain.";
@@ -45,19 +45,19 @@ pub fn run(context: &Context<'_>, delete_data: bool, token: Option<&str>) -> Rep
         Vec::new()
     };
     let result = service
-        .uninstall_core(token, choice)
+        .uninstall_cli(token, choice)
         .map_err(contract::from_core_error);
-    if matches!(result, Ok(CoreUninstall::Completed))
+    if matches!(result, Ok(CliUninstall::Completed))
         && let Err(failure) = remove_credentials(context, &credentials)
     {
         return Reply::failure(COMMAND, None, failure);
     }
     match result {
-        Ok(CoreUninstall::Completed) => Reply::new(
+        Ok(CliUninstall::Completed) => Reply::new(
             &Envelope::ok(COMMAND, None, Empty {}),
             format!("SpaceTerm Core is uninstalled from this machine. {what}\n"),
         ),
-        Ok(CoreUninstall::Preview {
+        Ok(CliUninstall::Preview {
             token,
             expires_at,
             sessions,

@@ -18,13 +18,34 @@ pub enum Data {
 /// An uninstall preview carries only bounded service effects and a nonsecret approval token.
 #[cfg(feature = "client")]
 #[derive(Debug)]
-pub enum CoreUninstall {
+pub enum CliUninstall {
     Preview {
         token: String,
         expires_at: u64,
         sessions: Vec<crate::hierarchy::Id>,
     },
     Completed,
+}
+
+/// A preview that always waits for confirmation, even while SpaceTerm Core is stopped.
+#[cfg(feature = "client")]
+#[derive(Debug)]
+pub struct UninstallPreview {
+    pub token: String,
+    pub expires_at: u64,
+    pub sessions: Vec<crate::hierarchy::Id>,
+}
+
+/// What one uninstall call asks for.
+#[cfg(feature = "client")]
+#[derive(Clone, Copy)]
+enum Request<'a> {
+    /// Preview while SpaceTerm Core runs; otherwise uninstall now.
+    Auto,
+    /// Preview only.
+    Preview,
+    /// Uninstall with the token of an earlier preview.
+    Confirm(&'a str),
 }
 
 #[cfg(feature = "client")]
@@ -36,16 +57,70 @@ struct UninstallConfirmation {
     observation: String,
 }
 
+/// How long a preview stays confirmable.
+#[cfg(feature = "client")]
+const PREVIEW_SECONDS: u64 = 600;
+
+#[cfg(feature = "client")]
+fn token() -> Result<String, CoreError> {
+    Ok(format!(
+        "c1-{}",
+        crate::protocol::random()?
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+#[cfg(feature = "client")]
+fn now() -> Result<u64, CoreError> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| CoreError::StorageUnavailable)?
+        .as_secs())
+}
+
 impl Service {
     /// Preview an uninstall or confirm its exact service, data choice and live Session
     /// observation. A preview is retained for ten minutes. Neither preview nor retention starts
-    /// a server. A stopped Core uninstalls without a preview.
+    /// a server. A stopped Core uninstalls without a preview; use
+    /// [`Self::preview_uninstall`] to confirm first.
     #[cfg(feature = "client")]
-    pub fn uninstall_core(
+    pub fn uninstall_cli(
         &self,
         confirmation: Option<&str>,
         choice: Data,
-    ) -> Result<CoreUninstall, CoreError> {
+    ) -> Result<CliUninstall, CoreError> {
+        let request = confirmation.map_or(Request::Auto, Request::Confirm);
+        self.uninstall_with(request, choice)
+    }
+
+    /// Preview an uninstall without removing anything, whether or not SpaceTerm Core runs. The
+    /// desktop confirms first and then passes the token to [`Self::uninstall_cli`]. Any change
+    /// to the service, its data choice or its live Sessions in between fails that call with
+    /// `Changed`.
+    #[cfg(feature = "client")]
+    pub fn preview_uninstall(&self, choice: Data) -> Result<UninstallPreview, CoreError> {
+        match self.uninstall_with(Request::Preview, choice)? {
+            CliUninstall::Preview {
+                token,
+                expires_at,
+                sessions,
+            } => Ok(UninstallPreview {
+                token,
+                expires_at,
+                sessions,
+            }),
+            CliUninstall::Completed => Err(CoreError::Protocol),
+        }
+    }
+
+    #[cfg(feature = "client")]
+    fn uninstall_with(
+        &self,
+        request: Request<'_>,
+        choice: Data,
+    ) -> Result<CliUninstall, CoreError> {
         // Admission waits for the service lock, so establish this passive link first.
         let initial = self.passive_status()?;
         let link = if initial.running {
@@ -58,10 +133,18 @@ impl Service {
         };
         let data = match Directory::open(&self.paths.data, false) {
             Ok(data) => data,
-            // Nothing was ever set up. Only a launcher can remain.
+            // Nothing was ever set up. Only a launcher can remain. A confirmation then needs
+            // no retained preview: if setup happens in between, the confirmation finds none.
+            Err(CoreError::NotSetUp) if matches!(request, Request::Preview) => {
+                return Ok(CliUninstall::Preview {
+                    token: token()?,
+                    expires_at: now()? + PREVIEW_SECONDS,
+                    sessions: Vec::new(),
+                });
+            }
             Err(CoreError::NotSetUp) => {
                 self.remove_files()?;
-                return Ok(CoreUninstall::Completed);
+                return Ok(CliUninstall::Completed);
             }
             Err(error) => return Err(error),
         };
@@ -92,11 +175,8 @@ impl Service {
         };
         let observation =
             activation::confirmation_token(&(&self.identity, &state, &status, &sessions, choice))?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| CoreError::StorageUnavailable)?
-            .as_secs();
-        if let Some(token) = confirmation {
+        let now = now()?;
+        if let Request::Confirm(token) = request {
             let preview = data
                 .read_json::<UninstallConfirmation>("uninstall.json")?
                 .ok_or(CoreError::Changed)?;
@@ -107,15 +187,9 @@ impl Service {
                 return Err(CoreError::Changed);
             }
             data.remove(c"uninstall.json")?;
-        } else if status.running {
-            let token = format!(
-                "c1-{}",
-                crate::protocol::random()?
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            );
-            let expires_at = now + 600;
+        } else if status.running || matches!(request, Request::Preview) {
+            let token = token()?;
+            let expires_at = now + PREVIEW_SECONDS;
             data.write_json(
                 c"uninstall.json",
                 &UninstallConfirmation {
@@ -124,7 +198,7 @@ impl Service {
                     observation,
                 },
             )?;
-            return Ok(CoreUninstall::Preview {
+            return Ok(CliUninstall::Preview {
                 token,
                 expires_at,
                 sessions,
@@ -136,7 +210,7 @@ impl Service {
         if choice == Data::Delete {
             self.remove_data_root()?;
         }
-        Ok(CoreUninstall::Completed)
+        Ok(CliUninstall::Completed)
     }
 
     /// Remove Machine's uninstall, run by the helper after it stopped the Core: revokes every
