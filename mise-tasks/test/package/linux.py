@@ -71,9 +71,9 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
-        major = self.root / core_package.PROTOCOL_MAJOR_SOURCE
+        major = self.root / core_package.PROTOCOL_SOURCE
         major.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / core_package.PROTOCOL_MAJOR_SOURCE, major)
+        shutil.copyfile(ROOT / core_package.PROTOCOL_SOURCE, major)
         configure_trust(self.root)
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")

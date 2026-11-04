@@ -50,7 +50,7 @@ class CoreCatalogTests(unittest.TestCase):
             target=native_target,
             commit="a" * 40,
             version="dev.aaaaaaaaaaaa",
-            protocol_major=core_package.PROTOCOL_MAJOR,
+            protocols=core_package.PROTOCOLS,
         )
         info.update(changed)
         # The tree follows the native target's layout, whatever the signed document declares.
@@ -264,7 +264,7 @@ int main(int argc, char **argv) {{
                     target for target in core_package.TARGETS.values() if target != self.target
                 )
             },
-            {"protocol_major": core_package.PROTOCOL_MAJOR + 1},
+            {"protocols": {**core_package.PROTOCOLS, **{"work": {**core_package.PROTOCOLS["work"], "major": core_package.PROTOCOL_MAJOR + 1}}}},
         ]:
             with self.subTest(changed=changed):
                 archive, signature, _ = self.artifact(self.target, **changed)

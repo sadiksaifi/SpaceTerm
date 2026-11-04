@@ -32,7 +32,7 @@ const TARGET: &str = "x86_64-unknown-linux-gnu";
 pub struct CandidateMetadata {
     pub version: String,
     pub commit: String,
-    pub protocol_major: u16,
+    pub protocols: crate::update::facts::Protocols,
 }
 
 /// Authenticate the exact captured archive and signature for one application and target.
@@ -591,7 +591,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
 fn verify_executable(path: &Path, expected: &Build) -> Result<(), CoreError> {
     #[cfg(test)]
     let bytes = if test_support::active() {
-        test_support::native_build(&expected.identity)
+        test_support::native_build(path, &expected.identity)
     } else {
         executable_build(path, &expected.identity)?
     };
@@ -636,7 +636,7 @@ struct Build {
     target: String,
     commit: String,
     version: String,
-    protocol_major: u16,
+    protocols: crate::update::facts::Protocols,
     source_sha256: Option<String>,
 }
 impl From<Build> for CandidateMetadata {
@@ -644,14 +644,14 @@ impl From<Build> for CandidateMetadata {
         Self {
             version: info.version,
             commit: info.commit,
-            protocol_major: info.protocol_major,
+            protocols: info.protocols,
         }
     }
 }
 impl Build {
-    /// `None` accepts any protocol major.
+    /// `None` accepts any work protocol major.
     fn require_compatibility(&self, required_major: Option<u16>) -> Result<(), CoreError> {
-        if required_major.is_some_and(|major| self.protocol_major != major) {
+        if required_major.is_some_and(|major| self.protocols.work.major != major) {
             return Err(CoreError::IncompatibleProtocol);
         }
         Ok(())
@@ -702,7 +702,13 @@ impl Build {
                 .source_sha256
                 .as_deref()
                 .is_some_and(|value| !digest_valid(value))
-            || info.protocol_major == 0
+            || [
+                info.protocols.work,
+                info.protocols.service,
+                info.protocols.desktop_channel,
+            ]
+            .iter()
+            .any(|version| version.major == 0)
         {
             return Err(CoreError::RuntimeUnavailable);
         }

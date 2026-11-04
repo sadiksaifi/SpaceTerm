@@ -1529,13 +1529,13 @@ fn staged_reply(installation: &RetainedInstallation) -> LaneReply {
 /// The protocol major a verified installation's signed build information declares.
 fn protocol_major(installation: &RetainedInstallation) -> Option<u16> {
     #[derive(Deserialize)]
-    struct Major {
-        protocol_major: u16,
+    struct Build {
+        protocols: crate::update::facts::Protocols,
     }
     let bytes = std::fs::read(installation.directory.join("build.json")).ok()?;
-    serde_json::from_slice::<Major>(&bytes)
+    serde_json::from_slice::<Build>(&bytes)
         .ok()
-        .map(|v| v.protocol_major)
+        .map(|v| v.protocols.work.major)
 }
 
 fn digest_bytes(text: &str) -> Result<[u8; 32], CoreError> {

@@ -64,9 +64,9 @@ class CoreSourceTests(unittest.TestCase):
             shutil.copyfile(
                 ROOT / "crates/spaceterm-cli/build_resources.rs", crate / "build_resources.rs"
             )
-            major = root / core_package.PROTOCOL_MAJOR_SOURCE
+            major = root / core_package.PROTOCOL_SOURCE
             major.parent.mkdir(parents=True)
-            shutil.copyfile(ROOT / core_package.PROTOCOL_MAJOR_SOURCE, major)
+            shutil.copyfile(ROOT / core_package.PROTOCOL_SOURCE, major)
             (root / "Cargo.toml").write_text(
                 '[workspace]\nmembers = ["crates/spaceterm-cli"]\nresolver = "3"\n'
             )
