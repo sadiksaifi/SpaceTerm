@@ -676,7 +676,10 @@ mod tests {
         let bytes = output.borrow().clone();
         let sent = messages(&bytes);
         assert_eq!(sent[0]["versions"], serde_json::json!(offered));
-        assert_eq!(sent[1]["expires_at"], clock.host() + duration.as_nanos() as u64);
+        assert_eq!(
+            sent[1]["expires_at"],
+            clock.host() + duration.as_nanos() as u64
+        );
         bytes
     }
 
@@ -927,7 +930,11 @@ mod tests {
 
     #[test]
     fn a_hello_must_offer_one_or_two_descending_majors() {
-        for versions in [vec![], vec![v(1, 0), v(2, 0)], vec![v(3, 0), v(2, 0), v(1, 0)]] {
+        for versions in [
+            vec![],
+            vec![v(1, 0), v(2, 0)],
+            vec![v(3, 0), v(2, 0), v(1, 0)],
+        ] {
             let (mut client, desktop) = UnixStream::pair().unwrap();
             let served = std::thread::spawn(move || {
                 serve(desktop, IDENTITY, after(TRANSFER_WINDOW), |_, _| {
