@@ -92,7 +92,17 @@ fn uninstall_names_the_sessions_that_close_and_keeps_data_unless_asked(cx: &mut 
          devices and settings were kept.",
         cx
     ));
-    assert!(alert_open(QUIT_SELECTOR, cx));
+
+    // SpaceTerm Core is gone, so Quit exits without the quit warning.
+    let quits = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = std::rc::Rc::clone(&quits);
+    cx.update(|_, cx| {
+        cx.on_action(move |_: &crate::app::QuitUninstalledApplication, _| {
+            counted.set(counted.get() + 1);
+        });
+    });
+    click_modal(QUIT_SELECTOR, cx);
+    assert_eq!(quits.get(), 1);
 }
 
 #[gpui::test]

@@ -437,7 +437,7 @@ impl SettingsWindow {
         })
         .present(window, cx, move |_, cx| {
             if quits {
-                cx.quit();
+                cx.dispatch_action(&crate::app::QuitUninstalledApplication);
             } else {
                 let _ = owner.update(cx, |settings, cx| settings.uninstall_ended(cx));
             }
@@ -445,7 +445,7 @@ impl SettingsWindow {
         if result.is_err() {
             eprintln!("failed to present the SpaceTerm uninstall result");
             if quits {
-                cx.quit();
+                cx.dispatch_action(&crate::app::QuitUninstalledApplication);
             } else {
                 self.uninstall_ended(cx);
             }
