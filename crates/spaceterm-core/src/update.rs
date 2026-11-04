@@ -2,4 +2,5 @@
 //! keys that sign every release.
 pub mod facts;
 pub mod feed;
+pub mod source;
 pub mod trust;

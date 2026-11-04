@@ -14,6 +14,7 @@ mod layout;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
+pub mod updates;
 
 pub use layout::{Layout, bundle_identifier, bundle_name};
 
