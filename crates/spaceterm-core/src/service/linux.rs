@@ -33,7 +33,8 @@ impl UserService {
             name: self.name.clone(),
         }
     }
-    fn contents(&self, runtime: &Path) -> Result<Vec<u8>, CoreError> {
+    /// The executable of `runtime`, quoted for an `ExecStart` line.
+    fn exec(&self, runtime: &Path) -> Result<String, CoreError> {
         let executable = runtime.join(
             super::runtime::Layout::host(&self.identity)
                 .ok_or(CoreError::RuntimeUnavailable)?
@@ -55,6 +56,24 @@ impl UserService {
                 }
             }
         }
+        Ok(quoted)
+    }
+    /// The recovery entry's unit name, beside the server's.
+    fn recovery_name(&self) -> String {
+        format!(
+            "io.github.sadiksaifi.{}.core-recovery.service",
+            self.identity
+        )
+    }
+    /// A oneshot unit that runs `runtime`'s recovery helper at the next start of the user
+    /// manager. The helper may wait for a readiness deadline and a return, so no start timeout
+    /// applies.
+    fn recovery_contents(&self, runtime: &Path) -> Result<Vec<u8>, CoreError> {
+        let quoted = self.exec(runtime)?;
+        Ok(format!("[Unit]\nDescription=SpaceTerm Core update recovery ({})\n\n[Service]\nType=oneshot\nExecStart=\"{quoted}\" internal helper --identity {}\nTimeoutStartSec=infinity\nUMask=0077\n\n[Install]\nWantedBy=default.target\n", self.identity, self.identity).into_bytes())
+    }
+    fn contents(&self, runtime: &Path) -> Result<Vec<u8>, CoreError> {
+        let quoted = self.exec(runtime)?;
         // Only the main process gets SIGTERM. It closes admissions, drains started Git writes,
         // and shuts down its Terminal Sessions before exiting. No manager SIGKILL bypasses that.
         Ok(format!("[Unit]\nDescription=SpaceTerm Core ({})\nStartLimitIntervalSec=60\nStartLimitBurst=3\n\n[Service]\nType=exec\nExecStart=\"{quoted}\" internal serve --service --identity {}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=infinity\nKillMode=mixed\nSendSIGKILL=no\nUMask=0077\n\n[Install]\nWantedBy=default.target\n", self.identity, self.identity).into_bytes())
@@ -275,6 +294,34 @@ fn linger_stdio(process: &mut Command, authorization: LingerAuthorization) {
 }
 
 impl Supervisor for UserService {
+    fn arm_recovery(&self, runtime: &Path) -> Result<(), CoreError> {
+        let unit = self.directory.join(self.recovery_name());
+        super::publish_entry(&unit, &self.recovery_contents(runtime)?)?;
+        let wants = self.directory.join("default.target.wants");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&wants)
+            .map_err(|_| CoreError::StorageUnavailable)?;
+        let link = wants.join(self.recovery_name());
+        if std::fs::read_link(&link).ok().as_deref() != Some(unit.as_path()) {
+            super::remove_entry(&link)?;
+            std::os::unix::fs::symlink(&unit, &link).map_err(|_| CoreError::StorageUnavailable)?;
+        }
+        self.systemctl(&["daemon-reload"])?;
+        Ok(())
+    }
+    fn disarm_recovery(&self) -> Result<(), CoreError> {
+        super::remove_entry(
+            &self
+                .directory
+                .join("default.target.wants")
+                .join(self.recovery_name()),
+        )?;
+        super::remove_entry(&self.directory.join(self.recovery_name()))?;
+        self.systemctl(&["daemon-reload"])?;
+        Ok(())
+    }
     fn replace(&self, previous: &Path, candidate: &Path) -> Result<(), CoreError> {
         self.registration()
             .check(&self.contents(previous)?, false)

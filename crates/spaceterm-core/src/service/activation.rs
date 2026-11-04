@@ -183,6 +183,10 @@ pub(super) enum Outcome<'a> {
 }
 
 impl Operation {
+    /// The directory of the version this activation started from.
+    pub(super) fn previous_installation(&self, service: &Service) -> PathBuf {
+        self.previous.installation(service).directory
+    }
     /// The outcome this journal proves, once the activation is past its last change to the
     /// update record.
     pub(super) fn outcome(&self) -> Option<Outcome<'_>> {
@@ -506,6 +510,10 @@ impl Service {
                     self.require_quiescent(&state)?;
                     self.verify_choice(&previous)?;
                     self.verify_choice(&candidate)?;
+                    // From here until the activation settles, the registration may name a
+                    // candidate that never starts. A power loss is then recovered at the next
+                    // boot by the previous runtime, through its own boot entry.
+                    self.supervisor.arm_recovery(&previous.directory)?;
                     self.supervisor
                         .replace(&previous.directory, &candidate.directory)?;
                     self.set_step(data, operation.id, Step::RegistrationReplaced)?;
@@ -570,6 +578,7 @@ impl Service {
                     if operation.ready {
                         runtime::updates::record_completed(data, &operation.candidate.digest)?;
                         remove_snapshot(data)?;
+                        self.supervisor.disarm_recovery()?;
                     }
                     return policy;
                 }
@@ -644,6 +653,7 @@ impl Service {
                 Step::Returned => {
                     self.repoint_cli_locked(&self.runtime(&state));
                     remove_snapshot(data)?;
+                    self.supervisor.disarm_recovery()?;
                     return policy;
                 }
             }

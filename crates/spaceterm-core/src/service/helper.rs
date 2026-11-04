@@ -40,17 +40,20 @@ pub fn launch(identity: &str, op: &OperationId) -> Result<(), CoreError> {
     spawn_detached(&format!("{identity}-service-{}", op.short()), &argv)
 }
 
+/// The arguments of the recovery helper of `identity`, after its executable.
+pub(crate) fn recovery_arguments(identity: &str) -> [OsString; 4] {
+    ["internal", "helper", "--identity", identity].map(OsString::from)
+}
+
 /// Starts the helper that finishes an activation a reboot interrupted, detached from the server
-/// that found it. That server refuses to run until the activation settles.
-pub(crate) fn launch_recovery(identity: &str) -> Result<(), CoreError> {
-    let program = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
-    let argv = [
-        program.into_os_string(),
-        "internal".into(),
-        "helper".into(),
-        "--identity".into(),
-        identity.into(),
-    ];
+/// that found it. That server refuses to run until the activation settles. The helper runs
+/// from `previous`, the installation the activation started from, never from the candidate.
+pub(crate) fn launch_recovery(identity: &str, previous: &std::path::Path) -> Result<(), CoreError> {
+    let layout = super::runtime::Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
+    super::runtime::verify(previous, identity)?;
+    let program = previous.join(layout.executable());
+    let mut argv = vec![program.into_os_string()];
+    argv.extend(recovery_arguments(identity));
     spawn_detached(&format!("{identity}-service-recovery"), &argv)
 }
 

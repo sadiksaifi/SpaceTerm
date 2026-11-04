@@ -151,6 +151,16 @@ trait Supervisor: Send + Sync {
     fn process(&self) -> Result<Option<u32>, CoreError> {
         Ok(None)
     }
+    /// Registers a boot entry that runs the recovery helper of `runtime`, the previous
+    /// version, so a power loss during an activation is finished by that version rather than
+    /// by a Pending Version that may not start. The entry acts at the next boot or login.
+    fn arm_recovery(&self, _runtime: &Path) -> Result<(), CoreError> {
+        Ok(())
+    }
+    /// Removes the boot recovery entry once the activation settled.
+    fn disarm_recovery(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
     /// Replace only the admitted old definition or finish its exact already-published replacement.
     fn replace(&self, _previous: &Path, _candidate: &Path) -> Result<(), CoreError> {
         Err(CoreError::Unsupported)
@@ -944,8 +954,10 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
     // An activation that refuses this run and whose earlier run ended, as a reboot proves,
     // has no helper left to finish it. A recovery helper finishes it outside this unit.
     let refuse = |state: &State| {
-        if check_cleanup(state).is_ok() {
-            let _ = helper::launch_recovery(identity);
+        if check_cleanup(state).is_ok()
+            && let Some(operation) = &state.activation
+        {
+            let _ = helper::launch_recovery(identity, &operation.previous_installation(&service));
         }
         CoreError::ActivationUnresolved
     };
@@ -993,6 +1005,36 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
     state.run = None;
     data.write_json(c"service.json", &state)?;
     served
+}
+/// Publishes `contents` at `path` whole, replacing an earlier file, for a service manager entry
+/// that SpaceTerm alone owns.
+#[cfg_attr(test, allow(dead_code))]
+fn publish_entry(path: &Path, contents: &[u8]) -> Result<(), CoreError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let temporary = path.with_extension("spaceterm-pending");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(|_| CoreError::StorageUnavailable)?;
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .map_err(|_| CoreError::StorageUnavailable)
+}
+/// Removes a service manager entry SpaceTerm alone owns. An absent entry is removed.
+#[cfg_attr(test, allow(dead_code))]
+fn remove_entry(path: &Path) -> Result<(), CoreError> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(CoreError::StorageUnavailable)
+        }
+        _ => Ok(()),
+    }
 }
 fn check_cleanup(state: &State) -> Result<(), CoreError> {
     if let Some(run) = &state.run

@@ -32,6 +32,10 @@ struct SupervisorFixture {
     start_reports_failure: AtomicBool,
     /// Changing automatic startup fails once a Start was dispatched.
     policy_fails_after_start: AtomicBool,
+    /// The runtime whose recovery helper the boot recovery entry runs, while one is armed.
+    recovery: Mutex<Option<PathBuf>>,
+    /// The recovery entry each registration replacement found, as `(registered, armed)`.
+    replacements: Mutex<Vec<(PathBuf, Option<PathBuf>)>>,
 }
 impl SupervisorFixture {
     /// The server's own run: it admits itself into the service state, then marks readiness.
@@ -145,7 +149,19 @@ impl Supervisor for SupervisorFixture {
         }
         Ok(self.running.load(Ordering::SeqCst))
     }
+    fn arm_recovery(&self, runtime: &Path) -> Result<(), CoreError> {
+        *self.recovery.lock().unwrap() = Some(runtime.to_owned());
+        Ok(())
+    }
+    fn disarm_recovery(&self) -> Result<(), CoreError> {
+        *self.recovery.lock().unwrap() = None;
+        Ok(())
+    }
     fn replace(&self, previous: &Path, candidate: &Path) -> Result<(), CoreError> {
+        self.replacements
+            .lock()
+            .unwrap()
+            .push((candidate.to_owned(), self.recovery.lock().unwrap().clone()));
         let mut current = self.approved.lock().unwrap();
         assert!(current.as_path() == previous || current.as_path() == candidate);
         *current = candidate.to_owned();
@@ -199,6 +215,8 @@ fn with_service_identity(
                 meddles: Mutex::new(None),
                 start_reports_failure: AtomicBool::new(false),
                 policy_fails_after_start: AtomicBool::new(false),
+                recovery: Mutex::new(None),
+                replacements: Mutex::new(Vec::new()),
             });
             let service = Service::new(
                 fixture.paths.clone(),
@@ -1348,4 +1366,30 @@ fn existing_pairings_survive_a_candidate_that_rewrote_them() {
         );
         crate::direct::host::State::open(&service.paths).unwrap();
     });
+}
+
+#[test]
+fn the_previous_runtime_recovers_an_unready_candidate_from_boot_until_the_activation_settles() {
+    for ready in [true, false] {
+        with_service(|service, previous, candidate, supervisor| {
+            if ready {
+                supervisor
+                    .ready
+                    .lock()
+                    .unwrap()
+                    .push(candidate.directory.clone());
+            }
+            update_running(&service, &previous, &candidate, &supervisor).unwrap();
+            assert_eq!(
+                supervisor.replacements.lock().unwrap().first(),
+                Some(&(
+                    candidate.directory.clone(),
+                    Some(previous.directory.clone())
+                )),
+                "a boot recovery entry runs the previous runtime before the registration names \
+                 the candidate"
+            );
+            assert_eq!(*supervisor.recovery.lock().unwrap(), None, "ready: {ready}");
+        });
+    }
 }
