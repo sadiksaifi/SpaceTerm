@@ -80,6 +80,8 @@ pub(crate) struct UpdateHistory {
     last_reminder: Option<u64>,
     reminder_stage: UpdateStage,
     pub(crate) last_check: Option<u64>,
+    /// The version whose release notes the person has read. A first install has read its own.
+    notes_read: Option<String>,
 }
 impl UpdateHistory {
     pub(crate) fn observe(&mut self, installed: &str, version: &str, published_at: u64, now: u64) {
@@ -97,10 +99,7 @@ impl UpdateHistory {
             .and_then(stable_version)
             .is_some_and(|previous| installed_parts.is_some_and(|installed| installed >= previous));
         if settled {
-            *self = Self {
-                last_check: self.last_check,
-                ..Self::default()
-            };
+            self.clear();
         }
         let publication = if published_at == 0 {
             now
@@ -189,17 +188,59 @@ impl UpdateHistory {
         self.last_reminder = Some(self.high_water);
     }
 
+    /// Forgets the pending release. The last check and the notes read stay.
     pub(crate) fn clear(&mut self) {
         *self = Self {
             last_check: self.last_check,
+            notes_read: self.notes_read.take(),
             ..Self::default()
         };
+    }
+
+    /// Records that this launch runs `installed`. The first launch ever has nothing new to read.
+    pub(crate) fn launched(&mut self, installed: &str) {
+        self.notes_read.get_or_insert_with(|| installed.to_owned());
+    }
+
+    /// Whether `installed` came by an update whose notes the person has not opened.
+    pub(crate) fn notes_unread(&self, installed: &str) -> bool {
+        self.notes_read
+            .as_deref()
+            .is_some_and(|read| read != installed)
+    }
+
+    pub(crate) fn read_notes(&mut self, installed: &str) {
+        self.notes_read = Some(installed.to_owned());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_wait_for_the_person_after_an_update_but_not_after_a_first_install() {
+        let mut history = UpdateHistory::default();
+        history.launched("0.8.0");
+        assert!(
+            !history.notes_unread("0.8.0"),
+            "a first install has nothing new"
+        );
+        history.observe("0.8.0", "0.9.0", 1_000, 1_000);
+        let bytes = serde_json::to_vec(&history).unwrap();
+        let mut updated: UpdateHistory = serde_json::from_slice(&bytes).unwrap();
+        updated.launched("0.9.0");
+        assert!(updated.notes_unread("0.9.0"));
+        updated.observe("0.9.0", "0.9.1", 2_000, 2_000);
+        updated.clear();
+        assert!(
+            updated.notes_unread("0.9.0"),
+            "settling or clearing the pending release keeps the notes waiting"
+        );
+        updated.read_notes("0.9.0");
+        updated.launched("0.9.0");
+        assert!(!updated.notes_unread("0.9.0"));
+    }
 
     #[test]
     fn deadlines_survive_newer_releases_restarts_and_clock_rollback() {

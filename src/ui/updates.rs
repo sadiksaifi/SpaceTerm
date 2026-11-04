@@ -4,10 +4,12 @@
 mod dropdown;
 mod launch;
 pub(crate) mod machine_rows;
+pub(crate) mod whats_new;
 
 pub(super) use dropdown::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
 pub(crate) use machine_rows::{LocalUpdateFacts, LocalUpdateObservation, install_local_updates};
+pub(crate) use whats_new::{OpenWhatsNew, WHATS_NEW_TITLE};
 
 use gpui::{
     AnyWindowHandle, App, BorrowAppContext, Context, Entity, Global, SharedString, Subscription,
@@ -25,7 +27,7 @@ use crate::updates::policy::UpdateStage;
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
 use machine_rows::{CoreNeed, CoreUpdateAction, MachineUpdateRow};
 
-actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
+actions!(spaceterm, [CheckForUpdates]);
 
 pub(crate) const CHECK_FOR_UPDATES_TITLE: &str = "Check for Updates…";
 pub(crate) const RELEASE_NOTES_TITLE: &str = "Release Notes";
@@ -36,7 +38,7 @@ const CURRENT_VERSION: &str = env!("SPACETERM_VERSION");
 /// service must already be installed.
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &CheckForUpdates, cx| check_for_updates(cx));
-    cx.on_action(|_: &OpenReleaseNotes, cx| cx.open_url(RELEASE_NOTES_URL));
+    whats_new::init(cx);
     let Some(service) = cx.try_global::<UpdateService>().cloned() else {
         return;
     };

@@ -7,6 +7,7 @@ pub(crate) mod machines;
 pub(crate) mod policy;
 pub(crate) mod push;
 pub(crate) mod release_feed;
+pub(crate) mod release_notes;
 
 use policy::{UpdateHistory, UpdatePreferences, UpdateStage};
 use std::rc::Rc;
@@ -495,15 +496,17 @@ impl ApplicationUpdates {
                     this.reschedule()
                 })
             };
-            let history = adapter.load_history();
+            let saved_history = adapter.load_history();
+            let mut history = saved_history.clone();
+            history.launched(env!("SPACETERM_VERSION"));
             let mut model = UpdateModel::new(available);
             if available {
                 model.version = history
                     .pending_version(env!("SPACETERM_VERSION"))
                     .map(str::to_owned);
             }
-            Self {
-                saved_history: history.clone(),
+            let mut updates = Self {
+                saved_history,
                 history,
                 launch: LaunchState::Open,
                 resume_launch: None,
@@ -524,7 +527,9 @@ impl ApplicationUpdates {
                 _events: events,
                 _schedule: schedule,
                 _wake: wake,
-            }
+            };
+            updates.save_history();
+            updates
         });
         cx.set_global(UpdateService(entity));
     }
@@ -584,6 +589,19 @@ impl ApplicationUpdates {
     }
     pub(crate) fn last_check(&self) -> Option<u64> {
         self.history.last_check
+    }
+
+    /// Whether this build carries release notes the person has not opened since updating to it.
+    /// Observers of [`UpdateService`] hear when this changes.
+    pub(crate) fn release_notes_unread(&self) -> bool {
+        release_notes::embedded().is_some() && self.history.notes_unread(env!("SPACETERM_VERSION"))
+    }
+
+    /// Records that the person opened this build's release notes.
+    pub(crate) fn read_release_notes(&mut self, cx: &mut Context<Self>) {
+        self.history.read_notes(env!("SPACETERM_VERSION"));
+        self.save_history();
+        cx.notify();
     }
 
     pub(crate) fn dismiss_reminder(&mut self, cx: &mut Context<Self>) {

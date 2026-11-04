@@ -7,9 +7,7 @@ use crate::app::{
     MinimizeWindow, OpenApplicationHelp, ShowAboutApplication, ShowAllApplications,
     ZoomActiveWindow,
 };
-use crate::ui::updates::{
-    CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenReleaseNotes, RELEASE_NOTES_TITLE,
-};
+use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenWhatsNew, WHATS_NEW_TITLE};
 use crate::ui::{
     ChooseWorkspace, ClosePane, CloseTab, DecreaseTerminalFontSize, ExportTerminalDiagnostics,
     FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
@@ -187,15 +185,22 @@ pub(crate) fn window_menu() -> Menu {
 }
 
 pub(crate) fn help_menu() -> Menu {
+    let mut items = vec![
+        MenuItem::action("SpaceTerm Help", OpenApplicationHelp),
+        MenuItem::separator(),
+    ];
+    // Only a build that carries release notes has them to show.
+    if cfg!(spaceterm_release_notes) {
+        items.push(MenuItem::action(WHATS_NEW_TITLE, OpenWhatsNew));
+    }
+    items.push(MenuItem::action(
+        "Export Terminal Diagnostics…",
+        ExportTerminalDiagnostics,
+    ));
     Menu {
         disabled: false,
         name: "Help".into(),
-        items: vec![
-            MenuItem::action("SpaceTerm Help", OpenApplicationHelp),
-            MenuItem::separator(),
-            MenuItem::action(RELEASE_NOTES_TITLE, OpenReleaseNotes),
-            MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
-        ],
+        items,
     }
 }
 
