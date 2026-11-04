@@ -456,13 +456,10 @@ fn turning_on_listens_at_the_address_the_core_suggests_on_spaceterms_port(cx: &m
 
     click(ACCESS_SELECTOR, cx);
 
-    let port = crate::machine_connection::direct::default_port(
-        crate::application_identity::ApplicationIdentity::current().directory_name(),
-    );
-    let bind = format!("192.168.1.21:{port}");
-    assert_eq!(access.policies(), vec![policy(&bind)]);
+    let suggested = format!("192.168.1.21:{}", crate::ssh::provisioning::own_port());
+    assert_eq!(access.policies(), vec![policy(&suggested)]);
     assert!(access_on(&window, cx));
-    assert!(reads(&format!("Listening on {bind}."), cx));
+    assert!(reads(&format!("Listening on {suggested}."), cx));
 }
 
 #[gpui::test]

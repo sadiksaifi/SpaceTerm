@@ -21,7 +21,7 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
-use crate::ssh::provisioning::{SetupOperation, SshSetupBackend};
+use crate::ssh::provisioning::{SetupOperation, SshSetupBackend, own_port};
 use crate::ui::appearance_runtime;
 use spaceterm_core::provisioning::SetupRefusal;
 
@@ -726,8 +726,9 @@ fn correcting_a_refused_address_keeps_focus_in_it(cx: &mut TestAppContext) {
     sheet.choose(SheetAction::SetUp.selector());
     sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
     assert_eq!(
-        sheet.computers.asked()[0].address.as_deref(),
-        Some(format!("studio.local:{}", own_port()).as_str())
+        sheet.computers.asked()[0].address,
+        Some(format!("studio.local:{}", own_port())),
+        "an address without a port uses this build's own port"
     );
 }
 
@@ -781,8 +782,8 @@ fn an_entered_network_name_reaches_setup_with_its_port(cx: &mut TestAppContext) 
     sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
 
     assert_eq!(
-        sheet.computers.asked()[0].address.as_deref(),
-        Some(format!("penguin.tail1234.ts.net:{}", own_port()).as_str())
+        sheet.computers.asked()[0].address,
+        Some(format!("penguin.tail1234.ts.net:{}", own_port()))
     );
 }
 
