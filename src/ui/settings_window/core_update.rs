@@ -262,23 +262,6 @@ pub(super) fn restarted(
     })
 }
 
-/// The dropdown observes the same facts and policy as Settings without resuming an activation.
-/// Blocking local reads and signature verification only; it retains no candidate. It returns the
-/// row's state badge, because the explanation refers to the Settings layout around it.
-pub(crate) fn passive_update(service: &Service) -> Result<(SharedString, bool), CoreError> {
-    // activation_status can prove recovery eligibility and clean a stale endpoint while doing
-    // so. A passive read instead refuses unresolved originals and leaves their review to Settings.
-    let facts = read_facts(service, None, Service::passive_status)?;
-    let presentation = present_update(&UpdateState {
-        facts: Some(facts),
-        ..UpdateState::default()
-    });
-    Ok((
-        presentation.state.into(),
-        presentation.actions.contains(&UpdateAction::Update),
-    ))
-}
-
 fn read_facts(
     service: &Service,
     activation: Option<ActivationStatus>,
