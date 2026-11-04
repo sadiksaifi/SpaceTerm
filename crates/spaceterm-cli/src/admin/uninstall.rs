@@ -19,8 +19,14 @@ use spaceterm_core::service::{CliUninstall, Data, Service};
 const COMMAND: &str = "uninstall";
 const KEPT: &str = "Workspaces, Machine Settings, pairings and saved machines remain.";
 const DELETED: &str = "Workspaces, Machine Settings, pairings, and this CLI's saved machines and their credentials are deleted.";
-/// What `--delete-data` leaves when it also removes the app, and where to delete that too.
-const APP_DATA_KEPT: &str = " The SpaceTerm app's own settings and saved machines remain. Uninstall SpaceTerm in SpaceTerm's Settings deletes them too.";
+/// What `--delete-data` leaves when it also removes the app.
+const APP_DATA_KEPT: &str = " The SpaceTerm app's own settings and saved machines remain.";
+/// In the preview: how to delete the app's data as well, while the app is still installed.
+const APP_DATA_BEFORE: &str =
+    " To delete them too, cancel this and use Uninstall SpaceTerm in SpaceTerm's Settings instead.";
+/// After the uninstall: the app is gone, so deleting its data takes reinstalling it first.
+const APP_DATA_AFTER: &str =
+    " To delete them, reinstall SpaceTerm, then use Uninstall SpaceTerm in its Settings.";
 
 /// What `uninstall` needs from this machine. Tests script it.
 trait Removal {
@@ -80,10 +86,10 @@ fn uninstall(removal: &dyn Removal, delete_data: bool, token: Option<&str>) -> R
         Data::Keep
     };
     let has_app = removal.has_app();
-    let what = match (delete_data, has_app) {
+    let what = |app_data: &str| match (delete_data, has_app) {
         (false, _) => KEPT.to_owned(),
         (true, false) => DELETED.to_owned(),
-        (true, true) => format!("{DELETED}{APP_DATA_KEPT}"),
+        (true, true) => format!("{DELETED}{APP_DATA_KEPT}{app_data}"),
     };
     let flag = if delete_data { " --delete-data" } else { "" };
     let (subject, verb) = if has_app {
@@ -98,7 +104,10 @@ fn uninstall(removal: &dyn Removal, delete_data: bool, token: Option<&str>) -> R
             }
             Reply::new(
                 &Envelope::ok(COMMAND, None, Empty {}),
-                format!("{subject} {verb} uninstalled from this machine. {what}\n"),
+                format!(
+                    "{subject} {verb} uninstalled from this machine. {}\n",
+                    what(APP_DATA_AFTER)
+                ),
             )
         }
         Ok(CliUninstall::Preview {
@@ -118,7 +127,8 @@ fn uninstall(removal: &dyn Removal, delete_data: bool, token: Option<&str>) -> R
                 pending: None,
             };
             let text = format!(
-                "Uninstall {subject} from this machine? Every Terminal Session on it ends, for every client. {what}\nConfirm with: spaceterm uninstall{flag} --confirm {token}\n"
+                "Uninstall {subject} from this machine? Every Terminal Session on it ends, for every client. {}\nConfirm with: spaceterm uninstall{flag} --confirm {token}\n",
+                what(APP_DATA_BEFORE)
             );
             Reply::new(
                 &Envelope::confirmation(
@@ -339,7 +349,13 @@ mod tests {
         let with_app = uninstall(&Scripted::new(true, false), true, None);
         assert_eq!(
             with_app.stdout,
-            "Uninstall SpaceTerm and SpaceTerm Core from this machine? Every Terminal Session on it ends, for every client. Workspaces, Machine Settings, pairings, and this CLI's saved machines and their credentials are deleted. The SpaceTerm app's own settings and saved machines remain. Uninstall SpaceTerm in SpaceTerm's Settings deletes them too.\nConfirm with: spaceterm uninstall --delete-data --confirm c1-token\n"
+            "Uninstall SpaceTerm and SpaceTerm Core from this machine? Every Terminal Session on it ends, for every client. Workspaces, Machine Settings, pairings, and this CLI's saved machines and their credentials are deleted. The SpaceTerm app's own settings and saved machines remain. To delete them too, cancel this and use Uninstall SpaceTerm in SpaceTerm's Settings instead.\nConfirm with: spaceterm uninstall --delete-data --confirm c1-token\n"
+        );
+        // The app is gone by then, so the completion can't point at its Settings.
+        let done_with_app = uninstall(&Scripted::new(true, false), true, Some("c1-token"));
+        assert_eq!(
+            done_with_app.stdout,
+            "SpaceTerm and SpaceTerm Core are uninstalled from this machine. Workspaces, Machine Settings, pairings, and this CLI's saved machines and their credentials are deleted. The SpaceTerm app's own settings and saved machines remain. To delete them, reinstall SpaceTerm, then use Uninstall SpaceTerm in its Settings.\n"
         );
         let done = uninstall(&Scripted::new(false, false), true, Some("c1-token"));
         assert_eq!(

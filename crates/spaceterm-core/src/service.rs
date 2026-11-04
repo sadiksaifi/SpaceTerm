@@ -2473,7 +2473,11 @@ mod tests {
                 let (waiting, started) = std::sync::mpsc::channel();
                 waiter = Some(std::thread::spawn(move || {
                     waiting.send(()).unwrap();
-                    let _lock = directory.lock("service.lock", false).unwrap();
+                    // The lock file can't be opened once the root is deleted, which on a slow
+                    // host can happen before this thread reaches it.
+                    let Ok(_lock) = directory.lock("service.lock", false) else {
+                        return false;
+                    };
                     root.exists()
                 }));
                 started.recv().unwrap();
