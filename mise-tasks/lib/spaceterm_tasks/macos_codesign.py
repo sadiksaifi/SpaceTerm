@@ -11,8 +11,13 @@ ID. `SPACETERM_APPLE_SIGNING_IDENTITY` is the certificate's name, "Developer ID 
 own designated requirement, and an ad hoc signature cannot satisfy the Team ID requirement. A
 dry run therefore signs ad hoc, checks that the Team ID requirement compiles, and verifies
 everything else.
+
+A dry run also signs without the hardened runtime. Under the runtime, library validation lets
+a process load only code from its own Team ID, and ad hoc code has none, so a dry-run app
+could not load Sparkle.framework. Every other build signs under the hardened runtime.
 """
 
+import os
 import plistlib
 import re
 import subprocess
@@ -20,6 +25,7 @@ from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, sparkle
 from spaceterm_tasks.packaging import checked
+from spaceterm_tasks.update_signing import dry_run
 
 TEAM_ID = "SPACETERM_APPLE_TEAM_ID"
 SIGNING_IDENTITY = "SPACETERM_APPLE_SIGNING_IDENTITY"
@@ -75,7 +81,9 @@ def designated_requirement(identifier, team):
 
 def sign(path, identity, *, identifier=None, entitlements=None, team=None, environment=None):
     """Sign one code object. Code nested in it must already carry its final signature."""
-    arguments = ["codesign", "--force", "--sign", identity, "--options", "runtime"]
+    arguments = ["codesign", "--force", "--sign", identity]
+    if not dry_run(os.environ if environment is None else environment):
+        arguments += ["--options", "runtime"]
     arguments.append("--timestamp=none" if identity == ADHOC else "--timestamp")
     if identifier is not None:
         arguments += ["--identifier", identifier]
@@ -180,6 +188,8 @@ def signed_entitlements(path):
 def verify(path, identifier, expected_entitlements, *, team=None, identity=ADHOC, label="code"):
     """Require a strict seal, hardened runtime, exact entitlements and the identity's requirement.
 
+    A dry run's code carries no hardened runtime, so its absence passes there.
+
     A Developer ID signature must carry the team's designated requirement and satisfy it, which
     needs Apple's certificate chain, and so must every native file in a bundle. An ad hoc
     signature with a team only proves that the team's requirement compiles.
@@ -195,7 +205,9 @@ def verify(path, identifier, expected_entitlements, *, team=None, identity=ADHOC
     )
     detail = details(path)
     flags = re.search(r"^CodeDirectory .*flags=0x([0-9a-f]+)", detail, re.MULTILINE)
-    if not flags or not int(flags.group(1), 16) & HARDENED_RUNTIME:
+    if not flags:
+        raise TaskError(f"{label} has no code directory flags")
+    if not dry_run() and not int(flags.group(1), 16) & HARDENED_RUNTIME:
         raise TaskError(f"{label} is not signed with the hardened runtime")
     if signed_entitlements(path) != expected_entitlements:
         raise TaskError(f"{label} entitlements differ from its identity's")

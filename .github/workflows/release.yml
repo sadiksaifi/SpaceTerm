@@ -16,6 +16,13 @@ on:
       - build.rs
       - build/**
       - crates/spaceterm-cli/build.rs
+      - crates/spaceterm-core/src/protocol/version.rs
+      - crates/spaceterm-core/src/service/runtime.rs
+      - crates/spaceterm-core/src/update/**
+      - src/updates.rs
+      - src/updates/**
+      - src/platform/linux_updates.rs
+      - src/platform/macos_updater.m
   workflow_dispatch:
 
 permissions:
@@ -25,13 +32,14 @@ concurrency:
   group: ${{ github.event_name == 'push' && 'release' || format('release-dry-run-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
-env:
-  SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
-  # The Developer ID Team ID. The Release Core compiles it into the requirement it checks
-  # retained runtimes against, and signing, verification and install.sh use it.
-  SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-  # "Developer ID Application: <name> (<Team ID>)" for a release; a dry run signs ad hoc.
-  SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
+# Only the four release jobs set the release mode: core, desktop-macos, desktop-linux and
+# publish. Validation runs the test suite, which must not inherit it. Each of them sets
+#   SPACETERM_RELEASE_DRY_RUN: 0 on a tag push, otherwise 1.
+#   SPACETERM_APPLE_TEAM_ID: the Developer ID Team ID. The Release Core compiles it into the
+#     requirement it checks retained runtimes against, and signing, verification and
+#     install.sh use it.
+#   SPACETERM_APPLE_SIGNING_IDENTITY: "Developer ID Application: <name> (<Team ID>)" on a tag
+#     push; a dry run signs ad hoc with "-".
 
 jobs:
   plan:
@@ -154,6 +162,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    env:
+      SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
+      SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -194,6 +206,10 @@ jobs:
     environment: ${{ github.event_name == 'push' && 'release' || '' }}
     runs-on: macos-26
     timeout-minutes: 150
+    env:
+      SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
+      SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -245,6 +261,10 @@ jobs:
     runs-on: ubuntu-26.04
     # mise pins Zig's glibc target and the Ubuntu 22.04 native-library sysroot.
     timeout-minutes: 75
+    env:
+      SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
+      SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -291,12 +311,17 @@ jobs:
     environment: ${{ github.event_name == 'push' && 'release' || '' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    env:
+      SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
+      SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: jdx/mise-action@v5
       - name: Tag the dry run
         if: github.event_name != 'push'
@@ -335,7 +360,8 @@ jobs:
         timeout-minutes: 10
         env:
           RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          GH_TOKEN: ${{ github.token }}
+          # A dry run gets no token, so gh cannot publish even if the dry-run check broke.
+          GH_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
         run: mise run release:publish "$RELEASE_TAG" --notes dist/release-notes.md
       - name: Keep the dry-run assets for inspection
         if: github.event_name != 'push'

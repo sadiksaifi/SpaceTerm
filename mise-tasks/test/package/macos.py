@@ -13,7 +13,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, core_package, macos_codesign, macos_signing, update_signing
+from spaceterm_tasks import (
+    ROOT,
+    core_package,
+    macos_codesign,
+    macos_signing,
+    sparkle,
+    update_signing,
+)
 from tests.core_artifact_fixture import SEED, configure_trust, prepare
 from tests.macos_signing_fixture import NAME, TEAM, certificate
 
@@ -136,12 +143,26 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             }
         )
         output.parent.mkdir(parents=True, exist_ok=True)
+        # The release executable links Sparkle like the real desktop, so the launch check
+        # proves that its signature lets it load the bundled framework.
+        updater = (
+            [
+                "-F",
+                str(sparkle.directory()),
+                "-framework",
+                "Sparkle",
+                "-Wl,-rpath,@executable_path/../Frameworks",
+            ]
+            if identity == "SpaceTerm"
+            else []
+        )
         self.run_command(
             "xcrun",
             "clang",
             "-arch",
             "arm64",
             "-mmacosx-version-min=26.0",
+            *updater,
             "-x",
             "c",
             "-",
@@ -297,7 +318,8 @@ int main(int argc, char **argv) {{
             framework / "Versions/B/Autoupdate",
             framework / "Versions/B/Updater.app",
         ):
-            self.assertIn("(adhoc,runtime)", macos_codesign.details(code))
+            # A dry run signs without the hardened runtime, so ad hoc code can load Sparkle.
+            self.assertIn("flags=0x2(adhoc)", macos_codesign.details(code))
         self.assertEqual(macos_codesign.signed_entitlements(app), {})
         self.assertIn("Dry run: notarization and stapling skipped for SpaceTerm.app", result.stdout)
         self.assertIn(

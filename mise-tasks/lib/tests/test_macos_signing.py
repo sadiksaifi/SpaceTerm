@@ -11,8 +11,18 @@ from unittest.mock import patch
 
 from spaceterm_tasks import TaskError, macos_codesign
 from spaceterm_tasks.macos_signing import release_keychain, signing_environment
+from spaceterm_tasks.update_signing import DRY_RUN
 
 from tests.macos_signing_fixture import NAME, TEAM, certificate
+
+
+def setUpModule():
+    # These tests sign as a release does. A caller's dry run must not change that.
+    patcher = patch.dict(os.environ)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    os.environ.pop(DRY_RUN, None)
+
 
 CORE_ENTITLEMENTS = plistlib.loads(macos_codesign.CORE_ENTITLEMENTS.read_bytes())
 
@@ -80,9 +90,12 @@ class CoreEntitlementTests(unittest.TestCase):
 
 
 class SigningArgumentTests(unittest.TestCase):
-    def signed(self, identity, **keywords):
+    def signed(self, identity, environment=None, **keywords):
+        # An explicit environment, so the caller's release mode never reaches the signer.
         with patch.object(macos_codesign, "checked") as checked:
-            macos_codesign.sign(Path("Fixture.app"), identity, **keywords)
+            macos_codesign.sign(
+                Path("Fixture.app"), identity, environment=environment or {}, **keywords
+            )
         return checked.call_args.args[0]
 
     def test_certificate_signatures_carry_a_secure_timestamp_and_the_team_requirement(self):
@@ -101,6 +114,12 @@ class SigningArgumentTests(unittest.TestCase):
         self.assertNotIn("--timestamp", arguments)
         self.assertNotIn("--requirements", arguments)
         self.assertEqual(arguments[arguments.index("--options") + 1], "runtime")
+
+    def test_a_dry_run_signs_without_the_hardened_runtime(self):
+        # Library validation would refuse the ad hoc app's Sparkle.framework under the runtime.
+        arguments = self.signed("-", {DRY_RUN: "1"}, identifier="io.example", team=TEAM)
+        self.assertNotIn("--options", arguments)
+        self.assertNotIn("runtime", arguments)
 
 
 class IdentityTests(unittest.TestCase):

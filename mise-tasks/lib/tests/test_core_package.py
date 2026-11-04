@@ -398,7 +398,12 @@ class CrossBuildTests(unittest.TestCase):
                 self.assertEqual(entry.read_bytes(), hexadecimal.read_bytes())
 
     def test_foreign_release_and_unknown_target_are_rejected_before_build(self):
-        with patch.object(core_package, "host_target", return_value="aarch64-apple-darwin"):
+        # A release, not a dry run, whatever release mode the caller runs in.
+        environment = {k: v for k, v in os.environ.items() if k != update_signing.DRY_RUN}
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(core_package, "host_target", return_value="aarch64-apple-darwin"),
+        ):
             with self.assertRaisesRegex(TaskError, "native target host"):
                 core_package.package("spaceterm", "v1.0.0", target="x86_64-unknown-linux-gnu")
             with self.assertRaisesRegex(TaskError, "unsupported"):

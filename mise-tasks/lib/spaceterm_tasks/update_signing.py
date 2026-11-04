@@ -9,9 +9,11 @@ only that key, so nothing it signs verifies under the release trust.
 """
 
 import base64
+import functools
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -32,7 +34,18 @@ def dry_run(environment=os.environ):
     return environment.get(DRY_RUN) == "1"
 
 
+@functools.cache
+def require_openssl():
+    """Ed25519 needs OpenSSL 3 or newer. macOS's /usr/bin/openssl is LibreSSL, which has none."""
+    result = subprocess.run(["openssl", "version"], capture_output=True, check=False)
+    version = re.match(rb"OpenSSL ([0-9]+)\.", result.stdout)
+    if result.returncode or not version or int(version.group(1)) < 3:
+        raise TaskError("update signing needs OpenSSL 3 or newer on PATH, not LibreSSL")
+
+
 def checked(arguments, **kwargs):
+    if arguments[0] == "openssl":
+        require_openssl()
     result = subprocess.run(arguments, capture_output=True, check=False, **kwargs)
     if result.returncode:
         raise TaskError("update signing or verification failed")
@@ -167,6 +180,7 @@ def verifies(public, message, signature):
     raw = public_key_bytes(public)
     if raw is None or Path(signature).stat().st_size != SIGNATURE_BYTES:
         return False
+    require_openssl()
     with tempfile.TemporaryDirectory(prefix="spaceterm-verify-") as temporary:
         key = Path(temporary) / "key.der"
         key.write_bytes(ED25519_SPKI_PREFIX + raw)
