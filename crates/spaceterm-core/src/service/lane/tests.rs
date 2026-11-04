@@ -1816,6 +1816,70 @@ mod flow {
             assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
         });
     }
+
+    /// A service version below every request: each request is 1.0 today, so only a selected
+    /// version below 1.0 lacks one.
+    const OLDER: crate::protocol::version::ProtocolVersion =
+        crate::protocol::version::ProtocolVersion { major: 0, minor: 9 };
+
+    #[test]
+    fn the_lane_answers_a_request_its_selected_version_lacks_as_unsupported() {
+        with_lane(|lane| {
+            let (mut client, mut core) = UnixStream::pair().unwrap();
+            let peer = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut replies = Vec::new();
+                for request in [LaneRequest::Status, LaneRequest::Facts {}] {
+                    client
+                        .send(&serde_json::to_vec(&request).unwrap(), deadline)
+                        .unwrap();
+                    replies.push(
+                        serde_json::from_slice::<LaneReply>(
+                            &client.receive(MAX_FRAME, deadline).unwrap(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                replies
+            });
+            let admitted = crate::protocol::AdmittedLane {
+                actor: LOCAL,
+                selected: OLDER,
+            };
+            let _ = lane.lane.serve(&mut core, admitted, None, &|| Ok(()));
+            let unsupported = LaneReply::Error {
+                code: "unsupported".into(),
+            };
+            assert_eq!(peer.join().unwrap(), [unsupported.clone(), unsupported]);
+        });
+    }
+
+    #[test]
+    fn a_session_sends_nothing_its_selected_version_lacks() {
+        /// Admits at [`OLDER`] and keeps the Core's end of the connection.
+        #[derive(Default)]
+        struct Older(Mutex<Option<UnixStream>>);
+        impl Connector for Older {
+            fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
+                let (client, core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+                *self.0.lock().unwrap() = Some(core);
+                Ok((Box::new(client), OLDER))
+            }
+        }
+        let older = Older::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut session = Session::open(&older, deadline).unwrap();
+        assert_eq!(session.selected(), OLDER);
+        assert_eq!(
+            session.request(&LaneRequest::Status, deadline),
+            Err(CoreError::Unsupported)
+        );
+        drop(session);
+        let mut core = older.0.lock().unwrap().take().unwrap();
+        let mut sent = Vec::new();
+        std::io::Read::read_to_end(&mut core, &mut sent).unwrap();
+        assert!(sent.is_empty(), "the Core received {} bytes", sent.len());
+    }
 }
 
 #[test]
