@@ -382,6 +382,25 @@ fn remote_presentation_uses_machine_facts_without_parsing_display_as_ssh_authori
 }
 
 #[test]
+fn remote_presentation_without_a_host_or_route_name_reads_as_a_machine() {
+    let tracker = MetadataTracker::new(
+        LocalPathSemantics::Posix,
+        "/srv/api",
+        "shell",
+        LocalMachine::default(),
+        Instant::now(),
+    );
+    let decoded = core_metadata::decode(metadata::encode(&tracker.snapshot()), None, None).unwrap();
+    assert_eq!(
+        decoded.context.origin(),
+        TerminalOrigin::Remote {
+            user: None,
+            host: "Machine"
+        }
+    );
+}
+
+#[test]
 fn encoded_snapshot_excludes_owning_shell_secrets_and_authority() {
     let epoch = Instant::now();
     let secret = "prompt-owner-private-fixture";

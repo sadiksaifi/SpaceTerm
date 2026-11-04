@@ -26,7 +26,7 @@ pub(crate) fn decode(
             .host
             .as_deref()
             .or_else(|| remote.map(RemoteTerminalMetadataContext::machine_display))
-            .unwrap_or("server")
+            .unwrap_or("Machine")
             .to_owned();
         TerminalMetadataContext::Remote(
             RemoteTerminalMetadataContext::new(

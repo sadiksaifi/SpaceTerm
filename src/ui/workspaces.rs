@@ -990,12 +990,12 @@ mod core_workspaces {
     }
 
     impl DirectMachine {
-        /// The label the Panes' terminal metadata displays for this server. It grants nothing,
-        /// and a name that leaves nothing to show reads as a generic server.
+        /// The label the Panes' terminal metadata displays for this machine. It grants nothing,
+        /// and a name that leaves nothing to show reads as a generic machine.
         fn display(&self) -> String {
             let name = self.name.trim();
             if name.is_empty() {
-                "server".to_owned()
+                "Machine".to_owned()
             } else {
                 name.to_owned()
             }

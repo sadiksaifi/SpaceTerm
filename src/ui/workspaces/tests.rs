@@ -2775,3 +2775,31 @@ mod retention_tests;
 
 #[path = "optimistic_tests.rs"]
 mod optimistic;
+
+/// A paired machine that reports no name still gives its Panes a machine to name.
+#[test]
+fn an_unnamed_paired_machine_names_its_panes_origin_as_a_machine() {
+    struct Unnamed(crate::ui::workspaces::DirectMachine);
+    impl WorkspacePaneOpener for Unnamed {
+        fn open(&self, _: [u8; 32]) -> Option<crate::ui::workspaces::WorkspacePaneSubscription> {
+            None
+        }
+        fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
+            WorkspaceTerminalSessionFactory::pending()
+        }
+        fn direct_route(&self) -> Option<&crate::ui::workspaces::DirectMachine> {
+            Some(&self.0)
+        }
+    }
+    for name in ["", " \t "] {
+        let opener = Unnamed(crate::ui::workspaces::DirectMachine {
+            route: [7; 32],
+            name: name.into(),
+        });
+        assert_eq!(
+            opener.remote_display().as_deref(),
+            Some("Machine"),
+            "{name:?}"
+        );
+    }
+}
