@@ -1465,6 +1465,8 @@ impl AddMachineSheet {
                 SetupFailure::Unreachable {
                     network: NetworkAfter::Restored(RestoredAccess::Off),
                     ..
+                } | SetupFailure::Stopped {
+                    network: NetworkAfter::Restored(RestoredAccess::Off),
                 }
             ),
             ..setup

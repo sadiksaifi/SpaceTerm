@@ -141,8 +141,9 @@ pub(crate) enum SetupFailure {
         network: NetworkAfter,
         blocked_port: Option<u16>,
     },
-    /// The person cancelled after setup paired this device. Setup revoked the pairing, and
-    /// `network` is what it left Network Access as when that wasn't how it was before.
+    /// Setup stopped after it changed Network Access, because the person cancelled or the
+    /// pairing step failed, or it stopped while Network Access couldn't go back as it was. Setup
+    /// revoked the pairing, and `network` is what it left Network Access as.
     Stopped {
         network: NetworkAfter,
     },
@@ -605,34 +606,39 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                 Ok(response)
             });
         let cancelled = cancellation.is_cancelled();
-        let cleanup_confirmed = (enrolled.is_err() || cancelled)
-            && session
-                .cancel_enrollment(prepared.operation(), &status.pin, None)
-                .is_some();
         // When setup changed Network Access, SSH stays open through the QUIC check, so a blocked
         // UDP port can put Network Access back. Otherwise the broker and socket close first.
         let changed_network =
             !status.enabled || status.policy.as_ref().map(|policy| policy.bind) != Some(bind);
+        let installed = NetworkPolicy::new(bind)
+            .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
+        // A failed or cancelled pairing step revokes the pairing, and puts back Network Access
+        // that setup changed in the same step.
+        let cleanup = (enrolled.is_err() || cancelled).then(|| {
+            session.cancel_enrollment(
+                prepared.operation(),
+                &status.pin,
+                changed_network.then(|| NetworkRestore::new(installed.clone(), &status)),
+            )
+        });
         let session = (changed_network && enrolled.is_ok() && !cancelled).then_some(session);
-        let enrolled = match enrolled {
-            Ok(enrolled) => enrolled,
-            Err(error) => {
-                if cleanup_confirmed {
+        let enrolled = match (enrolled, cleanup) {
+            (Ok(enrolled), None) => enrolled,
+            (enrolled, cleanup) => {
+                let cleanup = cleanup.flatten();
+                if cleanup.is_some() {
                     let _ = self.direct.confirm_setup_cancelled(&prepared);
                 } else {
                     let _ = self.direct.cancel_setup(&prepared);
                 }
-                return Err(error);
+                return Err(end_enrollment(
+                    enrolled.err(),
+                    cancelled,
+                    cleanup,
+                    changed_network,
+                ));
             }
         };
-        if cancelled || cancellation.is_cancelled() {
-            if cleanup_confirmed {
-                let _ = self.direct.confirm_setup_cancelled(&prepared);
-            } else {
-                let _ = self.direct.cancel_setup(&prepared);
-            }
-            return Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
-        }
         progress.report(SetupPhase::Connecting);
         let completed = self.direct.complete_setup(
             &prepared,
@@ -644,8 +650,6 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             Ok(route) => return Ok(route),
             Err(error) => map_direct_error(error),
         };
-        let installed = NetworkPolicy::new(bind)
-            .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
         let held = session.as_ref().map(|session| Held {
             session,
             operation: prepared.operation(),
@@ -672,6 +676,31 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             None => {}
         }
         Err(ended.failure)
+    }
+}
+
+/// How setup ends when the pairing step failed with `error` or the person cancelled it, after
+/// setup asked SpaceTerm Core over SSH to revoke the pairing. `cleanup` is `Some` once SpaceTerm
+/// Core confirmed that, holding what it did with Network Access when `restoring` asked it to put
+/// back what setup changed. A cancellation that leaves nothing changed closes the sheet.
+fn end_enrollment(
+    error: Option<SetupFailure>,
+    cancelled: bool,
+    cleanup: Option<Option<RestoredAccess>>,
+    restoring: bool,
+) -> SetupFailure {
+    match cleanup {
+        Some(Some(RestoredAccess::Off | RestoredAccess::On)) if restoring && cancelled => {
+            SetupFailure::Cancelled
+        }
+        Some(Some(restored)) if restoring => SetupFailure::Stopped {
+            network: NetworkAfter::Restored(restored),
+        },
+        _ if restoring => SetupFailure::Stopped {
+            network: NetworkAfter::Unconfirmed,
+        },
+        Some(_) if cancelled => SetupFailure::Cancelled,
+        _ => error.unwrap_or(SetupFailure::Unconfirmed(SetupOperation::Enrollment)),
     }
 }
 
@@ -741,10 +770,12 @@ fn end_admission(
     let bind = admission.installed.bind;
     let restore = NetworkRestore::new(admission.installed.clone(), admission.before);
     if cancelled {
+        // Network Access was already on, so nothing changed there. Admission already asked the
+        // device registry to revoke the pairing, and the sheet closes as for a restored one.
         let Some(held) = held else {
             return Ended {
-                failure: SetupFailure::Unconfirmed(SetupOperation::Enrollment),
-                confirmed: None,
+                failure: SetupFailure::Cancelled,
+                confirmed: Some(false),
             };
         };
         // A cancellation that put Network Access back changed nothing, so the sheet closes.
@@ -1527,6 +1558,51 @@ mod admission_tests {
             end(Some(&session), false, &before(false), true),
             Ended {
                 failure: unreachable(NetworkAfter::Unconfirmed, None),
+                confirmed: Some(false),
+            }
+        );
+    }
+
+    /// A failed or cancelled pairing step that changed Network Access says what it left Network
+    /// Access as, and a cancellation that put it back closes the sheet.
+    #[test]
+    fn a_stopped_pairing_step_reports_network_access() {
+        let failed = || Some(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
+        assert_eq!(
+            end_enrollment(None, true, Some(Some(RestoredAccess::Off)), true),
+            SetupFailure::Cancelled
+        );
+        assert_eq!(
+            end_enrollment(failed(), false, Some(Some(RestoredAccess::Off)), true),
+            SetupFailure::Stopped {
+                network: NetworkAfter::Restored(RestoredAccess::Off),
+            }
+        );
+        assert_eq!(
+            end_enrollment(failed(), false, None, true),
+            SetupFailure::Stopped {
+                network: NetworkAfter::Unconfirmed,
+            }
+        );
+        assert_eq!(
+            end_enrollment(None, true, Some(None), false),
+            SetupFailure::Cancelled,
+            "a confirmed cancellation that changed no Network Access closes the sheet"
+        );
+        assert_eq!(
+            end_enrollment(failed(), false, Some(None), false),
+            failed().unwrap()
+        );
+    }
+
+    /// Cancel while connecting with Network Access already on changed nothing there, so the
+    /// sheet closes as it does after a restore.
+    #[test]
+    fn cancel_while_connecting_with_network_access_already_on_closes() {
+        assert_eq!(
+            end(None, true, &before(true), true),
+            Ended {
+                failure: SetupFailure::Cancelled,
                 confirmed: Some(false),
             }
         );
