@@ -4,6 +4,7 @@
 //! opened from its mounted DMG asks once, before any window opens, to move itself there. Moving
 //! is the person's explicit choice: it copies the app to Applications, or to the account's own
 //! Applications folder when the shared one is not writable, then opens the copy and quits.
+//! When another SpaceTerm of this build already runs, it comes forward instead.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt as _;
@@ -15,7 +16,9 @@ use core_foundation::base::TCFType as _;
 use core_foundation::error::CFErrorRef;
 use core_foundation::url::{CFURL, CFURLRef};
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSAlertFirstButtonReturn;
+use objc2_app_kit::{
+    NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationOptions, NSRunningApplication,
+};
 use objc2_foundation::{NSBundle, NSString, ns_string};
 
 use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
@@ -44,6 +47,11 @@ pub(crate) fn leave_disk_image() -> bool {
     if !read_only_volume(&original) {
         return false;
     }
+    // A SpaceTerm that already runs, such as the one in Applications, can't be replaced, and the
+    // person gets the SpaceTerm they asked for.
+    if activate_running_copy(mtm) {
+        return true;
+    }
     let alert = application_alert(AlertSeverity::Standard, mtm);
     alert.setMessageText(ns_string!("Move SpaceTerm to Applications?"));
     alert.setInformativeText(ns_string!(
@@ -63,6 +71,26 @@ pub(crate) fn leave_disk_image() -> bool {
         failed.addButtonWithTitle(ns_string!("Quit"));
         run_modal_alert(&failed, AlertActivation::FORCEFUL, |_| {});
     }
+    true
+}
+
+/// Brings forward another running SpaceTerm of this build. Returns whether one runs.
+fn activate_running_copy(mtm: MainThreadMarker) -> bool {
+    let Some(identifier) = NSBundle::mainBundle().bundleIdentifier() else {
+        return false;
+    };
+    let current = NSRunningApplication::currentApplication();
+    let Some(running) = NSRunningApplication::runningApplicationsWithBundleIdentifier(&identifier)
+        .iter()
+        .find(|app| app.processIdentifier() != current.processIdentifier())
+    else {
+        return false;
+    };
+    NSApplication::sharedApplication(mtm).yieldActivationToApplication(&running);
+    running.activateFromApplication_options(
+        &current,
+        NSApplicationActivationOptions::ActivateAllWindows,
+    );
     true
 }
 
