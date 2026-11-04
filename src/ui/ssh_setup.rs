@@ -191,6 +191,9 @@ fn network_after(network: NetworkAfter, n: &str) -> Option<String> {
         NetworkAfter::Restored(RestoredAccess::Kept) => {
             format!("Network Access on {n} changed during setup, so SpaceTerm left it as it is.")
         }
+        NetworkAfter::Restored(RestoredAccess::InUse) => format!(
+            "Another device began using Network Access on {n} during setup, so SpaceTerm left it on."
+        ),
         NetworkAfter::Restored(RestoredAccess::Failed) => format!(
             "SpaceTerm couldn\u{2019}t turn Network Access on {n} back to how it was, so it\u{2019}s still on."
         ),
@@ -282,6 +285,10 @@ pub(crate) fn problem(failure: &SetupFailure, name: &str) -> SetupProblem {
         SetupFailure::Cancelled => {
             SetupProblem::new(format!("Setup stopped before {n} was added."), true)
         }
+        SetupFailure::Stopped { network } => SetupProblem {
+            footnote: network_after(*network, n).map(Into::into),
+            ..SetupProblem::new(format!("Setup stopped before {n} was added."), true)
+        },
     }
 }
 

@@ -228,14 +228,15 @@ impl State {
                 return Ok(Prepared::Keep);
             }
             // Connections of an earlier address that still end hold its port, so the wildcard
-            // can't bind.
+            // can't bind yet. That listener is this server's own, so the bind waits for it to
+            // retire, as any other bind it blocks does.
             self.retired.retain(|listener| !listener.finished());
             if self
                 .retired
                 .iter()
                 .any(|listener| listener.address().port() == addr.port())
             {
-                return Err(DirectError::AddressUnavailable);
+                return Ok(Prepared::Deferred);
             }
             // A failed widening keeps the listener at its old address.
             self.listener
@@ -1084,8 +1085,9 @@ impl State {
         Ok(())
     }
     /// Puts Network Access back as `restore` says it was before the setup `operation`, only
-    /// while it is still what that setup installed and no later setup began. Network Access that
-    /// is already as it was reads as put back, so a repeated cancellation agrees with the first.
+    /// while it is still what that setup installed and no other device relies on it: no later
+    /// setup is pending and no device paired after this setup's. Network Access that is already
+    /// as it was reads as put back, so a repeated cancellation agrees with the first.
     fn restore_network(
         &mut self,
         operation: &OperationId,
@@ -1106,11 +1108,32 @@ impl State {
         if put_back(&self.record) {
             return outcome(self.record.enabled);
         }
-        let installed = self.record.enabled
-            && self.record.policy.as_ref() == Some(&restore.installed)
-            && Some(self.record.setup_generation) == setup_generation(operation).checked_add(1);
+        let installed =
+            self.record.enabled && self.record.policy.as_ref() == Some(&restore.installed);
         if !installed {
             return RestoredAccess::Kept;
+        }
+        // A later setup that is still pending relies on the installed policy, which its own
+        // Setup compares against. One that was cancelled or failed relies on nothing.
+        let generation = setup_generation(operation);
+        let pending = self
+            .record
+            .setups
+            .iter()
+            .any(|setup| setup_generation(&setup.operation) > generation);
+        // Devices are appended as they pair, so those after this setup's paired later, over the
+        // installed policy. Without this setup's device, every live device counts.
+        let after = self
+            .record
+            .devices
+            .iter()
+            .position(|device| device.claim == *operation)
+            .map_or(0, |index| index + 1);
+        let paired = self.record.devices[after..]
+            .iter()
+            .any(|device| !device.revoked);
+        if pending || paired {
+            return RestoredAccess::InUse;
         }
         // An earlier policy is kept as the configured one even while access is off.
         match self.set_policy(restore.policy, restore.enabled) {
@@ -1981,6 +2004,40 @@ pub(super) mod tests {
         assert!(overlaps(at("192.0.2.8:9231"), at("192.0.2.8:9231")));
         assert!(!overlaps(at("192.0.2.8:9231"), at("192.0.2.9:9231")));
         assert!(!overlaps(at("0.0.0.0:9231"), at("0.0.0.0:9232")));
+    }
+
+    /// A widening to every interface that one of this server's own retired listeners of the same
+    /// port still blocks waits for it to retire, rather than refusing the address.
+    #[test]
+    fn a_widening_that_an_own_retired_listener_blocks_waits_for_it() {
+        let fixture = crate::direct::tests::Fixture::new();
+        let specific = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+        {
+            let mut state = fixture.state.lock().unwrap();
+            let retired = state
+                .bind(std::net::SocketAddr::new(
+                    std::net::Ipv6Addr::LOCALHOST.into(),
+                    specific.port(),
+                ))
+                .unwrap_or_else(|_| panic!("the retired listener must bind"));
+            state.retired.push(retired);
+        }
+        let wildcard = NetworkPolicy::every_interface(specific.port()).unwrap();
+        let reply = fixture.management(Management::SetPolicy {
+            enabled: true,
+            policy: Some(wildcard.clone()),
+        });
+        assert!(
+            matches!(reply, Ok(ManagementReply::Status(_))),
+            "the widening waits instead of refusing the address"
+        );
+        let state = fixture.state.lock().unwrap();
+        assert_eq!(state.record.policy, Some(wildcard.clone()));
+        assert!(matches!(
+            state.listener_state,
+            ListenerState::Starting { addr } | ListenerState::Listening { addr }
+                if addr == wildcard.bind
+        ));
     }
 
     pub(crate) fn reserve_policy(state: &Shared, ip: std::net::IpAddr) -> NetworkPolicy {

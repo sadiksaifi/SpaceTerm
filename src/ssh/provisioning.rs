@@ -141,6 +141,12 @@ pub(crate) enum SetupFailure {
         network: NetworkAfter,
         blocked_port: Option<u16>,
     },
+    /// Setup stopped after it changed Network Access, because the person cancelled or the
+    /// pairing step failed, or it stopped while Network Access couldn't go back as it was. Setup
+    /// revoked the pairing, and `network` is what it left Network Access as.
+    Stopped {
+        network: NetworkAfter,
+    },
     Incompatible(IncompatibilityKind),
     Refused(RefusalKind),
     Unavailable(UnavailableKind),
@@ -600,34 +606,39 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                 Ok(response)
             });
         let cancelled = cancellation.is_cancelled();
-        let cleanup_confirmed = (enrolled.is_err() || cancelled)
-            && session
-                .cancel_enrollment(prepared.operation(), &status.pin, None)
-                .is_some();
         // When setup changed Network Access, SSH stays open through the QUIC check, so a blocked
         // UDP port can put Network Access back. Otherwise the broker and socket close first.
         let changed_network =
             !status.enabled || status.policy.as_ref().map(|policy| policy.bind) != Some(bind);
+        let installed = NetworkPolicy::new(bind)
+            .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
+        // A failed or cancelled pairing step revokes the pairing, and puts back Network Access
+        // that setup changed in the same step.
+        let cleanup = (enrolled.is_err() || cancelled).then(|| {
+            session.cancel_enrollment(
+                prepared.operation(),
+                &status.pin,
+                changed_network.then(|| NetworkRestore::new(installed.clone(), &status)),
+            )
+        });
         let session = (changed_network && enrolled.is_ok() && !cancelled).then_some(session);
-        let enrolled = match enrolled {
-            Ok(enrolled) => enrolled,
-            Err(error) => {
-                if cleanup_confirmed {
+        let enrolled = match (enrolled, cleanup) {
+            (Ok(enrolled), None) => enrolled,
+            (enrolled, cleanup) => {
+                let cleanup = cleanup.flatten();
+                if cleanup.is_some() {
                     let _ = self.direct.confirm_setup_cancelled(&prepared);
                 } else {
                     let _ = self.direct.cancel_setup(&prepared);
                 }
-                return Err(error);
+                return Err(end_enrollment(
+                    enrolled.err(),
+                    cancelled,
+                    cleanup,
+                    changed_network,
+                ));
             }
         };
-        if cancelled || cancellation.is_cancelled() {
-            if cleanup_confirmed {
-                let _ = self.direct.confirm_setup_cancelled(&prepared);
-            } else {
-                let _ = self.direct.cancel_setup(&prepared);
-            }
-            return Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
-        }
         progress.report(SetupPhase::Connecting);
         let completed = self.direct.complete_setup(
             &prepared,
@@ -637,55 +648,191 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         );
         let failure = match completed {
             Ok(route) => return Ok(route),
-            Err(_) if cancellation.is_cancelled() => {
-                return Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
-            }
             Err(error) => map_direct_error(error),
         };
-        if failure != SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable) {
-            return Err(failure);
-        }
-        // No QUIC packet reached SpaceTerm Core. When setup changed Network Access, it revokes its
-        // pairing and asks SpaceTerm Core to put Network Access back in the same step, which Try
-        // Again changes again.
-        let Some(session) = session else {
-            return Err(SetupFailure::Unreachable {
+        let held = session.as_ref().map(|session| Held {
+            session,
+            operation: prepared.operation(),
+            pin: &status.pin,
+        });
+        let ended = end_admission(
+            held.as_ref().map(|held| held as &dyn HeldSetup),
+            cancellation.is_cancelled(),
+            failure,
+            Admission {
                 address,
-                network: NetworkAfter::Unchanged,
-                blocked_port: None,
-            });
-        };
-        // Whether SpaceTerm Core listens on the port this computer dialed, read before the
-        // restore changes it.
-        let listening = session
-            .direct_status(&CancellationToken::default())
-            .is_ok_and(|current| {
-                matches!(current.listener, ListenerState::Listening { addr }
-                    if addr.port() == bind.port() && (addr.ip().is_unspecified() || addr == bind))
-            });
-        let network = match session.cancel_enrollment(
-            prepared.operation(),
-            &status.pin,
-            Some(NetworkRestore::new(
-                NetworkPolicy::new(bind)
-                    .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?,
-                &status,
-            )),
-        ) {
-            Some(Some(restored)) => {
+                installed,
+                before: &status,
+                ssh_dials_address,
+            },
+        );
+        match ended.confirmed {
+            Some(true) => {
                 let _ = self.direct.confirm_setup_cancelled(&prepared);
-                NetworkAfter::Restored(restored)
             }
-            _ => {
+            Some(false) => {
                 let _ = self.direct.cancel_setup(&prepared);
-                NetworkAfter::Unconfirmed
             }
+            None => {}
+        }
+        Err(ended.failure)
+    }
+}
+
+/// How setup ends when the pairing step failed with `error` or the person cancelled it, after
+/// setup asked SpaceTerm Core over SSH to revoke the pairing. `cleanup` is `Some` once SpaceTerm
+/// Core confirmed that, holding what it did with Network Access when `restoring` asked it to put
+/// back what setup changed. A cancellation that leaves nothing changed closes the sheet.
+fn end_enrollment(
+    error: Option<SetupFailure>,
+    cancelled: bool,
+    cleanup: Option<Option<RestoredAccess>>,
+    restoring: bool,
+) -> SetupFailure {
+    match cleanup {
+        Some(Some(RestoredAccess::Off | RestoredAccess::On)) if restoring && cancelled => {
+            SetupFailure::Cancelled
+        }
+        Some(Some(restored)) if restoring => SetupFailure::Stopped {
+            network: NetworkAfter::Restored(restored),
+        },
+        _ if restoring => SetupFailure::Stopped {
+            network: NetworkAfter::Unconfirmed,
+        },
+        Some(_) if cancelled => SetupFailure::Cancelled,
+        _ => error.unwrap_or(SetupFailure::Unconfirmed(SetupOperation::Enrollment)),
+    }
+}
+
+/// The SSH session setup still holds after QUIC admission. It exists only when setup changed
+/// Network Access, so it can revoke the pairing and put Network Access back.
+trait HeldSetup {
+    /// SpaceTerm Core's listener now, or `None` when it didn't answer.
+    fn listener(&self) -> Option<ListenerState>;
+    /// Revokes setup's pairing and puts Network Access back as `restore` says, in one step.
+    /// `Some` once SpaceTerm Core confirmed it, holding what it did with Network Access.
+    fn cancel(&self, restore: NetworkRestore) -> Option<RestoredAccess>;
+}
+
+struct Held<'s, 'a, A: SshProcessAdapter> {
+    session: &'s SetupSession<'a, A>,
+    operation: [u8; 32],
+    pin: &'s MachinePin,
+}
+impl<A: SshProcessAdapter> HeldSetup for Held<'_, '_, A> {
+    fn listener(&self) -> Option<ListenerState> {
+        self.session
+            .direct_status(&CancellationToken::default())
+            .ok()
+            .map(|status| status.listener)
+    }
+    fn cancel(&self, restore: NetworkRestore) -> Option<RestoredAccess> {
+        self.session
+            .cancel_enrollment(self.operation, self.pin, Some(restore))
+            .flatten()
+    }
+}
+
+/// What setup knows when QUIC admission ends without a route: the address this computer dialed,
+/// the policy setup turned on, Network Access before setup, and whether SSH dialed that address
+/// itself.
+struct Admission<'a> {
+    address: SetupAddress,
+    installed: NetworkPolicy,
+    before: &'a DirectStatus,
+    ssh_dials_address: bool,
+}
+
+/// How setup ends after QUIC admission returned no route. `confirmed` says whether SpaceTerm
+/// Core confirmed revoking setup's pairing over SSH, or `None` when setup didn't ask it.
+#[derive(Debug, Eq, PartialEq)]
+struct Ended {
+    failure: SetupFailure,
+    confirmed: Option<bool>,
+}
+
+/// Whether SpaceTerm Core listening at `listener` takes what this computer sends to `bind`.
+fn listens(listener: &ListenerState, bind: SocketAddr) -> bool {
+    matches!(listener, ListenerState::Listening { addr }
+        if addr.port() == bind.port() && (addr.ip().is_unspecified() || *addr == bind))
+}
+
+/// Ends setup after QUIC admission failed with `failure` or the person cancelled it. With a held
+/// session, setup revokes its pairing and puts Network Access back in one step, whether no QUIC
+/// packet arrived or the person cancelled. A firewall is named only when SSH dialed the address
+/// itself and SpaceTerm Core listened on the port this computer dialed.
+fn end_admission(
+    held: Option<&dyn HeldSetup>,
+    cancelled: bool,
+    failure: SetupFailure,
+    admission: Admission<'_>,
+) -> Ended {
+    let bind = admission.installed.bind;
+    let restore = NetworkRestore::new(admission.installed.clone(), admission.before);
+    if cancelled {
+        // Network Access was already on, so nothing changed there. Admission already asked the
+        // device registry to revoke the pairing, and the sheet closes as for a restored one.
+        let Some(held) = held else {
+            return Ended {
+                failure: SetupFailure::Cancelled,
+                confirmed: Some(false),
+            };
         };
-        Err(SetupFailure::Unreachable {
-            address,
+        // A cancellation that put Network Access back changed nothing, so the sheet closes.
+        return match held.cancel(restore) {
+            Some(RestoredAccess::Off | RestoredAccess::On) => Ended {
+                failure: SetupFailure::Cancelled,
+                confirmed: Some(true),
+            },
+            Some(restored) => Ended {
+                failure: SetupFailure::Stopped {
+                    network: NetworkAfter::Restored(restored),
+                },
+                confirmed: Some(true),
+            },
+            None => Ended {
+                failure: SetupFailure::Stopped {
+                    network: NetworkAfter::Unconfirmed,
+                },
+                confirmed: Some(false),
+            },
+        };
+    }
+    if failure != SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable) {
+        return Ended {
+            failure,
+            confirmed: None,
+        };
+    }
+    let blocked_port =
+        |listening: bool| (admission.ssh_dials_address && listening).then_some(bind.port());
+    // No QUIC packet reached SpaceTerm Core. Network Access that was already on stays, and the
+    // listener read before setup is the evidence.
+    let Some(held) = held else {
+        return Ended {
+            failure: SetupFailure::Unreachable {
+                address: admission.address,
+                network: NetworkAfter::Unchanged,
+                blocked_port: blocked_port(listens(&admission.before.listener, bind)),
+            },
+            confirmed: None,
+        };
+    };
+    // Read before the restore changes it.
+    let listening = held
+        .listener()
+        .is_some_and(|listener| listens(&listener, bind));
+    let (network, confirmed) = match held.cancel(restore) {
+        Some(restored) => (NetworkAfter::Restored(restored), true),
+        None => (NetworkAfter::Unconfirmed, false),
+    };
+    Ended {
+        failure: SetupFailure::Unreachable {
+            address: admission.address,
             network,
-            blocked_port: (ssh_dials_address && listening).then_some(bind.port()),
-        })
+            blocked_port: blocked_port(listening),
+        },
+        confirmed: Some(confirmed),
     }
 }
 
@@ -1286,5 +1433,219 @@ mod proxy_tests {
             b"hostname penguin\nproxycommand ssh -W %h:%p bastion\n"
         ));
         assert!(resolved_through_proxy(&[0xff, 0xfe]));
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    const BIND: &str = "10.1.2.3:9231";
+
+    /// A held SSH session whose SpaceTerm Core listens at `listener` and answers a cancellation
+    /// with `restored`.
+    struct Session {
+        listener: Option<ListenerState>,
+        restored: Option<RestoredAccess>,
+        cancels: RefCell<Vec<NetworkRestore>>,
+    }
+    impl Session {
+        fn new(listening: bool, restored: Option<RestoredAccess>) -> Self {
+            Self {
+                listener: Some(listener(listening)),
+                restored,
+                cancels: RefCell::default(),
+            }
+        }
+    }
+    impl HeldSetup for Session {
+        fn listener(&self) -> Option<ListenerState> {
+            self.listener.clone()
+        }
+        fn cancel(&self, restore: NetworkRestore) -> Option<RestoredAccess> {
+            self.cancels.borrow_mut().push(restore);
+            self.restored
+        }
+    }
+
+    fn listener(listening: bool) -> ListenerState {
+        if listening {
+            ListenerState::Listening {
+                addr: BIND.parse().unwrap(),
+            }
+        } else {
+            ListenerState::Off
+        }
+    }
+
+    fn before(listening: bool) -> DirectStatus {
+        DirectStatus {
+            setup_generation: 0,
+            pin: MachinePin {
+                build: "spaceterm".into(),
+                core: [1; 32],
+                public_key: [2; 32],
+                certificate: [3; 32],
+            },
+            policy: listening.then(|| NetworkPolicy::new(BIND.parse().unwrap()).unwrap()),
+            enabled: listening,
+            machine_name: "penguin".into(),
+            listener: listener(listening),
+            network_addresses: Err(DirectError::Transport),
+        }
+    }
+
+    fn end(
+        held: Option<&dyn HeldSetup>,
+        cancelled: bool,
+        before: &DirectStatus,
+        ssh_dials_address: bool,
+    ) -> Ended {
+        end_admission(
+            held,
+            cancelled,
+            SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable),
+            Admission {
+                address: SetupAddress::parse("10.1.2.3", 9231).unwrap(),
+                installed: NetworkPolicy::new(BIND.parse().unwrap()).unwrap(),
+                before,
+                ssh_dials_address,
+            },
+        )
+    }
+
+    fn unreachable(network: NetworkAfter, blocked_port: Option<u16>) -> SetupFailure {
+        SetupFailure::Unreachable {
+            address: SetupAddress::parse("10.1.2.3", 9231).unwrap(),
+            network,
+            blocked_port,
+        }
+    }
+
+    /// Network Access that was already on at the dialed address, which SSH reached directly,
+    /// points at a firewall too, from the listener read before setup.
+    #[test]
+    fn a_firewall_is_named_when_network_access_was_already_on() {
+        assert_eq!(
+            end(None, false, &before(true), true),
+            Ended {
+                failure: unreachable(NetworkAfter::Unchanged, Some(9231)),
+                confirmed: None,
+            }
+        );
+        assert_eq!(
+            end(None, false, &before(true), false).failure,
+            unreachable(NetworkAfter::Unchanged, None),
+            "SSH through a proxy or an entered address blames no firewall"
+        );
+    }
+
+    /// When setup changed Network Access, a firewall is named only once SpaceTerm Core says it
+    /// listens there, and the cancellation puts Network Access back.
+    #[test]
+    fn a_held_session_restores_and_names_the_firewall_only_while_listening() {
+        let session = Session::new(true, Some(RestoredAccess::Off));
+        assert_eq!(
+            end(Some(&session), false, &before(false), true),
+            Ended {
+                failure: unreachable(NetworkAfter::Restored(RestoredAccess::Off), Some(9231)),
+                confirmed: Some(true),
+            }
+        );
+        let session = Session::new(false, None);
+        assert_eq!(
+            end(Some(&session), false, &before(false), true),
+            Ended {
+                failure: unreachable(NetworkAfter::Unconfirmed, None),
+                confirmed: Some(false),
+            }
+        );
+    }
+
+    /// A failed or cancelled pairing step that changed Network Access says what it left Network
+    /// Access as, and a cancellation that put it back closes the sheet.
+    #[test]
+    fn a_stopped_pairing_step_reports_network_access() {
+        let failed = || Some(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
+        assert_eq!(
+            end_enrollment(None, true, Some(Some(RestoredAccess::Off)), true),
+            SetupFailure::Cancelled
+        );
+        assert_eq!(
+            end_enrollment(failed(), false, Some(Some(RestoredAccess::Off)), true),
+            SetupFailure::Stopped {
+                network: NetworkAfter::Restored(RestoredAccess::Off),
+            }
+        );
+        assert_eq!(
+            end_enrollment(failed(), false, None, true),
+            SetupFailure::Stopped {
+                network: NetworkAfter::Unconfirmed,
+            }
+        );
+        assert_eq!(
+            end_enrollment(None, true, Some(None), false),
+            SetupFailure::Cancelled,
+            "a confirmed cancellation that changed no Network Access closes the sheet"
+        );
+        assert_eq!(
+            end_enrollment(failed(), false, Some(None), false),
+            failed().unwrap()
+        );
+    }
+
+    /// Cancel while connecting with Network Access already on changed nothing there, so the
+    /// sheet closes as it does after a restore.
+    #[test]
+    fn cancel_while_connecting_with_network_access_already_on_closes() {
+        assert_eq!(
+            end(None, true, &before(true), true),
+            Ended {
+                failure: SetupFailure::Cancelled,
+                confirmed: Some(false),
+            }
+        );
+    }
+
+    /// Cancel while connecting revokes the pairing and puts Network Access back like the other
+    /// paths. When that worked the sheet closes, and otherwise it says what stayed.
+    #[test]
+    fn cancel_while_connecting_revokes_and_restores() {
+        let session = Session::new(true, Some(RestoredAccess::Off));
+        assert_eq!(
+            end(Some(&session), true, &before(false), true),
+            Ended {
+                failure: SetupFailure::Cancelled,
+                confirmed: Some(true),
+            }
+        );
+        assert_eq!(
+            session.cancels.borrow().as_slice(),
+            [NetworkRestore::new(
+                NetworkPolicy::new(BIND.parse().unwrap()).unwrap(),
+                &before(false)
+            )]
+        );
+        let session = Session::new(true, Some(RestoredAccess::Failed));
+        assert_eq!(
+            end(Some(&session), true, &before(false), true),
+            Ended {
+                failure: SetupFailure::Stopped {
+                    network: NetworkAfter::Restored(RestoredAccess::Failed),
+                },
+                confirmed: Some(true),
+            }
+        );
+        let session = Session::new(true, None);
+        assert_eq!(
+            end(Some(&session), true, &before(false), true),
+            Ended {
+                failure: SetupFailure::Stopped {
+                    network: NetworkAfter::Unconfirmed,
+                },
+                confirmed: Some(false),
+            }
+        );
     }
 }
