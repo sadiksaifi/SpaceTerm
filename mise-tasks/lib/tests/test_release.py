@@ -318,6 +318,15 @@ class AppcastTests(unittest.TestCase):
                         verify_appcast(feed, archive, "1.0.0")
 
 
+class DiskImageUrlTests(unittest.TestCase):
+    def test_the_appcast_encloses_the_url_the_desktop_admits(self):
+        # src/updates.rs allows_release pins the same URL for the same version.
+        self.assertEqual(
+            release_feed.download_url("0.1.1", release_feed.dmg_name("0.1.1")),
+            "https://github.com/sadiksaifi/SpaceTerm/releases/download/v0.1.1/SpaceTerm-0.1.1-macos-arm64.dmg",
+        )
+
+
 class AssetListTests(unittest.TestCase):
     def test_the_release_holds_every_asset_once_with_one_checksum_file(self):
         names = release_feed.asset_names("1.4.0")

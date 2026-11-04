@@ -21,16 +21,17 @@ use super::secure_filesystem::{SecureCommitOutcome, SecureEntryIdentity};
 use crate::application_identity::ApplicationIdentity;
 use crate::updates::policy::UpdateHistory;
 use crate::updates::release_feed::{
-    MAX_ARCHIVE_BYTES, MAX_FEED_BYTES, MAX_FEED_SIGNATURE_BYTES, ReleaseFeed, ReleasePlatform,
-    UpdateKey,
+    MAX_ARCHIVE_BYTES, MAX_FEED_BYTES, MAX_FEED_SIGNATURE_BYTES, ReleaseFeed, release_trust,
 };
 use crate::updates::{UpdateAdapter, UpdateError, UpdateEvent, UpdateTransport};
+use spaceterm_core::update::feed::FeedTarget;
+use spaceterm_core::update::trust::UpdateTrust;
 
 #[cfg(target_arch = "x86_64")]
-const PLATFORM: Option<ReleasePlatform> = Some(ReleasePlatform::new("linux-x86_64"));
+const TARGET: Option<FeedTarget> = Some(FeedTarget::DESKTOP_LINUX);
 /// Releases publish no archive for this architecture yet.
 #[cfg(not(target_arch = "x86_64"))]
-const PLATFORM: Option<ReleasePlatform> = None;
+const TARGET: Option<FeedTarget> = None;
 
 const HISTORY_NAME: &str = "update-history.json";
 const MAX_HISTORY_BYTES: usize = 4096;
@@ -76,8 +77,8 @@ pub(super) struct LinuxUpdates {
 
 struct Dependencies {
     transport: Arc<dyn UpdateTransport>,
-    key: UpdateKey,
-    platform: ReleasePlatform,
+    trust: UpdateTrust,
+    target: FeedTarget,
     installation: Installation,
     archive_root: &'static str,
 }
@@ -93,11 +94,11 @@ impl LinuxUpdates {
         let installation = std::env::current_exe()
             .ok()
             .and_then(|executable| Installation::locate(&executable));
-        let dependencies = match (PLATFORM, UpdateKey::release(), installation) {
-            (Some(platform), Some(key), Some(installation)) => Some(Dependencies {
+        let dependencies = match (TARGET, release_trust(), installation) {
+            (Some(target), Some(trust), Some(installation)) => Some(Dependencies {
                 transport,
-                key,
-                platform,
+                trust,
+                target,
                 installation,
                 archive_root: identity.directory_name(),
             }),
@@ -125,8 +126,8 @@ impl UpdateAdapter for LinuxUpdates {
         let dependencies = self.dependencies.as_ref().ok_or(UpdateError::Unavailable)?;
         let shared = Arc::new(Shared {
             transport: Arc::clone(&dependencies.transport),
-            key: dependencies.key.clone(),
-            platform: dependencies.platform,
+            trust: dependencies.trust.clone(),
+            target: dependencies.target,
             installation: dependencies.installation.clone(),
             archive_root: dependencies.archive_root,
             current_version: env!("SPACETERM_VERSION"),
@@ -289,8 +290,8 @@ impl Cycle {
 /// State shared by the main-thread adapter and the worker of the current cycle.
 struct Shared {
     transport: Arc<dyn UpdateTransport>,
-    key: UpdateKey,
-    platform: ReleasePlatform,
+    trust: UpdateTrust,
+    target: FeedTarget,
     installation: Installation,
     archive_root: &'static str,
     current_version: &'static str,
@@ -370,18 +371,18 @@ impl Shared {
     fn fetch_feed(&self) -> Result<ReleaseFeed, UpdateError> {
         let feed = self
             .transport
-            .get(&self.platform.feed_url(), MAX_FEED_BYTES)
+            .get(&self.target.feed_url(), MAX_FEED_BYTES)
             .map_err(|_| UpdateError::Check)?;
         let signature = self
             .transport
             .get(
-                &self.platform.feed_signature_url(),
+                &self.target.feed_signature_url(),
                 MAX_FEED_SIGNATURE_BYTES,
             )
             .map_err(|_| UpdateError::Check)?;
         ReleaseFeed::verify(
-            &self.key,
-            self.platform,
+            &self.trust,
+            self.target,
             &feed,
             &signature,
             crate::updates::now(),
@@ -425,7 +426,7 @@ impl Shared {
             .map_err(|_| UpdateError::Installation)?;
         let archive = self.fetch_archive(feed, generation)?;
         self.send_current(generation, UpdateEvent::Verifying)?;
-        feed.archive.verify(&self.key, &archive)?;
+        feed.archive.verify(&self.trust, &archive)?;
         unpack(&archive, self.archive_root, &installation.staged_tree())
             .map_err(|_| UpdateError::Verification)?;
         if !Installation::executable_in(&installation.staged_tree()).is_file() {
@@ -1010,15 +1011,14 @@ mod tests {
     }
 
     fn served(signer: &ReleaseSigner, version: &str, archive: &[u8]) -> ServedRelease {
-        let platform = ReleasePlatform::new("linux-x86_64");
-        let (feed, signature) =
-            signer.feed("linux-x86_64", version, crate::updates::now() - 60, archive);
+        let target = FeedTarget::DESKTOP_LINUX;
+        let (feed, signature) = signer.feed(target, version, crate::updates::now() - 60, archive);
         ServedRelease(HashMap::from([
-            (platform.feed_url(), feed),
-            (platform.feed_signature_url(), signature),
+            (target.feed_url(), feed),
+            (target.feed_signature_url(), signature),
             (
                 format!(
-                    "https://github.com/sadiksaifi/SpaceTerm/releases/download/v{version}/SpaceTerm-{version}-linux-x86_64.tar.gz"
+                    "https://github.com/sadiksaifi/SpaceTerm/releases/download/v{version}/spaceterm-desktop-{version}-linux-x86_64.tar.gz"
                 ),
                 archive.to_vec(),
             ),
@@ -1028,13 +1028,13 @@ mod tests {
     fn shared(
         fixture: &Fixture,
         transport: ServedRelease,
-        key: UpdateKey,
+        trust: UpdateTrust,
     ) -> (Arc<Shared>, async_channel::Receiver<UpdateEvent>) {
         let (events, receiver) = async_channel::unbounded();
         let shared = Arc::new(Shared {
             transport: Arc::new(transport),
-            key,
-            platform: ReleasePlatform::new("linux-x86_64"),
+            trust,
+            target: FeedTarget::DESKTOP_LINUX,
             installation: fixture.installation.clone(),
             archive_root: ROOT,
             current_version: "1.0.0",
@@ -1064,7 +1064,7 @@ mod tests {
         let fixture = installed("old");
         let signer = ReleaseSigner::new(3);
         let archive = release(b"new");
-        let (shared, receiver) = shared(&fixture, served(&signer, "1.1.0", &archive), signer.key());
+        let (shared, receiver) = shared(&fixture, served(&signer, "1.1.0", &archive), signer.trust());
         let generation = shared
             .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
             .unwrap();
@@ -1090,7 +1090,7 @@ mod tests {
         let (shared, receiver) = shared(
             &fixture,
             served(&signer, "1.0.0", &release(b"same")),
-            signer.key(),
+            signer.trust(),
         );
         let generation = shared
             .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
@@ -1106,7 +1106,7 @@ mod tests {
         let (shared, receiver) = shared(
             &fixture,
             served(&signer, "1.1.0", &release(b"new")),
-            ReleaseSigner::new(4).key(),
+            ReleaseSigner::new(4).trust(),
         );
         let generation = shared
             .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
@@ -1121,11 +1121,11 @@ mod tests {
         let fixture = installed("old");
         let signer = ReleaseSigner::new(3);
         let mut transport = served(&signer, "1.1.0", &release(b"new"));
-        let url = "https://github.com/sadiksaifi/SpaceTerm/releases/download/v1.1.0/SpaceTerm-1.1.0-linux-x86_64.tar.gz";
+        let url = "https://github.com/sadiksaifi/SpaceTerm/releases/download/v1.1.0/spaceterm-desktop-1.1.0-linux-x86_64.tar.gz";
         let mut tampered = release(b"evil");
         tampered.resize(transport.0[url].len(), 0);
         transport.0.insert(url.to_owned(), tampered);
-        let (shared, receiver) = shared(&fixture, transport, signer.key());
+        let (shared, receiver) = shared(&fixture, transport, signer.trust());
         let generation = shared
             .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
             .unwrap();
@@ -1156,7 +1156,7 @@ mod tests {
         let (shared, receiver) = shared(
             &fixture,
             served(&signer, "1.1.0", &release(b"new")),
-            signer.key(),
+            signer.trust(),
         );
         let generation = shared
             .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
@@ -1191,7 +1191,7 @@ mod tests {
         let updates = adapter(
             &fixture,
             served(&signer, "1.1.0", &release(b"new")),
-            signer.key(),
+            signer.trust(),
         );
         let (events, receiver) = async_channel::unbounded();
         updates.start(events).unwrap();
@@ -1214,13 +1214,13 @@ mod tests {
     fn adapter(
         fixture: &Fixture,
         transport: impl UpdateTransport + 'static,
-        key: UpdateKey,
+        trust: UpdateTrust,
     ) -> LinuxUpdates {
         LinuxUpdates {
             dependencies: Some(Dependencies {
                 transport: Arc::new(transport),
-                key,
-                platform: ReleasePlatform::new("linux-x86_64"),
+                trust,
+                target: FeedTarget::DESKTOP_LINUX,
                 installation: fixture.installation.clone(),
                 archive_root: ROOT,
             }),
@@ -1273,7 +1273,7 @@ mod tests {
                 release: served(&signer, "1.1.0", &release(b"new")),
                 gate: Mutex::new(Some(stalled)),
             },
-            signer.key(),
+            signer.trust(),
         );
         let (events, receiver) = async_channel::unbounded();
         updates.start(events).unwrap();
@@ -1331,28 +1331,24 @@ mod tests {
         else {
             return;
         };
-        let key = UpdateKey::from_base64(
-            fs::read_to_string(directory.join("public-key"))
-                .unwrap()
-                .trim(),
-        )
-        .unwrap();
-        let platform = ReleasePlatform::new("linux-x86_64");
+        let trust =
+            UpdateTrust::parse(&fs::read(directory.join("update-trust.json")).unwrap()).unwrap();
+        let target = FeedTarget::DESKTOP_LINUX;
         let feed = ReleaseFeed::verify(
-            &key,
-            platform,
-            &fs::read(directory.join("latest-linux-x86_64.json")).unwrap(),
-            &fs::read(directory.join("latest-linux-x86_64.json.sig")).unwrap(),
+            &trust,
+            target,
+            &fs::read(directory.join(target.feed())).unwrap(),
+            &fs::read(directory.join(target.feed_signature())).unwrap(),
             crate::updates::now(),
         )
         .unwrap();
         let name = feed.archive.url.rsplit('/').next().unwrap();
         let archive = fs::read(directory.join(name)).unwrap();
-        assert_eq!(feed.archive.verify(&key, &archive), Ok(()));
+        assert_eq!(feed.archive.verify(&trust, &archive), Ok(()));
         let mut tampered = archive.clone();
         *tampered.last_mut().unwrap() ^= 1;
         assert_eq!(
-            feed.archive.verify(&key, &tampered),
+            feed.archive.verify(&trust, &tampered),
             Err(UpdateError::Verification)
         );
         let fixture = installed("old");
