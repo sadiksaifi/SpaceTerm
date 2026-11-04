@@ -311,7 +311,9 @@ impl MachineConnection {
             self.development.as_deref(),
         )
     }
-    fn machine_id(&self) -> Result<[u8; 32], CoreError> {
+    /// The server ID of the Core this handle names: a paired route's pinned one, or the one the
+    /// account Core's storage holds. Reading it never connects, so a stopped Core has one too.
+    pub fn machine_id(&self) -> Result<[u8; 32], CoreError> {
         if let Some(direct) = &self.direct {
             self.client_directory()?;
             return Ok(direct.paired.pin.core);

@@ -82,7 +82,6 @@ fn desktop_profile(
                     "Move SpaceTerm to Applications",
                     "Install SpaceTerm in Applications to update.",
                 ),
-                overdue_read_only_update: "Update overdue. Install SpaceTerm in Applications to update.",
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::NativeMenu,
@@ -162,6 +161,13 @@ fn compose(
         home_directory: startup.home_directory,
         adapters: crate::app::ApplicationCapabilities {
             updates: update_adapter(identity),
+            machine_updates: Some(crate::updates::machines::composed(
+                identity.directory_name(),
+                &direct_machines,
+            )),
+            update_reminders: Some(Rc::new(
+                super::macos_notification::MacosUpdateReminders::new(),
+            )),
             selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
             settings_file,
             application_menu: Rc::new(

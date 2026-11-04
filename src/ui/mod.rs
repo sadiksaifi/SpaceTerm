@@ -20,7 +20,6 @@ mod control_theme;
         reason = "only a status item without native alerts opens this window"
     )
 )]
-pub(crate) mod core_control_window;
 pub(crate) mod core_pane;
 pub(crate) mod core_worktrees;
 #[cfg(feature = "developer-tools")]

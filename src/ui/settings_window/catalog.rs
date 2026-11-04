@@ -163,8 +163,6 @@ pub(super) enum SettingsRowId {
     UpdateStatus,
     AutomaticUpdateDownloads,
     UpdateCheckInterval,
-    /// How often an overdue update is brought back after it was dismissed.
-    UpdateReminderInterval,
     /// The Keybinding of one Command.
     Shortcut(Command),
     /// The settings file, shown read-only and edited in the person's own editor.
@@ -227,7 +225,6 @@ impl SettingsRowId {
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
-            | Self::UpdateReminderInterval
             // Keybindings live outside the appearance preferences and reset through the keymap
             // profile, which returns a displaced default to its Command.
             | Self::Shortcut(_)
@@ -915,23 +912,6 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-update-check-interval",
     },
     SettingsRowDescriptor {
-        id: SettingsRowId::UpdateReminderInterval,
-        section: SettingsSectionId::Updates,
-        group: "Automatic updates",
-        label: "Overdue update reminders",
-        keywords: &[
-            "reminder",
-            "remind",
-            "overdue",
-            "banner",
-            "notification",
-            "frequency",
-            "interval",
-            "update",
-        ],
-        selector: "settings-row-update-reminder-interval",
-    },
-    SettingsRowDescriptor {
         id: SettingsRowId::SettingsFile,
         section: SettingsSectionId::Advanced,
         group: "Settings File",
@@ -1179,7 +1159,6 @@ mod tests {
         UpdateStatus,
         AutomaticUpdateDownloads,
         UpdateCheckInterval,
-        UpdateReminderInterval,
         SettingsFile,
         ExportSettings,
         ImportSettings,
@@ -1335,7 +1314,6 @@ mod tests {
         for (query, expected) in [
             ("accessibility", SettingsRowId::AccessibilityAccess),
             ("voice", SettingsRowId::MicrophoneAccess),
-            ("overdue", SettingsRowId::UpdateReminderInterval),
         ] {
             assert_eq!(matching_rows(query).first(), Some(&expected), "{query}");
         }

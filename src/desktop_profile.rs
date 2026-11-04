@@ -24,8 +24,6 @@ pub(crate) struct DesktopWording {
     pub(crate) reveal_file: &'static str,
     /// The remedy for an installation the updater cannot replace, as an alert title and message.
     pub(crate) read_only_update: (&'static str, &'static str),
-    /// The same remedy when the update is overdue.
-    pub(crate) overdue_read_only_update: &'static str,
 }
 
 pub(crate) trait ShortcutFormatter {
@@ -430,7 +428,6 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             system_directory_selection: "Choose Directory…",
             reveal_file: "Show in Folder",
             read_only_update: ("Move SpaceTerm", "Move SpaceTerm before updating it."),
-            overdue_read_only_update: "Update overdue. Reinstall with the install script.",
         },
         Rc::new(TestingShortcutFormatter),
         ShortcutSelection::NativeMenu,

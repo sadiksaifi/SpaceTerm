@@ -5,8 +5,11 @@ pub(crate) mod preview;
 
 pub(crate) mod machines;
 pub(crate) mod policy;
+pub(crate) mod presentation;
 pub(crate) mod push;
 pub(crate) mod release_feed;
+pub(crate) mod release_notes;
+pub(crate) mod reminders;
 
 use policy::{UpdateHistory, UpdatePreferences, UpdateStage};
 use std::rc::Rc;
@@ -371,6 +374,45 @@ pub(crate) fn now() -> u64 {
         .as_secs()
 }
 
+/// Recent Updates as every surface lists it, newest first: "penguin updated to 0.9.0 · 09:41".
+pub(crate) fn recent_lines(cx: &App) -> Vec<String> {
+    let Some(service) = cx.try_global::<UpdateService>() else {
+        return Vec::new();
+    };
+    service
+        .0
+        .read(cx)
+        .recent()
+        .iter()
+        .map(|entry| format!("{} \u{b7} {}", entry.text, recent_time(entry.at, cx)))
+        .collect()
+}
+
+/// "09:41" today, otherwise "Nov 3", in this computer's local time.
+fn recent_time(at: u64, cx: &App) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let Some(calendar) = cx.try_global::<crate::desktop_profile::DesktopPresentation>() else {
+        return "earlier".to_owned();
+    };
+    match (calendar.local_time(at), calendar.local_time(now())) {
+        (Some(at), Some(now)) if (at.year, at.month, at.day) == (now.year, now.month, now.day) => {
+            format!("{:02}:{:02}", at.hour, at.minute)
+        }
+        (Some(at), _) => format!("{} {}", MONTHS.get(at.month).copied().unwrap_or(""), at.day),
+        (None, _) => "earlier".to_owned(),
+    }
+}
+
+/// Records a Machine's finished update in Recent, which the desktop's update history keeps
+/// across relaunch.
+pub(crate) fn record_recent(text: String, cx: &mut App) {
+    if let Some(service) = cx.try_global::<UpdateService>().map(|s| s.0.clone()) {
+        service.update(cx, |updates, cx| updates.record_recent(text, cx));
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LaunchState {
     Open,
@@ -495,15 +537,17 @@ impl ApplicationUpdates {
                     this.reschedule()
                 })
             };
-            let history = adapter.load_history();
+            let saved_history = adapter.load_history();
+            let mut history = saved_history.clone();
+            history.launched(env!("SPACETERM_VERSION"), adapter.now());
             let mut model = UpdateModel::new(available);
             if available {
                 model.version = history
                     .pending_version(env!("SPACETERM_VERSION"))
                     .map(str::to_owned);
             }
-            Self {
-                saved_history: history.clone(),
+            let mut updates = Self {
+                saved_history,
                 history,
                 launch: LaunchState::Open,
                 resume_launch: None,
@@ -524,7 +568,9 @@ impl ApplicationUpdates {
                 _events: events,
                 _schedule: schedule,
                 _wake: wake,
-            }
+            };
+            updates.save_history();
+            updates
         });
         cx.set_global(UpdateService(entity));
     }
@@ -562,10 +608,7 @@ impl ApplicationUpdates {
                     .saturating_add(preferences.check_interval.seconds())
             })
             .filter(|due| *due > time);
-        let change = self
-            .history
-            .next_change(time, preferences.reminder_interval)
-            .filter(|due| *due > time);
+        let change = self.history.next_change(time).filter(|due| *due > time);
         check.into_iter().chain(change).min()
     }
 
@@ -582,8 +625,37 @@ impl ApplicationUpdates {
     pub(crate) fn reminder(&self) -> Option<UpdateStage> {
         self.reminder
     }
+    /// How old the pending release is.
+    pub(crate) fn stage(&self) -> UpdateStage {
+        self.stage
+    }
     pub(crate) fn last_check(&self) -> Option<u64> {
         self.history.last_check
+    }
+
+    /// Whether this build came by an update whose release notes the person has not opened.
+    /// Observers of [`UpdateService`] hear when this changes.
+    pub(crate) fn release_notes_unread(&self) -> bool {
+        self.history.notes_unread(env!("SPACETERM_VERSION"))
+    }
+
+    /// Finished updates of this desktop and every Machine, newest first.
+    pub(crate) fn recent(&self) -> &[policy::RecentUpdate] {
+        self.history.recent()
+    }
+
+    /// Adds a finished update to Recent, such as "penguin updated to 0.9.0".
+    pub(crate) fn record_recent(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.history.record(text, self.adapter.now());
+        self.save_history();
+        cx.notify();
+    }
+
+    /// Records that the person opened this build's release notes.
+    pub(crate) fn read_release_notes(&mut self, cx: &mut Context<Self>) {
+        self.history.read_notes(env!("SPACETERM_VERSION"));
+        self.save_history();
+        cx.notify();
     }
 
     pub(crate) fn dismiss_reminder(&mut self, cx: &mut Context<Self>) {
@@ -649,9 +721,7 @@ impl ApplicationUpdates {
         if outstanding
             && self.launch == LaunchState::Open
             && cx.active_window().is_some()
-            && self
-                .history
-                .reminder_due(time, preferences.reminder_interval)
+            && self.history.reminder_due(time)
         {
             self.reminder = Some(self.stage);
             self.history.reminded(time);
@@ -754,6 +824,25 @@ impl ApplicationUpdates {
     pub(crate) fn request_install_confirmation(&mut self, cx: &mut Context<Self>) {
         if matches!(self.model.state, UpdateState::Ready { .. }) && !self.model.confirmation_open {
             cx.emit(UpdateNotice::ReadyToInstall);
+        }
+    }
+
+    /// Installs the ready release and relaunches into it without asking: relaunching keeps every
+    /// Terminal Session running. Retries an authorized installation that a cancelled quit left.
+    pub(crate) fn relaunch(&mut self, cx: &mut Context<Self>) {
+        if let Some(token) = self.model.confirmation() {
+            self.finish_install_confirmation(token, true, cx);
+        } else {
+            self.retry_install(cx);
+        }
+    }
+
+    /// Clears a failed download or installation. The release stays pending, and the next
+    /// scheduled check tries again.
+    pub(crate) fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.model.state, UpdateState::Failed { .. }) {
+            self.model.state = UpdateState::Idle;
+            cx.notify();
         }
     }
 
@@ -1203,7 +1292,7 @@ mod tests {
     /// timer runs to the next due time measured from the wake.
     #[gpui::test]
     fn a_wake_from_sleep_runs_due_work_once_and_times_the_next(cx: &mut gpui::TestAppContext) {
-        use policy::{DAY, ReminderInterval};
+        use policy::DAY;
         const START: u64 = 1_000_000;
         let adapter = Rc::new(RecordingAdapter::available());
         let executor = cx.executor();
@@ -1269,7 +1358,7 @@ mod tests {
             "the check has not finished"
         );
         assert!(
-            !saved.reminder_due(woke, ReminderInterval::TwoHours),
+            !saved.reminder_due(woke),
             "the history retains the reminder shown on wake"
         );
         found(&adapter, cx);

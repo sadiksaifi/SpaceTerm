@@ -23,39 +23,17 @@ impl CheckInterval {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ReminderInterval {
-    #[default]
-    TwoHours,
-    FourHours,
-    EightHours,
-    Daily,
-}
-impl ReminderInterval {
-    pub(crate) fn seconds(self) -> u64 {
-        match self {
-            Self::TwoHours => 7200,
-            Self::FourHours => 4 * 3600,
-            Self::EightHours => 8 * 3600,
-            Self::Daily => DAY,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct UpdatePreferences {
     pub(crate) automatic_downloads: bool,
     pub(crate) check_interval: CheckInterval,
-    pub(crate) reminder_interval: ReminderInterval,
 }
 impl Default for UpdatePreferences {
     fn default() -> Self {
         Self {
             automatic_downloads: true,
             check_interval: CheckInterval::Daily,
-            reminder_interval: ReminderInterval::TwoHours,
         }
     }
 }
@@ -80,6 +58,26 @@ pub(crate) struct UpdateHistory {
     last_reminder: Option<u64>,
     reminder_stage: UpdateStage,
     pub(crate) last_check: Option<u64>,
+    /// The newest version whose release notes the person has read. A first install has read its
+    /// own.
+    notes_read: Option<String>,
+    /// The version the last launch ran, so the next launch can tell it came by an update.
+    launched: Option<String>,
+    /// Finished updates, newest first, at most [`RECENT_LIMIT`].
+    recent: Vec<RecentUpdate>,
+}
+
+/// The most entries Recent Updates keeps.
+pub(crate) const RECENT_LIMIT: usize = 4;
+
+/// One finished update, as Recent Updates lists it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecentUpdate {
+    /// "SpaceTerm updated to 0.9.0" or "penguin updated to 0.9.0".
+    pub(crate) text: String,
+    /// Unix seconds.
+    pub(crate) at: u64,
 }
 impl UpdateHistory {
     pub(crate) fn observe(&mut self, installed: &str, version: &str, published_at: u64, now: u64) {
@@ -97,10 +95,7 @@ impl UpdateHistory {
             .and_then(stable_version)
             .is_some_and(|previous| installed_parts.is_some_and(|installed| installed >= previous));
         if settled {
-            *self = Self {
-                last_check: self.last_check,
-                ..Self::default()
-            };
+            self.clear();
         }
         let publication = if published_at == 0 {
             now
@@ -138,7 +133,9 @@ impl UpdateHistory {
         }
     }
 
-    pub(crate) fn reminder_due(&mut self, now: u64, interval: ReminderInterval) -> bool {
+    /// Whether the daily reminder is due: the release is a day old or more, and a day has passed
+    /// since the last reminder or the stage changed since it.
+    pub(crate) fn reminder_due(&mut self, now: u64) -> bool {
         let stage = self.stage(now);
         if stage == UpdateStage::Optional {
             return false;
@@ -146,31 +143,21 @@ impl UpdateHistory {
         if stage != self.reminder_stage {
             return true;
         }
-        let interval = if stage == UpdateStage::Warning {
-            DAY
-        } else {
-            interval.seconds()
-        };
         self.last_reminder
-            .is_none_or(|last| self.high_water.saturating_sub(last) >= interval)
+            .is_none_or(|last| self.high_water.saturating_sub(last) >= DAY)
     }
 
     /// The first time after `now` at which [`Self::stage`] or [`Self::reminder_due`] changes:
-    /// the release turning one or two days old, or the reminder interval ending. A reminder that
-    /// is already due changes only when the person sees it, so it adds no time.
-    pub(crate) fn next_change(&mut self, now: u64, interval: ReminderInterval) -> Option<u64> {
+    /// the release turning one or two days old, or a day passing since the last reminder. A
+    /// reminder that is already due changes only when the person sees it, so it adds no time.
+    pub(crate) fn next_change(&mut self, now: u64) -> Option<u64> {
         let stage = self.stage(now);
         self.version.as_ref()?;
         // Both rules read the high-water time, which follows the clock once it passes the mark.
         let ahead = |moment: u64| (moment > self.high_water).then_some(moment);
         let reminder = match self.last_reminder {
             Some(last) if stage != UpdateStage::Optional && stage == self.reminder_stage => {
-                let gap = if stage == UpdateStage::Warning {
-                    DAY
-                } else {
-                    interval.seconds()
-                };
-                ahead(last.saturating_add(gap))
+                ahead(last.saturating_add(DAY))
             }
             _ => None,
         };
@@ -189,17 +176,168 @@ impl UpdateHistory {
         self.last_reminder = Some(self.high_water);
     }
 
+    /// Forgets the pending release. The last check, the notes read, the last launch and Recent
+    /// stay.
     pub(crate) fn clear(&mut self) {
         *self = Self {
             last_check: self.last_check,
+            notes_read: self.notes_read.take(),
+            launched: self.launched.take(),
+            recent: std::mem::take(&mut self.recent),
             ..Self::default()
         };
+    }
+
+    /// Records that this launch runs `installed` at `now`. The first launch ever has nothing new
+    /// to read. A launch of a newer version than the last one finished an update, so Recent
+    /// lists it.
+    pub(crate) fn launched(&mut self, installed: &str, now: u64) {
+        self.notes_read.get_or_insert_with(|| installed.to_owned());
+        if self
+            .launched
+            .as_deref()
+            .is_some_and(|previous| newer(installed, previous))
+        {
+            self.record(format!("SpaceTerm updated to {installed}"), now);
+        }
+        self.launched = Some(installed.to_owned());
+    }
+
+    /// Adds a finished update to Recent.
+    pub(crate) fn record(&mut self, text: impl Into<String>, at: u64) {
+        self.recent.insert(
+            0,
+            RecentUpdate {
+                text: text.into(),
+                at,
+            },
+        );
+        self.recent.truncate(RECENT_LIMIT);
+    }
+
+    /// Newest first.
+    pub(crate) fn recent(&self) -> &[RecentUpdate] {
+        &self.recent
+    }
+
+    /// Whether `installed` is newer than every version whose notes the person has opened.
+    pub(crate) fn notes_unread(&self, installed: &str) -> bool {
+        self.notes_read
+            .as_deref()
+            .is_some_and(|read| newer(installed, read))
+    }
+
+    /// Records that the person opened the notes of `installed`. Older notes read later leave the
+    /// newer record in place.
+    pub(crate) fn read_notes(&mut self, installed: &str) {
+        if self
+            .notes_read
+            .as_deref()
+            .is_none_or(|read| newer(installed, read))
+        {
+            self.notes_read = Some(installed.to_owned());
+        }
+    }
+}
+
+/// Whether `version` follows `than`. Development versions have no order, so any other one is newer.
+fn newer(version: &str, than: &str) -> bool {
+    match (stable_version(version), stable_version(than)) {
+        (Some(version), Some(than)) => version > than,
+        _ => version != than,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_wait_for_the_person_after_an_update_but_not_after_a_first_install() {
+        let mut history = UpdateHistory::default();
+        history.launched("0.8.0", 0);
+        assert!(
+            !history.notes_unread("0.8.0"),
+            "a first install has nothing new"
+        );
+        history.observe("0.8.0", "0.9.0", 1_000, 1_000);
+        let bytes = serde_json::to_vec(&history).unwrap();
+        let mut updated: UpdateHistory = serde_json::from_slice(&bytes).unwrap();
+        updated.launched("0.9.0", 0);
+        assert!(updated.notes_unread("0.9.0"));
+        updated.observe("0.9.0", "0.9.1", 2_000, 2_000);
+        updated.clear();
+        assert!(
+            updated.notes_unread("0.9.0"),
+            "settling or clearing the pending release keeps the notes waiting"
+        );
+        updated.read_notes("0.9.0");
+        updated.launched("0.9.0", 0);
+        assert!(!updated.notes_unread("0.9.0"));
+    }
+
+    #[test]
+    fn recent_keeps_the_newest_finished_updates_across_relaunch() {
+        let mut history = UpdateHistory::default();
+        history.launched("0.8.0", 100);
+        assert!(
+            history.recent().is_empty(),
+            "a first install updated nothing"
+        );
+        history.launched("0.8.0", 200);
+        assert!(
+            history.recent().is_empty(),
+            "relaunching the same version updated nothing"
+        );
+        history.record("penguin updated to 0.9.0", 300);
+        history.launched("0.9.0", 400);
+        let bytes = serde_json::to_vec(&history).unwrap();
+        let mut relaunched: UpdateHistory = serde_json::from_slice(&bytes).unwrap();
+        relaunched.clear();
+        let texts = |history: &UpdateHistory| -> Vec<(String, u64)> {
+            history
+                .recent()
+                .iter()
+                .map(|entry| (entry.text.clone(), entry.at))
+                .collect()
+        };
+        assert_eq!(
+            texts(&relaunched),
+            [
+                ("SpaceTerm updated to 0.9.0".to_owned(), 400),
+                ("penguin updated to 0.9.0".to_owned(), 300),
+            ]
+        );
+        for at in 0..RECENT_LIMIT as u64 {
+            relaunched.record(format!("build-box updated to 0.9.{at}"), 500 + at);
+        }
+        assert_eq!(relaunched.recent().len(), RECENT_LIMIT);
+        assert_eq!(relaunched.recent()[0].text, "build-box updated to 0.9.3");
+        // Going back is no update.
+        relaunched.launched("0.8.0", 600);
+        assert_eq!(relaunched.recent()[0].text, "build-box updated to 0.9.3");
+    }
+
+    #[test]
+    fn going_back_to_an_older_version_revives_no_notes() {
+        let mut history = UpdateHistory::default();
+        history.launched("0.8.0", 0);
+        history.launched("0.9.0", 0);
+        history.read_notes("0.9.0");
+        history.launched("0.8.0", 0);
+        assert!(
+            !history.notes_unread("0.8.0"),
+            "0.8.0 is older than the notes read"
+        );
+        history.read_notes("0.8.0");
+        history.launched("0.9.0", 0);
+        assert!(
+            !history.notes_unread("0.9.0"),
+            "opening older notes keeps newer ones read"
+        );
+        history.launched("0.10.0", 0);
+        assert!(history.notes_unread("0.10.0"));
+    }
 
     #[test]
     fn deadlines_survive_newer_releases_restarts_and_clock_rollback() {
@@ -222,46 +360,42 @@ mod tests {
     /// differs, so a scheduler that waits for it misses nothing and wakes for nothing.
     #[test]
     fn the_next_change_is_the_first_moment_the_stage_or_a_reminder_changes() {
-        let interval = ReminderInterval::TwoHours;
         let mut history = UpdateHistory::default();
-        assert_eq!(
-            history.next_change(1_000, interval),
-            None,
-            "no release, no change"
-        );
+        assert_eq!(history.next_change(1_000), None, "no release, no change");
         history.observe("0.1.0", "0.1.1", 1_000, 1_000);
         let warning = 1_000 + DAY;
-        assert_eq!(history.next_change(1_001, interval), Some(warning));
-        assert!(!history.clone().reminder_due(warning - 1, interval));
-        assert!(history.clone().reminder_due(warning, interval));
+        assert_eq!(history.next_change(1_001), Some(warning));
+        assert!(!history.clone().reminder_due(warning - 1));
+        assert!(history.clone().reminder_due(warning));
         assert_eq!(
-            history.next_change(warning, interval),
+            history.next_change(warning),
             Some(1_000 + 2 * DAY),
             "a due reminder waits for the person, not for time"
         );
         history.reminded(warning);
         let overdue = 1_000 + 2 * DAY;
-        assert_eq!(history.next_change(warning, interval), Some(overdue));
+        assert_eq!(history.next_change(warning), Some(overdue));
         history.reminded(overdue);
-        let again = overdue + interval.seconds();
-        assert_eq!(history.next_change(overdue, interval), Some(again));
-        assert!(!history.clone().reminder_due(again - 1, interval));
-        assert!(history.clone().reminder_due(again, interval));
+        let again = overdue + DAY;
+        assert_eq!(history.next_change(overdue), Some(again));
+        assert!(!history.clone().reminder_due(again - 1));
+        assert!(history.clone().reminder_due(again));
         // A clock set back changes nothing until it passes the high-water time again.
-        assert_eq!(history.next_change(10, interval), Some(again));
+        assert_eq!(history.next_change(10), Some(again));
     }
 
     #[test]
-    fn reminders_escalate_once_and_respect_the_retained_interval() {
+    fn reminders_start_after_one_day_and_repeat_daily() {
         let mut history = UpdateHistory::default();
         history.observe("0.1.0", "0.1.1", 1_000, 1_000);
-        assert!(!history.reminder_due(1_001, ReminderInterval::TwoHours));
-        assert!(history.reminder_due(87_400, ReminderInterval::TwoHours));
+        assert!(!history.reminder_due(1_001));
+        assert!(history.reminder_due(87_400));
         history.reminded(87_400);
-        assert!(!history.reminder_due(100_000, ReminderInterval::TwoHours));
-        assert!(history.reminder_due(173_800, ReminderInterval::TwoHours));
+        assert!(!history.reminder_due(100_000));
+        // The stage turns overdue at two days, which reminds at once.
+        assert!(history.reminder_due(173_800));
         history.reminded(173_800);
-        assert!(!history.reminder_due(180_999, ReminderInterval::TwoHours));
-        assert!(history.reminder_due(181_000, ReminderInterval::TwoHours));
+        assert!(!history.reminder_due(173_800 + DAY - 1));
+        assert!(history.reminder_due(173_800 + DAY));
     }
 }

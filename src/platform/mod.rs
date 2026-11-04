@@ -603,13 +603,13 @@ mod linux_service_watch;
 #[cfg(feature = "desktop")]
 mod macos_service_watch;
 
-/// The watch the status item learns of local service changes through: kqueue on macOS and
+/// The watch Machine updates learn of local service changes through: kqueue on macOS and
 /// inotify with a pidfd on Linux.
 #[cfg(feature = "desktop")]
 pub(crate) fn service_watch(
     directories: &[std::path::PathBuf],
     process: Option<u32>,
-) -> Option<Box<dyn crate::status_menu::service_changes::Watch>> {
+) -> Option<Box<dyn crate::updates::machines::live::service_changes::Watch>> {
     #[cfg(target_os = "macos")]
     return macos_service_watch::start(directories, process);
     #[cfg(target_os = "linux")]

@@ -1,24 +1,15 @@
 //! The client's status-area item over D-Bus: a StatusNotifierItem with its com.canonical.dbusmenu
-//! menu, served by the client process beside its windows. Stop, Restart, and startup
-//! authorization open the server control window in this process, without a Workspace Window.
+//! menu, served by the client process beside its windows. The menu is plain, as AppIndicator
+//! menus are: status lines, actions that name their Machine, SpaceTerm Settings… and Quit.
 //!
 //! Without a status-area host the item stays on the bus and appears once a host starts. Meanwhile
 //! the client reports the item unavailable, so closing its last window exits it rather than
 //! leaving it unreachable. `linux_status_host` decides whether a host shows it.
 use crate::status_menu::{
-    self,
-    model::{Command, Item, Presentation, State},
-    worker::{Event, Request, Worker},
+    self, Alert, StatusHost, StatusMenu,
+    model::{Command, FlatRow, Menu as StatusMenuModel},
 };
-use crate::ui::core_control_window::{self, Operation, Step};
-use gpui::{App, AppContext as _};
-use spaceterm_core::{
-    CoreError,
-    service::{
-        Service,
-        control::{Action, Controller},
-    },
-};
+use gpui::{App, PromptButton, PromptLevel};
 use std::{
     collections::HashMap,
     rc::Rc,
@@ -34,17 +25,16 @@ const ITEM_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
 
 enum Message {
-    Worker(Event),
     Command(Command),
     /// Whether a status-area host now shows the item.
     Hosted(bool),
-    /// The person opened the menu.
-    Refresh,
 }
 
 /// What the bus objects publish. The client replaces it after each change.
+#[derive(Default)]
 struct Published {
-    presentation: Presentation,
+    summary: String,
+    rows: Vec<FlatRow>,
     revision: u32,
 }
 
@@ -57,17 +47,12 @@ fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Published> {
 /// Serves this build's status item for as long as the client runs.
 pub(crate) fn install(
     cx: &mut App,
-    window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
+    _: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
 ) {
     let identity = crate::application_identity::ApplicationIdentity::current();
-    let Ok(service) = Service::for_identity(identity.directory_name()) else {
-        return;
-    };
-    let offered = service.clone();
-    let controller = Controller::new(service);
     let shared = Arc::new(Mutex::new(Published {
-        presentation: Presentation::of(identity, State::default()),
         revision: 1,
+        ..Published::default()
     }));
     let (sender, messages) = async_channel::unbounded();
     let connection = match Builder::session()
@@ -96,42 +81,20 @@ pub(crate) fn install(
         // Without a session bus there is no status area; closing the last window exits.
         Err(_) => return,
     };
-    let worker = {
-        let sender = sender.clone();
-        let update_offered = move || crate::ui::settings_window::update_offered(&offered);
-        match Worker::spawn(
-            controller.clone(),
-            crate::platform::service_watch,
-            update_offered,
-            move |event| {
-                let _ = sender.send_blocking(Message::Worker(event));
-            },
-        ) {
-            Ok(worker) => worker,
-            Err(_) => return,
-        }
-    };
     {
         let sender = sender.clone();
         super::linux_status_host::observe(&connection, move |hosted| {
             let _ = sender.send_blocking(Message::Hosted(hosted));
         });
     }
-    worker.send(Request::Refresh);
-    crate::status_menu::follow_local_core(worker.changes(), cx);
-    let item = Rc::new(LinuxStatusItem {
-        identity,
-        controller,
-        worker,
-        connection,
-        shared,
-        window_movement,
-        state: std::cell::Cell::new(State::default()),
-    });
+    let item = Rc::new(LinuxStatusItem { connection, shared });
+    let menu = StatusMenu::install(item, cx);
     cx.spawn(async move |cx| {
         while let Ok(message) = messages.recv().await {
-            let item = Rc::clone(&item);
-            cx.update(|cx| item.handle(message, cx));
+            cx.update(|cx| match message {
+                Message::Hosted(hosted) => status_menu::set_available(cx, hosted),
+                Message::Command(command) => menu.perform(command, cx),
+            });
         }
     })
     .detach();
@@ -154,148 +117,55 @@ fn icon(identity: &str) -> String {
 }
 
 struct LinuxStatusItem {
-    identity: crate::application_identity::ApplicationIdentity,
-    controller: Controller,
-    worker: Worker,
     connection: Connection,
     shared: Shared,
-    window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
-    state: std::cell::Cell<State>,
 }
 
-impl LinuxStatusItem {
-    fn handle(self: Rc<Self>, message: Message, cx: &mut App) {
-        match message {
-            Message::Refresh => self.worker.send(Request::Refresh),
-            Message::Hosted(hosted) => status_menu::set_available(cx, hosted),
-            Message::Worker(Event::Status(status)) => self.change(|state| {
-                state.status = Some(status);
-            }),
-            Message::Worker(Event::Update(update)) => self.change(|state| {
-                state.update = update;
-            }),
-            Message::Worker(Event::Finished(command, result)) => {
-                self.change(|state| {
-                    state.working = None;
-                    if let Ok(status) = result {
-                        state.status = Some(Ok(status));
-                    }
-                });
-                status_menu::end_operation(cx);
-                // Only the server control window explains and requests startup
-                // authorization, and it reports every other refusal as well.
-                let operation = match command {
-                    Command::Stop => Operation::Stop,
-                    Command::Restart => Operation::Restart,
-                    _ => Operation::Start,
-                };
-                match result {
-                    Ok(status) => status_menu::operation_succeeded(cx, status),
-                    Err(CoreError::AuthorizationRequired) => {
-                        self.open_control(operation, Step::Authorize, cx);
-                    }
-                    Err(error) => self.open_control(operation, Step::Failed(error), cx),
-                }
-            }
-            Message::Command(command) => {
-                let offered = {
-                    let published = lock(&self.shared);
-                    std::iter::once(&published.presentation.open)
-                        .chain(&published.presentation.controls)
-                        .chain(&published.presentation.update)
-                        .chain(std::iter::once(&published.presentation.quit))
-                        .find(|item| item.command == command)
-                        .is_some_and(|item| item.enabled)
-                };
-                // A host can deliver a click for a row that changed after it drew the menu.
-                if !offered {
-                    return;
-                }
-                match command {
-                    Command::Open => crate::app::activate_default_window(cx, None),
-                    Command::Start => {
-                        self.change(|state| state.working = Some(Command::Start));
-                        status_menu::begin_operation(cx);
-                        self.worker.send(Request::Start);
-                    }
-                    Command::Stop => self.prepare(Operation::Stop, Action::Stop, cx),
-                    Command::Restart => self.prepare(Operation::Restart, Action::Restart, cx),
-                    // Settings owns the one journey, which reads the server again and asks first.
-                    Command::Update => {
-                        crate::app::leave_menu_only(cx);
-                        crate::ui::settings_window::open_core_update(cx);
-                    }
-                    // The client's own quit policy decides, including its confirmation.
-                    Command::Quit => cx.dispatch_action(&crate::app::QuitApplication),
-                }
-            }
-        }
+impl StatusHost for LinuxStatusItem {
+    fn render(&self, presentation: &StatusMenuModel) {
+        publish(&self.connection, &self.shared, presentation);
     }
 
-    /// Applies one change to the item's state and publishes the result.
-    fn change(&self, change: impl FnOnce(&mut State)) {
-        let mut state = self.state.get();
-        change(&mut state);
-        self.state.set(state);
-        self.publish();
-    }
-
-    /// Reads the service off the event thread, then asks in the server control window.
-    fn prepare(self: &Rc<Self>, operation: Operation, action: Action, cx: &App) {
-        self.set_asking(true);
-        let controller = self.controller.clone();
-        let prepared = cx.background_spawn(async move { controller.prepare(action) });
-        let item = Rc::clone(self);
-        cx.spawn(async move |cx| {
-            let step = match prepared.await {
-                Ok(confirmation) => Step::Ask(confirmation),
-                Err(error) => Step::Failed(error),
-            };
-            cx.update(|cx| item.open_control(operation, step, cx));
+    /// A status area has no alerts of its own, so the alert opens in the front Workspace window.
+    fn alert(&self, alert: Alert, answered: Box<dyn FnOnce(bool) + Send>, cx: &mut App) {
+        crate::app::activate_default_window(cx, None);
+        let Some(handle) = crate::ui::updates::front_workspace_window(cx) else {
+            return answered(false);
+        };
+        let (level, buttons) = match &alert.confirm {
+            Some(label) => (
+                PromptLevel::Critical,
+                vec![
+                    PromptButton::cancel("Cancel"),
+                    PromptButton::ok(label.clone()),
+                ],
+            ),
+            None => (PromptLevel::Info, vec![PromptButton::ok("OK")]),
+        };
+        let confirming = alert.confirm.is_some();
+        let answer = handle.update(cx, |_, window, cx| {
+            window.prompt(level, &alert.title, Some(&alert.message), &buttons, cx)
+        });
+        let Ok(answer) = answer else {
+            return answered(false);
+        };
+        cx.spawn(async move |_| {
+            let chosen = answer.await.ok();
+            answered(confirming && chosen == Some(1));
         })
         .detach();
     }
-
-    fn open_control(self: &Rc<Self>, operation: Operation, step: Step, cx: &mut App) {
-        self.set_asking(true);
-        let item = Rc::clone(self);
-        let opened = core_control_window::open(
-            self.controller.clone(),
-            operation,
-            step,
-            Rc::clone(&self.window_movement),
-            Box::new(move |_: &mut App| {
-                item.set_asking(false);
-                item.worker.send(Request::Refresh);
-            }),
-            cx,
-        );
-        if opened.is_err() {
-            self.set_asking(false);
-        }
-    }
-
-    /// A server control window opened or closed.
-    fn set_asking(&self, asking: bool) {
-        self.change(|state| state.asking = asking);
-    }
-
-    fn publish(&self) {
-        publish(
-            &self.connection,
-            &self.shared,
-            Presentation::of(self.identity, self.state.get()),
-        );
-    }
 }
 
-fn publish(connection: &Connection, shared: &Shared, presentation: Presentation) {
+fn publish(connection: &Connection, shared: &Shared, presentation: &StatusMenuModel) {
+    let rows = presentation.flat();
     let revision = {
         let mut published = lock(shared);
-        if published.presentation == presentation {
+        if published.rows == rows && published.summary == presentation.summary {
             return;
         }
-        published.presentation = presentation;
+        published.rows = rows;
+        published.summary.clone_from(&presentation.summary);
         published.revision = published.revision.wrapping_add(1);
         published.revision
     };
@@ -335,10 +205,10 @@ impl StatusItem {
 
     #[zbus(property)]
     fn title(&self) -> String {
-        lock(&self.shared).presentation.summary.clone()
+        lock(&self.shared).summary.clone()
     }
 
-    /// Always Active: some hosts move Passive items out of sight, and a stopped server is still
+    /// Always Active: some hosts move Passive items out of sight, and a stopped Core is still
     /// something the person controls here.
     #[zbus(property)]
     fn status(&self) -> &str {
@@ -372,16 +242,11 @@ impl StatusItem {
 
     #[zbus(property)]
     fn tool_tip(&self) -> (String, Pixmaps, String, String) {
-        let published = lock(&self.shared);
         (
             self.icon_name(),
             Vec::new(),
-            published.presentation.summary.clone(),
-            published
-                .presentation
-                .explanation
-                .clone()
-                .unwrap_or_default(),
+            lock(&self.shared).summary.clone(),
+            String::new(),
         )
     }
 
@@ -417,30 +282,6 @@ impl StatusItem {
 /// One dbusmenu node: its id, its properties, and its children as variants of the same shape.
 type Node = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
 
-/// Row ids. 0 is the root.
-const HEADER: i32 = 1;
-const STATE: i32 = 2;
-const EXPLANATION: i32 = 3;
-const OPEN: i32 = 5;
-const START: i32 = 7;
-const STOP: i32 = 8;
-const RESTART: i32 = 9;
-const QUIT: i32 = 11;
-const UPDATE: i32 = 12;
-const SEPARATORS: [i32; 3] = [4, 6, 10];
-
-fn command(id: i32) -> Option<Command> {
-    Some(match id {
-        OPEN => Command::Open,
-        START => Command::Start,
-        STOP => Command::Stop,
-        RESTART => Command::Restart,
-        UPDATE => Command::Update,
-        QUIT => Command::Quit,
-        _ => return None,
-    })
-}
-
 struct Menu {
     shared: Shared,
     sender: async_channel::Sender<Message>,
@@ -451,38 +292,30 @@ impl Menu {
         let _ = self.sender.try_send(message);
     }
 
+    /// Each row with its id, the row's index plus one. 0 is the root.
     fn rows(&self) -> Vec<(i32, HashMap<String, OwnedValue>)> {
         let published = lock(&self.shared);
-        let presentation = &published.presentation;
-        let mut rows = vec![
-            (HEADER, label(&presentation.core, false)),
-            (STATE, label(presentation.state, false)),
-        ];
-        if let Some(explanation) = &presentation.explanation {
-            rows.push((EXPLANATION, label(explanation, false)));
+        published
+            .rows
+            .iter()
+            .zip(1..)
+            .map(|(row, id)| {
+                let properties = match row {
+                    FlatRow::Text(text) => label(text, false),
+                    FlatRow::Separator => separator(),
+                    FlatRow::Action { title, .. } => label(title, true),
+                };
+                (id, properties)
+            })
+            .collect()
+    }
+
+    fn command(&self, id: i32) -> Option<Command> {
+        let index = usize::try_from(id).ok()?.checked_sub(1)?;
+        match lock(&self.shared).rows.get(index)? {
+            FlatRow::Action { command, .. } => Some(command.clone()),
+            FlatRow::Text(_) | FlatRow::Separator => None,
         }
-        let item = |item: &Item| label(&item.label, item.enabled);
-        let [start, stop, restart] = &presentation.controls;
-        rows.extend([
-            (SEPARATORS[0], separator()),
-            (OPEN, item(&presentation.open)),
-            (SEPARATORS[1], separator()),
-            (START, item(start)),
-            (STOP, item(stop)),
-            (RESTART, item(restart)),
-        ]);
-        // Shown only while a verified build is offered.
-        rows.extend(
-            presentation
-                .update
-                .as_ref()
-                .map(|update| (UPDATE, item(update))),
-        );
-        rows.extend([
-            (SEPARATORS[2], separator()),
-            (QUIT, item(&presentation.quit)),
-        ]);
-        rows
     }
 }
 
@@ -575,7 +408,7 @@ impl Menu {
 
     fn event(&self, id: i32, event_id: &str, _data: OwnedValue, _timestamp: u32) {
         if event_id == "clicked"
-            && let Some(command) = command(id)
+            && let Some(command) = self.command(id)
         {
             self.send(Message::Command(command));
         }
@@ -588,18 +421,12 @@ impl Menu {
         Vec::new()
     }
 
-    /// Opening the menu reads the current state. Reading never changes the service.
-    fn about_to_show(&self, id: i32) -> bool {
-        if id == 0 {
-            self.send(Message::Refresh);
-        }
+    /// The menu follows every change as it happens, so opening it needs nothing new.
+    fn about_to_show(&self, _id: i32) -> bool {
         false
     }
 
-    fn about_to_show_group(&self, ids: Vec<i32>) -> (Vec<i32>, Vec<i32>) {
-        if ids.contains(&0) {
-            self.send(Message::Refresh);
-        }
+    fn about_to_show_group(&self, _ids: Vec<i32>) -> (Vec<i32>, Vec<i32>) {
         (Vec::new(), Vec::new())
     }
 

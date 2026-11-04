@@ -2,7 +2,7 @@ use super::application_menu::{
     ApplicationMenuAdapter, ApplicationMenuCommand, ApplicationMenuError, MenuCommandHandler,
 };
 use crate::application_identity::ApplicationIdentity;
-use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, RELEASE_NOTES_TITLE};
+use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, WHATS_NEW_TITLE};
 #[cfg(test)]
 use crate::ui::{
     ChooseWorkspace, ClosePane, CloseTab, ExportTerminalDiagnostics, KillWorkspace, NewTab,
@@ -337,16 +337,22 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "Help",
         submenu: None,
-        item: RELEASE_NOTES_TITLE,
-        symbol: "doc.text",
-    },
-    MenuItemIcon {
-        menu: "Help",
-        submenu: None,
         item: "Export Terminal Diagnostics…",
         symbol: "doc.text.magnifyingglass",
     },
 ];
+
+/// What's New exists only in a build that carries release notes.
+const WHATS_NEW_MENU_ITEM_ICONS: &[MenuItemIcon] = if cfg!(spaceterm_release_notes) {
+    &[MenuItemIcon {
+        menu: "Help",
+        submenu: None,
+        item: WHATS_NEW_TITLE,
+        symbol: "sparkles",
+    }]
+} else {
+    &[]
+};
 
 /// The Develop menu exists only in SpaceTerm Development.
 const DEVELOP_MENU_ITEM_ICONS: &[MenuItemIcon] = if cfg!(feature = "developer-tools") {
@@ -442,7 +448,11 @@ impl<I> DeferredSymbolImages<I> {
                 symbol,
             ));
         }
-        for decoration in MENU_ITEM_ICONS.iter().chain(DEVELOP_MENU_ITEM_ICONS) {
+        for decoration in MENU_ITEM_ICONS
+            .iter()
+            .chain(WHATS_NEW_MENU_ITEM_ICONS)
+            .chain(DEVELOP_MENU_ITEM_ICONS)
+        {
             pending.push((
                 find(decoration).ok_or(ApplicationMenuError::Unavailable)?,
                 decoration.symbol,
@@ -1122,6 +1132,7 @@ mod tests {
     fn icon_mapping_covers_every_custom_menu_item_path() {
         let mut decorated = MENU_ITEM_ICONS
             .iter()
+            .chain(WHATS_NEW_MENU_ITEM_ICONS)
             .chain(DEVELOP_MENU_ITEM_ICONS)
             .map(|decoration| {
                 (
@@ -1292,14 +1303,12 @@ mod tests {
                 ]
                 .map(str::to_owned)
                 .to_vec(),
-                [
-                    "SpaceTerm Help",
-                    "|",
-                    "Release Notes",
-                    "Export Terminal Diagnostics…"
-                ]
-                .map(str::to_owned)
-                .to_vec(),
+                ["SpaceTerm Help", "|"]
+                    .into_iter()
+                    .chain(cfg!(spaceterm_release_notes).then_some(WHATS_NEW_TITLE))
+                    .chain(["Export Terminal Diagnostics…"])
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
             )
         );
     }

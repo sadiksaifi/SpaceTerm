@@ -3,10 +3,6 @@
 //! uploads over SSH. It verifies each once, offers it to every Machine whose Core would install
 //! it, and streams it over that Core's service lane. The Core verifies it again before it
 //! installs it beside the running version, which ends nothing.
-#![allow(
-    dead_code,
-    reason = "#799 composes the push into its Machine updates adapter"
-)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

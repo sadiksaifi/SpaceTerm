@@ -652,15 +652,6 @@
             "daily"
           ],
           "default": "daily"
-        },
-        "reminder_interval": {
-          "enum": [
-            "two_hours",
-            "four_hours",
-            "eight_hours",
-            "daily"
-          ],
-          "default": "two_hours"
         }
       }
     },

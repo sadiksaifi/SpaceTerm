@@ -24,28 +24,6 @@ use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{NativeServiceOrigin, NativeServiceStatus, SelectionCopy};
 use crate::ui::{ChooseWorkspace, NewWorkspace, WorkspaceManager};
 
-struct NativeLocalUpdates;
-
-impl crate::ui::updates::LocalUpdateObservation for NativeLocalUpdates {
-    fn observe(&self) -> crate::ui::updates::LocalUpdateFacts {
-        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-        let service = spaceterm_core::service::Service::for_identity(identity);
-        let core = service
-            .as_ref()
-            .ok()
-            .and_then(|service| service.passive_machine_id().ok().flatten());
-        let update = if crate::local_startup::owned_foreground() {
-            Ok(("Development SpaceTerm Core".into(), false))
-        } else {
-            service
-                .as_ref()
-                .map_err(|error| *error)
-                .and_then(crate::ui::settings_window::core_update::passive_update)
-        };
-        crate::ui::updates::LocalUpdateFacts { core, update }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StartupDependenciesError {
     #[error("Home directory unavailable")]
@@ -496,8 +474,6 @@ enum ApplicationQuitCoordinatorState {
     SessionEnding,
     WaitingForSettings,
     WaitingForUpdater,
-    /// Waiting for a Stop or Restart the status item admitted.
-    WaitingForOperations,
 }
 
 struct ApplicationQuitCoordinator {
@@ -719,22 +695,6 @@ impl ApplicationQuitCoordinator {
             }),
         ) {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForUpdater;
-            return;
-        }
-        // An admitted Stop or Restart finishes before the client exits. The client stays
-        // usable meanwhile, so the wait ends with the same checks and save as this one.
-        if crate::status_menu::operations_running(cx) {
-            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForOperations;
-            let coordinator = Rc::clone(self);
-            crate::status_menu::after_operations(cx, move |cx| {
-                if *coordinator.state.borrow()
-                    != ApplicationQuitCoordinatorState::WaitingForOperations
-                {
-                    return;
-                }
-                *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                coordinator.wait_for_settings(Some(current), cx);
-            });
             return;
         }
         if let Some(adapter) = self.adapter.upgrade() {
@@ -1024,7 +984,6 @@ pub(crate) fn open(
         if let Some(placement) = placement {
             placement.finish(window);
         }
-        crate::ui::updates::install_local_updates(Arc::new(NativeLocalUpdates), cx);
         // Both enrollment methods publish into this paired connection registry.
         crate::ui::direct_machines::install(direct_machines.clone(), cx);
         // Paired server cards stop, restart and update each server over its service lane.
@@ -1153,7 +1112,6 @@ fn close_all_windows(cx: &mut App) {
                 manager.request_window_close(window, cx);
             });
         } else if !crate::ui::settings_window::request_window_close(window, cx)
-            && !crate::ui::core_control_window::request_window_close(window, cx)
             && !crate::ui::updates::request_launch_window_close(window, cx)
         {
             let _ = window.update(cx, |_, window, _| window.remove_window());
@@ -1310,6 +1268,10 @@ pub(crate) fn window_application_id() -> Option<String> {
 #[derive(Clone)]
 pub(crate) struct ApplicationCapabilities {
     pub(crate) updates: Rc<dyn crate::updates::UpdateAdapter>,
+    /// Reports each Machine's SpaceTerm Core updates. None installs no Machine updates.
+    pub(crate) machine_updates: Option<Rc<dyn crate::updates::machines::MachineUpdatesAdapter>>,
+    /// Shows the daily overdue update notifications. None shows none.
+    pub(crate) update_reminders: Option<Rc<dyn crate::updates::reminders::UpdateReminderAdapter>>,
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
     pub(crate) desktop_events: Rc<dyn crate::platform::desktop_events::DesktopEventAdapter>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
@@ -1572,6 +1534,12 @@ pub(crate) fn initialize_application(
     cx.set_global(host.window_chrome.clone());
     host.window_chrome.install_controls(cx);
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
+    if let Some(machines) = &host.adapters.machine_updates {
+        crate::updates::machines::store::MachineUpdates::install(Rc::clone(machines), cx);
+    }
+    if let Some(reminders) = &host.adapters.update_reminders {
+        crate::updates::reminders::UpdateReminders::install(Rc::clone(reminders), cx);
+    }
     cx.set_global(SelectedFileAccess(Arc::clone(
         &host.adapters.selected_files,
     )));
@@ -2257,26 +2225,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn quitting_waits_for_an_admitted_core_operation(cx: &mut TestAppContext) {
-        let quit = Rc::new(
-            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
-        );
-        cx.update(crate::ui::init).unwrap();
-        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
-        cx.update(crate::status_menu::begin_operation);
-        cx.update(|cx| cx.dispatch_action(&QuitApplication));
-        cx.run_until_parked();
-        assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("Quit");
-        cx.run_until_parked();
-        assert_eq!(quit.confirmations(), 0, "a running Stop is never cut off");
-
-        cx.update(crate::status_menu::end_operation);
-        cx.run_until_parked();
-        assert_eq!(quit.confirmations(), 1);
-    }
-
-    #[gpui::test]
     fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
         cx.update(crate::ui::init).expect("UI initialization");
         cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
@@ -2467,6 +2415,8 @@ mod runtime_tests {
             home_directory: std::env::temp_dir(),
             adapters: ApplicationCapabilities {
                 updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
+                machine_updates: None,
+                update_reminders: None,
                 selected_files: Arc::new(NoSelectedFiles),
                 settings_file: Rc::new(
                     crate::platform::settings_file::testing::RecordingSettingsFile::default(),

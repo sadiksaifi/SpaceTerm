@@ -1,6 +1,6 @@
 //! The local service's changes through kqueue: vnode events on its directories and the exit of
 //! its server's process. The watch thread sleeps in `kevent` between changes.
-use crate::status_menu::service_changes::{Fired, Watch};
+use crate::updates::machines::live::service_changes::{Fired, Watch};
 use std::ffi::CString;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;

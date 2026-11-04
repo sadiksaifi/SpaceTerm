@@ -194,7 +194,6 @@ fn launch_harness_restoring(
         connector,
     };
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
         let mut manager = WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1011,7 +1010,6 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
         }),
     };
     let second = cx.add_window(|window, cx| {
-        crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
         WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {

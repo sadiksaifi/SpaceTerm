@@ -47,7 +47,6 @@ fn open_window(cx: &mut TestAppContext) -> (Entity<WorkspaceManager>, VisualTest
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let handle = cx.add_window(|window, cx| {
-        crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
         WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             workspace_adapters(),

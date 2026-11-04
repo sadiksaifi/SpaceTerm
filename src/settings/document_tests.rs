@@ -478,14 +478,13 @@ fn invalid_keybinding_overrides_are_rejected_by_the_settings_document() {
 
 #[test]
 fn every_settings_section_round_trips_replaces_and_resets_without_changing_identity() {
-    use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
+    use crate::updates::policy::{CheckInterval, UpdatePreferences};
 
     let mut source = reset_fixture();
     source.revision = 19;
     source.updates = UpdatePreferences {
         automatic_downloads: false,
         check_interval: CheckInterval::Hourly,
-        reminder_interval: ReminderInterval::EightHours,
     };
     source.keybindings = serde_json::from_value(serde_json::json!({
         "close_tab": null, "new_workspace": "shift-cmd-t"

@@ -1,5 +1,7 @@
 #[path = "build/identity.rs"]
 mod identity;
+#[path = "build/release_notes.rs"]
+mod release_notes;
 
 use sha2::{Digest, Sha256};
 use std::{env, path::PathBuf, process::Command};
@@ -57,6 +59,7 @@ fn main() {
     // Watch source changes as well as refs so development identity cannot retain a release label.
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=build/identity.rs");
+    println!("cargo:rerun-if-changed=build/release_notes.rs");
     for path in identity::watched_paths(&root).unwrap_or_else(|error| panic!("{error}")) {
         println!("cargo:rerun-if-changed={}", path.display());
     }
@@ -73,6 +76,7 @@ fn main() {
         "cargo:rustc-env=SPACETERM_BUNDLE_VERSION={}",
         identity.bundle_version
     );
+    release_notes::emit(&root, release_tag.as_deref()).unwrap_or_else(|error| panic!("{error}"));
     // The application identity follows these inputs.
     let packaged = env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
     // The headless server depends on this library but does not carry a client candidate.

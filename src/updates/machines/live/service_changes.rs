@@ -1,7 +1,8 @@
 //! Learns that the local service changed without a link to its server: a stopped, started,
 //! crashed, installed or reconfigured server changes the service's directories or ends the
-//! server's process. The status item reads the service after each such change, and never on a
-//! timer, so it stays current in a menu-only client and beside a server that refuses admission.
+//! server's process. Machine updates read the service after each such change, and never on a
+//! timer, so This Mac's or This Computer's row stays current in a menu-only client, while its
+//! Core is stopped, and beside a Core that refuses admission.
 use std::path::{Path, PathBuf};
 
 /// What woke a [`Watch`].

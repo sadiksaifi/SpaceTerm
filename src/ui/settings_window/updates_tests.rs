@@ -9,7 +9,7 @@ use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
-use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
+use crate::updates::policy::{CheckInterval, UpdatePreferences};
 
 use super::updates::{CHECK_NOW_SELECTOR, DOWNLOAD_SELECTOR, RESTART_SELECTOR};
 use super::{SettingsSectionId, SettingsWindow};
@@ -67,13 +67,17 @@ fn updates_section_should_default_to_quiet_automatic_downloads(cx: &mut TestAppC
         "settings-row-update-status",
         "settings-row-automatic-update-downloads",
         "settings-row-update-check-interval",
-        "settings-row-update-reminder-interval",
     ] {
         assert!(
             cx.debug_bounds(selector).is_some(),
             "{selector} should render"
         );
     }
+    assert!(
+        cx.debug_bounds("settings-row-update-reminder-interval")
+            .is_none(),
+        "reminders repeat daily and have no setting"
+    );
     assert_eq!(preferences(&window, cx), UpdatePreferences::default());
     assert!(preferences(&window, cx).automatic_downloads);
     // Defaults offer nothing to reset.
@@ -89,13 +93,11 @@ fn update_preferences_should_edit_the_draft_and_reset_one_row_at_a_time(cx: &mut
 
     click("settings-automatic-update-downloads", cx);
     click("settings-update-check-interval-hourly", cx);
-    click("settings-update-reminder-interval-eight-hours", cx);
     assert_eq!(
         preferences(&window, cx),
         UpdatePreferences {
             automatic_downloads: false,
             check_interval: CheckInterval::Hourly,
-            reminder_interval: ReminderInterval::EightHours,
         }
     );
 
@@ -105,11 +107,9 @@ fn update_preferences_should_edit_the_draft_and_reset_one_row_at_a_time(cx: &mut
         UpdatePreferences {
             automatic_downloads: false,
             check_interval: CheckInterval::Daily,
-            reminder_interval: ReminderInterval::EightHours,
         }
     );
     click("settings-row-automatic-update-downloads-reset", cx);
-    click("settings-row-update-reminder-interval-reset", cx);
     assert_eq!(preferences(&window, cx), UpdatePreferences::default());
 }
 

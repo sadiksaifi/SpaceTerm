@@ -135,6 +135,9 @@ pub(crate) fn run() {
     native_test!(
         super::macos_status_menu::tests::machine_alerts_take_the_keyboard_and_bind_their_keys
     );
+    native_test!(
+        super::macos_status_menu::tests::the_native_menu_ends_with_settings_and_quit_and_offers_no_open
+    );
     gpui_test!(macos_services::tests::service_type_classifies_nil_and_empty_nsstring_as_absent);
     gpui_test!(macos_services::tests::nsstring_decode_enforces_the_paste_byte_limit);
     gpui_test!(macos_services::tests::nsstring_decode_rejects_embedded_nul_without_truncation);
