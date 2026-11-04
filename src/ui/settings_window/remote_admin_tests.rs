@@ -632,7 +632,7 @@ fn remove_machine_uninstalls_core_there_and_unpairs_in_one_step(cx: &mut TestApp
         preview: preview(LaneAction::Uninstall, effects(1)),
         settled: Vec::new(),
     });
-    // The Core answers nothing once its uninstall starts, so the lane returns at admission.
+    // The Core answers nothing once its uninstall helper launched, so the lane closes.
     *remote.perform.lock().unwrap() = Ok(Performed {
         outcome: Outcome::Shutdown {
             operation: "0123456789abcdef0123456789abcdef".into(),
@@ -708,7 +708,7 @@ fn removal_keeps_the_machine(
     assert_eq!(remote.performed.lock().unwrap().len(), 1);
     assert!(
         machines.direct.route(&route).is_some(),
-        "the Machine stays until its Core admits the uninstall"
+        "the Machine stays until its Core's uninstall started"
     );
     assert!(
         machines.direct.pending_unpairs().is_empty(),
@@ -724,6 +724,24 @@ fn an_uninstall_no_core_admitted_keeps_the_machine_and_its_pairing(cx: &mut Test
             outcome: Outcome::Unconfirmed {
                 operation: "0123456789abcdef0123456789abcdef".into(),
                 boot: String::new(),
+                last: None,
+            },
+            settled: Vec::new(),
+        }),
+        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its uninstall.",
+        cx,
+    );
+}
+
+/// A Core admitted the uninstall, but no receipt showed its helper launched, so the Core may
+/// still be installed and paired.
+#[gpui::test]
+fn an_admitted_uninstall_with_no_launched_helper_keeps_the_machine(cx: &mut TestAppContext) {
+    removal_keeps_the_machine(
+        Ok(Performed {
+            outcome: Outcome::Unconfirmed {
+                operation: "0123456789abcdef0123456789abcdef".into(),
+                boot: "a".into(),
                 last: None,
             },
             settled: Vec::new(),

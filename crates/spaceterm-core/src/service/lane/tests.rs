@@ -137,6 +137,8 @@ struct Lane {
     launches: Arc<AtomicUsize>,
     /// Plays the helper when an operation launches.
     hook: Hook,
+    /// Makes every later helper launch fail, as a failed process or unit start does.
+    unlaunchable: Arc<AtomicBool>,
 }
 
 #[cfg_attr(
@@ -188,6 +190,8 @@ fn with_lane(run: impl FnOnce(Lane)) {
             let counted = launches.clone();
             let hook: Hook = Arc::default();
             let helper = hook.clone();
+            let unlaunchable = Arc::new(AtomicBool::new(false));
+            let refused = unlaunchable.clone();
             let lane = LaneCore::new(
                 service.clone(),
                 Updates::open(service.clone()),
@@ -195,6 +199,9 @@ fn with_lane(run: impl FnOnce(Lane)) {
                 None,
                 Box::new(move |op| {
                     counted.fetch_add(1, Ordering::SeqCst);
+                    if refused.load(Ordering::SeqCst) {
+                        return Err(CoreError::Protocol);
+                    }
                     if let Some(hook) = helper.lock().unwrap().as_ref() {
                         hook(op);
                     }
@@ -209,6 +216,7 @@ fn with_lane(run: impl FnOnce(Lane)) {
                 host,
                 launches,
                 hook,
+                unlaunchable,
             });
         },
     );
@@ -1494,34 +1502,82 @@ mod flow {
         });
     }
 
-    /// Once its helper starts, the Core answers nothing more, so Remove Machine's uninstall
-    /// returns as soon as the Core admits it rather than waiting out the lane's deadline.
+    fn uninstall(switch: &Arc<Switch>) -> Outcome {
+        let (session, token) = previewed(switch, LaneAction::Uninstall);
+        client::perform(
+            &(switch.clone() as Arc<dyn Connector>),
+            session,
+            LaneAction::Uninstall,
+            token,
+            Duration::from_secs(20),
+            &mut |_| Ok(()),
+            &|| None,
+        )
+        .unwrap()
+    }
+
+    /// Once its helper launched, an uninstalling Core stops answering, so Remove Machine's
+    /// uninstall ends when the lane closes rather than at the flow's deadline.
     #[test]
-    fn an_uninstall_returns_as_soon_as_the_core_admits_it() {
+    fn an_uninstall_ends_when_the_core_closes_the_lane_after_its_helper_launched() {
         with_lane(|lane| {
             let switch = Arc::new(Switch::default());
             switch.up(lane.lane.clone());
-            let (session, token) = previewed(&switch, LaneAction::Uninstall);
+            let stopping = switch.clone();
+            *lane.hook.lock().unwrap() = Some(Box::new(move |_| {
+                let stopping = stopping.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    stopping.down();
+                });
+            }));
             let started = Instant::now();
-            let outcome = client::perform(
-                &(switch.clone() as Arc<dyn Connector>),
-                session,
-                LaneAction::Uninstall,
-                token,
-                Duration::from_secs(20),
-                &mut |_| Ok(()),
-                &|| None,
-            )
-            .unwrap();
+            let outcome = uninstall(&switch);
             assert!(
                 started.elapsed() < Duration::from_secs(5),
                 "took {:?}",
                 started.elapsed()
             );
             let Outcome::Shutdown { boot, .. } = outcome else {
-                panic!("expected an admitted uninstall, got {outcome:?}");
+                panic!("expected a started uninstall, got {outcome:?}");
             };
             assert_eq!(boot, hex(&lane.lane.boot));
+        });
+    }
+
+    /// A Core whose uninstall helper fails to launch stays installed and paired, so the flow
+    /// returns that failure instead of ending at admission.
+    #[test]
+    fn an_uninstall_whose_helper_fails_to_launch_returns_its_failure() {
+        with_lane(|lane| {
+            lane.unlaunchable.store(true, Ordering::SeqCst);
+            let switch = Arc::new(Switch::default());
+            switch.up(lane.lane.clone());
+            let outcome = uninstall(&switch);
+            let Outcome::Settled { receipt, boot } = outcome else {
+                panic!("expected the failed launch, got {outcome:?}");
+            };
+            assert_eq!(receipt.state, LaneOperationState::NotPerformed);
+            assert_eq!(boot, hex(&lane.lane.boot));
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    /// A lane that closes before any receipt showed the helper launched proves nothing, so the
+    /// uninstall stays unconfirmed and its operation stays to settle later.
+    #[test]
+    fn an_uninstall_whose_lane_closes_at_admission_stays_unconfirmed() {
+        with_lane(|lane| {
+            let switch = Arc::new(Switch::default());
+            switch.up(lane.lane.clone());
+            let closing = switch.clone();
+            *lane.hook.lock().unwrap() = Some(Box::new(move |_| closing.down()));
+            let outcome = uninstall(&switch);
+            let Outcome::Unconfirmed { boot, last, .. } = outcome else {
+                panic!("expected an unconfirmed uninstall, got {outcome:?}");
+            };
+            assert_eq!(boot, hex(&lane.lane.boot));
+            assert_eq!(last, None);
         });
     }
 

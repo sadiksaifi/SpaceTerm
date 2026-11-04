@@ -656,18 +656,21 @@ fn earlier(settled: &[LaneReceipt]) -> Option<(Act, Settlement)> {
     ))
 }
 
-/// What a finished flow established about `act`.
-/// Whether `outcome` proves the Core admitted Remove Machine's uninstall. Once its helper
-/// starts, the Core answers nothing more, so admission is the evidence: a run that accepted the
-/// operation, and no receipt that says it failed. An outcome with no admitting run proves
-/// nothing, because the request may never have arrived.
-fn uninstall_admitted(outcome: &Outcome) -> bool {
+/// Whether `outcome` proves Remove Machine's uninstall started. Once its helper starts, the Core
+/// answers nothing more, so the evidence is a receipt that its helper launched followed by the
+/// closed lane, or a receipt that it finished. Admission alone proves nothing: a helper that
+/// failed to launch leaves the Core installed and paired.
+fn uninstall_started(outcome: &Outcome) -> bool {
     match outcome {
         Outcome::Settled { .. } => settlement(outcome) == Settlement::Done,
-        Outcome::Shutdown { boot, .. } | Outcome::Unconfirmed { boot, .. } => !boot.is_empty(),
+        // The lane ends an uninstall this way only after its helper launched.
+        Outcome::Shutdown { boot, .. } => !boot.is_empty(),
+        // An admitted uninstall whose helper may never have launched leaves the Core paired.
+        Outcome::Unconfirmed { .. } => false,
     }
 }
 
+/// What a finished flow established about `act`.
 fn settlement(outcome: &Outcome) -> Settlement {
     Settlement::of(admin::verdict(outcome))
 }
@@ -1004,12 +1007,12 @@ impl SettingsWindow {
             let _ = settings.update(cx, |settings, cx| {
                 let removed = matches!(
                     &performed,
-                    Ok(performed) if act == Act::Uninstall && uninstall_admitted(&performed.outcome)
+                    Ok(performed) if act == Act::Uninstall && uninstall_started(&performed.outcome)
                 );
                 if removed {
-                    // The Core admitted its uninstall, which revokes every pairing, so the
-                    // machine leaves this computer too. Anything less keeps the route, its key
-                    // and the pending operation, so a later check can settle it.
+                    // The Core's uninstall started, which revokes every pairing, so the machine
+                    // leaves this computer too. Anything less keeps the route, its key and the
+                    // pending operation, so a later check can settle it.
                     settings.remote_admin.routes.remove(&route);
                     settings.forget_machine(route, cx);
                     return;
