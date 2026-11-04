@@ -509,11 +509,11 @@ pub(in crate::platform) mod tests {
         }
     }
 
-    /// Presents each sheet on a real window that stays off screen, lets AppKit lay it out and draw
-    /// it, then answers it by a click or a key and reads the answer the production mapping
+    /// Presents each sheet on a real key window that stays off screen, lets AppKit lay it out and
+    /// draw it, then answers it by a click or a key and reads the answer the production mapping
     /// delivers.
     pub(in crate::platform) fn quit_sheet_delivers_each_answer_and_keys_quit_by_default() {
-        use objc2_app_kit::{NSBackingStoreType, NSWindowStyleMask};
+        use objc2_app_kit::{NSBackingStoreType, NSPanel, NSWindowStyleMask};
         use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize};
 
         let mtm = objc2::MainThreadMarker::new().expect("native test must run on the main thread");
@@ -521,24 +521,27 @@ pub(in crate::platform) mod tests {
             || NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.3));
         for (buttons, keys, focused, answers) in answer_cases() {
             for &(answering, expected) in answers {
-                // SAFETY: The window is created and released on the main thread, and AppKit does
-                // not release it on close because the test owns it.
-                let host = unsafe {
-                    NSWindow::initWithContentRect_styleMask_backing_defer(
-                        NSWindow::alloc(mtm),
-                        NSRect::new(
-                            NSPoint::new(-20_000.0, -20_000.0),
-                            NSSize::new(600.0, 400.0),
-                        ),
-                        NSWindowStyleMask::Titled,
-                        NSBackingStoreType::Buffered,
-                        false,
-                    )
-                };
+                // The client takes the keyboard before it asks, so production presents on the key
+                // window. A nonactivating panel becomes key without activating the test process,
+                // so the test never takes the keyboard from the app in front.
+                let host = NSPanel::initWithContentRect_styleMask_backing_defer(
+                    NSPanel::alloc(mtm),
+                    NSRect::new(
+                        NSPoint::new(-20_000.0, -20_000.0),
+                        NSSize::new(600.0, 400.0),
+                    ),
+                    NSWindowStyleMask::Titled | NSWindowStyleMask::NonactivatingPanel,
+                    NSBackingStoreType::Buffered,
+                    false,
+                );
+                // SAFETY: The window is released on the main thread, and AppKit does not release
+                // it on close because the test owns it.
                 unsafe { host.setReleasedWhenClosed(false) };
                 let prompt = quit_prompt_fixture(buttons);
                 let alert = quit_alert(&prompt, mtm);
                 assert_eq!(alert.informativeText().to_string(), prompt.detail);
+                host.orderFront(None);
+                host.makeKeyWindow();
                 let responses = begin_quit_sheet(&alert, &host, buttons);
                 settle();
                 let sheet = alert.window();
@@ -547,7 +550,8 @@ pub(in crate::platform) mod tests {
                     host.attachedSheet().is_some(),
                     "the alert begins as a sheet"
                 );
-                // Space presses the focused button.
+                // Space presses the focused button, and only in the key window.
+                assert!(sheet.isKeyWindow(), "the sheet takes the keyboard");
                 assert_eq!(laid_out(&alert), (expected_keys(keys), Some(focused)));
 
                 match answering {
