@@ -192,11 +192,20 @@ pub(crate) enum MachineState {
         expected: Version,
     },
     CantCheck {
-        reason: CheckFailure,
+        reason: CheckProblem,
         push: Option<Version>,
     },
     Stopped,
     Offline,
+}
+
+/// Why a Machine can't check for updates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckProblem {
+    /// Every check has failed for [`CANT_CHECK_AFTER`] or longer.
+    Failing(CheckFailure),
+    /// Its SpaceTerm Core reports no update facts ([`MachineLink::Unreported`]).
+    Unreported,
 }
 
 impl MachineState {
@@ -875,6 +884,12 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
         MachineLink::Incompatible(Incompatible::CallerTooOld) => {
             return MachineState::DesktopTooOld;
         }
+        MachineLink::Unreported => {
+            return MachineState::CantCheck {
+                reason: CheckProblem::Unreported,
+                push: update.push.clone(),
+            };
+        }
         MachineLink::Incompatible(Incompatible::ListenerTooOld) => {}
         MachineLink::Connected => {}
     }
@@ -964,7 +979,7 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
         && now.saturating_sub(since) >= CANT_CHECK_AFTER
     {
         return MachineState::CantCheck {
-            reason,
+            reason: CheckProblem::Failing(reason),
             push: update.push.clone(),
         };
     }
@@ -1726,25 +1741,31 @@ fn desktop_failure(release: &str, error: UpdateError) -> String {
 }
 
 /// Why a Machine's checks fail, as the start of a sentence.
-fn check_failure(name: &str, reason: CheckFailure) -> String {
+fn check_failure(name: &str, reason: CheckProblem) -> String {
     match reason {
-        CheckFailure::Network => format!("{name} can't reach SpaceTerm's update feed"),
-        CheckFailure::Proxy => format!("{name}'s proxy blocks SpaceTerm's update feed"),
-        CheckFailure::Verification => {
+        CheckProblem::Failing(CheckFailure::Network) => {
+            format!("{name} can't reach SpaceTerm's update feed")
+        }
+        CheckProblem::Failing(CheckFailure::Proxy) => {
+            format!("{name}'s proxy blocks SpaceTerm's update feed")
+        }
+        CheckProblem::Failing(CheckFailure::Verification) => {
             format!("{name} received an update feed that failed verification")
         }
-        CheckFailure::SystemTooOld => {
+        CheckProblem::Failing(CheckFailure::SystemTooOld) => {
             format!("The newest SpaceTerm Core needs a newer system than {name} runs")
         }
+        CheckProblem::Unreported => format!("SpaceTerm Core on {name} doesn't report its updates"),
     }
 }
 
-fn check_remedy(reason: CheckFailure) -> &'static str {
+fn check_remedy(reason: CheckProblem) -> &'static str {
     match reason {
-        CheckFailure::Network => "Check its network or proxy settings.",
-        CheckFailure::Proxy => "Check its proxy settings.",
-        CheckFailure::Verification => "SpaceTerm tries again later.",
-        CheckFailure::SystemTooOld => "Update its operating system.",
+        CheckProblem::Failing(CheckFailure::Network) => "Check its network or proxy settings.",
+        CheckProblem::Failing(CheckFailure::Proxy) => "Check its proxy settings.",
+        CheckProblem::Failing(CheckFailure::Verification) => "SpaceTerm tries again later.",
+        CheckProblem::Failing(CheckFailure::SystemTooOld) => "Update its operating system.",
+        CheckProblem::Unreported => "Run spaceterm update on it.",
     }
 }
 

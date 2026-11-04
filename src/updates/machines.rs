@@ -8,6 +8,7 @@
     reason = "#799 composes the adapter and builds the UI that consumes it"
 )]
 
+pub(crate) mod live;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod preview;
 pub(crate) mod store;
@@ -50,6 +51,9 @@ pub(crate) enum MachineLink {
     /// A restart began, and the Core did not come back on `expected` before the deadline
     /// ("Can't confirm").
     Unconfirmed { expected: Version, since: u64 },
+    /// The Core's service lane admits this desktop but answers `Facts` with `unsupported`: it
+    /// predates update facts, so SpaceTerm can't check its updates ("Can't check").
+    Unreported,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +96,22 @@ pub(crate) enum MachineUpdatesEvent {
 pub(crate) enum MachineUpdatesError {
     #[error("Machine updates are unavailable.")]
     Unavailable,
+}
+
+/// The adapter the desktop composes: in a `developer-tools` build the preview
+/// `SPACETERM_MACHINE_PREVIEW` names, otherwise This Mac or This Computer and each paired
+/// Machine over its SpaceTerm Core's service lane.
+pub(crate) fn composed(
+    identity: &str,
+    direct: &crate::direct_connections::DirectConnections,
+) -> std::rc::Rc<dyn MachineUpdatesAdapter> {
+    #[cfg(feature = "developer-tools")]
+    if let Some(preview) = preview::from_environment() {
+        return std::rc::Rc::new(preview);
+    }
+    std::rc::Rc::new(live::LiveMachines::new(std::sync::Arc::new(
+        live::desktop::DesktopSources::new(identity, direct.clone()),
+    )))
 }
 
 pub(crate) trait MachineUpdatesAdapter {

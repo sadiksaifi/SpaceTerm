@@ -431,7 +431,7 @@ fn every_label_has_at_most_two_words() {
             expected: version("0.9.0"),
         },
         MachineState::CantCheck {
-            reason: CheckFailure::Proxy,
+            reason: CheckProblem::Failing(CheckFailure::Proxy),
             push: None,
         },
         MachineState::Stopped,

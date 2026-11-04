@@ -93,19 +93,6 @@ fn simulated_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
     Rc::new(crate::updates::UnavailableUpdates)
 }
 
-/// Machine updates come only from the preview `SPACETERM_MACHINE_PREVIEW` names until a Core
-/// adapter over update facts exists.
-#[cfg(feature = "developer-tools")]
-fn machine_updates() -> Option<Rc<dyn crate::updates::machines::MachineUpdatesAdapter>> {
-    crate::updates::machines::preview::from_environment()
-        .map(|preview| Rc::new(preview) as Rc<dyn crate::updates::machines::MachineUpdatesAdapter>)
-}
-
-#[cfg(not(feature = "developer-tools"))]
-fn machine_updates() -> Option<Rc<dyn crate::updates::machines::MachineUpdatesAdapter>> {
-    None
-}
-
 fn capture_startup_dependencies(
     identity: ApplicationIdentity,
 ) -> Result<
@@ -281,7 +268,10 @@ fn compose(
         home_directory: startup.home_directory,
         adapters: crate::app::ApplicationCapabilities {
             updates,
-            machine_updates: machine_updates(),
+            machine_updates: Some(crate::updates::machines::composed(
+                identity.directory_name(),
+                &direct_machines,
+            )),
             update_reminders: Some(Rc::new(
                 super::linux_notification::LinuxUpdateReminders::new(bus.clone(), identity),
             )),
