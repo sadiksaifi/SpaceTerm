@@ -174,12 +174,39 @@ fn launch_harness_restoring(
     remembered: Option<crate::ui::remembered_view::WindowView>,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let launch = Arc::new(ScriptedLaunch::default());
+    let launch = ScriptedLaunch::default();
     for answer in answers {
         launch.answer(answer);
     }
+    scripted_harness(launch, edits, selections, remembered, cx)
+}
+
+/// A launch harness whose background item reads answer `off` in order before launch begins.
+fn launch_harness_reading_background_item(
+    answers: Vec<Result<LaunchOutcome, CoreError>>,
+    off: impl IntoIterator<Item = bool>,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    let launch = ScriptedLaunch::default();
+    for answer in answers {
+        launch.answer(answer);
+    }
+    launch.background_item(off);
+    scripted_harness(launch, ScriptedEdits::new(Some(inventory())), [], None, cx)
+}
+
+fn scripted_harness(
+    launch: ScriptedLaunch,
+    edits: ScriptedEdits,
+    selections: impl IntoIterator<
+        Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
+    >,
+    remembered: Option<crate::ui::remembered_view::WindowView>,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let launch = Arc::new(launch);
     let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
         TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
     ));
@@ -404,22 +431,28 @@ fn a_stopped_core_stays_stopped_until_start_core(cx: &mut TestAppContext) {
 /// and never starts it: once the person turns it on and comes back, launch runs again.
 #[gpui::test]
 fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::LoginItemOff), ready()], cx);
+    let (harness, cx) = launch_harness_reading_background_item(vec![ready()], [true], cx);
     cx.run_until_parked();
     assert_eq!(
         harness.launch_title(cx),
         Some("SpaceTerm Core is turned off in Login Items")
     );
     assert!(cx.debug_bounds(LAUNCH_START_SELECTOR).is_none());
+    assert_eq!(
+        harness.launch.steps(),
+        Vec::<&str>::new(),
+        "launch neither prepares nor starts a service macOS keeps off"
+    );
 
     harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
-    assert_eq!(harness.launch.steps(), ["run", "open_login_items"]);
+    assert_eq!(harness.launch.steps(), ["open_login_items"]);
 
+    // The person turns SpaceTerm Core on in System Settings and comes back.
     cx.deactivate_window();
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     sync(&harness, cx);
-    assert_eq!(harness.launch.steps(), ["run", "open_login_items", "run"]);
+    assert_eq!(harness.launch.steps(), ["open_login_items", "run"]);
     assert_eq!(harness.rows(cx), 1);
 }
 
@@ -427,7 +460,11 @@ fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &m
 /// Login Items rather than reporting a failure.
 #[gpui::test]
 fn a_blocked_background_item_asks_for_approval_in_login_items(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::BackgroundItemBlocked)], cx);
+    let (harness, cx) = launch_harness_reading_background_item(
+        vec![Err(CoreError::StartupFailed)],
+        [false, true],
+        cx,
+    );
     cx.run_until_parked();
     assert_eq!(
         harness.launch_title(cx),

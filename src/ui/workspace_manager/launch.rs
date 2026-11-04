@@ -46,21 +46,19 @@ pub(crate) enum LaunchOutcome {
     /// Another service operation, such as Update, Restart or Stop, is running. Launch waits for
     /// it, then runs again.
     ServiceBusy,
-    /// The person turned SpaceTerm Core off in Login Items, so macOS doesn't let it run. Launch
-    /// never turns it back on.
-    LoginItemOff,
-    /// macOS blocked the background item SpaceTerm Core installed, and waits for the person to
-    /// approve it in Login Items.
-    BackgroundItemBlocked,
     /// The window closed or SpaceTerm quit before launch finished.
     Cancelled,
 }
 
 /// The blocking steps of local launch. Each runs on a background thread.
 pub(crate) trait LocalLaunch: Send + Sync {
-    /// Prepares or reuses the account's service and connects. Never reverses Stop, never asks
-    /// for authorization, and never turns on a background item macOS keeps off.
+    /// Prepares or reuses the account's service and connects. Never reverses Stop and never asks
+    /// for authorization. It may install, enable and start the service, so launch runs it only
+    /// while [`Self::background_item_off`] is false.
     fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError>;
+    /// Whether macOS keeps SpaceTerm Core's background item off, because the person turned it
+    /// off in Login Items or has not approved it yet. Reads only: it changes nothing.
+    fn background_item_off(&self) -> bool;
     /// Opens System Settings at Login Items, where the person turns SpaceTerm Core on. It must
     /// run on the event thread, so macOS brings System Settings forward.
     fn open_login_items(&self);
@@ -131,25 +129,17 @@ impl AccountLaunch {
 impl LocalLaunch for AccountLaunch {
     fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
         use spaceterm_core::StartupOutcome;
-        // What the person turned off stays off: launch reaches no service.
-        if crate::local_startup::background_item_off() {
-            return Ok(LaunchOutcome::LoginItemOff);
-        }
-        let outcome = match crate::local_startup::run(cancelled) {
-            Ok(outcome) => outcome,
-            // macOS blocked the background item this launch installed, so it could not start.
-            Err(_) if crate::local_startup::background_item_off() => {
-                return Ok(LaunchOutcome::BackgroundItemBlocked);
-            }
-            Err(error) => return Err(error),
-        };
-        Ok(match outcome {
+        Ok(match crate::local_startup::run(cancelled)? {
             StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
             StartupOutcome::Stopped => LaunchOutcome::Stopped,
             StartupOutcome::AuthorizationRequired => LaunchOutcome::AuthorizationRequired,
             StartupOutcome::ServiceBusy => LaunchOutcome::ServiceBusy,
             StartupOutcome::Cancelled => LaunchOutcome::Cancelled,
         })
+    }
+
+    fn background_item_off(&self) -> bool {
+        crate::local_startup::background_item_off()
     }
 
     fn open_login_items(&self) {
@@ -615,6 +605,12 @@ impl Drop for LocalLaunchState {
 /// What one background run reports back to the window.
 enum StepResult {
     Outcome(LaunchOutcome),
+    /// The person turned SpaceTerm Core off in Login Items, so macOS doesn't let it run. Launch
+    /// never turns it back on.
+    LoginItemOff,
+    /// macOS blocked the background item SpaceTerm Core installed, and waits for the person to
+    /// approve it in Login Items.
+    BackgroundItemBlocked,
     Failed(CoreError),
     /// The client refused the server. `update` is whether a verified build can update it.
     Incompatible(CoreError, bool),
@@ -737,9 +733,15 @@ impl WorkspaceManager {
             if let Some(refused) = refused {
                 return refused;
             }
+            // What the person turned off in Login Items stays off: launch reaches no service.
+            if adapter.background_item_off() {
+                return StepResult::LoginItemOff;
+            }
             let observed = move || cancelled.load(Ordering::Acquire);
             match adapter.run(&observed) {
                 Ok(outcome) => StepResult::Outcome(outcome),
+                // macOS blocked the background item this launch installed, so it could not start.
+                Err(_) if adapter.background_item_off() => StepResult::BackgroundItemBlocked,
                 Err(error) if incompatible(error) => {
                     StepResult::Incompatible(error, adapter.update_offered())
                 }
@@ -764,10 +766,8 @@ impl WorkspaceManager {
         let state = match result {
             StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_core(window, cx),
             StepResult::Outcome(LaunchOutcome::Stopped) => LaunchState::Stopped,
-            StepResult::Outcome(LaunchOutcome::LoginItemOff) => LaunchState::LoginItemOff,
-            StepResult::Outcome(LaunchOutcome::BackgroundItemBlocked) => {
-                LaunchState::BackgroundItemBlocked
-            }
+            StepResult::LoginItemOff => LaunchState::LoginItemOff,
+            StepResult::BackgroundItemBlocked => LaunchState::BackgroundItemBlocked,
             // The operation decides what launch finds next, so launch runs again once it ends.
             StepResult::Outcome(LaunchOutcome::ServiceBusy) => {
                 self.run_local_launch(Some(LaunchStep::WaitForService), window, cx);
@@ -1279,6 +1279,8 @@ pub(crate) mod testing {
         authorize: Mutex<Option<CoreError>>,
         /// Whether a verified build can update a refused server.
         update: Mutex<bool>,
+        /// Each background item read in order. It is on once the queue is empty.
+        background_item_off: Mutex<VecDeque<bool>>,
     }
 
     impl ScriptedLaunch {
@@ -1288,6 +1290,10 @@ pub(crate) mod testing {
         }
         pub(crate) fn answer(&self, result: Result<LaunchOutcome, CoreError>) {
             self.runs.lock().unwrap().push_back(result);
+        }
+        /// Answers the next background item reads with `off`, in order.
+        pub(crate) fn background_item(&self, off: impl IntoIterator<Item = bool>) {
+            self.background_item_off.lock().unwrap().extend(off);
         }
         pub(crate) fn refuse_start(&self, error: CoreError) {
             *self.start.lock().unwrap() = Some(error);
@@ -1332,6 +1338,13 @@ pub(crate) mod testing {
         fn update_offered(&self) -> bool {
             self.steps.lock().unwrap().push("update_offered");
             *self.update.lock().unwrap()
+        }
+        fn background_item_off(&self) -> bool {
+            self.background_item_off
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(false)
         }
         fn open_login_items(&self) {
             self.steps.lock().unwrap().push("open_login_items");
