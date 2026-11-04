@@ -1238,3 +1238,25 @@ fn unfinished_file_enrollment_cleans_up_after_native_becomes_available() {
     assert!(provider.files.values.lock().unwrap().is_empty());
     assert!(provider.native.reads.lock().unwrap().is_empty());
 }
+
+/// ADR 0029: an invitation from another edition is refused as `identity_mismatch` before any
+/// credential or network access.
+#[test]
+fn another_editions_invitation_is_an_identity_mismatch() {
+    let mut fixture = Fixture::new();
+    let provider = fixture.provider();
+    let output = Connections {
+        identity: "spaceterm-preflight",
+        global: &global(),
+        store: &fixture.store,
+        credentials: &provider,
+        held: &NoHeld,
+        network: &fixture.network,
+        io: &mut fixture.io,
+    }
+    .run(&add("penguin"));
+    assert_eq!(output.envelope["error"]["code"], "identity_mismatch");
+    assert_eq!(output.exit, 4);
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+    assert!(fixture.network.submits.lock().unwrap().is_empty());
+}

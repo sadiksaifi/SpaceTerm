@@ -354,8 +354,9 @@ impl Connections<'_> {
         self.checkpoint(deadline)?;
         let link = self.io.invitation(deadline)?;
         let mut invitation = Invitation::parse(&link).map_err(contract::from_direct_error)?;
+        // ADR 0029: both clients refuse another edition's invitation as an identity mismatch.
         if invitation.machine_pin().build != self.identity {
-            return Err(contract::from_direct_error(DirectError::WrongMachine));
+            return Err(contract::from_direct_error(DirectError::IdentityMismatch));
         }
         if let Some(address) = address {
             invitation = invitation
