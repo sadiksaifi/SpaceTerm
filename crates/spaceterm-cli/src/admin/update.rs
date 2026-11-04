@@ -28,9 +28,16 @@ pub fn run(context: &Context<'_>, files: Option<(&Path, &Path)>) -> Reply {
     };
     match super::open_lane(context, &routed.connection, &routed.route, &pending) {
         Ok(opened) => running(context, routed, opened, files),
-        Err(_) if routed.local => stopped(context, routed, files),
+        Err(failure) if routed.local && offline(&failure) => stopped(context, routed, files),
         Err(failure) => Reply::failure(COMMAND, Some(routed.machine), failure),
     }
+}
+
+/// Whether a lane failure means SpaceTerm Core on this machine is not running, so the CLI
+/// installs directly. A running Core that refuses or fails answers for itself instead, because
+/// an install outside its engine would stay invisible to it.
+pub(crate) fn offline(failure: &Failure) -> bool {
+    matches!(failure.code, Code::NotRunning | Code::Unreachable)
 }
 
 /// A running SpaceTerm Core installs through its service lane, on this machine or a paired one.
@@ -206,6 +213,11 @@ pub(crate) fn text(installed: bool, facts: &UpdateFacts, restart: &str) -> Strin
         )
     };
     let how = match facts.sessions {
+        // The Core restarts into a compatible version by itself while no Session is open.
+        0 if !pending.breaking => {
+            "SpaceTerm Core restarts into it by itself while no Terminal Session is open."
+                .to_owned()
+        }
         0 => format!("Restart to use it: {restart}"),
         1 => format!("Restart to use it; restarting ends 1 Terminal Session: {restart}"),
         sessions => {

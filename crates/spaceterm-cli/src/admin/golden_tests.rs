@@ -475,8 +475,16 @@ fn update_reports_the_version_it_installed_and_how_to_use_it() {
     idle.sessions = 0;
     assert_eq!(
         update::text(true, &idle, RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. SpaceTerm Core restarts into it by itself \
+         while no Terminal Session is open.\n"
+    );
+    let mut breaking = idle.clone();
+    breaking.pending = Some(pending(true, false));
+    assert_eq!(
+        update::text(true, &breaking, RESTART),
         "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Restart to use it: spaceterm --machine \
-         penguin restart\n"
+         penguin restart\n",
+        "a breaking version never restarts by itself"
     );
     let current = facts(None, UpdateCheck::Succeeded { at: SUCCEEDED });
     let envelope = update::envelope(local(), false, &current, Vec::new());
@@ -486,6 +494,20 @@ fn update_reports_the_version_it_installed_and_how_to_use_it() {
         update::text(false, &current, RESTART),
         "SpaceTerm Core 0.7.0 is up to date.\n"
     );
+}
+
+#[test]
+fn update_installs_directly_only_while_the_local_core_is_not_running() {
+    for (code, offline) in [
+        (Code::NotRunning, true),
+        (Code::Unreachable, true),
+        (Code::ServiceBusy, false),
+        (Code::IncompatibleProtocol, false),
+        (Code::AuthenticationRefused, false),
+        (Code::ProtocolError, false),
+    ] {
+        assert_eq!(update::offline(&Failure::new(code)), offline, "{code:?}");
+    }
 }
 
 #[test]
