@@ -4176,12 +4176,15 @@ fn fitted_width(
             .text_system()
             .shape_line(text.clone(), size, &[run], None)
             .width
+            .ceil()
     };
     let regular = typography.regular();
     let columns =
         panel_leading_columns(entries).label_offset(metrics.leading_column_metrics(), metrics.gap);
-    let fixed =
-        (metrics.panel_padding + metrics.horizontal_padding + metrics.border_width) * 2.0 + columns;
+    // Each side holds the panel's border and padding, then the row's own border and padding.
+    let fixed = (metrics.panel_padding + metrics.horizontal_padding + metrics.border_width * 2.0)
+        * 2.0
+        + columns;
     let trailing = |text: &Option<SharedString>, font: &Font, size: Pixels| {
         text.as_ref()
             .map_or(px(0.0), |text| metrics.gap + measure(text, font, size))
@@ -5578,10 +5581,17 @@ pub(crate) mod tests {
         const LABEL: &str = "This Computer at the end of a long name";
         const DETAIL: &str = "Closes 3 sessions \u{b7} Restart\u{2026}";
         cx.update(super::init);
-        cx.set_global(test_theme());
+        // Bordered rows and a leading icon, as the update menu draws them.
+        let mut theme = test_theme();
+        let paint = row_paint(10);
+        theme.paint = theme.paint.rows(crate::ListRowPaints::new(
+            paint, paint, paint, paint, paint, paint,
+        ));
+        cx.set_global(theme);
         let entries = vec![
             MenuEntry::action(LABEL, "restart")
                 .detail(DETAIL)
+                .icon(test_icon("fit-row-glyph"))
                 .debug_selector("fit-row"),
         ];
         let (_, cx) = cx.add_window_view(move |_, _| FitRoot { fit, entries });
