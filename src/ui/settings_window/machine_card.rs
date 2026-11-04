@@ -669,17 +669,12 @@ impl SettingsWindow {
             DirectRouteStatus::Connecting | DirectRouteStatus::Refused(RefusalReason::Revoked)
         );
         let mut menu = Vec::new();
-        // Stop and Restart reach the server over its service lane while SpaceTerm holds a
-        // connection to it. Start needs the server's own computer, so the menu offers none.
+        // Restart reaches SpaceTerm Core over its service lane while SpaceTerm holds a connection
+        // to it. Start and Stop run only on the Machine itself, so the menu offers neither.
         if super::remote_admin::installed(cx).is_some() {
             menu.push(MenuItem::new(
                 Change::Restart.label(),
                 StatusStep::Remote(Change::Restart),
-                ready,
-            ));
-            menu.push(MenuItem::new(
-                Change::Stop.label(),
-                StatusStep::Remote(Change::Stop),
                 ready,
             ));
         }
@@ -1626,9 +1621,6 @@ fn status_step_consequence(step: &StatusStep, machine: &str) -> Option<SharedStr
         StatusStep::Version(VersionStep::Local(action)) => {
             action.consequence().map(SharedString::new_static)
         }
-        StatusStep::Remote(Change::Stop) => Some(SharedString::from(format!(
-            "Stops {machine} for every client. Start it again on its own computer."
-        ))),
         StatusStep::Remote(Change::Restart) => Some(SharedString::from(format!(
             "Restarts {machine}, ending its Terminal Sessions for every client."
         ))),

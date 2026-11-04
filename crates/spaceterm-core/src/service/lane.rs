@@ -483,6 +483,26 @@ impl LaneCore {
         actor: &Actor,
         caller: Option<NetworkCaller>,
     ) -> (LaneReply, Option<Dispatch>) {
+        // Stop runs only on the Machine itself: nothing could start SpaceTerm Core again from a
+        // paired device.
+        if actor.pairing.is_some()
+            && matches!(
+                &request,
+                LaneRequest::Preview {
+                    action: LaneAction::Stop
+                } | LaneRequest::Execute {
+                    action: LaneAction::Stop,
+                    ..
+                }
+            )
+        {
+            return (
+                LaneReply::Error {
+                    code: LOCAL_ONLY.to_owned(),
+                },
+                None,
+            );
+        }
         let result = match request {
             LaneRequest::Execute {
                 action: LaneAction::Network { access },

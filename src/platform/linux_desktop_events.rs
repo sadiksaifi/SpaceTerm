@@ -44,7 +44,7 @@ impl DesktopEffects for GpuiEffects<'_> {
         crate::app::activate_default_window(self.0, token.as_deref());
     }
     fn open_invitation(&mut self, link: String) {
-        crate::ui::settings_window::open_add_machine(Some(link), None, self.0);
+        crate::ui::settings_window::open_add_server(Some(link), None, self.0);
     }
     /// Quit runs the application quit policy, including its confirmation.
     fn quit(&mut self) {
@@ -263,7 +263,7 @@ mod tests {
         fn client(&self) -> SessionBus {
             SessionBus::connect_to(Some(self.address.clone())).unwrap()
         }
-        fn core(&self) -> zbus::blocking::connection::Builder<'_> {
+        fn server(&self) -> zbus::blocking::connection::Builder<'_> {
             zbus::blocking::connection::Builder::address(self.address.as_str()).unwrap()
         }
     }
@@ -365,7 +365,7 @@ mod tests {
         let (submitted, notifications) = mpsc::channel();
         let (release, gate) = mpsc::channel();
         let old = private
-            .core()
+            .server()
             .allow_name_replacements(true)
             .serve_at(
                 "/org/freedesktop/Notifications",
@@ -408,7 +408,7 @@ mod tests {
             old.release_name("org.freedesktop.Notifications").unwrap();
         }
         let replacement = private
-            .core()
+            .server()
             .replace_existing_names(true)
             .serve_at(
                 "/org/freedesktop/Notifications",
@@ -456,8 +456,8 @@ mod tests {
         let private = PrivateBus::new();
         let (submitted, notifications) = mpsc::channel();
         let reject = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let _core = private
-            .core()
+        let _server = private
+            .server()
             .serve_at(
                 "/org/freedesktop/Notifications",
                 RestartNotifications {
@@ -524,8 +524,8 @@ mod tests {
         let private = PrivateBus::new();
         let (submitted, notifications) = mpsc::channel();
         let (closed, closes) = mpsc::channel();
-        let core = private
-            .core()
+        let server = private
+            .server()
             .serve_at(
                 "/org/freedesktop/Notifications",
                 Notifications {
@@ -578,22 +578,24 @@ mod tests {
             42
         );
         bus.query(|_| Ok(())).unwrap();
-        core.emit_signal(
-            None::<&str>,
-            "/org/freedesktop/Notifications",
-            "org.freedesktop.Notifications",
-            "ActivationToken",
-            &(42u32, "private-activation-token"),
-        )
-        .unwrap();
-        core.emit_signal(
-            None::<&str>,
-            "/org/freedesktop/Notifications",
-            "org.freedesktop.Notifications",
-            "ActionInvoked",
-            &(42u32, "default"),
-        )
-        .unwrap();
+        server
+            .emit_signal(
+                None::<&str>,
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+                "ActivationToken",
+                &(42u32, "private-activation-token"),
+            )
+            .unwrap();
+        server
+            .emit_signal(
+                None::<&str>,
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+                "ActionInvoked",
+                &(42u32, "default"),
+            )
+            .unwrap();
         assert_eq!(
             wait_activation(&events).as_deref(),
             Some("private-activation-token")
@@ -615,8 +617,8 @@ mod tests {
         let private = PrivateBus::new();
         let (submitted, notifications) = mpsc::channel();
         let (closed, closes) = mpsc::channel();
-        let _core = private
-            .core()
+        let _server = private
+            .server()
             .serve_at(
                 "/org/freedesktop/Notifications",
                 Notifications {
@@ -762,7 +764,7 @@ mod tests {
         let private = PrivateBus::new();
         let identity = crate::application_identity::ApplicationIdentity::current();
         let name = identity.application_id();
-        let earlier = private.core().name(name).unwrap().build().unwrap();
+        let earlier = private.server().name(name).unwrap().build().unwrap();
         let fresh = private.client();
         let (sender, events) = super::LinuxDesktopEvents::new(
             crate::application_identity::ApplicationIdentity::current(),
@@ -872,8 +874,8 @@ mod tests {
             },
             Some(temporary.as_path().as_os_str()),
         );
-        let _core = private
-            .core()
+        let _server = private
+            .server()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 Settings(HashMap::from([(
@@ -914,8 +916,8 @@ mod tests {
     fn linux_desktop_portal_appearance_reads_watches_and_stops_on_drop() {
         use crate::platform::appearance::AppearancePlatform;
         let private = PrivateBus::new();
-        let core = private
-            .core()
+        let server = private
+            .server()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 Settings(non_default_settings()),
@@ -944,18 +946,19 @@ mod tests {
             (OwnedValue::from(true), true),
             (OwnedValue::from(1u32), false),
         ] {
-            core.emit_signal(
-                None::<&str>,
-                "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.Settings",
-                "SettingChanged",
-                &(
-                    "org.gnome.desktop.a11y.interface",
-                    "show-status-shapes",
-                    value,
-                ),
-            )
-            .unwrap();
+            server
+                .emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/portal/desktop",
+                    "org.freedesktop.portal.Settings",
+                    "SettingChanged",
+                    &(
+                        "org.gnome.desktop.a11y.interface",
+                        "show-status-shapes",
+                        value,
+                    ),
+                )
+                .unwrap();
             receive(&observation.changed).unwrap();
             assert_eq!(
                 appearance
@@ -964,18 +967,19 @@ mod tests {
                 expected
             );
         }
-        core.emit_signal(
-            None::<&str>,
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.Settings",
-            "SettingChanged",
-            &(
-                "org.freedesktop.appearance",
-                "color-scheme",
-                zbus::zvariant::Value::from(2u32),
-            ),
-        )
-        .unwrap();
+        server
+            .emit_signal(
+                None::<&str>,
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Settings",
+                "SettingChanged",
+                &(
+                    "org.freedesktop.appearance",
+                    "color-scheme",
+                    zbus::zvariant::Value::from(2u32),
+                ),
+            )
+            .unwrap();
         receive(&observation.changed).unwrap();
         assert_eq!(
             appearance.system_appearance(),
@@ -994,8 +998,8 @@ mod tests {
     fn linux_desktop_portal_appearance_reconciles_changes_during_observer_installation() {
         use crate::platform::appearance::AppearancePlatform;
         let private = PrivateBus::new();
-        let core = private
-            .core()
+        let server = private
+            .server()
             .serve_at("/org/freedesktop/portal/desktop", Settings(HashMap::new()))
             .unwrap()
             .name("org.freedesktop.portal.Desktop")
@@ -1036,7 +1040,7 @@ mod tests {
             receive(&observation.changed).unwrap();
         });
         started.recv_timeout(Duration::from_secs(2)).unwrap();
-        let interface = core
+        let interface = server
             .object_server()
             .interface::<_, Settings>("/org/freedesktop/portal/desktop")
             .unwrap();
@@ -1046,18 +1050,19 @@ mod tests {
             .unwrap()
             .insert("gtk-enable-primary-paste".into(), false.into());
         interface.get_mut().0 = settings;
-        core.emit_signal(
-            None::<&str>,
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.Settings",
-            "SettingChanged",
-            &(
-                "org.freedesktop.appearance",
-                "color-scheme",
-                zbus::zvariant::Value::from(1u32),
-            ),
-        )
-        .unwrap();
+        server
+            .emit_signal(
+                None::<&str>,
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Settings",
+                "SettingChanged",
+                &(
+                    "org.freedesktop.appearance",
+                    "color-scheme",
+                    zbus::zvariant::Value::from(1u32),
+                ),
+            )
+            .unwrap();
         resume.send(()).unwrap();
         observer.join().unwrap();
     }
@@ -1095,8 +1100,8 @@ mod tests {
     fn linux_desktop_portal_appearance_preserves_change_during_snapshot_refresh() {
         use crate::platform::appearance::AppearancePlatform;
         let private = PrivateBus::new();
-        let _core = private
-            .core()
+        let _server = private
+            .server()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 ChangingSettings(std::sync::atomic::AtomicUsize::new(0)),
@@ -1126,8 +1131,8 @@ mod tests {
         let values = value
             .map(|value| HashMap::from([("show-status-shapes".into(), value)]))
             .unwrap_or_default();
-        let _core = private
-            .core()
+        let _server = private
+            .server()
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 Settings(HashMap::from([(
@@ -1200,8 +1205,8 @@ mod tests {
     fn linux_desktop_portal_timeout_keeps_default_appearance() {
         use crate::platform::appearance::AppearancePlatform;
         let private = PrivateBus::new();
-        let _core = private
-            .core()
+        let _server = private
+            .server()
             .serve_at("/org/freedesktop/portal/desktop", UnresponsiveSettings)
             .unwrap()
             .name("org.freedesktop.portal.Desktop")

@@ -1,12 +1,12 @@
-//! Status, Stop, Restart and Update of a paired server from its Servers card.
+//! Status, Restart and Update of a paired Machine from its Machines card.
 //!
 //! The card takes the CLI's steps over the server's service lane:
 //! [`spaceterm_core::service::lane::admin`] settles what this desktop left pending, previews
 //! each change, and follows a confirmed one until it settles. A confirmation binds the server's
 //! own preview, so the server refuses a change whose Terminal Sessions or service changed since.
-//! Start stays on the server's own computer, because a stopped server accepts no connection.
+//! Start and Stop stay on the Machine itself, because a stopped SpaceTerm Core accepts no connection.
 //!
-//! Nothing here connects on its own: Check Now, Stop, Restart and Update each open a lane
+//! Nothing here connects on its own: Check Now, Restart and Update each open a lane
 //! connection only when the person asks. Each route keeps its work and its last outcome while
 //! this window is open, so selecting another server and back shows them again.
 
@@ -30,16 +30,15 @@ use crate::direct_connections::{DirectRouteId, DirectRouteStatus, RefusalReason}
 use crate::machine_connection::{CoreError, MachineConnection};
 use crate::ui::sidebar_window::form::CaptionTone;
 
-pub(super) const STOP_SELECTOR: &str = "settings-remote-server-stop";
 pub(super) const RESTART_SELECTOR: &str = "settings-remote-server-restart";
 pub(super) const UPDATE_SELECTOR: &str = "settings-remote-server-update";
 pub(super) const CONFIRM_SELECTOR: &str = "settings-remote-server-confirm";
 pub(super) const CANCEL_SELECTOR: &str = "settings-remote-server-cancel";
 
-/// A change the person can ask of a paired server.
+/// A change the person can ask of a paired Machine. Start and Stop run only on the Machine
+/// itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Change {
-    Stop,
     Restart,
     /// Updates to the server's newest signed release, or returns to its previous version when
     /// the server offers that instead.
@@ -49,7 +48,6 @@ pub(crate) enum Change {
 impl Change {
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Stop => "Stop SpaceTerm Core\u{2026}",
             Self::Restart => "Restart SpaceTerm Core\u{2026}",
             Self::Update => "Update\u{2026}",
         }
@@ -57,7 +55,6 @@ impl Change {
 
     pub(super) const fn selector(self) -> &'static str {
         match self {
-            Self::Stop => STOP_SELECTOR,
             Self::Restart => RESTART_SELECTOR,
             Self::Update => UPDATE_SELECTOR,
         }
@@ -247,7 +244,6 @@ impl RemoteMachineControl for LaneControl {
     fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure> {
         let (_, _, mut session, settled) = self.open()?;
         let preview = match change {
-            Change::Stop => admin::preview(&mut session, LaneAction::Stop),
             Change::Restart => admin::preview(&mut session, LaneAction::Restart),
             Change::Update => admin::plan_update(&mut session).map(|plan| match plan {
                 UpdatePlan::Return(preview) | UpdatePlan::Update { preview, .. } => preview,
@@ -752,7 +748,7 @@ impl SettingsWindow {
     pub(super) fn remote_reading(&self, route: &DirectRouteId) -> bool {
         matches!(
             self.remote_work(route),
-            Some(Work::Reading | Work::Preparing(Change::Stop | Change::Restart))
+            Some(Work::Reading | Work::Preparing(Change::Restart))
         )
     }
 

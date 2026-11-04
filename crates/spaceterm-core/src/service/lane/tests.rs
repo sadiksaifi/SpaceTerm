@@ -147,6 +147,12 @@ const ACTOR: Actor = Actor {
     client: [8; 32],
 };
 
+/// A caller on the Machine itself, the only one that may Stop SpaceTerm Core.
+const LOCAL: Actor = Actor {
+    pairing: None,
+    client: [8; 32],
+};
+
 type Hook = Arc<Mutex<Option<Box<dyn Fn(&OperationId) + Send>>>>;
 
 #[cfg_attr(
@@ -252,21 +258,54 @@ fn code(reply: LaneReply) -> String {
 }
 
 fn preview(lane: &Arc<LaneCore>, action: LaneAction) -> (String, LaneEffects) {
-    match lane.answer(LaneRequest::Preview { action }, &ACTOR) {
+    let actor = caller(&action);
+    match lane.answer(LaneRequest::Preview { action }, actor) {
         LaneReply::Preview { token, effects, .. } => (token, effects),
         other => panic!("expected a preview, got {other:?}"),
     }
 }
 
 fn execute(lane: &Arc<LaneCore>, action: LaneAction, token: &str, op: u8) -> LaneReply {
+    let actor = caller(&action);
     lane.answer(
         LaneRequest::Execute {
             action,
             token: token.to_owned(),
             operation: OperationId([op; 16]).to_string(),
         },
-        &ACTOR,
+        actor,
     )
+}
+
+/// The caller these tests use for `action`: a paired device, except for a local-only Stop.
+fn caller(action: &LaneAction) -> &'static Actor {
+    if *action == LaneAction::Stop {
+        &LOCAL
+    } else {
+        &ACTOR
+    }
+}
+
+#[test]
+fn a_paired_caller_cannot_stop_the_core() {
+    with_lane(|lane| {
+        let local_only = || LaneReply::Error {
+            code: "local_only".into(),
+        };
+        let request = LaneRequest::Preview {
+            action: LaneAction::Stop,
+        };
+        assert_eq!(lane.lane.answer(request, &ACTOR), local_only());
+        let (token, _) = preview(&lane.lane, LaneAction::Stop);
+        let request = LaneRequest::Execute {
+            action: LaneAction::Stop,
+            token,
+            operation: OperationId([1; 16]).to_string(),
+        };
+        assert_eq!(lane.lane.answer(request, &ACTOR), local_only());
+        assert!(!lane.host.fenced.load(Ordering::SeqCst));
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+    });
 }
 
 #[test]
@@ -834,7 +873,7 @@ fn revoking_the_actor_mid_operation_keeps_the_fence_and_refuses_another_operatio
         };
         let LaneReply::Preview { token, .. } = lane.lane.answer(
             LaneRequest::Preview {
-                action: LaneAction::Stop,
+                action: LaneAction::Restart,
             },
             &other,
         ) else {
@@ -842,7 +881,7 @@ fn revoking_the_actor_mid_operation_keeps_the_fence_and_refuses_another_operatio
         };
         let reply = lane.lane.answer(
             LaneRequest::Execute {
-                action: LaneAction::Stop,
+                action: LaneAction::Restart,
                 token,
                 operation: OperationId([2; 16]).to_string(),
             },
@@ -1157,7 +1196,7 @@ mod flow {
             // The fixture's signing trust is per thread, so the serving thread holds it too.
             std::thread::spawn(move || {
                 crate::service::runtime::test_support::with_fixture_trust(|| {
-                    lane.serve(&mut core, ACTOR, None, &|| Ok(()))
+                    lane.serve(&mut core, LOCAL, None, &|| Ok(()))
                 })
             });
             Ok(Box::new(client))
@@ -1391,7 +1430,7 @@ mod flow {
                     };
                     let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
                     let execute = matches!(request, LaneRequest::Execute { .. });
-                    let reply = lane.answer(request, &ACTOR);
+                    let reply = lane.answer(request, &LOCAL);
                     if execute && lose.swap(false, Ordering::SeqCst) {
                         let _ = core.shutdown(std::net::Shutdown::Both);
                         return;
@@ -1511,7 +1550,7 @@ mod flow {
                     }
                     let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
                     let execute = matches!(request, LaneRequest::Execute { .. });
-                    let reply = lane.answer(request, &ACTOR);
+                    let reply = lane.answer(request, &LOCAL);
                     if execute {
                         stalled.store(true, Ordering::SeqCst);
                         continue;

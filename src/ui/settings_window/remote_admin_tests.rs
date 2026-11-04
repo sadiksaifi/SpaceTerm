@@ -323,12 +323,19 @@ fn state(machines: &Machines<'_>) -> super::super::machine_card::CoreState {
 }
 
 #[gpui::test]
-fn a_connected_paired_machine_offers_restart_and_stop_but_never_start(cx: &mut TestAppContext) {
+fn a_connected_paired_machine_offers_restart_but_never_start_or_stop(cx: &mut TestAppContext) {
     let remote = ScriptedRemote::new();
     let machines = open_penguin(&remote, cx);
 
     assert!(menu_offers(RESTART_SELECTOR, machines.cx));
-    assert!(menu_offers(STOP_SELECTOR, machines.cx));
+    // A paired Machine has no Stop change at all; the local Stop is never offered for it either.
+    assert!(
+        !menu_offers(
+            super::super::machines::ServiceAction::Stop.selector(),
+            machines.cx
+        ),
+        "Stop runs only on the Machine itself"
+    );
     assert!(
         !menu_offers(
             super::super::machines::ServiceAction::Start.selector(),
@@ -355,67 +362,10 @@ fn a_disconnected_paired_machine_takes_no_lane_step(cx: &mut TestAppContext) {
     });
     assert!(!ready);
     click(super::super::machine_card::MENU_SELECTOR, machines.cx);
-    click(STOP_SELECTOR, machines.cx);
+    click(RESTART_SELECTOR, machines.cx);
     assert!(remote.prepared.lock().unwrap().is_empty());
     assert!(
         footnote(&machines).contains("Connect to penguin to change these settings."),
-        "got {:?}",
-        footnote(&machines)
-    );
-}
-
-/// Stop previews on the server, the alert names it and what ends, and confirming executes that
-/// exact preview once. A Stop whose outcome only the server's computer can read says so.
-#[gpui::test]
-fn stop_confirms_the_machines_preview_and_reports_an_unconfirmed_stop(cx: &mut TestAppContext) {
-    let remote = ScriptedRemote::new();
-    *remote.prepare.lock().unwrap() = Ok(Prepared {
-        preview: preview(LaneAction::Stop, effects(2)),
-        settled: Vec::new(),
-    });
-    *remote.perform.lock().unwrap() = Ok(Performed {
-        outcome: Outcome::Shutdown {
-            operation: "0123456789abcdef0123456789abcdef".into(),
-            boot: "a".into(),
-        },
-        settled: Vec::new(),
-    });
-    let machines = open_penguin(&remote, cx);
-
-    click(STOP_SELECTOR, machines.cx);
-    assert_eq!(*remote.prepared.lock().unwrap(), vec![Change::Stop]);
-    assert!(alert_open(machines.cx), "Stop asks first");
-    let tree = A11yTree::read(machines.cx);
-    assert!(tree.find_text("Stop SpaceTerm Core on penguin?").is_some());
-    assert!(remote.performed.lock().unwrap().is_empty());
-
-    answer(CONFIRM_SELECTOR, machines.cx);
-    machines.cx.run_until_parked();
-
-    let performed = remote.performed.lock().unwrap().clone();
-    assert_eq!(performed.len(), 1, "one confirmation executes once");
-    assert_eq!(performed[0].token, "c1-previewed");
-    assert!(
-        footnote(&machines).contains("can\u{2019}t confirm the stop finished"),
-        "got {:?}",
-        footnote(&machines)
-    );
-    assert!(footnote(&machines).contains("start it again there"));
-
-    // The connection ends as the server stops, and the card reads Stopped rather than a
-    // connection that keeps retrying.
-    machines.direct.disconnect(&machines.routes[0]);
-    settle(machines.cx, |_| true);
-    assert_eq!(state(&machines).state.as_ref(), "Stopped");
-    // Someone started it on its own computer, so connecting again leaves nothing to explain.
-    machines.direct.connect(&machines.routes[0]);
-    let route = machines.routes[0];
-    let direct = machines.direct.clone();
-    settle(machines.cx, |_| {
-        direct.status(&route) == Some(crate::direct_connections::DirectRouteStatus::Connected)
-    });
-    assert!(
-        !footnote(&machines).contains("stop"),
         "got {:?}",
         footnote(&machines)
     );
@@ -521,40 +471,6 @@ fn check_now_offers_the_machines_update_and_update_follows_it_to_the_end(cx: &mu
         footnote(&machines)
     );
     assert!(state(&machines).operation.is_none(), "nothing is underway");
-}
-
-/// A Stop that runs out of time while the server keeps its connection proves no shutdown: the
-/// card says the outcome is unknown, and a later disconnect doesn't read as Stopped.
-#[gpui::test]
-fn a_stop_without_an_observed_shutdown_reads_as_uncertain(cx: &mut TestAppContext) {
-    let remote = ScriptedRemote::new();
-    *remote.prepare.lock().unwrap() = Ok(Prepared {
-        preview: preview(LaneAction::Stop, effects(1)),
-        settled: Vec::new(),
-    });
-    *remote.perform.lock().unwrap() = Ok(Performed {
-        outcome: Outcome::Unconfirmed {
-            operation: "0123456789abcdef0123456789abcdef".into(),
-            boot: "a".into(),
-            last: Some(receipt(LaneAction::Stop, LaneOperationState::Running, "a")),
-        },
-        settled: Vec::new(),
-    });
-    let machines = open_penguin(&remote, cx);
-
-    click(STOP_SELECTOR, machines.cx);
-    answer(CONFIRM_SELECTOR, machines.cx);
-    machines.cx.run_until_parked();
-
-    let note = footnote(&machines);
-    assert!(
-        note.contains("SpaceTerm couldn\u{2019}t confirm whether penguin finished its stop."),
-        "got {note:?}"
-    );
-    assert!(!note.contains("closed its connection"), "got {note:?}");
-    machines.direct.disconnect(&machines.routes[0]);
-    settle(machines.cx, |_| true);
-    assert_eq!(state(&machines).state.as_ref(), "Not connected");
 }
 
 /// A reading belongs to the link it was read over. Once the connection is replaced, as after an
