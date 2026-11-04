@@ -293,6 +293,9 @@ verify_code() {
         || die "$(basename "$1") is not signed by the SpaceTerm Developer ID"
 }
 
+# Every SpaceTerm Core command the installer runs takes --machine local, because it acts on this
+# account's Core whatever SPACETERM_MACHINE the shell selects.
+
 # The SpaceTerm Core executable within an installation, in this machine's layout. A macOS
 # installation is an app-like bundle, so System Permissions follow the bundle.
 core_executable() {
@@ -321,16 +324,17 @@ installed_core_version() {
     printf '%s' "$newest"
 }
 
-# Refuses a downgrade of product $1 from installed version $2. Prints install or skip.
+# Refuses a downgrade of product $1 from installed version $2 to version $3. Prints install or
+# skip.
 plan_product() {
     if [ -z "$2" ]; then
         say install
         return
     fi
-    case "$(compare_versions "$version" "$2")" in
+    case "$(compare_versions "$3" "$2")" in
         newer) say install ;;
         same) say skip ;;
-        older) die "$1 $2 is installed, which is newer than $version; the installer never downgrades" ;;
+        older) die "$1 $2 is installed, which is newer than $3; the installer never downgrades" ;;
     esac
 }
 
@@ -368,7 +372,7 @@ install_core() {
     cp "$work/$archive" "$runtime/artifact.tar.gz"
     cp "$work/$archive.sig" "$runtime/artifact.sig"
     step "Installing SpaceTerm Core $version"
-    "$executable" internal retain "$runtime" || die "SpaceTerm Core $version could not be installed"
+    "$executable" --machine local internal retain "$runtime" || die "SpaceTerm Core $version could not be installed"
 }
 
 # Resolves the installed SpaceTerm Core executable through its launcher, or through the service
@@ -415,7 +419,7 @@ uninstall_core() {
         return
     fi
     status=0
-    preview="$("$core_installed" uninstall)" || status=$?
+    preview="$("$core_installed" --machine local uninstall)" || status=$?
     case "$status" in
         0)
             say "$preview"
@@ -435,7 +439,7 @@ uninstall_core() {
     fi
     printf '%s\n' "$preview" | sed -n '1p' >/dev/tty
     ask "Uninstall SpaceTerm Core?" || die "uninstall cancelled"
-    "$core_installed" uninstall --confirm "$token" || die "SpaceTerm Core could not be uninstalled"
+    "$core_installed" --machine local uninstall --confirm "$token" || die "SpaceTerm Core could not be uninstalled"
 }
 
 # Linux only. Without linger, systemd stops the account's SpaceTerm Core at logout.
@@ -672,6 +676,21 @@ install_desktop_linux() {
         && [ -f "$1/share/applications/$DESKTOP_ID.desktop" ] \
         || die "$archive does not contain one SpaceTerm installation"
     mv "$1" "$staging/new"
+    # The signature authenticates these bytes, not the version their asset name claims, so the
+    # verified build itself must be the selected release. An older signed archive served under a
+    # newer name is a downgrade.
+    candidate="$("$staging/new/bin/spaceterm-desktop" --build-info 2>/dev/null </dev/null)" \
+        || die "$archive does not report its build"
+    candidate_version="$(printf '%s\n' "$candidate" | json_field version)"
+    if ! valid_version "$candidate_version" \
+        || [ "$(printf '%s\n' "$candidate" | json_field identity)" != spaceterm ] \
+        || [ "$(printf '%s\n' "$candidate" | json_field target)" != x86_64-unknown-linux-gnu ]; then
+        die "$archive does not hold a SpaceTerm release for this computer"
+    fi
+    candidate_plan="$(plan_product SpaceTerm "$desktop_before" "$candidate_version")"
+    if [ "$candidate_plan" != install ] || [ "$candidate_version" != "$version" ]; then
+        die "$archive holds SpaceTerm $candidate_version, not the SpaceTerm $version release"
+    fi
 
     step "Installing SpaceTerm $version to $target"
     ensure_not_running_linux
@@ -781,10 +800,10 @@ install() {
         fi
     fi
     find_release
-    core_plan="$(plan_product "SpaceTerm Core" "$core_before")"
+    core_plan="$(plan_product "SpaceTerm Core" "$core_before" "$version")"
     desktop_plan=skip
     if [ "$desktop" = true ]; then
-        desktop_plan="$(plan_product SpaceTerm "$desktop_before")"
+        desktop_plan="$(plan_product SpaceTerm "$desktop_before" "$version")"
         if [ "$desktop_plan" = install ]; then
             if [ "$platform" = macos-arm64 ]; then
                 ensure_not_running_macos
@@ -794,9 +813,6 @@ install() {
         fi
     fi
 
-    # Installer steps act on this account, whatever machine CLI preferences select.
-    SPACETERM_MACHINE=local
-    export SPACETERM_MACHINE
     if [ "$core_plan" = install ]; then
         install_core
     else

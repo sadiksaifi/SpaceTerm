@@ -17,6 +17,7 @@ from spaceterm_tasks.release import RELEASES
 from tests.installer_fixture import (
     CORE,
     CURL,
+    TEAM_ID,
     TOKEN,
     Release,
     core_archive,
@@ -40,9 +41,12 @@ int main(int argc, char **argv) {
     char copy[PATH_MAX], script[PATH_MAX];
     strlcpy(copy, argv[0], sizeof copy);
     snprintf(script, sizeof script, "%s/../Resources/core.sh", dirname(copy));
-    argv[0] = script;
-    execv("/bin/sh", (char *[]){"sh", script, argc > 1 ? argv[1] : NULL,
-        argc > 2 ? argv[2] : NULL, argc > 3 ? argv[3] : NULL, NULL});
+    char *arguments[argc + 2];
+    arguments[0] = "sh";
+    arguments[1] = script;
+    for (int index = 1; index < argc; index++) arguments[index + 1] = argv[index];
+    arguments[argc + 1] = NULL;
+    execv("/bin/sh", arguments);
     return 127;
 }
 """
@@ -280,6 +284,60 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.installations(), [])
         self.assert_no_leftovers()
 
+    def test_a_release_pins_each_bundle_to_its_identifier_and_the_team_id(self):
+        """The rendered release passes codesign the complete requirement for each bundle.
+
+        No test certificate chains to Apple, so a recording codesign stands in for the
+        signature check and the test reads the requirement the release installer asks for.
+        """
+        calls = self.root / "codesign.log"
+        fake(
+            self.bin,
+            "codesign",
+            f"""#!{sys.executable}
+import json, sys
+with open({str(calls)!r}, "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+""",
+        )
+        installer = render(self.root, current=VALID_KEY, backup=VALID_KEY)
+        self.succeed("--desktop", installer=installer)
+
+        def requirement(identifier):
+            return (
+                f'=identifier "{identifier}" and anchor apple generic'
+                " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"
+                " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+                f' and certificate leaf[subject.OU] = "{TEAM_ID}"'
+            )
+
+        recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+        self.assertEqual(
+            [(call[:-1], Path(call[-1]).name) for call in recorded],
+            [
+                (
+                    [
+                        "--verify",
+                        "--deep",
+                        "--strict",
+                        "--test-requirement=" + requirement("io.github.sadiksaifi.spaceterm.core"),
+                    ],
+                    "SpaceTerm Core.app",
+                ),
+                (
+                    [
+                        "--verify",
+                        "--deep",
+                        "--strict",
+                        "--test-requirement=" + requirement("io.github.sadiksaifi.spaceterm"),
+                    ],
+                    "SpaceTerm.app",
+                ),
+            ],
+        )
+        self.assertEqual(self.installations(), ["1.2.0"])
+        self.assertEqual(self.application_version(), "1.2.0")
+
     def test_unsigned_or_changed_core_bundles_are_refused_before_they_run(self):
         for options in ({"sign": False}, {"tamper": True}):
             with self.subTest(**options):
@@ -426,9 +484,10 @@ class InstallTests(unittest.TestCase):
 
     def test_uninstall_desktop_confirms_on_the_terminal_and_removes_the_application(self):
         self.succeed("--desktop")
+        # The installer acts on this Mac's SpaceTerm Core whatever the shell selects.
         result, terminal = run_with_tty(
             ["sh", str(self.installer), "--uninstall", "--desktop"],
-            self.environment(),
+            self.environment(SPACETERM_MACHINE="paired-machine"),
             "y\n",
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

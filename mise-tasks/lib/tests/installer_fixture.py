@@ -38,10 +38,21 @@ if source is None:
 shutil.copyfile(source, arguments[arguments.index("--output") + 1])
 """
 
-# The fake SpaceTerm Core. `internal retain` copies the unpacked installation into
-# installations/<sha256 of the archive> and links the launcher only when none exists, so an
-# existing installation and its launcher stay as they were.
+# The fake SpaceTerm Core. Like the CLI, it selects the Machine from --machine, then
+# SPACETERM_MACHINE, then local, and refuses its local-only commands for any other Machine.
+# `internal retain` copies the unpacked installation into installations/<sha256 of the
+# archive> and links the launcher only when none exists, so an existing installation and its
+# launcher stay as they were. The log records each command without its --machine flag.
 CORE = r"""#!/bin/sh
+machine="${SPACETERM_MACHINE:-local}"
+if [ "${1:-}" = --machine ]; then
+    machine="$2"
+    shift 2
+fi
+if [ "$machine" != local ]; then
+    echo "error: local_only" >&2
+    exit 1
+fi
 printf '%s\n' "$*" >>"$CORE_LOG"
 case "$1:${2:-}" in
     internal:retain)

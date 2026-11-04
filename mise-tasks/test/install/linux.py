@@ -37,7 +37,8 @@ DESKTOP = r"""
 #include <unistd.h>
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {
-        printf("{\"schema\":1,\"identity\":\"spaceterm\",\"version\":\"%s\"}\n", VERSION);
+        printf("{\"schema\":1,\"identity\":\"%s\",\"version\":\"%s\",\"target\":\"%s\"}\n",
+               IDENTITY, VERSION, TARGET);
         return 0;
     }
     for (;;) pause();
@@ -151,13 +152,26 @@ class InstallTests(unittest.TestCase):
         archive = core_archive(directory / core_name(version), version, **options)
         return archive, self.sign(archive, key)
 
-    def desktop(self, version, key="current"):
-        directory = self.root / f"desktop-{version}-{key}"
+    def desktop(
+        self, version, key="current", identity="spaceterm", target="x86_64-unknown-linux-gnu"
+    ):
+        """A signed desktop archive whose executable reports `version`, `identity`, `target`."""
+        directory = self.root / f"desktop-{version}-{key}-{identity}-{target}"
         archive = directory / desktop_name(version)
         if not archive.exists():
-            executable = self.root / f"spaceterm-desktop-{version}"
+            executable = directory.with_name(f"{directory.name}-executable")
             subprocess.run(
-                ["cc", "-x", "c", f'-DVERSION="{version}"', "-", "-o", executable],
+                [
+                    "cc",
+                    "-x",
+                    "c",
+                    f'-DVERSION="{version}"',
+                    f'-DIDENTITY="{identity}"',
+                    f'-DTARGET="{target}"',
+                    "-",
+                    "-o",
+                    executable,
+                ],
                 input=DESKTOP,
                 text=True,
                 check=True,
@@ -357,17 +371,34 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.requested(), [f"{RELEASES}/latest/download/SHA256SUMS"])
         self.assertEqual(self.desktop_version(), "1.3.0")
 
-    def test_signature_failures_stop_before_anything_runs(self):
-        archive, _ = self.core("1.2.0")
-        truncated = self.root / "truncated.sig"
-        truncated.write_bytes(self.sign(archive).read_bytes()[:63])
+    def bad_signatures(self, archive):
+        """Signatures that must not authenticate `archive`, under each pinned key and another."""
         other = self.root / "other"
         other.write_bytes(b"other bytes")
-        for label, signature, message in (
-            ("unknown key", self.core("1.2.0", "rogue")[1], "does not carry a valid SpaceTerm"),
-            ("other bytes", self.sign(other), "does not carry a valid SpaceTerm"),
-            ("truncated", truncated, "has a malformed signature"),
-        ):
+        signatures = [("unknown key", self.sign(archive, "rogue", self.root / "rogue.sig"), "")]
+        for key in ("current", "backup"):
+            truncated = self.root / f"truncated-{key}.sig"
+            truncated.write_bytes(self.sign(archive, key, truncated).read_bytes()[:63])
+            signatures += [
+                (
+                    f"{key} key over other bytes",
+                    self.sign(other, key, self.root / f"{key}.sig"),
+                    "",
+                ),
+                (f"{key} key truncated", truncated, "malformed"),
+            ]
+        return [
+            (
+                label,
+                signature,
+                "has a malformed signature" if malformed else "does not carry a valid SpaceTerm",
+            )
+            for label, signature, malformed in signatures
+        ]
+
+    def test_signature_failures_stop_before_anything_runs(self):
+        archive, _ = self.core("1.2.0")
+        for label, signature, message in self.bad_signatures(archive):
             with self.subTest(label):
                 self.release.publish(
                     "1.2.0", {archive.name: archive, f"{archive.name}.sig": signature}
@@ -479,21 +510,83 @@ class InstallTests(unittest.TestCase):
     def test_a_desktop_archive_with_a_bad_signature_is_not_installed(self):
         core, core_signature = self.core("1.2.0")
         archive, _ = self.desktop("1.2.0")
-        rogue = self.sign(archive, "rogue", self.root / "rogue.sig")
+        for label, signature, message in self.bad_signatures(archive):
+            with self.subTest(label):
+                self.release.publish(
+                    "1.2.0",
+                    {
+                        core.name: core,
+                        core_signature.name: core_signature,
+                        archive.name: archive,
+                        f"{archive.name}.sig": signature,
+                    },
+                )
+                result = self.install("--desktop")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"{archive.name} {message}", result.stderr)
+                self.assertFalse(self.install_dir.exists())
+                self.assertFalse(os.path.lexists(self.home / ".local/bin/spaceterm-desktop"))
+                self.assert_no_leftovers()
+
+    def serve_desktop_as(self, version, archive):
+        """Serve a correctly signed desktop `archive` under the desktop asset names of `version`."""
+        core, core_signature = self.core(version)
         self.release.publish(
-            "1.2.0",
+            version,
             {
                 core.name: core,
                 core_signature.name: core_signature,
-                archive.name: archive,
-                f"{archive.name}.sig": rogue,
+                desktop_name(version): archive,
+                f"{desktop_name(version)}.sig": Path(f"{archive}.sig"),
             },
         )
+
+    def test_an_older_signed_desktop_archive_replayed_as_a_newer_release_is_refused(self):
+        self.publish("1.2.0", desktop=True)
+        self.succeed("--desktop")
+        older, _ = self.desktop("1.1.0")
+        self.serve_desktop_as("1.3.0", older)
         result = self.install("--desktop")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(f"{archive.name} does not carry a valid SpaceTerm signature", result.stderr)
-        self.assertFalse(self.install_dir.exists())
+        self.assertIn(
+            "SpaceTerm 1.2.0 is installed, which is newer than 1.1.0; "
+            "the installer never downgrades",
+            result.stderr,
+        )
+        self.assertEqual(self.desktop_version(), "1.2.0")
+        self.assertEqual(sorted(path.name for path in self.install_dir.iterdir()), ["spaceterm"])
         self.assert_no_leftovers()
+
+    def test_a_signed_desktop_archive_must_be_the_selected_release_for_this_computer(self):
+        for archive, message in (
+            (self.desktop("1.1.0")[0], "holds SpaceTerm 1.1.0, not the SpaceTerm 1.3.0 release"),
+            (
+                self.desktop("1.3.0", identity="spaceterm-preflight")[0],
+                "does not hold a SpaceTerm release for this computer",
+            ),
+            (
+                self.desktop("1.3.0", target="aarch64-unknown-linux-gnu")[0],
+                "does not hold a SpaceTerm release for this computer",
+            ),
+        ):
+            with self.subTest(archive=archive.parent.name):
+                self.serve_desktop_as("1.3.0", archive)
+                result = self.install("--desktop")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(list(self.install_dir.iterdir()), [])
+                self.assertFalse(os.path.lexists(self.home / ".local/bin/spaceterm-desktop"))
+                self.assert_no_leftovers()
+
+    def test_install_and_uninstall_act_on_the_local_machine_whatever_the_shell_selects(self):
+        self.succeed(SPACETERM_MACHINE="paired-machine")
+        self.assertEqual(list(self.installations().values()), ["1.2.0"])
+        result, _ = self.install_with_tty(
+            "--uninstall", answers="y\n", SPACETERM_MACHINE="paired-machine"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.core_calls()[1:], ["uninstall", f"uninstall --confirm {TOKEN}"])
+        self.assertFalse(os.path.lexists(self.launcher()))
 
     def test_a_running_desktop_app_is_refused_before_downloading(self):
         self.publish("1.1.0", latest=False, desktop=True)
