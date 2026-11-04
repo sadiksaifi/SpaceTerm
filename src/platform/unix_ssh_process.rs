@@ -306,6 +306,12 @@ mod tests {
                 "{script}"
             );
             assert!(script.contains("Darwin) executable='SpaceTerm Core Development.app/Contents/MacOS/spaceterm';;\n*) executable='bin/spaceterm';;"), "{script}");
+            // The identity directory above the Core data root must not be a link either.
+            assert!(
+                script.contains("root=\"$HOME/.local/share/spaceterm-development/core\"\n"),
+                "{script}"
+            );
+            assert!(script.contains("[ ! -L \"${root%/core}\" ]"), "{script}");
         }
     }
 
@@ -871,7 +877,7 @@ exit 0
             script.push_str("exit 73\n");
         }
         script.push_str(r#"fi
-[ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] && [ ! -L "${root%/server}" ] && [ ! -L "$root" ] && [ ! -L "$policy" ] || exit 74
+[ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] && [ ! -L "${root%/core}" ] && [ ! -L "$root" ] && [ ! -L "$policy" ] || exit 74
 case "$(uname -s)" in
 Darwin) owner=$(stat -f '%u:%Lp' "$policy"); dir_owner=$(stat -f '%u:%Lp' "$root");;
 Linux) owner=$(stat -c '%u:%a' "$policy"); dir_owner=$(stat -c '%u:%a' "$root");;
