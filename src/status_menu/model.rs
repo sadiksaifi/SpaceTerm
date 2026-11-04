@@ -3,7 +3,7 @@
 //! that apply now, then Settings and Quit. There is no "Open SpaceTerm". Each row's wording comes
 //! from [`crate::updates::presentation`]; hosts render this tree natively.
 use crate::updates::machines::{MachineId, MachineUpdate};
-use crate::updates::presentation::{self, ExtraHeader, ExtraItem, ExtraRow, MachineState, Tone};
+use crate::updates::presentation::{self, ExtraHeader, ExtraItem, ExtraRow, Tone};
 use spaceterm_core::update::facts::Platform;
 
 pub(crate) const HEADER_TITLE: &str = "SpaceTerm";
@@ -34,9 +34,6 @@ pub(crate) enum MachineKind {
 pub(crate) struct MachineRow {
     pub(crate) row: ExtraRow,
     pub(crate) kind: MachineKind,
-    /// The Machine waits on the person, as the title-bar control counts it, or is stopped and
-    /// offers Start. A flat menu lists the first action of these rows only.
-    pub(crate) pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,9 +74,6 @@ impl Menu {
             .into_iter()
             .map(|row| MachineRow {
                 kind: kind(row.machine, row.local, machines),
-                pending: update.machine(row.machine).is_some_and(|view| {
-                    view.state.pending() || view.state == MachineState::Stopped
-                }),
                 row,
             })
             .collect();
@@ -117,8 +111,8 @@ impl Menu {
     }
 
     /// The same menu without submenus or subtitles: one status line each for the desktop and every
-    /// Machine, then each Machine's first action while it needs the person, naming the Machine,
-    /// then the actions group, Settings and Quit.
+    /// Machine, then every available Machine action, naming the Machine, then the actions group,
+    /// Settings and Quit.
     #[cfg_attr(
         not(any(target_os = "linux", test)),
         allow(dead_code, reason = "only the Linux status area shows a flat menu")
@@ -131,12 +125,9 @@ impl Menu {
         rows.extend(self.machines.iter().map(|machine| {
             FlatRow::Text(format!("{} \u{b7} {}", machine.row.name, machine.row.line))
         }));
-        let machines = self
-            .machines
-            .iter()
-            .filter(|machine| machine.pending)
-            .filter_map(|machine| {
-                let (title, command) = first_action(machine.row.items.as_deref()?)?;
+        let machines = self.machines.iter().flat_map(|machine| {
+            machine.row.items.iter().flatten().filter_map(move |item| {
+                let (title, command) = action(item)?;
                 let (title, asks) = match title.strip_suffix('\u{2026}') {
                     Some(title) => (title, "\u{2026}"),
                     None => (title, ""),
@@ -145,9 +136,10 @@ impl Menu {
                     title: format!("{title} on {}{asks}", machine.row.name),
                     command: Command::Update(command.clone()),
                 })
-            });
+            })
+        });
         let actions = self.actions.iter().filter_map(|item| {
-            let (title, command) = first_action(std::slice::from_ref(item))?;
+            let (title, command) = action(item)?;
             Some(FlatRow::Action {
                 title: title.to_owned(),
                 command: Command::Update(command.clone()),
@@ -173,11 +165,11 @@ impl Menu {
     }
 }
 
-fn first_action(items: &[ExtraItem]) -> Option<(&str, &presentation::Command)> {
-    items.iter().find_map(|item| match item {
+fn action(item: &ExtraItem) -> Option<(&str, &presentation::Command)> {
+    match item {
         ExtraItem::Action { title, command, .. } => Some((title.as_ref(), command)),
         ExtraItem::Separator => None,
-    })
+    }
 }
 
 fn kind(machine: MachineId, local: bool, machines: &[MachineUpdate]) -> MachineKind {

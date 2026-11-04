@@ -374,6 +374,8 @@ fn the_flat_menu_names_the_machine_each_pending_action_affects(cx: &mut TestAppC
             "penguin \u{b7} Version 0.8.0 \u{b7} Update ready".to_owned(),
             "build-box \u{b7} Version 0.8.0 \u{b7} Update ready".to_owned(),
             "-".to_owned(),
+            "[Restart SpaceTerm Core on This Mac]".to_owned(),
+            "[Stop SpaceTerm Core on This Mac]".to_owned(),
             "[Restart to Update on penguin\u{2026}]".to_owned(),
             "[Restart to Update on build-box\u{2026}]".to_owned(),
             "[Restart All\u{2026}]".to_owned(),
@@ -600,7 +602,61 @@ fn the_flat_menu_offers_start_for_a_stopped_local_core(cx: &mut TestAppContext) 
         )
     );
     assert!(
-        !actions.iter().any(|(title, _)| title.contains("penguin")),
-        "a running Machine with sessions only reports its status: {actions:?}"
+        actions
+            .iter()
+            .any(|(title, _)| title == "Restart SpaceTerm Core on penguin\u{2026}"),
+        "a running Machine keeps its restart action: {actions:?}"
+    );
+}
+
+#[gpui::test]
+fn the_flat_menu_keeps_local_restart_and_stop_and_never_offers_remote_stop(
+    cx: &mut TestAppContext,
+) {
+    let fixture = start(
+        vec![
+            machine(LOCAL, "This Computer", 2),
+            machine(PENGUIN, "penguin", 0),
+        ],
+        cx,
+    );
+    let titles = |menu: Menu| {
+        menu.flat()
+            .into_iter()
+            .filter_map(|row| match row {
+                FlatRow::Action {
+                    title,
+                    command: Command::Update(_),
+                } => Some(title),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        titles(fixture.host.menu()),
+        [
+            "Restart SpaceTerm Core on This Computer\u{2026}",
+            "Stop SpaceTerm Core on This Computer\u{2026}",
+            "Restart SpaceTerm Core on penguin",
+        ],
+    );
+
+    changed(&fixture, waiting(machine(LOCAL, "This Computer", 2)), cx);
+    assert_eq!(
+        titles(fixture.host.menu()),
+        [
+            "Restart to Update on This Computer\u{2026}",
+            "Stop SpaceTerm Core on This Computer\u{2026}",
+            "Restart SpaceTerm Core on penguin",
+        ],
+    );
+
+    let mut stopping = machine(LOCAL, "This Computer", 2);
+    stopping.facts.as_mut().unwrap().operation =
+        Some(spaceterm_core::update::facts::Operation::Stopping);
+    changed(&fixture, stopping, cx);
+    assert_eq!(
+        titles(fixture.host.menu()),
+        ["Restart SpaceTerm Core on penguin"],
     );
 }
