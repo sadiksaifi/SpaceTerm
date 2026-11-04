@@ -619,26 +619,34 @@ impl Shared {
 
     /// Applies `change` to `id`'s entry and reports the Machine when its update changed.
     fn publish<T>(&self, id: MachineId, change: impl FnOnce(&mut Entry) -> T) -> Option<T> {
-        let (result, changed) = {
+        let (result, sent) = {
             let mut state = self.lock();
             let entry = state.entries.get_mut(&id)?;
             let before = entry.update.clone();
             let result = change(entry);
-            let changed = (entry.update != before).then(|| entry.update.clone());
-            (result, changed)
+            let sent = entry.update == before
+                || self.send_locked(MachineUpdatesEvent::Changed(Box::new(entry.update.clone())));
+            (result, sent)
         };
-        if let Some(update) = changed {
-            self.emit(MachineUpdatesEvent::Changed(Box::new(update)));
+        if !sent {
+            self.close();
         }
         Some(result)
+    }
+
+    /// Sends `event` while the caller holds the state lock, so events leave in the order the
+    /// state changed: a Machine's changes never precede the listing that names it. False when
+    /// nobody receives; the caller then closes once it releases the lock.
+    fn send_locked(&self, event: MachineUpdatesEvent) -> bool {
+        self.events.try_send(event).is_ok()
     }
 
     /// Brings the Machines in line with `known`: starts a follower for each new Machine ID,
     /// retires each removed one, hands each kept one its current routes, and wakes each kept
     /// follower to read its reach again.
     fn reconcile(self: &Arc<Self>, known: Vec<Known>) {
-        let mut renamed = Vec::new();
-        let listing = {
+        let sent = {
+            let mut renamed = Vec::new();
             let mut state = self.lock();
             if state.closed {
                 return;
@@ -713,20 +721,21 @@ impl Shared {
             state.listed = true;
             state.order = order;
             // A follower just started reads its reach anyway.
+            let sent = match listing {
+                Some(machines) => self.send_locked(MachineUpdatesEvent::Machines(machines)),
+                None => renamed.into_iter().all(|update| {
+                    self.send_locked(MachineUpdatesEvent::Changed(Box::new(update)))
+                }),
+            };
             for (id, entry) in &state.entries {
                 if !started.contains(id) {
                     entry.wake.poke();
                 }
             }
-            listing
+            sent
         };
-        match listing {
-            Some(machines) => self.emit(MachineUpdatesEvent::Machines(machines)),
-            None => {
-                for update in renamed {
-                    self.emit(MachineUpdatesEvent::Changed(Box::new(update)));
-                }
-            }
+        if !sent {
+            self.close();
         }
     }
 

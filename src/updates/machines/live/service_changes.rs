@@ -142,6 +142,7 @@ mod tests {
     use super::*;
     use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
 
@@ -166,13 +167,12 @@ mod tests {
     /// Follows a service whose `data` directory is first passed to `prepare`, with `server` as the
     /// running server's process.
     fn fixture_with(prepare: impl FnOnce(&Path), core: Option<u32>) -> Fixture {
+        // Fixtures of tests running in parallel each watch their own root.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "spaceterm-service-changes-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let data = root.join("data/core");
         std::fs::create_dir_all(&data).unwrap();
