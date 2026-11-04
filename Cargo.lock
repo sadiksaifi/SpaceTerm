@@ -6243,6 +6243,7 @@ dependencies = [
  "noq-udp",
  "objc2 0.6.4",
  "objc2-av-foundation",
+ "objc2-foundation 0.3.2",
  "postcard",
  "rcgen",
  "ring",

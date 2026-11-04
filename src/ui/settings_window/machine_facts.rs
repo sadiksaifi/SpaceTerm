@@ -109,9 +109,14 @@ pub(super) fn merged(
 ) -> LastKnownFacts {
     let previous = previous.unwrap_or_default();
     let core = observed.core;
-    // Stop ends every Terminal Session, so a Core observed stopped or uninstalled runs none.
+    // A Core whose process isn't running runs no Terminal Session: one stopped, uninstalled,
+    // turned off in Login Items, which macOS stops, or exited.
     let running_sessions = match observed.status {
-        Some(ObservedCoreStatus::Stopped | ObservedCoreStatus::NotInstalled) => Some(0),
+        Some(
+            ObservedCoreStatus::Stopped
+            | ObservedCoreStatus::NotInstalled
+            | ObservedCoreStatus::Unavailable,
+        ) => Some(0),
         _ => observed.running_sessions.or(previous.running_sessions),
     };
     LastKnownFacts {
@@ -390,13 +395,21 @@ mod tests {
         assert_eq!(next.observed_at, 20);
     }
 
-    /// Stop ends every Terminal Session, so a Core observed stopped or uninstalled runs none,
-    /// whatever count it reported while it ran.
+    /// A Core observed stopped, uninstalled, or installed but not running, as after macOS stops
+    /// one turned off in Login Items, runs no Terminal Session, whatever count it reported while
+    /// it ran.
     #[test]
-    fn a_core_observed_stopped_runs_no_sessions() {
+    fn a_core_observed_not_running_runs_no_sessions() {
+        let turned_off = ServiceStatus {
+            installed: true,
+            enabled: true,
+            running: false,
+            stopped: false,
+        };
         for status in [
             ObservedCoreStatus::Stopped,
             ObservedCoreStatus::NotInstalled,
+            service_status(turned_off),
         ] {
             let previous = LastKnownFacts {
                 observed_at: 10,

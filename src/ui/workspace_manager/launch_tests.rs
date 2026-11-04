@@ -427,32 +427,25 @@ fn a_stopped_core_stays_stopped_until_start_core(cx: &mut TestAppContext) {
     assert_eq!(harness.launch_title(cx), None);
 }
 
-/// The person turned SpaceTerm Core off in Login Items. The window says so and opens that list,
-/// and never starts it: once the person turns it on and comes back, launch runs again.
+/// SpaceTerm Core is off in Login Items, so the service refuses launch's start. The window says so
+/// and opens that list: once the person turns it on and comes back, launch runs again.
 #[gpui::test]
-fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness_reading_background_item(vec![ready()], [true], cx);
+fn a_core_off_in_login_items_opens_that_list_until_turned_on(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(CoreError::LoginItemOff), ready()], cx);
     cx.run_until_parked();
-    assert_eq!(
-        harness.launch_title(cx),
-        Some("SpaceTerm Core is turned off in Login Items")
-    );
+    assert_eq!(harness.launch_title(cx), Some(launch::LOGIN_ITEM_OFF_TITLE));
     assert!(cx.debug_bounds(LAUNCH_START_SELECTOR).is_none());
-    assert_eq!(
-        harness.launch.steps(),
-        Vec::<&str>::new(),
-        "launch neither prepares nor starts a service macOS keeps off"
-    );
+    assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_none());
 
     harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
-    assert_eq!(harness.launch.steps(), ["open_login_items"]);
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items"]);
 
     // The person turns SpaceTerm Core on in System Settings and comes back.
     cx.deactivate_window();
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     sync(&harness, cx);
-    assert_eq!(harness.launch.steps(), ["open_login_items", "run"]);
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items", "run"]);
     assert_eq!(harness.rows(cx), 1);
 }
 
@@ -463,11 +456,9 @@ fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &m
 #[gpui::test]
 fn a_core_turned_off_in_login_items_while_open_says_so_until_turned_on(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    const TITLE: &str = "SpaceTerm Core is turned off in Login Items";
 
-    // Launch reads the item on, the connection loss reads it off, and the return reads it on.
-    let (harness, cx) =
-        launch_harness_reading_background_item(vec![ready(), ready()], [false, true, false], cx);
+    // The connection loss reads the item off.
+    let (harness, cx) = launch_harness_reading_background_item(vec![ready(), ready()], [true], cx);
     cx.run_until_parked();
     sync(&harness, cx);
     assert!(cx.debug_bounds("tab-bar").is_some());
@@ -478,7 +469,7 @@ fn a_core_turned_off_in_login_items_while_open_says_so_until_turned_on(cx: &mut 
     cx.run_until_parked();
 
     let tree = A11yTree::read(cx);
-    let stage = tree.node(TITLE).clone();
+    let stage = tree.node(launch::LOGIN_ITEM_OFF_TITLE).clone();
     assert_eq!(
         stage["aria"]["description"],
         "Workspaces on This Computer open when you turn it on."
@@ -490,7 +481,7 @@ fn a_core_turned_off_in_login_items_while_open_says_so_until_turned_on(cx: &mut 
         "Start can't run a service macOS keeps off"
     );
     assert!(
-        cx.debug_bounds("server-launch-alert-ok").is_none(),
+        !cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)),
         "the stage says it, so no alert repeats it"
     );
     assert_eq!(harness.launch.steps(), ["run"], "the read changes nothing");
@@ -507,50 +498,100 @@ fn a_core_turned_off_in_login_items_while_open_says_so_until_turned_on(cx: &mut 
     sync(&harness, cx);
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    assert!(A11yTree::read(cx).find(TITLE).is_none());
+    assert!(
+        A11yTree::read(cx)
+            .find(launch::LOGIN_ITEM_OFF_TITLE)
+            .is_none()
+    );
     assert!(cx.debug_bounds("tab-bar").is_some(), "the Tabs return");
 }
 
-/// The person stopped SpaceTerm Core, then turned it off in Login Items. Start, chosen after
-/// that, starts nothing and says the item is off instead.
+/// The person stopped SpaceTerm Core, then turned it off in Login Items. The service refuses the
+/// Start chosen after that, and the window says the item is off and offers that list.
 #[gpui::test]
-fn start_after_turning_off_in_login_items_starts_nothing(cx: &mut TestAppContext) {
-    let (harness, cx) =
-        launch_harness_reading_background_item(vec![Ok(LaunchOutcome::Stopped)], [false, true], cx);
+fn start_after_turning_off_in_login_items_offers_login_items(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped)], cx);
     cx.run_until_parked();
-    assert_eq!(harness.launch.steps(), ["run"]);
+    harness.launch.refuse_start(CoreError::LoginItemOff);
 
     harness.click(LAUNCH_START_SELECTOR, cx);
-    cx.run_until_parked();
 
-    assert_eq!(
-        harness.launch_title(cx),
-        Some("SpaceTerm Core is turned off in Login Items")
-    );
-    assert_eq!(
-        harness.launch.steps(),
-        ["run"],
-        "Start never turns on a service macOS keeps off"
-    );
+    assert_eq!(harness.launch.steps(), ["run", "start"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::LOGIN_ITEM_OFF_TITLE));
+    harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "start", "open_login_items"]);
 }
 
-/// macOS blocked the background item SpaceTerm Core installs, so the window asks for approval in
-/// Login Items rather than reporting a failure.
+/// An item macOS blocked when launch installed it and an item the person turned off read the
+/// same to the service, so the window says the same about both on every run. A Retry never turns
+/// a blocked item into one the person "turned off".
 #[gpui::test]
-fn a_blocked_background_item_asks_for_approval_in_login_items(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness_reading_background_item(
-        vec![Err(CoreError::StartupFailed)],
-        [false, true],
+fn an_item_off_in_login_items_reads_the_same_on_every_run(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(
+        vec![Err(CoreError::LoginItemOff), Err(CoreError::LoginItemOff)],
         cx,
     );
     cx.run_until_parked();
-    assert_eq!(
-        harness.launch_title(cx),
-        Some("SpaceTerm Core needs your approval")
-    );
+    let first = harness
+        .manager
+        .read_with(cx, |manager, _| manager.launch_presentation());
 
-    harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
-    assert_eq!(harness.launch.steps(), ["run", "open_login_items"]);
+    let manager = harness.manager.clone();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.run_local_launch(None, window, cx));
+    });
+    cx.run_until_parked();
+
+    assert_eq!(harness.launch.steps(), ["run", "run"]);
+    let second = harness
+        .manager
+        .read_with(cx, |manager, _| manager.launch_presentation());
+    assert_eq!(second, first);
+    assert_eq!(
+        second.map(|presentation| presentation.title),
+        Some(launch::LOGIN_ITEM_OFF_TITLE)
+    );
+}
+
+/// The person stopped SpaceTerm Core and turned it off in Login Items while another computer's
+/// Workspace is active. Start from this computer's row can't say so on the stage, so its alert
+/// offers Open Login Items rather than only OK.
+#[gpui::test]
+fn a_start_refused_by_login_items_behind_another_machines_workspace_offers_that_list(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = ready_harness(cx);
+    present_paired_machine(&harness, inventory(), cx);
+    let manager = harness.manager.clone();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            let remote = manager
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id())
+                .find(|id| manager.binding.owner(*id) != Some(MachineKey::LOCAL))
+                .expect("the paired machine's Workspace");
+            manager.activate_workspace(remote, window, cx);
+        });
+    });
+    harness.edits.set_connected(false);
+    harness.edits.set_error(CoreError::Stopped);
+    sync(&harness, cx);
+    harness.launch.refuse_start(CoreError::LoginItemOff);
+
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.run_launch_action(launch::LaunchAction::Start, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    let action: &'static str = Box::leak(
+        format!("modal-action-{}", launch::LAUNCH_ALERT_ACTION_SELECTOR).into_boxed_str(),
+    );
+    harness.click(action, cx);
+    assert_eq!(harness.launch.steps(), ["run", "start", "open_login_items"]);
 }
 
 /// A paired server presented while the local server is stopped makes this window the presenting

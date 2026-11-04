@@ -1783,7 +1783,7 @@ pub(crate) fn current(cx: &App) -> Presentation {
 }
 
 /// The alert for an action on a Machine that did not succeed: its title and full sentence.
-/// `Changed` asks again instead, so it has no alert.
+/// `Changed` asks again instead, and `LoginItemOff` opens Login Items, so neither has an alert.
 pub(crate) fn action_failure(
     name: &str,
     local: bool,
@@ -1804,7 +1804,7 @@ pub(crate) fn action_failure(
         MachineAction::DismissFailure(_) => return None,
     };
     let message = match failure {
-        ActionFailure::Changed => return None,
+        ActionFailure::Changed | ActionFailure::LoginItemOff => return None,
         ActionFailure::Unavailable(Unavailable::CoreTooOld) => format!(
             "SpaceTerm Core on {place} is too old to {verb} from this SpaceTerm. Update it on              {place} first."
         ),

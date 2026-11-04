@@ -78,6 +78,7 @@ core_error_cases! {
     ServiceBusy => (true, Guidance),
     NotInstalled => (false, Guidance),
     Stopped => (false, Guidance),
+    LoginItemOff => (true, Guidance),
     Changed => (true, Error),
     ActivationUnresolved => (true, Guidance),
     RuntimeUnavailable => (true, Error),
@@ -1204,8 +1205,9 @@ fn start_restores_a_stopped_core_without_asking(cx: &mut TestAppContext) {
 }
 
 /// The person turned SpaceTerm Core off in Login Items while Settings was open. Start, chosen
-/// after that, reaches no service: the row says the item is off and offers Login Items. Once the
-/// person turns it on there and comes back, the row offers Start again.
+/// after that, is refused by the service, which starts nothing: the row says the item is off and
+/// offers Login Items, with no failure. Once the person turns it on there and comes back, the row
+/// offers Start again.
 #[gpui::test]
 fn start_after_turning_off_in_login_items_offers_login_items_instead(cx: &mut TestAppContext) {
     let (window, _core, service, cx) = open_machines_with_service(Ok(not_running()), cx);
@@ -1214,10 +1216,7 @@ fn start_after_turning_off_in_login_items_offers_login_items_instead(cx: &mut Te
     service.turn_off_in_login_items(true);
     click(START_SERVICE_SELECTOR, cx);
 
-    assert!(
-        service.changes().is_empty(),
-        "Start never turns on a service macOS keeps off"
-    );
+    assert_eq!(service.changes(), vec![ServiceCall::Start]);
     assert_eq!(status(&window, cx), "Off in Login Items");
     let presented = service_presentation(&window, cx);
     assert_eq!(presented.state, "Off in Login Items");
@@ -1229,7 +1228,7 @@ fn start_after_turning_off_in_login_items_offers_login_items_instead(cx: &mut Te
 
     click(OPEN_LOGIN_ITEMS_SELECTOR, cx);
     assert_eq!(service.calls().last(), Some(&ServiceCall::OpenLoginItems));
-    assert!(service.changes().is_empty());
+    assert_eq!(service.changes(), vec![ServiceCall::Start]);
 
     // The person turns SpaceTerm Core on in System Settings and comes back.
     service.turn_off_in_login_items(false);
@@ -1240,7 +1239,11 @@ fn start_after_turning_off_in_login_items_offers_login_items_instead(cx: &mut Te
     assert_eq!(status(&window, cx), "Not running");
     assert!(rendered(START_SERVICE_SELECTOR, cx));
     click(START_SERVICE_SELECTOR, cx);
-    assert_eq!(service.changes(), vec![ServiceCall::Start]);
+    assert_eq!(
+        service.changes(),
+        vec![ServiceCall::Start, ServiceCall::Start]
+    );
+    assert_eq!(service_presentation(&window, cx).state, "Running");
 }
 
 /// A read that finds a stopped SpaceTerm Core also off in Login Items presents Login Items, not

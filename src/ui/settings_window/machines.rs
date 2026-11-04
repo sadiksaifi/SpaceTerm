@@ -131,8 +131,9 @@ pub(super) trait CoreServiceControl: Send + Sync {
     /// Changes only whether the server starts on its own at login or boot. A deliberate Stop
     /// stays in force. Enabling it at boot may need [`Self::authorize_startup`] first.
     fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, CoreError>;
-    /// Whether macOS keeps the service from running because the person turned its background
-    /// item off in Login Items. Reads only: it changes nothing.
+    /// Whether macOS keeps the service from running because its background item is off in Login
+    /// Items. Reads only: it changes nothing. Every start refuses with
+    /// [`CoreError::LoginItemOff`] meanwhile.
     fn background_item_off(&self) -> bool;
     /// Opens System Settings at Login Items, where the person turns SpaceTerm Core on. Call it
     /// on the event thread, so macOS brings System Settings forward.
@@ -187,8 +188,7 @@ impl CoreServiceControl for Service {
     }
 
     fn background_item_off(&self) -> bool {
-        // The same policy launch reads, so Settings and the Workspace Window agree.
-        crate::local_startup::service_background_item_off(self)
+        Service::login_item_off(self)
     }
 
     fn open_login_items(&self) {
@@ -409,6 +409,10 @@ pub(super) fn present(status: LocalCoreStatus) -> LocalCorePresentation {
                 ),
                 // A deliberate Stop is a state the person chose, not a fault.
                 CoreError::Stopped => guidance(STOPPED_GUIDANCE),
+                CoreError::LoginItemOff => guidance(
+                    "Turn on SpaceTerm Core in System Settings > General > Login Items & \
+                     Extensions.",
+                ),
                 CoreError::NotInstalled => {
                     guidance("Install the SpaceTerm Core service below to start it.")
                 }
@@ -448,6 +452,12 @@ fn failure(error: CoreError) -> (&'static str, &'static str, bool) {
         // Only the service's explicit Start or Install reverses these, so checking again says
         // nothing new.
         CoreError::Stopped => ("Stopped", "settings-local-server-state-stopped", false),
+        // The person turns it on outside SpaceTerm, so a check can find it on.
+        CoreError::LoginItemOff => (
+            "Off in Login Items",
+            "settings-local-server-state-login-item-off",
+            true,
+        ),
         CoreError::NotInstalled => (
             "Not installed",
             "settings-local-server-state-not-installed",
@@ -672,19 +682,6 @@ impl ServiceAction {
     /// Whether the action changes the service. A check only reads it.
     const fn changes_service(self) -> bool {
         !matches!(self, Self::Check | Self::OpenLoginItems)
-    }
-
-    /// Whether the action would install or start the service, which the person's Login Items
-    /// choice can forbid.
-    const fn starts_service(self) -> bool {
-        matches!(
-            self,
-            Self::Install
-                | Self::Start
-                | Self::Restart
-                | Self::AuthorizeInstall
-                | Self::AuthorizeStart
-        )
     }
 
     /// The progress badge and caption. Installing keeps a Stop the person chose, so it starts the
@@ -1355,11 +1352,7 @@ fn perform_service_operation(
         use ServiceAction as Action;
         let authorizing = matches!(action, Action::AuthorizeInstall | Action::AuthorizeStart);
         let retry = installation.clone();
-        // What the person turned off in Login Items stays off: no step here installs or starts
-        // the service while it is. The row reads the service and offers Login Items instead.
-        let turned_off = action.starts_service() && control.background_item_off();
         let outcome = match (action, installation.as_deref()) {
-            _ if turned_off => control.status().await,
             (Action::Install, Some(installation)) => control.install(installation),
             (Action::Install, None) => Err(CoreError::RuntimeUnavailable),
             (Action::Check | Action::OpenLoginItems, _) => control.status().await,
@@ -1374,9 +1367,13 @@ fn perform_service_operation(
                 }
             }
         };
-        let authorized = authorizing && outcome.is_ok() && !turned_off;
+        let authorized = authorizing && outcome.is_ok();
+        // The service refuses to start what the person turned off in Login Items. The row reads
+        // the service and offers Login Items instead, so the refusal is no failure.
+        let turned_off = matches!(outcome, Err(CoreError::LoginItemOff));
         let (status, failure) = match outcome {
             Ok(status) => (Some(status), None),
+            Err(CoreError::LoginItemOff) => (control.status().await.ok(), None),
             Err(error) if action == Action::Check => (None, Some(error)),
             Err(error) => (control.status().await.ok(), Some(error)),
         };
@@ -1412,7 +1409,6 @@ fn perform_service_operation(
                 request,
                 declined: authorizing,
             }),
-            // macOS can also block an item this Install just added.
             background_item_off: turned_off || control.background_item_off(),
         };
         if authorized {
@@ -2329,6 +2325,10 @@ pub(super) mod testing {
             }
             let mut status = self.status.lock().expect("status");
             let changed = next((*status).unwrap_or(not_installed()));
+            // The service starts nothing that is off in Login Items.
+            if changed.running && *self.background_item_off.lock().expect("background item") {
+                return Err(CoreError::LoginItemOff);
+            }
             // Starting needs authorization first, and a refused start changes nothing.
             if changed.running && !*self.authorized.lock().expect("authorized") {
                 return Err(CoreError::AuthorizationRequired);

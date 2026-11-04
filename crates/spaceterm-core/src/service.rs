@@ -174,6 +174,11 @@ trait Supervisor: Send + Sync {
     fn linger_authorized(&self) -> Result<Option<bool>, CoreError> {
         Ok(None)
     }
+    /// Whether the service manager keeps the service's background item off until the person
+    /// turns it on in Login Items. Reading it changes nothing.
+    fn login_item_off(&self) -> bool {
+        false
+    }
 }
 
 impl Service {
@@ -201,13 +206,11 @@ impl Service {
             supervisor,
         }
     }
-    /// The LaunchAgent file macOS lists under Login Items & Extensions as this server's
-    /// background item, whether or not it exists. Reading the path reaches no service.
-    #[cfg(target_os = "macos")]
-    pub fn login_item(&self) -> Result<PathBuf, CoreError> {
-        Ok(macos::LaunchAgent::new(&self.paths, &self.identity)?
-            .registration()
-            .path())
+    /// Whether this server's background item is off in Login Items & Extensions, so the
+    /// service manager won't run it until the person turns it on there. Every start refuses
+    /// with [`CoreError::LoginItemOff`] meanwhile. Reading it changes nothing.
+    pub fn login_item_off(&self) -> bool {
+        self.supervisor.login_item_off()
     }
     /// Where this account's signed installations are retained.
     pub fn installations_directory(&self) -> PathBuf {
@@ -620,6 +623,11 @@ impl Service {
                 Ok(())
             };
         }
+        // What the person turned off in Login Items stays off, and a retained Stop stays. No
+        // start, explicit or not, turns the item back on.
+        if self.supervisor.login_item_off() {
+            return Err(CoreError::LoginItemOff);
+        }
         check_cleanup(state)?;
         self.prove_quiescent()?;
         state.run = None;
@@ -633,7 +641,16 @@ impl Service {
             .supervisor
             .start()
             .and_then(|()| self.supervisor.set_automatic_start(state.automatic_start))
-            .and_then(|()| self.wait_running(true));
+            .and_then(|()| self.wait_running(true))
+            // The service manager blocked the item this start registered until the person
+            // approves it.
+            .map_err(|error| {
+                if self.supervisor.login_item_off() {
+                    CoreError::LoginItemOff
+                } else {
+                    error
+                }
+            });
         if result.is_err() {
             let returning = {
                 let _intent = data.lock("service-intent.lock", false)?;
@@ -1205,10 +1222,14 @@ mod tests {
         automatic_start: std::sync::atomic::AtomicBool,
         checks: std::sync::atomic::AtomicUsize,
         running_checks: std::sync::atomic::AtomicUsize,
+        login_item_off: bool,
     }
     impl Supervisor for TestSupervisor {
         fn startup(&self) -> ServiceStartup {
             ServiceStartup::AtLogin
+        }
+        fn login_item_off(&self) -> bool {
+            self.login_item_off
         }
         fn check(&self, _: &Path, _: bool) -> Result<(), CoreError> {
             self.checks
@@ -1336,6 +1357,39 @@ mod tests {
         running.store(true, Ordering::Relaxed);
         assert_eq!(service.stop_if_stopped(), Err(CoreError::CleanupUnresolved));
         assert_eq!(service.stop(), Err(CoreError::ServiceUnavailable));
+    }
+    /// The person stopped SpaceTerm Core, then turned it off in Login Items. Every start refuses
+    /// before it reaches the service manager, so the item stays off and the Stop stays retained.
+    #[test]
+    fn a_core_off_in_login_items_never_starts_and_keeps_its_stop() {
+        let fixture = Fixture::new();
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            std::sync::Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                login_item_off: true,
+                ..Default::default()
+            }),
+        );
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        state.stopped = true;
+        data.write_json(c"service.json", &state).unwrap();
+        let retained = std::fs::read(fixture.paths.data.join("service.json")).unwrap();
+
+        assert!(service.login_item_off());
+        // The test supervisor panics on any native start.
+        assert_eq!(service.start(), Err(CoreError::LoginItemOff));
+        assert_eq!(
+            std::fs::read(fixture.paths.data.join("service.json")).unwrap(),
+            retained,
+            "the Stop stays retained"
+        );
+
+        state.stopped = false;
+        data.write_json(c"service.json", &state).unwrap();
+        assert_eq!(service.connect(), Err(CoreError::LoginItemOff));
     }
     #[test]
     fn setup_start_refuses_replaced_installation_core_or_stop_before_native_effects() {

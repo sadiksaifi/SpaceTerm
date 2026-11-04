@@ -69,6 +69,8 @@ struct Host {
     answers: RefCell<Vec<bool>>,
     /// The open alert's answer, until [`Host::answer`] gives it.
     open: RefCell<Option<Answered>>,
+    /// How many times the menu opened Login Items.
+    login_items: std::cell::Cell<u32>,
 }
 
 impl StatusHost for Host {
@@ -84,6 +86,10 @@ impl StatusHost for Host {
         } else {
             answered(answers.remove(0));
         }
+    }
+
+    fn open_login_items(&self) {
+        self.login_items.set(self.login_items.get() + 1);
     }
 }
 
@@ -611,6 +617,44 @@ fn the_flat_menu_offers_start_for_a_stopped_local_core(cx: &mut TestAppContext) 
             .any(|(title, _)| title == "Restart SpaceTerm Core on penguin\u{2026}"),
         "a running Machine keeps its restart action: {actions:?}"
     );
+}
+
+/// This computer's SpaceTerm Core is off in Login Items, so the service refuses the menu's Start.
+/// The menu opens Login Items, where the person turns it on, instead of an alert with only OK.
+#[gpui::test]
+fn a_start_refused_by_login_items_opens_that_list(cx: &mut TestAppContext) {
+    let mut stopped = machine(LOCAL, "This Computer", 0);
+    stopped.link = MachineLink::Stopped;
+    let fixture = start(vec![stopped], cx);
+    let start_command = fixture
+        .host
+        .menu()
+        .flat()
+        .into_iter()
+        .find_map(|row| match row {
+            FlatRow::Action { command, .. }
+                if command
+                    == Command::Update(crate::updates::presentation::Command::Machine(
+                        LOCAL,
+                        MachineAction::Start,
+                    )) =>
+            {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("the menu offers Start");
+    cx.update(|cx| fixture.menu.perform(start_command, cx));
+    cx.run_until_parked();
+    fixture.machines.emit(MachineUpdatesEvent::Finished {
+        machine: LOCAL,
+        action: MachineAction::Start,
+        outcome: Err(ActionFailure::LoginItemOff),
+    });
+    cx.run_until_parked();
+
+    assert_eq!(fixture.host.login_items.get(), 1);
+    assert!(fixture.host.alerts.borrow().is_empty());
 }
 
 #[gpui::test]
