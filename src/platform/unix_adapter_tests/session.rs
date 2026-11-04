@@ -199,16 +199,17 @@ fn real_shell_exit_command_emits_an_exited_event() {
     assert_eq!(exit_status, Some(TerminalSessionExit::Success));
 }
 
-/// A pane's shell reaches the local network with `ssh` and sends Apple Events with `osascript`,
-/// and neither ends in a crash or a sandbox denial. Under `cargo test` the test runner is the
-/// responsible process. The packaged SpaceTerm Core holds the hardened runtime entitlements for
-/// both, and the package tests sign and check that bundle.
+/// PTY and sandbox smoke test: the system `ssh` and `osascript` start in a real pane's shell and
+/// finish without a crash or a sandbox denial. It establishes nothing about privacy permissions.
+/// The test runner is the responsible process here, the loopback connection needs no Local
+/// Network grant and the script sends no Apple Event, so it can never cause a privacy prompt.
+/// `mise run check:core-permissions:macos` checks both permissions in the signed SpaceTerm Core.
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_pane_runs_ssh_to_a_lan_host_and_osascript() {
+fn macos_pane_shell_starts_ssh_and_osascript_without_a_crash_or_sandbox_denial() {
     let _isolation = crate::platform::unix_pty::lock_real_pty_test();
     if crate::platform::unix_pty::isolate_real_pty_test(
-        "terminal::session::unix_adapter_tests::macos_pane_runs_ssh_to_a_lan_host_and_osascript",
+        "terminal::session::unix_adapter_tests::macos_pane_shell_starts_ssh_and_osascript_without_a_crash_or_sandbox_denial",
     ) {
         return;
     }
@@ -226,12 +227,13 @@ fn macos_pane_runs_ssh_to_a_lan_host_and_osascript() {
     let session = JoinedRealPtySession(session);
     wait_for_shell_prompt(&session, &events);
 
-    // 10.255.255.1 is a private address no host answers. Without user configuration, ssh
-    // exits with 255 once the connection times out, is refused or is denied.
+    // Absolute paths run the system programs, never a shell function or alias. Port 9 on
+    // loopback refuses at once, which ssh reports only after it started and tried to connect.
     enter_command(
         &session,
-        "ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=3 10.255.255.1 true; \
-         printf 'ssh-exit:%s\\n' $?; osascript -e 'return 1'; printf 'osascript-exit:%s\\n' $?",
+        "/usr/bin/ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=3 -p 9 127.0.0.1 true; \
+         printf 'ssh-exit:%s\\n' $?; /usr/bin/osascript -e 'return 6 * 7'; \
+         printf 'osascript-exit:%s\\n' $?",
     );
 
     // The echoed command shows each marker followed by "%s", and the output by a status.
@@ -263,8 +265,17 @@ fn macos_pane_runs_ssh_to_a_lan_host_and_osascript() {
         "ssh did not fail cleanly: {screen:?}"
     );
     assert!(
+        screen.contains("Connection refused"),
+        "ssh did not try the connection: {screen:?}"
+    );
+    assert!(
         screen.contains("osascript-exit:0"),
         "osascript failed: {screen:?}"
+    );
+    // The command line shows "6 * 7", so only osascript's own output can contain 42.
+    assert!(
+        screen.contains("42"),
+        "osascript did not run its script: {screen:?}"
     );
     for denial in [
         "Sandbox",
