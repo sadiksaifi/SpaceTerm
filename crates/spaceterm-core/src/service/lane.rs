@@ -5,17 +5,21 @@
 //! frame is length-prefixed JSON of at most [`MAX_FRAME`] bytes. Fields may be added to these
 //! messages. They are never removed or renamed.
 //!
+//! Installing never ends anything, so it runs in one step: `StageFetch` installs the release the
+//! Core's own feed names, and `StageUpload` with `UploadChunk` installs a pushed archive. Both
+//! answer `Installed`; [`crate::update::sources`] describes the sources.
+//!
 //! Stop, Restart, Update and Network Access changes run in two steps. `Preview` observes the service, the live
 //! Session set and the candidate, and returns a token bound to that observation. `Execute`
 //! recomputes the observation under the hierarchy lock, sets the membership fence so no new
 //! Session starts, admits the operation in the ledger and launches the helper that performs it.
 //! The client later reads the outcome with `Resolve` and deletes it with `Acknowledge`.
 //! [`network`] describes how a Network Access change differs.
-use super::feed::{self, Source};
 use super::operations::{
     Action, Actor, Admission, Evidence, HELPER_LOCK, Ledger, OperationId, Record, State,
 };
 use super::tokens::Tokens;
+use super::updates::Updates;
 use super::{RetainedInstallation, Service, runtime};
 use crate::CoreError;
 use crate::diagnostics::TerminalCounterSnapshot;
@@ -26,16 +30,16 @@ use crate::permissions::{
 };
 use crate::protocol::Preamble;
 use crate::storage::Directory;
+use crate::update::facts::{UpdateFacts, Version};
+use crate::update::source::FactsSource;
+use crate::update::sources::{FeedCheck, Pushes, Received, SourceError};
 use base64::Engine;
 use network::{
     Followed, LISTEN_LIMIT, LaneNetworkEffects, ListenerProgress, ListenerView, NetworkAccess,
     NetworkCaller, NetworkPlan,
 };
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -73,9 +77,15 @@ pub enum LaneRequest {
         boot: String,
         revision: u64,
     },
+    /// Checks the Core's own feed now, and installs the release it names when that is newer.
+    /// Answers `Facts`. A Core that never fetches a feed answers `no_update_feed`.
     Check,
+    /// Installs the release the Core's own feed names. Answers `Installed`.
     StageFetch,
+    /// Begins a push of `length` archive bytes of `version`. The Core refuses a version it would
+    /// not install before any byte arrives.
     StageUpload {
+        version: String,
         length: u64,
         sha256: String,
         /// Base64.
@@ -143,11 +153,11 @@ pub enum LaneReply {
         boot: String,
         facts: Box<crate::update::facts::UpdateFacts>,
     },
-    Check(LaneCheck),
-    Staged {
-        installation: String,
-        version: String,
-        commit: String,
+    /// `StageFetch` or a push's last `UploadChunk` finished. `installed` is false when the feed
+    /// named no newer version.
+    Installed {
+        installed: bool,
+        facts: Box<UpdateFacts>,
     },
     UploadProgress {
         upload: String,
@@ -212,12 +222,6 @@ pub struct LaneVersion {
     pub sha256: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneStaged {
-    pub version: String,
-    pub sha256: String,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneActivation {
@@ -251,7 +255,8 @@ pub struct LaneStatus {
     pub automatic_start: bool,
     pub linger: Option<bool>,
     pub runtime: LaneVersion,
-    pub staged: Vec<LaneStaged>,
+    /// The Core's update facts. None while no runtime is installed.
+    pub update: Option<UpdateFacts>,
     pub activation: LaneActivation,
     pub sessions: u32,
     pub network: LaneNetwork,
@@ -259,14 +264,6 @@ pub struct LaneStatus {
     pub lane_major: u16,
     /// The running server's Terminal Diagnostics counters. A stopped server has none.
     pub terminal_counters: Option<TerminalCounterSnapshot>,
-}
-
-/// Mirrors the `server.update --check` data of the CLI output contract.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneCheck {
-    pub approved: LaneVersion,
-    pub latest: Option<LaneVersion>,
-    pub staged: Vec<LaneVersion>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,33 +350,20 @@ pub struct LaneCore {
     boot: Id,
     host: Arc<dyn LaneHost>,
     tokens: Tokens,
-    feed: Arc<dyn Source>,
+    updates: Updates,
+    /// A Release Core's own feed. None for Preflight and Development.
+    feed: Option<Arc<FeedCheck>>,
+    pushes: Pushes,
+    /// Names each served connection, so a push ends with the connection that sent it.
+    connections: AtomicU64,
     launch: Box<Launcher>,
     permissions: Arc<dyn SystemPermissions>,
     /// The Permission Setups whose preparations run, and their cancellations.
     setups: Mutex<setups::Setups>,
-    upload: Mutex<Option<Upload>>,
     /// Held for each whole `Execute`, and while the fence watcher releases the fence.
     executing: Mutex<()>,
     /// A fence watcher runs. The watcher clears it only under `executing`.
     watching: AtomicBool,
-}
-
-struct Upload {
-    id: String,
-    length: u64,
-    sha256: String,
-    next: u64,
-    file: std::fs::File,
-    archive: PathBuf,
-    signature: PathBuf,
-}
-
-impl Drop for Upload {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.archive);
-        let _ = std::fs::remove_file(&self.signature);
-    }
 }
 
 /// The part of an observation that does not depend on the Session set, and the effects it
@@ -399,34 +383,43 @@ impl LaneCore {
     ) -> Result<Arc<Self>, CoreError> {
         let service = Service::for_paths(paths.clone())?;
         let owned = paths.identity.clone();
-        Self::new(
+        let feed = FeedCheck::for_identity(&paths.identity, paths.data.clone());
+        let lane = Self::new(
             service,
             host,
-            Arc::new(feed::Releases::new(&paths.identity)),
+            feed,
             Box::new(move |op| super::helper::launch(&owned, op)),
             crate::permissions::native(&paths.identity),
-        )
+        )?;
+        if let Some(feed) = &lane.feed {
+            let host = lane.host.clone();
+            feed.clone()
+                .spawn(lane.updates.clone(), Arc::new(move || host.stopping()));
+        }
+        Ok(lane)
     }
 
     fn new(
         service: Service,
         host: Arc<dyn LaneHost>,
-        feed: Arc<dyn Source>,
+        feed: Option<FeedCheck>,
         launch: Box<Launcher>,
         permissions: Arc<dyn SystemPermissions>,
     ) -> Result<Arc<Self>, CoreError> {
         let core = service.passive_machine_id()?.ok_or(CoreError::NotSetUp)?;
         let lane = Self {
+            updates: Updates::open(service.clone())?,
+            pushes: Pushes::new(service.paths.data.clone()),
             service,
             core,
             boot: crate::protocol::random()?,
             host,
             tokens: Tokens::default(),
-            feed,
+            feed: feed.map(Arc::new),
+            connections: AtomicU64::new(0),
             launch,
             permissions,
             setups: Mutex::default(),
-            upload: Mutex::new(None),
             executing: Mutex::new(()),
             watching: AtomicBool::new(false),
         };
@@ -448,6 +441,20 @@ impl LaneCore {
         route: Option<std::net::SocketAddr>,
         authorized: &dyn Fn() -> Result<(), CoreError>,
     ) -> Result<(), CoreError> {
+        let connection = self.connections.fetch_add(1, Ordering::Relaxed) + 1;
+        let served = self.serve_connection(stream, actor, route, authorized, connection);
+        self.pushes.closed(connection);
+        served
+    }
+
+    fn serve_connection(
+        self: &Arc<Self>,
+        stream: &mut dyn Preamble,
+        actor: Actor,
+        route: Option<std::net::SocketAddr>,
+        authorized: &dyn Fn() -> Result<(), CoreError>,
+        connection: u64,
+    ) -> Result<(), CoreError> {
         loop {
             // A stopping server must not keep a polling client's connection open: its
             // shutdown waits for every connection, and the client waits for this one to close.
@@ -464,7 +471,7 @@ impl LaneCore {
             authorized()?;
             let caller = NetworkCaller::of(&actor, route);
             let (reply, launch) = match serde_json::from_slice::<LaneRequest>(&bytes) {
-                Ok(request) => self.respond(request, &actor, caller),
+                Ok(request) => self.respond(request, &actor, caller, connection),
                 Err(_) => (error(&CoreError::Protocol), None),
             };
             let sent = serde_json::to_vec(&reply)
@@ -482,7 +489,7 @@ impl LaneCore {
     /// Answers one request from a caller with no paired connection, and starts what it
     /// admitted.
     pub fn answer(self: &Arc<Self>, request: LaneRequest, actor: &Actor) -> LaneReply {
-        let (reply, launch) = self.respond(request, actor, NetworkCaller::of(actor, None));
+        let (reply, launch) = self.respond(request, actor, NetworkCaller::of(actor, None), 0);
         if let Some(dispatch) = launch {
             self.dispatch(dispatch);
         }
@@ -496,6 +503,7 @@ impl LaneCore {
         request: LaneRequest,
         actor: &Actor,
         caller: Option<NetworkCaller>,
+        connection: u64,
     ) -> (LaneReply, Option<Dispatch>) {
         // Stop runs only on the Machine itself: nothing could start SpaceTerm Core again from a
         // paired device.
@@ -542,25 +550,39 @@ impl LaneCore {
             } => self.preview_network(access, actor, caller),
             LaneRequest::Status => self
                 .admin()
-                .status(Some(self.host.as_ref()))
+                .status(Some((self.host.as_ref(), self.facts())))
                 .map(LaneReply::Status),
-            LaneRequest::Check => self.admin().check().map(LaneReply::Check),
-            // #797's update engine answers these.
-            LaneRequest::Facts {} | LaneRequest::WaitFacts { .. } => Err(CoreError::Unsupported),
-            LaneRequest::StageFetch => self
-                .admin()
-                .stage_fetch()
-                .map(|installation| staged_reply(&installation)),
+            LaneRequest::Facts {} => Ok(self.facts_reply(self.facts())),
+            LaneRequest::WaitFacts { boot, revision } => Ok(if boot == hex(&self.boot) {
+                self.facts_reply(self.updates.wait(revision, WAIT_FACTS_LIMIT))
+            } else {
+                self.facts_reply(self.facts())
+            }),
+            LaneRequest::Check => {
+                return (
+                    self.check()
+                        .map(|()| self.facts_reply(self.facts()))
+                        .unwrap_or_else(|failure| source_error(&failure)),
+                    None,
+                );
+            }
+            LaneRequest::StageFetch => return (self.stage_fetch(), None),
             LaneRequest::StageUpload {
+                version,
                 length,
                 sha256,
                 signature,
-            } => self.stage_upload(length, sha256, &signature),
+            } => {
+                return (
+                    self.stage_upload(connection, &version, length, &sha256, &signature),
+                    None,
+                );
+            }
             LaneRequest::UploadChunk {
                 upload,
                 offset,
                 data,
-            } => self.upload_chunk(&upload, offset, &data),
+            } => return (self.upload_chunk(&upload, offset, &data), None),
             LaneRequest::Preview { action } => self.preview(&action, actor),
             LaneRequest::Resolve { operation } => self.resolve(&operation),
             LaneRequest::Acknowledge { operation } => self.acknowledge(&operation, actor),
@@ -632,81 +654,85 @@ impl LaneCore {
         })
     }
 
-    fn stage_upload(
-        &self,
-        length: u64,
-        sha256: String,
-        signature: &str,
-    ) -> Result<LaneReply, CoreError> {
-        let signature = base64::engine::general_purpose::STANDARD
-            .decode(signature)
-            .map_err(|_| CoreError::Protocol)?;
-        if length == 0
-            || length > feed::MAX_ARCHIVE
-            || !runtime::digest_valid(&sha256)
-            || signature.len() != 64
-        {
-            return Err(CoreError::Protocol);
-        }
-        let id = hex(&crate::protocol::random()?[..16]);
-        let (archive, signature_path) = self.admin().staging_files(&id)?;
-        let mut slot = self.upload.lock().map_err(|_| CoreError::Protocol)?;
-        // One upload at a time: a new one replaces any unfinished upload.
-        *slot = None;
-        let file = create_private(&archive)?;
-        create_private(&signature_path)?
-            .write_all(&signature)
-            .map_err(|_| CoreError::StorageUnavailable)?;
-        *slot = Some(Upload {
-            id: id.clone(),
-            length,
-            sha256,
-            next: 0,
-            file,
-            archive,
-            signature: signature_path,
-        });
-        Ok(LaneReply::UploadProgress {
-            upload: id,
-            next_offset: 0,
-        })
+    /// The Core's update facts now.
+    fn facts(&self) -> UpdateFacts {
+        self.updates.facts()
     }
 
-    fn upload_chunk(&self, id: &str, offset: u64, data: &str) -> Result<LaneReply, CoreError> {
-        let mut slot = self.upload.lock().map_err(|_| CoreError::Protocol)?;
-        let upload = slot
-            .as_mut()
-            .filter(|v| v.id == id)
-            .ok_or(CoreError::Changed)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .map_err(|_| CoreError::Protocol)?;
-        if bytes.is_empty()
-            || bytes.len() > MAX_CHUNK
-            || offset != upload.next
-            || upload.next + bytes.len() as u64 > upload.length
-        {
-            return Err(CoreError::Protocol);
+    fn facts_reply(&self, facts: UpdateFacts) -> LaneReply {
+        LaneReply::Facts {
+            boot: hex(&self.boot),
+            facts: Box::new(facts),
         }
-        upload
-            .file
-            .write_all(&bytes)
-            .map_err(|_| CoreError::StorageUnavailable)?;
-        upload.next += bytes.len() as u64;
-        if upload.next < upload.length {
-            return Ok(LaneReply::UploadProgress {
-                upload: upload.id.clone(),
-                next_offset: upload.next,
-            });
+    }
+
+    /// Checks the feed now. A finished check that found nothing newer succeeds.
+    fn check(&self) -> Result<(), SourceError> {
+        let feed = self.feed.as_ref().ok_or(SourceError::NoFeed)?;
+        feed.run(&self.updates).map(drop)
+    }
+
+    fn stage_fetch(&self) -> LaneReply {
+        let Some(feed) = self.feed.as_ref() else {
+            return source_error(&SourceError::NoFeed);
+        };
+        match feed.run(&self.updates) {
+            Ok(outcome) => LaneReply::Installed {
+                installed: matches!(outcome, crate::update::sources::Outcome::Installed(_)),
+                facts: Box::new(self.facts()),
+            },
+            Err(failure) => source_error(&failure),
         }
-        let upload = slot.take().ok_or(CoreError::Changed)?;
-        upload
-            .file
-            .sync_all()
-            .map_err(|_| CoreError::StorageUnavailable)?;
-        self.service
-            .stage_candidate(&upload.archive, &upload.signature, &upload.sha256)
-            .map(|installation| staged_reply(&installation))
+    }
+
+    fn stage_upload(
+        &self,
+        connection: u64,
+        version: &str,
+        length: u64,
+        sha256: &str,
+        signature: &str,
+    ) -> LaneReply {
+        let (Ok(version), Ok(signature)) = (
+            Version::parse(version),
+            base64::engine::general_purpose::STANDARD.decode(signature),
+        ) else {
+            return error(&CoreError::Protocol);
+        };
+        match self.pushes.begin(
+            &self.updates,
+            connection,
+            version,
+            length,
+            sha256,
+            &signature,
+        ) {
+            Ok(upload) => LaneReply::UploadProgress {
+                upload,
+                next_offset: 0,
+            },
+            Err(failure) => source_error(&failure),
+        }
+    }
+
+    fn upload_chunk(&self, id: &str, offset: u64, data: &str) -> LaneReply {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            return error(&CoreError::Protocol);
+        };
+        if bytes.len() > MAX_CHUNK {
+            return error(&CoreError::Protocol);
+        }
+        match self.pushes.chunk(id, offset, &bytes) {
+            Ok(Received::Next(next_offset)) => LaneReply::UploadProgress {
+                upload: id.to_owned(),
+                next_offset,
+            },
+            Ok(Received::Installed(_)) => LaneReply::Installed {
+                installed: true,
+                facts: Box::new(self.facts()),
+            },
+            Err(failure) => source_error(&failure),
+        }
     }
 
     /// Plans a Network Access change without applying it. A paired caller's change that keeps
@@ -1108,7 +1134,6 @@ impl LaneCore {
     fn admin(&self) -> Admin<'_> {
         Admin {
             service: &self.service,
-            feed: self.feed.as_ref(),
         }
     }
 
@@ -1127,17 +1152,24 @@ impl LaneCore {
     }
 }
 
-/// Service administration that needs no running server: status, the feed, staging and the
-/// observation an action previews. The lane uses it while the server runs, and the CLI uses it
-/// on the server's own machine while the server is stopped.
+/// Service administration that needs no running server: status and the observation an action
+/// previews. The lane uses it while the server runs, and the CLI uses it on the server's own
+/// machine while the server is stopped.
 pub struct Admin<'a> {
     service: &'a Service,
-    feed: &'a dyn Source,
 }
 
 impl Admin<'_> {
-    /// The service's status, with what only a running server knows supplied by `live`.
-    pub fn status(&self, live: Option<&dyn LaneHost>) -> Result<LaneStatus, CoreError> {
+    /// The service's status, with what only a running server knows supplied by `live`: its host
+    /// and its update facts. A stopped server reports its persisted update facts.
+    pub fn status(
+        &self,
+        live: Option<(&dyn LaneHost, UpdateFacts)>,
+    ) -> Result<LaneStatus, CoreError> {
+        let (live, facts) = match live {
+            Some((host, facts)) => (Some(host), Some(facts)),
+            None => (None, None),
+        };
         let Some((_, state)) = self.service.read()? else {
             // Set up but never installed: nothing runs, and no runtime is approved.
             return Ok(LaneStatus {
@@ -1151,7 +1183,7 @@ impl Admin<'_> {
                     commit: String::new(),
                     sha256: String::new(),
                 },
-                staged: Vec::new(),
+                update: None,
                 activation: LaneActivation::Settled,
                 sessions: 0,
                 network: offline_network(self.service)?,
@@ -1172,14 +1204,10 @@ impl Admin<'_> {
             automatic_start: snapshot.enabled,
             linger: self.service.linger()?,
             runtime: self.approved(&state)?,
-            staged: self
-                .staged(&state)?
-                .into_iter()
-                .map(|v| LaneStaged {
-                    version: v.version,
-                    sha256: v.sha256,
-                })
-                .collect(),
+            update: match facts {
+                Some(facts) => Some(facts),
+                None => Updates::stored(self.service).ok(),
+            },
             activation: if unresolved {
                 LaneActivation::Unresolved
             } else {
@@ -1199,66 +1227,6 @@ impl Admin<'_> {
             lane_major: LANE_MAJOR,
             terminal_counters: live.map(LaneHost::terminal_counters),
         })
-    }
-
-    pub fn check(&self) -> Result<LaneCheck, CoreError> {
-        let (_, state) = self.service.read()?.ok_or(CoreError::NotInstalled)?;
-        let latest = self.latest()?.map(|feed| {
-            let staged = self.installation(&feed.archive.sha256).ok();
-            LaneVersion {
-                version: feed.version,
-                commit: staged.map(|v| v.commit).unwrap_or_default(),
-                sha256: feed.archive.sha256,
-            }
-        });
-        Ok(LaneCheck {
-            approved: self.approved(&state)?,
-            latest,
-            staged: self.staged(&state)?,
-        })
-    }
-
-    fn latest(&self) -> Result<Option<feed::Feed>, CoreError> {
-        let Some((document, signature)) = self.feed.latest()? else {
-            return Ok(None);
-        };
-        feed::verify(&self.service.identity, &document, &signature).map(Some)
-    }
-
-    /// Downloads and stages the latest feed's archive, or finds it already staged.
-    pub fn stage_fetch(&self) -> Result<RetainedInstallation, CoreError> {
-        let feed = self.latest()?.ok_or(CoreError::CandidateMissing)?;
-        if let Ok(installation) = self.installation(&feed.archive.sha256) {
-            return Ok(installation);
-        }
-        let (archive, signature) = self.staging_files(&hex(&crate::protocol::random()?[..8]))?;
-        let result = (|| {
-            let mut file = create_private(&archive)?;
-            self.feed.download(&feed, &mut file)?;
-            file.sync_all().map_err(|_| CoreError::StorageUnavailable)?;
-            create_private(&signature)?
-                .write_all(&feed.archive.signature)
-                .map_err(|_| CoreError::StorageUnavailable)?;
-            self.service
-                .stage_candidate(&archive, &signature, &feed.archive.sha256)
-        })();
-        let _ = std::fs::remove_file(&archive);
-        let _ = std::fs::remove_file(&signature);
-        result
-    }
-
-    /// Stages a signed archive and its detached signature from local files.
-    pub fn stage_files(
-        &self,
-        archive: &std::path::Path,
-        signature: &std::path::Path,
-    ) -> Result<RetainedInstallation, CoreError> {
-        let bytes = std::fs::read(archive).map_err(|_| CoreError::CandidateMissing)?;
-        if bytes.len() as u64 > feed::MAX_ARCHIVE {
-            return Err(CoreError::RuntimeUnavailable);
-        }
-        let sha256 = hex(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
-        self.service.stage_candidate(archive, signature, &sha256)
     }
 
     /// Observes the service for `action` without changing it.
@@ -1336,27 +1304,6 @@ impl Admin<'_> {
         Ok(version_of(&self.service.describe_approved(state)?))
     }
 
-    /// Verified installations other than the approved one.
-    fn staged(&self, state: &super::State) -> Result<Vec<LaneVersion>, CoreError> {
-        let parent = self.service.paths.data.join("installations");
-        let Ok(entries) = std::fs::read_dir(&parent) else {
-            return Ok(Vec::new());
-        };
-        let mut staged = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if !runtime::digest_valid(name) || name == state.installation {
-                continue;
-            }
-            if let Ok(installation) = self.installation(name) {
-                staged.push(version_of(&installation));
-            }
-        }
-        staged.sort_by(|a, b| (&a.version, &a.sha256).cmp(&(&b.version, &b.sha256)));
-        Ok(staged)
-    }
-
     /// A verified retained installation by digest.
     pub fn installation(&self, digest: &str) -> Result<RetainedInstallation, CoreError> {
         if !runtime::digest_valid(digest) {
@@ -1373,41 +1320,55 @@ impl Admin<'_> {
             commit,
         })
     }
-
-    fn staging_files(&self, id: &str) -> Result<(PathBuf, PathBuf), CoreError> {
-        let directory = self.service.paths.data.join("staging");
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(&directory)
-            .map_err(|_| CoreError::StorageUnavailable)?;
-        Directory::open(&directory, false)?;
-        Ok((
-            directory.join(format!("{id}.tar.gz")),
-            directory.join(format!("{id}.sig")),
-        ))
-    }
 }
 
-/// [`Admin`] with its own service and the public release feed, for a stopped server.
+/// [`Admin`] with its own service, for a stopped server on its own machine. It also installs
+/// new versions while the server is stopped.
 pub struct Offline {
     service: Service,
-    feed: Arc<dyn Source>,
 }
 
 impl Offline {
     pub fn new(identity: &str) -> Result<Self, CoreError> {
         Ok(Self {
             service: Service::for_identity(identity)?,
-            feed: Arc::new(feed::Releases::new(identity)),
         })
     }
 
     pub fn admin(&self) -> Admin<'_> {
         Admin {
             service: &self.service,
-            feed: self.feed.as_ref(),
         }
+    }
+
+    /// Installs the release this Core's own feed names. Returns whether a version was installed
+    /// and the facts after.
+    pub fn install_from_feed(&self) -> Result<(bool, UpdateFacts), SourceError> {
+        let feed = FeedCheck::for_identity(&self.service.identity, self.service.paths.data.clone())
+            .ok_or(SourceError::NoFeed)?;
+        let updates = Updates::open(self.service.clone())?;
+        let outcome = feed.run(&updates)?;
+        Ok((
+            matches!(outcome, crate::update::sources::Outcome::Installed(_)),
+            updates.facts(),
+        ))
+    }
+
+    /// Installs a signed local archive and its raw signature. Returns the facts after.
+    pub fn install_archive(
+        &self,
+        archive: &std::path::Path,
+        signature: &std::path::Path,
+        sha256: &str,
+    ) -> Result<UpdateFacts, SourceError> {
+        let updates = Updates::open(self.service.clone())?;
+        updates.install(super::updates::Archive {
+            archive,
+            signature,
+            sha256,
+            source: super::updates::Source::Local,
+        })?;
+        Ok(updates.facts())
     }
 }
 
@@ -1569,15 +1530,6 @@ fn version_of(installation: &RetainedInstallation) -> LaneVersion {
     }
 }
 
-fn staged_reply(installation: &RetainedInstallation) -> LaneReply {
-    let version = version_of(installation);
-    LaneReply::Staged {
-        installation: version.sha256,
-        version: version.version,
-        commit: version.commit,
-    }
-}
-
 /// The protocol major a verified installation's signed build information declares.
 fn protocol_major(installation: &RetainedInstallation) -> Option<u16> {
     #[derive(Deserialize)]
@@ -1602,16 +1554,6 @@ fn digest_bytes(text: &str) -> Result<[u8; 32], CoreError> {
     Ok(out)
 }
 
-fn create_private(path: &std::path::Path) -> Result<std::fs::File, CoreError> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| CoreError::StorageUnavailable)
-}
-
 fn timestamp(at: SystemTime) -> String {
     unix_timestamp(
         at.duration_since(SystemTime::UNIX_EPOCH)
@@ -1634,6 +1576,12 @@ fn hex(bytes: &[u8]) -> String {
 fn refusal() -> LaneReply {
     LaneReply::Error {
         code: super::lane_codes::DISCONNECTS_EVERY_DEVICE.to_owned(),
+    }
+}
+
+fn source_error(failure: &SourceError) -> LaneReply {
+    LaneReply::Error {
+        code: failure.code().to_owned(),
     }
 }
 

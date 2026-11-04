@@ -2,7 +2,6 @@
 pub mod activation;
 mod command;
 pub mod control;
-pub mod feed;
 pub mod helper;
 pub mod lane;
 pub mod lane_codes;
