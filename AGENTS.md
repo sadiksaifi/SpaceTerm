@@ -12,7 +12,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 ## Architecture
 
 - Nothing has been released yet, so maintain no backward compatibility for anything. Pick the best solution for every change and replace the old one in place, with no migrations, aliases, fallbacks or readers for old versions.
-- Each SpaceTerm Server owns its Workspaces, Tabs, Panes, and Terminal Sessions. Each SpaceTerm Client owns its presentation and client view over account-local IPC or paired QUIC connections. SSH is temporary provisioning authority inside the desktop's Add Server.
+- Each SpaceTerm Core owns its Machine's Workspaces, Tabs, Panes, and Terminal Sessions. Each SpaceTerm Client owns its presentation and client view over account-local IPC or paired QUIC connections. SSH is temporary provisioning authority inside the desktop's Add Machine.
 - Put behavior, invariants, and cleanup in deep modules with narrow interfaces. Expose intentional operations and typed recoverable failures.
 - Keep product policy portable. Reach frameworks, external systems, and operating system capabilities through narrow adapters chosen by constructor injection. Add a boundary only for durable replaceability or locality.
 - Use Apple's Human Interface Guidelines for macOS 27 as the UI design baseline.
@@ -31,7 +31,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 - Coordinate shared caches and native resources per host; separate baseline artifacts and overlap independent checks and reviews.
 - Run scoped tests, then required acceptance checks; reuse evidence only while relevant code, artifacts, configuration and environment still match.
 - Before any user-requested commit, push, or PR merge into main, disclose any known pre-existing test or check failures unrelated to your changes.
-- For local server setup, follow [the local workflow](docs/local-server.md).
+- For SpaceTerm Core setup on This Mac or This Computer, follow [the local workflow](docs/local-server.md).
 - For Linux work and native verification, use Penguin directly: `ssh penguin` for commands and Remora for its desktop.
 - Repositories live at `~/Projects/{SpaceTerm,zed,accesskit}` on both hosts. Clone missing forks from `github.com/sadiksaifi/{zed,accesskit}`.
 

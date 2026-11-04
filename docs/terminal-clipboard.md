@@ -1,6 +1,6 @@
 # Terminal clipboard integration
 
-OSC 52 connects terminal programs to the clipboard of the machine running SpaceTerm, including
+OSC 52 connects terminal programs to the clipboard of the computer running the SpaceTerm desktop, including
 when the programs run over SSH. Configure each program and intervening multiplexer to forward it.
 Clipboard access is controlled in Settings > Privacy; enable reading there only when needed.
 
@@ -16,7 +16,7 @@ vim.opt.clipboard = 'unnamedplus'
 ```
 
 This chooses the local terminal's clipboard instead of a tool such as `pbcopy` on the remote
-machine. See [Neovim's clipboard provider documentation](https://neovim.io/doc/user/provider/#clipboard-osc52).
+computer. See [Neovim's clipboard provider documentation](https://neovim.io/doc/user/provider/#clipboard-osc52).
 
 ## tmux
 
