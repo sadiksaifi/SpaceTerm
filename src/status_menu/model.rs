@@ -1,4 +1,5 @@
 //! What the status item shows and offers, derived from the service's state alone.
+use crate::application_identity::ApplicationIdentity;
 use spaceterm_core::{CoreError, service::ServiceStatus};
 
 /// One person-chosen operation the status menu offers.
@@ -64,8 +65,9 @@ pub(crate) struct Presentation {
 }
 
 impl Presentation {
-    /// `name` is the build's display name, such as "SpaceTerm Preflight".
-    pub(crate) fn of(name: &str, state: State) -> Self {
+    /// Names the build and its SpaceTerm Core from `identity`.
+    pub(crate) fn of(identity: ApplicationIdentity, state: State) -> Self {
+        let name = identity.display_name();
         let phase = Phase::of(state.status);
         let (label, explanation) = match state.working {
             Some(Command::Start) => ("Starting\u{2026}", None),
@@ -80,7 +82,7 @@ impl Presentation {
             label: label.to_owned(),
             enabled: offered(command),
         };
-        let core = format!("{name} Core");
+        let core = identity.core_name().to_owned();
         Self {
             summary: format!("{core}: {label}"),
             core,
@@ -207,8 +209,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn each_build_names_spaceterm_core_in_full_before_its_qualifier() {
+        for (identity, core) in [
+            (ApplicationIdentity::production(), "SpaceTerm Core"),
+            (ApplicationIdentity::preflight(), "SpaceTerm Core Preflight"),
+            (
+                ApplicationIdentity::development(),
+                "SpaceTerm Core Development",
+            ),
+        ] {
+            let presentation = Presentation::of(identity, status(true, true, false));
+            assert_eq!(presentation.core, core);
+            assert_eq!(presentation.summary, format!("{core}: Running"));
+        }
+    }
+
     fn offered(state: State) -> Vec<Command> {
-        Presentation::of("SpaceTerm Preflight", state)
+        Presentation::of(ApplicationIdentity::preflight(), state)
             .controls
             .into_iter()
             .filter(|item| item.enabled)
@@ -244,7 +262,7 @@ mod tests {
         assert!(offered(stopping).is_empty());
         // Exiting would abandon the admitted Stop before the service manager confirms it.
         assert!(
-            !Presentation::of("SpaceTerm Preflight", stopping)
+            !Presentation::of(ApplicationIdentity::preflight(), stopping)
                 .quit
                 .enabled
         );
@@ -254,12 +272,17 @@ mod tests {
             ..status(true, true, false)
         };
         assert!(offered(asking).is_empty());
-        assert!(!Presentation::of("SpaceTerm Preflight", asking).quit.enabled);
+        assert!(
+            !Presentation::of(ApplicationIdentity::preflight(), asking)
+                .quit
+                .enabled
+        );
     }
 
     #[test]
     fn update_machine_appears_only_while_a_verified_build_is_offered() {
-        let update = |state: State| Presentation::of("SpaceTerm Preflight", state).update;
+        let update =
+            |state: State| Presentation::of(ApplicationIdentity::preflight(), state).update;
         assert_eq!(update(status(true, true, false)), None);
         let offered = |state: State| State {
             update: true,

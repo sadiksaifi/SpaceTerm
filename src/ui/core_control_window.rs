@@ -98,7 +98,9 @@ pub(crate) fn open(
         ]);
         cx.set_global(Bindings);
     }
-    let name = controller.display_name().to_owned();
+    let name = crate::application_identity::ApplicationIdentity::current()
+        .core_name()
+        .to_owned();
     let content = Content::of(&name, operation, &step);
     let window_size = reachable_size(&name, operation, &content, cx);
     let options = cx
@@ -179,6 +181,7 @@ enum Response {
 }
 
 impl Content {
+    /// `name` names this build's SpaceTerm Core, such as "SpaceTerm Core Preflight".
     fn of(name: &str, operation: Operation, step: &Step) -> Self {
         let cancel = Choice {
             label: "Cancel".into(),
@@ -204,7 +207,7 @@ impl Content {
             Step::Authorize => {
                 let prompt = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
                 Self {
-                    title: format!("{name} Core").into(),
+                    title: name.to_owned().into(),
                     heading: prompt.title.into(),
                     body: Some(format!("{} {}", prompt.message, prompt.detail).into()),
                     buttons: vec![
@@ -219,7 +222,7 @@ impl Content {
                 }
             }
             Step::Working(operation) => Self {
-                title: format!("{name} Core").into(),
+                title: name.to_owned().into(),
                 heading: match operation {
                     Operation::Stop => "Stopping SpaceTerm Core…",
                     Operation::Restart => "Restarting SpaceTerm Core…",
@@ -230,8 +233,8 @@ impl Content {
                 buttons: Vec::new(),
             },
             Step::Failed(error) => Self {
-                title: format!("{name} Core").into(),
-                heading: format!("The {name} Core couldn\u{2019}t {}.", operation.verb()).into(),
+                title: name.to_owned().into(),
+                heading: format!("{name} couldn\u{2019}t {}.", operation.verb()).into(),
                 body: Some(error.to_string().into()),
                 buttons: vec![Choice {
                     label: "OK".into(),

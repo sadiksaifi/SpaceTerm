@@ -65,9 +65,8 @@ pub(crate) fn install(
     };
     let offered = service.clone();
     let controller = Controller::new(service);
-    let name = controller.display_name().to_owned();
     let shared = Arc::new(Mutex::new(Published {
-        presentation: Presentation::of(&name, State::default()),
+        presentation: Presentation::of(identity, State::default()),
         revision: 1,
     }));
     let (sender, messages) = async_channel::unbounded();
@@ -121,7 +120,7 @@ pub(crate) fn install(
     worker.send(Request::Refresh);
     crate::status_menu::follow_local_core(worker.changes(), cx);
     let item = Rc::new(LinuxStatusItem {
-        name,
+        identity,
         controller,
         worker,
         connection,
@@ -155,7 +154,7 @@ fn icon(identity: &str) -> String {
 }
 
 struct LinuxStatusItem {
-    name: String,
+    identity: crate::application_identity::ApplicationIdentity,
     controller: Controller,
     worker: Worker,
     connection: Connection,
@@ -285,7 +284,7 @@ impl LinuxStatusItem {
         publish(
             &self.connection,
             &self.shared,
-            Presentation::of(&self.name, self.state.get()),
+            Presentation::of(self.identity, self.state.get()),
         );
     }
 }

@@ -63,7 +63,6 @@ pub(crate) fn install(
     };
     let offered = service.clone();
     let controller = Controller::new(service);
-    let name = controller.display_name().to_owned();
     let (sender, messages) = async_channel::unbounded();
     let worker = {
         let sender = sender.clone();
@@ -92,7 +91,7 @@ pub(crate) fn install(
         }),
     );
     status_menu::set_available(cx, true);
-    let item = StatusItem::new(mtm, name, worker, sender);
+    let item = StatusItem::new(mtm, identity, worker, sender);
     item.render();
     item.worker.send(Request::Refresh);
     status_menu::follow_local_core(item.worker.changes(), cx);
@@ -106,7 +105,7 @@ pub(crate) fn install(
 
 struct StatusItem {
     mtm: MainThreadMarker,
-    name: String,
+    identity: crate::application_identity::ApplicationIdentity,
     worker: Worker,
     sender: Sender,
     state: Cell<State>,
@@ -128,7 +127,12 @@ struct Rows {
 }
 
 impl StatusItem {
-    fn new(mtm: MainThreadMarker, name: String, worker: Worker, sender: Sender) -> Rc<Self> {
+    fn new(
+        mtm: MainThreadMarker,
+        identity: crate::application_identity::ApplicationIdentity,
+        worker: Worker,
+        sender: Sender,
+    ) -> Rc<Self> {
         let target = MenuTarget::new(mtm, sender.clone());
         let menu = NSMenu::new(mtm);
         // Each row's availability follows the server's state, not AppKit's responder chain.
@@ -175,7 +179,7 @@ impl StatusItem {
         item.setMenu(Some(&menu));
         Rc::new(Self {
             mtm,
-            name,
+            identity,
             worker,
             sender,
             state: Cell::new(State::default()),
@@ -188,7 +192,7 @@ impl StatusItem {
     }
 
     fn render(&self) {
-        let presentation = Presentation::of(&self.name, self.state.get());
+        let presentation = Presentation::of(self.identity, self.state.get());
         let rows = &self.rows;
         rows.header
             .setTitle(&NSString::from_str(&presentation.core));
@@ -282,7 +286,7 @@ impl StatusItem {
 
     fn perform(&self, command: Command, cx: &mut App) {
         // A menu drawn before the state changed can still deliver a row it no longer offers.
-        let presentation = Presentation::of(&self.name, self.state.get());
+        let presentation = Presentation::of(self.identity, self.state.get());
         let offered = std::iter::once(&presentation.open)
             .chain(&presentation.controls)
             .chain(&presentation.update)
@@ -350,7 +354,7 @@ impl StatusItem {
             Command::Stop => "stop",
             _ => "restart",
         };
-        let message = format!("The {} Core couldn\u{2019}t {operation}.", self.name);
+        let message = format!("{} couldn\u{2019}t {operation}.", self.identity.core_name());
         let alert = core_alert(&message, &error.to_string(), None, self.mtm);
         present(alert, self.activation, cx.windows().is_empty(), |_| {});
     }

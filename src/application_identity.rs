@@ -47,6 +47,8 @@ macro_rules! icon {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ApplicationIdentity {
     display_name: &'static str,
+    /// This build's SpaceTerm Core, named in full with the build's qualifier after it.
+    core_name: &'static str,
     version_label: &'static str,
     directory_name: &'static str,
     application_id: &'static str,
@@ -73,6 +75,11 @@ impl ApplicationIdentity {
         self.display_name
     }
 
+    /// The name of this build's SpaceTerm Core, such as "SpaceTerm Core Preflight".
+    pub(crate) const fn core_name(self) -> &'static str {
+        self.core_name
+    }
+
     /// The display name followed by the build's version, as Settings presents the running build.
     pub(crate) const fn version_label(self) -> &'static str {
         self.version_label
@@ -95,10 +102,11 @@ impl ApplicationIdentity {
         self.update_source
     }
 
-    const fn production() -> Self {
+    pub(crate) const fn production() -> Self {
         let (display_name, version_label) = named!("SpaceTerm");
         Self {
             display_name,
+            core_name: "SpaceTerm Core",
             version_label,
             directory_name: "spaceterm",
             application_id: "io.github.sadiksaifi.spaceterm",
@@ -107,10 +115,11 @@ impl ApplicationIdentity {
         }
     }
 
-    const fn preflight() -> Self {
+    pub(crate) const fn preflight() -> Self {
         let (display_name, version_label) = named!("SpaceTerm Preflight");
         Self {
             display_name,
+            core_name: "SpaceTerm Core Preflight",
             version_label,
             directory_name: "spaceterm-preflight",
             application_id: "io.github.sadiksaifi.spaceterm-preflight",
@@ -122,10 +131,11 @@ impl ApplicationIdentity {
         }
     }
 
-    const fn development() -> Self {
+    pub(crate) const fn development() -> Self {
         let (display_name, version_label) = named!("SpaceTerm Development");
         Self {
             display_name,
+            core_name: "SpaceTerm Core Development",
             version_label,
             directory_name: "spaceterm-development",
             application_id: "io.github.sadiksaifi.spaceterm-development",
