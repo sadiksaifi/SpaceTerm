@@ -385,7 +385,8 @@ mod tests {
                     "XDG_DATA_DIRS",
                     "ZDOTDIR",
                     "ENV",
-                    "PATH"
+                    "PATH",
+                    "HOME"
                 ]
             );
             // Planning repeatedly uses the captured values after the reader has been dropped.

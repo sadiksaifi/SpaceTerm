@@ -31,6 +31,9 @@ pub struct ShellEnvironment {
     pub env: Option<OsString>,
     /// The PATH a Session's shell inherits, which the Session's own CLI goes in front of.
     pub path: Option<OsString>,
+    /// The home directory the shell inherits. macOS's Bash 3.2 finds SpaceTerm's login profile
+    /// through a replaced HOME, which that profile restores.
+    pub home: Option<OsString>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -43,8 +46,9 @@ pub struct ShellIntegrationPlan {
 /// Captured compatibility and search-path facts, selected independently of the host at planning.
 #[derive(Clone)]
 pub struct ShellIntegrationPolicy {
-    /// Whether the shell can run SpaceTerm's startup files at all.
-    pub supported: bool,
+    /// Whether `bash` is macOS's Bash 3.2, which runs no startup file through `ENV`. SpaceTerm's
+    /// file runs as its login profile instead, and only restores PATH.
+    pub legacy_bash: bool,
     pub path_list_separator: char,
     pub fallback_xdg_data_dirs: OsString,
 }
@@ -53,7 +57,7 @@ impl ShellIntegrationPolicy {
     #[cfg(test)]
     pub fn fixture() -> Self {
         Self {
-            supported: true,
+            legacy_bash: false,
             path_list_separator: ':',
             fallback_xdg_data_dirs: "/fixture/share".into(),
         }
@@ -118,7 +122,7 @@ pub fn plan_shell_integration(
     inherited: &ShellEnvironment,
     policy: &ShellIntegrationPolicy,
 ) -> ShellIntegrationPlan {
-    let startup = detect_startup(shell).filter(|_| policy.supported);
+    let startup = detect_startup(shell, policy);
     let applied = match startup {
         Some(Startup::Integrated(kind)) => Some(kind),
         _ => None,
@@ -167,6 +171,9 @@ enum Startup {
     Integrated(ShellKind),
     /// A POSIX shell that reads `ENV` after its login profile. Its file only restores PATH.
     Posix,
+    /// macOS's Bash 3.2, which reads SpaceTerm's file as its login profile from a replaced
+    /// HOME. The file restores HOME, runs the person's own login profile, then restores PATH.
+    BashProfile,
 }
 
 fn startup_plan(
@@ -178,6 +185,7 @@ fn startup_plan(
     let integration_root = resource_root.join("shell-integration");
     let required = match startup {
         Startup::Posix => integration_root.join("sh/spaceterm.sh"),
+        Startup::BashProfile => integration_root.join("bash-login/.bash_profile"),
         Startup::Integrated(ShellKind::Bash) => integration_root.join("bash/spaceterm.bash"),
         Startup::Integrated(ShellKind::Elvish) => {
             integration_root.join("elvish/lib/spaceterm-integration.elv")
@@ -202,6 +210,17 @@ fn startup_plan(
             if let Some(value) = &inherited.env {
                 environment.push((OsString::from("SPACETERM_SH_ENV"), value.clone()));
             }
+        }
+        Startup::BashProfile => {
+            // Without a HOME to restore, the person's own login profile could not be found.
+            let Some(home) = &inherited.home else {
+                return Err(ShellIntegrationStatus::Unsupported);
+            };
+            environment.push((
+                OsString::from("HOME"),
+                integration_root.join("bash-login").into_os_string(),
+            ));
+            environment.push((OsString::from("SPACETERM_BASH_HOME"), home.clone()));
         }
         Startup::Integrated(ShellKind::Bash) => {
             arguments.push(OsString::from("--posix"));
@@ -278,8 +297,9 @@ fn empty_plan(status: ShellIntegrationStatus) -> ShellIntegrationPlan {
     }
 }
 
-fn detect_startup(shell: &Path) -> Option<Startup> {
+fn detect_startup(shell: &Path, policy: &ShellIntegrationPolicy) -> Option<Startup> {
     Some(match shell.file_name()?.to_str()? {
+        "bash" if policy.legacy_bash => Startup::BashProfile,
         "bash" => Startup::Integrated(ShellKind::Bash),
         "elvish" => Startup::Integrated(ShellKind::Elvish),
         "fish" => Startup::Integrated(ShellKind::Fish),
@@ -333,7 +353,7 @@ mod tests {
     fn captured_fallback_and_compatibility_control_the_plan() {
         let resources = ShellResourcesFixture::new();
         let mut policy = ShellIntegrationPolicy {
-            supported: true,
+            legacy_bash: false,
             path_list_separator: ';',
             fallback_xdg_data_dirs: "/fixture/one;/fixture/two".into(),
         };
@@ -350,7 +370,9 @@ mod tests {
             plan.environment
                 .contains(&("XDG_DATA_DIRS".into(), expected))
         );
-        policy.supported = false;
+        // macOS's Bash 3.2 has no integration. Its login profile restores PATH in both modes,
+        // and needs a HOME to restore.
+        policy.legacy_bash = true;
         let plan = plan_shell_integration(
             Path::new("/fixture/bash"),
             resources.path(),
@@ -360,6 +382,43 @@ mod tests {
         );
         assert_eq!(plan.status, ShellIntegrationStatus::Unsupported);
         assert!(plan.arguments.is_empty() && plan.environment.is_empty());
+        let inherited = ShellEnvironment {
+            home: Some("/Users/person".into()),
+            ..ShellEnvironment::default()
+        };
+        for (mode, status) in [
+            (
+                ShellIntegrationMode::Automatic,
+                ShellIntegrationStatus::Unsupported,
+            ),
+            (
+                ShellIntegrationMode::Disabled,
+                ShellIntegrationStatus::Disabled,
+            ),
+        ] {
+            let plan = plan_shell_integration(
+                Path::new("/fixture/bash"),
+                resources.path(),
+                mode,
+                &inherited,
+                &policy,
+            );
+            assert_eq!(plan.status, status);
+            assert!(plan.arguments.is_empty());
+            assert_eq!(
+                plan.environment,
+                [
+                    (
+                        "HOME".into(),
+                        resources
+                            .path()
+                            .join("shell-integration/bash-login")
+                            .into_os_string()
+                    ),
+                    ("SPACETERM_BASH_HOME".into(), "/Users/person".into()),
+                ]
+            );
+        }
     }
 
     #[test]
@@ -371,6 +430,7 @@ mod tests {
             zdotdir: Some(OsString::from("/Users/me/.config/zsh")),
             env: Some(OsString::from("/Users/me/.shenv")),
             path: None,
+            home: Some(OsString::from("/Users/me")),
         };
 
         let zsh = plan_shell_integration(

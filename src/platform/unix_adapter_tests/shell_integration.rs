@@ -532,8 +532,9 @@ set edit:before-readline = (conj $edit:before-readline { user-path; exit })
 }
 
 /// A login shell whose profile replaces PATH still finds the Session's own `spaceterm`, for Bash
-/// with shell integration on or off and for `/bin/sh`, which has no integration. macOS's
-/// `/bin/bash` is Bash 3.2, which cannot run SpaceTerm's startup files.
+/// with shell integration on or off and for `/bin/sh`, which has no integration. On macOS,
+/// `/bin/bash` is Bash 3.2, which runs SpaceTerm's file as its login profile and keeps the
+/// person's HOME.
 #[test]
 fn a_login_shell_whose_profile_replaces_path_still_finds_the_session_cli() {
     use crate::platform::launch_host::shell_launch_planner_with;
@@ -557,14 +558,14 @@ fn a_login_shell_whose_profile_replaces_path_still_finds_the_session_cli() {
         session: [2; 32],
         cli: cli.clone(),
     };
-    let bash = if cfg!(target_os = "linux") {
-        vec![("/bin/bash", None), ("/bin/bash", Some("0"))]
-    } else {
-        Vec::new()
-    };
-    for (shell, integration) in bash.into_iter().chain([("/bin/sh", None)]) {
+    for (shell, integration) in [
+        ("/bin/bash", None),
+        ("/bin/bash", Some("0")),
+        ("/bin/sh", None),
+    ] {
         let launch = shell_launch_planner_with(shell.into(), resource_root(), |key| match key {
             "PATH" => Some("/usr/bin:/bin".into()),
+            "HOME" => Some(home.clone().into_os_string()),
             "SPACETERM_SHELL_INTEGRATION" => integration.map(Into::into),
             _ => None,
         })
@@ -577,7 +578,7 @@ fn a_login_shell_whose_profile_replaces_path_still_finds_the_session_cli() {
             [
                 "-i",
                 "-c",
-                r#"printf 'FOUND=%s\n' "$(command -v spaceterm)""#,
+                r#"printf 'HOME=%s\nFOUND=%s\n' "$HOME" "$(command -v spaceterm)""#,
             ]
             .map(std::ffi::OsStr::new),
         );
@@ -604,6 +605,12 @@ fn a_login_shell_whose_profile_replaces_path_still_finds_the_session_cli() {
             found,
             cli.to_str().unwrap(),
             "{shell} with SPACETERM_SHELL_INTEGRATION={integration:?}"
+        );
+        let start = stdout.rfind("HOME=").expect("the shell reports its HOME") + "HOME=".len();
+        assert_eq!(
+            stdout[start..].split(['\r', '\n']).next().unwrap(),
+            home.to_str().unwrap(),
+            "{shell} with SPACETERM_SHELL_INTEGRATION={integration:?} keeps the person's HOME"
         );
     }
 }

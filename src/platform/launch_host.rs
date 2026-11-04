@@ -152,16 +152,16 @@ fn account_shell() -> Option<PathBuf> {
     }
 }
 
-/// macOS ships Bash 3.2 as `/bin/bash`. In POSIX mode it reads its login profile but not `ENV`,
-/// so SpaceTerm's startup file never runs.
+/// macOS ships Bash 3.2 as `/bin/bash`. It reads `ENV` in no mode a login shell runs in, so
+/// SpaceTerm's file runs as its login profile instead.
 #[cfg(target_os = "macos")]
-fn shell_integration_supported(shell: &Path) -> bool {
-    shell != Path::new("/bin/bash")
+fn legacy_bash(shell: &Path) -> bool {
+    shell == Path::new("/bin/bash")
 }
 
 #[cfg(target_os = "linux")]
-fn shell_integration_supported(_shell: &Path) -> bool {
-    true
+fn legacy_bash(_shell: &Path) -> bool {
+    false
 }
 
 /// macOS removes only the shared foreign terminal variables.
@@ -208,7 +208,7 @@ pub(super) fn shell_launch_planner_with(
 ) -> super::shell_launch::ShellLaunchPlanner {
     use super::shell_integration::{ShellEnvironment, ShellIntegrationPolicy, configured_mode};
     let policy = ShellIntegrationPolicy {
-        supported: shell_integration_supported(&shell),
+        legacy_bash: legacy_bash(&shell),
         path_list_separator: ':',
         fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
     };
@@ -221,6 +221,7 @@ pub(super) fn shell_launch_planner_with(
             zdotdir: read("ZDOTDIR"),
             env: read("ENV"),
             path: read("PATH"),
+            home: read("HOME"),
         },
         policy,
         HOST_RUNTIME_ENVIRONMENT,
@@ -238,7 +239,7 @@ mod tests {
             installed_resource_root(Path::new("/opt/spaceterm/bin/spaceterm-desktop")),
             Some(PathBuf::from("/opt/spaceterm/share/spaceterm"))
         );
-        assert!(shell_integration_supported(Path::new("/bin/bash")));
+        assert!(!legacy_bash(Path::new("/bin/bash")));
         assert!(fallback_shell().is_absolute());
     }
 
@@ -354,6 +355,6 @@ mod tests {
             installed_resource_root(Path::new("/usr/local/bin/spaceterm")),
             Some(PathBuf::from("/usr/local/share/spaceterm"))
         );
-        assert!(!shell_integration_supported(Path::new("/bin/bash")));
+        assert!(legacy_bash(Path::new("/bin/bash")));
     }
 }

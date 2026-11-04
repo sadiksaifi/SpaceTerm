@@ -89,7 +89,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
             ShellIntegrationMode::Disabled,
             ShellEnvironment::default(),
             ShellIntegrationPolicy {
-                supported: true,
+                legacy_bash: false,
                 path_list_separator: ':',
                 fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
             },

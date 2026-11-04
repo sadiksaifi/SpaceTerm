@@ -350,6 +350,7 @@ mod tests {
             zdotdir: Some("/private/zsh config".into()),
             env: Some("/private/bash env".into()),
             path: None,
+            home: Some("/Users/me".into()),
         };
         for (shell, kind, arguments) in [
             ("/opt/bin/bash", ShellKind::Bash, vec!["--posix", "-l"]),

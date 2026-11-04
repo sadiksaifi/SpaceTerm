@@ -18,6 +18,7 @@ impl ShellResourcesFixture {
         std::fs::create_dir(&root).unwrap();
         for relative in [
             "bash/spaceterm.bash",
+            "bash-login/.bash_profile",
             "elvish/lib/spaceterm-integration.elv",
             "elvish/rc.elv",
             "fish/vendor_conf.d/spaceterm-shell-integration.fish",
