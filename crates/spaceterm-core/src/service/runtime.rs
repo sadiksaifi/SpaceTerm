@@ -566,31 +566,50 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
     #[cfg(target_os = "macos")]
     {
         let layout = Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
-        let mut requirement = format!("identifier \"{}\"", bundle_identifier(identity));
-        if identity == "spaceterm" {
-            let template = include_str!("../../../../packaging/macos/spaceterm/Packager.toml");
-            let signer = template
-                .lines()
-                .find_map(|line| line.strip_prefix("signing-identity = \""))
-                .and_then(|v| v.strip_suffix('"'))
-                .ok_or(CoreError::RuntimeUnavailable)?;
-            requirement.push_str(&format!(" and certificate leaf = H\"{signer}\""));
-        }
-        command(
-            "/usr/bin/codesign",
-            &[
-                "--verify".into(),
-                "--strict".into(),
-                "-R".into(),
-                format!("={requirement}").into(),
-                path.join(layout.signed()).into_os_string(),
-            ],
-        )
-        .map_err(|_| CoreError::RuntimeUnavailable)?;
+        let requirement = native_requirement(identity, option_env!("SPACETERM_APPLE_TEAM_ID"))
+            .ok_or(CoreError::RuntimeUnavailable)?;
+        verify_signature(&path.join(layout.signed()), &requirement)?;
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (path, identity);
     Ok(())
+}
+/// The code requirement an installed version's bundle must satisfy. Release adds Apple's
+/// Developer ID requirement for the release Team ID, which release packaging supplies at build
+/// time as `SPACETERM_APPLE_TEAM_ID`, so every Release version from that team satisfies it. A
+/// Release build without a valid Team ID admits no installed version.
+#[cfg(target_os = "macos")]
+fn native_requirement(identity: &str, team: Option<&str>) -> Option<String> {
+    let identifier = format!("identifier \"{}\"", bundle_identifier(identity));
+    if identity != "spaceterm" {
+        return Some(identifier);
+    }
+    let team = team.filter(|team| {
+        team.len() == 10
+            && team
+                .bytes()
+                .all(|v| v.is_ascii_digit() || v.is_ascii_uppercase())
+    })?;
+    Some(format!(
+        "{identifier} and anchor apple generic and certificate \
+         1[field.1.2.840.113635.100.6.2.6] and certificate \
+         leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = \"{team}\""
+    ))
+}
+#[cfg(target_os = "macos")]
+fn verify_signature(signed: &Path, requirement: &str) -> Result<(), CoreError> {
+    command(
+        "/usr/bin/codesign",
+        &[
+            "--verify".into(),
+            "--strict".into(),
+            "-R".into(),
+            format!("={requirement}").into(),
+            signed.as_os_str().to_owned(),
+        ],
+    )
+    .map(|_| ())
+    .map_err(|_| CoreError::RuntimeUnavailable)
 }
 fn verify_executable(path: &Path, expected: &Build) -> Result<(), CoreError> {
     #[cfg(test)]

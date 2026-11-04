@@ -1,7 +1,21 @@
-"""Create signed GitHub Releases assets and update the Homebrew cask."""
+"""Build, sign and publish one SpaceTerm release from an annotated tag at HEAD.
+
+The release workflow runs these steps, each on its own runner:
+
+1. `core`: build SpaceTerm Core once for the host target and sign it once: on macOS Developer
+   ID, the hardened runtime, notarization and stapling, then Ed25519 everywhere.
+2. `notes`: render the release notes with git-cliff before any desktop build.
+3. `desktop_macos` and `desktop_linux`: build each desktop app with both Core builds and the
+   notes embedded. macOS signs, notarizes and staples the app and its disk image and writes the
+   Sparkle appcast.
+4. `assemble`: sign the Linux desktop archive and every feed, add install.sh and SHA256SUMS.
+5. `publish`: upload the assembled assets as one GitHub release.
+
+A dry run runs every step with a generated update key and ad hoc code signatures, skips
+notarization, and never publishes.
+"""
 
 import base64
-import hashlib
 import json
 import os
 import plistlib
@@ -14,358 +28,43 @@ import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, package_linux, sparkle
-from spaceterm_tasks.macos_bundle import identity
-from spaceterm_tasks.packaging import DIST, release_version
+from spaceterm_tasks import ROOT, TaskError, macos_codesign, release_feed, sparkle, update_signing
+from spaceterm_tasks.packaging import DIST, STABLE_TAG, checked, release_version
+from spaceterm_tasks.release_feed import (
+    APPCAST,
+    CHECKSUMS,
+    INSTALLER,
+    archive_name,
+    asset_names,
+    dmg_name,
+    download_url,
+    notes_url,
+)
 
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
-RELEASES = "https://github.com/sadiksaifi/SpaceTerm/releases"
-RELEASE_ASSETS = DIST / "release"
-LINUX_RELEASE_ASSETS = DIST / "release-linux"
-LINUX_PLATFORM = "linux-x86_64"
-INSTALLER = ROOT / "packaging" / "install.sh"
-CASK = "sadiksaifi/tap/spaceterm"
-SIGNING_SECRET = "UPDATE_SIGNING_KEY"
-ED25519_PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
-ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
-# The Linux updater refuses a longer feed.
-MAX_FEED_BYTES = 4096
-
-
-def archive_name(version):
-    return f"SpaceTerm-{version}-darwin-arm64.dmg"
-
-
-def linux_archive_name(version):
-    return f"SpaceTerm-{version}-{LINUX_PLATFORM}.tar.gz"
-
-
-def linux_feed_name():
-    return f"latest-{LINUX_PLATFORM}.json"
-
-
-def public_key():
-    """The update trust root that installed applications carry in their Info.plist."""
-    return identity("spaceterm")["SUPublicEDKey"]
-
-
-def checked(arguments, **kwargs):
-    result = subprocess.run(arguments, capture_output=True, check=False, **kwargs)
-    if result.returncode:
-        raise TaskError("release signing or verification failed")
-    return result.stdout
-
-
-def signing_seed(secret):
-    """The 32-byte Ed25519 seed of the base64 update signing secret."""
-    try:
-        seed = base64.b64decode(secret.strip(), validate=True)
-    except ValueError:
-        raise TaskError("the update signing secret is invalid") from None
-    if len(seed) != 32:
-        raise TaskError("the update signing secret must contain a 32-byte Ed25519 seed")
-    return seed
-
-
-def derived_public_key(seed):
-    # Derive only the public key through stdin. Never put the private key in argv or logs.
-    derived = checked(
-        ["openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
-        input=ED25519_PKCS8_PREFIX + seed,
-    )
-    return base64.b64encode(derived[-32:]).decode()
-
-
-def signing_options():
-    secret = os.environ.get(SIGNING_SECRET)
-    if secret:
-        actual = derived_public_key(signing_seed(secret))
-        options = ["--ed-key-file", "-"]
-        stdin = secret.strip().encode()
-    else:
-        actual = (
-            checked([sparkle.tool("generate_keys"), "--account", sparkle.ACCOUNT, "-p"])
-            .decode()
-            .strip()
-        )
-        options = ["--account", sparkle.ACCOUNT]
-        stdin = None
-    if actual != public_key():
-        raise TaskError("the signing key does not match the key trusted by installed applications")
-    return options, stdin
-
-
-def verify_feed(path, archive, version):
-    root = ET.parse(path).getroot()
-    items = root.findall("./channel/item")
-    if len(items) != 1:
-        raise ValueError("the release feed must contain exactly one complete update")
-    item = items[0]
-    if (
-        item.findtext(f"{{{SPARKLE_NS}}}version") != version
-        or item.findtext(f"{{{SPARKLE_NS}}}shortVersionString") != version
-    ):
-        raise ValueError("the feed version must match the Git tag")
-    if item.find(f"{{{SPARKLE_NS}}}channel") is not None:
-        raise ValueError("release channels are not supported")
-    enclosure = item.find("enclosure")
-    if enclosure is None:
-        raise ValueError("the release archive is missing")
-    expected = f"{RELEASES}/download/v{version}/{archive.name}"
-    if enclosure.get("url") != expected or enclosure.get("length") != str(archive.stat().st_size):
-        raise ValueError("the release archive URL or size does not match")
-    signature = enclosure.get(f"{{{SPARKLE_NS}}}edSignature", "")
-    if len(base64.b64decode(signature, validate=True)) != 64:
-        raise ValueError("the release archive signature is missing")
-    return signature
-
-
-def create_assets(tag):
-    """Sign the packaged release into dist/release: DMG, appcast, installer, and checksums."""
-    version = release_version(tag)
-    plist = plistlib.loads((DIST / "SpaceTerm.app/Contents/Info.plist").read_bytes())
-    if plist["CFBundleShortVersionString"] != version or plist["CFBundleVersion"] != version:
-        raise TaskError("package the selected Git tag before preparing release assets")
-    options, stdin = signing_options()
-    environment = {key: value for key, value in os.environ.items() if key != SIGNING_SECRET}
-    with tempfile.TemporaryDirectory(dir=DIST) as temporary:
-        directory = Path(temporary)
-        archive = directory / archive_name(version)
-        shutil.copyfile(DIST / "SpaceTerm.dmg", archive)
-        checked(
-            [
-                sparkle.tool("generate_appcast"),
-                *options,
-                "--maximum-deltas",
-                "0",
-                "--maximum-versions",
-                "1",
-                "--download-url-prefix",
-                f"{RELEASES}/download/v{version}/",
-                "--link",
-                f"{RELEASES}/tag/v{version}",
-                directory,
-            ],
-            input=stdin,
-            env=environment,
-        )
-        feed = directory / "appcast.xml"
-        try:
-            signature = verify_feed(feed, archive, version)
-        except ValueError as error:
-            raise TaskError(str(error)) from None
-        checked(
-            [sparkle.tool("sign_update"), *options, "--verify", archive, signature],
-            input=stdin,
-            env=environment,
-        )
-        checked(
-            [sparkle.tool("sign_update"), *options, "--verify", feed], input=stdin, env=environment
-        )
-        installer = directory / "install.sh"
-        shutil.copyfile(INSTALLER, installer)
-        (directory / "SHA256SUMS").write_text(checksums((archive, feed, installer)))
-        shutil.rmtree(RELEASE_ASSETS, ignore_errors=True)
-        RELEASE_ASSETS.mkdir()
-        for path in (archive, feed, installer, directory / "SHA256SUMS"):
-            shutil.copyfile(path, RELEASE_ASSETS / path.name)
-    print("Release DMG, signed appcast, installer, and checksums verified.")
+RELEASES = release_feed.RELEASES
+INSTALLER_SOURCE = ROOT / "packaging" / "install.sh"
+# The directory each step writes, which the next steps read.
+CORE = DIST / "release-core"
+NOTES = DIST / "release-notes.md"
+DESKTOP_MACOS = DIST / "release-desktop-macos"
+DESKTOP_LINUX = DIST / "release-desktop-linux"
+RELEASE = DIST / "release"
+CORE_FILES = ("artifact.tar.gz", "artifact.sig", "artifact.sha256")
 
 
 def sha256(path):
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+    return update_signing.sha256(path)
 
 
 def checksums(paths):
-    return "".join(f"{sha256(path)}  {path.name}\n" for path in paths)
+    return "".join(f"{sha256(path)}  {Path(path).name}\n" for path in paths)
 
 
-def sign_ed25519(seed, message, signature):
-    """Sign the file `message` into `signature` with a key file only this process can read."""
-    with tempfile.TemporaryDirectory(prefix="spaceterm-signing-") as temporary:
-        key = Path(temporary) / "key.der"
-        descriptor = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(ED25519_PKCS8_PREFIX + seed)
-        checked(
-            [
-                "openssl",
-                "pkeyutl",
-                "-sign",
-                "-rawin",
-                "-keyform",
-                "DER",
-                "-inkey",
-                key,
-                "-in",
-                message,
-                "-out",
-                signature,
-            ]
-        )
-
-
-def verify_ed25519(public, message, signature):
-    """Verify a raw Ed25519 signature with the base64 public key installed releases trust."""
-    with tempfile.TemporaryDirectory(prefix="spaceterm-verify-") as temporary:
-        key = Path(temporary) / "key.der"
-        key.write_bytes(ED25519_SPKI_PREFIX + base64.b64decode(public))
-        checked(
-            [
-                "openssl",
-                "pkeyutl",
-                "-verify",
-                "-pubin",
-                "-rawin",
-                "-keyform",
-                "DER",
-                "-inkey",
-                key,
-                "-in",
-                message,
-                "-sigfile",
-                signature,
-            ]
-        )
-
-
-def sign_linux_release(seed, archive, version, published_at, directory):
-    """Write the archive, its signed feed, and the feed's detached signature into `directory`.
-
-    The feed names the archive with its size, SHA-256, and signature. The detached signature
-    covers the exact feed bytes, which the updater verifies before reading any field.
-    """
-    public = derived_public_key(seed)
-    release_archive = directory / linux_archive_name(version)
-    shutil.copyfile(archive, release_archive)
-    feed = directory / linux_feed_name()
-    feed_signature = directory / f"{feed.name}.sig"
-    with tempfile.TemporaryDirectory(prefix="spaceterm-signatures-") as temporary:
-        archive_signature = Path(temporary) / "archive"
-        sign_ed25519(seed, release_archive, archive_signature)
-        verify_ed25519(public, release_archive, archive_signature)
-        document = {
-            "version": version,
-            "published_at": published_at,
-            "archive": {
-                "name": release_archive.name,
-                "size": release_archive.stat().st_size,
-                "sha256": sha256(release_archive),
-                "signature": base64.b64encode(archive_signature.read_bytes()).decode(),
-            },
-        }
-        feed.write_bytes(json.dumps(document, separators=(",", ":")).encode())
-        if feed.stat().st_size > MAX_FEED_BYTES:
-            raise TaskError("the Linux release feed is larger than installed updaters accept")
-        raw = Path(temporary) / "feed"
-        sign_ed25519(seed, feed, raw)
-        verify_ed25519(public, feed, raw)
-        feed_signature.write_text(base64.b64encode(raw.read_bytes()).decode() + "\n")
-    return [release_archive, feed, feed_signature]
-
-
-def create_linux_assets(tag):
-    """Sign the packaged Linux release into dist/release-linux: archive, feed, and checksums."""
-    version = release_version(tag)
-    archive = package_linux.archive_path("spaceterm")
-    if not archive.is_file():
-        raise TaskError("package the selected Git tag before preparing release assets")
-    # Verification runs the packaged executable, which reports the version it was built for.
-    package_linux.verify(archive, tag)
-    secret = os.environ.get(SIGNING_SECRET)
-    if not secret:
-        raise TaskError(f"{SIGNING_SECRET} must hold the update signing key")
-    seed = signing_seed(secret)
-    if derived_public_key(seed) != public_key():
-        raise TaskError("the signing key does not match the key trusted by installed applications")
-    with tempfile.TemporaryDirectory(dir=DIST) as temporary:
-        directory = Path(temporary)
-        assets = sign_linux_release(seed, archive, version, int(time.time()), directory)
-        (directory / "SHA256SUMS").write_text(checksums(assets))
-        shutil.rmtree(LINUX_RELEASE_ASSETS, ignore_errors=True)
-        LINUX_RELEASE_ASSETS.mkdir()
-        for path in (*assets, directory / "SHA256SUMS"):
-            shutil.copyfile(path, LINUX_RELEASE_ASSETS / path.name)
-    print("Linux release archive, signed feed, and checksums verified.")
-
-
-def core_platform(target):
-    return {"aarch64-apple-darwin": "darwin-arm64", "x86_64-unknown-linux-gnu": "linux-x86_64"}[
-        target
-    ]
-
-
-def machine_archive_name(version, target):
-    return f"spaceterm-{version}-{core_platform(target)}.tar.gz"
-
-
-def machine_feed_name(target):
-    return f"spaceterm-{core_platform(target)}.json"
-
-
-def core_release_directory(target):
-    return DIST / f"release-core-{core_platform(target)}"
-
-
-def sign_core_release(seed, archive, signature, build, published_at, directory):
-    """Publish the same signed CLI bytes with a separately authenticated per-target feed."""
-    public = derived_public_key(seed)
-    verify_ed25519(public, archive, signature)
-    selected = directory / machine_archive_name(build["version"], build["target"])
-    shutil.copyfile(archive, selected)
-    detached = directory / f"{selected.name}.sig"
-    shutil.copyfile(signature, detached)
-    feed = directory / machine_feed_name(build["target"])
-    feed.write_bytes(
-        json.dumps(
-            {
-                "schema": 1,
-                "identity": build["identity"],
-                "target": build["target"],
-                "version": build["version"],
-                "published_at": published_at,
-                "archive": {
-                    "name": selected.name,
-                    "size": selected.stat().st_size,
-                    "sha256": sha256(selected),
-                    "signature": base64.b64encode(detached.read_bytes()).decode(),
-                },
-            },
-            separators=(",", ":"),
-        ).encode()
-    )
-    if feed.stat().st_size > MAX_FEED_BYTES:
-        raise TaskError("the server release feed is too large")
-    feed_signature = directory / f"{feed.name}.sig"
-    sign_ed25519(seed, feed, feed_signature)
-    verify_ed25519(public, feed, feed_signature)
-    return [selected, detached, feed, feed_signature]
-
-
-def create_core_assets(tag, archive, signature):
-    """Retain verified native CLI assets alongside the desktop's release assets."""
-    from spaceterm_tasks.core_package import artifact_signing_seed, document, verified_copy
-
-    version = release_version(tag)
-    with tempfile.TemporaryDirectory(dir=DIST, prefix=".server-release-") as temporary:
-        directory = Path(temporary)
-        verified = directory / "verified"
-        verified.mkdir()
-        tree, private, raw = verified_copy(archive, signature, verified, None, identity="spaceterm")
-        build = document((tree / "build.json").read_bytes())
-        if build["version"] != version:
-            raise TaskError("the CLI version must match the release tag")
-        assets = sign_core_release(
-            artifact_signing_seed("spaceterm"), private, raw, build, int(time.time()), directory
-        )
-        (directory / "SHA256SUMS").write_text(checksums(assets))
-        destination = core_release_directory(build["target"])
-        shutil.rmtree(destination, ignore_errors=True)
-        destination.mkdir()
-        for path in [*assets, directory / "SHA256SUMS"]:
-            shutil.copyfile(path, destination / path.name)
-    print("Native CLI archive, signatures, feed and checksums verified.")
+def replace_directory(staged, destination):
+    shutil.rmtree(destination, ignore_errors=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staged.rename(destination)
 
 
 def notes(root=ROOT):
@@ -391,10 +90,349 @@ def notes(root=ROOT):
     return result.stdout
 
 
-def publish(tag):
-    """Publish the release with its complete assets; a published release is never replaced."""
+def write_notes(output=NOTES, root=ROOT):
+    """Write the notes file that the desktop builds embed and the GitHub release shows."""
+    text = notes(root)
+    if len(text.encode()) > 64 * 1024:
+        raise TaskError("the release notes are larger than the 64 KiB a desktop embeds")
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text)
+    print(f"Wrote the release notes to {output.name}")
+    return output
+
+
+def dry_run_version(tags):
+    """A version newer than every stable tag, from 1.0.0, so a dry run never reuses a tag."""
+    versions = [
+        tuple(int(part) for part in match.groups())
+        for match in (STABLE_TAG.fullmatch(tag) for tag in tags)
+        if match
+    ]
+    newest = max(versions, default=(0, 0, 0))
+    if newest < (1, 0, 0):
+        return "1.0.0"
+    return f"{newest[0]}.{newest[1]}.{newest[2] + 1}"
+
+
+def dry_run_tag(root=ROOT):
+    tags = checked(["git", "tag", "--list"], "Git could not list tags", cwd=root, text=True)
+    return f"v{dry_run_version(tags.split())}"
+
+
+def create_dry_run_tag(root=ROOT):
+    """Tag HEAD for a dry run in a disposable checkout, and return the tag."""
+    tag = dry_run_tag(root)
+    checked(
+        [
+            "git",
+            "-c",
+            "user.name=SpaceTerm dry run",
+            "-c",
+            "user.email=dry-run@spaceterm.invalid",
+            "tag",
+            "--annotate",
+            "--no-sign",
+            tag,
+            "--message",
+            f"Dry run of SpaceTerm {tag[1:]}",
+        ],
+        "Git could not tag the dry run",
+        cwd=root,
+    )
+    return tag
+
+
+def core(tag, target=None):
+    """Build and sign SpaceTerm Core for `target`, the host by default, into dist/release-core."""
+    from spaceterm_tasks.core_package import host_target, package
+
+    target = target or host_target()
+    archive, signature = package("spaceterm", tag, target=target)
+    with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-core-") as temporary:
+        staged = Path(temporary) / target
+        staged.mkdir()
+        shutil.copyfile(archive, staged / "artifact.tar.gz")
+        shutil.copyfile(signature, staged / "artifact.sig")
+        (staged / "artifact.sha256").write_text(sha256(archive) + "\n")
+        replace_directory(staged, CORE / target)
+    print(f"SpaceTerm Core for {target} is signed and ready to embed")
+
+
+def core_catalog(directory):
+    """Require dist/release-core to hold both targets' signed Core builds."""
+    from spaceterm_tasks.core_package import TARGETS
+
+    directory = Path(directory)
+    for target in TARGETS.values():
+        if not all((directory / target / name).is_file() for name in CORE_FILES):
+            raise TaskError(f"the release Core builds lack {target}; run release:core on it")
+    return directory
+
+
+def desktop_macos(tag, notes_file=NOTES, core_directory=CORE):
+    """Package the macOS desktop with both Core builds, then write its signed appcast."""
+    from spaceterm_tasks import package_macos
+
+    os.environ["SPACETERM_CLI_ARTIFACTS"] = str(core_catalog(core_directory).resolve())
+    os.environ.pop("SPACETERM_CLI_ARCHIVE", None)
+    os.environ.pop("SPACETERM_CLI_SIGNATURE", None)
+    package_macos.package(tag, notes_file)
+    appcast(tag)
+
+
+def desktop_linux(tag, notes_file=NOTES, core_directory=CORE):
+    """Package the Linux desktop with both Core builds."""
+    from spaceterm_tasks import package_linux
+
+    os.environ["SPACETERM_CLI_ARTIFACTS"] = str(core_catalog(core_directory).resolve())
+    os.environ.pop("SPACETERM_CLI_ARCHIVE", None)
+    os.environ.pop("SPACETERM_CLI_SIGNATURE", None)
+    package_linux.package(tag, notes_file)
     version = release_version(tag)
-    head = checked(["git", "rev-parse", "HEAD"], cwd=ROOT).strip()
+    with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-desktop-") as temporary:
+        staged = Path(temporary) / "desktop"
+        staged.mkdir()
+        shutil.copyfile(
+            package_linux.archive_path("spaceterm"),
+            staged / archive_name("desktop", version, "linux-x86_64"),
+        )
+        replace_directory(staged, DESKTOP_LINUX)
+    print("The Linux desktop archive is ready to sign")
+
+
+def sparkle_signing(environment, plist):
+    """Sparkle's options for the update key, which must be the key the packaged app trusts.
+
+    A release app pins the current key of update-trust.json, a dry-run app its generated key.
+    """
+    seed = update_signing.release_seed(environment)
+    if plist.get("SUPublicEDKey") != update_signing.trust(environment)[0]:
+        raise TaskError("the app's SUPublicEDKey must be the current update key")
+    return ["--ed-key-file", "-"], update_signing.encoded_seed(seed).encode()
+
+
+def verify_appcast(path, archive, version):
+    root = ET.parse(path).getroot()
+    items = root.findall("./channel/item")
+    if len(items) != 1:
+        raise ValueError("the appcast must contain exactly one complete update")
+    item = items[0]
+    if (
+        item.findtext(f"{{{SPARKLE_NS}}}version") != version
+        or item.findtext(f"{{{SPARKLE_NS}}}shortVersionString") != version
+    ):
+        raise ValueError("the appcast version must match the Git tag")
+    if item.findtext(f"{{{SPARKLE_NS}}}minimumSystemVersion") != "26.0":
+        raise ValueError("the appcast minimum system version must be 26.0")
+    if item.findtext(f"{{{SPARKLE_NS}}}fullReleaseNotesLink") != notes_url(version):
+        raise ValueError("the appcast must link the release notes")
+    if item.find(f"{{{SPARKLE_NS}}}channel") is not None:
+        raise ValueError("release channels are not supported")
+    enclosure = item.find("enclosure")
+    if enclosure is None:
+        raise ValueError("the release disk image is missing")
+    if enclosure.get("url") != download_url(version, archive.name) or enclosure.get(
+        "length"
+    ) != str(archive.stat().st_size):
+        raise ValueError("the release disk image URL or size does not match")
+    signature = enclosure.get(f"{{{SPARKLE_NS}}}edSignature", "")
+    if len(base64.b64decode(signature, validate=True)) != 64:
+        raise ValueError("the release disk image signature is missing")
+    return signature
+
+
+def appcast(tag):
+    """Sign the packaged disk image into dist/release-desktop-macos with its Sparkle appcast."""
+    version = release_version(tag)
+    plist = plistlib.loads((DIST / "SpaceTerm.app/Contents/Info.plist").read_bytes())
+    if plist["CFBundleShortVersionString"] != version or plist["CFBundleVersion"] != version:
+        raise TaskError("package the selected Git tag before writing its appcast")
+    options, stdin = sparkle_signing(os.environ, plist)
+    environment = {
+        key: value for key, value in os.environ.items() if key != update_signing.SIGNING_SECRET
+    }
+
+    def run(*arguments):
+        if subprocess.run(arguments, input=stdin, env=environment, capture_output=True).returncode:
+            raise TaskError("Sparkle could not sign or verify the appcast")
+
+    with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-appcast-") as temporary:
+        directory = Path(temporary) / "desktop"
+        directory.mkdir()
+        archive = directory / dmg_name(version)
+        shutil.copyfile(DIST / "SpaceTerm.dmg", archive)
+        run(
+            sparkle.tool("generate_appcast"),
+            *options,
+            "--maximum-deltas",
+            "0",
+            "--maximum-versions",
+            "1",
+            "--download-url-prefix",
+            f"{RELEASES}/download/v{version}/",
+            "--full-release-notes-url",
+            notes_url(version),
+            "--link",
+            notes_url(version),
+            directory,
+        )
+        feed = directory / APPCAST
+        try:
+            signature = verify_appcast(feed, archive, version)
+        except (OSError, ValueError, ET.ParseError) as error:
+            raise TaskError(str(error)) from None
+        run(sparkle.tool("sign_update"), *options, "--verify", archive, signature)
+        run(sparkle.tool("sign_update"), *options, "--verify", feed)
+        replace_directory(directory, DESKTOP_MACOS)
+    print("The disk image and its signed appcast are verified")
+
+
+def verified_core(entry, target, version, directory):
+    """Authenticate one Core build and return its archive and signature."""
+    from spaceterm_tasks.core_package import document, host_target, verified_copy
+
+    if (entry / "artifact.sha256").read_text() != sha256(entry / "artifact.tar.gz") + "\n":
+        raise TaskError(f"the {target} Core build differs from its digest")
+    tree, archive, signature = verified_copy(
+        entry / "artifact.tar.gz",
+        entry / "artifact.sig",
+        directory,
+        None,
+        identity="spaceterm",
+        target=target,
+        native=target == host_target(),
+    )
+    if document((tree / "build.json").read_bytes())["version"] != version:
+        raise TaskError("the Core version must match the release tag")
+    return archive, signature
+
+
+def assemble(
+    tag,
+    core_directory=CORE,
+    macos_directory=DESKTOP_MACOS,
+    linux_directory=DESKTOP_LINUX,
+    *,
+    complete=True,
+    environment=os.environ,
+):
+    """Sign every feed and the Linux desktop archive and write dist/release with SHA256SUMS.
+
+    A release requires every asset. A local dry run, which cannot build both desktops on one
+    host, omits the products its host does not build.
+    """
+    from spaceterm_tasks.core_package import PLATFORMS
+
+    version = release_version(tag)
+    if not complete and not update_signing.dry_run(environment):
+        raise TaskError("only a dry run may assemble a release without every asset")
+    seed = update_signing.release_seed(environment)
+    keys = update_signing.trust(environment)
+    protocols = release_feed.protocols()
+    published_at = int(time.time())
+    with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-") as temporary:
+        directory = Path(temporary) / "release"
+        directory.mkdir()
+        scratch = Path(temporary) / "scratch"
+        scratch.mkdir()
+        archives = []
+        for target, platform in PLATFORMS.items():
+            entry = Path(core_directory) / target
+            if not entry.is_dir() and not complete:
+                print(f"Dry run: no {platform} Core build on this host; its assets are skipped.")
+                continue
+            verified = scratch / target
+            verified.mkdir()
+            archive, signature = verified_core(entry, target, version, verified)
+            name = archive_name("core", version, platform)
+            shutil.copyfile(archive, directory / name)
+            shutil.copyfile(signature, directory / f"{name}.sig")
+            archives.append(("core", platform, directory / name))
+        linux = Path(linux_directory) / archive_name("desktop", version, "linux-x86_64")
+        if linux.is_file() or complete:
+            from spaceterm_tasks import package_linux
+
+            package_linux.verify(linux, tag)
+            shutil.copyfile(linux, directory / linux.name)
+            update_signing.sign(seed, directory / linux.name, directory / f"{linux.name}.sig")
+            archives.append(("desktop", "linux-x86_64", directory / linux.name))
+        else:
+            print("Dry run: no Linux desktop build on this host; its assets are skipped.")
+        for product, platform, archive in archives:
+            release_feed.write(
+                seed,
+                keys,
+                directory,
+                product=product,
+                platform=platform,
+                version=version,
+                published_at=published_at,
+                protocols=protocols,
+                archive=archive,
+            )
+        dmg = Path(macos_directory) / dmg_name(version)
+        if dmg.is_file() or complete:
+            for name in (dmg.name, APPCAST):
+                shutil.copyfile(Path(macos_directory) / name, directory / name)
+            try:
+                verify_appcast(directory / APPCAST, directory / dmg.name, version)
+            except (OSError, ValueError, ET.ParseError) as error:
+                raise TaskError(str(error)) from None
+        else:
+            print("Dry run: no macOS desktop build on this host; its assets are skipped.")
+        installer(directory / INSTALLER, environment)
+        listed = sorted(path for path in directory.iterdir())
+        (directory / CHECKSUMS).write_text(checksums(listed))
+        if complete:
+            require_assets(directory, version)
+        replace_directory(directory, RELEASE)
+    print(f"Assembled {len(listed) + 1} release assets with checksums")
+
+
+def installer(destination, environment=os.environ, source=INSTALLER_SOURCE, root=ROOT):
+    """Write the published install.sh: the release kind and Team ID filled in once each, and
+    the update keys it pins equal to packaging/update-trust.json.
+
+    A release fills the Developer ID Team ID and needs real keys. A dry run's installer accepts
+    ad hoc code signatures and placeholder keys, so it receives no Team ID.
+    """
+    text = Path(source).read_text()
+    for token in ("@RELEASE_KIND@", "@TEAM_ID@"):
+        if text.count(token) != 1:
+            raise TaskError(f"packaging/install.sh must hold {token} exactly once")
+    pinned = dict(re.findall(r"^readonly UPDATE_KEY_(CURRENT|BACKUP)='([^'\n]*)'$", text, re.M))
+    try:
+        trust = json.loads((root / update_signing.TRUST).read_text())
+    except (OSError, ValueError):
+        raise TaskError("packaging/update-trust.json is missing or malformed") from None
+    if pinned != {"CURRENT": trust.get("current"), "BACKUP": trust.get("backup")}:
+        raise TaskError("packaging/install.sh must pin the keys in packaging/update-trust.json")
+    if update_signing.dry_run(environment):
+        kind, team = "dry-run", ""
+    else:
+        update_signing.release_trust(root)
+        kind, team = "release", macos_codesign.team_id(environment)
+    Path(destination).write_text(text.replace("@RELEASE_KIND@", kind).replace("@TEAM_ID@", team))
+    Path(destination).chmod(0o755)
+
+
+def require_assets(directory, version):
+    """Require exactly the release assets, each listed once with its digest in SHA256SUMS."""
+    names = asset_names(version)
+    if sorted(path.name for path in Path(directory).iterdir()) != sorted(names):
+        raise TaskError("the release assets differ from the release asset list")
+    listed = [path for path in (Path(directory) / name for name in names) if path.name != CHECKSUMS]
+    if (Path(directory) / CHECKSUMS).read_text() != checksums(sorted(listed)):
+        raise TaskError("the release assets differ from their checksums")
+
+
+def publish(tag, notes_file=NOTES, directory=RELEASE, environment=os.environ):
+    """Publish the assembled release with the notes the desktops embed; a published release is
+    never replaced."""
+    version = release_version(tag)
+    require_assets(directory, version)
+    head = checked(["git", "rev-parse", "HEAD"], "Git could not read HEAD", cwd=ROOT).strip()
     tagged = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
         cwd=ROOT,
@@ -402,109 +440,29 @@ def publish(tag):
     )
     if tagged.returncode or tagged.stdout.strip() != head:
         raise TaskError("check out the release tag before publishing")
-    platforms = [
-        (RELEASE_ASSETS, (archive_name(version), "appcast.xml", "install.sh")),
-        (
-            LINUX_RELEASE_ASSETS,
-            (linux_archive_name(version), linux_feed_name(), f"{linux_feed_name()}.sig"),
-        ),
-    ]
-    for target in ("aarch64-apple-darwin", "x86_64-unknown-linux-gnu"):
-        archive = machine_archive_name(version, target)
-        feed = machine_feed_name(target)
-        platforms.append(
-            (core_release_directory(target), (archive, f"{archive}.sig", feed, f"{feed}.sig"))
-        )
-    assets = [directory / name for directory, names in platforms for name in names]
-    if not all(path.is_file() for path in assets):
-        raise TaskError("prepare the complete release assets before publishing")
-    # Each package job lists its own assets. The release publishes one list of every asset.
-    for directory, names in platforms:
-        if published_checksums(directory) != checksums(directory / name for name in names):
-            raise TaskError("the release assets differ from their checksums")
-    with tempfile.TemporaryDirectory() as temporary:
-        combined = Path(temporary) / "SHA256SUMS"
-        combined.write_text(checksums(assets))
-        assets.append(combined)
-        release_notes = Path(temporary) / "release-notes.md"
-        release_notes.write_text(notes())
-        # gh uploads the assets to a draft and publishes it only after every upload succeeds, so
-        # the latest/download URLs never point at a partial release.
-        if subprocess.run(
-            [
-                "gh",
-                "release",
-                "create",
-                tag,
-                *assets,
-                "--verify-tag",
-                "--latest",
-                "--title",
-                f"SpaceTerm {tag}",
-                "--notes-file",
-                release_notes,
-            ],
-            cwd=ROOT,
-        ).returncode:
-            raise TaskError("GitHub could not publish the release")
-    print(f"Published SpaceTerm {tag} with complete update assets.")
-
-
-def published_checksums(directory):
-    try:
-        return (directory / "SHA256SUMS").read_text()
-    except OSError:
-        raise TaskError("the release checksums are missing") from None
-
-
-def archive_digest(version, listing):
-    archive = archive_name(version)
-    digests = [
-        line.split("  ", 1)[0] for line in listing.splitlines() if line.endswith(f"  {archive}")
-    ]
-    if (
-        len(digests) != 1
-        or len(digests[0]) != 64
-        or not all(c in "0123456789abcdef" for c in digests[0])
-    ):
-        raise TaskError(f"the release checksums must list {archive} once")
-    return digests[0]
-
-
-def supersedes(version, installed):
-    """Whether a release is at least as new as the version the cask installs."""
-
-    def parse(value):
-        return tuple(int(part) for part in value.split("."))
-
-    return parse(version) >= parse(installed)
-
-
-def update_cask(tag):
-    """Point the tapped cask at a release; an older release's job never rolls the tap back."""
-    version = release_version(tag)
-    cask = json.loads(checked(["brew", "info", "--cask", "--json=v2", CASK]))["casks"][0]
-    if not supersedes(version, cask["version"]):
-        print(f"The cask already installs a release newer than SpaceTerm {tag}.")
+    if not Path(notes_file).is_file():
+        raise TaskError("publishing needs the release notes from release:notes")
+    assets = [Path(directory) / name for name in asset_names(version)]
+    if update_signing.dry_run(environment):
+        print(f"Dry run: verified {len(assets)} release assets for {tag}; nothing is published.")
         return
-    digest = archive_digest(version, (RELEASE_ASSETS / "SHA256SUMS").read_text())
-    # brew bump-cask-pr refuses a cask that already matches, so a rerun stops here.
-    if (cask["version"], cask["sha256"]) == (version, digest):
-        print(f"The cask already installs SpaceTerm {tag}.")
-        return
+    # gh uploads the assets to a draft and publishes it only after every upload succeeds, so the
+    # latest/download URLs never point at a partial release.
     if subprocess.run(
         [
-            "brew",
-            "bump-cask-pr",
-            "--write-only",
-            "--no-audit",
-            "--no-style",
-            "--version",
-            version,
-            "--sha256",
-            digest,
-            CASK,
-        ]
+            "gh",
+            "release",
+            "create",
+            tag,
+            *assets,
+            "--verify-tag",
+            "--latest",
+            "--title",
+            f"SpaceTerm {tag}",
+            "--notes-file",
+            notes_file,
+        ],
+        cwd=ROOT,
     ).returncode:
-        raise TaskError("Homebrew could not update the cask")
-    print(f"Updated the SpaceTerm cask to {tag}.")
+        raise TaskError("GitHub could not publish the release")
+    print(f"Published SpaceTerm {tag} with {len(assets)} assets.")

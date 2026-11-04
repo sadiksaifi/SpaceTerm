@@ -324,14 +324,24 @@ impl UpdateModel {
     }
 }
 
+/// Whether Sparkle may install the appcast item: a stable release whose enclosure is that
+/// release's disk image, named as the release publishes it.
 #[cfg(any(spaceterm_sparkle, test))]
 pub(crate) fn allows_release(version: &str, display: &str, url: &str, informational: bool) -> bool {
+    use spaceterm_core::update::{facts::Version, feed};
+    let Some(release) = Version::parse(version)
+        .ok()
+        .filter(|v| v.release().is_some())
+    else {
+        return false;
+    };
     !informational
-        && stable_version(version).is_some()
         && version == display
         && url
             == format!(
-                "https://github.com/sadiksaifi/SpaceTerm/releases/download/v{version}/SpaceTerm-{version}-darwin-arm64.dmg"
+                "{}/download/v{version}/{}",
+                feed::RELEASES,
+                feed::desktop_dmg(&release)
             )
 }
 
@@ -1579,7 +1589,8 @@ mod tests {
 
     #[test]
     fn release_metadata_cannot_redirect_installation_to_another_asset_or_repository() {
-        let expected = "https://github.com/sadiksaifi/SpaceTerm/releases/download/v0.1.1/SpaceTerm-0.1.1-darwin-arm64.dmg";
+        // The appcast enclosure the release publishes; test_release pins the same URL.
+        let expected = "https://github.com/sadiksaifi/SpaceTerm/releases/download/v0.1.1/SpaceTerm-0.1.1-macos-arm64.dmg";
         assert!(allows_release("0.1.1", "0.1.1", expected, false));
         for url in [
             expected.replace("https:", "http:"),
@@ -1587,6 +1598,7 @@ mod tests {
             expected.replace("github.com", "github.com.evil.invalid"),
             format!("{expected}?redirect=1"),
             expected.replace("arm64.dmg", "arm64.pkg"),
+            expected.replace("macos-arm64", "darwin-arm64"),
         ] {
             assert!(!allows_release("0.1.1", "0.1.1", &url, false));
         }

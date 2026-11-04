@@ -199,6 +199,98 @@ fn real_shell_exit_command_emits_an_exited_event() {
     assert_eq!(exit_status, Some(TerminalSessionExit::Success));
 }
 
+/// PTY and sandbox smoke test: the system `ssh` and `osascript` start in a real pane's shell and
+/// finish without a crash or a sandbox denial. It establishes nothing about privacy permissions.
+/// The test runner is the responsible process here, the loopback connection needs no Local
+/// Network grant and the script sends no Apple Event, so it can never cause a privacy prompt.
+/// `mise run check:core-permissions:macos` checks both permissions in the signed SpaceTerm Core.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_pane_shell_starts_ssh_and_osascript_without_a_crash_or_sandbox_denial() {
+    let _isolation = crate::platform::unix_pty::lock_real_pty_test();
+    if crate::platform::unix_pty::isolate_real_pty_test(
+        "terminal::session::unix_adapter_tests::macos_pane_shell_starts_ssh_and_osascript_without_a_crash_or_sandbox_denial",
+    ) {
+        return;
+    }
+    let startup = ShellStartupDirectory::new();
+    let (session, events, _accessibility) = TerminalRuntime::start(
+        native_pty_adapter_factory(),
+        test_launch_planner(startup.path()),
+        test_geometry(),
+        &std::env::current_dir().unwrap(),
+        Some("fixture.test"),
+        LocalFilesystemAuthority::testing(),
+        Arc::default(),
+    )
+    .unwrap();
+    let session = JoinedRealPtySession(session);
+    wait_for_shell_prompt(&session, &events);
+
+    // Absolute paths run the system programs, never a shell function or alias. Port 9 on
+    // loopback refuses at once, which ssh reports only after it started and tried to connect.
+    enter_command(
+        &session,
+        "/usr/bin/ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=3 -p 9 127.0.0.1 true; \
+         printf 'ssh-exit:%s\\n' $?; /usr/bin/osascript -e 'return 6 * 7'; \
+         printf 'osascript-exit:%s\\n' $?",
+    );
+
+    // The echoed command shows each marker followed by "%s", and the output by a status.
+    let reported = |screen: &str, marker: &str| {
+        screen
+            .match_indices(marker)
+            .any(|(at, _)| screen[at + marker.len()..].starts_with(|v: char| v.is_ascii_digit()))
+    };
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+    let mut screen = String::new();
+    while Instant::now() < deadline && !reported(&screen, "osascript-exit:") {
+        match events.try_recv() {
+            Ok(TerminalSessionEvent::Screen(snapshot)) => {
+                screen = super::tests::screen_text(&snapshot);
+            }
+            Ok(TerminalSessionEvent::Failed(failure)) => {
+                panic!("terminal session failed: {failure}")
+            }
+            Ok(TerminalSessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
+            Ok(_) => {}
+            Err(async_channel::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+            Err(async_channel::TryRecvError::Closed) => break,
+        }
+    }
+
+    let screen = screen.trim_end();
+    assert!(
+        screen.contains("ssh-exit:255"),
+        "ssh did not fail cleanly: {screen:?}"
+    );
+    assert!(
+        screen.contains("Connection refused"),
+        "ssh did not try the connection: {screen:?}"
+    );
+    assert!(
+        screen.contains("osascript-exit:0"),
+        "osascript failed: {screen:?}"
+    );
+    // The command line shows "6 * 7", so only osascript's own output can contain 42.
+    assert!(
+        screen.contains("42"),
+        "osascript did not run its script: {screen:?}"
+    );
+    for denial in [
+        "Sandbox",
+        "deny(",
+        "Killed",
+        "Abort trap",
+        "Segmentation fault",
+    ] {
+        assert!(
+            !screen.contains(denial),
+            "the pane reported {denial:?}: {screen:?}"
+        );
+    }
+}
+
 struct JoinedRealPtySession(TerminalRuntime);
 
 impl std::ops::Deref for JoinedRealPtySession {

@@ -4,6 +4,10 @@ import base64
 import hashlib
 import subprocess
 
+TEAM = "ABCDE12345"
+# Release signing selects the certificate by this name. Being self-signed, it has no Team ID.
+NAME = f"Developer ID Application: SpaceTerm Test ({TEAM})"
+
 
 def certificate(directory, *, private=True):
     directory.mkdir(parents=True, exist_ok=True)
@@ -14,7 +18,7 @@ def certificate(directory, *, private=True):
     config = directory / "certificate.cnf"
     config.write_text(
         "[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n"
-        "[dn]\nCN=SpaceTerm ephemeral signing test\n[ext]\n"
+        f"[dn]\nCN={NAME}\n[ext]\n"
         "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n"
         "extendedKeyUsage=critical,codeSigning\n"
     )

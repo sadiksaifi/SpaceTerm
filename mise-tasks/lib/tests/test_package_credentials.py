@@ -16,6 +16,9 @@ class PackageCredentialsTests(unittest.TestCase):
             "UPDATE_SIGNING_KEY": "fixture-update-key",
             "MACOS_SIGNING_CERTIFICATE_P12": "fixture-certificate",
             "MACOS_SIGNING_CERTIFICATE_PASSWORD": "fixture-password",
+            "APP_STORE_CONNECT_API_KEY": "fixture-notary-key",
+            "APP_STORE_CONNECT_KEY_ID": "FIXTURE123",
+            "APP_STORE_CONNECT_ISSUER_ID": "fixture-issuer",
             "SPACETERM_LINUX_PACKAGE_TARGET": "x86_64-unknown-linux-gnu.2.35",
             "SPACETERM_LINUX_PACKAGE_SYSROOT": "/fixture-sysroot",
         }

@@ -71,19 +71,18 @@ With all interfaces, add the Machine once per route, for example once by its LAN
 The desktop executable is `spaceterm-desktop` on Linux. SpaceTerm Core's `spaceterm` executable runs its account service and controls it. A SpaceTerm Core installation needs no desktop, graphics driver or credential store to run its local commands.
 
 ```sh
-curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless
+curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
 spaceterm setup --network off
 ```
 
-For a local Development package, run the installer with `--headless --identity spaceterm-development --archive FILE --signature FILE.sig`. Preflight uses `--identity spaceterm-preflight` in the same form. Retention verifies the signed package and creates `~/.local/bin/<identity>`. It does not register or start a service. On a computer with the desktop, Settings > Machines > Command Line Tool creates the same launcher. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
+The installer installs the Release build of SpaceTerm Core beside any version already installed and creates `~/.local/bin/spaceterm`. It does not register or start a service. `--desktop` also installs the desktop app. [The installer](../packaging/install.sh) lists its options and owns its verification. On a computer with the desktop, Settings > Machines > Command Line Tool creates the same launcher, also for Preflight and Development. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
 
 ```sh
 spaceterm uninstall
 ```
 
-Uninstall previews any Terminal Sessions it would end. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. `install.sh --headless --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
+Uninstall previews any Terminal Sessions it would end. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. `install.sh --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
 
-[Signing] Developer ID signing, hardened runtime, notarization and the installer's Developer ID requirement check are future work. Ed25519 authenticates the package and feed independently.
 
 ## Cross-target artifact catalogs
 

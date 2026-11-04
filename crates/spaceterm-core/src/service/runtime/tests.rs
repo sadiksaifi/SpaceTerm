@@ -1499,3 +1499,97 @@ fn verification_survives_a_truncated_archive_after_authentication() {
     });
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(target_os = "macos")]
+const RELEASE_REQUIREMENT: &str = "identifier \"io.github.sadiksaifi.spaceterm.core\" and anchor \
+    apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate \
+    leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = \"ABCDE12345\"";
+
+#[cfg(target_os = "macos")]
+#[test]
+fn release_requirement_pins_the_identifier_developer_id_and_build_time_team() {
+    assert_eq!(
+        native_requirement("spaceterm", Some("ABCDE12345")).as_deref(),
+        Some(RELEASE_REQUIREMENT)
+    );
+    for identity in ["spaceterm-preflight", "spaceterm-development"] {
+        assert_eq!(
+            native_requirement(identity, Some("ABCDE12345")),
+            Some(format!(
+                "identifier \"io.github.sadiksaifi.{identity}.core\""
+            ))
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn release_requirement_fails_closed_without_a_valid_build_time_team() {
+    for team in [
+        None,
+        Some(""),
+        Some("abcde12345"),
+        Some("ABCDE1234"),
+        Some("ABCDE123456"),
+        Some("ABCDE1234\""),
+        Some("ABCDE 1234"),
+    ] {
+        assert_eq!(native_requirement("spaceterm", team), None, "{team:?}");
+    }
+}
+
+/// A disposable bundle of `identity` holding an ad hoc signed copy of a system executable.
+#[cfg(target_os = "macos")]
+fn adhoc_package(identity: &str) -> PathBuf {
+    let root = temporary();
+    let layout = Layout::host(identity).unwrap();
+    let executable = root.join(layout.executable());
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::copy("/usr/bin/true", &executable).unwrap();
+    let bundle = root.join(layout.signed());
+    let identifier = bundle_identifier(identity);
+    std::fs::write(
+        bundle.join("Contents/Info.plist"),
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+             <key>CFBundleIdentifier</key><string>{identifier}</string>\
+             <key>CFBundleExecutable</key><string>spaceterm</string>\
+             <key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n"
+        ),
+    )
+    .unwrap();
+    let signed = std::process::Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-", "--identifier", &identifier])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert!(signed.status.success(), "{signed:?}");
+    root
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn release_native_verification_rejects_an_adhoc_bundle_with_the_release_identifier() {
+    assert!(!test_support::active());
+    let release = adhoc_package("spaceterm");
+    let bundle = release.join(Layout::host("spaceterm").unwrap().signed());
+    // The bundle is valid and carries the Release identifier, so only the Team ID part rejects it.
+    verify_signature(
+        &bundle,
+        "identifier \"io.github.sadiksaifi.spaceterm.core\"",
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_signature(&bundle, RELEASE_REQUIREMENT),
+        Err(CoreError::RuntimeUnavailable)
+    ));
+    // Without the fixture bypass, the compiled Release check rejects it with or without a team.
+    assert!(matches!(
+        verify_native(&release, "spaceterm"),
+        Err(CoreError::RuntimeUnavailable)
+    ));
+    let preflight = adhoc_package("spaceterm-preflight");
+    verify_native(&preflight, "spaceterm-preflight").unwrap();
+    std::fs::remove_dir_all(release).unwrap();
+    std::fs::remove_dir_all(preflight).unwrap();
+}

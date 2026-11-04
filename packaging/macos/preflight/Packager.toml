@@ -1,6 +1,7 @@
 # cargo-packager configuration for the SpaceTerm Preflight identity.
 # Packaging adds the tag-derived version, the Info.plist with that version, and the build's
-# binaries directory.
+# binaries directory. SpaceTerm signs the app with Entitlements.plist beside this file,
+# so cargo-packager receives no signing identity.
 product-name = "SpaceTerm Preflight"
 identifier = "io.github.sadiksaifi.spaceterm-preflight"
 formats = ["app", "dmg"]
@@ -16,8 +17,6 @@ resources = [
 
 [macos]
 minimum-system-version = "26.0"
-signing-identity = "-"
-entitlements = "packaging/macos/preflight/Entitlements.plist"
 
 [dmg]
 window-size = { width = 600, height = 400 }

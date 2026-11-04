@@ -14,11 +14,31 @@
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals control other apps, such as with osascript.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals read and change your calendars.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals read and change your calendars.</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals add events to your calendars.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>SpaceTerm lets programs you run in its terminals use your camera, such as for photos or calls.</string>
+	<string>SpaceTerm Core lets programs you run in its terminals use your camera, such as for photos or calls.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals read and change your contacts.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Sadik Saifi</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>SpaceTerm Core lets devices you pair connect to it and lets programs you run in its terminals reach your local network, such as with ssh.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals use your location.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals use your location.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>SpaceTerm lets programs you run in its terminals use your microphone, such as for voice input.</string>
+	<string>SpaceTerm Core lets programs you run in its terminals use your microphone, such as for voice input.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals add photos to your photo library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SpaceTerm Core lets programs you run in its terminals read and change your photo library.</string>
 </dict>
 </plist>
