@@ -2,7 +2,7 @@
 
 Updating SpaceTerm Core takes two steps. [ADR 0040](0040-install-core-versions-from-the-feed-a-push-or-a-local-archive.md) owns the first: installing a Pending Version beside the running version, which ends nothing. This record owns the second: the restart that moves SpaceTerm Core to the Pending Version and ends that Machine's Terminal Sessions.
 
-Client and SpaceTerm Core release numbers may differ. Work admission requires a shared protocol major under [ADR 0035](0035-negotiate-one-protocol-major.md). Refusal leaves other connections and Core-owned work intact. Client updates restart the client and preserve Core-owned work.
+Client and SpaceTerm Core release numbers may differ. Work admission requires a shared protocol major under [ADR 0035](0035-negotiate-protocol-versions-per-connection.md). Refusal leaves other connections and Core-owned work intact. Client updates restart the client and preserve Core-owned work.
 
 ## When SpaceTerm Core restarts
 
