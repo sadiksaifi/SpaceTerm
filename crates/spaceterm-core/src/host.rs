@@ -1366,14 +1366,16 @@ mod tests {
         );
     }
 
-    /// The update facts are a work connection's first message, ahead of the inventory its
-    /// service pushes at admission, and they arrive again after each change.
-    #[test]
-    fn a_work_connection_hears_the_update_facts_first_and_after_each_change() {
-        use crate::connection::link::LinkEvent;
+    /// One work connection served as `serve_admitted` serves it, from a host whose service
+    /// pushes an inventory at admission and whose update facts the test changes by hand.
+    mod facts_delivery {
+        use super::*;
+        use crate::connection::link::{CoreLink, LinkEvent};
         use crate::protocol::InventoryRevision;
+        use crate::protocol::version::ProtocolVersion;
         use crate::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
         use crate::update::source::FactsSource;
+
         /// Pushes an inventory at admission.
         struct Inventory;
         impl PaneService for Inventory {
@@ -1400,8 +1402,33 @@ mod tests {
                 Ok(())
             }
         }
+
         /// Facts the test changes by hand.
-        struct Board(Mutex<UpdateFacts>, std::sync::Condvar);
+        pub(super) struct Board(Mutex<UpdateFacts>, std::sync::Condvar);
+        impl Board {
+            fn new() -> Arc<Self> {
+                Arc::new(Self(
+                    Mutex::new(UpdateFacts {
+                        revision: 1,
+                        platform: Platform::LinuxX86_64,
+                        running: Version::parse("1.4.0").unwrap(),
+                        pending: None,
+                        sessions: 0,
+                        operation: None,
+                        check: UpdateCheck::Never,
+                        skipped: None,
+                        last_failure: None,
+                    }),
+                    std::sync::Condvar::new(),
+                ))
+            }
+            fn change(&self, revision: u64, sessions: u32) {
+                let mut facts = self.0.lock().unwrap();
+                facts.revision = revision;
+                facts.sessions = sessions;
+                self.1.notify_all();
+            }
+        }
         impl FactsSource for Board {
             fn facts(&self) -> UpdateFacts {
                 self.0.lock().unwrap().clone()
@@ -1415,83 +1442,156 @@ mod tests {
                 facts.clone()
             }
         }
-        let board = Arc::new(Board(
-            Mutex::new(UpdateFacts {
-                revision: 1,
-                platform: Platform::LinuxX86_64,
-                running: Version::parse("1.4.0").unwrap(),
-                pending: None,
-                sessions: 0,
-                operation: None,
-                check: UpdateCheck::Never,
-                skipped: None,
-                last_failure: None,
-            }),
-            std::sync::Condvar::new(),
-        ));
-        let (sync, _) = SyncWorker::spawn().unwrap();
-        let mut environment =
-            Environment::for_tests(Arc::new(Mutex::new(Box::new(Inventory))), sync, None);
-        environment.facts = Some(Arc::clone(&board) as _);
-        let (client, core) = UnixStream::pair().unwrap();
-        let (waker, wake) = Waker::new().unwrap();
-        let host_wake = Arc::clone(&wake);
-        let serving = {
-            let environment = environment.clone();
-            std::thread::spawn(move || {
-                serve_admitted(
-                    Box::new(UnixCarrier::new(core).unwrap()),
-                    Served {
-                        peer: Peer {
-                            client: [1; 32],
-                            connection: [1; 32],
-                            pairing: None,
-                        },
-                        name: "Test".into(),
-                        work: crate::protocol::version::WORK,
-                    },
-                    Outbox::new(wake),
-                    waker,
-                    &environment,
+
+        /// The (revision, sessions) of each update facts message, and `None` for each inventory,
+        /// in arrival order.
+        type Events = Arc<Mutex<Vec<Option<(u64, u32)>>>>;
+
+        /// One connection at selected work version `work`.
+        struct Connection {
+            link: CoreLink,
+            events: Events,
+            serving: std::thread::JoinHandle<()>,
+        }
+        impl Connection {
+            fn open(environment: &Environment, work: ProtocolVersion) -> Self {
+                let (client, core) = UnixStream::pair().unwrap();
+                let (waker, wake) = Waker::new().unwrap();
+                let serving = {
+                    let environment = environment.clone();
+                    std::thread::spawn(move || {
+                        serve_admitted(
+                            Box::new(UnixCarrier::new(core).unwrap()),
+                            Served {
+                                peer: Peer {
+                                    client: [1; 32],
+                                    connection: [1; 32],
+                                    pairing: None,
+                                },
+                                name: "Test".into(),
+                                work,
+                            },
+                            Outbox::new(wake),
+                            waker,
+                            &environment,
+                        );
+                    })
+                };
+                let events = Events::default();
+                let link = crate::connection::io::spawn_link(
+                    Box::new(UnixCarrier::new(client).unwrap()),
+                    Arc::new({
+                        let events = Arc::clone(&events);
+                        move |event: LinkEvent| {
+                            events.lock().unwrap().push(match event {
+                                LinkEvent::UpdateFacts(facts) => {
+                                    Some((facts.revision, facts.sessions))
+                                }
+                                LinkEvent::Inventory(_) => None,
+                                LinkEvent::Health(_) => return,
+                            });
+                        }
+                    }),
                 )
-            })
-        };
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let link = crate::connection::io::spawn_link(
-            Box::new(UnixCarrier::new(client).unwrap()),
-            Arc::new({
-                let events = Arc::clone(&events);
-                move |event: LinkEvent| {
-                    events.lock().unwrap().push(match event {
-                        LinkEvent::UpdateFacts(facts) => Some((facts.revision, facts.sessions)),
-                        LinkEvent::Inventory(_) => None,
-                        LinkEvent::Health(_) => return,
-                    });
+                .unwrap();
+                // A change before the first facts are written would replace them in their slot.
+                link.next_inventory(0).unwrap();
+                Self {
+                    link,
+                    events,
+                    serving,
                 }
-            }),
-        )
-        .unwrap();
-        // A change before the first facts are written would replace them in their slot.
-        link.next_inventory(0).unwrap();
-        {
-            let mut facts = board.0.lock().unwrap();
-            facts.revision = 2;
-            facts.sessions = 1;
-            board.1.notify_all();
+            }
+            /// The events once there are `count`, or after ten seconds.
+            fn events(&self, count: usize) -> Vec<Option<(u64, u32)>> {
+                let deadline = Instant::now() + std::time::Duration::from_secs(10);
+                while self.events.lock().unwrap().len() < count && Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                self.events.lock().unwrap().clone()
+            }
+            /// Closes the client's end, as an idle client that disconnects does.
+            fn close(self) {
+                drop(self.link);
+                self.serving.join().unwrap();
+            }
         }
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
-        while events.lock().unwrap().len() < 3 && Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+
+        fn environment(board: &Arc<Board>) -> Environment {
+            let (sync, _) = SyncWorker::spawn().unwrap();
+            let mut environment =
+                Environment::for_tests(Arc::new(Mutex::new(Box::new(Inventory))), sync, None);
+            environment.facts = Some(Arc::clone(board) as _);
+            environment
         }
-        assert_eq!(
-            events.lock().unwrap().as_slice(),
-            [Some((1, 0)), None, Some((2, 1))],
-            "facts, then the inventory, then the changed facts"
-        );
-        assert_eq!(link.update_facts().map(|facts| facts.sessions), Some(1));
-        environment.stop.stopping.store(true, Ordering::Release);
-        host_wake.wake();
-        serving.join().unwrap();
+
+        /// The update facts are a work connection's first message, ahead of the inventory its
+        /// service pushes at admission, and they arrive again after each change.
+        #[test]
+        fn a_work_connection_hears_the_update_facts_first_and_after_each_change() {
+            let board = Board::new();
+            let environment = environment(&board);
+            let connection = Connection::open(&environment, crate::protocol::version::WORK);
+            board.change(2, 1);
+            assert_eq!(
+                connection.events(3),
+                [Some((1, 0)), None, Some((2, 1))],
+                "facts, then the inventory, then the changed facts"
+            );
+            assert_eq!(
+                connection.link.update_facts().map(|facts| facts.sessions),
+                Some(1)
+            );
+            connection.close();
+        }
+
+        /// A selected version without the facts frame never receives it. Every capability is
+        /// 1.0 today, so only a version below 1.0 lacks it.
+        #[test]
+        fn a_connection_whose_version_lacks_the_facts_frame_never_receives_it() {
+            let board = Board::new();
+            let environment = environment(&board);
+            let older = ProtocolVersion { major: 0, minor: 9 };
+            let connection = Connection::open(&environment, older);
+            board.change(2, 1);
+            std::thread::sleep(FOLLOW_RECHECK + std::time::Duration::from_millis(200));
+            assert_eq!(connection.events(1), [None], "the inventory alone");
+            assert!(connection.link.update_facts().is_none());
+            connection.close();
+        }
+
+        /// An idle connection that closes while the facts stay unchanged releases its follower
+        /// within its recheck, and a later connection alone hears later changes.
+        #[test]
+        fn a_closed_connection_releases_its_facts_follower_while_the_facts_stay_unchanged() {
+            let board = Board::new();
+            let environment = environment(&board);
+            // The test's handle and the environment's.
+            let held = Arc::strong_count(&board);
+            let first = Connection::open(&environment, crate::protocol::version::WORK);
+            assert_eq!(first.events(2), [Some((1, 0)), None]);
+            assert!(
+                Arc::strong_count(&board) > held,
+                "the follower holds the source"
+            );
+            first.close();
+            let deadline = Instant::now() + 3 * FOLLOW_RECHECK;
+            while Arc::strong_count(&board) > held && Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(
+                Arc::strong_count(&board),
+                held,
+                "the ended connection's follower released its source"
+            );
+            let second = Connection::open(&environment, crate::protocol::version::WORK);
+            board.change(2, 3);
+            assert_eq!(second.events(3), [Some((1, 0)), None, Some((2, 3))]);
+            // The second connection's serving thread holds the environment, and its follower
+            // holds the source; the first connection holds nothing.
+            assert_eq!(Arc::strong_count(&board), held + 2);
+            second.close();
+        }
     }
 
     #[test]
