@@ -1005,7 +1005,11 @@ fn native_request(approvals: Arc<NativeApprovals>) -> SetupRequest {
         )
         .unwrap(),
         address: std::env::var_os("SPACETERM_SETUP_NATIVE_ADDRESS").map(|address| {
-            SetupAddress::parse(address.to_str().expect("the setup address must be UTF-8"), 9231).unwrap()
+            SetupAddress::parse(
+                address.to_str().expect("the setup address must be UTF-8"),
+                9231,
+            )
+            .unwrap()
         }),
         name: "setup-native-653".into(),
         prompts: approvals.prompts.clone(),
@@ -1956,13 +1960,7 @@ raise SystemExit(86)
             "{prefix}python3 -c {quoted} \"$root/identity.json\" \"$policy\" \"$root/installations/$digest/bin/spaceterm\" '{identity}'\n"
         )
     }
-    fn install(
-        &self,
-        identity: &str,
-        length: usize,
-        signature: &[u8],
-        digest: &str,
-    ) -> String {
+    fn install(&self, identity: &str, length: usize, signature: &[u8], digest: &str) -> String {
         crate::platform::unix_ssh_process::UnixSshProcessAdapter
             .install(identity, length, signature, digest)
     }

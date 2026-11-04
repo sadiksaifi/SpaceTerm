@@ -57,6 +57,11 @@ impl CredentialStore for NoCredentials {
     }
 }
 
+/// The UDP port this desktop's build identity uses unless an address names one.
+fn port() -> u16 {
+    crate::ssh::provisioning::own_port()
+}
+
 const SUPPORTED_LINUX: &[u8] = b"SPACETERM_PREFLIGHT 1 os=linux arch=x86_64 uid=501 system=2.39 manager=1 linger=1 gui=0 filevault=0\n";
 
 #[derive(Clone)]
@@ -521,11 +526,13 @@ fn declined_linger_on_a_remote_linux_machine_refuses_before_upload() {
     );
     // The fixture fails every linger script and the password prompt, and nothing is uploaded.
     let effects = fixture.adapter.effects.lock().unwrap();
-    assert!(
-        effects
-            .iter()
-            .all(|effect| !effect.last().unwrap().to_string_lossy().contains("ssh-install"))
-    );
+    assert!(effects.iter().all(|effect| {
+        !effect
+            .last()
+            .unwrap()
+            .to_string_lossy()
+            .contains("ssh-install")
+    }));
     drop(effects);
     assert_eq!(fixture.backend.process_counts().active(), 0);
 }
@@ -679,7 +686,8 @@ fn uninstalled_stopped_core_reinstall_then_start_then_network_uses_one_authentic
         .effects_succeed
         .store(true, Ordering::SeqCst);
     let mut network = status();
-    network.policy = Some(NetworkPolicy::new("192.0.2.9:9231".parse().unwrap()).unwrap());
+    network.policy =
+        Some(NetworkPolicy::new(format!("192.0.2.9:{}", port()).parse().unwrap()).unwrap());
     *fixture.adapter.status.lock().unwrap() = Some(network);
     let active = Arc::clone(&fixture.adapter.active);
     let offers = Arc::new(Mutex::new(Vec::new()));
@@ -705,9 +713,9 @@ fn uninstalled_stopped_core_reinstall_then_start_then_network_uses_one_authentic
             },
             SetupOffer::Startup,
             SetupOffer::Network {
-                address: SetupAddress::parse("configured.example", 9231).unwrap(),
-                bind: "192.0.2.9:9231".parse().unwrap(),
-                current: Some("192.0.2.9:9231".parse().unwrap()),
+                address: SetupAddress::parse("configured.example", port()).unwrap(),
+                bind: format!("192.0.2.9:{}", port()).parse().unwrap(),
+                current: Some(format!("192.0.2.9:{}", port()).parse().unwrap()),
                 enabled: false,
             },
         ]
@@ -885,8 +893,9 @@ fn setup_derives_dns_from_effective_hostname_and_keeps_bind_and_ssh_port_separat
         assert_eq!(
             offer,
             SetupOffer::Network {
-                address: SetupAddress::parse("actual.tail.example:9231", 9231).unwrap(),
-                bind: "192.0.2.9:9231".parse().unwrap(),
+                address: SetupAddress::parse(&format!("actual.tail.example:{}", port()), port())
+                    .unwrap(),
+                bind: format!("192.0.2.9:{}", port()).parse().unwrap(),
                 current: None,
                 enabled: false,
             }
@@ -906,7 +915,8 @@ fn default_hostname_offers_the_authenticated_interface_instead_of_an_unrelated_l
     remote.ssh_local_address = Some("100.64.0.9".parse().unwrap());
     let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
     let mut current = status();
-    current.policy = Some(NetworkPolicy::new("192.168.1.9:9231".parse().unwrap()).unwrap());
+    current.policy =
+        Some(NetworkPolicy::new(format!("192.168.1.9:{}", port()).parse().unwrap()).unwrap());
     current.enabled = true;
     *fixture.adapter.status.lock().unwrap() = Some(current);
     *fixture.adapter.resolved.lock().unwrap() =
@@ -916,9 +926,9 @@ fn default_hostname_offers_the_authenticated_interface_instead_of_an_unrelated_l
         assert_eq!(
             offer,
             SetupOffer::Network {
-                address: SetupAddress::parse("actual.tail.example", 9231).unwrap(),
-                bind: "100.64.0.9:9231".parse().unwrap(),
-                current: Some("192.168.1.9:9231".parse().unwrap()),
+                address: SetupAddress::parse("actual.tail.example", port()).unwrap(),
+                bind: format!("100.64.0.9:{}", port()).parse().unwrap(),
+                current: Some(format!("192.168.1.9:{}", port()).parse().unwrap()),
                 enabled: true,
             }
         );
@@ -935,16 +945,17 @@ fn default_hostname_offers_the_authenticated_interface_instead_of_an_unrelated_l
 fn default_hostname_preserves_a_configured_wildcard_bind_when_enabling_network_access() {
     let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
     let mut current = status();
-    current.policy = Some(NetworkPolicy::new("0.0.0.0:9231".parse().unwrap()).unwrap());
+    current.policy =
+        Some(NetworkPolicy::new(format!("0.0.0.0:{}", port()).parse().unwrap()).unwrap());
     *fixture.adapter.status.lock().unwrap() = Some(current);
 
     let result = fixture.setup(Arc::new(Approvals(|offer, _: &CancellationToken| {
         assert_eq!(
             offer,
             SetupOffer::Network {
-                address: SetupAddress::parse("configured.example", 9231).unwrap(),
-                bind: "0.0.0.0:9231".parse().unwrap(),
-                current: Some("0.0.0.0:9231".parse().unwrap()),
+                address: SetupAddress::parse("configured.example", port()).unwrap(),
+                bind: format!("0.0.0.0:{}", port()).parse().unwrap(),
+                current: Some(format!("0.0.0.0:{}", port()).parse().unwrap()),
                 enabled: false,
             }
         );
@@ -965,7 +976,7 @@ fn enabled_every_interface_network_access_enrolls_another_route_without_a_networ
     remote.ssh_local_address = Some("100.64.0.9".parse().unwrap());
     let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
     let mut current = status();
-    current.policy = Some(NetworkPolicy::every_interface(9231).unwrap());
+    current.policy = Some(NetworkPolicy::every_interface(port()).unwrap());
     current.enabled = true;
     *fixture.adapter.status.lock().unwrap() = Some(current);
     *fixture.adapter.resolved.lock().unwrap() =
@@ -994,8 +1005,9 @@ fn setup_reoffers_changed_policy_while_holding_the_same_authentication() {
     let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
         assert!(matches!(offer, SetupOffer::Network { .. }));
         if observed.fetch_add(1, Ordering::SeqCst) == 0 {
-            source.lock().unwrap().as_mut().unwrap().policy =
-                Some(NetworkPolicy::new("192.0.2.10:9231".parse().unwrap()).unwrap());
+            source.lock().unwrap().as_mut().unwrap().policy = Some(
+                NetworkPolicy::new(format!("192.0.2.10:{}", port()).parse().unwrap()).unwrap(),
+            );
             true
         } else {
             false
