@@ -310,8 +310,9 @@ impl Act {
         let to = to.map(|to| SharedString::from(to.version.clone()));
         match action {
             LaneAction::Stop => Self::Stop,
+            // A Restart into the Pending Version names the version it updates to.
+            LaneAction::Restart if to.is_some() => Self::Update(to),
             LaneAction::Restart => Self::Restart,
-            LaneAction::Update { .. } => Self::Update(to),
             LaneAction::Network { .. } => Self::NetworkAccess,
         }
     }
@@ -442,7 +443,9 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
     // wording's startup clause never shows.
     let startup = spaceterm_core::service::ServiceStartup::AtLogin;
     match &preview.action {
-        LaneAction::Stop | LaneAction::Restart => {
+        LaneAction::Stop | LaneAction::Restart
+            if preview.action == LaneAction::Stop || effects.to.is_none() =>
+        {
             let (action, detail) = if preview.action == LaneAction::Stop {
                 (
                     control::Action::Stop,
@@ -476,7 +479,8 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
             detail: "Paired connections to it may end.".to_owned(),
             confirm: "Change".to_owned(),
         },
-        LaneAction::Update { .. } => {
+        // A Restart into the Pending Version reads as the update it completes.
+        LaneAction::Stop | LaneAction::Restart => {
             let unnamed = LaneVersion {
                 version: String::new(),
                 commit: String::new(),

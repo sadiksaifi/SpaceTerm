@@ -26,7 +26,6 @@ fn effects(ends_sessions: u32) -> LaneEffects {
         start_requires_machine: true,
         from: None,
         to: None,
-        kind: None,
         to_major: None,
     }
 }
@@ -42,13 +41,10 @@ fn preview(action: LaneAction, effects: LaneEffects) -> Preview {
 
 fn update_preview(to_major: Option<u16>) -> Preview {
     preview(
-        LaneAction::Update {
-            installation: "1.3.0-package".into(),
-        },
+        LaneAction::Restart,
         LaneEffects {
             from: Some(version("1.2.0", "aaaaaaaaaa")),
             to: Some(version("1.3.0", "bbbbbbbbbb")),
-            kind: Some(spaceterm_core::service::lane::LaneUpdateKind::Update),
             to_major,
             ..effects(2)
         },
@@ -419,9 +415,7 @@ fn check_now_offers_the_machines_update_and_update_follows_it_to_the_end(cx: &mu
         preview: update_preview(None),
         settled: Vec::new(),
     });
-    let update = LaneAction::Update {
-        installation: "1.3.0-package".into(),
-    };
+    let update = LaneAction::Restart;
     *remote.perform.lock().unwrap() = Ok(Performed {
         outcome: Outcome::Settled {
             receipt: receipt(update, LaneOperationState::Done, "b"),

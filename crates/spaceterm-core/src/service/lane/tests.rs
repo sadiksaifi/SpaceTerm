@@ -275,9 +275,7 @@ fn a_paired_caller_cannot_stop_the_core() {
 #[test]
 fn lane_messages_keep_their_frozen_json_shape() {
     let request = LaneRequest::Execute {
-        action: LaneAction::Update {
-            installation: "abc".into(),
-        },
+        action: LaneAction::Restart,
         token: "c1-00".into(),
         operation: "op".into(),
     };
@@ -285,7 +283,7 @@ fn lane_messages_keep_their_frozen_json_shape() {
         serde_json::to_value(&request).unwrap(),
         serde_json::json!({
             "request": "execute",
-            "action": { "action": "update", "installation": "abc" },
+            "action": { "action": "restart" },
             "token": "c1-00",
             "operation": "op",
         })
@@ -1075,11 +1073,10 @@ fn install_pending(lane: &Lane, version: &str) -> String {
 fn a_restart_moves_into_the_pending_version_when_one_waits() {
     with_lane(|lane| {
         let (_, effects) = preview(&lane.lane, LaneAction::Restart);
-        assert_eq!((effects.kind, effects.to), (None, None));
+        assert_eq!(effects.to, None);
         let sha256 = install_pending(&lane, "1.0.0");
         lane.host.sessions.lock().unwrap().push([3; 32]);
         let (token, effects) = preview(&lane.lane, LaneAction::Restart);
-        assert_eq!(effects.kind, Some(LaneUpdateKind::Update));
         assert_eq!(
             effects.to.as_ref().map(|to| to.version.as_str()),
             Some("1.0.0")
@@ -1888,4 +1885,95 @@ fn facts_messages_keep_their_json_shape() {
     let mut nested = json;
     nested["facts"]["staged"] = serde_json::json!([]);
     assert!(serde_json::from_value::<LaneReply>(nested).is_err());
+}
+
+#[test]
+fn no_client_can_activate_an_installation_it_names() {
+    // A Restart reaches only the Pending Version, so a skipped or previous version cannot run.
+    assert!(
+        serde_json::from_str::<LaneRequest>(
+            r#"{"request":"execute","action":{"action":"update","installation":"abc"},"token":"c1-00","operation":"op"}"#
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn every_client_sees_a_confirmed_restart_or_stop_in_the_update_facts() {
+    use crate::update::facts::Operation;
+    use crate::update::source::FactsSource;
+    for (action, op) in [(LaneAction::Restart, 1), (LaneAction::Stop, 2)] {
+        with_lane(|lane| {
+            let updates = lane.lane.updates().unwrap().clone();
+            let (token, _) = preview(&lane.lane, action.clone());
+            let reply = execute(&lane.lane, action.clone(), &token, op);
+            assert!(matches!(reply, LaneReply::Accepted { .. }), "{reply:?}");
+            let expected = match action {
+                LaneAction::Stop => Operation::Stopping,
+                _ => Operation::Restarting {
+                    to: updates.facts().running,
+                },
+            };
+            assert_eq!(updates.facts().operation, Some(expected));
+        });
+    }
+}
+
+#[test]
+fn a_confirmed_restart_waits_for_an_install_in_progress() {
+    with_lane(|lane| {
+        let updates = lane.lane.updates().unwrap().clone();
+        let installing = updates
+            .begin_install(crate::update::facts::Version::parse("2.0.0").unwrap(), 10)
+            .unwrap();
+        let (token, _) = preview(&lane.lane, LaneAction::Restart);
+        assert_eq!(
+            code(execute(&lane.lane, LaneAction::Restart, &token, 1)),
+            "service_busy"
+        );
+        assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+        drop(installing);
+    });
+}
+
+#[test]
+fn a_restart_whose_helper_fails_before_stopping_the_server_ends_and_may_try_again() {
+    use crate::update::source::FactsSource;
+    with_lane(|lane| {
+        let updates = lane.lane.updates().unwrap().clone();
+        install_pending(&lane, "1.0.0");
+        let restarter: Arc<dyn runtime::updates::Restarter> = lane.lane.clone();
+        updates
+            .run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
+                None
+            })
+            .unwrap();
+        updates.set_sessions(0);
+        assert!(
+            updates.facts().operation.is_some(),
+            "the silent restart began"
+        );
+        let records = lane.lane.ledger().unwrap().records().unwrap();
+        // The helper fails before it stops this server.
+        lane.lane
+            .ledger()
+            .unwrap()
+            .mark(
+                &records[0].id,
+                State::Failed {
+                    code: "service_busy".into(),
+                },
+            )
+            .unwrap();
+        assert!(lane.lane.release_if_settled());
+        assert_eq!(updates.facts().operation, None);
+        let data = Directory::open(&lane.service.paths.data, false).unwrap();
+        let record: serde_json::Value = data.read_json("updates.json").unwrap().unwrap();
+        assert_eq!(
+            record["silent"],
+            serde_json::Value::Null,
+            "the next attempt may run"
+        );
+    });
 }

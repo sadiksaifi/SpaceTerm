@@ -442,14 +442,7 @@ mod tests {
         );
         // A change settles within the server's listener limit, and the caller then reconnects.
         assert!(NETWORK_WAIT >= super::super::network::LISTEN_LIMIT + Duration::from_secs(10));
-        for action in [
-            LaneAction::Restart,
-            LaneAction::Update {
-                installation: "00".into(),
-            },
-        ] {
-            assert_eq!(wait(&action), RETURN_WAIT, "{action:?}");
-        }
+        assert_eq!(wait(&LaneAction::Restart), RETURN_WAIT);
     }
 
     #[test]

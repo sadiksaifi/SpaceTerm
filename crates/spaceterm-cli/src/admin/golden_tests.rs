@@ -250,7 +250,6 @@ fn stop_effects() -> LaneEffects {
         start_requires_machine: true,
         from: None,
         to: None,
-        kind: None,
         to_major: None,
     }
 }

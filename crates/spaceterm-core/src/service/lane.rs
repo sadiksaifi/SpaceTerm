@@ -151,7 +151,6 @@ impl LaneRequest {
 pub enum LaneAction {
     Stop,
     Restart,
-    Update { installation: String },
     Network { access: NetworkAccess },
 }
 
@@ -277,14 +276,8 @@ pub struct LaneStatus {
     pub terminal_counters: Option<TerminalCounterSnapshot>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaneUpdateKind {
-    Update,
-}
-
-/// Mirrors the confirmation `effects` of `server.stop`, `server.restart` and `server.update`.
-/// Stop and Restart leave the version fields empty.
+/// Mirrors the confirmation `effects` of `stop` and `restart`. Stop and a Restart into the
+/// running version leave the version fields empty; a Restart into the Pending Version names it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneEffects {
     pub ends_sessions: u32,
@@ -292,9 +285,8 @@ pub struct LaneEffects {
     pub start_requires_machine: bool,
     pub from: Option<LaneVersion>,
     pub to: Option<LaneVersion>,
-    pub kind: Option<LaneUpdateKind>,
-    /// The protocol major the update or return activates, so a client can warn when its own
-    /// work major differs.
+    /// The work protocol major a Restart into the Pending Version activates, so a client can
+    /// warn when its own work major differs.
     pub to_major: Option<u16>,
 }
 
@@ -1004,7 +996,6 @@ impl LaneCore {
                 LaneAction::Stop => Action::Stop,
                 LaneAction::Restart if prepared.candidate.is_some() => Action::Update,
                 LaneAction::Restart => Action::Restart,
-                LaneAction::Update { .. } => Action::Update,
                 LaneAction::Network { .. } => return Err(CoreError::Protocol),
             },
             observation_digest: expected,
@@ -1013,14 +1004,28 @@ impl LaneCore {
             updated_at: 0,
             orphaned: false,
         };
-        let mut admitted = None;
-        self.host.fence(&mut |sessions| {
-            if observation(&prepared, sessions) != expected {
-                return Err(CoreError::Changed);
-            }
-            admitted = Some(self.ledger()?.admit(record.clone())?);
-            Ok(())
-        })?;
+        let admit = || {
+            let mut admitted = None;
+            self.host.fence(&mut |sessions| {
+                if observation(&prepared, sessions) != expected {
+                    return Err(CoreError::Changed);
+                }
+                admitted = Some(self.ledger()?.admit(record.clone())?);
+                Ok(())
+            })?;
+            Ok(admitted)
+        };
+        // The engine owns a confirmed Restart or Stop, so every client's facts show it.
+        let change = match action {
+            LaneAction::Stop => runtime::updates::Confirmed::Stop,
+            _ => runtime::updates::Confirmed::Restart {
+                candidate: prepared.candidate,
+            },
+        };
+        let admitted = match self.updates() {
+            Ok(updates) => updates.confirm(change, admit)?,
+            Err(_) => admit()?,
+        };
         let launch = matches!(admitted, Some(Admission::New(_))).then_some(id);
         Ok((accepted, launch))
     }
@@ -1084,6 +1089,9 @@ impl LaneCore {
         }
         self.host.release_fence();
         self.watching.store(false, Ordering::SeqCst);
+        if let Ok(updates) = self.updates() {
+            updates.operations_settled();
+        }
         true
     }
 
@@ -1119,14 +1127,8 @@ impl LaneCore {
             operation: id.to_string(),
             action: match record.action {
                 Action::Stop => LaneAction::Stop,
-                Action::Restart => LaneAction::Restart,
-                Action::Update => LaneAction::Update {
-                    installation: record
-                        .candidate
-                        .as_ref()
-                        .map(|v| hex(v))
-                        .unwrap_or_default(),
-                },
+                // A restart into the Pending Version is the Restart its client confirmed.
+                Action::Restart | Action::Update => LaneAction::Restart,
                 Action::Network(access) => LaneAction::Network { access },
             },
             state,
@@ -1249,10 +1251,9 @@ impl Admin<'_> {
             start_requires_machine: false,
             from: None,
             to: None,
-            kind: None,
             to_major: None,
         };
-        // Restart moves into the Pending Version when one waits, as Update does.
+        // Restart moves into the Pending Version when one waits.
         let pending = match action {
             LaneAction::Restart => {
                 let (data, _) = self.service.read()?.ok_or(CoreError::NotInstalled)?;
@@ -1260,13 +1261,8 @@ impl Admin<'_> {
             }
             _ => None,
         };
-        let update = match (action, pending) {
-            (LaneAction::Update { installation }, _) => Some(installation.clone()),
-            (_, Some(pending)) => Some(pending),
-            _ => None,
-        };
-        let (running, candidate) = match (action, update) {
-            (LaneAction::Restart | LaneAction::Update { .. }, Some(installation)) => {
+        let (running, candidate) = match (action, pending) {
+            (LaneAction::Restart, Some(installation)) => {
                 let candidate = self.installation(&installation)?;
                 let approval = self
                     .service
@@ -1275,7 +1271,6 @@ impl Admin<'_> {
                 digest.update(approval.confirmation_token()?.as_bytes());
                 effects.from = Some(version_of(approval.previous()));
                 effects.to = Some(version_of(approval.candidate()));
-                effects.kind = Some(LaneUpdateKind::Update);
                 effects.to_major = protocol_major(approval.candidate());
                 (approval.running(), Some(digest_bytes(&installation)?))
             }
@@ -1292,7 +1287,6 @@ impl Admin<'_> {
                 effects.start_requires_machine = *action == LaneAction::Stop;
                 (confirmation.running(), None)
             }
-            (LaneAction::Update { .. }, None) => return Err(CoreError::CandidateMissing),
             (LaneAction::Network { .. }, _) => return Err(CoreError::Unsupported),
         };
         Ok(Prepared {
