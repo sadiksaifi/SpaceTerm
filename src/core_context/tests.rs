@@ -413,7 +413,7 @@ fn malformed_network_records_are_preserved_during_load_and_later_updates() {
         let mut files = filesystem.files.lock().unwrap();
         let bytes = &mut files.values.values_mut().next().unwrap().0;
         let mut document: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        document["facts"][0]["facts"]["network_access"]["server_name"] = "\u{202e}hidden".into();
+        document["facts"][0]["facts"]["network_access"]["machine_name"] = "\u{202e}hidden".into();
         *bytes = serde_json::to_vec(&document).unwrap();
     }
     let before = filesystem.files.lock().unwrap().values.clone();

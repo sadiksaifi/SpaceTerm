@@ -1709,7 +1709,7 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
                 flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
             let mut archive = tar::Builder::new(compressed);
             let helper = format!(
-                "#!/bin/sh\n[ \"$1:$2\" = server:provision ] || exit 91\nshift 2\ncase $1 in ssh-enable-linger) if [ \"${{2-}}\" = --password-stdin ]; then IFS= read -r password; test \"$password\" = fixture; else exit {}; fi;; ssh-install) test -f \"$2\" && test -f \"$3\";; *) exit 91;; esac\n",
+                "#!/bin/sh\n[ \"$1\" = internal ] || exit 91\nshift\ncase $1 in ssh-enable-linger) if [ \"${{2-}}\" = --password-stdin ]; then IFS= read -r password; test \"$password\" = fixture; else exit {}; fi;; ssh-install) test -f \"$2\" && test -f \"$3\";; *) exit 91;; esac\n",
                 if authorization_required { 1 } else { 0 },
             );
             let mut header = tar::Header::new_gnu();
@@ -1955,7 +1955,7 @@ for signum in (signal.SIGHUP,signal.SIGTERM,signal.SIGINT):
     signal.signal(signum,interrupted)
 try:
     write(replacement)
-    result=subprocess.run([binary,'server','provision','ssh-start'],input=request,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=10)
+    result=subprocess.run([binary,'internal','ssh-start'],input=request,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=10)
     assert result.returncode!=0 and b'(changed)' in result.stderr
     assert open(policy_path,'rb').read()==policy
 finally:

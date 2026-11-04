@@ -133,7 +133,7 @@ fn paired() -> PairedDevice {
     }
 }
 fn invitation() -> String {
-    let document = serde_json::json!({ "schema":1, "id":([2;32]), "endpoint":"quic://192.0.2.8:9231", "pin":pin(), "server_name":"Penguin Fixture", "token":([9;32]), "expires":2000000000u64, "valid_for_seconds":300 });
+    let document = serde_json::json!({ "schema":1, "id":([2;32]), "endpoint":"quic://192.0.2.8:9231", "pin":pin(), "machine_name":"Penguin Fixture", "token":([9;32]), "expires":2000000000u64, "valid_for_seconds":300 });
     format!(
         "spaceterm://pair/{}",
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&document).unwrap())

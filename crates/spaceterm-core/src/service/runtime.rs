@@ -608,7 +608,7 @@ fn executable_build(path: &Path, identity: &str) -> Result<Vec<u8>, CoreError> {
     let layout = Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
     let bytes = execute(
         Command::new(path.join(layout.executable()))
-            .args(["server", "provision", "build-info"])
+            .args(["internal", "build-info"])
             .env_clear()
             .current_dir(path),
     )

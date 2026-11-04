@@ -6,7 +6,7 @@
 # USAGE flag "--conditions <list>" help="Comma-separated conditions: plain, accessibility" default="plain,accessibility"
 # USAGE flag "--host <name>" help="Baseline name; defaults to this machine's short host name"
 # USAGE flag "--record" help="Store the medians of every workload and condition as this host's baseline instead of comparing"
-# USAGE flag "--output <directory>" help="Directory for results.json; defaults to target/bench/server/TIME"
+# USAGE flag "--output <directory>" help="Directory for results.json; defaults to target/bench/core/TIME"
 """Measure a temporary Development server under fixed workloads.
 
 The task builds the server and a presentation client from this checkout in release mode, starts
@@ -27,7 +27,7 @@ completion marker. The task also records how much each of the server's Terminal 
 counters moved during the workload, read from `spaceterm server status` outside the measured
 window; a failed read fails the task.
 
-Results go to `--output`. The medians are compared with mise-tasks/bench/baselines/server/HOST.json;
+Results go to `--output`. The medians are compared with mise-tasks/bench/baselines/core/HOST.json;
 the task fails when one exceeds the baseline by more than mise-tasks/bench/budgets.json allows,
 and when the baseline is missing, lacks a measurement the run has, or measured other settings, input
 or hardware. `--record` replaces the baseline instead and needs every workload and condition.
@@ -129,7 +129,7 @@ class Core:
     def __init__(self, executable, jail, env):
         self.jailed = jail.directory is not None
         self.process = subprocess.Popen(
-            jail.wrap([executable, "server", "run", "--owned"]),
+            jail.wrap([executable, "internal", "serve", "--owned"]),
             env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -278,7 +278,7 @@ def measure(context, client, workload, args):
         - sent["accessibility_revisions"],
         "accessibility_payload_bytes": received["accessibility_payload_bytes"]
         - sent["accessibility_payload_bytes"],
-        "server_counters": counted,
+        "core_counters": counted,
         "receipt": receipt,
     }
     if "written_bytes" in row:
@@ -352,9 +352,7 @@ def run(args):
                 check_receipt(jobs.receipt(number, 30), "receipt")
                 for workload in workloads:
                     for repeat in range(1, args.runs + 1):
-                        print(
-                            f"bench:server: {workload}, {condition}, run {repeat}", file=sys.stderr
-                        )
+                        print(f"bench:core: {workload}, {condition}, run {repeat}", file=sys.stderr)
                         values, details = measure(context, client, workload, args)
                         if condition == "accessibility" and not details["accessibility_revisions"]:
                             raise TaskError("the client received no accessibility revisions")
@@ -389,7 +387,7 @@ def run(args):
             },
         )
         write_json(output / "results.json", results)
-        print(f"bench:server: recorded the baseline for {host}")
+        print(f"bench:core: recorded the baseline for {host}")
         return 0
     baseline = json.loads(baseline_path.read_text()) if baseline_path.exists() else None
     comparison = compare_core(baseline, results, budgets)
@@ -413,7 +411,7 @@ def run(args):
         raise TaskError(
             f"{len(regressed)} medians exceed {host}'s baseline by more than {budgets['regression']:.0%}"
         )
-    print(f"bench:server: within {budgets['regression']:.0%} of {host}'s baseline")
+    print(f"bench:core: within {budgets['regression']:.0%} of {host}'s baseline")
     return 0
 
 

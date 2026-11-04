@@ -1,5 +1,5 @@
 //! The transient service helper. It runs one admitted service operation outside the server it
-//! stops or replaces: `spaceterm server provision service-run --operation ID --identity X`.
+//! stops or replaces: `spaceterm internal helper --operation ID --identity X`.
 //!
 //! The helper must outlive the service manager's Stop of the server that launched it. On Linux
 //! it therefore runs in its own transient user unit, outside the server unit's control group. On
@@ -17,9 +17,8 @@ use std::time::Duration;
 /// The helper's arguments after the executable, as the CLI parses them.
 fn arguments(identity: &str, op: &OperationId) -> Vec<OsString> {
     [
-        "server",
-        "provision",
-        "service-run",
+        "internal",
+        "helper",
         "--operation",
         &op.to_string(),
         "--identity",
@@ -243,9 +242,8 @@ mod tests {
         assert_eq!(
             arguments("spaceterm-preflight", &op),
             [
-                "server",
-                "provision",
-                "service-run",
+                "internal",
+                "helper",
                 "--operation",
                 &"ab".repeat(16),
                 "--identity",
@@ -500,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "starts a fixture service job; run mise run server:admin:native"]
+    #[ignore = "starts a fixture service job; run mise run core:admin:native"]
     fn helper_outlives_the_stop_of_the_job_that_launched_it() {
         let suffix =
             u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap());

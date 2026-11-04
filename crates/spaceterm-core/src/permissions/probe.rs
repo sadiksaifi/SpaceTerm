@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use super::{PermissionError, PermissionState, SystemPermission};
 
 /// The hidden command that runs the probe role.
-const PROBE_ARGUMENTS: [&str; 3] = ["server", "provision", "permission-report"];
+const PROBE_ARGUMENTS: [&str; 2] = ["internal", "permission-report"];
 /// A probe answers within milliseconds. A slower one is stuck and is stopped.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CHILD_POLL: Duration = Duration::from_millis(5);

@@ -86,7 +86,7 @@ jobs:
           MACOS_SIGNING_CERTIFICATE_P12: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_CERTIFICATE_P12 || '' }}
           MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD || '' }}
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: mise run server:package --identity spaceterm --release-tag "$RELEASE_TAG" --catalog dist/server-artifacts
+        run: mise run core:package --identity spaceterm --release-tag "$RELEASE_TAG" --catalog dist/server-artifacts
       - name: Upload signed native server catalog target
         uses: actions/upload-artifact@v7
         with:

@@ -7590,7 +7590,7 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
         });
     });
     cx.run_until_parked();
-    let machine_workspace_id = manager
+    let core_workspace_id = manager
         .read_with(cx, |manager, _| {
             manager
                 .workspaces
@@ -7604,17 +7604,13 @@ fn a_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at
     // system chooser from it.
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.choose_pin_directory(machine_workspace_id, window, cx);
+            manager.choose_pin_directory(core_workspace_id, window, cx);
         });
     });
     cx.run_until_parked();
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.choose_local_pin_directory(
-                PinTarget::Workspace(machine_workspace_id),
-                window,
-                cx,
-            );
+            manager.choose_local_pin_directory(PinTarget::Workspace(core_workspace_id), window, cx);
         });
     });
 

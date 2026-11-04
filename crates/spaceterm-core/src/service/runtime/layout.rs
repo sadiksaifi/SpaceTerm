@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 const LINUX: &str = "x86_64-unknown-linux-gnu";
 const MACOS: &str = "aarch64-apple-darwin";
-/// The prefix `packaging/server-resources.json` names every resource under.
+/// The prefix `packaging/core-resources.json` names every resource under.
 const SHARED: &str = "share/spaceterm";
 const EXECUTABLE: &str = "spaceterm";
 
@@ -80,23 +80,23 @@ impl Layout {
     }
 }
 
-/// The macOS bundle directory of an identity's server package, named for the identity's product.
-/// Privacy prompts and System Settings show a bundle's Launch Services display name, which is its
-/// directory name, not `CFBundleName` or `CFBundleDisplayName`. A person therefore sees the
-/// product's name: SpaceTerm, SpaceTerm Preflight or SpaceTerm Development. The system hides the
-/// `.app` extension unless the person turned on "Show all filename extensions".
+/// The macOS bundle directory of an identity's SpaceTerm Core package, named for the identity's
+/// product. Privacy prompts and System Settings show a bundle's Launch Services display name,
+/// which is its directory name, not `CFBundleName` or `CFBundleDisplayName`. A person therefore
+/// sees SpaceTerm Core, SpaceTerm Preflight Core or SpaceTerm Development Core. The system hides
+/// the `.app` extension unless the person turned on "Show all filename extensions".
 pub fn bundle_name(identity: &str) -> Option<&'static str> {
     match identity {
-        "spaceterm" => Some("SpaceTerm.app"),
-        "spaceterm-preflight" => Some("SpaceTerm Preflight.app"),
-        "spaceterm-development" => Some("SpaceTerm Development.app"),
+        "spaceterm" => Some("SpaceTerm Core.app"),
+        "spaceterm-preflight" => Some("SpaceTerm Preflight Core.app"),
+        "spaceterm-development" => Some("SpaceTerm Development Core.app"),
         _ => None,
     }
 }
 
-/// The bundle identifier and code signing identifier of an identity's server package.
+/// The bundle identifier and code signing identifier of an identity's SpaceTerm Core package.
 pub fn bundle_identifier(identity: &str) -> String {
-    format!("io.github.sadiksaifi.{identity}.server")
+    format!("io.github.sadiksaifi.{identity}.core")
 }
 
 #[cfg(test)]
@@ -108,15 +108,15 @@ mod tests {
         let layout = Layout::for_target(MACOS, "spaceterm-preflight").unwrap();
         assert_eq!(
             layout.executable(),
-            Path::new("SpaceTerm Preflight.app/Contents/MacOS/spaceterm")
+            Path::new("SpaceTerm Preflight Core.app/Contents/MacOS/spaceterm")
         );
         assert_eq!(
             layout.resource(Path::new("share/spaceterm/shell-integration/VERSION")),
             Some(PathBuf::from(
-                "SpaceTerm Preflight.app/Contents/Resources/shell-integration/VERSION"
+                "SpaceTerm Preflight Core.app/Contents/Resources/shell-integration/VERSION"
             ))
         );
-        assert_eq!(layout.signed(), Path::new("SpaceTerm Preflight.app"));
+        assert_eq!(layout.signed(), Path::new("SpaceTerm Preflight Core.app"));
         assert_eq!(layout.bundle_files().len(), 2);
     }
 

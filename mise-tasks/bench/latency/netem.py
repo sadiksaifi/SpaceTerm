@@ -96,7 +96,7 @@ def build_owner(args):
 
 
 def start_core(args, target):
-    command = jailed(args, f"{target}/release/spaceterm server run --owned")
+    command = jailed(args, f"{target}/release/spaceterm internal serve --owned")
     core = subprocess.Popen(
         ["ssh", "-T", args.owner_host, f"exec sh -c {shlex.quote(command)}"],
         stdin=subprocess.PIPE,

@@ -26,7 +26,7 @@ use std::{
 };
 use zbus::{
     blocking::{Connection, connection::Builder},
-    object_core::SignalEmitter,
+    object_server::SignalEmitter,
     zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value},
 };
 
@@ -300,7 +300,7 @@ fn publish(connection: &Connection, shared: &Shared, presentation: Presentation)
         published.revision = published.revision.wrapping_add(1);
         published.revision
     };
-    let core = connection.object_core();
+    let core = connection.object_server();
     if let Ok(menu) = core.interface::<_, Menu>(MENU_PATH) {
         let _ = zbus::block_on(Menu::layout_updated(menu.signal_emitter(), revision, 0));
     }

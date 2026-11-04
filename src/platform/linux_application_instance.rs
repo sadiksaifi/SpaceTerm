@@ -77,7 +77,7 @@ pub(super) fn forward_launch_if_secondary(
         let path = format!("/{}", name.replace('.', "/").replace('-', "_"));
         // Register before claiming, so another launch cannot race an uninstalled interface.
         connection
-            .object_core()
+            .object_server()
             .at(path.as_str(), Application { events })
             .map_err(SessionBusError::from)?;
         let flags = match launch {

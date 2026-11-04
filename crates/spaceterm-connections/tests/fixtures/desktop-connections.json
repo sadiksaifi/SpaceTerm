@@ -42,7 +42,7 @@
         "paired": {
           "pin": {
             "build": "spaceterm-development",
-            "server": [
+            "core": [
               3,
               3,
               3,

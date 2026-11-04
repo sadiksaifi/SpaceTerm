@@ -96,7 +96,7 @@ class LinuxPrefixTests(unittest.TestCase):
                 self.root / directory,
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
-        for name in ("server-nonproduction-trust.json", "server-resources.json"):
+        for name in ("core-nonproduction-trust.json", "core-resources.json"):
             shutil.copyfile(ROOT / "packaging" / name, self.root / "packaging" / name)
         major = self.root / core_package.PROTOCOL_MAJOR_SOURCE
         major.parent.mkdir(parents=True, exist_ok=True)
@@ -140,11 +140,11 @@ class LinuxPrefixTests(unittest.TestCase):
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {{
-    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "build-info") == 0) {{
+    if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "build-info") == 0) {{
         puts({json.dumps(json.dumps(info))});
         return 0;
     }}
-    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "check") == 0) {{
+    if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "check") == 0) {{
         puts("Core checks passed.");
         return 0;
     }}

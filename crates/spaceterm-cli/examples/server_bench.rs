@@ -1,4 +1,4 @@
-//! Presentation client for `mise run bench:server`.
+//! Presentation client for `mise run bench:core`.
 //!
 //! core_bench IDENTITY [--accessibility] [--columns N] [--rows N] [--max-hz N]
 //!

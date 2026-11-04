@@ -397,11 +397,11 @@ retain_headless() {
     runtime="$work/runtime/server"
     executable="$runtime/$(server_executable)"
     [ -x "$executable" ] || die "the CLI executable is missing"
-    compiled_identity="$("$executable" server provision build-info | sed -n 's/.*"identity":"\([a-z-]*\)".*/\1/p')"
+    compiled_identity="$("$executable" internal build-info | sed -n 's/.*"identity":"\([a-z-]*\)".*/\1/p')"
     [ "$compiled_identity" = "$headless_identity" ] || die "the CLI archive has a different application identity"
     cp "$headless_archive" "$runtime/artifact.tar.gz" 2>/dev/null || die "could not stage the CLI archive"
     cp "$headless_signature" "$runtime/artifact.sig" 2>/dev/null || die "could not stage the CLI signature"
-    "$executable" server provision retain "$runtime" \
+    "$executable" internal retain "$runtime" \
         || die "the signed CLI installation could not be retained"
 }
 
@@ -440,11 +440,11 @@ headless_uninstall() {
     done
     [ -f "$executable" ] && [ -x "$executable" ] || die "the installed server executable is missing"
     if [ -n "$headless_confirm" ]; then
-        "$executable" server provision uninstall --confirm "$headless_confirm"
+        "$executable" internal uninstall --confirm "$headless_confirm"
         return
     fi
     status=0
-    preview="$("$executable" server provision uninstall)" || status=$?
+    preview="$("$executable" internal uninstall)" || status=$?
     printf '%s\n' "$preview"
     case "$status" in
         0) return ;;
@@ -463,7 +463,7 @@ headless_uninstall() {
         die "review the preview, then run this installer with --headless --uninstall --confirm $token"
     fi
     case "$answer" in
-        y|Y|yes|YES) "$executable" server provision uninstall --confirm "$token" ;;
+        y|Y|yes|YES) "$executable" internal uninstall --confirm "$token" ;;
         *) die "uninstall cancelled" ;;
     esac
 }

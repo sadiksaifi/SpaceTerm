@@ -19,7 +19,7 @@ impl LaunchAgent {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .ok_or(CoreError::StorageUnavailable)?;
-        let label = format!("io.github.sadiksaifi.{identity}.server");
+        let label = format!("io.github.sadiksaifi.{identity}.core");
         // SAFETY: geteuid has no preconditions.
         let target = format!("gui/{}/{label}", unsafe { libc::geteuid() });
         Ok(Self {
@@ -43,7 +43,7 @@ impl LaunchAgent {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>{}</string>
-<key>ProgramArguments</key><array><string>{executable}</string><string>server</string><string>run</string><string>--service</string><string>--identity</string><string>{}</string></array>
+<key>ProgramArguments</key><array><string>{executable}</string><string>internal</string><string>serve</string><string>--service</string><string>--identity</string><string>{}</string></array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ProcessType</key><string>Interactive</string>
@@ -279,7 +279,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/approved-fixture/SpaceTerm Development Core.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Ok(true)
         );
@@ -287,7 +287,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/other-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
+                b"\"Program\" = \"/other-fixture/SpaceTerm Development Core.app/Contents/MacOS/spaceterm\";\n\"PID\" = 7;\n"
             ),
             Err(CoreError::CleanupUnresolved)
         );
@@ -295,7 +295,7 @@ mod tests {
             agent.validate_observation(
                 runtime,
                 false,
-                b"\"Program\" = \"/approved-fixture/SpaceTerm Development.app/Contents/MacOS/spaceterm\";\n"
+                b"\"Program\" = \"/approved-fixture/SpaceTerm Development Core.app/Contents/MacOS/spaceterm\";\n"
             ),
             Ok(false)
         );
@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a GUI login domain; run mise run server:service:test:macos"]
+    #[ignore = "requires a GUI login domain; run mise run core:service:test:macos"]
     fn launchd_unload_allows_in_flight_cleanup_to_finish() {
         let suffix =
             u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap());

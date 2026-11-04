@@ -1,4 +1,4 @@
-"""Shared code for bench:desktop:macos and bench:server.
+"""Shared code for bench:desktop:macos and bench:core.
 
 It reads per-process CPU time, memory and wakeups, coordinates workloads that run inside a Pane
 through receipt files, summarizes repeated runs, and checks results against the budgets and
@@ -702,14 +702,14 @@ def regressions(baseline, current, core_budgets):
 
 
 CORE_METRICS = ("cpu_s", "peak_footprint_bytes", "after_footprint_bytes", "bytes_sent")
-# Settings that define the work a bench:server run measures.
+# Settings that define the work a bench:core run measures.
 MACHINE_SETTINGS = ("seconds", "columns", "rows", "max_hz")
 # Environment facts that a baseline is valid for: the same host, hardware, isolation and input.
 CORE_ENVIRONMENT = ("host", "hardware", "cpus", "memory_bytes", "jailed", "input_sha256")
 
 
 def summarize_core(runs):
-    """Medians of each bench:server metric per `workload/condition` across runs."""
+    """Medians of each bench:core metric per `workload/condition` across runs."""
     groups = {}
     for run in runs:
         groups.setdefault(f"{run['workload']}/{run['condition']}", []).append(run["values"])
@@ -720,7 +720,7 @@ def summarize_core(runs):
 
 
 def compare_core(baseline, results, core_budgets):
-    """Compares a bench:server run with a host baseline.
+    """Compares a bench:core run with a host baseline.
 
     Returns `{"status", "reasons", "comparisons"}`. Status is `incomparable` when the baseline
     is absent, measured different work or another machine, or lacks a measurement or metric the

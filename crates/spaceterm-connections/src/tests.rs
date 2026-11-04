@@ -50,7 +50,7 @@ pub fn waiting_invitation(
     let payload = Zeroizing::new(
         serde_json::to_vec(&serde_json::json!({
             "schema": 1, "id": invitation, "endpoint": "quic://127.0.0.1:9231",
-            "pin": pin, "server_name": label, "token": random_id().unwrap(),
+            "pin": pin, "machine_name": label, "token": random_id().unwrap(),
             "expires": expires, "valid_for_seconds": 300,
         }))
         .unwrap(),

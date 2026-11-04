@@ -32,7 +32,7 @@ class ResourcePolicyTests(unittest.TestCase):
             text=True,
         ).stdout.splitlines()
         self.assertCountEqual(
-            json.loads((ROOT / "packaging/server-resources.json").read_text()),
+            json.loads((ROOT / "packaging/core-resources.json").read_text()),
             ["share/spaceterm/" + name.removeprefix("assets/") for name in tracked],
         )
 
@@ -97,7 +97,7 @@ class CoreArchiveTests(unittest.TestCase):
         self.assertEqual(self.unpack(), self.info)
 
     def test_nonproduction_artifact_trust_needs_no_production_secret_and_cannot_sign_release(self):
-        trust = json.loads((ROOT / "packaging/server-nonproduction-trust.json").read_text())
+        trust = json.loads((ROOT / "packaging/core-nonproduction-trust.json").read_text())
         seed = base64.b64decode(trust["seed"])
         self.assertNotEqual(trust["public_key"], self.public)
         for identity in ("spaceterm-preflight", "spaceterm-development", "spaceterm"):
@@ -244,15 +244,15 @@ class CoreArchiveTests(unittest.TestCase):
                         "identity": self.info["identity"],
                         "target": self.info["target"],
                         "version": "99.0.0",
-                        "server_candidate_sha256": client_pin["value"],
+                        "core_candidate_sha256": client_pin["value"],
                     }
                 ).encode()
             elif arguments[0] == "objdump":
                 output = b"elf64-x86-64" if arguments[1] == "-f" else b""
-            elif arguments[1:] == ["server", "provision", "build-info"]:
+            elif arguments[1:] == ["internal", "build-info"]:
                 core_queries.append(arguments[0])
                 output = json.dumps(self.info).encode()
-            elif arguments[1:] == ["server", "provision", "check"]:
+            elif arguments[1:] == ["internal", "check"]:
                 output = b"Server checks passed.\n"
             else:
                 return run(arguments, **kwargs)
@@ -427,7 +427,7 @@ compatibility version 1.0.0
                         core_package.verify_macho_output(output)
 
     def test_rcodesign_identity_requires_exact_identifier_and_adhoc_flags(self):
-        identifier = "io.github.sadiksaifi.spaceterm-preflight.server"
+        identifier = "io.github.sadiksaifi.spaceterm-preflight.core"
         output = f'''CodeDirectoryBlob {{
     flags: CodeSignatureFlags(
         ADHOC,

@@ -51,7 +51,7 @@ fn direct_code(error: &DirectError) -> &'static str {
         DirectError::Rejected => "pairing_rejected",
         DirectError::ChangedClaim | DirectError::PolicyChanged => "changed",
         DirectError::AuthenticationRefused => "authentication_refused",
-        DirectError::PinMismatch => "server_identity_changed",
+        DirectError::PinMismatch => "machine_identity_changed",
         DirectError::Revoked => "revoked",
         DirectError::IncompatibleProtocol => "incompatible_protocol",
         DirectError::Capacity => "capacity",
@@ -61,6 +61,6 @@ fn direct_code(error: &DirectError) -> &'static str {
         DirectError::AddressUnavailable => "address_unavailable",
         DirectError::AlreadyDecided => "claim_decided",
         DirectError::Substituted => "comparison_mismatch",
-        DirectError::WrongMachine => "wrong_server",
+        DirectError::WrongMachine => "wrong_machine",
     }
 }

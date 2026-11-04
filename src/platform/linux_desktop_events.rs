@@ -1037,7 +1037,7 @@ mod tests {
         });
         started.recv_timeout(Duration::from_secs(2)).unwrap();
         let interface = core
-            .object_core()
+            .object_server()
             .interface::<_, Settings>("/org/freedesktop/portal/desktop")
             .unwrap();
         let mut settings = non_default_settings();

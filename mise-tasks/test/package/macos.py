@@ -132,7 +132,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
                     "SpaceTerm Development": "spaceterm-development",
                 }[identity],
                 "target": "aarch64-apple-darwin",
-                "server_candidate_sha256": candidate_digest,
+                "core_candidate_sha256": candidate_digest,
             }
         )
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -373,7 +373,7 @@ class CurrentMachinePackageTests(unittest.TestCase):
                 / core_package.executable_path(core_package.host_target(), "spaceterm-preflight")
             )
             result = subprocess.run(
-                [launcher, "server", "provision", "check"],
+                [launcher, "internal", "check"],
                 env={},
                 cwd=tree,
                 capture_output=True,

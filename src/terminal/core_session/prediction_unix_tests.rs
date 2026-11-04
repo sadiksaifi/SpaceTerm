@@ -174,7 +174,7 @@ fn isolated(name: &str) -> Option<std::sync::MutexGuard<'static, ()>> {
     (!isolate_real_pty_test(name)).then(lock_real_pty_test)
 }
 
-const PREFIX: &str = "terminal::server_session::prediction::unix_tests::";
+const PREFIX: &str = "terminal::core_session::prediction::unix_tests::";
 
 #[test]
 fn zsh_and_bash_prompts_show_typed_keys_before_their_echo() {

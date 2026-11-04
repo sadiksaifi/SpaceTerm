@@ -848,14 +848,14 @@ codes! {
     InvalidInvitation = "invalid_invitation", Target, false, "This Invitation Link is invalid or used.";
     InvitationExpired = "invitation_expired", Target, false, "This Invitation Link expired.";
     PairingRejected = "pairing_rejected", Failed, false, "The server owner rejected this pairing.";
-    MachineIdentityChanged = "server_identity_changed", ActionRequired, false, "The server no longer matches this connection.";
+    MachineIdentityChanged = "machine_identity_changed", ActionRequired, false, "The server no longer matches this connection.";
     Revoked = "revoked", ActionRequired, false, "This device was unpaired.";
     NetworkOff = "network_off", Unavailable, false, "The server's Network Access is off.";
     InvalidAddress = "invalid_address", Target, false, "Enter a DNS name or IP address and an optional nonzero port.";
     AddressUnavailable = "address_unavailable", Unavailable, true, "The server couldn\u{2019}t listen at this address and port. Nothing changed.";
     ClaimDecided = "claim_decided", Target, false, "This pairing claim was already decided.";
     ComparisonMismatch = "comparison_mismatch", Failed, false, "The Comparison Code did not match.";
-    WrongMachine = "wrong_server", Target, false, "This invitation or connection names another server.";
+    WrongMachine = "wrong_machine", Target, false, "This invitation or connection names another server.";
     // worktree::Error.
     MainWorktree = "main_worktree", Target, false, "This is the Main Worktree.";
     WorktreeLocked = "worktree_locked", Failed, false, "The Worktree is locked.";
@@ -868,7 +868,7 @@ codes! {
     GitUnavailable = "git_unavailable", Unavailable, false, "Git is unavailable on the server.";
     WorktreeInterrupted = "worktree_interrupted", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm the Worktree change finished.";
     // Fatal.
-    CoreStopping = "server_stopping", Unavailable, true, "The server is stopping.";
+    CoreStopping = "core_stopping", Unavailable, true, "The server is stopping.";
     // hierarchy::Outcome.
     Conflict = "conflict", Target, true, "Another change came first. Review it and try again.";
     InvalidTarget = "invalid_target", Target, false, "The target can\u{2019}t take this change.";
@@ -2240,7 +2240,7 @@ mod tests {
             (E::ChangedClaim, "changed", 4),
             (E::PolicyChanged, "changed", 4),
             (E::AuthenticationRefused, "authentication_refused", 3),
-            (E::PinMismatch, "server_identity_changed", 3),
+            (E::PinMismatch, "machine_identity_changed", 3),
             (E::Revoked, "revoked", 3),
             (E::IncompatibleProtocol, "incompatible_protocol", 5),
             (E::Capacity, "capacity", 5),
@@ -2249,7 +2249,7 @@ mod tests {
             (E::InvalidAddress, "invalid_address", 4),
             (E::AlreadyDecided, "claim_decided", 4),
             (E::Substituted, "comparison_mismatch", 1),
-            (E::WrongMachine, "wrong_server", 4),
+            (E::WrongMachine, "wrong_machine", 4),
         ] {
             let failure = from_direct_error(error);
             assert_eq!((failure.code.as_str(), failure.code.exit()), (code, exit));

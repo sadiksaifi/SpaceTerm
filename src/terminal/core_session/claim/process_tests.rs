@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-const CHILD: &str = "terminal::server_session::claim::process_tests::client_process";
+const CHILD: &str = "terminal::core_session::claim::process_tests::client_process";
 const SOCKET: &str = "SPACETERM_START_TEST_SOCKET";
 
 /// The Pane commands this fixture carries between its processes. `Request` stays in process, so

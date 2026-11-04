@@ -21,7 +21,7 @@ impl UserService {
             .ok_or(CoreError::StorageUnavailable)?;
         Ok(Self {
             directory: home.join(".config/systemd/user"),
-            name: format!("io.github.sadiksaifi.{identity}.server.service"),
+            name: format!("io.github.sadiksaifi.{identity}.core.service"),
             identity: identity.into(),
             // SAFETY: geteuid has no preconditions; Paths rejects root and mismatched accounts.
             uid: unsafe { libc::geteuid() },
@@ -57,7 +57,7 @@ impl UserService {
         }
         // Only the main process gets SIGTERM. It closes admissions, drains started Git writes,
         // and shuts down its Terminal Sessions before exiting. No manager SIGKILL bypasses that.
-        Ok(format!("[Unit]\nDescription=SpaceTerm account server ({})\nStartLimitIntervalSec=60\nStartLimitBurst=3\n\n[Service]\nType=exec\nExecStart=\"{quoted}\" server run --service --identity {}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=infinity\nKillMode=mixed\nSendSIGKILL=no\nUMask=0077\n\n[Install]\nWantedBy=default.target\n", self.identity, self.identity).into_bytes())
+        Ok(format!("[Unit]\nDescription=SpaceTerm Core ({})\nStartLimitIntervalSec=60\nStartLimitBurst=3\n\n[Service]\nType=exec\nExecStart=\"{quoted}\" internal serve --service --identity {}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=infinity\nKillMode=mixed\nSendSIGKILL=no\nUMask=0077\n\n[Install]\nWantedBy=default.target\n", self.identity, self.identity).into_bytes())
     }
     fn manager(&self, program: &str, args: &[OsString]) -> Result<Vec<u8>, CoreError> {
         let mut command = Command::new(program);
@@ -346,8 +346,8 @@ impl Supervisor for UserService {
             || entries[0].get(1)
                 != Some(&serde_json::json!([
                     expected,
-                    "server",
-                    "run",
+                    "internal",
+                    "serve",
                     "--service",
                     "--identity",
                     self.identity

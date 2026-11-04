@@ -135,8 +135,8 @@ def launch():
         return supervise(
             [
                 str(bundle / "Contents/MacOS/spaceterm"),
-                "server",
-                "run",
+                "internal",
+                "serve",
                 "--owned",
             ],
             ["open", "-W", "-n", "--stdout", output, "--stderr", output, str(bundle)],

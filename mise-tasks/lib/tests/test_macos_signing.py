@@ -32,7 +32,7 @@ class AdhocSigningTests(unittest.TestCase):
                 check=True,
                 capture_output=True,
             )
-            identifier = "io.github.sadiksaifi.spaceterm-preflight.server"
+            identifier = "io.github.sadiksaifi.spaceterm-preflight.core"
             subprocess.run(
                 ["codesign", "--force", "--sign", "-", "--identifier", identifier, str(executable)],
                 env=clean,
@@ -41,9 +41,7 @@ class AdhocSigningTests(unittest.TestCase):
             )
             verify_adhoc_signature(executable, identifier, "server")
             with self.assertRaises(TaskError):
-                verify_adhoc_signature(
-                    executable, "io.github.sadiksaifi.spaceterm.server", "server"
-                )
+                verify_adhoc_signature(executable, "io.github.sadiksaifi.spaceterm.core", "server")
             with self.assertRaises(TaskError):
                 verify_release_signature(executable, "0" * 40, identifier, "server")
             with executable.open("r+b") as output:

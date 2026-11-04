@@ -140,7 +140,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
                     "SpaceTerm Development": "spaceterm-development",
                 }[name],
                 "target": "x86_64-unknown-linux-gnu",
-                "server_candidate_sha256": candidate_digest,
+                "core_candidate_sha256": candidate_digest,
             }
         )
         self.artifact.parent.mkdir(parents=True, exist_ok=True)

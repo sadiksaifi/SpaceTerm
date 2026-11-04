@@ -62,11 +62,11 @@ class CoreCatalogTests(unittest.TestCase):
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {{
-    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "build-info") == 0) {{
+    if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "build-info") == 0) {{
         puts({json.dumps(json.dumps(info))});
         return 0;
     }}
-    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "check") == 0) {{
+    if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "check") == 0) {{
         fputs({json.dumps(check_stdout)}, stdout);
         fputs({json.dumps(check_stderr)}, stderr);
         return {check_exit};

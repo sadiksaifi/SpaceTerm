@@ -128,8 +128,8 @@ impl RemoteFailure {
             "startup_failed" => Self::StartupFailed,
             "authentication_refused"
             | "revoked"
-            | "server_identity_changed"
-            | "wrong_server"
+            | "machine_identity_changed"
+            | "wrong_machine"
             | "credential_unavailable"
             | "credential_interaction_required" => Self::Refused,
             "protocol_error" | "incompatible_protocol" => Self::Protocol,

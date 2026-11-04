@@ -302,7 +302,7 @@ mod tests {
         ] {
             let script = adapter.locator(IDENTITY, action, action == "ssh-discover");
             assert!(
-                script.ends_with(&format!("exec \"$path\" server provision '{command}'\n")),
+                script.ends_with(&format!("exec \"$path\" internal '{command}'\n")),
                 "{script}"
             );
             assert!(script.contains("Darwin) executable='SpaceTerm Development.app/Contents/MacOS/spaceterm';;\n*) executable='bin/spaceterm';;"), "{script}");
@@ -898,7 +898,7 @@ done
 "#,
         );
         script.push_str(&format!(
-            "exec \"$path\" server provision {}{}\n",
+            "exec \"$path\" internal {}{}\n",
             quote(match action {
                 "setup-start" => "ssh-start",
                 "setup-direct-status" => "ssh-direct-status",
@@ -954,10 +954,10 @@ fn transfer_script(
     let executable = executable_case(identity, "executable");
     let authorize = match linger {
         Some(true) => String::from(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/$executable\" server provision ssh-enable-linger --password-stdin || exit 77\nunset authorization\nfi\n",
+            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/$executable\" internal ssh-enable-linger --password-stdin || exit 77\nunset authorization\nfi\n",
         ),
         Some(false) => String::from(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/$executable\" server provision ssh-enable-linger || exit 77\nfi\n",
+            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/$executable\" internal ssh-enable-linger || exit 77\nfi\n",
         ),
         None => String::new(),
     };
@@ -974,7 +974,7 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
 mkdir "$work/runtime"
 tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
-{executable}{authorize}"$work/runtime/server/$executable" server provision {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
+{executable}{authorize}"$work/runtime/server/$executable" internal {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
 "#,
         quote(&signature),
         quote(action),

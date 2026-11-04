@@ -1,4 +1,4 @@
-"""Check the bench:desktop:macos and bench:server measurement, budget and receipt code."""
+"""Check the bench:desktop:macos and bench:core measurement, budget and receipt code."""
 
 import importlib.util
 import json
@@ -15,7 +15,7 @@ from spaceterm_tasks import ROOT, TaskError, bench
 
 PS = """    1     0 /sbin/launchd
   100     1 /Applications/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight
-  200     1 /Users/me/.local/share/spaceterm-preflight/server/installations/a/SpaceTerm Preflight.app/Contents/MacOS/spaceterm
+  200     1 /Users/me/.local/share/spaceterm-preflight/server/installations/a/SpaceTerm Preflight Core.app/Contents/MacOS/spaceterm
   201   200 /bin/zsh
   202   201 /bin/cat
   300     1 /usr/bin/yes
@@ -609,7 +609,7 @@ class CounterReadTests(unittest.TestCase):
 
     def test_bench_core_fails_when_its_core_reports_no_counters(self):
         specification = importlib.util.spec_from_file_location(
-            "bench_server", ROOT / "mise-tasks" / "bench" / "server.py"
+            "bench_core", ROOT / "mise-tasks" / "bench" / "core.py"
         )
         assert specification is not None and specification.loader is not None
         task = importlib.util.module_from_spec(specification)

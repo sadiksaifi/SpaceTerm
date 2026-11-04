@@ -1085,7 +1085,7 @@ pub(super) mod enrollment_tests {
             let payload = Zeroizing::new(
                 serde_json::to_vec(&serde_json::json!({
                     "schema": 1, "id": ([7_u8; 32]), "endpoint": "quic://127.0.0.1:9231",
-                    "pin": network.paired.pin, "server_name": label, "token": ([8_u8; 32]),
+                    "pin": network.paired.pin, "machine_name": label, "token": ([8_u8; 32]),
                     "expires": expires, "valid_for_seconds": 300,
                 }))
                 .unwrap(),

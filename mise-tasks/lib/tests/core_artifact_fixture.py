@@ -52,11 +52,11 @@ def prepare(
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {{
-    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "build-info") == 0) {{
+    if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "build-info") == 0) {{
         puts({json.dumps(json.dumps(expected))});
         return 0;
     }}
-    if (argc == 4 && strcmp(argv[1], "server") == 0 && strcmp(argv[2], "provision") == 0 && strcmp(argv[3], "check") == 0) {{
+    if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "check") == 0) {{
         puts("Core checks passed.");
         return 0;
     }}

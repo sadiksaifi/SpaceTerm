@@ -90,7 +90,7 @@ mod tests {
                 "public_key": vec![255; 32],
                 "certificate": vec![255; 32]
             },
-            "server_name": "Build server",
+            "machine_name": "Build server",
             "token": vec![255; 32],
             "expires": 1730000000,
             "valid_for_seconds": 300

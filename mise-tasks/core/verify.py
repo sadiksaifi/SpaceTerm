@@ -16,7 +16,7 @@ if __name__ == "__main__":
     parser.add_argument("--commit", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument(
-        "--source-sha256", help="Signed source digest printed by server:package or server:catalog"
+        "--source-sha256", help="Signed source digest printed by core:package or core:catalog"
     )
     parser.add_argument(
         "--retain",

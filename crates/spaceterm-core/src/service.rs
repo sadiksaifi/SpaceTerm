@@ -2656,7 +2656,7 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut wire = protocol::Wire::new(&mut stream);
                 let hello: serde_json::Value = wire.read()?;
-                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "server":hello["server"], "server_major":protocol::MAJOR, "client":hello["client"]}))
+                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "server":hello["server"], "core_major":protocol::MAJOR, "client":hello["client"]}))
             }));
             assert!(matches!(
                 LocalStartup::with_service(supervisor.service())

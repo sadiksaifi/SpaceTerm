@@ -375,14 +375,14 @@ impl Native for System {
 }
 
 /// The hidden command that runs one request in a child of the server.
-fn request_arguments(permission: SystemPermission) -> [&'static str; 4] {
+fn request_arguments(permission: SystemPermission) -> [&'static str; 3] {
     let name = match permission {
         SystemPermission::Microphone => "microphone",
         SystemPermission::Camera => "camera",
         SystemPermission::ScreenRecording => "screen-recording",
         SystemPermission::Accessibility => "accessibility",
     };
-    ["server", "provision", "permission-request", name]
+    ["internal", "permission-request", name]
 }
 
 /// The request role: asks the system for `permission` from this process, which lists this
@@ -552,9 +552,9 @@ mod tests {
         std::mem::take(&mut *scripted.effects.lock().unwrap())
     }
 
-    const BUNDLE: &str = "io.github.sadiksaifi.spaceterm-preflight.server";
-    const OWN_BUNDLE: &str = "/installations/aa/SpaceTerm Preflight.app";
-    const REGISTER: &str = "register /installations/aa/SpaceTerm Preflight.app";
+    const BUNDLE: &str = "io.github.sadiksaifi.spaceterm-preflight.core";
+    const OWN_BUNDLE: &str = "/installations/aa/SpaceTerm Preflight Core.app";
+    const REGISTER: &str = "register /installations/aa/SpaceTerm Preflight Core.app";
 
     #[test]
     fn the_machine_names_its_own_bundle_only_when_launchd_started_it_from_there() {
@@ -804,16 +804,11 @@ mod tests {
     fn screen_recording_and_accessibility_requests_run_in_a_child() {
         assert_eq!(
             request_arguments(SystemPermission::ScreenRecording),
-            [
-                "server",
-                "provision",
-                "permission-request",
-                "screen-recording"
-            ]
+            ["internal", "permission-request", "screen-recording"]
         );
         assert_eq!(
             request_arguments(SystemPermission::Accessibility),
-            ["server", "provision", "permission-request", "accessibility"]
+            ["internal", "permission-request", "accessibility"]
         );
     }
 
@@ -866,7 +861,7 @@ mod tests {
         let installation = Path::new("/data/installations").join("a".repeat(64));
         assert_eq!(
             own_bundle(&installation.join(layout.executable()), layout),
-            Some(installation.join("SpaceTerm Preflight.app"))
+            Some(installation.join("SpaceTerm Preflight Core.app"))
         );
         let development =
             Layout::for_target("aarch64-apple-darwin", "spaceterm-development").unwrap();
@@ -878,7 +873,7 @@ mod tests {
                 development
             ),
             None,
-            "the Development desktop's bundle has the server's name but is no installation"
+            "the Development desktop's bundle is no installation"
         );
     }
 

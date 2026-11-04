@@ -230,7 +230,7 @@ def source_session(core, client_command, environment):
     """Own the fixture's foreground Server and private display client as one source run."""
     with development_run():
         return supervise(
-            [str(core), "server", "run", "--owned"],
+            [str(core), "internal", "serve", "--owned"],
             client_command,
             environment,
         )

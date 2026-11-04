@@ -43,11 +43,11 @@ IDENTITIES = ("spaceterm", "spaceterm-preflight", "spaceterm-development")
 # The product name a person sees for each identity's server bundle. Privacy prompts and System
 # Settings show the bundle's Launch Services display name, which is its directory name.
 BUNDLES = {
-    "spaceterm": "SpaceTerm",
-    "spaceterm-preflight": "SpaceTerm Preflight",
-    "spaceterm-development": "SpaceTerm Development",
+    "spaceterm": "SpaceTerm Core",
+    "spaceterm-preflight": "SpaceTerm Preflight Core",
+    "spaceterm-development": "SpaceTerm Development Core",
 }
-CORE_INFO = ROOT / "packaging/macos/server/Info.plist"
+CORE_INFO = ROOT / "packaging/macos/core/Info.plist"
 SHARED_RESOURCES = "share/spaceterm"
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
@@ -79,7 +79,7 @@ BUILD_KEYS = {
 
 
 def core_identifier(identity):
-    return f"io.github.sadiksaifi.{identity}.server"
+    return f"io.github.sadiksaifi.{identity}.core"
 
 
 def bundle_directory(identity):
@@ -129,7 +129,7 @@ def artifact_public_key(identity):
     if identity == "spaceterm":
         return release.public_key()
     if identity in ("spaceterm-preflight", "spaceterm-development"):
-        return json.loads((ROOT / "packaging/server-nonproduction-trust.json").read_text())[
+        return json.loads((ROOT / "packaging/core-nonproduction-trust.json").read_text())[
             "public_key"
         ]
     raise TaskError("the server artifact application identity is unsupported")
@@ -144,7 +144,7 @@ def artifact_signing_seed(identity):
     elif identity in ("spaceterm-preflight", "spaceterm-development"):
         # This tracked seed is intentionally public. It grants no Release authority.
         seed = base64.b64decode(
-            json.loads((ROOT / "packaging/server-nonproduction-trust.json").read_text())["seed"],
+            json.loads((ROOT / "packaging/core-nonproduction-trust.json").read_text())["seed"],
             validate=True,
         )
     else:
@@ -206,7 +206,7 @@ def document(data):
 def build_info(executable):
     try:
         result = subprocess.run(
-            [executable, "server", "provision", "build-info"],
+            [executable, "internal", "build-info"],
             env={},
             capture_output=True,
             timeout=10,
@@ -476,7 +476,7 @@ def verify_tree(tree, expected, *, native=True):
         for path in SHELL_INTEGRATION.rglob("*")
         if path.is_file()
     }
-    listed = set(json.loads((ROOT / "packaging/server-resources.json").read_text()))
+    listed = set(json.loads((ROOT / "packaging/core-resources.json").read_text()))
     if listed != shell | {f"{SHARED_RESOURCES}/THIRD-PARTY-NOTICES.txt"}:
         raise TaskError("the server resource policy differs from the tracked resources")
     directory = resource_directory(target, identity)
@@ -570,7 +570,7 @@ def verify_tree(tree, expected, *, native=True):
     )
     try:
         result = subprocess.run(
-            [executable, "server", "provision", "check"],
+            [executable, "internal", "check"],
             env={},
             cwd=tree,
             capture_output=True,
@@ -918,9 +918,9 @@ def verify_desktop_artifact(destination, identity, release_tag=None, *, executab
                     and client["schema"] == 1
                     and client["identity"] == identity
                     and client["target"] == host_target()
-                    and re.fullmatch(r"[0-9a-f]{64}", client["server_candidate_sha256"])
+                    and re.fullmatch(r"[0-9a-f]{64}", client["core_candidate_sha256"])
                 )
-                pin = client["server_candidate_sha256"] if valid else None
+                pin = client["core_candidate_sha256"] if valid else None
             except (ValueError, KeyError, TypeError):
                 valid = False
             if not valid:

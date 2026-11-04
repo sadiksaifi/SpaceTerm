@@ -285,7 +285,7 @@ def launch(backend: str | None = None) -> int | None:
                 "could not register the Development desktop entry; run mise doctor project"
             ) from None
         return supervise(
-            [str(prefix / "bin/spaceterm"), "server", "run", "--owned"],
+            [str(prefix / "bin/spaceterm"), "internal", "serve", "--owned"],
             [str(prefix / "bin/spaceterm-desktop"), "--new-instance"],
             environment,
         )
