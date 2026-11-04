@@ -100,11 +100,11 @@ fn start(machines: Vec<MachineUpdate>, cx: &mut TestAppContext) -> Fixture {
     let host = Rc::new(Host::default());
     let adapter = Rc::new(ScriptedMachines::default());
     let menu = cx.update(|cx| {
-        StatusMenu::install(
-            Rc::clone(&host) as Rc<dyn StatusHost>,
-            Some(Rc::clone(&adapter) as Rc<dyn MachineUpdatesAdapter>),
+        crate::updates::machines::store::MachineUpdates::install(
+            Rc::clone(&adapter) as Rc<dyn MachineUpdatesAdapter>,
             cx,
-        )
+        );
+        StatusMenu::install(Rc::clone(&host) as Rc<dyn StatusHost>, cx)
     });
     adapter.emit(MachineUpdatesEvent::Machines(machines));
     cx.run_until_parked();
@@ -292,7 +292,7 @@ fn a_failed_action_from_the_menu_opens_an_alert_and_others_stay_quiet(cx: &mut T
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
     let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
     cx.update(|cx| fixture.menu.perform(restart, cx));
-    // The title-bar control's own action fails too; that surface reports it.
+    // An action no surface performed fails too; nobody reports it.
     for _ in 0..2 {
         fixture.machines.emit(MachineUpdatesEvent::Finished {
             machine: PENGUIN,
@@ -304,8 +304,8 @@ fn a_failed_action_from_the_menu_opens_an_alert_and_others_stay_quiet(cx: &mut T
     assert_eq!(
         fixture.host.alerts.borrow().as_slice(),
         [Alert {
-            title: "SpaceTerm couldn't restart SpaceTerm Core on penguin.".to_owned(),
-            message: "SpaceTerm can't reach penguin.".to_owned(),
+            title: "Couldn't restart SpaceTerm Core on penguin".to_owned(),
+            message: "SpaceTerm can't reach penguin. Try again when it is connected.".to_owned(),
             confirm: None,
         }]
     );

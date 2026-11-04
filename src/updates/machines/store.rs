@@ -1,8 +1,8 @@
 //! The application's one view of Machine updates: it starts the composed
 //! [`MachineUpdatesAdapter`], keeps the latest [`MachineUpdate`] per Machine, the failure notices
 //! dismissed on this desktop and the Recent history, and performs actions. Observers of
-//! [`MachineUpdatesService`] hear every change. [`MachineUpdatesNotice`] reports a refused or
-//! failed action so the surface that started it can explain it.
+//! [`MachineUpdatesService`] hear every change. [`MachineUpdatesNotice`] reports how each action
+//! a surface performed finished, so that surface, and only it, can explain a failure.
 
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -28,14 +28,24 @@ pub(crate) struct RecentUpdate {
     pub(crate) at: u64,
 }
 
-/// An action that did not succeed.
+/// Where the person asked for an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Surface {
+    /// The title-bar control, its alerts and notifications.
+    Window,
+    /// The menu bar extra or the Linux status item.
+    StatusMenu,
+}
+
+/// How an action a surface performed finished.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MachineUpdatesNotice {
     pub(crate) machine: MachineId,
     pub(crate) name: SharedString,
     pub(crate) local: bool,
     pub(crate) action: MachineAction,
-    pub(crate) failure: ActionFailure,
+    pub(crate) surface: Surface,
+    pub(crate) outcome: Result<(), ActionFailure>,
 }
 
 pub(crate) struct MachineUpdates {
@@ -43,6 +53,8 @@ pub(crate) struct MachineUpdates {
     machines: Vec<MachineUpdate>,
     dismissed: Dismissed,
     recent: VecDeque<RecentUpdate>,
+    /// Actions performed that have not finished, oldest first.
+    performed: Vec<(MachineId, MachineAction, Surface)>,
     _events: Task<()>,
 }
 
@@ -73,6 +85,7 @@ impl MachineUpdates {
                 machines: Vec::new(),
                 dismissed: Dismissed::new(),
                 recent: VecDeque::new(),
+                performed: Vec::new(),
                 _events: events,
             }
         });
@@ -97,17 +110,20 @@ impl MachineUpdates {
         self.recent.iter()
     }
 
-    /// Asks the adapter to perform `action`. Dismissing a failure retires it here at once.
+    /// Asks the adapter to perform `action` for `surface`. Dismissing a failure retires it here
+    /// at once.
     pub(crate) fn perform(
         &mut self,
         machine: MachineId,
         action: MachineAction,
+        surface: Surface,
         cx: &mut Context<Self>,
     ) {
         if let MachineAction::DismissFailure(id) = action {
             self.dismissed.insert((machine, id));
             cx.notify();
         }
+        self.performed.push((machine, action.clone(), surface));
         self.adapter.perform(machine, action);
     }
 
@@ -148,8 +164,16 @@ impl MachineUpdates {
             MachineUpdatesEvent::Finished {
                 machine,
                 action,
-                outcome: Err(failure),
+                outcome,
             } => {
+                let Some(index) = self
+                    .performed
+                    .iter()
+                    .position(|(id, performed, _)| *id == machine && *performed == action)
+                else {
+                    return;
+                };
+                let (_, _, surface) = self.performed.remove(index);
                 if let MachineAction::DismissFailure(_) = action {
                     return;
                 }
@@ -162,10 +186,10 @@ impl MachineUpdates {
                     name: update.name.clone(),
                     local: update.local,
                     action,
-                    failure,
+                    surface,
+                    outcome,
                 });
             }
-            MachineUpdatesEvent::Finished { .. } => {}
         }
         cx.notify();
     }
@@ -252,6 +276,19 @@ mod tests {
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(update(
             "0.9.0", None,
         ))));
+        // An action no surface performed reports to none.
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine: [2; 32],
+            action: MachineAction::Restart,
+            outcome: Err(ActionFailure::Busy),
+        });
+        cx.run_until_parked();
+        assert!(notices.borrow().is_empty());
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.perform([2; 32], MachineAction::Restart, Surface::StatusMenu, cx);
+            });
+        });
         adapter.emit(MachineUpdatesEvent::Finished {
             machine: [2; 32],
             action: MachineAction::Restart,
@@ -274,17 +311,26 @@ mod tests {
             ]
         );
         assert_eq!(notices.borrow().len(), 1);
-        assert_eq!(notices.borrow()[0].failure, ActionFailure::Busy);
+        assert_eq!(notices.borrow()[0].surface, Surface::StatusMenu);
+        assert_eq!(notices.borrow()[0].outcome, Err(ActionFailure::Busy));
 
         cx.update(|cx| {
             store.update(cx, |store, cx| {
-                store.perform([2; 32], MachineAction::DismissFailure(4), cx);
+                store.perform(
+                    [2; 32],
+                    MachineAction::DismissFailure(4),
+                    Surface::Window,
+                    cx,
+                );
             });
         });
         assert!(cx.read(|cx| store.read(cx).dismissed().contains(&([2; 32], 4))));
         assert_eq!(
             adapter.performed(),
-            vec![([2; 32], MachineAction::DismissFailure(4))]
+            vec![
+                ([2; 32], MachineAction::Restart),
+                ([2; 32], MachineAction::DismissFailure(4)),
+            ]
         );
     }
 }

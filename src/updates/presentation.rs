@@ -1587,7 +1587,9 @@ pub(crate) fn current(cx: &App) -> Presentation {
             state: updates.state(),
             pending: updates.pending_version(),
             stage: updates.stage(),
-            notes_unread: updates.release_notes_unread(),
+            // A build without release notes has nothing to read.
+            notes_unread: super::release_notes::embedded().is_some()
+                && updates.release_notes_unread(),
             running,
         },
         None => DesktopFacts {

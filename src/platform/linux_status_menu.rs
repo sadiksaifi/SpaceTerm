@@ -88,7 +88,7 @@ pub(crate) fn install(
         });
     }
     let item = Rc::new(LinuxStatusItem { connection, shared });
-    let menu = StatusMenu::install(item, status_menu::machine_updates(), cx);
+    let menu = StatusMenu::install(item, cx);
     cx.spawn(async move |cx| {
         while let Ok(message) = messages.recv().await {
             cx.update(|cx| match message {

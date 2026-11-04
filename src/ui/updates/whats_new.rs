@@ -42,13 +42,6 @@ pub(super) fn init(cx: &mut App) {
     cx.on_action(|_: &OpenWhatsNew, cx| open_whats_new(cx));
 }
 
-/// Whether this build's release notes wait for the person: it came by an update, it carries
-/// notes, and the person has not opened them.
-pub(crate) fn release_notes_unread(cx: &App) -> bool {
-    release_notes::embedded().is_some()
-        && service(cx).is_some_and(|updates| updates.read(cx).release_notes_unread())
-}
-
 /// The menu command that opens the sheet, such as "What's New in SpaceTerm 0.9", or nothing in a
 /// build without release notes.
 #[expect(

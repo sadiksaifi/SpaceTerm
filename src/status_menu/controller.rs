@@ -1,6 +1,6 @@
 //! The status menu's behavior, shared by every platform's status item: it follows the desktop's
-//! update service and every Machine, renders after each change, and performs each command,
-//! asking first wherever the update presentation says a command asks.
+//! update service and the shared Machine updates, renders after each change, and performs each
+//! command, asking first wherever the update presentation says a command asks.
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -8,11 +8,9 @@ use gpui::App;
 use spaceterm_core::service::ServiceStatus;
 
 use super::model::{Command, Menu};
-use crate::updates::machines::{
-    ActionFailure, MachineAction, MachineId, MachineUpdate, MachineUpdatesAdapter,
-    MachineUpdatesEvent,
-};
-use crate::updates::presentation::{self, DesktopAction, DesktopFacts, Dismissed, Presentation};
+use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice, Surface};
+use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
+use crate::updates::presentation::{self, DesktopAction};
 use crate::updates::{UpdateService, UpdateState};
 
 /// A native alert the status item shows by itself.
@@ -33,57 +31,26 @@ pub(crate) trait StatusHost {
 }
 
 enum Message {
-    Machines(MachineUpdatesEvent),
     /// The person answered an alert with this command to run.
     Answered(presentation::Command),
 }
 
 pub(crate) struct StatusMenu {
     host: Rc<dyn StatusHost>,
-    adapter: Option<Rc<dyn MachineUpdatesAdapter>>,
     messages: async_channel::Sender<Message>,
-    state: RefCell<State>,
-}
-
-#[derive(Default)]
-struct State {
-    machines: Vec<MachineUpdate>,
-    dismissed: Dismissed,
-    /// Recent history, newest first.
-    recent: Vec<String>,
-    menu: Option<Menu>,
-    /// Actions this menu performed that have not finished, so it reports only its own failures.
-    performed: Vec<(MachineId, MachineAction)>,
+    /// The menu as last rendered.
+    menu: RefCell<Option<Menu>>,
 }
 
 impl StatusMenu {
-    /// Starts the menu: it follows the desktop's update service and `adapter`'s Machines, and
-    /// renders through `host` after every change.
-    pub(crate) fn install(
-        host: Rc<dyn StatusHost>,
-        adapter: Option<Rc<dyn MachineUpdatesAdapter>>,
-        cx: &mut App,
-    ) -> Rc<Self> {
+    /// Starts the menu: it follows the desktop's update service and the shared Machine updates,
+    /// and renders through `host` after every change. Install it after both services.
+    pub(crate) fn install(host: Rc<dyn StatusHost>, cx: &mut App) -> Rc<Self> {
         let (messages, received) = async_channel::unbounded();
-        if let Some(adapter) = &adapter {
-            let (events, machine_events) = async_channel::unbounded();
-            if adapter.start(events).is_ok() {
-                let messages = messages.clone();
-                cx.spawn(async move |_| {
-                    while let Ok(event) = machine_events.recv().await {
-                        if messages.send(Message::Machines(event)).await.is_err() {
-                            return;
-                        }
-                    }
-                })
-                .detach();
-            }
-        }
         let menu = Rc::new(Self {
             host,
-            adapter,
             messages,
-            state: RefCell::default(),
+            menu: RefCell::default(),
         });
         if let Some(service) = cx
             .try_global::<UpdateService>()
@@ -93,6 +60,24 @@ impl StatusMenu {
             cx.observe(&service, move |_, cx| {
                 if let Some(menu) = observed.upgrade() {
                     menu.render(cx);
+                }
+            })
+            .detach();
+        }
+        if let Some(machines) = MachineUpdates::global(cx) {
+            let observed = Rc::downgrade(&menu);
+            cx.observe(&machines, move |_, cx| {
+                if let Some(menu) = observed.upgrade() {
+                    menu.render(cx);
+                }
+            })
+            .detach();
+            let observed = Rc::downgrade(&menu);
+            cx.subscribe(&machines, move |_, notice: &MachineUpdatesNotice, cx| {
+                if let Some(menu) = observed.upgrade()
+                    && notice.surface == Surface::StatusMenu
+                {
+                    menu.finished(notice, cx);
                 }
             })
             .detach();
@@ -112,51 +97,36 @@ impl StatusMenu {
 
     fn receive(&self, message: Message, cx: &mut App) {
         match message {
-            Message::Machines(event) => self.machines_changed(event, cx),
             Message::Answered(command) => self.run(command, cx),
         }
         self.render(cx);
     }
 
-    fn machines_changed(&self, event: MachineUpdatesEvent, cx: &mut App) {
-        match event {
-            MachineUpdatesEvent::Machines(machines) => self.state.borrow_mut().machines = machines,
-            MachineUpdatesEvent::Changed(update) => {
-                let mut state = self.state.borrow_mut();
-                match state
-                    .machines
-                    .iter_mut()
-                    .find(|machine| machine.machine == update.machine)
-                {
-                    Some(machine) => *machine = *update,
-                    None => state.machines.push(*update),
+    /// An action this menu performed finished.
+    fn finished(&self, notice: &MachineUpdatesNotice, cx: &mut App) {
+        match notice.outcome {
+            Ok(()) => self.succeeded(notice.local, &notice.action, cx),
+            // The sessions or the Pending Version changed since the person agreed, so the menu
+            // asks again with what is true now.
+            Err(ActionFailure::Changed) => {
+                self.render(cx);
+                if let Some(command) = self.command_for(notice.machine, &notice.action) {
+                    self.run(command, cx);
                 }
             }
-            MachineUpdatesEvent::Finished {
-                machine,
-                action,
-                outcome,
-            } => {
-                let ours = {
-                    let mut state = self.state.borrow_mut();
-                    let index = state
-                        .performed
-                        .iter()
-                        .position(|performed| *performed == (machine, action.clone()));
-                    index.map(|index| state.performed.remove(index)).is_some()
-                };
-                match outcome {
-                    Err(_) if !ours => {}
-                    Ok(()) => self.succeeded(machine, &action, cx),
-                    // The sessions or the Pending Version changed since the person agreed, so
-                    // the menu asks again with what is true now.
-                    Err(ActionFailure::Changed) => {
-                        self.render(cx);
-                        if let Some(command) = self.command_for(machine, &action) {
-                            self.run(command, cx);
-                        }
-                    }
-                    Err(failure) => self.report(machine, &action, failure, cx),
+            Err(failure) => {
+                if let Some((title, message)) = presentation::action_failure(
+                    &notice.name,
+                    notice.local,
+                    &notice.action,
+                    failure,
+                ) {
+                    let alert = Alert {
+                        title: title.to_string(),
+                        message: message.to_string(),
+                        confirm: None,
+                    };
+                    self.host.alert(alert, Box::new(|_| {}), cx);
                 }
             }
         }
@@ -164,13 +134,7 @@ impl StatusMenu {
 
     /// A Start, Stop or Restart of this computer's Core reaches every Workspace Window still
     /// waiting on it, as the same change made in Settings does.
-    fn succeeded(&self, machine: MachineId, action: &MachineAction, cx: &mut App) {
-        let local = self
-            .state
-            .borrow()
-            .machines
-            .iter()
-            .any(|update| update.machine == machine && update.local);
+    fn succeeded(&self, local: bool, action: &MachineAction, cx: &mut App) {
         let running = match action {
             MachineAction::Start | MachineAction::Restart => true,
             MachineAction::Stop => false,
@@ -196,64 +160,46 @@ impl StatusMenu {
         machine: MachineId,
         action: &MachineAction,
     ) -> Option<presentation::Command> {
-        let state = self.state.borrow();
-        state
-            .menu
-            .as_ref()?
-            .commands()
-            .find_map(|command| match command {
-                Command::Update(presentation::Command::Machine(id, offered))
-                    if id == machine && offered == *action =>
-                {
-                    Some(presentation::Command::Machine(id, offered))
-                }
-                Command::Update(presentation::Command::Confirm(confirmation))
-                    if confirmation.actions.contains(&(machine, action.clone())) =>
-                {
-                    Some(presentation::Command::Confirm(confirmation))
-                }
-                _ => None,
-            })
+        let menu = self.menu.borrow();
+        menu.as_ref()?.commands().find_map(|command| match command {
+            Command::Update(presentation::Command::Machine(id, offered))
+                if id == machine && offered == *action =>
+            {
+                Some(presentation::Command::Machine(id, offered))
+            }
+            Command::Update(presentation::Command::Confirm(confirmation))
+                if confirmation.actions.contains(&(machine, action.clone())) =>
+            {
+                Some(presentation::Command::Confirm(confirmation))
+            }
+            _ => None,
+        })
     }
 
     fn render(&self, cx: &App) {
-        let menu = {
-            let state = self.state.borrow();
-            let service = cx
-                .try_global::<UpdateService>()
-                .map(|service| service.0.read(cx));
-            let unavailable = UpdateState::Unavailable;
-            let desktop = DesktopFacts {
-                state: service.map_or(&unavailable, |updates| updates.state()),
-                pending: service.and_then(|updates| updates.pending_version()),
-                stage: service
-                    .and_then(|updates| updates.reminder())
-                    .unwrap_or_default(),
-                notes_unread: crate::ui::updates::whats_new::release_notes_unread(cx),
-                running: env!("SPACETERM_VERSION"),
-            };
-            let update = Presentation::new(
-                desktop,
-                &state.machines,
-                &state.dismissed,
-                crate::updates::now(),
-            );
-            Menu::new(&update, &state.machines, state.recent.clone())
-        };
-        if self.state.borrow().menu.as_ref() == Some(&menu) {
+        let update = presentation::current(cx);
+        let (machines, recent) =
+            MachineUpdates::global(cx).map_or_else(Default::default, |store| {
+                let store = store.read(cx);
+                (
+                    store.machines().to_vec(),
+                    store.recent().map(|entry| entry.text.to_string()).collect(),
+                )
+            });
+        let menu = Menu::new(&update, &machines, recent);
+        if self.menu.borrow().as_ref() == Some(&menu) {
             return;
         }
         self.host.render(&menu);
-        self.state.borrow_mut().menu = Some(menu);
+        *self.menu.borrow_mut() = Some(menu);
     }
 
     /// Performs `command` if the menu still offers it. A host can deliver a row it drew before
     /// the state changed.
     pub(crate) fn perform(&self, command: Command, cx: &mut App) {
         let offered = self
-            .state
-            .borrow()
             .menu
+            .borrow()
             .as_ref()
             .is_some_and(|menu| menu.offers(&command));
         if !offered {
@@ -273,7 +219,7 @@ impl StatusMenu {
 
     fn run(&self, command: presentation::Command, cx: &mut App) {
         match command {
-            presentation::Command::Machine(machine, action) => self.act(machine, action),
+            presentation::Command::Machine(machine, action) => act(machine, action, cx),
             presentation::Command::Confirm(confirmation) => {
                 let alert = Alert {
                     title: confirmation.title.to_string(),
@@ -317,36 +263,14 @@ impl StatusMenu {
             presentation::Command::Desktop(action) => desktop(action, cx),
         }
     }
+}
 
-    fn act(&self, machine: MachineId, action: MachineAction) {
-        let Some(adapter) = &self.adapter else {
-            return;
-        };
-        {
-            let mut state = self.state.borrow_mut();
-            if let MachineAction::DismissFailure(id) = action {
-                state.dismissed.insert((machine, id));
-            }
-            state.performed.push((machine, action.clone()));
-        }
-        adapter.perform(machine, action);
-    }
-
-    fn report(
-        &self,
-        machine: MachineId,
-        action: &MachineAction,
-        failure: ActionFailure,
-        cx: &mut App,
-    ) {
-        let alert = {
-            let state = self.state.borrow();
-            let Some(update) = state.machines.iter().find(|m| m.machine == machine) else {
-                return;
-            };
-            failure_alert(update, action, failure)
-        };
-        self.host.alert(alert, Box::new(|_| {}), cx);
+/// Performs `action` through the shared Machine updates, which report back to this menu.
+fn act(machine: MachineId, action: MachineAction, cx: &mut App) {
+    if let Some(store) = MachineUpdates::global(cx) {
+        store.update(cx, |store, cx| {
+            store.perform(machine, action, Surface::StatusMenu, cx);
+        });
     }
 }
 
@@ -361,11 +285,7 @@ fn desktop(action: DesktopAction, cx: &mut App) {
                 return;
             };
             service.update(cx, |updates, cx| match updates.state() {
-                UpdateState::Ready { .. } => {
-                    if let Some(token) = updates.begin_install_confirmation() {
-                        updates.finish_install_confirmation(token, true, cx);
-                    }
-                }
+                UpdateState::Ready { .. } | UpdateState::Installing { .. } => updates.relaunch(cx),
                 UpdateState::Available { .. } => updates.download(cx),
                 _ => updates.retry_download(cx),
             });
@@ -377,36 +297,5 @@ fn desktop(action: DesktopAction, cx: &mut App) {
         }
         // The menu bar extra offers Retry SpaceTerm Update instead of a dismissal.
         DesktopAction::DismissFailure => {}
-    }
-}
-
-/// The full sentence a failed action reports, with OK.
-fn failure_alert(machine: &MachineUpdate, action: &MachineAction, failure: ActionFailure) -> Alert {
-    let place = match (machine.local, cfg!(target_os = "macos")) {
-        (true, true) => "this Mac".to_owned(),
-        (true, false) => "this computer".to_owned(),
-        (false, _) => machine.name.to_string(),
-    };
-    let operation = match action {
-        MachineAction::Install => "install the update",
-        MachineAction::Restart => "restart SpaceTerm Core",
-        MachineAction::CheckAgain => "check SpaceTerm Core",
-        MachineAction::DismissFailure(_) => "dismiss the notice",
-        MachineAction::Start => "start SpaceTerm Core",
-        MachineAction::Stop => "stop SpaceTerm Core",
-    };
-    let message = match failure {
-        ActionFailure::Unavailable(_) => {
-            format!("SpaceTerm Core on {place} is too old to do this.")
-        }
-        ActionFailure::Busy => format!("SpaceTerm Core on {place} is busy with another change."),
-        ActionFailure::Changed => format!("SpaceTerm Core on {place} changed. Try again."),
-        ActionFailure::Unreachable => format!("SpaceTerm can't reach {place}."),
-        ActionFailure::Failed => format!("SpaceTerm Core on {place} refused the request."),
-    };
-    Alert {
-        title: format!("SpaceTerm couldn't {operation} on {place}."),
-        message,
-        confirm: None,
     }
 }

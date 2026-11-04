@@ -11,7 +11,7 @@ use spaceterm_ui::{
 use super::{front_workspace_window, service, whats_new};
 use crate::ui::WorkspaceManager;
 use crate::updates::UpdateState;
-use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice};
+use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction};
 use crate::updates::presentation::{self, Command, Confirmation, DesktopAction, Explanation};
 
@@ -38,7 +38,9 @@ fn perform_now(command: Command, window: Option<AnyWindowHandle>, cx: &mut App) 
         }
         Command::Machine(machine, action) => {
             if let Some(store) = MachineUpdates::global(cx) {
-                store.update(cx, |store, cx| store.perform(machine, action, cx));
+                store.update(cx, |store, cx| {
+                    store.perform(machine, action, Surface::Window, cx)
+                });
             }
         }
         Command::Confirm(confirmation) => present_in(window, cx, move |window, cx| {
@@ -154,7 +156,7 @@ pub(super) fn confirm<T: 'static>(
             };
             store.update(cx, |store, cx| {
                 for (machine, action) in actions {
-                    store.perform(machine, action, cx);
+                    store.perform(machine, action, Surface::Window, cx);
                 }
             });
         },
@@ -198,10 +200,13 @@ fn explain<T: 'static>(explanation: Explanation, window: &mut Window, cx: &mut C
     );
 }
 
-/// Explains each Machine action that did not succeed, in the front Workspace Window. A
-/// confirmation that went stale asks again with the current facts.
+/// Explains each Machine action a window performed that did not succeed, in the front Workspace
+/// Window. A confirmation that went stale asks again with the current facts.
 pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
-    if notice.failure == ActionFailure::Changed && notice.action == MachineAction::Restart {
+    let (Surface::Window, Err(failure)) = (notice.surface, notice.outcome) else {
+        return;
+    };
+    if failure == ActionFailure::Changed && notice.action == MachineAction::Restart {
         let presentation = presentation::current(cx);
         if let Some(command) = presentation
             .machine(notice.machine)
@@ -212,7 +217,7 @@ pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
         return;
     }
     let Some((title, message)) =
-        presentation::action_failure(&notice.name, notice.local, &notice.action, notice.failure)
+        presentation::action_failure(&notice.name, notice.local, &notice.action, failure)
     else {
         return;
     };

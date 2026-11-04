@@ -64,7 +64,7 @@ pub(crate) fn install(
     );
     status_menu::set_available(cx, true);
     let item = Rc::new(StatusItem::new(mtm, sender));
-    let menu = StatusMenu::install(item, status_menu::machine_updates(), cx);
+    let menu = StatusMenu::install(item, cx);
     cx.spawn(async move |cx| {
         while let Ok(command) = messages.recv().await {
             cx.update(|cx| menu.perform(command, cx));

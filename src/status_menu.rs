@@ -68,16 +68,6 @@ pub(crate) fn show_in_dock(cx: &mut App, visible: bool) {
     }
 }
 
-/// The adapter this build reports Machine updates through, if any. Development builds play the
-/// scenario `SPACETERM_MACHINE_PREVIEW` names.
-pub(crate) fn machine_updates() -> Option<Rc<dyn crate::updates::machines::MachineUpdatesAdapter>> {
-    #[cfg(feature = "developer-tools")]
-    if let Some(preview) = crate::updates::machines::preview::from_environment() {
-        return Some(Rc::new(preview));
-    }
-    None
-}
-
 /// A status-surface operation succeeded. A server it left running reaches every Workspace Window
 /// still waiting on it, as a Start from Settings does. Nothing here opens a window.
 pub(crate) fn operation_succeeded(cx: &mut App, status: ServiceStatus) {
