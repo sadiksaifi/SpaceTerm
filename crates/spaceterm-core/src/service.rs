@@ -2386,6 +2386,105 @@ mod tests {
             }
         }
 
+        /// A credential item that can't be removed yet keeps the service, the versions and the
+        /// data root whose records name it, so the same confirmation finishes on a rerun.
+        #[test]
+        fn a_failed_forget_removes_nothing_and_the_same_confirmation_finishes() {
+            #[derive(Debug, PartialEq)]
+            enum Failure {
+                Core(CoreError),
+                Locked,
+            }
+            impl From<CoreError> for Failure {
+                fn from(error: CoreError) -> Self {
+                    Self::Core(error)
+                }
+            }
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    service.stop().unwrap();
+                    let Ok(CliUninstall::Preview { token, .. }) =
+                        service.uninstall_cli(None, Data::Delete)
+                    else {
+                        panic!("an uninstall previews first");
+                    };
+                    let data = &fixture.paths.data;
+                    assert_eq!(
+                        service
+                            .uninstall_cli_forgetting(Some(&token), Data::Delete, || {
+                                Err(Failure::Locked)
+                            })
+                            .err(),
+                        Some(Failure::Locked)
+                    );
+                    assert!(supervisor.registered.lock().unwrap().is_some());
+                    assert!(data.join("installations").exists());
+                    assert!(data.join("identity.json").exists());
+                    let mut forgotten = 0;
+                    assert!(matches!(
+                        service.uninstall_cli_forgetting(Some(&token), Data::Delete, || {
+                            forgotten += 1;
+                            Ok::<_, Failure>(())
+                        }),
+                        Ok(CliUninstall::Completed)
+                    ));
+                    assert_eq!(forgotten, 1);
+                    assert!(supervisor.registered.lock().unwrap().is_none());
+                    assert!(!data.exists());
+                },
+            );
+        }
+
+        /// A setup that waits for the service lock finds the data root already gone, so it
+        /// can't publish into a root that is about to be deleted.
+        #[test]
+        fn delete_data_removes_the_root_before_it_releases_the_service_lock() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let service = AccountSupervisor::new(fixture.paths.clone()).service();
+            let data = fixture.paths.data.clone();
+            // Enough files that deleting them outlasts a waiter's wakeup.
+            let filler = data.join("filler");
+            std::fs::create_dir(&filler).unwrap();
+            for index in 0..4000 {
+                std::fs::write(filler.join(index.to_string()), b"x").unwrap();
+            }
+            let Ok(CliUninstall::Preview { token, .. }) = service.uninstall_cli(None, Data::Delete)
+            else {
+                panic!("an uninstall previews first");
+            };
+            let mut waiter = None;
+            let result = service.uninstall_cli_forgetting(Some(&token), Data::Delete, || {
+                // Runs under the service lock, so this waiter blocks until uninstall releases it.
+                let directory = Directory::open(&data, false)?;
+                let root = data.clone();
+                let (waiting, started) = std::sync::mpsc::channel();
+                waiter = Some(std::thread::spawn(move || {
+                    waiting.send(()).unwrap();
+                    let _lock = directory.lock("service.lock", false).unwrap();
+                    root.exists()
+                }));
+                started.recv().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                Ok::<_, CoreError>(())
+            });
+            assert!(matches!(result, Ok(CliUninstall::Completed)));
+            assert!(!waiter.unwrap().join().unwrap());
+            assert!(!data.exists());
+        }
+
         /// `spaceterm uninstall` without `--confirm` only previews, also while the Core is
         /// stopped, and its token confirms only the previewed data choice.
         #[test]

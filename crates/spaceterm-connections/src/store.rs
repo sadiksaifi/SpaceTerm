@@ -109,6 +109,29 @@ impl ConnectionStore {
         Ok(self.read()?.enrollments)
     }
 
+    /// The credential item of every saved connection, pending revocation and pending enrollment,
+    /// each once, from one read. Deleting this client's data removes these items too.
+    pub fn credential_items(&self) -> Result<Vec<(crate::StoreKind, [u8; 32])>, StoreError> {
+        let document = self.read()?;
+        let mut items = Vec::new();
+        let connections = document
+            .connections
+            .iter()
+            .chain(document.pending.iter().map(|row| &row.connection))
+            .chain(document.confirmations.iter().map(|row| &row.connection))
+            .map(|row| (row.credential_store, row.credential));
+        let enrollments = document
+            .enrollments
+            .iter()
+            .map(|row| (row.credential_store, row.credential));
+        for item in connections.chain(enrollments) {
+            if !items.contains(&item) {
+                items.push(item);
+            }
+        }
+        Ok(items)
+    }
+
     fn read(&self) -> Result<Document, StoreError> {
         match Directory::open(&self.root, false) {
             Ok(directory) => read(&directory),
@@ -652,6 +675,46 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    /// An interrupted `machine add` leaves only its pending enrollment, and that names a
+    /// credential item too.
+    #[test]
+    fn credential_items_include_saved_pending_and_enrolling_connections() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        assert!(store.credential_items().unwrap().is_empty());
+        transaction(&store)
+            .commit_guarded(|rows| {
+                rows.extend([saved(1), saved(2)]);
+                Ok(())
+            })
+            .unwrap();
+        transaction(&store).remove("server-2").unwrap();
+        let enrolling = saved(3);
+        transaction(&store)
+            .reserve(PendingEnrollment {
+                route: enrolling.route,
+                name: enrolling.name,
+                endpoint: enrolling.endpoint,
+                pin: enrolling.paired.pin,
+                claim: [8; 32],
+                credential: enrolling.credential,
+                credential_store: crate::StoreKind::PrivateFile,
+                public_key: [9; 32],
+                offered: false,
+                confirmed: false,
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.credential_items().unwrap(),
+            vec![
+                (crate::StoreKind::Keychain, saved(1).credential),
+                (crate::StoreKind::Keychain, saved(2).credential),
+                (crate::StoreKind::PrivateFile, enrolling.credential),
+            ]
         );
     }
 

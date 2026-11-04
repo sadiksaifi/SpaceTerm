@@ -3,8 +3,8 @@
 //!
 //! Uninstall removes the account service, the managed CLI launcher and every installed version.
 //! With [`Data::Keep`] the data root stays: Workspace organization, Machine Settings, pairings and
-//! the CLI's saved machines. With [`Data::Delete`] the data root goes too. Remove Machine keeps
-//! the data and revokes every pairing.
+//! the CLI's saved machines. With [`Data::Delete`] the data root goes too, still under the service
+//! lock. Remove Machine keeps the data and revokes every pairing.
 use super::*;
 
 /// What uninstall does with the data root.
@@ -124,8 +124,27 @@ impl Service {
         confirmation: Option<&str>,
         choice: Data,
     ) -> Result<CliUninstall, CoreError> {
+        self.uninstall_cli_forgetting(confirmation, choice, || Ok(()))
+    }
+
+    /// [`Self::uninstall_cli`], where a confirmed [`Data::Delete`] first runs `forget`: it
+    /// removes what the data root's records name outside the root, such as credential items.
+    /// `forget` runs under the service lock once the confirmation holds, before anything is
+    /// removed. When it fails, nothing is removed and its error is returned, so the same
+    /// confirmation, or a later one, finds the same records and can finish.
+    #[cfg(feature = "client")]
+    pub fn uninstall_cli_forgetting<E: From<CoreError>>(
+        &self,
+        confirmation: Option<&str>,
+        choice: Data,
+        forget: impl FnOnce() -> Result<(), E>,
+    ) -> Result<CliUninstall, E> {
         let request = confirmation.map_or(Request::Preview, Request::Confirm);
-        self.uninstall_with(request, choice)
+        let forget = || match choice {
+            Data::Delete => forget(),
+            Data::Keep => Ok(()),
+        };
+        self.uninstall_with(request, choice, forget)
     }
 
     /// Preview an uninstall without removing anything, whether or not SpaceTerm Core runs. The
@@ -134,7 +153,7 @@ impl Service {
     /// `Changed`.
     #[cfg(feature = "client")]
     pub fn preview_uninstall(&self, choice: Data) -> Result<UninstallPreview, CoreError> {
-        match self.uninstall_with(Request::Preview, choice)? {
+        match self.uninstall_with(Request::Preview, choice, || Ok::<_, CoreError>(()))? {
             CliUninstall::Preview {
                 token,
                 expires_at,
@@ -149,11 +168,12 @@ impl Service {
     }
 
     #[cfg(feature = "client")]
-    fn uninstall_with(
+    fn uninstall_with<E: From<CoreError>>(
         &self,
         request: Request<'_>,
         choice: Data,
-    ) -> Result<CliUninstall, CoreError> {
+        forget: impl FnOnce() -> Result<(), E>,
+    ) -> Result<CliUninstall, E> {
         // Admission waits for the service lock, so establish this passive link first.
         let initial = self.passive_status()?;
         let link = if initial.running {
@@ -180,19 +200,20 @@ impl Service {
                 if let Request::Confirm(token) = request
                     && !issued(token)
                 {
-                    return Err(CoreError::Changed);
+                    return Err(CoreError::Changed.into());
                 }
+                forget()?;
                 self.remove_files()?;
                 return Ok(CliUninstall::Completed);
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
         let operation = data.lock("service.lock", false)?;
         data.verify_path(&self.paths.data)?;
         let state = Self::state(&data)?;
         let status = self.passive_status()?;
         if status.running != initial.running {
-            return Err(CoreError::Changed);
+            return Err(CoreError::Changed.into());
         }
         // A confirmation fences Session starts in the same step that reads the Sessions it
         // compares, and `link` holds that fence until the removal below finished.
@@ -211,8 +232,10 @@ impl Service {
                 || preview.observation != observation
                 || now > preview.expires_at
             {
-                return Err(CoreError::Changed);
+                return Err(CoreError::Changed.into());
             }
+            // Before the preview is spent, so the same confirmation can retry a failed `forget`.
+            forget()?;
             data.remove(c"uninstall.json")?;
         } else {
             let token = token()?;
@@ -233,11 +256,13 @@ impl Service {
         }
         self.remove_locked(&data, state.is_some(), status.running)?;
         drop(link);
-        drop(operation);
-        drop(data);
+        // The root goes while the service lock is still held, so no setup that waits for the
+        // lock can publish into it first.
         if choice == Data::Delete {
             self.remove_data_root()?;
         }
+        drop(operation);
+        drop(data);
         Ok(CliUninstall::Completed)
     }
 
@@ -283,7 +308,7 @@ impl Service {
         }
     }
 
-    /// Deletes the data root once nothing holds its locks.
+    /// Deletes the data root. The caller holds the service lock inside it.
     #[cfg(feature = "client")]
     fn remove_data_root(&self) -> Result<(), CoreError> {
         match std::fs::symlink_metadata(&self.paths.data) {
