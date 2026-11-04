@@ -5,7 +5,7 @@
 import argparse
 
 from spaceterm_tasks import main
-from spaceterm_tasks.core_package import IDENTITIES, PROTOCOL_MAJOR, TARGETS, install, verify
+from spaceterm_tasks.core_package import IDENTITIES, PROTOCOLS, TARGETS, install, verify
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
@@ -31,7 +31,7 @@ if __name__ == "__main__":
         "target": args.target,
         "commit": args.commit,
         "version": args.version,
-        "protocol_major": PROTOCOL_MAJOR,
+        "protocols": PROTOCOLS,
     }
     operation = install if args.retain else verify
     main(lambda: operation(args.archive, args.signature, expected) and None)

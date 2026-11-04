@@ -14,12 +14,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{AnyWindowHandle, App, AppContext as _, Context, Global, SharedString, Task};
-use spaceterm_core::service::control::{self, BuildName, UpdateChange, UpdateWording, Wording};
-use spaceterm_core::service::lane::admin::{self, Preview, UpdatePlan, Verdict};
+use spaceterm_core::service::control::{self, BuildName, UpdateWording, Wording};
+use spaceterm_core::service::lane::admin::{self, Preview, Verdict};
 use spaceterm_core::service::lane::client::{LaneError, Outcome};
-use spaceterm_core::service::lane::{
-    LaneAction, LaneCheck, LaneReceipt, LaneStatus, LaneUpdateKind, LaneVersion,
-};
+use spaceterm_core::service::lane::{LaneAction, LaneReceipt, LaneStatus, LaneVersion};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
     ModalActionRole, ModalId,
@@ -40,8 +38,8 @@ pub(super) const CANCEL_SELECTOR: &str = "settings-remote-server-cancel";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Change {
     Restart,
-    /// Updates to the server's newest signed release, or returns to its previous version when
-    /// the server offers that instead.
+    /// Installs the server's newest signed release beside its running version, then restarts
+    /// into it after confirmation.
     Update,
 }
 
@@ -64,8 +62,8 @@ impl Change {
 /// What the lane read of a paired server returned.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Reading {
+    /// The server's Status, with its update facts.
     pub(crate) status: LaneStatus,
-    pub(crate) check: LaneCheck,
     /// Operations this desktop admitted earlier that this connection settled.
     pub(crate) settled: Vec<LaneReceipt>,
 }
@@ -190,10 +188,10 @@ type ReadAnswer<'a> = std::pin::Pin<
 /// executor. Each step opens its own lane connection and first settles what this desktop left
 /// pending on it.
 pub(crate) trait RemoteMachineControl: Send + Sync {
-    /// Reads the server's Status and its update check. Changes nothing.
+    /// Reads the server's Status and its update facts. Changes nothing.
     fn read(&self) -> ReadAnswer<'_>;
-    /// Asks the server to preview `change`. Update first has the server stage its newest signed
-    /// release, unless it offers a return to its previous version instead.
+    /// Asks the server to preview `change`. Update first has the server install its newest
+    /// signed release, and previews the restart into it.
     fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure>;
     /// Executes a confirmed preview and follows it until it settles or its wait passes.
     fn perform(&self, preview: Preview) -> Result<Performed, RemoteFailure>;
@@ -232,12 +230,7 @@ impl RemoteMachineControl for LaneControl {
         Box::pin(async move {
             let (_, _, mut session, settled) = self.open()?;
             let status = admin::status(&mut session).map_err(RemoteFailure::of_lane)?;
-            let check = admin::check(&mut session).map_err(RemoteFailure::of_lane)?;
-            Ok(Reading {
-                status,
-                check,
-                settled,
-            })
+            Ok(Reading { status, settled })
         })
     }
 
@@ -245,9 +238,14 @@ impl RemoteMachineControl for LaneControl {
         let (_, _, mut session, settled) = self.open()?;
         let preview = match change {
             Change::Restart => admin::preview(&mut session, LaneAction::Restart),
-            Change::Update => admin::plan_update(&mut session).map(|plan| match plan {
-                UpdatePlan::Return(preview) | UpdatePlan::Update { preview, .. } => preview,
-            }),
+            Change::Update => {
+                let (_, facts) =
+                    admin::install_from_feed(&mut session).map_err(RemoteFailure::of_lane)?;
+                if facts.pending.is_none() {
+                    return Err(RemoteFailure::NoUpdate);
+                }
+                admin::preview(&mut session, LaneAction::Restart)
+            }
         }
         .map_err(RemoteFailure::of_lane)?;
         Ok(Prepared { preview, settled })
@@ -302,7 +300,6 @@ pub(super) enum Act {
     Stop,
     Restart,
     Update(Option<SharedString>),
-    Return(Option<SharedString>),
     /// A Network Access change. Only the CLI makes one, so the card names it only as an earlier
     /// operation a connection settled.
     NetworkAccess,
@@ -313,9 +310,9 @@ impl Act {
         let to = to.map(|to| SharedString::from(to.version.clone()));
         match action {
             LaneAction::Stop => Self::Stop,
+            // A Restart into the Pending Version names the version it updates to.
+            LaneAction::Restart if to.is_some() => Self::Update(to),
             LaneAction::Restart => Self::Restart,
-            LaneAction::Update { .. } => Self::Update(to),
-            LaneAction::Return => Self::Return(to),
             LaneAction::Network { .. } => Self::NetworkAccess,
         }
     }
@@ -326,7 +323,6 @@ impl Act {
             Self::Stop => "stop",
             Self::Restart => "restart",
             Self::Update(_) => "update",
-            Self::Return(_) => "return to the previous version",
             Self::NetworkAccess => "Network Access change",
         }
     }
@@ -337,7 +333,6 @@ impl Act {
             Self::Stop => "stop",
             Self::Restart => "restart",
             Self::Update(_) => "update",
-            Self::Return(_) => "return to its previous version",
             Self::NetworkAccess => "change its Network Access",
         }
     }
@@ -393,8 +388,7 @@ pub(super) enum Work {
 #[derive(Default)]
 struct RouteAdmin {
     status: Option<LaneStatus>,
-    check: Option<LaneCheck>,
-    /// The connection and its link generation when `status` and `check` were read. A reconnect
+    /// The connection and its link generation when `status` was read. A reconnect
     /// may reach a server that restarted or updated since, so a reading belongs to that link.
     read_over: Option<(MachineConnection, u64)>,
     work: Option<Work>,
@@ -449,7 +443,9 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
     // wording's startup clause never shows.
     let startup = spaceterm_core::service::ServiceStartup::AtLogin;
     match &preview.action {
-        LaneAction::Stop | LaneAction::Restart => {
+        LaneAction::Stop | LaneAction::Restart
+            if preview.action == LaneAction::Stop || effects.to.is_none() =>
+        {
             let (action, detail) = if preview.action == LaneAction::Stop {
                 (
                     control::Action::Stop,
@@ -483,7 +479,8 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
             detail: "Paired connections to it may end.".to_owned(),
             confirm: "Change".to_owned(),
         },
-        LaneAction::Update { .. } | LaneAction::Return => {
+        // A Restart into the Pending Version reads as the update it completes.
+        LaneAction::Stop | LaneAction::Restart => {
             let unnamed = LaneVersion {
                 version: String::new(),
                 commit: String::new(),
@@ -491,28 +488,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
             };
             let from = effects.from.as_ref().unwrap_or(&unnamed);
             let to = effects.to.as_ref().unwrap_or(&unnamed);
-            let returning = effects.kind == Some(LaneUpdateKind::Return)
-                || preview.action == LaneAction::Return;
-            // A return names the version it returns to as the previous one.
-            let wording = if returning {
-                UpdateWording::for_machine(
-                    name,
-                    UpdateChange::Return,
-                    build(to),
-                    build(from),
-                    true,
-                    false,
-                )
-            } else {
-                UpdateWording::for_machine(
-                    name,
-                    UpdateChange::Update,
-                    build(from),
-                    build(to),
-                    true,
-                    false,
-                )
-            };
+            let wording = UpdateWording::for_machine(name, build(from), build(to), true, false);
             let (previous, candidate) = control::build_labels(build(from), build(to));
             let mut detail = format!(
                 "It changes from {previous} to {candidate}, replacing the running SpaceTerm Core. {ends} \
@@ -566,13 +542,6 @@ pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) 
             to.as_ref().map_or_else(
                 || format!("{name} updated."),
                 |to| format!("{name} updated to {to}."),
-            ),
-            CaptionTone::Guidance,
-        ),
-        Ended::Changed(Act::Return(to), Settlement::Done) => (
-            to.as_ref().map_or_else(
-                || format!("{name} returned to its previous version."),
-                |to| format!("{name} returned to {to}."),
             ),
             CaptionTone::Guidance,
         ),
@@ -710,11 +679,11 @@ impl SettingsWindow {
         Some(status.runtime.version.clone().into())
     }
 
-    /// The newer release the server's last update check over the current link found, if any.
+    /// The server's Pending Version as the current link last read it, if one waits.
     pub(super) fn remote_available(&self, route: &DirectRouteId) -> Option<SharedString> {
-        let check = self.current_reading(route)?.check.as_ref()?;
-        let latest = check.latest.as_ref()?;
-        (latest.sha256 != check.approved.sha256).then(|| latest.version.clone().into())
+        let status = self.current_reading(route)?.status.as_ref()?;
+        let pending = status.update.as_ref()?.pending.as_ref()?;
+        Some(pending.version.to_string().into())
     }
 
     /// Whether the last change SpaceTerm made to `route` stopped it, or closed the lane while
@@ -735,7 +704,6 @@ impl SettingsWindow {
             Work::Performing(Act::Stop) => Some("Stopping\u{2026}"),
             Work::Performing(Act::Restart) => Some("Restarting\u{2026}"),
             Work::Performing(Act::Update(_)) => Some("Updating\u{2026}"),
-            Work::Performing(Act::Return(_)) => Some("Restoring\u{2026}"),
             // The card never performs a Network Access change.
             Work::Performing(Act::NetworkAccess) => None,
             Work::Preparing(Change::Update) => Some("Preparing\u{2026}"),
@@ -765,9 +733,6 @@ impl SettingsWindow {
             Work::Performing(Act::Restart) => "Restarting SpaceTerm Core\u{2026}".to_owned(),
             Work::Performing(Act::Update(to)) => {
                 named(to, "Updating to", "Updating SpaceTerm Core\u{2026}")
-            }
-            Work::Performing(Act::Return(to)) => {
-                named(to, "Restoring", "Restoring the previous version\u{2026}")
             }
             Work::Performing(Act::NetworkAccess) => return None,
             Work::Preparing(Change::Update) => named(
@@ -846,7 +811,6 @@ impl SettingsWindow {
                 match read {
                     Ok(reading) => {
                         admin.status = Some(reading.status);
-                        admin.check = Some(reading.check);
                         admin.read_over = Some(read_over);
                         admin.earlier = earlier(&reading.settled);
                     }
@@ -1003,7 +967,6 @@ impl SettingsWindow {
                         admin.left = false;
                         // The server changed, so what the last read said no longer holds.
                         admin.status = None;
-                        admin.check = None;
                         admin.read_over = None;
                     }
                     Err(failure) => admin.ended = Some(Ended::Refused(failure)),

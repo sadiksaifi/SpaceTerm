@@ -164,7 +164,7 @@ fn failure_copy(error: CoreError) -> (&'static str, SharedString) {
             "Connection Failed",
             SharedString::new_static("SpaceTerm stopped reconnecting."),
         ),
-        CoreError::IncompatibleProtocol => (
+        CoreError::IncompatibleProtocol(_) => (
             "Incompatible SpaceTerm Core",
             SharedString::new_static("SpaceTerm and this SpaceTerm Core are incompatible."),
         ),

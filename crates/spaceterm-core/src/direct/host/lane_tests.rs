@@ -47,6 +47,7 @@ fn open_lane(endpoint: &str, paired: &PairedDevice, credential: &DeviceCredentia
             agent: None,
         })
         .unwrap()
+        .0
 }
 
 /// One lane request. An error means the lane is gone.

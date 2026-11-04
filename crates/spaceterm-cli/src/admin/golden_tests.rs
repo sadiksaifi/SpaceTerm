@@ -5,13 +5,17 @@ use crate::contract::{
     Code, CoreSetup, CoreStart, CoreUnpair, DeviceRef, Envelope, Failure, HeldOutcomes, Launcher,
     MachineRef, Receipt, ReceiptState, RecoveredIdentity, RecoveredKind, RecoveredOperation,
     RecoveredOutcome, RecoveredState, ServiceAction, SetupNetwork, SetupStep, SetupStepName,
-    StepResult, UpdateEffects, UpdateKind, Version,
+    StepResult, Version,
 };
 use spaceterm_core::diagnostics::{PaneWorkerWaits, TerminalCounterSnapshot};
 use spaceterm_core::service::lane::client::Outcome;
 use spaceterm_core::service::lane::{
-    LaneAction, LaneActivation, LaneCheck, LaneDevice, LaneEffects, LaneNetwork,
-    LaneOperationState, LaneReceipt, LaneStaged, LaneStatus, LaneUpdateKind, LaneVersion,
+    LaneAction, LaneActivation, LaneDevice, LaneEffects, LaneNetwork, LaneOperationState,
+    LaneReceipt, LaneStatus, LaneVersion,
+};
+use spaceterm_core::update::facts::{
+    CheckFailure, Operation, PendingVersion, Platform, Protocols, StrandedDevice, UpdateCheck,
+    UpdateFacts, Version as CoreVersion,
 };
 
 const EXPIRES: &str = "2026-10-30T12:10:00Z";
@@ -73,10 +77,14 @@ fn status_reports_service_network_devices_and_held_outcomes() {
         automatic_start: true,
         linger: Some(true),
         runtime: lane_version("0.7.0", 'a'),
-        staged: vec![LaneStaged {
-            version: "0.7.1".into(),
-            sha256: "b".repeat(64),
-        }],
+        update: Some(Box::new(facts(
+            Some(pending(true, true)),
+            UpdateCheck::Failing {
+                since: FAILING,
+                last_success: Some(SUCCEEDED),
+                reason: CheckFailure::Proxy,
+            },
+        ))),
         activation: LaneActivation::Settled,
         sessions: 2,
         network: LaneNetwork {
@@ -108,9 +116,120 @@ fn status_reports_service_network_devices_and_held_outcomes() {
         identity: RecoveredIdentity::Agent("agent-1".parse().unwrap()),
         count: 3,
     }];
-    let (envelope, _) = status::envelope(core(), &lane, held, recovered());
+    let (envelope, text) = status::envelope(core(), &lane, held, recovered(), RESTART);
     assert_exit(&envelope, 0);
     assert_golden("status", &envelope);
+    assert!(
+        text.contains(
+            "Pending: 0.8.0, installed 2026-11-03T09:12:00Z, restart overdue. Restart to use it: \
+             spaceterm --machine penguin restart\n  It changes the protocol. These devices stop \
+             working until they update: old-mini\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Update check: failing since 2026-11-02T08:00:00Z, the proxy is unreachable\n"
+        ),
+        "{text}"
+    );
+}
+
+const INSTALLED: u64 = 1_793_697_120;
+const SUCCEEDED: u64 = 1_793_520_000;
+const FAILING: u64 = 1_793_606_400;
+const RESTART: &str = "spaceterm --machine penguin restart";
+
+fn pending(breaking: bool, overdue: bool) -> PendingVersion {
+    PendingVersion {
+        version: CoreVersion::parse("0.8.0").unwrap(),
+        protocols: Protocols::CURRENT,
+        breaking,
+        installed_at: INSTALLED,
+        overdue_since: overdue.then_some(INSTALLED + 86_400),
+        stranded: if breaking {
+            vec![StrandedDevice {
+                pairing: [0x9c; 32],
+                name: "old-mini".into(),
+            }]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn facts(pending: Option<PendingVersion>, check: UpdateCheck) -> UpdateFacts {
+    UpdateFacts {
+        revision: 4,
+        platform: Platform::LinuxX86_64,
+        running: CoreVersion::parse("0.7.0").unwrap(),
+        pending,
+        sessions: 2,
+        operation: None,
+        check,
+        skipped: None,
+        last_failure: None,
+    }
+}
+
+#[test]
+fn status_reports_each_update_check_state() {
+    use crate::contract::{UpdateCheckReason, UpdateCheckState};
+    let check = |check, operation| {
+        let mut facts = facts(None, check);
+        facts.operation = operation;
+        status::update_check(Some(&facts))
+    };
+    let never = check(UpdateCheck::Never, None);
+    assert_eq!(never.state, UpdateCheckState::Never);
+    assert_eq!(
+        (never.last_success_at, never.failing_since, never.reason),
+        (None, None, None)
+    );
+    assert_eq!(
+        check(UpdateCheck::Disabled, None).state,
+        UpdateCheckState::Disabled
+    );
+    let succeeded = check(UpdateCheck::Succeeded { at: SUCCEEDED }, None);
+    assert_eq!(succeeded.state, UpdateCheckState::Succeeded);
+    assert_eq!(
+        succeeded.last_success_at.as_deref(),
+        Some("2026-11-01T08:00:00Z")
+    );
+    let failing = check(
+        UpdateCheck::Failing {
+            since: FAILING,
+            last_success: None,
+            reason: CheckFailure::SystemTooOld,
+        },
+        None,
+    );
+    assert_eq!(failing.state, UpdateCheckState::Failing);
+    assert_eq!(failing.last_success_at, None);
+    assert_eq!(
+        failing.failing_since.as_deref(),
+        Some("2026-11-02T08:00:00Z")
+    );
+    assert_eq!(failing.reason, Some(UpdateCheckReason::SystemTooOld));
+    let checking = check(
+        UpdateCheck::Failing {
+            since: FAILING,
+            last_success: Some(SUCCEEDED),
+            reason: CheckFailure::Network,
+        },
+        Some(Operation::Checking),
+    );
+    assert_eq!(checking.state, UpdateCheckState::Checking);
+    assert_eq!(
+        (checking.failing_since, checking.reason),
+        (None, None),
+        "only a failing state names its failure"
+    );
+    assert_eq!(
+        checking.last_success_at.as_deref(),
+        Some("2026-11-01T08:00:00Z")
+    );
+    assert_eq!(status::update_check(None).state, UpdateCheckState::Never);
 }
 
 #[test]
@@ -131,7 +250,6 @@ fn stop_effects() -> LaneEffects {
         start_requires_machine: true,
         from: None,
         to: None,
-        kind: None,
         to_major: None,
     }
 }
@@ -143,11 +261,93 @@ fn a_stop_preview_names_the_sessions_it_ends_and_exits_3() {
         core(),
         format!("c1-{}", "ab".repeat(32)),
         EXPIRES.into(),
-        &stop_effects(),
+        lifecycle::service_effects(&stop_effects(), None),
         Vec::new(),
     );
     assert_exit(&envelope, 3);
     assert_golden("stop_preview", &envelope);
+}
+
+/// The lane's preview of a restart into the Pending Version 0.8.0 on work major `to_major`.
+fn restart_effects(to_major: u16) -> LaneEffects {
+    LaneEffects {
+        ends_sessions: 1,
+        sessions: vec!["0e".repeat(32)],
+        start_requires_machine: false,
+        from: Some(lane_version("0.7.0", 'a')),
+        to: Some(lane_version("0.8.0", 'b')),
+        to_major: Some(to_major),
+    }
+}
+
+#[test]
+fn a_breaking_restart_preview_names_its_versions_and_stranded_devices_and_warns() {
+    let next = spaceterm_core::protocol::MAJOR + 1;
+    let facts = facts(Some(pending(true, false)), UpdateCheck::Never);
+    let previewed = lifecycle::service_effects(&restart_effects(next), Some(&facts));
+    assert_eq!(
+        lifecycle::summary(lifecycle::Kind::Restart, "penguin", &previewed),
+        "Restart SpaceTerm Core on penguin from 0.7.0 into 0.8.0?\nAll Terminal Sessions on it \
+         end for every client. Workspaces are kept, and each Pane starts a new shell when you use \
+         it.\n0.8.0 changes the protocol. These devices can\u{2019}t connect until they update: \
+         old-mini\n"
+    );
+    let envelope = lifecycle::preview_envelope(
+        "restart",
+        core(),
+        format!("c1-{}", "cd".repeat(32)),
+        EXPIRES.into(),
+        previewed,
+        Vec::new(),
+    );
+    assert_exit(&envelope, 3);
+    assert_golden("restart_preview", &envelope);
+}
+
+#[test]
+fn a_restart_into_a_compatible_pending_version_names_it_without_a_warning() {
+    let compatible = facts(Some(pending(false, false)), UpdateCheck::Never);
+    let previewed = lifecycle::service_effects(
+        &restart_effects(spaceterm_core::protocol::MAJOR),
+        Some(&compatible),
+    );
+    let target = previewed.effects.pending.clone().unwrap();
+    assert_eq!(
+        (target.from.as_str(), target.to.as_str()),
+        ("0.7.0", "0.8.0")
+    );
+    assert!(!target.breaking && target.stranded.is_empty());
+    assert_eq!(
+        lifecycle::summary(lifecycle::Kind::Restart, "penguin", &previewed),
+        "Restart SpaceTerm Core on penguin from 0.7.0 into 0.8.0?\nAll Terminal Sessions on it \
+         end for every client. Workspaces are kept, and each Pane starts a new shell when you use \
+         it.\n"
+    );
+    let envelope = lifecycle::preview_envelope(
+        "restart",
+        core(),
+        "c1-00".into(),
+        EXPIRES.into(),
+        previewed,
+        Vec::new(),
+    );
+    assert!(envelope.warnings.is_empty());
+    // Facts of another Pending Version say nothing about this one.
+    let other = facts(Some(pending(true, false)), UpdateCheck::Never);
+    let mut moved = restart_effects(spaceterm_core::protocol::MAJOR);
+    moved.to = Some(lane_version("0.9.0", 'c'));
+    let target = lifecycle::service_effects(&moved, Some(&other))
+        .effects
+        .pending
+        .unwrap();
+    assert!(!target.breaking && target.stranded.is_empty());
+    // A restart into the running version names no versions.
+    assert_eq!(
+        lifecycle::service_effects(&stop_effects(), None)
+            .effects
+            .pending,
+        None
+    );
 }
 
 fn receipt(
@@ -252,128 +452,85 @@ fn failed_not_performed_and_unconfirmed_restarts_map_to_their_codes() {
 }
 
 #[test]
-fn update_check_lists_approved_latest_and_staged() {
-    let data = update::lane_check(LaneCheck {
-        approved: lane_version("0.7.0", 'a'),
-        latest: Some(lane_version("0.7.1", 'b')),
-        staged: vec![lane_version("0.7.1", 'b')],
-    });
-    let envelope = update::check_envelope(core(), data, Vec::new());
+fn update_reports_the_version_it_installed_and_how_to_use_it() {
+    let installed = facts(
+        Some(pending(false, false)),
+        UpdateCheck::Succeeded { at: SUCCEEDED },
+    );
+    let envelope = update::envelope(core(), true, &installed, Vec::new());
     assert_exit(&envelope, 0);
-    assert_golden("update_check", &envelope);
-}
-
-#[test]
-fn an_update_preview_warns_when_the_candidate_has_another_protocol_major() {
-    let effects = UpdateEffects {
-        from: version("0.7.0", 'a'),
-        to: version("0.8.0", 'b'),
-        kind: UpdateKind::Update,
-        ends_sessions: 1,
-        sessions: vec!["0e".repeat(32)],
-    };
-    let major = spaceterm_core::protocol::MAJOR + 1;
-    let envelope = update::preview_envelope(
-        core(),
-        format!("c1-{}", "cd".repeat(32)),
-        EXPIRES.into(),
-        effects,
-        Some(major),
-        Vec::new(),
+    assert_golden("update_installed", &envelope);
+    assert_eq!(
+        update::text(true, &installed, RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Restart to use it; restarting ends 2 \
+         Terminal Sessions: spaceterm --machine penguin restart\n"
     );
-    assert_exit(&envelope, 3);
-    assert_golden("update_preview", &envelope);
-    // The same major adds no warning.
-    let lane = LaneEffects {
-        kind: Some(LaneUpdateKind::Update),
-        to_major: Some(spaceterm_core::protocol::MAJOR),
-        ..stop_effects()
-    };
-    let same = update::preview_envelope(
-        core(),
-        "c1-00".into(),
-        EXPIRES.into(),
-        UpdateEffects {
-            from: version("0.7.0", 'a'),
-            to: version("0.7.1", 'b'),
-            kind: UpdateKind::Update,
-            ends_sessions: 0,
-            sessions: Vec::new(),
-        },
-        lane.to_major,
-        Vec::new(),
+    assert_eq!(
+        update::text(false, &installed, RESTART),
+        "SpaceTerm Core 0.8.0 is already installed beside 0.7.0. Restart to use it; restarting \
+         ends 2 Terminal Sessions: spaceterm --machine penguin restart\n"
     );
-    assert!(same.warnings.is_empty());
-}
-
-#[test]
-fn a_return_preview_on_the_machine_itself_ends_no_sessions() {
-    let envelope = update::preview_envelope(
-        local(),
-        format!("c1-{}", "ef".repeat(32)),
-        EXPIRES.into(),
-        UpdateEffects {
-            from: version("0.8.0", 'b'),
-            to: version("0.7.0", 'a'),
-            kind: UpdateKind::Return,
-            ends_sessions: 0,
-            sessions: Vec::new(),
-        },
-        None,
-        Vec::new(),
+    let mut idle = installed.clone();
+    idle.sessions = 0;
+    assert_eq!(
+        update::text(true, &idle, RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. SpaceTerm Core restarts into it by itself \
+         while no Terminal Session is open.\n"
     );
-    assert_exit(&envelope, 3);
-    assert_golden("update_return_preview", &envelope);
-}
-
-#[test]
-fn a_settled_update_reports_its_receipt_and_version() {
-    let settled = lifecycle::settle(
-        ServiceAction::Update,
-        Outcome::Settled {
-            receipt: receipt(
-                LaneAction::Update {
-                    installation: "b".repeat(64),
-                },
-                LaneOperationState::Done,
-                None,
-                NEW_BOOT,
-            ),
-            boot: BOOT.into(),
-        },
+    let mut breaking = idle.clone();
+    breaking.pending = Some(pending(true, false));
+    assert_eq!(
+        update::text(true, &breaking, RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Restart to use it: spaceterm --machine \
+         penguin restart\n",
+        "a breaking version never restarts by itself"
     );
-    let envelope = update::operation_envelope(
-        core(),
-        settled.receipt,
-        settled.failure,
-        Some(version("0.8.0", 'b')),
-        Vec::new(),
-    );
+    let current = facts(None, UpdateCheck::Succeeded { at: SUCCEEDED });
+    let envelope = update::envelope(local(), false, &current, Vec::new());
     assert_exit(&envelope, 0);
-    assert_golden("update_done", &envelope);
-    let unresolved = lifecycle::settle(
-        ServiceAction::Update,
-        Outcome::Settled {
-            receipt: receipt(
-                LaneAction::Update {
-                    installation: "b".repeat(64),
-                },
-                LaneOperationState::Unresolved,
-                None,
-                NEW_BOOT,
-            ),
-            boot: BOOT.into(),
-        },
+    assert_golden("update_current", &envelope);
+    assert_eq!(
+        update::text(false, &current, RESTART),
+        "SpaceTerm Core 0.7.0 is up to date.\n"
     );
-    let envelope = update::operation_envelope(
-        core(),
-        unresolved.receipt,
-        unresolved.failure,
-        Some(version("0.8.0", 'b')),
-        Vec::new(),
+}
+
+#[test]
+fn update_installs_directly_only_while_the_local_core_is_not_running() {
+    for (code, offline) in [
+        (Code::NotRunning, true),
+        (Code::Unreachable, true),
+        (Code::ServiceBusy, false),
+        (Code::IncompatibleProtocol, false),
+        (Code::AuthenticationRefused, false),
+        (Code::ProtocolError, false),
+    ] {
+        assert_eq!(update::offline(&Failure::new(code)), offline, "{code:?}");
+    }
+}
+
+#[test]
+fn update_refusals_have_their_own_codes() {
+    for (code, exit) in [
+        (Code::NotNewer, 4),
+        (Code::VersionSkipped, 4),
+        (Code::NoUpdateFeed, 5),
+        (Code::FeedUnreachable, 5),
+        (Code::ProxyUnreachable, 5),
+        (Code::SystemTooOld, 5),
+        (Code::DiskFull, 1),
+        (Code::DownloadFailed, 1),
+    ] {
+        assert_eq!(crate::contract::from_lane_code(code.as_str()).code, code);
+        assert_eq!(code.exit(), exit, "{code:?}");
+    }
+    let envelope = Envelope::error(
+        "update",
+        Some(core()),
+        Failure::new(Code::NoUpdateFeed),
+        crate::contract::Empty {},
     );
-    assert_exit(&envelope, 7);
-    assert_golden("update_unresolved", &envelope);
+    assert_golden("update_no_feed", &envelope);
 }
 
 #[test]
@@ -446,6 +603,10 @@ fn setup_reports_each_step() {
                     step: SetupStepName::AutomaticStart,
                     result: StepResult::Skipped,
                 },
+                SetupStep {
+                    step: SetupStepName::UpdateProxy,
+                    result: StepResult::Done,
+                },
             ],
             runtime: version("0.7.0", 'a'),
             network: SetupNetwork {
@@ -456,6 +617,7 @@ fn setup_reports_each_step() {
             automatic_start: true,
             launcher: Launcher::Linked,
             path_ok: true,
+            update_proxy: Some("http://proxy.example:3128".into()),
         },
     );
     assert_exit(&envelope, 0);
@@ -492,18 +654,18 @@ fn pair_without_a_terminal_needs_interaction() {
 #[test]
 fn receipts_keep_the_lane_state_and_code() {
     let receipt = lifecycle::receipt_of(&receipt(
-        LaneAction::Return,
+        LaneAction::Restart,
         LaneOperationState::Failed,
-        Some("return_unavailable"),
+        Some("startup_failed"),
         BOOT,
     ));
     assert_eq!(
         receipt,
         Receipt {
             operation: OPERATION.into(),
-            action: ServiceAction::Return,
+            action: ServiceAction::Restart,
             state: ReceiptState::Failed,
-            code: Some(Code::ReturnUnavailable),
+            code: Some(Code::StartupFailed),
             boot: BOOT.into(),
         }
     );

@@ -7,8 +7,8 @@
 //! | L2 | bulk replies, in frames of at most [`limits::BULK_CHUNK_BYTES`] |
 //!
 //! The I/O thread writes one frame per [`Outbox::next_frame`] call, so L0 interleaves between the
-//! frames of a large L1 or L2 message. Inventory and each channel's presentation are latest-state
-//! slots: publishing again replaces a state that is not yet written but keeps its place in L1.
+//! frames of a large L1 or L2 message. Inventory, update facts and each channel's presentation
+//! are latest-state slots: publishing again replaces a state that is not yet written but keeps its place in L1.
 //! Each channel has one frame of credit, returned by its acknowledgement, and one semantic credit
 //! of its own ([`semantics`]).
 //!
@@ -24,6 +24,7 @@ use crate::protocol::{
     AccessibilityMessage, Channel, CoreMessage, Fatal, Frame, InventoryRevision, PaneEvent,
     PaneMessage, Ping, Pong, Refusal, Reply, ReplyBody, RequestId, limits,
 };
+use crate::update::facts::UpdateFacts;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -122,6 +123,8 @@ struct State {
     l2_rest_reply: Option<RequestId>,
     inventory: Option<Frames>,
     inventory_queued: bool,
+    update_facts: Option<Frames>,
+    update_facts_queued: bool,
     channels: BTreeMap<Channel, Slot>,
     /// Channels closed since the connection last asked, for its serial bookkeeping.
     closed: Vec<Channel>,
@@ -136,6 +139,7 @@ enum Entry {
     /// A whole message, and the request its last frame answers.
     Message(Frames, Option<RequestId>),
     Inventory,
+    UpdateFacts,
     Frame(Channel),
     /// The channel's next semantic message, encoded when taken.
     Semantics(Channel),
@@ -270,6 +274,20 @@ impl Outbox {
                 state.inventory_queued = true;
             }
             state.inventory = Some(frames);
+            Ok(())
+        })
+    }
+
+    /// Replaces any update facts not yet written, keeping their place in L1.
+    pub fn update_facts(&self, facts: UpdateFacts) -> Result<(), OutboxError> {
+        let frames = encode(&CoreMessage::UpdateFacts(Box::new(facts)))?;
+        self.with(|state| {
+            state.open()?;
+            if !state.update_facts_queued {
+                state.push_l1(Entry::UpdateFacts)?;
+                state.update_facts_queued = true;
+            }
+            state.update_facts = Some(frames);
             Ok(())
         })
     }
@@ -696,7 +714,7 @@ impl State {
         self.open()?;
         let bytes = match &entry {
             Entry::Message(frames, _) => size(frames),
-            Entry::Inventory | Entry::Frame(_) | Entry::Semantics(_) => 0,
+            Entry::Inventory | Entry::UpdateFacts | Entry::Frame(_) | Entry::Semantics(_) => 0,
         };
         if self.l1.len() >= limits::MAX_L1_MESSAGES || self.l1_bytes + bytes > limits::MAX_L1_BYTES
         {
@@ -738,6 +756,10 @@ impl State {
                 Entry::Inventory => {
                     self.inventory_queued = false;
                     (self.inventory.take().unwrap_or_default(), None)
+                }
+                Entry::UpdateFacts => {
+                    self.update_facts_queued = false;
+                    (self.update_facts.take().unwrap_or_default(), None)
                 }
                 Entry::Frame(channel) => return Some(self.present(channel)),
                 Entry::Semantics(channel) => {

@@ -92,54 +92,25 @@ impl LaneHost for Host {
     }
 }
 
-struct NoFeed;
-impl Source for NoFeed {
-    fn latest(&self) -> Result<Option<feed::Signed>, CoreError> {
-        Ok(None)
-    }
-    fn download(&self, _: &feed::Feed, _: &mut dyn Write) -> Result<(), CoreError> {
-        panic!("no feed to download from")
-    }
-}
-
 /// A lane over the server state at `paths`, whose service manager reports a running server and
 /// whose helper launches do nothing.
 pub(crate) fn serving(paths: &crate::host::Paths) -> Arc<LaneCore> {
     serving_with(paths, Arc::new(Host::default()))
 }
 
-/// [`serving`] with its own view of the running server.
+/// [`serving`] with its own view of the running server. It fetches no feed, as Preflight and
+/// Development do.
 pub(crate) fn serving_with(paths: &crate::host::Paths, host: Arc<dyn LaneHost>) -> Arc<LaneCore> {
-    serving_with_feed(paths, host, Arc::new(NoFeed))
-}
-
-/// [`serving_with`] whose release feed is `feed`.
-pub(crate) fn serving_with_feed(
-    paths: &crate::host::Paths,
-    host: Arc<dyn LaneHost>,
-    feed: Arc<dyn Source>,
-) -> Arc<LaneCore> {
+    let service = Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running));
     LaneCore::new(
-        Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
+        service.clone(),
+        Updates::open(service),
         host,
-        feed,
+        None,
         Box::new(|_| Ok(())),
         Arc::new(crate::permissions::Unsupported),
     )
     .unwrap()
-}
-
-/// A release feed that takes `0` to answer and then has no release, as a slow download holds
-/// the lane connection that asked for it.
-pub(crate) struct SlowFeed(pub Duration);
-impl Source for SlowFeed {
-    fn latest(&self) -> Result<Option<feed::Signed>, CoreError> {
-        std::thread::sleep(self.0);
-        Ok(None)
-    }
-    fn download(&self, _: &feed::Feed, _: &mut dyn Write) -> Result<(), CoreError> {
-        panic!("no feed to download from")
-    }
 }
 
 const ACTOR: Actor = Actor {
@@ -166,8 +137,6 @@ struct Lane {
     launches: Arc<AtomicUsize>,
     /// Plays the helper when an operation launches.
     hook: Hook,
-    archive: Vec<u8>,
-    signature: Vec<u8>,
 }
 
 #[cfg_attr(
@@ -179,8 +148,9 @@ impl Lane {
     fn restarted(&self) -> Arc<LaneCore> {
         LaneCore::new(
             self.service.clone(),
+            Updates::open(self.service.clone()),
             self.host.clone(),
-            Arc::new(NoFeed),
+            None,
             Box::new(|_| Ok(())),
             Arc::new(crate::permissions::Unsupported),
         )
@@ -220,8 +190,9 @@ fn with_lane(run: impl FnOnce(Lane)) {
             let helper = hook.clone();
             let lane = LaneCore::new(
                 service.clone(),
+                Updates::open(service.clone()),
                 host.clone(),
-                Arc::new(NoFeed),
+                None,
                 Box::new(move |op| {
                     counted.fetch_add(1, Ordering::SeqCst);
                     if let Some(hook) = helper.lock().unwrap().as_ref() {
@@ -232,19 +203,12 @@ fn with_lane(run: impl FnOnce(Lane)) {
                 Arc::new(crate::permissions::Unsupported),
             )
             .unwrap();
-            // A second package of the same build: a different gzip timestamp, re-signed.
-            let mut bytes = std::fs::read(archive).unwrap();
-            bytes[4] = 1;
-            let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap();
-            let signature = key.sign(&bytes).as_ref().to_vec();
             run(Lane {
                 lane,
                 service,
                 host,
                 launches,
                 hook,
-                archive: bytes,
-                signature,
             });
         },
     );
@@ -311,9 +275,7 @@ fn a_paired_caller_cannot_stop_the_core() {
 #[test]
 fn lane_messages_keep_their_frozen_json_shape() {
     let request = LaneRequest::Execute {
-        action: LaneAction::Update {
-            installation: "abc".into(),
-        },
+        action: LaneAction::Restart,
         token: "c1-00".into(),
         operation: "op".into(),
     };
@@ -321,7 +283,7 @@ fn lane_messages_keep_their_frozen_json_shape() {
         serde_json::to_value(&request).unwrap(),
         serde_json::json!({
             "request": "execute",
-            "action": { "action": "update", "installation": "abc" },
+            "action": { "action": "restart" },
             "token": "c1-00",
             "operation": "op",
         })
@@ -348,10 +310,12 @@ fn serving_permissions(
     paths: &crate::host::Paths,
     permissions: Arc<dyn crate::permissions::SystemPermissions>,
 ) -> Arc<LaneCore> {
+    let service = Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running));
     LaneCore::new(
-        Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
+        service.clone(),
+        Updates::open(service),
         Arc::new(Host::default()),
-        Arc::new(NoFeed),
+        None,
         Box::new(|_| Ok(())),
         permissions,
     )
@@ -654,8 +618,7 @@ fn status_reports_the_approved_runtime_and_live_sessions() {
         assert_eq!(status.runtime.commit, COMMIT);
         assert_eq!(status.sessions, 1);
         assert_eq!(status.activation, LaneActivation::Settled);
-        assert_eq!(status.lane_major, LANE_MAJOR);
-        assert!(status.staged.is_empty());
+        assert_eq!(status.lane_major, crate::protocol::version::SERVICE.major);
         assert_eq!(
             status.terminal_counters,
             Some(crate::diagnostics::TerminalCounterSnapshot {
@@ -701,19 +664,6 @@ fn a_confirmed_stop_is_admitted_once_behind_the_fence() {
             code(execute(&lane.lane, LaneAction::Restart, &token, 2)),
             "service_busy"
         );
-    });
-}
-
-#[test]
-fn a_running_core_without_a_failed_activation_offers_no_return() {
-    with_lane(|lane| {
-        let reply = lane.lane.answer(
-            LaneRequest::Preview {
-                action: LaneAction::Return,
-            },
-            &ACTOR,
-        );
-        assert_eq!(code(reply), "return_unavailable");
     });
 }
 
@@ -932,76 +882,207 @@ fn a_full_ledger_refuses_execute_with_capacity() {
 }
 
 #[test]
-fn an_uploaded_candidate_is_staged_and_previewed_as_an_update() {
+fn a_core_without_a_feed_refuses_to_check_or_install_from_one() {
     with_lane(|lane| {
-        let sha256: String = ring::digest::digest(&ring::digest::SHA256, &lane.archive)
-            .as_ref()
-            .iter()
-            .map(|v| format!("{v:02x}"))
-            .collect();
-        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-        let LaneReply::UploadProgress {
-            upload,
-            next_offset,
-        } = lane.lane.answer(
-            LaneRequest::StageUpload {
-                length: lane.archive.len() as u64,
-                sha256: sha256.clone(),
-                signature: encode(&lane.signature),
-            },
-            &ACTOR,
+        assert_eq!(
+            code(lane.lane.answer(LaneRequest::Check, &ACTOR)),
+            "no_update_feed"
+        );
+        assert_eq!(
+            code(lane.lane.answer(LaneRequest::StageFetch, &ACTOR)),
+            "no_update_feed"
+        );
+    });
+}
+
+/// A release host that cannot be reached.
+struct Unreachable;
+impl crate::update::fetch::FeedSource for Unreachable {
+    fn feed(
+        &self,
+        _: crate::update::feed::FeedTarget,
+    ) -> Result<crate::update::fetch::Signed, crate::update::fetch::FetchError> {
+        Err(crate::update::fetch::FetchError::Network)
+    }
+    fn archive(
+        &self,
+        _: crate::update::feed::FeedTarget,
+        _: &crate::update::facts::Version,
+        _: u64,
+        _: &mut dyn std::io::Write,
+    ) -> Result<(), crate::update::fetch::FetchError> {
+        panic!("no feed to download from")
+    }
+}
+
+#[test]
+fn a_feed_check_that_fails_answers_its_code_and_ends_its_operation() {
+    use crate::update::facts::UpdateCheck;
+    with_lane(|lane| {
+        let served = LaneCore::new(
+            lane.service.clone(),
+            Updates::open(lane.service.clone()),
+            lane.host.clone(),
+            Some(FeedCheck::fixture(
+                lane.service.paths.data.clone(),
+                None,
+                Arc::new(Unreachable),
+            )),
+            Box::new(|_| Ok(())),
+            Arc::new(crate::permissions::Unsupported),
         )
-        else {
-            panic!("expected an upload");
+        .unwrap();
+        assert_eq!(
+            code(served.answer(LaneRequest::Check, &ACTOR)),
+            "feed_unreachable"
+        );
+        assert_eq!(
+            code(served.answer(LaneRequest::StageFetch, &ACTOR)),
+            "feed_unreachable"
+        );
+        let LaneReply::Facts { boot, facts } = served.answer(LaneRequest::Facts {}, &ACTOR) else {
+            panic!("expected facts");
         };
-        assert_eq!(next_offset, 0);
-        let chunk = |offset: usize, end: usize| {
-            lane.lane.answer(
-                LaneRequest::UploadChunk {
-                    upload: upload.clone(),
-                    offset: offset as u64,
-                    data: encode(&lane.archive[offset..end]),
+        assert_eq!(boot, hex(&served.boot));
+        // The fixture is a Development Core, whose facts always report its check as off.
+        assert_eq!(facts.check, UpdateCheck::Disabled);
+        assert_eq!(facts.operation, None, "the check ended");
+        let LaneReply::Status(status) = served.answer(LaneRequest::Status, &ACTOR) else {
+            panic!("expected a status");
+        };
+        assert_eq!(
+            status.update.map(|facts| facts.running),
+            Some(facts.running)
+        );
+    });
+}
+
+#[test]
+fn a_push_of_the_running_version_is_refused_before_any_byte() {
+    with_lane(|lane| {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(
+            code(lane.lane.answer(
+                LaneRequest::StageUpload {
+                    version: VERSION.into(),
+                    length: 10,
+                    sha256: "ab".repeat(32),
+                    signature: encode(&[3; 64]),
                 },
                 &ACTOR,
-            )
-        };
-        let half = lane.archive.len() / 2;
-        assert_eq!(
-            chunk(0, half),
-            LaneReply::UploadProgress {
-                upload: upload.clone(),
-                next_offset: half as u64,
-            }
+            )),
+            "not_newer"
         );
-        // A chunk out of order is refused without changing the upload.
-        assert_eq!(code(chunk(0, half)), "protocol_error");
-        let LaneReply::Staged {
-            installation,
-            version,
-            ..
-        } = chunk(half, lane.archive.len())
-        else {
-            panic!("expected a staged candidate");
-        };
-        assert_eq!(installation, sha256);
-        assert_eq!(version, VERSION);
-        let LaneReply::Check(check) = lane.lane.answer(LaneRequest::Check, &ACTOR) else {
-            panic!("expected a check");
-        };
-        assert_eq!(check.latest, None);
-        assert_eq!(check.staged.len(), 1);
-        lane.host.sessions.lock().unwrap().push([3; 32]);
-        let (token, effects) = preview(
-            &lane.lane,
-            LaneAction::Update {
-                installation: installation.clone(),
+    });
+}
+
+#[test]
+fn a_malformed_push_is_refused_before_anything_is_received() {
+    with_lane(|lane| {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let sha256 = "ab".repeat(32);
+        for request in [
+            LaneRequest::StageUpload {
+                version: "not a version".into(),
+                length: 10,
+                sha256: sha256.clone(),
+                signature: encode(&[3; 64]),
             },
+            LaneRequest::StageUpload {
+                version: VERSION.into(),
+                length: 10,
+                sha256: sha256.clone(),
+                signature: "not base64".into(),
+            },
+            LaneRequest::StageUpload {
+                version: VERSION.into(),
+                length: 0,
+                sha256: sha256.clone(),
+                signature: encode(&[3; 64]),
+            },
+            LaneRequest::StageUpload {
+                version: VERSION.into(),
+                length: 10,
+                sha256: sha256.to_uppercase(),
+                signature: encode(&[3; 64]),
+            },
+            LaneRequest::StageUpload {
+                version: VERSION.into(),
+                length: 10,
+                sha256,
+                signature: encode(&[3; 63]),
+            },
+        ] {
+            assert_eq!(code(lane.lane.answer(request, &ACTOR)), "protocol_error");
+        }
+        assert_eq!(
+            code(lane.lane.answer(
+                LaneRequest::UploadChunk {
+                    upload: "00".repeat(16),
+                    offset: 0,
+                    data: encode(b"abc"),
+                },
+                &ACTOR,
+            )),
+            "changed",
+            "a chunk of no push is refused"
         );
-        assert_eq!(effects.kind, Some(LaneUpdateKind::Update));
-        assert_eq!(effects.to.as_ref().unwrap().sha256, installation);
-        assert_eq!(effects.to_major, Some(crate::protocol::MAJOR));
+        assert_eq!(
+            code(lane.lane.answer(
+                LaneRequest::UploadChunk {
+                    upload: "00".repeat(16),
+                    offset: 0,
+                    data: encode(&vec![0; MAX_CHUNK + 1]),
+                },
+                &ACTOR,
+            )),
+            "protocol_error"
+        );
+    });
+}
+
+/// Installs a signed Release `version` as the Pending Version of `lane`'s Core.
+fn install_pending(lane: &Lane, version: &str) -> String {
+    let source = lane.service.paths.data.join("../pending-source");
+    let (archive, signature) = crate::service::runtime::test_support::with_build(
+        version,
+        crate::update::facts::Protocols::CURRENT,
+        || {
+            with_artifact(&source, &lane.service.identity, |archive, signature| {
+                (archive.to_owned(), signature.to_owned())
+            })
+        },
+    );
+    let sha256 =
+        hex(
+            ring::digest::digest(&ring::digest::SHA256, &std::fs::read(&archive).unwrap()).as_ref(),
+        );
+    runtime::updates::Updates::open(lane.service.clone())
+        .unwrap()
+        .install(runtime::updates::Archive {
+            archive: &archive,
+            signature: &signature,
+            sha256: &sha256,
+            source: runtime::updates::Source::Local,
+        })
+        .unwrap();
+    sha256
+}
+
+#[test]
+fn a_restart_moves_into_the_pending_version_when_one_waits() {
+    with_lane(|lane| {
+        let (_, effects) = preview(&lane.lane, LaneAction::Restart);
+        assert_eq!(effects.to, None);
+        let sha256 = install_pending(&lane, "1.0.0");
+        lane.host.sessions.lock().unwrap().push([3; 32]);
+        let (token, effects) = preview(&lane.lane, LaneAction::Restart);
+        assert_eq!(
+            effects.to.as_ref().map(|to| to.version.as_str()),
+            Some("1.0.0")
+        );
         assert_eq!(effects.ends_sessions, 1);
-        let reply = execute(&lane.lane, LaneAction::Update { installation }, &token, 1);
+        let reply = execute(&lane.lane, LaneAction::Restart, &token, 1);
         assert!(matches!(reply, LaneReply::Accepted { .. }), "{reply:?}");
         let record = lane
             .lane
@@ -1010,7 +1091,39 @@ fn an_uploaded_candidate_is_staged_and_previewed_as_an_update() {
             .resolve(&OperationId([1; 16]))
             .unwrap()
             .unwrap();
-        assert_eq!(hex(&record.candidate.unwrap()), sha256);
+        assert_eq!(record.action, Action::Update);
+        assert_eq!(record.candidate.map(|v| hex(&v)), Some(sha256));
+    });
+}
+
+#[test]
+fn a_restart_the_core_decides_on_waits_for_zero_sessions_and_leaves_no_record() {
+    use runtime::updates::{RestartRefusal, Restarter};
+    with_lane(|lane| {
+        lane.host.sessions.lock().unwrap().push([3; 32]);
+        assert_eq!(
+            Arc::clone(&lane.lane).restart(None, true),
+            Err(RestartRefusal::SessionsOpen)
+        );
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+        assert!(!lane.host.fenced.load(Ordering::SeqCst));
+        lane.host.sessions.lock().unwrap().clear();
+        assert_eq!(Arc::clone(&lane.lane).restart(None, true), Ok(()));
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        assert!(lane.host.fenced.load(Ordering::SeqCst));
+        let records = lane.lane.ledger().unwrap().records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            (records[0].actor, records[0].action),
+            (Actor::CORE, Action::Restart)
+        );
+        lane.lane
+            .ledger()
+            .unwrap()
+            .mark(&records[0].id, State::Done)
+            .unwrap();
+        assert!(lane.lane.settled().unwrap());
+        assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
     });
 }
 
@@ -1047,16 +1160,20 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
             (major, reply)
         });
         // Admission hands the lane connection to the caller with its actor.
-        let admitted =
-            crate::protocol::admit_core(&mut core, &lane.lane.core, &lane.lane.service.identity)
-                .unwrap();
+        let admitted = crate::protocol::admit_core(
+            &mut core,
+            &lane.lane.core,
+            &lane.lane.service.identity,
+            &crate::protocol::CoreVersions::for_tests(),
+        )
+        .unwrap();
         let crate::protocol::Admission::Service(actor) = admitted else {
             panic!("expected a service-lane connection");
         };
-        assert_eq!(actor.client, derived);
+        assert_eq!(actor.actor.client, derived);
         lane.lane.serve(&mut core, actor, None, &|| Ok(())).unwrap();
         let (major, reply) = peer.join().unwrap();
-        assert_eq!(major, crate::protocol::MAJOR);
+        assert_eq!(major.selected, crate::protocol::version::SERVICE);
         assert_eq!(code(reply), "not_found");
         // The admitted actor is the agent's own identity, so its tokens are its own.
         let (token, _) = preview(&lane.lane, LaneAction::Stop);
@@ -1119,7 +1236,9 @@ fn a_stopping_machine_closes_a_polling_lane_connection() {
             client.receive(MAX_FRAME, deadline).is_err()
         });
         let started = Instant::now();
-        lane.lane.serve(&mut core, ACTOR, None, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut core, ACTOR.into(), None, &|| Ok(()))
+            .unwrap();
         drop(core);
         assert!(peer.join().unwrap(), "the client saw the connection close");
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -1148,7 +1267,9 @@ fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
             }
             replies
         });
-        lane.lane.serve(&mut core, ACTOR, None, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut core, ACTOR.into(), None, &|| Ok(()))
+            .unwrap();
         let mut replies = peer.join().unwrap().into_iter();
         assert_eq!(code(replies.next().unwrap()), "protocol_error");
         assert!(matches!(replies.next().unwrap(), LaneReply::Status(_)));
@@ -1181,7 +1302,7 @@ mod flow {
         }
     }
     impl Connector for Switch {
-        fn connect(&self, _: Instant) -> Result<Box<dyn Preamble + Send>, CoreError> {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
             let lane = self
                 .lane
                 .lock()
@@ -1196,10 +1317,10 @@ mod flow {
             // The fixture's signing trust is per thread, so the serving thread holds it too.
             std::thread::spawn(move || {
                 crate::service::runtime::test_support::with_fixture_trust(|| {
-                    lane.serve(&mut core, LOCAL, None, &|| Ok(()))
+                    lane.serve(&mut core, LOCAL.into(), None, &|| Ok(()))
                 })
             });
-            Ok(Box::new(client))
+            Ok((Box::new(client), crate::protocol::version::SERVICE))
         }
     }
 
@@ -1276,9 +1397,10 @@ mod flow {
                     drop(helper);
                     // The helper ends before the new server starts, so start-up settles it.
                     let new = LaneCore::new(
-                        service,
+                        service.clone(),
+                        Updates::open(service.clone()),
                         host,
-                        Arc::new(NoFeed),
+                        None,
                         Box::new(|_| Ok(())),
                         Arc::new(crate::permissions::Unsupported),
                     )
@@ -1413,7 +1535,7 @@ mod flow {
         lose: Arc<AtomicBool>,
     }
     impl Connector for Lossy {
-        fn connect(&self, _: Instant) -> Result<Box<dyn Preamble + Send>, CoreError> {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
             let lane = self
                 .lane
                 .lock()
@@ -1438,7 +1560,7 @@ mod flow {
                     let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
                 }
             });
-            Ok(Box::new(client))
+            Ok((Box::new(client), crate::protocol::version::SERVICE))
         }
     }
 
@@ -1538,7 +1660,7 @@ mod flow {
         stalled: Arc<AtomicBool>,
     }
     impl Connector for Stalling {
-        fn connect(&self, _: Instant) -> Result<Box<dyn Preamble + Send>, CoreError> {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
             let lane = self.lane.lock().unwrap().clone().unwrap();
             let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
             let stalled = self.stalled.clone();
@@ -1558,7 +1680,7 @@ mod flow {
                     let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
                 }
             });
-            Ok(Box::new(client))
+            Ok((Box::new(client), crate::protocol::version::SERVICE))
         }
     }
 
@@ -1638,98 +1760,6 @@ mod flow {
         )
     }
 
-    /// A signed release feed naming the fixture's second package of the same build.
-    struct Release {
-        document: Vec<u8>,
-        signature: Vec<u8>,
-        archive: Vec<u8>,
-    }
-
-    impl Release {
-        fn of(lane: &Lane) -> Self {
-            #[cfg(target_os = "macos")]
-            const PLATFORM: &str = "darwin-arm64";
-            #[cfg(target_os = "linux")]
-            const PLATFORM: &str = "linux-x86_64";
-            let sha256 = hex(ring::digest::digest(&ring::digest::SHA256, &lane.archive).as_ref());
-            let document = serde_json::json!({
-                "schema": 1,
-                "identity": lane.service.identity,
-                "target": target(),
-                "version": VERSION,
-                "published_at": 1,
-                "archive": {
-                    "name": format!("spaceterm-{VERSION}-{PLATFORM}.tar.gz"),
-                    "size": lane.archive.len(),
-                    "sha256": sha256,
-                    "signature": base64::engine::general_purpose::STANDARD.encode(&lane.signature),
-                },
-            })
-            .to_string()
-            .into_bytes();
-            let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap();
-            let signature = key.sign(&document).as_ref().to_vec();
-            Self {
-                document,
-                signature,
-                archive: lane.archive.clone(),
-            }
-        }
-    }
-
-    impl Source for Release {
-        fn latest(&self) -> Result<Option<feed::Signed>, CoreError> {
-            Ok(Some((self.document.clone(), self.signature.clone())))
-        }
-        fn download(&self, _: &feed::Feed, into: &mut dyn Write) -> Result<(), CoreError> {
-            into.write_all(&self.archive)
-                .map_err(|_| CoreError::StorageUnavailable)
-        }
-    }
-
-    /// The desktop's and the CLI's Update: no return applies, so the server stages its newest
-    /// signed release and previews exactly that candidate.
-    #[test]
-    fn planning_an_update_stages_the_machines_signed_release_and_previews_it() {
-        use crate::service::lane::admin::{self, UpdatePlan};
-        with_lane(|lane| {
-            let served = LaneCore::new(
-                lane.service.clone(),
-                lane.host.clone(),
-                Arc::new(Release::of(&lane)),
-                Box::new(|_| Ok(())),
-                Arc::new(crate::permissions::Unsupported),
-            )
-            .unwrap();
-            let switch = Arc::new(Switch::default());
-            switch.up(served);
-            let pending = pending_record(&lane);
-            let (mut session, settled) =
-                admin::open(&client::Lane::over(switch.clone()), &pending).unwrap();
-            assert!(settled.is_empty());
-            let check = admin::check(&mut session).unwrap();
-            let latest = check.latest.clone().expect("the feed names a release");
-            assert_ne!(latest.sha256, check.approved.sha256);
-            assert!(check.staged.is_empty(), "the check stages nothing");
-
-            let plan = admin::plan_update(&mut session).unwrap();
-            let UpdatePlan::Update { candidate, preview } = plan else {
-                panic!("expected an update, got {plan:?}");
-            };
-            assert_eq!(candidate.sha256, latest.sha256);
-            assert_eq!(candidate.version, VERSION);
-            assert_eq!(
-                preview.action,
-                LaneAction::Update {
-                    installation: latest.sha256.clone(),
-                }
-            );
-            assert_eq!(preview.effects.kind, Some(LaneUpdateKind::Update));
-            assert_eq!(preview.effects.to.as_ref().unwrap().sha256, latest.sha256);
-            assert!(preview.token.starts_with("c1-"));
-        });
-    }
-
     /// A Restart whose receipt never arrives stays in the route's pending record, and the next
     /// connection after the server returns settles and acknowledges it.
     #[test]
@@ -1786,4 +1816,228 @@ mod flow {
             assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
         });
     }
+
+    /// A service version below every request: each request is 1.0 today, so only a selected
+    /// version below 1.0 lacks one.
+    const OLDER: crate::protocol::version::ProtocolVersion =
+        crate::protocol::version::ProtocolVersion { major: 0, minor: 9 };
+
+    #[test]
+    fn the_lane_answers_a_request_its_selected_version_lacks_as_unsupported() {
+        with_lane(|lane| {
+            let (mut client, mut core) = UnixStream::pair().unwrap();
+            let peer = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut replies = Vec::new();
+                for request in [LaneRequest::Status, LaneRequest::Facts {}] {
+                    client
+                        .send(&serde_json::to_vec(&request).unwrap(), deadline)
+                        .unwrap();
+                    replies.push(
+                        serde_json::from_slice::<LaneReply>(
+                            &client.receive(MAX_FRAME, deadline).unwrap(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                replies
+            });
+            let admitted = crate::protocol::AdmittedLane {
+                actor: LOCAL,
+                selected: OLDER,
+            };
+            let _ = lane.lane.serve(&mut core, admitted, None, &|| Ok(()));
+            let unsupported = LaneReply::Error {
+                code: "unsupported".into(),
+            };
+            assert_eq!(peer.join().unwrap(), [unsupported.clone(), unsupported]);
+        });
+    }
+
+    #[test]
+    fn a_session_sends_nothing_its_selected_version_lacks() {
+        /// Admits at [`OLDER`] and keeps the Core's end of the connection.
+        #[derive(Default)]
+        struct Older(Mutex<Option<UnixStream>>);
+        impl Connector for Older {
+            fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
+                let (client, core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+                *self.0.lock().unwrap() = Some(core);
+                Ok((Box::new(client), OLDER))
+            }
+        }
+        let older = Older::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut session = Session::open(&older, deadline).unwrap();
+        assert_eq!(session.selected(), OLDER);
+        assert_eq!(
+            session.request(&LaneRequest::Status, deadline),
+            Err(CoreError::Unsupported)
+        );
+        drop(session);
+        let mut core = older.0.lock().unwrap().take().unwrap();
+        let mut sent = Vec::new();
+        std::io::Read::read_to_end(&mut core, &mut sent).unwrap();
+        assert!(sent.is_empty(), "the Core received {} bytes", sent.len());
+    }
+}
+
+#[test]
+fn facts_messages_keep_their_json_shape() {
+    use crate::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+    assert_eq!(
+        serde_json::from_str::<LaneRequest>(r#"{"request":"facts"}"#).unwrap(),
+        LaneRequest::Facts {}
+    );
+    assert_eq!(
+        serde_json::to_value(LaneRequest::Facts {}).unwrap(),
+        serde_json::json!({ "request": "facts" })
+    );
+    assert_eq!(
+        serde_json::from_str::<LaneRequest>(r#"{"request":"wait_facts","boot":"b1","revision":4}"#)
+            .unwrap(),
+        LaneRequest::WaitFacts {
+            boot: "b1".into(),
+            revision: 4
+        }
+    );
+    let reply = LaneReply::Facts {
+        boot: "b1".into(),
+        facts: Box::new(UpdateFacts {
+            revision: 4,
+            platform: Platform::MacosArm64,
+            running: Version::parse("0.9.0").unwrap(),
+            pending: None,
+            sessions: 2,
+            operation: None,
+            check: UpdateCheck::Succeeded { at: 10 },
+            skipped: None,
+            last_failure: None,
+        }),
+    };
+    let json = serde_json::json!({
+        "reply": "facts",
+        "boot": "b1",
+        "facts": {
+            "revision": 4,
+            "platform": "macos-arm64",
+            "running": "0.9.0",
+            "pending": null,
+            "sessions": 2,
+            "operation": null,
+            "check": { "succeeded": { "at": 10 } },
+            "skipped": null,
+            "last_failure": null,
+        },
+    });
+    assert_eq!(serde_json::to_value(&reply).unwrap(), json);
+    assert_eq!(
+        serde_json::from_value::<LaneReply>(json.clone()).unwrap(),
+        reply
+    );
+
+    assert!(serde_json::from_str::<LaneRequest>(r#"{"request":"facts","since":1}"#).is_err());
+    assert!(
+        serde_json::from_str::<LaneRequest>(
+            r#"{"request":"wait_facts","boot":"b1","revision":4,"since":1}"#
+        )
+        .is_err()
+    );
+    let mut envelope = json.clone();
+    envelope["staged"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<LaneReply>(envelope).is_err());
+    let mut nested = json;
+    nested["facts"]["staged"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<LaneReply>(nested).is_err());
+}
+
+#[test]
+fn no_client_can_activate_an_installation_it_names() {
+    // A Restart reaches only the Pending Version, so a skipped or previous version cannot run.
+    assert!(
+        serde_json::from_str::<LaneRequest>(
+            r#"{"request":"execute","action":{"action":"update","installation":"abc"},"token":"c1-00","operation":"op"}"#
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn every_client_sees_a_confirmed_restart_or_stop_in_the_update_facts() {
+    use crate::update::facts::Operation;
+    use crate::update::source::FactsSource;
+    for (action, op) in [(LaneAction::Restart, 1), (LaneAction::Stop, 2)] {
+        with_lane(|lane| {
+            let updates = lane.lane.updates().unwrap().clone();
+            let (token, _) = preview(&lane.lane, action.clone());
+            let reply = execute(&lane.lane, action.clone(), &token, op);
+            assert!(matches!(reply, LaneReply::Accepted { .. }), "{reply:?}");
+            let expected = match action {
+                LaneAction::Stop => Operation::Stopping,
+                _ => Operation::Restarting {
+                    to: updates.facts().running,
+                },
+            };
+            assert_eq!(updates.facts().operation, Some(expected));
+        });
+    }
+}
+
+#[test]
+fn a_confirmed_restart_waits_for_an_install_in_progress() {
+    with_lane(|lane| {
+        let updates = lane.lane.updates().unwrap().clone();
+        let installing = updates
+            .begin_install(crate::update::facts::Version::parse("2.0.0").unwrap(), 10)
+            .unwrap();
+        let (token, _) = preview(&lane.lane, LaneAction::Restart);
+        assert_eq!(
+            code(execute(&lane.lane, LaneAction::Restart, &token, 1)),
+            "service_busy"
+        );
+        assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+        drop(installing);
+    });
+}
+
+#[test]
+fn a_restart_whose_helper_fails_before_stopping_the_server_ends_and_may_try_again() {
+    use crate::update::source::FactsSource;
+    with_lane(|lane| {
+        let updates = lane.lane.updates().unwrap().clone();
+        install_pending(&lane, "1.0.0");
+        let restarter: Arc<dyn runtime::updates::Restarter> = lane.lane.clone();
+        updates
+            .run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
+                None
+            })
+            .unwrap();
+        updates.set_sessions(0);
+        assert!(
+            updates.facts().operation.is_some(),
+            "the silent restart began"
+        );
+        let records = lane.lane.ledger().unwrap().records().unwrap();
+        // The helper fails before it stops this server.
+        lane.lane
+            .ledger()
+            .unwrap()
+            .mark(
+                &records[0].id,
+                State::Failed {
+                    code: "service_busy".into(),
+                },
+            )
+            .unwrap();
+        assert!(lane.lane.release_if_settled());
+        assert_eq!(updates.facts().operation, None);
+        let data = Directory::open(&lane.service.paths.data, false).unwrap();
+        let record: serde_json::Value = data.read_json("updates.json").unwrap().unwrap();
+        assert_eq!(
+            record["silent"],
+            serde_json::Value::Null,
+            "the next attempt may run"
+        );
+    });
 }

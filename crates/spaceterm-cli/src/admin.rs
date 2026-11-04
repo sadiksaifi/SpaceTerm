@@ -20,6 +20,8 @@ pub mod update;
 
 #[cfg(test)]
 mod golden_tests;
+#[cfg(test)]
+mod notice_tests;
 
 use crate::args::{CoreCommand, Global};
 use crate::contract::{
@@ -40,6 +42,8 @@ pub struct Reply {
     envelope: Envelope<serde_json::Value>,
     /// Operational output for stdout in text mode. It may name machines, devices and paths.
     stdout: String,
+    /// The `notice:` line about a version that waits for a restart, for stderr after the result.
+    notice: Option<String>,
     broken_pipe: bool,
 }
 
@@ -48,6 +52,7 @@ impl Reply {
         Self {
             envelope: envelope.erased(),
             stdout,
+            notice: None,
             broken_pipe: false,
         }
     }
@@ -97,10 +102,21 @@ impl Reply {
         stdout: &mut dyn Write,
         stderr: &mut dyn Write,
     ) -> u8 {
+        self.write_to(mode, terminal(libc::STDERR_FILENO), stdout, stderr)
+    }
+
+    /// [`Self::write`], with whether stderr is a terminal given.
+    fn write_to(
+        &self,
+        mode: contract::Mode,
+        stderr_terminal: bool,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+    ) -> u8 {
         if self.broken_pipe {
             return contract::EXIT_BROKEN_PIPE;
         }
-        contract::render(
+        let exit = contract::render(
             &self.envelope,
             &self.stdout,
             "",
@@ -108,7 +124,9 @@ impl Reply {
             crate::interrupt::finish(self.envelope.exit()),
             stdout,
             stderr,
-        )
+        );
+        crate::notice::print(self.notice.as_deref(), exit, mode, stderr_terminal, stderr);
+        exit
     }
 }
 
@@ -119,12 +137,19 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
         identity,
         global,
         credentials: crate::connection::CliCredentials::new(identity),
+        facts: std::cell::RefCell::new(None),
     };
     let mut reply = match command {
         CoreCommand::Setup {
             network,
             automatic_start,
-        } => setup::run(&context, network.as_ref(), *automatic_start),
+            update_proxy,
+        } => setup::run(
+            &context,
+            network.as_ref(),
+            *automatic_start,
+            update_proxy.as_ref(),
+        ),
         CoreCommand::Pair { address } => pair::run(&context, address.as_deref()),
         CoreCommand::Status => status::run(&context),
         CoreCommand::Start => lifecycle::start(&context),
@@ -136,17 +161,9 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
             lifecycle::Kind::Restart,
             confirm.confirm.as_deref(),
         ),
-        CoreCommand::Update {
-            check,
-            archive,
-            signature,
-            confirm,
-        } => update::run(
-            &context,
-            *check,
-            archive.as_deref().zip(signature.as_deref()),
-            confirm.as_deref(),
-        ),
+        CoreCommand::Update { archive, signature } => {
+            update::run(&context, archive.as_deref().zip(signature.as_deref()))
+        }
         CoreCommand::Network { access, confirm } => {
             network::run(&context, access.as_ref(), confirm.as_deref())
         }
@@ -160,7 +177,27 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
         CoreCommand::Uninstall(confirm) => uninstall::run(&context, confirm.confirm.as_deref()),
     };
     context.credentials.report(&mut reply.envelope);
+    reply.notice = notice(&context, command, &reply);
     reply
+}
+
+/// The notice about a version that waits for a restart on the Core this command reached.
+/// `status`, `update` and `restart` already report it.
+fn notice(context: &Context<'_>, command: &CoreCommand, reply: &Reply) -> Option<String> {
+    if matches!(
+        command,
+        CoreCommand::Status | CoreCommand::Update { .. } | CoreCommand::Restart(_)
+    ) {
+        return None;
+    }
+    let facts = context.facts.borrow_mut().take()?;
+    let machine = reply.envelope.machine.as_ref()?;
+    crate::notice::line(
+        &facts,
+        display_name(machine),
+        &context.command_line(machine, &["restart"]),
+        crate::notice::now(),
+    )
 }
 
 /// What every machine verb shares.
@@ -168,6 +205,8 @@ pub struct Context<'a> {
     pub identity: &'a str,
     pub global: &'a Global,
     pub credentials: crate::connection::CliCredentials<'a>,
+    /// The update facts of the Core this command reached, for its notice.
+    pub facts: std::cell::RefCell<Option<spaceterm_core::update::facts::UpdateFacts>>,
 }
 
 impl Context<'_> {
@@ -235,16 +274,7 @@ impl Context<'_> {
     /// so the copy ignores a different `SPACETERM_MACHINE` or `SPACETERM_AS` in another shell.
     /// Every word is a [`crate::shell::word`], so the line pastes into any POSIX shell or Zsh.
     pub fn command_line(&self, machine: &MachineRef, words: &[&str]) -> String {
-        let agent = self.agent();
-        let mut line = vec!["spaceterm", "--machine", machine.route.as_str()];
-        if let Some(agent) = &agent {
-            line.extend(["--as", agent.as_str()]);
-        }
-        line.extend(words);
-        line.iter()
-            .map(|word| crate::shell::word(word))
-            .collect::<Vec<_>>()
-            .join(" ")
+        command_line(&machine.route, self.agent().as_ref(), words)
     }
 
     pub fn agent(&self) -> Option<spaceterm_core::protocol::AgentName> {
@@ -263,7 +293,24 @@ impl Context<'_> {
     }
 }
 
-fn terminal(fd: libc::c_int) -> bool {
+/// `spaceterm --machine ROUTE [--as AGENT] WORDS…`, each word a [`crate::shell::word`].
+pub fn command_line(
+    route: &str,
+    agent: Option<&spaceterm_core::protocol::AgentName>,
+    words: &[&str],
+) -> String {
+    let mut line = vec!["spaceterm", "--machine", route];
+    if let Some(agent) = agent {
+        line.extend(["--as", agent.as_str()]);
+    }
+    line.extend(words);
+    line.iter()
+        .map(|word| crate::shell::word(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn terminal(fd: libc::c_int) -> bool {
     // SAFETY: isatty only observes the descriptor.
     unsafe { libc::isatty(fd) == 1 }
 }
@@ -378,7 +425,13 @@ pub fn open_lane(
     let lane = connection
         .service_lane()
         .map_err(contract::from_core_error)?;
-    let (session, settled) = admin::open(&lane, &pending.operations).map_err(lane_failure)?;
+    let (mut session, settled) = admin::open(&lane, &pending.operations).map_err(lane_failure)?;
+    // Only a notice that can print costs the round trip.
+    if crate::notice::shown(context.global.into(), terminal(libc::STDERR_FILENO))
+        && let Ok((_, facts)) = admin::facts(&mut session)
+    {
+        context.facts.replace(Some(facts));
+    }
     let mut recovered: Vec<_> = settled
         .iter()
         .map(|receipt| recovered_operation(receipt, identity))

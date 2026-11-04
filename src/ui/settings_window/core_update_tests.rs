@@ -7,10 +7,9 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 
 use super::testing::{Outcome, ScriptedUpdate, UpdateCall, approved, available, included};
 use super::{
-    CoreUpdateControl, FINISH_SELECTOR, IncludedCore, RETURN_CANCEL_SELECTOR,
-    RETURN_CONFIRM_SELECTOR, RETURN_SELECTOR, UPDATE_CANCEL_SELECTOR, UPDATE_CHECK_SELECTOR,
-    UPDATE_CONFIRM_SELECTOR, UPDATE_SELECTOR, UpdateAction, UpdateFacts, UpdatePresentation,
-    UpdateState, UpdateStep, present_update,
+    CoreUpdateControl, FINISH_SELECTOR, IncludedCore, UPDATE_CANCEL_SELECTOR,
+    UPDATE_CHECK_SELECTOR, UPDATE_CONFIRM_SELECTOR, UPDATE_SELECTOR, UpdateAction, UpdateFacts,
+    UpdatePresentation, UpdateState, UpdateStep, present_update,
 };
 use crate::appearance::Appearance;
 use crate::local_startup::CandidateError;
@@ -134,16 +133,20 @@ impl Harness<'_> {
     }
 }
 
-fn activation(phase: ActivationPhase, returned: bool) -> ActivationStatus {
+fn activation(phase: ActivationPhase) -> ActivationStatus {
     ActivationStatus {
         operation: [7; 32],
         previous: approved(),
         candidate: included(),
         stopped: false,
         phase,
-        returned,
     }
 }
+
+const RETURNED: ActivationPhase = ActivationPhase::Returned {
+    failure: crate::machine_connection::update::facts::StartFailure::NotReady,
+    running: false,
+};
 
 fn presented(facts: UpdateFacts) -> UpdatePresentation {
     present_update(&UpdateState {
@@ -237,7 +240,6 @@ fn cancelling_the_confirmation_changes_nothing(cx: &mut TestAppContext) {
 #[test]
 fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
     let prepared = |running, stopped| super::PreparedChange {
-        change: crate::machine_connection::service::control::UpdateChange::Update,
         previous: approved(),
         candidate: included(),
         running,
@@ -353,70 +355,25 @@ fn a_changed_machine_needs_a_fresh_confirmation(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_failed_update_offers_return_only_when_the_service_proves_it_safe(cx: &mut TestAppContext) {
+fn a_failed_update_reports_the_return_to_the_previous_version(cx: &mut TestAppContext) {
     let mut harness = open(available(), cx);
-    harness.update.answer(Outcome::Failed { can_return: true });
+    harness.update.answer(Outcome::Returned);
     click(UPDATE_SELECTOR, harness.cx);
     click_modal(UPDATE_CONFIRM_SELECTOR, harness.cx);
 
     let presentation = harness.presentation();
     assert_eq!(presentation.state, "Update failed");
     assert!(
-        presentation.explanation.contains("didn\u{2019}t start"),
+        presentation.explanation.contains(
+            "didn\u{2019}t start, and Terminal Sessions ended. SpaceTerm Core returned to 1.4.0"
+        ),
         "{}",
         presentation.explanation
     );
-    assert_eq!(
-        presentation.actions,
-        [UpdateAction::Return, UpdateAction::Check]
-    );
-    assert_eq!(
-        spaceterm_ui::a11y_testing::A11yTree::read(harness.cx).node("Restore 1.4.0\u{2026}")["aria"]
-            ["role"],
-        "Button",
-        "the safe return is the row's one button and names the version it returns to"
-    );
-
-    click(RETURN_SELECTOR, harness.cx);
-    click_modal(RETURN_CANCEL_SELECTOR, harness.cx);
-    assert!(!harness.update.changes().contains(&UpdateCall::Return));
-
-    click(RETURN_SELECTOR, harness.cx);
-    click_modal(RETURN_CONFIRM_SELECTOR, harness.cx);
+    assert_eq!(presentation.actions, [UpdateAction::Check]);
     assert_eq!(
         harness.update.changes(),
-        [
-            UpdateCall::PrepareUpdate,
-            UpdateCall::Activate,
-            UpdateCall::PrepareReturn,
-            UpdateCall::PrepareReturn,
-            UpdateCall::Return
-        ]
-    );
-    let presentation = harness.presentation();
-    assert!(
-        presentation
-            .explanation
-            .contains("You returned from version"),
-        "{}",
-        presentation.explanation
-    );
-    // Returning leaves the server stopped; only an explicit Start runs it again.
-    assert!(harness.service.changes().is_empty());
-
-    let unproven = presented(UpdateFacts {
-        status: Ok(stopped()),
-        activation: Some(activation(
-            ActivationPhase::Failed { can_return: false },
-            false,
-        )),
-        ..available()
-    });
-    assert_eq!(unproven.actions, [UpdateAction::Check]);
-    assert!(
-        unproven
-            .explanation
-            .contains("SpaceTerm can\u{2019}t safely restore 1.4.0 (commit aaaaaaa).")
+        [UpdateCall::PrepareUpdate, UpdateCall::Activate]
     );
 }
 
@@ -426,7 +383,7 @@ fn an_unresolved_update_finishes_without_asking_again(cx: &mut TestAppContext) {
         UpdateFacts {
             // The status read refuses while the update is unresolved.
             status: Err(CoreError::ActivationUnresolved),
-            activation: Some(activation(ActivationPhase::Activating, false)),
+            activation: Some(activation(ActivationPhase::Activating)),
             ..available()
         },
         cx,
@@ -441,7 +398,7 @@ fn an_unresolved_update_finishes_without_asking_again(cx: &mut TestAppContext) {
 
     let uncertain = presented(UpdateFacts {
         status: Err(CoreError::ActivationUnresolved),
-        activation: Some(activation(ActivationPhase::Uncertain, false)),
+        activation: Some(activation(ActivationPhase::Uncertain)),
         ..available()
     });
     assert_eq!(uncertain.state, "Update uncertain");
@@ -768,8 +725,7 @@ fn check_now_reads_the_core_after_spaceterm_finishes_checking(cx: &mut TestAppCo
 }
 
 /// A failed update read before the approved build reads again still names both builds from the
-/// update's own record: the subtitle says what didn't update, and the safe return names the
-/// version it returns to.
+/// update's own record: the subtitle says what didn't update and which version runs.
 #[gpui::test]
 fn a_failed_update_names_its_builds_from_its_own_record(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
@@ -778,10 +734,7 @@ fn a_failed_update_names_its_builds_from_its_own_record(cx: &mut TestAppContext)
         UpdateFacts {
             status: Err(CoreError::ActivationUnresolved),
             approved: None,
-            activation: Some(activation(
-                ActivationPhase::Failed { can_return: true },
-                false,
-            )),
+            activation: Some(activation(RETURNED)),
             ..available()
         },
         cx,
@@ -793,67 +746,6 @@ fn a_failed_update_names_its_builds_from_its_own_record(cx: &mut TestAppContext)
             .is_some(),
         "the subtitle names both builds"
     );
-    assert_eq!(tree.node("Restore 1.4.0\u{2026}")["aria"]["role"], "Button");
-    assert!(rendered(RETURN_SELECTOR, harness.cx));
-}
-
-/// Returning to Servers reads the update again. While that read runs, the failed update's
-/// Restore is unavailable rather than taking a click it would drop. Once the read finishes, it
-/// asks to restore.
-#[gpui::test]
-fn restore_waits_for_the_update_read_after_returning_to_machines(cx: &mut TestAppContext) {
-    let harness = open(
-        UpdateFacts {
-            status: Ok(stopped()),
-            activation: Some(activation(
-                ActivationPhase::Failed { can_return: true },
-                false,
-            )),
-            ..available()
-        },
-        cx,
-    );
-    // Reads the published tree as the last frame drew it, without running background work.
-    let restore_disabled = |cx: &mut VisualTestContext| {
-        let tree: serde_json::Value = cx.update(|window, _| {
-            serde_json::from_str(&window.debug_a11y_tree_json().expect("a published tree"))
-                .expect("a valid tree")
-        });
-        tree["nodes"]
-            .as_object()
-            .expect("published nodes")
-            .values()
-            .find(|node| node["aria"]["label"] == "Restore 1.4.0\u{2026}")
-            .expect("Restore is the row's button")["aria"]["disabled"]
-            == true
-    };
-    spaceterm_ui::a11y_testing::A11yTree::read(harness.cx);
-    assert!(
-        !restore_disabled(harness.cx),
-        "a settled read offers Restore"
-    );
-
-    harness.window.update(harness.cx, |settings, cx| {
-        settings.select_section(super::super::SettingsSectionId::Interface, cx);
-        settings.select_section(super::super::SettingsSectionId::Machines, cx);
-    });
-    assert_eq!(
-        harness.window.read_with(harness.cx, |settings, _| {
-            settings.core_update.as_ref().unwrap().state.working
-        }),
-        Some(UpdateStep::Check),
-        "the update read is held"
-    );
-    assert!(restore_disabled(harness.cx), "Restore waits for the read");
-
-    harness.cx.run_until_parked();
-    assert!(
-        !restore_disabled(harness.cx),
-        "the finished read offers Restore"
-    );
-    click(RETURN_SELECTOR, harness.cx);
-    assert!(alert_open(RETURN_CONFIRM_SELECTOR, harness.cx));
-    assert_eq!(harness.update.changes(), [UpdateCall::PrepareReturn]);
 }
 
 /// The first version read Servers begins answers what it saw before the status item uninstalled
@@ -887,5 +779,88 @@ fn a_first_version_read_begun_before_a_status_item_uninstall_offers_no_stale_upd
     assert!(
         !presentation.actions.contains(&UpdateAction::Update),
         "a removed server offers no update"
+    );
+}
+
+/// The row records a confirmed restart into the Pending Version by how its lane operation ended.
+#[test]
+fn a_confirmed_restart_is_recorded_by_how_its_lane_operation_ended() {
+    use crate::machine_connection::service::RetainedInstallation;
+    use crate::machine_connection::service::lane::client::Outcome as LaneOutcome;
+    use crate::machine_connection::service::lane::{LaneAction, LaneOperationState, LaneReceipt};
+    use crate::machine_connection::update::facts::StartFailure;
+    let installation = |version: &str| RetainedInstallation {
+        directory: std::path::PathBuf::from(format!("/installations/{version}")),
+        version: version.into(),
+        commit: "c".repeat(40),
+    };
+    let settled = |state| LaneOutcome::Settled {
+        receipt: LaneReceipt {
+            operation: "0a".repeat(16),
+            action: LaneAction::Restart,
+            state,
+            code: None,
+            boot: "b".repeat(64),
+        },
+        boot: "a".repeat(64),
+    };
+    let phase = |outcome: &LaneOutcome| {
+        super::restarted(outcome, installation("1.0.0"), installation("1.1.0"))
+            .map(|status| status.phase)
+    };
+    assert_eq!(
+        phase(&settled(LaneOperationState::Done)),
+        Ok(ActivationPhase::Completed { running: true })
+    );
+    assert_eq!(
+        phase(&settled(LaneOperationState::Failed)),
+        Ok(ActivationPhase::Returned {
+            failure: StartFailure::NotReady,
+            running: true
+        })
+    );
+    assert_eq!(
+        phase(&settled(LaneOperationState::NotPerformed)),
+        Err(CoreError::Changed)
+    );
+    assert_eq!(
+        phase(&LaneOutcome::Unconfirmed {
+            operation: "0a".repeat(16),
+            boot: "a".repeat(64),
+            last: None,
+        }),
+        Ok(ActivationPhase::Uncertain)
+    );
+    let status = super::restarted(
+        &settled(LaneOperationState::Done),
+        installation("1.0.0"),
+        installation("1.1.0"),
+    )
+    .unwrap();
+    assert_eq!(status.operation[..16], [0x0a; 16]);
+    assert_eq!(status.candidate.version, "1.1.0");
+    assert_eq!(status.previous.version, "1.0.0");
+}
+
+#[test]
+fn lane_failures_keep_the_rows_classifications() {
+    use crate::machine_connection::service::lane::client::LaneError;
+    for (code, error) in [
+        ("service_busy", CoreError::ServiceBusy),
+        ("changed", CoreError::Changed),
+        ("not_running", CoreError::NotRunning),
+        ("version_skipped", CoreError::CandidateMissing),
+        ("candidate_unverified", CoreError::RuntimeUnavailable),
+        ("disk_full", CoreError::StorageUnavailable),
+    ] {
+        assert_eq!(
+            super::lane_error(LaneError::Code(code.into())),
+            error,
+            "{code}"
+        );
+    }
+    assert_eq!(
+        super::lane_error(LaneError::Core(CoreError::Protocol)),
+        CoreError::Protocol
     );
 }

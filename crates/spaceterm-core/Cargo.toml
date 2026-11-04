@@ -9,6 +9,8 @@ default = []
 client = []
 # Lets another crate's tests serve a client handle in process.
 test-support = ["client"]
+# Fakes for developer-tools preview builds and other crates' tests.
+developer-tools = []
 
 [dependencies]
 base64 = "=0.22.1"

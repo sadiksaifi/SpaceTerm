@@ -51,7 +51,7 @@ def _record(archive, signature, role, target):
     if (
         info["identity"] != "spaceterm-preflight"
         or info["target"] != target
-        or info["protocol_major"]
+        or info["protocols"]["work"]["major"]
         != core_package.PROTOCOL_MAJOR + (1 if role == "next-major" else 0)
     ):
         raise TaskError("the fixture has a different identity, target or protocol major")
@@ -61,7 +61,7 @@ def _record(archive, signature, role, target):
         "archive": str(archive),
         "signature": str(signature),
         "sha256": release.sha256(archive),
-        "protocol_major": info["protocol_major"],
+        "protocol_major": info["protocols"]["work"]["major"],
         "version": info["version"],
     }
 
@@ -183,12 +183,14 @@ def prepare(destination, selected, *, resume=False):
         _build(root, destination, "normal", targets, result, resume)
         for target in targets:
             _broken_verification(destination, target, result)
-        major = root / core_package.PROTOCOL_MAJOR_SOURCE
+        major = root / core_package.PROTOCOL_SOURCE
         current = major.read_text()
         major.write_text(
             current.replace(
-                f"pub const MAJOR: u16 = {core_package.PROTOCOL_MAJOR};",
-                f"pub const MAJOR: u16 = {core_package.PROTOCOL_MAJOR + 1};",
+                "pub const WORK: ProtocolVersion = ProtocolVersion "
+                f"{{ major: {core_package.PROTOCOL_MAJOR},",
+                "pub const WORK: ProtocolVersion = ProtocolVersion "
+                f"{{ major: {core_package.PROTOCOL_MAJOR + 1},",
             )
         )
         if core_package.protocol_major(root) != core_package.PROTOCOL_MAJOR + 1:

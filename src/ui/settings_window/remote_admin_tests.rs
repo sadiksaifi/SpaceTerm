@@ -26,7 +26,6 @@ fn effects(ends_sessions: u32) -> LaneEffects {
         start_requires_machine: true,
         from: None,
         to: None,
-        kind: None,
         to_major: None,
     }
 }
@@ -42,13 +41,10 @@ fn preview(action: LaneAction, effects: LaneEffects) -> Preview {
 
 fn update_preview(to_major: Option<u16>) -> Preview {
     preview(
-        LaneAction::Update {
-            installation: "1.3.0-package".into(),
-        },
+        LaneAction::Restart,
         LaneEffects {
             from: Some(version("1.2.0", "aaaaaaaaaa")),
             to: Some(version("1.3.0", "bbbbbbbbbb")),
-            kind: Some(LaneUpdateKind::Update),
             to_major,
             ..effects(2)
         },
@@ -65,6 +61,33 @@ fn receipt(action: LaneAction, state: LaneOperationState, boot: &str) -> LaneRec
     }
 }
 
+/// A Status whose update facts name `pending` as the version that waits for a restart.
+fn pending_status(runtime: LaneVersion, pending: &str) -> LaneStatus {
+    use spaceterm_core::update::facts::{
+        PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts, Version,
+    };
+    let mut status = status(runtime.clone());
+    status.update = Some(Box::new(UpdateFacts {
+        revision: 1,
+        platform: Platform::LinuxX86_64,
+        running: Version::parse(&runtime.version).unwrap(),
+        pending: Some(PendingVersion {
+            version: Version::parse(pending).unwrap(),
+            protocols: Protocols::CURRENT,
+            breaking: false,
+            installed_at: 1,
+            overdue_since: None,
+            stranded: Vec::new(),
+        }),
+        sessions: 2,
+        operation: None,
+        check: UpdateCheck::Never,
+        skipped: None,
+        last_failure: None,
+    }));
+    status
+}
+
 fn status(runtime: LaneVersion) -> LaneStatus {
     LaneStatus {
         running: true,
@@ -73,7 +96,7 @@ fn status(runtime: LaneVersion) -> LaneStatus {
         automatic_start: true,
         linger: None,
         runtime,
-        staged: Vec::new(),
+        update: None,
         activation: LaneActivation::Settled,
         sessions: 2,
         network: LaneNetwork {
@@ -154,35 +177,6 @@ fn confirmation_detail(to_major: Option<u16>) -> String {
     confirmation("penguin", &update_preview(to_major)).detail
 }
 
-#[test]
-fn a_return_confirmation_names_the_version_it_returns_to() {
-    let returning = preview(
-        LaneAction::Return,
-        LaneEffects {
-            from: Some(version("1.3.0", "bbbbbbbbbb")),
-            to: Some(version("1.2.0", "aaaaaaaaaa")),
-            kind: Some(LaneUpdateKind::Return),
-            ..effects(0)
-        },
-    );
-    let confirmation = confirmation("penguin", &returning);
-
-    assert_eq!(confirmation.title, "Return to Previous Version");
-    assert_eq!(
-        confirmation.message,
-        "Return SpaceTerm Core on penguin to 1.2.0 (commit aaaaaaa)?"
-    );
-    assert_eq!(confirmation.confirm, "Return to 1.2.0 (commit aaaaaaa)");
-    assert!(
-        confirmation
-            .detail
-            .contains("No Terminal Sessions are running on it."),
-        "got {:?}",
-        confirmation.detail
-    );
-}
-
-/// The CLI contract's uncertain outcome reads as uncertain, never as success or failure.
 #[test]
 fn an_outcome_the_client_cannot_confirm_says_so() {
     let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Shutdown));
@@ -414,21 +408,14 @@ fn a_refused_preview_explains_why_and_asks_nothing(cx: &mut TestAppContext) {
 fn check_now_offers_the_machines_update_and_update_follows_it_to_the_end(cx: &mut TestAppContext) {
     let remote = ScriptedRemote::new();
     *remote.read.lock().unwrap() = Ok(Reading {
-        status: status(version("1.2.0", "aaaaaaaaaa")),
-        check: LaneCheck {
-            approved: version("1.2.0", "aaaaaaaaaa"),
-            latest: Some(version("1.3.0", "bbbbbbbbbb")),
-            staged: Vec::new(),
-        },
+        status: pending_status(version("1.2.0", "aaaaaaaaaa"), "1.3.0"),
         settled: vec![receipt(LaneAction::Restart, LaneOperationState::Done, "a")],
     });
     *remote.prepare.lock().unwrap() = Ok(Prepared {
         preview: update_preview(None),
         settled: Vec::new(),
     });
-    let update = LaneAction::Update {
-        installation: "1.3.0-package".into(),
-    };
+    let update = LaneAction::Restart;
     *remote.perform.lock().unwrap() = Ok(Performed {
         outcome: Outcome::Settled {
             receipt: receipt(update, LaneOperationState::Done, "b"),
@@ -480,12 +467,7 @@ fn check_now_offers_the_machines_update_and_update_follows_it_to_the_end(cx: &mu
 fn a_new_connection_retires_the_last_lane_reading(cx: &mut TestAppContext) {
     let remote = ScriptedRemote::new();
     *remote.read.lock().unwrap() = Ok(Reading {
-        status: status(version("1.2.0", "aaaaaaaaaa")),
-        check: LaneCheck {
-            approved: version("1.2.0", "aaaaaaaaaa"),
-            latest: Some(version("1.3.0", "bbbbbbbbbb")),
-            staged: Vec::new(),
-        },
+        status: pending_status(version("1.2.0", "aaaaaaaaaa"), "1.3.0"),
         settled: Vec::new(),
     });
     let machines = open_penguin(&remote, cx);
@@ -528,21 +510,11 @@ fn a_new_connection_retires_the_last_lane_reading(cx: &mut TestAppContext) {
     let replacement_lane = ScriptedRemote::new();
     *replacement_lane.read.lock().unwrap() = Ok(Reading {
         status: status(version("2.4.0", "cccccccccc")),
-        check: LaneCheck {
-            approved: version("2.4.0", "cccccccccc"),
-            latest: None,
-            staged: Vec::new(),
-        },
         settled: Vec::new(),
     });
     machines.cx.update(|_, cx| replacement_lane.install(cx));
     late.release(Ok(Reading {
-        status: status(version("1.1.0", "dddddddddd")),
-        check: LaneCheck {
-            approved: version("1.1.0", "dddddddddd"),
-            latest: Some(version("1.9.0", "eeeeeeeeee")),
-            staged: Vec::new(),
-        },
+        status: pending_status(version("1.1.0", "dddddddddd"), "1.9.0"),
         settled: Vec::new(),
     }));
     machines.cx.run_until_parked();
@@ -611,11 +583,6 @@ fn an_uncertain_restart_is_reported_and_the_next_check_settles_it(cx: &mut TestA
     // unresolved, and this connection acknowledges it.
     *remote.read.lock().unwrap() = Ok(Reading {
         status: status(version("1.2.0", "aaaaaaaaaa")),
-        check: LaneCheck {
-            approved: version("1.2.0", "aaaaaaaaaa"),
-            latest: None,
-            staged: Vec::new(),
-        },
         settled: vec![receipt(
             LaneAction::Restart,
             LaneOperationState::Unresolved,

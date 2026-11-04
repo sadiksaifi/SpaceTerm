@@ -14,6 +14,7 @@ mod layout;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
+pub mod updates;
 
 pub use layout::{Layout, bundle_identifier, bundle_name};
 
@@ -31,7 +32,7 @@ const TARGET: &str = "x86_64-unknown-linux-gnu";
 pub struct CandidateMetadata {
     pub version: String,
     pub commit: String,
-    pub protocol_major: u16,
+    pub protocols: crate::update::facts::Protocols,
 }
 
 /// Authenticate the exact captured archive and signature for one application and target.
@@ -490,6 +491,7 @@ fn digest(bytes: &[u8]) -> String {
         .map(|v| format!("{v:02x}"))
         .collect()
 }
+/// The nonproduction key that Preflight and Development archives verify under.
 fn public_key(identity: &str) -> Result<Vec<u8>, CoreError> {
     #[cfg(test)]
     if test_support::active() {
@@ -500,16 +502,6 @@ fn public_key(identity: &str) -> Result<Vec<u8>, CoreError> {
         });
     }
     let key = match identity {
-        "spaceterm" => {
-            let template = include_str!("../../../../packaging/macos/spaceterm/Info.plist");
-            template
-                .split_once("<key>SUPublicEDKey</key>")
-                .and_then(|(_, tail)| tail.trim_start().strip_prefix("<string>"))
-                .and_then(|tail| tail.split_once("</string>"))
-                .ok_or(CoreError::RuntimeUnavailable)?
-                .0
-                .to_owned()
-        }
         "spaceterm-preflight" | "spaceterm-development" => {
             #[derive(Deserialize)]
             struct NonproductionTrust {
@@ -528,11 +520,24 @@ fn public_key(identity: &str) -> Result<Vec<u8>, CoreError> {
         .decode(key.trim())
         .map_err(|_| CoreError::RuntimeUnavailable)
 }
+/// Verifies an archive's raw signature for `identity`. A Release archive verifies under the
+/// current or the backup key of `packaging/update-trust.json`, and under nothing else.
+/// Preflight and Development archives verify under the nonproduction key.
 pub(super) fn authenticate(
     bytes: &[u8],
     signature: &[u8],
     identity: &str,
 ) -> Result<(), CoreError> {
+    #[cfg(test)]
+    let release = identity == "spaceterm" && !test_support::active();
+    #[cfg(not(test))]
+    let release = identity == "spaceterm";
+    if release {
+        return crate::update::trust::UpdateTrust::release()
+            .map_err(|_| CoreError::RuntimeUnavailable)?
+            .verify(bytes, signature)
+            .map_err(|_| CoreError::RuntimeUnavailable);
+    }
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key(identity)?)
         .verify(bytes, signature)
         .map_err(|_| CoreError::RuntimeUnavailable)
@@ -590,7 +595,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
 fn verify_executable(path: &Path, expected: &Build) -> Result<(), CoreError> {
     #[cfg(test)]
     let bytes = if test_support::active() {
-        test_support::native_build(&expected.identity)
+        test_support::native_build(path, &expected.identity)
     } else {
         executable_build(path, &expected.identity)?
     };
@@ -617,6 +622,17 @@ fn executable_build(path: &Path, identity: &str) -> Result<Vec<u8>, CoreError> {
     Ok(bytes)
 }
 
+/// The verified build document of the installation at `path`.
+pub(super) fn build(path: &Path, identity: &str) -> Result<CandidateMetadata, CoreError> {
+    verify(path, identity)?;
+    let directory = owned_directory(path)?;
+    Build::parse(
+        &read_file(&directory, Path::new("build.json"), 4096)?,
+        identity,
+    )
+    .map(Into::into)
+}
+
 pub(super) fn describe(path: &Path, identity: &str) -> Result<(String, String), CoreError> {
     verify(path, identity)?;
     let directory = owned_directory(path)?;
@@ -635,7 +651,7 @@ struct Build {
     target: String,
     commit: String,
     version: String,
-    protocol_major: u16,
+    protocols: crate::update::facts::Protocols,
     source_sha256: Option<String>,
 }
 impl From<Build> for CandidateMetadata {
@@ -643,15 +659,23 @@ impl From<Build> for CandidateMetadata {
         Self {
             version: info.version,
             commit: info.commit,
-            protocol_major: info.protocol_major,
+            protocols: info.protocols,
         }
     }
 }
 impl Build {
-    /// `None` accepts any protocol major.
+    /// `None` accepts any work protocol major.
     fn require_compatibility(&self, required_major: Option<u16>) -> Result<(), CoreError> {
-        if required_major.is_some_and(|major| self.protocol_major != major) {
-            return Err(CoreError::IncompatibleProtocol);
+        if let Some(major) = required_major
+            && self.protocols.work.major != major
+        {
+            return Err(CoreError::IncompatibleProtocol(
+                if self.protocols.work.major > major {
+                    crate::protocol::version::Incompatible::CallerTooOld
+                } else {
+                    crate::protocol::version::Incompatible::ListenerTooOld
+                },
+            ));
         }
         Ok(())
     }
@@ -701,7 +725,13 @@ impl Build {
                 .source_sha256
                 .as_deref()
                 .is_some_and(|value| !digest_valid(value))
-            || info.protocol_major == 0
+            || [
+                info.protocols.work,
+                info.protocols.service,
+                info.protocols.desktop_channel,
+            ]
+            .iter()
+            .any(|version| version.major == 0)
         {
             return Err(CoreError::RuntimeUnavailable);
         }

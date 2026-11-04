@@ -30,7 +30,7 @@ accesskit_unix = { git = "https://github.com/sadiksaifi/accesskit", tag = "space
 default = ["desktop", "developer-tools"]
 # Native fixtures also exercise the desktop adapters.
 native-tests = ["desktop-tests", "spaceterm-connections/native-tests"]
-developer-tools = ["desktop-tests", "spaceterm-ui/control-preview"]
+developer-tools = ["desktop-tests", "spaceterm-ui/control-preview", "spaceterm-core/developer-tools"]
 desktop-tests = [
     "spaceterm-connections/test-support",
     "desktop",
@@ -138,7 +138,7 @@ accesskit_consumer = { version = "=0.38.0", optional = true }
 jsonschema = { version = "=0.56.0", default-features = false, optional = true }
 
 [dev-dependencies]
-spaceterm-core = { path = "crates/spaceterm-core", features = ["test-support"] }
+spaceterm-core = { path = "crates/spaceterm-core", features = ["test-support", "developer-tools"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify = { version = "=8.2.0", default-features = false }

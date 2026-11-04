@@ -1,0 +1,118 @@
+"""The compatibility workflow pairs this commit with every listed release, both ways."""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from spaceterm_tasks import ROOT, TaskError
+from spaceterm_tasks.compatibility import (
+    RELEASES,
+    candidate_tag,
+    expected,
+    plan,
+    releases,
+    verdict,
+)
+
+
+class CompatibilityPlanTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def listed(self, text):
+        path = self.root / "compatibility.toml"
+        path.write_text(text)
+        return path
+
+    def planned(self, path):
+        output = self.root / "output"
+        output.write_text("")
+        plan(output, path)
+        return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+    def test_a_listed_release_is_paired_with_this_commit_as_each_side(self):
+        outputs = self.planned(self.listed('releases = ["v1.2.0", "v2.0.3"]\n'))
+        self.assertEqual(outputs["any"], "true")
+        self.assertEqual(
+            outputs["matrix"],
+            '{"include":['
+            '{"release":"v1.2.0","candidate":"client"},'
+            '{"release":"v1.2.0","candidate":"core"},'
+            '{"release":"v2.0.3","candidate":"client"},'
+            '{"release":"v2.0.3","candidate":"core"}]}',
+        )
+
+    def test_the_tracked_list_plans_and_an_empty_list_plans_no_pair(self):
+        releases(RELEASES)
+        outputs = self.planned(self.listed("releases = []\n"))
+        self.assertEqual(outputs, {"matrix": '{"include":[]}', "any": "false"})
+
+    def test_the_list_holds_distinct_stable_releases_oldest_first(self):
+        for text in [
+            "",
+            'releases = "v1.0.0"\n',
+            'releases = ["1.0.0"]\n',
+            'releases = ["v0.6.8"]\n',
+            'releases = ["v1.0.0-rc.1"]\n',
+            'releases = ["v1.10.0", "v1.9.0"]\n',
+            'releases = ["v1.0.0", "v1.0.0"]\n',
+        ]:
+            with self.subTest(text=text), self.assertRaises(TaskError):
+                releases(self.listed(text))
+        self.assertEqual(
+            releases(self.listed('releases = ["v1.9.0", "v1.10.0"]\n')), ["v1.9.0", "v1.10.0"]
+        )
+
+    def test_the_candidate_is_tagged_one_minor_past_the_newest_release(self):
+        self.assertEqual(candidate_tag(["v1.2.0", "v2.0.3"]), "v2.1.0")
+
+    def test_this_cli_works_one_major_back_and_that_releases_cli_is_refused_as_older(self):
+        def protocols(work, service):
+            return {"work": {"major": work, "minor": 0}, "service": {"major": service, "minor": 4}}
+
+        current = protocols(3, 2)
+        works = {"list": "ok", "status": "ok"}
+        for release in (protocols(3, 2), protocols(2, 2), protocols(3, 1), protocols(2, 1)):
+            with self.subTest(release=release):
+                self.assertEqual(expected("client", release, current), works)
+        self.assertEqual(expected("core", protocols(3, 2), current), works)
+        self.assertEqual(
+            expected("core", protocols(2, 2), current), {"list": "cli_too_old", "status": "ok"}
+        )
+        self.assertEqual(
+            expected("core", protocols(3, 1), current), {"list": "ok", "status": "cli_too_old"}
+        )
+        for release in (protocols(1, 2), protocols(4, 2), protocols(3, 0), protocols(3, 3)):
+            for candidate in ("client", "core"):
+                with self.subTest(candidate=candidate, release=release):
+                    with self.assertRaises(TaskError):
+                        expected(candidate, release, current)
+
+    def test_planned_pairs_must_all_pass_and_skipped_pairs_pass_only_without_any(self):
+        verdict("success", "true", "success")
+        verdict("success", "false", "skipped")
+        for planning, planned, pairs in [
+            ("success", "true", "skipped"),
+            ("success", "true", "failure"),
+            ("success", "true", "cancelled"),
+            ("success", "false", "success"),
+            ("success", "", "skipped"),
+            ("failure", "false", "skipped"),
+            ("failure", "true", "success"),
+        ]:
+            with self.subTest(planning=planning, planned=planned, pairs=pairs):
+                with self.assertRaises(TaskError):
+                    verdict(planning, planned, pairs)
+
+    def test_the_aggregate_check_gives_the_verdict_the_planned_pairs(self):
+        workflow = (ROOT / ".github/workflows/compatibility.yml").read_text()
+        aggregate = workflow[workflow.index("\n  compatible:\n") :]
+        for line in [
+            "PLAN: ${{ needs.plan.result }}",
+            "ANY: ${{ needs.plan.outputs.any }}",
+            "PAIR: ${{ needs.pair.result }}",
+            'run: mise run compat:verdict "$PLAN" "$ANY" "$PAIR"',
+        ]:
+            self.assertIn(line, aggregate)

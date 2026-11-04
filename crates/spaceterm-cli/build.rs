@@ -1,8 +1,6 @@
 mod build_resources;
 #[path = "../../build/identity.rs"]
 mod identity;
-#[path = "../spaceterm-core/src/protocol/major.rs"]
-mod major;
 
 fn main() {
     let root = std::path::PathBuf::from(
@@ -20,7 +18,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!("cargo:rerun-if-changed=../../build/identity.rs");
-    println!("cargo:rerun-if-changed=../spaceterm-core/src/protocol/major.rs");
+    println!("cargo:rerun-if-changed=../spaceterm-core/src/protocol/version.rs");
     println!("cargo:rerun-if-changed=src");
     let release = std::env::var("SPACETERM_RELEASE_TAG").ok();
     let packaged = std::env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
@@ -51,12 +49,41 @@ fn main() {
         "valid source digest"
     );
     let source = source.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
+    let protocols = protocols(&root);
     // All strings come from the validated build identity or Cargo's target triple.
     let document = format!(
-        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocol_major\":{}}}\n",
-        build.version,
-        build.commit,
-        major::MAJOR,
+        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocols\":{protocols}}}\n",
+        build.version, build.commit,
     );
     std::fs::write(output.join("build-info.json"), document).expect("write server build metadata");
+}
+
+/// The build document's `protocols` object, from the three constants in the Core's
+/// `protocol/version.rs`. Each is declared on one line as
+/// `pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };`.
+fn protocols(root: &std::path::Path) -> String {
+    let source =
+        std::fs::read_to_string(root.join("crates/spaceterm-core/src/protocol/version.rs"))
+            .expect("read the protocol versions");
+    let version = |name: &str| {
+        let prefix = format!("pub const {name}: ProtocolVersion = ProtocolVersion {{ major: ");
+        let mut found = source.lines().filter_map(|line| line.strip_prefix(&prefix));
+        let rest = found.next().expect("the protocol version is declared");
+        assert!(
+            found.next().is_none(),
+            "the protocol version is declared once"
+        );
+        let (major, rest) = rest.split_once(", minor: ").expect("a major and a minor");
+        let minor = rest.strip_suffix(" };").expect("one declaration per line");
+        let major: u16 = major.parse().expect("a u16 major");
+        let minor: u16 = minor.parse().expect("a u16 minor");
+        assert!(major > 0, "majors start at 1");
+        format!("{{\"major\":{major},\"minor\":{minor}}}")
+    };
+    format!(
+        "{{\"work\":{},\"service\":{},\"desktop_channel\":{}}}",
+        version("WORK"),
+        version("SERVICE"),
+        version("DESKTOP_CHANNEL")
+    )
 }

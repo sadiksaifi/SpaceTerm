@@ -106,7 +106,9 @@ fn an_update_still_running_names_updating_when_settings_reopens() {
 #[test]
 fn a_local_core_without_a_protocol_in_common_needs_an_update() {
     let state = local_state(
-        LocalCoreStatus::Failed(CoreError::IncompatibleProtocol),
+        LocalCoreStatus::Failed(CoreError::IncompatibleProtocol(
+            spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+        )),
         Some((Some(ServicePhase::Running), None, false)),
         false,
     );

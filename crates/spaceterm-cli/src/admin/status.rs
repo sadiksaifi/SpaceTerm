@@ -1,16 +1,19 @@
-//! `status`: SpaceTerm Core's service facts, Network Access, paired devices and held outcomes.
+//! `status`: SpaceTerm Core's service facts, its Pending Version and update checks, Network
+//! Access, paired devices and held outcomes.
 //!
 //! A running SpaceTerm Core answers over its service lane. A stopped local one is read directly,
 //! without recovery, start or any other change.
 use super::{Context, Opened, Pending, Reply};
 use crate::contract::{
-    self, Activation, Code, CoreStatus, Device, Envelope, Failure, HeldOutcomes, MachineRef,
-    RecoveredIdentity, StagedVersion, StatusNetwork, UnreachableData, Version,
+    self, Activation, Code, CoreStatus, Device, DeviceRef, Envelope, Failure, HeldOutcomes,
+    MachineRef, PendingStatus, RecoveredIdentity, StatusNetwork, UnreachableData,
+    UpdateCheckReason, UpdateCheckState, UpdateCheckStatus, Version,
 };
 use crate::state::{CliState, RouteKey};
 use spaceterm_core::service::lane::{
     LaneActivation, LaneReply, LaneRequest, LaneStatus, LaneVersion, Offline,
 };
+use spaceterm_core::update::facts::{CheckFailure, Operation, UpdateCheck, UpdateFacts};
 use std::time::{Duration, Instant};
 
 const COMMAND: &str = "status";
@@ -135,17 +138,88 @@ fn report(
     route: &RouteKey,
     recovered: Vec<crate::contract::RecoveredOperation>,
 ) -> Reply {
-    let (envelope, text) = envelope(core, status, held(context, route), recovered);
+    let restart = context.command_line(&core, &["restart"]);
+    let (envelope, text) = envelope(core, status, held(context, route), recovered, &restart);
     Reply::new(&envelope, text)
 }
 
-/// The `status` envelope and its text, from the lane's status and this CLI's held
-/// outcomes.
+/// An RFC 3339 UTC time of Unix seconds.
+pub(crate) fn rfc3339(seconds: u64) -> String {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+        .map_or_else(String::new, |at| at.to_string())
+}
+
+/// The Pending Version of `facts`, as `status` and `update` report it.
+pub(crate) fn pending(facts: &UpdateFacts) -> Option<PendingStatus> {
+    let pending = facts.pending.as_ref()?;
+    Some(PendingStatus {
+        version: pending.version.to_string(),
+        breaking: pending.breaking,
+        installed_at: rfc3339(pending.installed_at),
+        overdue_since: pending.overdue_since.map(rfc3339),
+        stranded: pending
+            .stranded
+            .iter()
+            .map(|device| DeviceRef {
+                id: super::hex(&device.pairing),
+                name: device.name.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// The state of the Core's feed checks. A Core with no installed runtime has never checked.
+pub(crate) fn update_check(facts: Option<&UpdateFacts>) -> UpdateCheckStatus {
+    let mut status = UpdateCheckStatus {
+        state: UpdateCheckState::Never,
+        last_success_at: None,
+        failing_since: None,
+        reason: None,
+    };
+    let Some(facts) = facts else {
+        return status;
+    };
+    match &facts.check {
+        UpdateCheck::Disabled => status.state = UpdateCheckState::Disabled,
+        UpdateCheck::Never => {}
+        UpdateCheck::Succeeded { at } => {
+            status.state = UpdateCheckState::Succeeded;
+            status.last_success_at = Some(rfc3339(*at));
+        }
+        UpdateCheck::Failing {
+            since,
+            last_success,
+            reason,
+        } => {
+            status.state = UpdateCheckState::Failing;
+            status.last_success_at = last_success.map(rfc3339);
+            status.failing_since = Some(rfc3339(*since));
+            status.reason = Some(match reason {
+                CheckFailure::Network => UpdateCheckReason::Network,
+                CheckFailure::Proxy => UpdateCheckReason::Proxy,
+                CheckFailure::Verification => UpdateCheckReason::Verification,
+                CheckFailure::SystemTooOld => UpdateCheckReason::SystemTooOld,
+            });
+        }
+    }
+    if facts.operation == Some(Operation::Checking) {
+        status.state = UpdateCheckState::Checking;
+        status.failing_since = None;
+        status.reason = None;
+    }
+    status
+}
+
+/// The `status` envelope and its text, from the lane's status and this CLI's held outcomes.
+/// `restart` is the command line that restarts this machine's SpaceTerm Core.
 pub(crate) fn envelope(
     core: MachineRef,
     status: &LaneStatus,
     held_outcomes: Vec<HeldOutcomes>,
     recovered: Vec<crate::contract::RecoveredOperation>,
+    restart: &str,
 ) -> (Envelope<CoreStatus>, String) {
     let data = CoreStatus {
         running: status.running,
@@ -154,14 +228,8 @@ pub(crate) fn envelope(
         automatic_start: status.automatic_start,
         linger: status.linger,
         runtime: version(&status.runtime),
-        staged: status
-            .staged
-            .iter()
-            .map(|v| StagedVersion {
-                version: v.version.clone(),
-                sha256: v.sha256.clone(),
-            })
-            .collect(),
+        pending: status.update.as_deref().and_then(pending),
+        update_check: update_check(status.update.as_deref()),
         activation: match status.activation {
             LaneActivation::Settled => Activation::Settled,
             LaneActivation::Unresolved => Activation::Unresolved,
@@ -187,14 +255,14 @@ pub(crate) fn envelope(
         lane_major: status.lane_major,
         terminal_counters: status.terminal_counters,
     };
-    let text = text(&core, &data);
+    let text = text(&core, &data, restart);
     (
         super::with_recovered(Envelope::ok(COMMAND, Some(core), data), recovered),
         text,
     )
 }
 
-fn text(core: &MachineRef, data: &CoreStatus) -> String {
+fn text(core: &MachineRef, data: &CoreStatus, restart: &str) -> String {
     let state = if !data.installed {
         "not installed"
     } else if data.running {
@@ -224,6 +292,10 @@ fn text(core: &MachineRef, data: &CoreStatus) -> String {
             }
         ));
     }
+    if let Some(pending) = &data.pending {
+        out.push_str(&pending_text(pending, restart));
+    }
+    out.push_str(&check_text(&data.update_check));
     if data.activation == Activation::Unresolved {
         out.push_str("Update: unresolved. Run spaceterm update on that machine.\n");
     }
@@ -234,9 +306,6 @@ fn text(core: &MachineRef, data: &CoreStatus) -> String {
         _ => "off".to_owned(),
     };
     out.push_str(&format!("Network Access: {network}\n"));
-    for staged in &data.staged {
-        out.push_str(&format!("Staged: {}\n", staged.version));
-    }
     if data.devices.is_empty() {
         out.push_str("Paired devices: none\n");
     } else {
@@ -258,4 +327,54 @@ fn text(core: &MachineRef, data: &CoreStatus) -> String {
         out.push_str(&format!("Held outcomes: {} for {identity}\n", held.count));
     }
     out
+}
+
+fn pending_text(pending: &PendingStatus, restart: &str) -> String {
+    let overdue = if pending.overdue_since.is_some() {
+        ", restart overdue"
+    } else {
+        ""
+    };
+    let mut out = format!(
+        "Pending: {}, installed {}{overdue}. Restart to use it: {restart}\n",
+        pending.version, pending.installed_at
+    );
+    if pending.breaking {
+        if pending.stranded.is_empty() {
+            out.push_str(
+                "  It changes the protocol. Older clients stop working until they update.\n",
+            );
+        } else {
+            let names: Vec<&str> = pending.stranded.iter().map(|v| v.name.as_str()).collect();
+            out.push_str(&format!(
+                "  It changes the protocol. These devices stop working until they update: {}\n",
+                names.join(", ")
+            ));
+        }
+    }
+    out
+}
+
+fn check_text(check: &UpdateCheckStatus) -> String {
+    let reason = |reason: Option<UpdateCheckReason>| match reason {
+        Some(UpdateCheckReason::Network) => "the update feed is unreachable",
+        Some(UpdateCheckReason::Proxy) => "the proxy is unreachable",
+        Some(UpdateCheckReason::Verification) => "the update feed did not verify",
+        Some(UpdateCheckReason::SystemTooOld) => "the newest version needs a newer system",
+        None => "unknown",
+    };
+    match check.state {
+        UpdateCheckState::Disabled => "Update check: off for this build\n".to_owned(),
+        UpdateCheckState::Never => "Update check: not yet run\n".to_owned(),
+        UpdateCheckState::Checking => "Update check: checking now\n".to_owned(),
+        UpdateCheckState::Succeeded => format!(
+            "Update check: succeeded {}\n",
+            check.last_success_at.as_deref().unwrap_or_default()
+        ),
+        UpdateCheckState::Failing => format!(
+            "Update check: failing since {}, {}\n",
+            check.failing_since.as_deref().unwrap_or_default(),
+            reason(check.reason)
+        ),
+    }
 }

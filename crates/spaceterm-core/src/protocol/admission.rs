@@ -2,10 +2,15 @@
 //! length-prefixed JSON. An incompatible peer therefore always receives a typed incompatibility.
 //! After admission both peers switch to the postcard framing in [`super::frame`].
 //! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
-//! The preamble is frozen: later majors read and write these exact messages, so the service lane
-//! ([`Lane::Service`]) works across majors.
-use super::MAJOR;
+//!
+//! The preamble is frozen: later majors read and write these exact messages, each at most
+//! [`MAX_FRAME`] bytes with unknown fields refused. A Hello names the lane it opens and offers
+//! the caller's versions of that lane's protocol, and the Core selects one with
+//! [`negotiate`] or none. The Offer always carries the Core's own versions, so a refused client
+//! knows which side is older and whether the other lane admits it.
+use super::version::{self, Incompatible, ProtocolVersion, negotiate};
 use crate::pane::control::ClientName;
+use crate::update::facts::Version;
 use crate::{AuthenticatedStatus, CoreError};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -20,7 +25,11 @@ const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Hello {
-    versions: Vec<u16>,
+    lane: Lane,
+    /// The caller's versions of `lane`'s protocol: its current version and, when one exists,
+    /// its previous major at that major's last minor. 1 or 2 entries, distinct majors, highest
+    /// first.
+    versions: Vec<ProtocolVersion>,
     build: String,
     core: [u8; 32],
     /// The base Client Identity.
@@ -28,27 +37,108 @@ struct Hello {
     /// Composed by the client and rechecked by the server.
     name: ClientName,
     agent: Option<AgentName>,
-    lane: Lane,
 }
 
-/// What an admitted connection carries. The service lane stays in bounded JSON whatever the
-/// selected work major, so remote administration works across majors.
+/// What an admitted connection carries. Each lane negotiates its own protocol version: the work
+/// protocol or the service lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Lane {
     Work,
     Service,
 }
 
+impl Lane {
+    /// The versions this build offers as a caller of this lane: the current one, then the
+    /// previous major when one exists.
+    pub fn offered(self) -> Vec<ProtocolVersion> {
+        let (current, previous) = match self {
+            Self::Work => (version::WORK, version::PREVIOUS_WORK),
+            Self::Service => (version::SERVICE, version::PREVIOUS_SERVICE),
+        };
+        std::iter::once(current).chain(previous).collect()
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Offer {
-    /// 0 means no shared work major.
-    selected: u16,
+    /// `negotiate(hello.versions, the Core's version of hello.lane)`. None when no major is
+    /// shared; the Core then closes the connection.
+    selected: Option<ProtocolVersion>,
+    /// The Core's own versions.
+    versions: CoreVersions,
     build: String,
     core: [u8; 32],
-    core_major: u16,
     /// The effective Client Identity, derived from the agent name when the client sent one.
     client: [u8; 32],
+}
+
+/// A SpaceTerm Core's version and the protocol versions it listens with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreVersions {
+    pub version: Version,
+    pub work: ProtocolVersion,
+    pub service: ProtocolVersion,
+}
+
+impl CoreVersions {
+    /// A Core of this build running `version`.
+    pub fn current(version: Version) -> Self {
+        Self {
+            version,
+            work: version::WORK,
+            service: version::SERVICE,
+        }
+    }
+
+    /// A Core of this build running [`crate::UNVERSIONED`].
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self::current(Version::parse(crate::UNVERSIONED).unwrap_or_else(|_| unreachable!()))
+    }
+
+    /// The version the Core listens with on `lane`.
+    pub fn of(&self, lane: Lane) -> ProtocolVersion {
+        match lane {
+            Lane::Work => self.work,
+            Lane::Service => self.service,
+        }
+    }
+}
+
+/// What a client's admission negotiated on one lane, and the Core's own versions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Negotiated {
+    pub selected: ProtocolVersion,
+    pub core: CoreVersions,
+}
+
+/// Why a client's admission ended without a selected version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// The Core answered and shares no major with this client on the lane. It closes the
+    /// connection next.
+    Incompatible {
+        older: Incompatible,
+        core: CoreVersions,
+    },
+    Failed(CoreError),
+}
+
+impl From<CoreError> for Refused {
+    fn from(error: CoreError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<Refused> for CoreError {
+    fn from(refused: Refused) -> Self {
+        match refused {
+            Refused::Incompatible { older, .. } => Self::IncompatibleProtocol(older),
+            Refused::Failed(error) => error,
+        }
+    }
 }
 
 /// An agent name, `[a-z0-9][a-z0-9-]{0,31}`. It names an identity, not a secret.
@@ -233,13 +323,33 @@ impl<'a> Wire<'a> {
 }
 
 /// A connection the server admitted: its effective Client Identity, which an agent name derives
-/// from the base one, and the name it presents.
+/// from the base one, the name it presents and the work version it selected.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Admitted {
     pub status: AuthenticatedStatus,
     pub client: [u8; 32],
     pub agent: Option<AgentName>,
     pub name: ClientName,
+    /// Every version the client's Hello offered, highest first.
+    pub offered: Vec<ProtocolVersion>,
+}
+
+/// A service-lane connection the server admitted.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AdmittedLane {
+    pub actor: crate::service::operations::Actor,
+    pub selected: ProtocolVersion,
+}
+
+#[cfg(test)]
+impl From<crate::service::operations::Actor> for AdmittedLane {
+    /// A lane admitted at this build's service version.
+    fn from(actor: crate::service::operations::Actor) -> Self {
+        Self {
+            actor,
+            selected: version::SERVICE,
+        }
+    }
 }
 
 /// What a client's hello selected.
@@ -247,9 +357,9 @@ pub(crate) struct Admitted {
 pub(crate) enum Admission {
     /// A work connection, which the caller serves with the protocol.
     Work(Admitted),
-    /// A service-lane connection as `Actor`. The caller serves the lane, or closes the connection
-    /// when it has none.
-    Service(crate::service::operations::Actor),
+    /// A service-lane connection. The caller serves the lane, or closes the connection when it
+    /// has none.
+    Service(AdmittedLane),
 }
 
 #[cfg(test)]
@@ -269,9 +379,10 @@ pub(crate) fn admit_core(
     stream: &mut UnixStream,
     core: &[u8; 32],
     build: &str,
+    versions: &CoreVersions,
 ) -> Result<Admission, CoreError> {
     crate::host::check_peer(stream)?;
-    admit_core_transport(stream, core, build, None)
+    admit_core_transport(stream, core, build, versions, None)
 }
 
 /// Only the paired host calls this after pinned-server and enrolled-device proof validation.
@@ -279,19 +390,31 @@ pub(crate) fn admit_core(
 pub(crate) fn admit_direct_machine(
     stream: &mut dyn Preamble,
     paired: &crate::direct::PairedDevice,
+    versions: &CoreVersions,
 ) -> Result<Admission, CoreError> {
     admit_core_transport(
         stream,
         &paired.pin.core,
         &paired.pin.build,
+        versions,
         Some((paired.client, paired.pairing)),
     )
+}
+
+/// 1 or 2 versions with distinct majors, highest first.
+fn well_formed(versions: &[ProtocolVersion]) -> bool {
+    match versions {
+        [_] => true,
+        [first, second] => first.major > second.major,
+        _ => false,
+    }
 }
 
 fn admit_core_transport(
     stream: &mut dyn Preamble,
     core: &[u8; 32],
     build: &str,
+    versions: &CoreVersions,
     paired: Option<([u8; 32], crate::direct::PairingId)>,
 ) -> Result<Admission, CoreError> {
     let expected_client = paired.map(|(client, _)| client);
@@ -304,7 +427,7 @@ fn admit_core_transport(
     {
         return Err(CoreError::AuthenticationRefused);
     }
-    if hello.versions.is_empty() || hello.versions.len() > 16 {
+    if !well_formed(&hello.versions) {
         return Err(CoreError::Protocol);
     }
     // An agent's Client Name keeps " CLI <agent>" whole, so every client can tell agents apart.
@@ -317,35 +440,31 @@ fn admit_core_transport(
         .agent
         .as_ref()
         .map_or(hello.client, |agent| agent.client(&hello.client));
-    let selected = if hello.versions.contains(&MAJOR) {
-        MAJOR
-    } else {
-        0
-    };
+    let negotiated = negotiate(&hello.versions, versions.of(hello.lane));
     wire.write(&Offer {
-        selected,
+        selected: negotiated.ok(),
+        versions: versions.clone(),
         build: build.to_owned(),
         core: *core,
-        core_major: MAJOR,
         client,
     })?;
+    let selected = negotiated.map_err(CoreError::IncompatibleProtocol)?;
     if hello.lane == Lane::Service {
         stream.admitted();
-        return Ok(Admission::Service(crate::service::operations::Actor {
-            pairing: paired.map(|(_, pairing)| pairing),
-            client,
+        return Ok(Admission::Service(AdmittedLane {
+            actor: crate::service::operations::Actor {
+                pairing: paired.map(|(_, pairing)| pairing),
+                client,
+            },
+            selected,
         }));
     }
-    if selected == 0 {
-        return Err(CoreError::IncompatibleProtocol);
-    }
     Ok(Admission::Work(Admitted {
-        status: AuthenticatedStatus {
-            protocol_major: selected,
-        },
+        status: AuthenticatedStatus { work: selected },
         client,
         agent: hello.agent,
         name: hello.name,
+        offered: hello.versions,
     }))
 }
 
@@ -375,8 +494,8 @@ impl Caller<'_> {
     }
 }
 
-/// Admits a service-lane connection as `caller`. The lane is answered whatever the work majors
-/// of the two peers, so this returns the server's work major for the caller to compare.
+/// Admits a service-lane connection as `caller`. The lane needs a shared service major, just as
+/// work admission needs a shared work major.
 #[cfg_attr(
     not(feature = "client"),
     allow(dead_code, reason = "the CLI's server commands open the service lane")
@@ -386,23 +505,15 @@ pub(crate) fn admit_service_lane(
     caller: Caller<'_>,
     core: &[u8; 32],
     build: &str,
-) -> Result<u16, CoreError> {
-    let mut wire = Wire::new(stream);
-    wire.write(&Hello {
-        versions: vec![MAJOR],
-        build: build.to_owned(),
-        core: *core,
-        client: *caller.client,
-        name: caller.name.clone(),
-        agent: caller.agent.cloned(),
-        lane: Lane::Service,
-    })?;
-    let offer: Offer = wire.read()?;
-    if offer.build != build || offer.core != *core || offer.client != caller.effective() {
-        return Err(CoreError::AuthenticationRefused);
-    }
-    stream.admitted();
-    Ok(offer.core_major)
+) -> Result<Negotiated, Refused> {
+    admit_lane(
+        stream,
+        caller,
+        core,
+        build,
+        Lane::Service,
+        &Lane::Service.offered(),
+    )
 }
 
 #[cfg_attr(
@@ -414,90 +525,264 @@ pub(crate) fn admit_client<'a>(
     caller: impl Into<Caller<'a>>,
     core: &[u8; 32],
     build: &str,
-) -> Result<AuthenticatedStatus, CoreError> {
+) -> Result<Negotiated, Refused> {
     crate::host::check_peer(stream)?;
     admit_transport(stream, caller, core, build)
 }
 
+/// Admits a work connection as `caller`, offering this build's work versions.
 pub(crate) fn admit_transport<'a>(
     stream: &mut dyn Preamble,
     caller: impl Into<Caller<'a>>,
     core: &[u8; 32],
     build: &str,
-) -> Result<AuthenticatedStatus, CoreError> {
-    let caller = caller.into();
+) -> Result<Negotiated, Refused> {
+    admit_lane(
+        stream,
+        caller.into(),
+        core,
+        build,
+        Lane::Work,
+        &Lane::Work.offered(),
+    )
+}
+
+/// The caller's half of admission on `lane`, offering `offered`. The Offer must select one of
+/// the offered majors at no more than its offered minor, or none.
+fn admit_lane(
+    stream: &mut dyn Preamble,
+    caller: Caller<'_>,
+    core: &[u8; 32],
+    build: &str,
+    lane: Lane,
+    offered: &[ProtocolVersion],
+) -> Result<Negotiated, Refused> {
     let mut wire = Wire::new(stream);
     wire.write(&Hello {
-        versions: vec![MAJOR],
+        lane,
+        versions: offered.to_vec(),
         build: build.to_owned(),
         core: *core,
         client: *caller.client,
         name: caller.name.clone(),
         agent: caller.agent.cloned(),
-        lane: Lane::Work,
     })?;
     let offer: Offer = wire.read()?;
     if offer.build != build || offer.core != *core || offer.client != caller.effective() {
-        return Err(CoreError::AuthenticationRefused);
+        return Err(CoreError::AuthenticationRefused.into());
     }
-    if offer.selected != MAJOR {
-        return Err(CoreError::IncompatibleProtocol);
+    let expected = negotiate(offered, offer.versions.of(lane));
+    match (offer.selected, expected) {
+        (Some(selected), Ok(expected)) if selected == expected => {
+            if lane == Lane::Service {
+                stream.admitted();
+            }
+            Ok(Negotiated {
+                selected,
+                core: offer.versions,
+            })
+        }
+        (None, Err(older)) => Err(Refused::Incompatible {
+            older,
+            core: offer.versions,
+        }),
+        _ => Err(CoreError::Protocol.into()),
     }
-    Ok(AuthenticatedStatus {
-        protocol_major: offer.selected,
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const fn v(major: u16, minor: u16) -> ProtocolVersion {
+        ProtocolVersion { major, minor }
+    }
+
+    fn versions() -> CoreVersions {
+        CoreVersions::current(Version::parse("1.4.0").unwrap())
+    }
+
+    /// Serves one admission as a Core listening with `core`.
+    fn serve(
+        core: CoreVersions,
+    ) -> (
+        UnixStream,
+        std::thread::JoinHandle<Result<Admission, CoreError>>,
+    ) {
+        let (client, mut stream) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn(move || {
+            admit_core(&mut stream, &[7; 32], "spaceterm-development", &core)
+        });
+        (client, thread)
+    }
+
+    /// Admits `lane` offering `offered` against a Core listening with `core`.
+    fn admit(
+        lane: Lane,
+        offered: &[ProtocolVersion],
+        core: CoreVersions,
+    ) -> (Result<Negotiated, Refused>, Result<Admission, CoreError>) {
+        let (mut client, thread) = serve(core);
+        let result = admit_lane(
+            &mut client,
+            (&[9; 32], &"Build Mac".into()).into(),
+            &[7; 32],
+            "spaceterm-development",
+            lane,
+            offered,
+        );
+        (result, thread.join().unwrap())
+    }
+
     #[test]
     fn account_admission_preserves_nonsecret_client_identity() {
-        let (mut client, mut core) = UnixStream::pair().unwrap();
-        let thread =
-            std::thread::spawn(move || admit_core(&mut core, &[7; 32], "spaceterm-development"));
+        let (mut client, thread) = serve(versions());
         let result = admit_client(
             &mut client,
             (&[9; 32], &"Build Mac".into()),
             &[7; 32],
             "spaceterm-development",
         );
-        assert_eq!(result.unwrap().protocol_major, MAJOR);
+        assert_eq!(
+            result,
+            Ok(Negotiated {
+                selected: version::WORK,
+                core: versions()
+            })
+        );
         let admitted = thread.join().unwrap().unwrap().work();
         assert_eq!(
             (admitted.client, admitted.name.as_str()),
             ([9; 32], "Build Mac")
         );
+        assert_eq!(admitted.status.work, version::WORK);
+        assert_eq!(admitted.offered, Lane::Work.offered());
     }
+
+    /// A client one major ahead still speaks the Core's major, at the lower of the two minors.
     #[test]
-    fn a_client_of_another_major_is_offered_none_and_refused() {
-        let (mut client, mut core) = UnixStream::pair().unwrap();
-        let thread =
-            std::thread::spawn(move || admit_core(&mut core, &[7; 32], "spaceterm-development"));
-        let mut wire = Wire::new(&mut client);
-        wire.write(&Hello {
-            versions: vec![MAJOR + 1],
-            build: "spaceterm-development".into(),
-            core: [7; 32],
-            client: [9; 32],
-            name: "Build Mac".into(),
-            agent: None,
-            lane: Lane::Work,
-        })
-        .unwrap();
-        let offer: Offer = wire.read().unwrap();
-        assert_eq!(offer.selected, 0);
+    fn a_client_at_the_next_major_still_talks_to_a_core_at_the_previous_one() {
+        let core = CoreVersions {
+            work: v(1, 3),
+            ..versions()
+        };
+        let (client, admitted) = admit(Lane::Work, &[v(2, 0), v(1, 2)], core.clone());
         assert_eq!(
-            thread.join().unwrap().err(),
-            Some(CoreError::IncompatibleProtocol)
+            client,
+            Ok(Negotiated {
+                selected: v(1, 2),
+                core
+            })
+        );
+        let admitted = admitted.unwrap().work();
+        assert_eq!(admitted.status.work, v(1, 2));
+        assert_eq!(admitted.offered, [v(2, 0), v(1, 2)]);
+    }
+
+    #[test]
+    fn with_no_shared_major_both_sides_learn_which_one_is_older() {
+        for (core_work, older) in [
+            (v(3, 0), Incompatible::CallerTooOld),
+            (v(1, 9), Incompatible::ListenerTooOld),
+        ] {
+            let core = CoreVersions {
+                work: core_work,
+                ..versions()
+            };
+            let (client, admitted) = admit(Lane::Work, &[v(2, 1)], core.clone());
+            assert_eq!(client, Err(Refused::Incompatible { older, core }));
+            assert_eq!(admitted, Err(CoreError::IncompatibleProtocol(older)));
+        }
+    }
+
+    /// The service lane negotiates its own major, so a client that shares no work major still
+    /// administers the Core, and one that shares no service major is refused.
+    #[test]
+    fn the_service_lane_negotiates_its_own_major() {
+        let core = CoreVersions {
+            work: v(3, 0),
+            service: v(1, 4),
+            ..versions()
+        };
+        let (client, admitted) = admit(Lane::Service, &[v(1, 2)], core.clone());
+        assert_eq!(
+            client,
+            Ok(Negotiated {
+                selected: v(1, 2),
+                core: core.clone()
+            })
+        );
+        assert!(matches!(
+            admitted,
+            Ok(Admission::Service(AdmittedLane { selected, .. })) if selected == v(1, 2)
+        ));
+        let (client, admitted) = admit(Lane::Service, &[v(2, 0)], core.clone());
+        assert_eq!(
+            client,
+            Err(Refused::Incompatible {
+                older: Incompatible::ListenerTooOld,
+                core
+            })
+        );
+        assert_eq!(
+            admitted,
+            Err(CoreError::IncompatibleProtocol(
+                Incompatible::ListenerTooOld
+            ))
         );
     }
+
+    #[test]
+    fn a_hello_must_offer_one_or_two_descending_majors() {
+        for offered in [
+            vec![],
+            vec![v(1, 0), v(2, 0)],
+            vec![v(1, 0), v(1, 1)],
+            vec![v(3, 0), v(2, 0), v(1, 0)],
+        ] {
+            let (_, admitted) = admit(Lane::Work, &offered, versions());
+            assert_eq!(admitted, Err(CoreError::Protocol), "{offered:?}");
+        }
+    }
+
+    #[test]
+    fn a_client_refuses_an_offer_it_did_not_negotiate() {
+        for selected in [Some(v(1, 1)), Some(v(2, 0)), None] {
+            let (mut client, mut core) = UnixStream::pair().unwrap();
+            let thread = std::thread::spawn(move || {
+                let mut wire = Wire::new(&mut core);
+                let _: Hello = wire.read().unwrap();
+                wire.write(&Offer {
+                    selected,
+                    versions: CoreVersions {
+                        work: v(1, 1),
+                        ..versions()
+                    },
+                    build: "spaceterm-development".into(),
+                    core: [7; 32],
+                    client: [9; 32],
+                })
+                .unwrap();
+            });
+            let result = admit_lane(
+                &mut client,
+                (&[9; 32], &"Build Mac".into()).into(),
+                &[7; 32],
+                "spaceterm-development",
+                Lane::Work,
+                &[v(1, 0)],
+            );
+            assert_eq!(result, Err(Refused::Failed(CoreError::Protocol)));
+            thread.join().unwrap();
+        }
+    }
+
     #[test]
     fn substituted_build_or_core_is_refused_before_operations() {
         for (build, id) in [("spaceterm", [7; 32]), ("spaceterm-development", [8; 32])] {
             let (mut client, mut core) = UnixStream::pair().unwrap();
             let thread = std::thread::spawn(move || {
-                admit_core(&mut core, &[7; 32], "spaceterm-development")
+                admit_core(&mut core, &[7; 32], "spaceterm-development", &versions())
             });
             assert!(
                 admit_client(&mut client, (&[9; 32], &"Build Mac".into()), &id, build).is_err()
@@ -516,10 +801,10 @@ mod tests {
                 let mut wire = Wire::new(&mut core);
                 let _: Hello = wire.read().unwrap();
                 wire.write(&Offer {
-                    selected: MAJOR,
+                    selected: Some(version::WORK),
+                    versions: versions(),
                     build: build.into(),
                     core: machine_id,
-                    core_major: MAJOR,
                     client: [9; 32],
                 })
                 .unwrap();
@@ -531,7 +816,7 @@ mod tests {
                     &[7; 32],
                     "spaceterm-development",
                 ),
-                Err(CoreError::AuthenticationRefused)
+                Err(Refused::Failed(CoreError::AuthenticationRefused))
             );
             thread.join().unwrap();
         }
@@ -541,7 +826,7 @@ mod tests {
         let (mut client, mut core) = UnixStream::pair().unwrap();
         client.write_all(&u32::MAX.to_be_bytes()).unwrap();
         assert_eq!(
-            admit_core(&mut core, &[7; 32], "spaceterm-development"),
+            admit_core(&mut core, &[7; 32], "spaceterm-development", &versions()),
             Err(CoreError::Protocol)
         );
     }
@@ -565,8 +850,9 @@ mod tests {
         let other: AgentName = "agent-2".parse().unwrap();
         assert_ne!(derived, other.client(&[9; 32]));
         let (mut client, mut core) = UnixStream::pair().unwrap();
-        let thread =
-            std::thread::spawn(move || admit_core(&mut core, &[7; 32], "spaceterm-development"));
+        let thread = std::thread::spawn(move || {
+            admit_core(&mut core, &[7; 32], "spaceterm-development", &versions())
+        });
         let name: ClientName = "Build Mac CLI agent-1".into();
         admit_client(
             &mut client,
@@ -588,8 +874,9 @@ mod tests {
     fn an_agent_whose_name_hides_it_is_refused() {
         let agent: AgentName = "agent-1".parse().unwrap();
         let (mut client, mut core) = UnixStream::pair().unwrap();
-        let thread =
-            std::thread::spawn(move || admit_core(&mut core, &[7; 32], "spaceterm-development"));
+        let thread = std::thread::spawn(move || {
+            admit_core(&mut core, &[7; 32], "spaceterm-development", &versions())
+        });
         let name: ClientName = "Build Mac".into();
         assert!(
             admit_client(
@@ -618,6 +905,7 @@ mod tests {
                 &mut core,
                 &[7; 32],
                 "spaceterm-development",
+                &versions(),
                 Some(([9; 32], [8; 32])),
             )
         });

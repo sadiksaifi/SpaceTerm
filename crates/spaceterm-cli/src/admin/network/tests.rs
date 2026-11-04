@@ -172,6 +172,7 @@ fn the_access_argument_round_trips_into_the_confirmation_hint() {
 fn context_for(global: &crate::args::Global) -> Context<'_> {
     Context {
         credentials: crate::connection::CliCredentials::new("spaceterm-development"),
+        facts: Default::default(),
         identity: "spaceterm-development",
         global,
     }

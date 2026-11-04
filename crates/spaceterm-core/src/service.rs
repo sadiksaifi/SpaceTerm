@@ -2,7 +2,6 @@
 pub mod activation;
 mod command;
 pub mod control;
-pub mod feed;
 pub mod helper;
 pub mod lane;
 pub mod lane_codes;
@@ -16,6 +15,7 @@ mod runtime;
 pub mod tokens;
 #[cfg(feature = "client")]
 pub use runtime::CliUninstall;
+pub use runtime::updates;
 pub use runtime::{
     CandidateMetadata, CliLauncher, CliLink, Layout, bundle_identifier, bundle_name,
     verify_candidate_bytes,
@@ -138,6 +138,11 @@ trait Supervisor: Send + Sync {
     /// How long Stop waits for the server to exit. Restart and Update stop through the same wait.
     /// A server still running afterwards leaves the operation unresolved.
     fn stop_timeout(&self) -> Duration;
+    /// How long a started Pending Version has to become ready before the Core returns to the
+    /// previous version.
+    fn ready_deadline(&self) -> Duration {
+        Duration::from_secs(60)
+    }
     /// Change startup activation only. Never stop, start or unregister the service.
     fn set_automatic_start(&self, enabled: bool) -> Result<(), CoreError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), CoreError>;
@@ -145,6 +150,16 @@ trait Supervisor: Send + Sync {
     /// The running server's process identifier, as the service manager reports it.
     fn process(&self) -> Result<Option<u32>, CoreError> {
         Ok(None)
+    }
+    /// Registers a boot entry that runs the recovery helper of `runtime`, the previous
+    /// version, so a power loss during an activation is finished by that version rather than
+    /// by a Pending Version that may not start. The entry acts at the next boot or login.
+    fn arm_recovery(&self, _runtime: &Path) -> Result<(), CoreError> {
+        Ok(())
+    }
+    /// Removes the boot recovery entry once the activation settled.
+    fn disarm_recovery(&self) -> Result<(), CoreError> {
+        Ok(())
     }
     /// Replace only the admitted old definition or finish its exact already-published replacement.
     fn replace(&self, _previous: &Path, _candidate: &Path) -> Result<(), CoreError> {
@@ -614,11 +629,22 @@ impl Service {
             .and_then(|()| self.supervisor.set_automatic_start(state.automatic_start))
             .and_then(|()| self.wait_running(true));
         if result.is_err() {
-            let _intent = data.lock("service-intent.lock", false)?;
-            let mut latest = Self::state(data)?.ok_or(CoreError::StorageUnavailable)?;
-            if let Some(operation) = latest.activation.as_mut() {
-                operation.startup_failed();
-                data.write_json(c"service.json", &latest)?;
+            let returning = {
+                let _intent = data.lock("service-intent.lock", false)?;
+                let mut latest = Self::state(data)?.ok_or(CoreError::StorageUnavailable)?;
+                let returning = latest
+                    .activation
+                    .as_mut()
+                    .is_some_and(|operation| operation.startup_failed(latest.stopped));
+                if returning {
+                    data.write_json(c"service.json", &latest)?;
+                }
+                returning
+            };
+            // A stopped update's candidate failed its first start: return to the previous
+            // version now, as the helper does after a failed restart.
+            if returning {
+                let _ = self.resume_activation(data);
             }
         }
         result
@@ -919,39 +945,68 @@ pub(crate) fn check_runtime(paths: &Paths, supervised: bool) -> Result<(), CoreE
 /// Reboot proves the previous boot's processes ended; ordinary client launches grant no recovery.
 pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
     let service = Service::for_identity(identity)?;
+    let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
+    crate::host::install_shutdown_signals()?;
+    run_approved(&service, &executable, |paths| {
+        crate::host::serve_runtime(paths, Some(panes), true)
+    })
+}
+
+/// Admits this run of `executable` as the approved runtime's, then `serve`s it. Boot and every
+/// other start run the approved runtime first: a Pending Version runs only after a restart moved
+/// the approval to it.
+fn run_approved(
+    service: &Service,
+    executable: &Path,
+    serve: impl FnOnce(&Paths) -> Result<(), CoreError>,
+) -> Result<(), CoreError> {
+    let identity = service.identity.as_str();
     let (data, _) = service.read()?.ok_or(CoreError::NotInstalled)?;
     let intent = data.lock("service-intent.lock", false)?;
     let mut state = Service::state(&data)?.ok_or(CoreError::NotInstalled)?;
     if state.stopped || !state.installed {
         return Ok(());
     }
+    // An activation that refuses this run and whose earlier run ended, as a reboot proves,
+    // has no helper left to finish it. A recovery helper finishes it outside this unit.
+    let refuse = |state: &State| {
+        if check_cleanup(state).is_ok()
+            && let Some(operation) = &state.activation
+        {
+            let _ = helper::launch_recovery(identity, &operation.previous_installation(service));
+        }
+        CoreError::ActivationUnresolved
+    };
     if state
         .activation
         .as_ref()
         .is_some_and(|o| !o.permits_start())
     {
-        return Err(CoreError::ActivationUnresolved);
+        return Err(refuse(&state));
     }
     check_cleanup(&state)?;
-    let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
     let layout = runtime::Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
     if executable != service.runtime(&state).join(layout.executable()) {
         return Err(CoreError::RuntimeUnavailable);
     }
     runtime::verify(&service.runtime(&state), identity)?;
-    crate::host::install_shutdown_signals()?;
     let run = Run {
         boot: boot()?,
         token: crate::protocol::random()?,
     };
-    activation::admit_run(&mut state, &run)?;
+    if activation::admit_run(&mut state, &run).is_err() {
+        return Err(refuse(
+            &Service::state(&data)?.ok_or(CoreError::NotInstalled)?,
+        ));
+    }
     state.run = Some(run.clone());
     data.write_json(c"service.json", &state)?;
     drop(intent);
-    match crate::host::serve_runtime(&service.paths, Some(panes), true) {
-        Ok(()) | Err(CoreError::Stopped) => {}
-        Err(error) => return Err(error),
-    }
+    // A startup that fails has returned from its cleanup too, so its run ends either way.
+    let served = match serve(&service.paths) {
+        Ok(()) | Err(CoreError::Stopped) => Ok(()),
+        Err(error) => Err(error),
+    };
     let _intent = data.lock("service-intent.lock", false)?;
     let mut state = Service::state(&data)?.ok_or(CoreError::StorageUnavailable)?;
     if state
@@ -962,7 +1017,38 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
         return Err(CoreError::CleanupUnresolved);
     }
     state.run = None;
-    data.write_json(c"service.json", &state)
+    data.write_json(c"service.json", &state)?;
+    served
+}
+/// Publishes `contents` at `path` whole, replacing an earlier file, for a service manager entry
+/// that SpaceTerm alone owns.
+#[cfg_attr(test, allow(dead_code))]
+fn publish_entry(path: &Path, contents: &[u8]) -> Result<(), CoreError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let temporary = path.with_extension("spaceterm-pending");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(|_| CoreError::StorageUnavailable)?;
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .map_err(|_| CoreError::StorageUnavailable)
+}
+/// Removes a service manager entry SpaceTerm alone owns. An absent entry is removed.
+#[cfg_attr(test, allow(dead_code))]
+fn remove_entry(path: &Path) -> Result<(), CoreError> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(CoreError::StorageUnavailable)
+        }
+        _ => Ok(()),
+    }
 }
 fn check_cleanup(state: &State) -> Result<(), CoreError> {
     if let Some(run) = &state.run
@@ -1881,7 +1967,7 @@ mod tests {
         fn ready(outcome: StartupOutcome) -> crate::MachineConnection {
             match outcome {
                 StartupOutcome::Ready { core, status } => {
-                    assert_eq!(status.protocol_major, protocol::MAJOR);
+                    assert_eq!(status.work, protocol::version::WORK);
                     core
                 }
                 _ => panic!("launch did not connect"),
@@ -2656,13 +2742,15 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut wire = protocol::Wire::new(&mut stream);
                 let hello: serde_json::Value = wire.read()?;
-                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "core":hello["core"], "core_major":protocol::MAJOR, "client":hello["client"]}))
+                wire.write(&serde_json::json!({"selected":null, "versions":{"version":"9.0.0","work":{"major":protocol::MAJOR + 1,"minor":0},"service":{"major":1,"minor":0}}, "build":hello["build"], "core":hello["core"], "client":hello["client"]}))
             }));
             assert!(matches!(
                 LocalStartup::with_service(supervisor.service())
                     .unwrap()
                     .run(no_provision, || false),
-                Err(CoreError::IncompatibleProtocol)
+                Err(CoreError::IncompatibleProtocol(
+                    protocol::version::Incompatible::CallerTooOld
+                ))
             ));
             assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
             assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);

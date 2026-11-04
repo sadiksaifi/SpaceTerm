@@ -1828,7 +1828,9 @@ fn a_resolving_update_keeps_the_pane_reconnecting_without_carrying_a_click() {
     for error in [
         CoreError::Stopped,
         CoreError::AuthenticationRefused,
-        CoreError::IncompatibleProtocol,
+        CoreError::IncompatibleProtocol(
+            spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+        ),
     ] {
         let state = CorePaneState::new();
         assert!(!state.connection_failed(error, false), "{error:?}");

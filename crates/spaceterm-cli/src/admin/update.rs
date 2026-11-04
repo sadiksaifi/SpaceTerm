@@ -1,40 +1,23 @@
-//! `update`: check the signed feed, stage a verified candidate, preview the change and
-//! activate it after confirmation.
+//! `update`: install a SpaceTerm Core update beside the running version. Installing ends
+//! nothing, so it asks nothing; `restart` moves SpaceTerm Core to the new version.
 //!
-//! A running SpaceTerm Core stages and activates through its service lane, which reaches it
-//! across protocol majors. On the machine itself a stopped SpaceTerm Core is updated directly, and an
-//! interrupted activation is settled first. When the settled state allows return to the
-//! previous runtime, the preview offers that return instead.
-use super::lifecycle::{self, Settled};
+//! Without files, SpaceTerm Core installs the release its own signed feed names. Preflight and
+//! Development builds have no feed, so they take only `--archive` with `--signature`, which this
+//! command pushes over the service lane like the desktop pushes its embedded build. A stopped
+//! SpaceTerm Core on this machine installs directly.
 use super::{Context, Opened, Pending, Reply, Routed};
-use crate::contract::{
-    self, Code, Confirmation, Envelope, Failure, MachineRef, Receipt, ReceiptState, ServiceAction,
-    UpdateCheck, UpdateEffects, UpdateKind, UpdateOperation, Version, Warning, WarningCode,
-    WarningDetails,
-};
-use base64::Engine;
-use spaceterm_core::service::activation::{ActivationPhase, ActivationStatus};
-use spaceterm_core::service::lane::admin;
-use spaceterm_core::service::lane::client::within;
-use spaceterm_core::service::lane::{
-    LaneAction, LaneEffects, LaneReply, LaneRequest, LaneUpdateKind, LaneVersion, MAX_CHUNK,
-    Offline,
-};
-use spaceterm_core::service::{RetainedInstallation, Service};
+use crate::contract::{self, Code, CoreUpdate, Envelope, Failure, MachineRef};
+use spaceterm_core::service::Service;
+use spaceterm_core::service::lane::Offline;
+use spaceterm_core::service::lane::admin::{self, PushArchive};
+use spaceterm_core::update::facts::{UpdateFacts, Version};
+use spaceterm_core::update::sources::SourceError;
 use std::io::Read;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 const COMMAND: &str = "update";
-/// Each uploaded chunk's decoded size. Base64 keeps the frame under the lane's limit.
-const CHUNK: usize = MAX_CHUNK;
 
-pub fn run(
-    context: &Context<'_>,
-    check: bool,
-    files: Option<(&Path, &Path)>,
-    token: Option<&str>,
-) -> Reply {
+pub fn run(context: &Context<'_>, files: Option<(&Path, &Path)>) -> Reply {
     let routed = match context.routed() {
         Ok(routed) => routed,
         Err(error) => return Reply::routing_failure(COMMAND, error),
@@ -43,721 +26,203 @@ pub fn run(
         Ok(pending) => pending,
         Err(failure) => return Reply::failure(COMMAND, Some(routed.machine), failure),
     };
-    settle_first(routed.local, check, &mut || {
-        let _ = Service::for_identity(context.identity).and_then(|v| v.recover_activation());
-    });
-    let opened = super::open_lane(context, &routed.connection, &routed.route, &pending);
-    match opened {
-        Ok(opened) => running(context, routed, opened, &pending, check, files, token),
-        Err(_) if routed.local => stopped(context, routed, check, files, token),
+    match super::open_lane(context, &routed.connection, &routed.route, &pending) {
+        Ok(opened) => running(context, routed, opened, files),
+        Err(failure) if routed.local && offline(&failure) => stopped(context, routed, files),
         Err(failure) => Reply::failure(COMMAND, Some(routed.machine), failure),
     }
 }
 
-/// An update on the server's own machine settles an interrupted activation first. Recovery
-/// never repeats a dispatched step. `--check` is passive, so it never recovers.
-fn settle_first(local: bool, check: bool, recover: &mut dyn FnMut()) {
-    if local && !check {
-        recover();
-    }
+/// Whether a lane failure means SpaceTerm Core on this machine is not running, so the CLI
+/// installs directly. A running Core that refuses or fails answers for itself instead, because
+/// an install outside its engine would stay invisible to it.
+pub(crate) fn offline(failure: &Failure) -> bool {
+    matches!(failure.code, Code::NotRunning | Code::Unreachable)
 }
 
-fn version(value: &LaneVersion) -> Version {
-    super::status::version(value)
-}
-
-fn installed(value: &RetainedInstallation) -> Version {
-    Version {
-        version: value.version.clone(),
-        commit: value.commit.clone(),
-        sha256: value
-            .directory
-            .file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or_default()
-            .to_owned(),
-    }
-}
-
-fn check_text(check: &UpdateCheck) -> String {
-    let mut text = format!("Installed: {}\n", check.approved.version);
-    match &check.latest {
-        Some(latest) if latest.sha256 == check.approved.sha256 => {
-            text.push_str("Up to date.\n");
-        }
-        Some(latest) => text.push_str(&format!("Available: {}\n", latest.version)),
-        None => text.push_str("No release feed for this build.\n"),
-    }
-    for staged in &check.staged {
-        text.push_str(&format!("Staged: {}\n", staged.version));
-    }
-    text
-}
-
-/// The envelope of `update --check`.
-pub(crate) fn check_envelope(
-    core: MachineRef,
-    data: UpdateCheck,
-    recovered: Vec<contract::RecoveredOperation>,
-) -> Envelope<UpdateCheck> {
-    super::with_recovered(Envelope::ok(COMMAND, Some(core), data), recovered)
-}
-
-pub(crate) fn lane_check(check: spaceterm_core::service::lane::LaneCheck) -> UpdateCheck {
-    UpdateCheck {
-        approved: version(&check.approved),
-        latest: check.latest.as_ref().map(version),
-        staged: check.staged.iter().map(version).collect(),
-    }
-}
-
+/// A running SpaceTerm Core installs through its service lane, on this machine or a paired one.
 fn running(
     context: &Context<'_>,
     routed: Routed,
     mut opened: Opened,
-    pending: &Pending,
-    check: bool,
     files: Option<(&Path, &Path)>,
-    token: Option<&str>,
 ) -> Reply {
-    let core = routed.machine.clone();
-    let fail = |failure: Failure, recovered| {
-        Reply::new(
+    let installed = match files {
+        Some((archive, signature)) => {
+            push(context, &mut opened.session, archive, signature).map(|facts| (true, facts))
+        }
+        None => admin::install_from_feed(&mut opened.session).map_err(super::lane_failure),
+    };
+    match installed {
+        Ok((installed, facts)) => {
+            finish(context, routed.machine, installed, &facts, opened.recovered)
+        }
+        Err(failure) => Reply::new(
             &super::with_recovered(
-                Envelope::error(COMMAND, Some(core.clone()), failure, contract::Empty {}),
-                recovered,
+                Envelope::error(COMMAND, Some(routed.machine), failure, contract::Empty {}),
+                opened.recovered,
             ),
             String::new(),
-        )
-    };
-    if check {
-        return match admin::check(&mut opened.session) {
-            Ok(check) => {
-                let data = lane_check(check);
-                let text = check_text(&data);
-                Reply::new(&check_envelope(core, data, opened.recovered), text)
-            }
-            Err(error) => fail(super::lane_failure(error), opened.recovered),
-        };
-    }
-    // When the settled state allows return to the previous runtime, the return is the offered
-    // action instead of an update.
-    match admin::probe_return(&mut opened.session) {
-        Ok(Some(admin::Preview {
-            token: token_now,
-            expires_at,
-            effects,
-            ..
-        })) => {
-            let Some(to) = effects.to.as_ref().map(version) else {
-                return fail(Failure::new(Code::ProtocolError), opened.recovered);
-            };
-            return match token {
-                None => preview(
-                    context,
-                    routed,
-                    opened,
-                    pending,
-                    (LaneAction::Return, to),
-                    token_now,
-                    expires_at,
-                    &effects,
-                ),
-                Some(given) => execute(
-                    context,
-                    routed,
-                    opened,
-                    pending,
-                    LaneAction::Return,
-                    given.to_owned(),
-                    to,
-                ),
-            };
-        }
-        Ok(None) => {}
-        Err(error) => return fail(super::lane_failure(error), opened.recovered),
-    }
-    // Stage the candidate. Local files stage directly on this machine; a remote server
-    // receives them over the lane.
-    let staged = match files {
-        Some((archive, signature)) if routed.local => Offline::new(context.identity)
-            .and_then(|offline| offline.admin().stage_files(archive, signature))
-            .map(|v| installed(&v))
-            .map_err(contract::from_core_error),
-        Some((archive, signature)) => upload(&mut opened.session, archive, signature),
-        None => admin::stage_fetch(&mut opened.session)
-            .map(|staged| version(&staged))
-            .map_err(super::lane_failure),
-    };
-    let candidate = match staged {
-        Ok(candidate) => candidate,
-        Err(failure) => return fail(failure, opened.recovered),
-    };
-    let action = LaneAction::Update {
-        installation: candidate.sha256.clone(),
-    };
-    let Some(token) = token else {
-        return match admin::preview(&mut opened.session, action.clone()) {
-            Ok(admin::Preview {
-                token,
-                expires_at,
-                effects,
-                ..
-            }) => preview(
-                context,
-                routed,
-                opened,
-                pending,
-                (action, candidate),
-                token,
-                expires_at,
-                &effects,
-            ),
-            Err(error) => fail(super::lane_failure(error), opened.recovered),
-        };
-    };
-    execute(
-        context,
-        routed,
-        opened,
-        pending,
-        action,
-        token.to_owned(),
-        candidate,
-    )
-}
-
-#[allow(clippy::too_many_arguments, reason = "one preview's parts, used once")]
-fn preview(
-    context: &Context<'_>,
-    routed: Routed,
-    opened: Opened,
-    pending: &Pending,
-    (action, candidate): (LaneAction, Version),
-    token: String,
-    expires_at: String,
-    effects: &LaneEffects,
-) -> Reply {
-    let (Some(from), Some(to)) = (&effects.from, &effects.to) else {
-        return Reply::failure(
-            COMMAND,
-            Some(routed.machine),
-            Failure::new(Code::ProtocolError),
-        );
-    };
-    let data = UpdateEffects {
-        from: version(from),
-        to: version(to),
-        kind: match effects.kind {
-            Some(LaneUpdateKind::Return) => UpdateKind::Return,
-            _ => UpdateKind::Update,
-        },
-        ends_sessions: effects.ends_sessions,
-        sessions: effects.sessions.clone(),
-    };
-    let summary = summary(super::display_name(&routed.machine), &data);
-    if context.interactive() {
-        let warnings: Vec<_> = major_warning(effects.to_major)
-            .into_iter()
-            .chain(super::recovered_warning(&opened.recovered))
-            .collect();
-        contract::write_warnings(&warnings, &mut std::io::stderr().lock());
-        eprint!("{summary}");
-        if super::confirm("Update SpaceTerm Core?") {
-            return execute(context, routed, opened, pending, action, token, candidate);
-        }
-        return Reply::failure(
-            COMMAND,
-            Some(routed.machine),
-            Failure::new(Code::ConfirmationRequired),
-        );
-    }
-    let text = format!(
-        "{summary}Confirm with: {}\n",
-        context.command_line(&routed.machine, &["update", "--confirm", &token])
-    );
-    Reply::new(
-        &preview_envelope(
-            routed.machine,
-            token,
-            expires_at,
-            data,
-            effects.to_major,
-            opened.recovered,
         ),
-        text,
-    )
-}
-
-/// The confirmation envelope of an update or return preview.
-pub(crate) fn preview_envelope(
-    core: MachineRef,
-    token: String,
-    expires_at: String,
-    effects: UpdateEffects,
-    to_major: Option<u16>,
-    recovered: Vec<contract::RecoveredOperation>,
-) -> Envelope<contract::ConfirmationData<UpdateEffects>> {
-    let mut envelope = Envelope::confirmation(
-        COMMAND,
-        Some(core),
-        Confirmation {
-            token,
-            expires_at,
-            effects,
-        },
-    );
-    if let Some(warning) = major_warning(to_major) {
-        envelope.warnings.push(warning);
     }
-    super::with_recovered(envelope, recovered)
 }
 
-/// After an update to another protocol major, work commands need a matching CLI.
-fn major_warning(to_major: Option<u16>) -> Option<Warning> {
-    let core_major = to_major?;
-    let client_major = spaceterm_core::protocol::MAJOR;
-    (core_major != client_major).then(|| {
-        Warning::new(
-            WarningCode::ClientMajorDiffers,
-            WarningDetails::Major {
-                client_major,
-                core_major,
-            },
-        )
-    })
-}
-
-fn summary(machine: &str, effects: &UpdateEffects) -> String {
-    let change = match effects.kind {
-        UpdateKind::Update => format!(
-            "Update SpaceTerm Core on {machine} from {} to {}?",
-            effects.from.version, effects.to.version
-        ),
-        UpdateKind::Return => format!(
-            "Return SpaceTerm Core on {machine} from {} to {}?",
-            effects.from.version, effects.to.version
-        ),
-    };
-    let ends = if effects.ends_sessions == 0 {
-        "No Terminal Sessions end.".to_owned()
-    } else {
-        format!(
-            "{} Terminal Sessions end for every client. Workspaces are kept.",
-            effects.ends_sessions
-        )
-    };
-    format!("{change}\n{ends}\n")
-}
-
-fn execute(
-    context: &Context<'_>,
-    routed: Routed,
-    opened: Opened,
-    pending: &Pending,
-    action: LaneAction,
-    token: String,
-    candidate: Version,
-) -> Reply {
-    let Opened {
-        lane,
-        session,
-        recovered,
-    } = opened;
-    let outcome = admin::execute(
-        &lane,
-        session,
-        action,
-        token,
-        context.timeout(admin::RETURN_WAIT),
-        pending.operations(),
-        &mut super::dispatch,
-        &crate::interrupt::settle_by,
-    );
-    let outcome = match outcome {
-        Ok(outcome) => outcome,
+/// A stopped SpaceTerm Core on this machine installs directly. It starts on the new version.
+fn stopped(context: &Context<'_>, routed: Routed, files: Option<(&Path, &Path)>) -> Reply {
+    let offline = match Offline::new(context.identity) {
+        Ok(offline) => offline,
         Err(error) => {
-            return Reply::new(
-                &super::with_recovered(
-                    Envelope::error(
-                        COMMAND,
-                        Some(routed.machine),
-                        super::lane_failure(error),
-                        contract::Empty {},
-                    ),
-                    recovered,
-                ),
-                String::new(),
+            return Reply::failure(
+                COMMAND,
+                Some(routed.machine),
+                contract::from_core_error(error),
             );
         }
     };
-    let Settled {
-        receipt, failure, ..
-    } = lifecycle::settle(ServiceAction::Update, outcome);
-    finish(routed, receipt, failure, Some(candidate), recovered)
+    let installed = match files {
+        Some((archive, signature)) => digest(archive).and_then(|(sha256, _)| {
+            offline
+                .install_archive(archive, signature, &sha256)
+                .map(|facts| (true, facts))
+                .map_err(|error| source_failure(&error))
+        }),
+        None => offline
+            .install_from_feed()
+            .map_err(|error| source_failure(&error)),
+    };
+    match installed {
+        Ok((installed, facts)) => finish(context, routed.machine, installed, &facts, Vec::new()),
+        Err(failure) => Reply::failure(COMMAND, Some(routed.machine), failure),
+    }
+}
+
+fn source_failure(error: &SourceError) -> Failure {
+    contract::from_lane_code(error.code())
+}
+
+/// The archive's SHA-256 as 64 lowercase hex digits, and its length.
+fn digest(archive: &Path) -> Result<(String, u64), Failure> {
+    let unreadable = || Failure::new(Code::NoCandidate);
+    let mut file = std::fs::File::open(archive).map_err(|_| unreadable())?;
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = vec![0; 1 << 20];
+    let mut length = 0u64;
+    loop {
+        let count = file.read(&mut buffer).map_err(|_| unreadable())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+        length += count as u64;
+    }
+    Ok((super::hex(digest.finish().as_ref()), length))
+}
+
+/// Verifies a local archive as this build identity would, then pushes it. Verifying first
+/// names the version, so SpaceTerm Core refuses one it would not install before any byte is
+/// sent.
+fn push(
+    context: &Context<'_>,
+    session: &mut spaceterm_core::service::lane::client::Session,
+    archive: &Path,
+    signature_path: &Path,
+) -> Result<UpdateFacts, Failure> {
+    let (sha256, length) = digest(archive)?;
+    let signature =
+        std::fs::read(signature_path).map_err(|_| Failure::new(Code::CandidateUnverified))?;
+    let service = Service::for_identity(context.identity).map_err(contract::from_core_error)?;
+    let metadata = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+        .iter()
+        .find_map(|target| {
+            service
+                .inspect_candidate_for_target(
+                    archive,
+                    signature_path,
+                    &sha256,
+                    target,
+                    spaceterm_core::protocol::MAJOR,
+                )
+                .ok()
+        });
+    let metadata = match metadata {
+        Some(metadata) => metadata,
+        None => service
+            .inspect_update_candidate(archive, signature_path, &sha256)
+            .map_err(contract::from_core_error)?,
+    };
+    let version =
+        Version::parse(&metadata.version).map_err(|_| Failure::new(Code::CandidateUnverified))?;
+    let mut file = std::fs::File::open(archive).map_err(|_| Failure::new(Code::NoCandidate))?;
+    admin::push(
+        session,
+        &PushArchive {
+            version: &version,
+            length,
+            sha256: &sha256,
+            signature: &signature,
+        },
+        &mut file,
+        &mut |_| {},
+    )
+    .map_err(super::lane_failure)
 }
 
 fn finish(
-    routed: Routed,
-    receipt: Receipt,
-    failure: Option<Failure>,
-    version: Option<Version>,
+    context: &Context<'_>,
+    machine: MachineRef,
+    installed: bool,
+    facts: &UpdateFacts,
     recovered: Vec<contract::RecoveredOperation>,
 ) -> Reply {
-    let text = match failure {
-        None => "SpaceTerm Core updated.\n".to_owned(),
-        Some(_) => String::new(),
-    };
-    Reply::new(
-        &operation_envelope(routed.machine, receipt, failure, version, recovered),
-        text,
-    )
+    let restart = context.command_line(&machine, &["restart"]);
+    let text = text(installed, facts, &restart);
+    Reply::new(&envelope(machine, installed, facts, recovered), text)
 }
 
-/// The envelope of a confirmed update or return.
-pub(crate) fn operation_envelope(
-    core: MachineRef,
-    receipt: Receipt,
-    failure: Option<Failure>,
-    version: Option<Version>,
+/// The `update` envelope.
+pub(crate) fn envelope(
+    machine: MachineRef,
+    installed: bool,
+    facts: &UpdateFacts,
     recovered: Vec<contract::RecoveredOperation>,
-) -> Envelope<UpdateOperation> {
-    let data = UpdateOperation {
-        operation: receipt.operation.clone(),
-        version: version.unwrap_or(Version {
-            version: String::new(),
-            commit: String::new(),
-            sha256: String::new(),
-        }),
-        receipt,
+) -> Envelope<CoreUpdate> {
+    let data = CoreUpdate {
+        installed,
+        running: facts.running.to_string(),
+        pending: super::status::pending(facts),
+        sessions: facts.sessions,
     };
-    let envelope = match failure {
-        None => Envelope::ok(COMMAND, Some(core), data),
-        Some(failure) => Envelope::error(COMMAND, Some(core), failure, data),
-    };
-    super::with_recovered(envelope, recovered)
+    super::with_recovered(Envelope::ok(COMMAND, Some(machine), data), recovered)
 }
 
-/// Sends a signed archive over the lane in order, then returns the staged installation.
-fn upload(
-    session: &mut spaceterm_core::service::lane::client::Session,
-    archive: &Path,
-    signature: &Path,
-) -> Result<Version, Failure> {
-    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-    let signature = std::fs::read(signature).map_err(|_| Failure::new(Code::NoCandidate))?;
-    let mut file = std::fs::File::open(archive).map_err(|_| Failure::new(Code::NoCandidate))?;
-    let length = file
-        .metadata()
-        .map_err(|_| Failure::new(Code::NoCandidate))?
-        .len();
-    let sha256 = {
-        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-        let mut buffer = vec![0; 1 << 20];
-        loop {
-            let count = file
-                .read(&mut buffer)
-                .map_err(|_| Failure::new(Code::NoCandidate))?;
-            if count == 0 {
-                break;
-            }
-            digest.update(&buffer[..count]);
-        }
-        super::hex(digest.finish().as_ref())
+/// What installing found, and how to use the Pending Version.
+pub(crate) fn text(installed: bool, facts: &UpdateFacts, restart: &str) -> String {
+    let running = &facts.running;
+    let Some(pending) = &facts.pending else {
+        return format!("SpaceTerm Core {running} is up to date.\n");
     };
-    let deadline = || Instant::now() + Duration::from_secs(30);
-    let reply = session
-        .call(
-            &LaneRequest::StageUpload {
-                length,
-                sha256,
-                signature: encode(&signature),
-            },
-            deadline(),
+    let what = if installed {
+        format!(
+            "Installed SpaceTerm Core {} beside {running}.",
+            pending.version
         )
-        .map_err(super::lane_failure)?;
-    let LaneReply::UploadProgress { upload, .. } = reply else {
-        return Err(Failure::new(Code::ProtocolError));
-    };
-    let mut file = std::fs::File::open(archive).map_err(|_| Failure::new(Code::NoCandidate))?;
-    let mut buffer = vec![0; CHUNK];
-    let mut offset = 0u64;
-    loop {
-        let count =
-            read_full(&mut file, &mut buffer).map_err(|_| Failure::new(Code::NoCandidate))?;
-        if count == 0 {
-            return Err(Failure::new(Code::CandidateChanged));
-        }
-        let reply = session
-            .call(
-                &LaneRequest::UploadChunk {
-                    upload: upload.clone(),
-                    offset,
-                    data: encode(&buffer[..count]),
-                },
-                deadline(),
-            )
-            .map_err(super::lane_failure)?;
-        offset += count as u64;
-        match reply {
-            LaneReply::UploadProgress { next_offset, .. } if next_offset == offset => {}
-            reply @ LaneReply::Staged { .. } if offset == length => {
-                return admin::staged(reply)
-                    .map(|staged| version(&staged))
-                    .map_err(super::lane_failure);
-            }
-            _ => return Err(Failure::new(Code::ProtocolError)),
-        }
-    }
-}
-
-fn read_full(file: &mut std::fs::File, buffer: &mut [u8]) -> std::io::Result<usize> {
-    let mut filled = 0;
-    while filled < buffer.len() {
-        match file.read(&mut buffer[filled..])? {
-            0 => break,
-            count => filled += count,
-        }
-    }
-    Ok(filled)
-}
-
-/// A stopped SpaceTerm Core on this machine: stage, preview and activate through the service itself.
-fn stopped(
-    context: &Context<'_>,
-    routed: Routed,
-    check: bool,
-    files: Option<(&Path, &Path)>,
-    token: Option<&str>,
-) -> Reply {
-    let core = routed.machine.clone();
-    let fail = |failure: Failure| Reply::failure(COMMAND, Some(core.clone()), failure);
-    let offline = match Offline::new(context.identity) {
-        Ok(offline) => offline,
-        Err(error) => return fail(contract::from_core_error(error)),
-    };
-    let admin = offline.admin();
-    if check {
-        return match admin.check() {
-            Ok(check) => {
-                let data = lane_check(check);
-                let text = check_text(&data);
-                Reply::new(&check_envelope(core, data, Vec::new()), text)
-            }
-            Err(error) => fail(contract::from_core_error(error)),
-        };
-    }
-    let service = match Service::for_identity(context.identity) {
-        Ok(service) => service,
-        Err(error) => return fail(contract::from_core_error(error)),
-    };
-    // A candidate that never became ready can return to the previous runtime instead.
-    if let Ok(approval) = service.prepare_return() {
-        let effects = UpdateEffects {
-            from: installed(approval.candidate()),
-            to: installed(approval.previous()),
-            kind: UpdateKind::Return,
-            ends_sessions: 0,
-            sessions: Vec::new(),
-        };
-        let observed = match approval.confirmation_token() {
-            Ok(observed) => observed,
-            Err(error) => return fail(contract::from_core_error(error)),
-        };
-        match confirmed(
-            context,
-            super::display_name(&routed.machine),
-            &effects,
-            ("return", &observed),
-            token,
-        ) {
-            Ok(true) => {}
-            Ok(false) => return offline_preview(context, routed, effects, ("return", &observed)),
-            Err(failure) => return fail(failure),
-        }
-        let to = effects.to.clone();
-        if let Err(failure) = crate::interrupt::dispatch() {
-            return fail(failure);
-        }
-        let returned = within(ACTIVATION, &crate::interrupt::settle_by, move || {
-            service.return_to_previous(approval)
-        });
-        return offline_activated(routed, ServiceAction::Return, returned, to);
-    }
-    let staged = match files {
-        Some((archive, signature)) => admin.stage_files(archive, signature),
-        None => admin.stage_fetch(),
-    };
-    let candidate = match staged {
-        Ok(candidate) => candidate,
-        Err(error) => return fail(contract::from_core_error(error)),
-    };
-    let approval = match service.prepare_activation(&candidate) {
-        Ok(Some(approval)) => approval,
-        Ok(None) => return fail(Failure::new(Code::NoCandidate)),
-        Err(error) => return fail(contract::from_core_error(error)),
-    };
-    let effects = UpdateEffects {
-        from: installed(approval.previous()),
-        to: installed(approval.candidate()),
-        kind: UpdateKind::Update,
-        ends_sessions: 0,
-        sessions: Vec::new(),
-    };
-    let observed = match approval.confirmation_token() {
-        Ok(observed) => observed,
-        Err(error) => return fail(contract::from_core_error(error)),
-    };
-    match confirmed(
-        context,
-        super::display_name(&routed.machine),
-        &effects,
-        ("update", &observed),
-        token,
-    ) {
-        Ok(true) => {}
-        Ok(false) => return offline_preview(context, routed, effects, ("update", &observed)),
-        Err(failure) => return fail(failure),
-    }
-    let to = effects.to.clone();
-    if let Err(failure) = crate::interrupt::dispatch() {
-        return fail(failure);
-    }
-    let activated = within(ACTIVATION, &crate::interrupt::settle_by, move || {
-        service.activate(approval)
-    });
-    offline_activated(routed, ServiceAction::Update, activated, to)
-}
-
-type Activated = Result<ActivationStatus, spaceterm_core::CoreError>;
-
-/// The thread that runs a dispatched offline activation. Once `settle_by` reports an interrupt,
-/// [`within`] waits for its result only until that instant. A result that did not arrive by then
-/// is settled by a later `update` or `start`.
-const ACTIVATION: &str = "spaceterm-activation";
-
-/// The reply of an offline activation, or an unresolved one when its result never arrived.
-fn offline_activated(
-    routed: Routed,
-    action: ServiceAction,
-    activated: Option<Activated>,
-    to: Version,
-) -> Reply {
-    match activated {
-        Some(Ok(status)) => offline_finish(routed, action, &status, to),
-        Some(Err(error)) => Reply::failure(
-            COMMAND,
-            Some(routed.machine),
-            contract::from_core_error(error),
-        ),
-        None => {
-            let failure = Failure::new(Code::ActivationUnresolved);
-            // The activation chose its operation ID, which this command never received.
-            let receipt = Receipt {
-                operation: String::new(),
-                action,
-                state: ReceiptState::Unresolved,
-                code: Some(failure.code),
-                boot: String::new(),
-            };
-            finish(routed, receipt, Some(failure), Some(to), Vec::new())
-        }
-    }
-}
-
-/// Whether the change is confirmed: by `--confirm` with a token for this exact observation
-/// that has not expired, or by the person at a prompt. Any other token is `changed`.
-fn confirmed(
-    context: &Context<'_>,
-    core: &str,
-    effects: &UpdateEffects,
-    (purpose, observed): (&str, &str),
-    given: Option<&str>,
-) -> Result<bool, Failure> {
-    match given {
-        Some(given) => super::offline_token::verify(
-            purpose,
-            observed.as_bytes(),
-            given,
-            std::time::SystemTime::now(),
+    } else {
+        format!(
+            "SpaceTerm Core {} is already installed beside {running}.",
+            pending.version
         )
-        .map(|()| true),
-        None if context.interactive() => {
-            eprint!("{}", summary(core, effects));
-            Ok(super::confirm("Update SpaceTerm Core?"))
-        }
-        None => Ok(false),
-    }
-}
-
-fn offline_preview(
-    context: &Context<'_>,
-    routed: Routed,
-    effects: UpdateEffects,
-    (purpose, observed): (&str, &str),
-) -> Reply {
-    let issued =
-        super::offline_token::issue(purpose, observed.as_bytes(), std::time::SystemTime::now());
-    let text = format!(
-        "{}Confirm with: {}\n",
-        summary(super::display_name(&routed.machine), &effects),
-        context.command_line(&routed.machine, &["update", "--confirm", &issued.token])
-    );
-    Reply::new(
-        &preview_envelope(
-            routed.machine,
-            issued.token,
-            issued.expires_at,
-            effects,
-            None,
-            Vec::new(),
-        ),
-        text,
-    )
-}
-
-fn offline_finish(
-    routed: Routed,
-    action: ServiceAction,
-    status: &spaceterm_core::service::activation::ActivationStatus,
-    to: Version,
-) -> Reply {
-    let (state, failure) = match status.phase {
-        ActivationPhase::Completed { .. } => (ReceiptState::Done, None),
-        ActivationPhase::Failed { .. } => (
-            ReceiptState::Failed,
-            Some(Failure::new(Code::StartupFailed)),
-        ),
-        ActivationPhase::Activating | ActivationPhase::Uncertain => (
-            ReceiptState::Unresolved,
-            Some(Failure::new(Code::ActivationUnresolved)),
-        ),
     };
-    let receipt = Receipt {
-        operation: super::hex(&status.operation[..16]),
-        action,
-        state,
-        code: failure.as_ref().map(|v| v.code),
-        boot: String::new(),
-    };
-    finish(routed, receipt, failure, Some(to), Vec::new())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn check_never_recovers_and_only_a_local_update_does() {
-        for (local, check, recovers) in [
-            (true, true, false),
-            (true, false, true),
-            (false, true, false),
-            (false, false, false),
-        ] {
-            let mut recovered = false;
-            settle_first(local, check, &mut || recovered = true);
-            assert_eq!(recovered, recovers, "local {local}, check {check}");
+    let how = match facts.sessions {
+        // The Core restarts into a compatible version by itself while no Session is open.
+        0 if !pending.breaking => {
+            "SpaceTerm Core restarts into it by itself while no Terminal Session is open."
+                .to_owned()
         }
-    }
+        0 => format!("Restart to use it: {restart}"),
+        1 => format!("Restart to use it; restarting ends 1 Terminal Session: {restart}"),
+        sessions => {
+            format!("Restart to use it; restarting ends {sessions} Terminal Sessions: {restart}")
+        }
+    };
+    format!("{what} {how}\n")
 }

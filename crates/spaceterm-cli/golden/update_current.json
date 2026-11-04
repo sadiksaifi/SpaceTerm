@@ -1,0 +1,18 @@
+{
+  "command": "update",
+  "data": {
+    "installed": false,
+    "pending": null,
+    "running": "0.7.0",
+    "sessions": 2
+  },
+  "error": null,
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "local",
+    "route": "local"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": []
+}

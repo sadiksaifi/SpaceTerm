@@ -1,12 +1,31 @@
 //! Exact, account-authorized runtime replacement and recovery of its original operation.
+//!
+//! The helper from the previous runtime stops the server, snapshots the retained state, moves
+//! the service registration to the Pending Version and starts it. A Pending Version that does
+//! not become ready before the readiness deadline is stopped; the snapshot is restored and the
+//! previous version runs again. The update record then names the failure.
 use super::*;
+use crate::update::facts::StartFailure;
+
+/// The snapshot of the retained state an activation may restore, beside the files it copies.
+const SNAPSHOT: [(&std::ffi::CStr, &std::ffi::CStr); 2] = [
+    (c"identity.json", c"activation-identity.json"),
+    (c"direct.json", c"activation-direct.json"),
+];
 
 /// The result a control surface can present without interpreting retained transition steps.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActivationPhase {
     Activating,
-    Completed { running: bool },
-    Failed { can_return: bool },
+    Completed {
+        running: bool,
+    },
+    /// The Pending Version did not become ready. The retained state was restored and the
+    /// previous version runs again unless the Core was stopped.
+    Returned {
+        failure: StartFailure,
+        running: bool,
+    },
     Uncertain,
 }
 
@@ -18,7 +37,6 @@ pub struct ActivationStatus {
     pub candidate: RetainedInstallation,
     pub stopped: bool,
     pub phase: ActivationPhase,
-    pub returned: bool,
 }
 
 /// One approval binds the selected service, artifact, boot and observed installation/run policy.
@@ -61,28 +79,6 @@ impl ActivationApproval {
     }
 }
 
-/// A separate approval to return to a verified previous runtime while keeping the server stopped.
-pub struct ReturnApproval {
-    service: Service,
-    state: State,
-    previous: RetainedInstallation,
-    candidate: RetainedInstallation,
-}
-impl ReturnApproval {
-    pub fn confirmation_token(&self) -> Result<String, CoreError> {
-        confirmation_token(&(&self.service.identity, &self.state))
-    }
-    pub fn previous(&self) -> &RetainedInstallation {
-        &self.previous
-    }
-    pub fn candidate(&self) -> &RetainedInstallation {
-        &self.candidate
-    }
-    pub fn stopped(&self) -> bool {
-        true
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Step {
@@ -93,7 +89,12 @@ enum Step {
     Approved,
     StartDispatched,
     Completed,
-    ReturnAdmitted,
+    /// The candidate's start failed or missed the readiness deadline.
+    StartFailed,
+    ReturnStopDispatched,
+    /// The retained state is restored and the registration names the previous version again.
+    ReturnApproved,
+    ReturnStartDispatched,
     Returned,
 }
 
@@ -159,11 +160,52 @@ pub(super) struct Operation {
     original_run: Option<Run>,
     candidate_run: Option<Run>,
     step: Step,
+    /// The digest of the retained-state snapshot taken once the server was quiescent.
     saved: Option<[u8; 32]>,
+    /// Unix seconds when the candidate's Start was dispatched, for the readiness deadline.
+    started_at: Option<u64>,
     ready: bool,
     failed: bool,
+    /// Why the candidate did not become ready, once the return began.
+    failure: Option<StartFailure>,
 }
+/// How an activation ended, as the update record must name it.
+pub(super) enum Outcome<'a> {
+    /// The candidate became ready and runs now.
+    Completed { candidate: &'a str },
+    /// The candidate did not become ready, and the Core returned to the previous version.
+    Returned {
+        activation: [u8; 32],
+        candidate: &'a str,
+        version: &'a str,
+        failure: StartFailure,
+    },
+}
+
 impl Operation {
+    /// The directory of the version this activation started from.
+    pub(super) fn previous_installation(&self, service: &Service) -> PathBuf {
+        self.previous.installation(service).directory
+    }
+    /// The outcome this journal proves, once the activation is past its last change to the
+    /// update record.
+    pub(super) fn outcome(&self) -> Option<Outcome<'_>> {
+        match (self.step, self.failure) {
+            (Step::Completed, _) if self.ready => Some(Outcome::Completed {
+                candidate: &self.candidate.digest,
+            }),
+            (
+                Step::ReturnApproved | Step::ReturnStartDispatched | Step::Returned,
+                Some(failure),
+            ) => Some(Outcome::Returned {
+                activation: self.id,
+                candidate: &self.candidate.digest,
+                version: &self.candidate.version,
+                failure,
+            }),
+            _ => None,
+        }
+    }
     pub(super) fn pending(&self) -> bool {
         !matches!(self.step, Step::Completed | Step::Returned)
     }
@@ -173,13 +215,19 @@ impl Operation {
     pub(super) fn permits_start(&self) -> bool {
         matches!(
             self.step,
-            Step::StartDispatched | Step::Completed | Step::Returned
+            Step::StartDispatched | Step::Completed | Step::ReturnStartDispatched | Step::Returned
         )
     }
-    pub(super) fn startup_failed(&mut self) {
-        if self.step == Step::Completed && !self.ready {
-            self.failed = true;
+    /// A later Start of a stopped update's candidate failed before it was ready, so the Core
+    /// returns to the previous version. That Start ended the Stop, which is now `stopped`.
+    /// Returns whether the return begins.
+    pub(super) fn startup_failed(&mut self, stopped: bool) -> bool {
+        let returning = self.step == Step::Completed && !self.ready;
+        if returning {
+            self.step = Step::StartFailed;
+            self.stopped = stopped;
         }
+        returning
     }
     pub(super) fn validate(&self, state: &State) -> Result<(), CoreError> {
         let expected = if matches!(
@@ -188,6 +236,8 @@ impl Operation {
                 | Step::StopDispatched
                 | Step::Quiescent
                 | Step::RegistrationReplaced
+                | Step::ReturnApproved
+                | Step::ReturnStartDispatched
                 | Step::Returned
         ) {
             &self.previous.digest
@@ -202,15 +252,17 @@ impl Operation {
             || &state.installation != expected
             || (self.ready && !matches!(self.step, Step::Completed))
             || (self.pending()
-                && (!state.installed || state.removing || state.stopped != self.stopped)
-                && self.step != Step::ReturnAdmitted)
+                && (!state.installed || state.removing || state.stopped != self.stopped))
             || (!matches!(self.step, Step::Admitted | Step::StopDispatched) && self.saved.is_none())
-            || (self.step == Step::ReturnAdmitted
-                && (!state.installed || state.removing || !state.stopped))
+            || (matches!(
+                self.step,
+                Step::ReturnApproved | Step::ReturnStartDispatched | Step::Returned
+            ) && self.failure.is_none())
             || (matches!(
                 self.step,
                 Step::Quiescent | Step::RegistrationReplaced | Step::Approved
             ) && (state.run.is_some() || self.candidate_run.is_some()))
+            || (self.step == Step::ReturnApproved && state.run.is_some())
             || (self.step == Step::StartDispatched
                 && state
                     .run
@@ -295,8 +347,10 @@ impl Service {
                 candidate_run: None,
                 step: Step::Admitted,
                 saved: None,
+                started_at: None,
                 ready: false,
                 failed: false,
+                failure: None,
             });
             data.write_json(c"service.json", &state)?;
         }
@@ -325,53 +379,6 @@ impl Service {
         let _operation = data.lock("service.lock", false)?;
         self.resume_activation(&data)?;
         self.activation_status_locked(&data)
-    }
-
-    pub fn prepare_return(&self) -> Result<ReturnApproval, CoreError> {
-        let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
-        let _operation = data.lock("service.lock", false)?;
-        let _intent = data.lock("service-intent.lock", false)?;
-        let state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
-        self.prove_return(&data, &state)?;
-        let operation = state
-            .activation
-            .as_ref()
-            .ok_or(CoreError::ReturnUnavailable)?;
-        Ok(ReturnApproval {
-            service: self.clone(),
-            previous: operation.previous.installation(self),
-            candidate: operation.candidate.installation(self),
-            state,
-        })
-    }
-
-    /// Explicit return never restores an old state snapshot or any ended Terminal Session.
-    /// The previous runtime remains stopped until a later explicit Start SpaceTerm Core.
-    pub fn return_to_previous(
-        &self,
-        approval: ReturnApproval,
-    ) -> Result<ActivationStatus, CoreError> {
-        self.same_service(&approval.service)?;
-        let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
-        let _operation = data.lock("service.lock", false)?;
-        {
-            let _intent = data.lock("service-intent.lock", false)?;
-            let mut state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
-            if state != approval.state {
-                return Err(CoreError::Changed);
-            }
-            self.prove_return(&data, &state)?;
-            let operation = state
-                .activation
-                .as_mut()
-                .ok_or(CoreError::ReturnUnavailable)?;
-            operation.step = Step::ReturnAdmitted;
-            state.stopped = true;
-            data.write_json(c"service.json", &state)?;
-        }
-        self.resume_activation(&data)?;
-        self.activation_status_locked(&data)?
-            .ok_or(CoreError::ActivationUnresolved)
     }
 
     fn same_service(&self, other: &Self) -> Result<(), CoreError> {
@@ -414,19 +421,14 @@ impl Service {
         let Some(operation) = &state.activation else {
             return Ok(None);
         };
-        let phase = match operation.step {
-            Step::Completed if operation.failed && !operation.ready => ActivationPhase::Failed {
-                can_return: self.prove_return(data, &state).is_ok(),
-            },
-            Step::Completed | Step::Returned => self
-                .snapshot(&state)
-                .map(|s| ActivationPhase::Completed { running: s.running })
+        let running = || self.snapshot(&state).map(|s| s.running);
+        let phase = match (operation.step, operation.failure) {
+            (Step::Completed, _) => running()
+                .map(|running| ActivationPhase::Completed { running })
                 .unwrap_or(ActivationPhase::Uncertain),
-            Step::StartDispatched if !self.supervisor.running().unwrap_or(true) => {
-                ActivationPhase::Failed {
-                    can_return: self.prove_return(data, &state).is_ok(),
-                }
-            }
+            (Step::Returned, Some(failure)) => running()
+                .map(|running| ActivationPhase::Returned { failure, running })
+                .unwrap_or(ActivationPhase::Uncertain),
             _ if operation.failed => ActivationPhase::Uncertain,
             _ => ActivationPhase::Activating,
         };
@@ -436,7 +438,6 @@ impl Service {
             candidate: operation.candidate.installation(self),
             stopped: state.stopped,
             phase,
-            returned: operation.step == Step::Returned,
         }))
     }
 
@@ -460,6 +461,9 @@ impl Service {
     }
 
     fn resume_steps(&self, data: &Directory) -> Result<(), CoreError> {
+        // A failed change to automatic startup fails no start. It is reported once the
+        // activation settles, and a later start or Stop sets the policy again.
+        let mut policy = Ok(());
         loop {
             let Some(mut state) = Self::state(data)? else {
                 return Ok(());
@@ -467,57 +471,32 @@ impl Service {
             let Some(operation) = state.activation.clone() else {
                 return Ok(());
             };
-            if !operation.pending() {
-                return Ok(());
-            }
             data.verify_path(&self.paths.data)?;
+            let previous = operation.previous.installation(self);
+            let candidate = operation.candidate.installation(self);
             match operation.step {
                 Step::Admitted => {
-                    self.verify_choice(&operation.previous.installation(self))?;
-                    self.verify_choice(&operation.candidate.installation(self))?;
+                    self.verify_choice(&previous)?;
+                    self.verify_choice(&candidate)?;
                     self.supervisor.check(&self.runtime(&state), false)?;
+                    // Durable dispatch marker precedes the native call. Interruption in this
+                    // gap requires intervention if the old process remains live; never resend.
+                    self.set_step(data, operation.id, Step::StopDispatched)?;
                     if !state.stopped {
-                        // Durable dispatch marker precedes the native call. Interruption in this
-                        // gap requires intervention if the old process remains live; never resend.
-                        self.set_step(data, operation.id, Step::StopDispatched)?;
                         self.supervisor.stop()?;
                         self.wait_running(false)?;
-                    } else {
-                        self.set_step(data, operation.id, Step::StopDispatched)?;
                     }
                 }
                 Step::StopDispatched => {
                     self.supervisor.check(&self.runtime(&state), false)?;
-                    if self.supervisor.running()? {
-                        return Err(CoreError::ActivationUnresolved);
-                    }
-                    let deadline = Instant::now() + Duration::from_secs(15);
-                    loop {
-                        state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
-                        if state
-                            .run
-                            .as_ref()
-                            .is_some_and(|run| Some(run) != operation.original_run.as_ref())
-                        {
-                            return Err(CoreError::ActivationUnresolved);
-                        }
-                        match check_cleanup(&state).and_then(|()| self.prove_quiescent()) {
-                            Ok(()) => break,
-                            Err(CoreError::CleanupUnresolved)
-                                if Instant::now() < deadline && !operation.failed =>
-                            {
-                                std::thread::sleep(Duration::from_millis(20))
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
+                    self.wait_quiescent(data, &operation, operation.original_run.as_ref(), false)?;
                     let _intent = data.lock("service-intent.lock", false)?;
                     state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
                     let _writes = data
                         .lock("worktree.lock", true)
                         .map_err(|_| CoreError::CleanupUnresolved)?;
                     let _setup = data.lock("setup.lock", false)?;
-                    let saved = saved_state(data)?;
+                    let saved = take_snapshot(data)?;
                     let current = state
                         .activation
                         .as_mut()
@@ -529,18 +508,19 @@ impl Service {
                 }
                 Step::Quiescent => {
                     self.require_quiescent(&state)?;
-                    self.verify_choice(&operation.previous.installation(self))?;
-                    self.verify_choice(&operation.candidate.installation(self))?;
-                    self.supervisor.replace(
-                        &operation.previous.installation(self).directory,
-                        &operation.candidate.installation(self).directory,
-                    )?;
+                    self.verify_choice(&previous)?;
+                    self.verify_choice(&candidate)?;
+                    // From here until the activation settles, the registration may name a
+                    // candidate that never starts. A power loss is then recovered at the next
+                    // boot by the previous runtime, through its own boot entry.
+                    self.supervisor.arm_recovery(&previous.directory)?;
+                    self.supervisor
+                        .replace(&previous.directory, &candidate.directory)?;
                     self.set_step(data, operation.id, Step::RegistrationReplaced)?;
                 }
                 Step::RegistrationReplaced => {
                     self.require_quiescent(&state)?;
-                    self.supervisor
-                        .check(&operation.candidate.installation(self).directory, false)?;
+                    self.supervisor.check(&candidate.directory, false)?;
                     let _intent = data.lock("service-intent.lock", false)?;
                     state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
                     state.installation = operation.candidate.digest.clone();
@@ -555,51 +535,207 @@ impl Service {
                     // A launcher failure never stops the candidate; clients read it as Outdated.
                     self.repoint_cli_locked(&self.runtime(&state));
                     self.require_quiescent(&state)?;
-                    self.verify_choice(&operation.candidate.installation(self))?;
+                    self.verify_choice(&candidate)?;
                     if state.stopped {
                         self.set_step(data, operation.id, Step::Completed)?;
-                    } else {
-                        self.supervisor.check(&self.runtime(&state), false)?;
-                        self.supervisor.prepare_start()?;
-                        self.set_step(data, operation.id, Step::StartDispatched)?;
-                        self.supervisor.start()?;
-                        self.supervisor.set_automatic_start(state.automatic_start)?;
-                        self.wait_running(true)?;
+                        continue;
+                    }
+                    self.supervisor.check(&self.runtime(&state), false)?;
+                    self.supervisor.prepare_start()?;
+                    self.change(data, operation.id, |operation| {
+                        operation.step = Step::StartDispatched;
+                        operation.started_at = Some(unix_now());
+                    })?;
+                    if self.supervisor.start().is_err() {
+                        // The candidate may have become ready before its Start reported failure.
+                        self.transition(
+                            data,
+                            operation.id,
+                            Step::StartDispatched,
+                            Step::StartFailed,
+                        )?;
+                        continue;
+                    }
+                    if let Err(error) = self.supervisor.set_automatic_start(state.automatic_start) {
+                        policy = Err(error);
                     }
                 }
                 Step::StartDispatched => {
-                    // The candidate's readiness marker is written before endpoint publication.
+                    // The candidate marks readiness durably before it publishes its endpoint.
                     // Neither a timeout nor an absent process permits another native Start.
-                    return Err(CoreError::ActivationUnresolved);
-                }
-                Step::ReturnAdmitted => {
-                    self.require_quiescent(&state)?;
-                    if operation.ready || operation.saved != Some(saved_state(data)?) {
-                        return Err(CoreError::ReturnUnavailable);
+                    if !self.await_step(data, &operation, Step::StartDispatched)? {
+                        // Readiness may commit after the wait read the step for the last time.
+                        self.transition(
+                            data,
+                            operation.id,
+                            Step::StartDispatched,
+                            Step::StartFailed,
+                        )?;
                     }
-                    self.verify_choice(&operation.previous.installation(self))?;
-                    self.supervisor.replace(
-                        &operation.candidate.installation(self).directory,
-                        &operation.previous.installation(self).directory,
-                    )?;
+                }
+                Step::Completed if operation.ready || state.stopped => {
+                    self.repoint_cli_locked(&self.runtime(&state));
+                    if operation.ready {
+                        runtime::updates::record_completed(data, &operation.candidate.digest)?;
+                        remove_snapshot(data)?;
+                        self.supervisor.disarm_recovery()?;
+                    }
+                    return policy;
+                }
+                Step::Completed => {
+                    // Ready is recorded by the candidate's own run. A running candidate that
+                    // is not ready yet stays Activating until its deadline passes.
+                    return policy;
+                }
+                Step::StartFailed => {
+                    // Durable dispatch marker precedes the Stop of the candidate.
+                    self.set_step(data, operation.id, Step::ReturnStopDispatched)?;
+                    if self.supervisor.running()? {
+                        self.supervisor.stop()?;
+                        self.wait_running(false)?;
+                    }
+                }
+                Step::ReturnStopDispatched => {
+                    self.wait_quiescent(data, &operation, operation.candidate_run.as_ref(), true)?;
+                    let failure = self.classify();
                     let _intent = data.lock("service-intent.lock", false)?;
                     state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
+                    let _writes = data
+                        .lock("worktree.lock", true)
+                        .map_err(|_| CoreError::CleanupUnresolved)?;
+                    let _setup = data.lock("setup.lock", false)?;
+                    restore_snapshot(data, operation.saved.ok_or(CoreError::UnsafeStorage)?)?;
+                    self.verify_choice(&previous)?;
+                    self.supervisor
+                        .replace(&candidate.directory, &previous.directory)?;
                     state.installation = operation.previous.digest.clone();
-                    state.stopped = true;
                     state.run = None;
-                    state
+                    let current = state
                         .activation
                         .as_mut()
-                        .ok_or(CoreError::ActivationUnresolved)?
-                        .step = Step::Returned;
+                        .ok_or(CoreError::ActivationUnresolved)?;
+                    current.step = Step::ReturnApproved;
+                    current.failure = Some(failure);
                     data.write_json(c"service.json", &state)?;
+                    runtime::updates::record_start_failure(
+                        data,
+                        operation.id,
+                        &operation.candidate.digest,
+                        &operation.candidate.version,
+                        failure,
+                    )?;
                 }
-                Step::Completed | Step::Returned => {
+                Step::ReturnApproved => {
                     self.repoint_cli_locked(&self.runtime(&state));
-                    return Ok(());
+                    self.require_quiescent(&state)?;
+                    if state.stopped {
+                        self.set_step(data, operation.id, Step::Returned)?;
+                        continue;
+                    }
+                    self.supervisor.check(&self.runtime(&state), false)?;
+                    self.supervisor.prepare_start()?;
+                    self.change(data, operation.id, |operation| {
+                        operation.step = Step::ReturnStartDispatched;
+                        operation.started_at = Some(unix_now());
+                    })?;
+                    self.supervisor.start()?;
+                    if let Err(error) = self.supervisor.set_automatic_start(state.automatic_start) {
+                        policy = Err(error);
+                    }
+                }
+                Step::ReturnStartDispatched => {
+                    // The previous version's own run records Returned once it is ready. One
+                    // that misses the deadline leaves the outcome unresolved.
+                    if !self.await_step(data, &operation, Step::ReturnStartDispatched)? {
+                        return Err(CoreError::ActivationUnresolved);
+                    }
+                }
+                Step::Returned => {
+                    self.repoint_cli_locked(&self.runtime(&state));
+                    remove_snapshot(data)?;
+                    self.supervisor.disarm_recovery()?;
+                    return policy;
                 }
             }
         }
+    }
+    /// Waits until the started server's own run moves `operation` on from `step`, or until the
+    /// readiness deadline from its dispatch. Returns whether it moved on.
+    fn await_step(
+        &self,
+        data: &Directory,
+        operation: &Operation,
+        step: Step,
+    ) -> Result<bool, CoreError> {
+        let deadline = operation
+            .started_at
+            .unwrap_or(0)
+            .saturating_add(self.supervisor.ready_deadline().as_secs());
+        loop {
+            let current = Self::state(data)?
+                .and_then(|state| state.activation)
+                .filter(|current| current.id == operation.id)
+                .map(|current| current.step);
+            if current != Some(step) {
+                return Ok(true);
+            }
+            if unix_now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    /// Waits for the stopped server's cleanup, refusing a run other than `expected`.
+    ///
+    /// A candidate that never became ready published no endpoint and admitted no client, so it
+    /// started no Terminal Session. With `unready_candidate`, its own run counts as ended once
+    /// the service manager stopped it and its instance lock and endpoint prove it gone, even
+    /// when it failed or crashed during startup without recording its end.
+    fn wait_quiescent(
+        &self,
+        data: &Directory,
+        operation: &Operation,
+        expected: Option<&Run>,
+        unready_candidate: bool,
+    ) -> Result<(), CoreError> {
+        if self.supervisor.running()? {
+            return Err(CoreError::ActivationUnresolved);
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
+            if state.run.as_ref().is_some_and(|run| Some(run) != expected) {
+                return Err(CoreError::ActivationUnresolved);
+            }
+            let ended = unready_candidate
+                && !operation.ready
+                && expected.is_some()
+                && state.run.as_ref() == expected;
+            let cleanup = if ended { Ok(()) } else { check_cleanup(&state) };
+            match cleanup.and_then(|()| self.prove_quiescent()) {
+                Ok(()) => return Ok(()),
+                Err(CoreError::CleanupUnresolved)
+                    if Instant::now() < deadline && !operation.failed =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    /// Why the candidate did not become ready. Disk full and a network port another program
+    /// holds are transient: they say nothing about the version.
+    fn classify(&self) -> StartFailure {
+        if runtime::updates::storage_full(&self.paths.data, 64 * 1024 * 1024) {
+            return StartFailure::DiskFull;
+        }
+        if let Ok((Some(policy), true, _)) = crate::direct::observe(&self.paths)
+            && std::net::UdpSocket::bind(policy.bind)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
+        {
+            return StartFailure::PortInUse;
+        }
+        StartFailure::NotReady
     }
     fn require_quiescent(&self, state: &State) -> Result<(), CoreError> {
         if self.supervisor.running()? {
@@ -608,7 +744,15 @@ impl Service {
         check_cleanup(state)?;
         self.prove_quiescent()
     }
-    fn set_step(&self, data: &Directory, id: [u8; 32], step: Step) -> Result<(), CoreError> {
+    /// Moves the activation from `from` to `to` only if it is still at `from`, in one hold of
+    /// the intent lock that the started server's readiness also takes.
+    fn transition(
+        &self,
+        data: &Directory,
+        id: [u8; 32],
+        from: Step,
+        to: Step,
+    ) -> Result<(), CoreError> {
         let _intent = data.lock("service-intent.lock", false)?;
         let mut state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
         let operation = state
@@ -618,35 +762,96 @@ impl Service {
         if operation.id != id {
             return Err(CoreError::Changed);
         }
-        operation.step = step;
+        if operation.step != from {
+            return Ok(());
+        }
+        operation.step = to;
         operation.failed = false;
         data.write_json(c"service.json", &state)
     }
-    fn prove_return(&self, data: &Directory, state: &State) -> Result<(), CoreError> {
+    fn set_step(&self, data: &Directory, id: [u8; 32], step: Step) -> Result<(), CoreError> {
+        self.change(data, id, |operation| operation.step = step)
+    }
+    fn change(
+        &self,
+        data: &Directory,
+        id: [u8; 32],
+        edit: impl FnOnce(&mut Operation),
+    ) -> Result<(), CoreError> {
+        let _intent = data.lock("service-intent.lock", false)?;
+        let mut state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
         let operation = state
             .activation
-            .as_ref()
-            .ok_or(CoreError::ReturnUnavailable)?;
-        if !(operation.step == Step::StartDispatched
-            || (operation.step == Step::Completed && operation.failed))
-            || operation.ready
-            || operation.saved.is_none()
-        {
-            return Err(CoreError::ReturnUnavailable);
+            .as_mut()
+            .ok_or(CoreError::ActivationUnresolved)?;
+        if operation.id != id {
+            return Err(CoreError::Changed);
         }
-        self.require_quiescent(state)
-            .map_err(|_| CoreError::ReturnUnavailable)?;
-        let _writes = data
-            .lock("worktree.lock", true)
-            .map_err(|_| CoreError::ReturnUnavailable)?;
-        let _setup = data.lock("setup.lock", false)?;
-        if operation.saved != Some(saved_state(data)?) {
-            return Err(CoreError::ReturnUnavailable);
-        }
-        self.verify_choice(&operation.previous.installation(self))?;
-        self.supervisor
-            .check(&operation.candidate.installation(self).directory, false)
+        edit(operation);
+        operation.failed = false;
+        data.write_json(c"service.json", &state)
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// Copies the retained state beside itself and returns the copy's digest.
+fn take_snapshot(data: &Directory) -> Result<[u8; 32], CoreError> {
+    for (live, copy) in SNAPSHOT {
+        data.copy_record(live, copy)?;
+    }
+    snapshot_digest(data, 1)
+}
+
+/// Restores the retained state from the snapshot whose digest is `saved`.
+fn restore_snapshot(data: &Directory, saved: [u8; 32]) -> Result<(), CoreError> {
+    if snapshot_digest(data, 1)? != saved {
+        return Err(CoreError::UnsafeStorage);
+    }
+    for (live, copy) in SNAPSHOT {
+        data.copy_record(copy, live)?;
+    }
+    Ok(())
+}
+
+fn remove_snapshot(data: &Directory) -> Result<(), CoreError> {
+    for (_, copy) in SNAPSHOT {
+        data.remove_record(copy)?;
+    }
+    Ok(())
+}
+
+/// The digest of the retained-state files at `side` of [`SNAPSHOT`]: 0 live, 1 the copy.
+/// Presence is distinct from a JSON null document.
+fn snapshot_digest(data: &Directory, side: usize) -> Result<[u8; 32], CoreError> {
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    digest.update(b"spaceterm-core-retained-state-1\0");
+    for pair in SNAPSHOT {
+        let name = [pair.0, pair.1][side]
+            .to_str()
+            .map_err(|_| CoreError::UnsafeStorage)?;
+        digest.update(pair.0.to_bytes_with_nul());
+        match data.read_json::<serde_json::Value>(name)? {
+            None => digest.update(b"absent\0"),
+            Some(value) => {
+                let bytes = zeroize::Zeroizing::new(
+                    serde_json::to_vec(&value).map_err(|_| CoreError::StorageUnavailable)?,
+                );
+                digest.update(b"present\0");
+                digest.update(&(bytes.len() as u64).to_be_bytes());
+                digest.update(&bytes);
+            }
+        }
+    }
+    digest
+        .finish()
+        .as_ref()
+        .try_into()
+        .map_err(|_| CoreError::StorageUnavailable)
 }
 
 pub(super) fn confirmation_token(value: &impl Serialize) -> Result<String, CoreError> {
@@ -656,35 +861,6 @@ pub(super) fn confirmation_token(value: &impl Serialize) -> Result<String, CoreE
         .iter()
         .map(|v| format!("{v:02x}"))
         .collect())
-}
-
-fn saved_state(data: &Directory) -> Result<[u8; 32], CoreError> {
-    // The proof covers server organization and direct identity/policy/revocation together.
-    // Client files are not rolled back. Presence is distinct from a JSON null document.
-    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-    digest.update(b"spaceterm-core-saved-state-1\0");
-    let identity = zeroize::Zeroizing::new(
-        serde_json::to_vec(&data.read()?).map_err(|_| CoreError::StorageUnavailable)?,
-    );
-    digest.update(b"identity.json\0present\0");
-    digest.update(&(identity.len() as u64).to_be_bytes());
-    digest.update(&identity);
-    match data.read_json::<serde_json::Value>("direct.json")? {
-        None => digest.update(b"direct.json\0absent\0"),
-        Some(value) => {
-            let direct = zeroize::Zeroizing::new(
-                serde_json::to_vec(&value).map_err(|_| CoreError::StorageUnavailable)?,
-            );
-            digest.update(b"direct.json\0present\0");
-            digest.update(&(direct.len() as u64).to_be_bytes());
-            digest.update(&direct);
-        }
-    }
-    digest
-        .finish()
-        .as_ref()
-        .try_into()
-        .map_err(|_| CoreError::StorageUnavailable)
 }
 
 /// Whether two verified release versions identify an ordinary update as a downgrade.
@@ -718,7 +894,10 @@ pub(crate) fn ready(paths: &Paths) -> Result<(), CoreError> {
     let Some(operation) = state.activation.as_mut() else {
         return Ok(());
     };
-    if matches!(operation.step, Step::StartDispatched | Step::Completed)
+    if operation.step == Step::ReturnStartDispatched && !state.stopped {
+        operation.step = Step::Returned;
+        data.write_json(c"service.json", &state)?;
+    } else if matches!(operation.step, Step::StartDispatched | Step::Completed)
         && !operation.ready
         && !state.stopped
     {
@@ -736,6 +915,14 @@ pub(crate) fn ready(paths: &Paths) -> Result<(), CoreError> {
 }
 
 pub(super) fn admit_run(state: &mut State, run: &Run) -> Result<(), CoreError> {
+    // The previous version starting again after a return is no candidate run.
+    if state
+        .activation
+        .as_ref()
+        .is_some_and(|operation| operation.step == Step::ReturnStartDispatched)
+    {
+        return Ok(());
+    }
     if let Some(operation) = state.activation.as_mut()
         && (operation.pending() || (operation.step == Step::Completed && !operation.ready))
     {

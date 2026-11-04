@@ -890,6 +890,9 @@ mod tests {
                                 LinkEvent::Inventory(Arc::clone(revision))
                             }
                             LinkEvent::Health(health) => LinkEvent::Health(*health),
+                            LinkEvent::UpdateFacts(facts) => {
+                                LinkEvent::UpdateFacts(Arc::clone(facts))
+                            }
                         });
                     }
                 });

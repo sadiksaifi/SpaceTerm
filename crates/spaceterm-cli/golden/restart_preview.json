@@ -1,23 +1,23 @@
 {
-  "command": "update",
+  "command": "restart",
   "data": {
     "confirmation": {
       "effects": {
         "ends_sessions": 1,
-        "from": {
-          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "version": "0.7.0"
+        "pending": {
+          "breaking": true,
+          "from": "0.7.0",
+          "stranded": [
+            {
+              "id": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+              "name": "old-mini"
+            }
+          ],
+          "to": "0.8.0"
         },
-        "kind": "update",
         "sessions": [
           "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
-        ],
-        "to": {
-          "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "version": "0.8.0"
-        }
+        ]
       },
       "expires_at": "2026-10-30T12:10:00Z",
       "token": "c1-cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
@@ -44,7 +44,7 @@
         "client_major": 1,
         "core_major": 2
       },
-      "message": "After this update, work commands need a CLI with SpaceTerm Core's protocol major."
+      "message": "After this restart, work commands need a CLI with SpaceTerm Core's protocol major."
     }
   ]
 }

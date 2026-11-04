@@ -28,6 +28,18 @@
       "enabled": true,
       "listening": true
     },
+    "pending": {
+      "breaking": true,
+      "installed_at": "2026-11-03T09:12:00Z",
+      "overdue_since": "2026-11-04T09:12:00Z",
+      "stranded": [
+        {
+          "id": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+          "name": "old-mini"
+        }
+      ],
+      "version": "0.8.0"
+    },
     "recovered_operations": [
       {
         "identity": "base",
@@ -45,12 +57,6 @@
       "version": "0.7.0"
     },
     "sessions": 2,
-    "staged": [
-      {
-        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "version": "0.7.1"
-      }
-    ],
     "stopped": false,
     "terminal_counters": {
       "accessibility_rebinds": 0,
@@ -79,6 +85,12 @@
       "pty_data_reads": 4,
       "pty_read_attempts": 6,
       "pty_read_bytes": 10000
+    },
+    "update_check": {
+      "failing_since": "2026-11-02T08:00:00Z",
+      "last_success_at": "2026-11-01T08:00:00Z",
+      "reason": "proxy",
+      "state": "failing"
     }
   },
   "error": null,

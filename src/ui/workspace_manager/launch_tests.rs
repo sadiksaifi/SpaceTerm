@@ -731,7 +731,9 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
     for (error, title) in [
         (
-            CoreError::IncompatibleProtocol,
+            CoreError::IncompatibleProtocol(
+                spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+            ),
             "Incompatible SpaceTerm Core",
         ),
         (CoreError::IncompatibleState, "Incompatible SpaceTerm Core"),
@@ -766,8 +768,12 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
 fn a_refused_core_offers_an_update_only_from_a_verified_build(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(
         vec![
-            Err(CoreError::IncompatibleProtocol),
-            Err(CoreError::IncompatibleProtocol),
+            Err(CoreError::IncompatibleProtocol(
+                spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+            )),
+            Err(CoreError::IncompatibleProtocol(
+                spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+            )),
         ],
         cx,
     );
@@ -816,7 +822,9 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
     sync(&harness, cx);
     assert_eq!(harness.launch.steps(), ["run"]);
 
-    harness.edits.set_error(CoreError::IncompatibleProtocol);
+    harness.edits.set_error(CoreError::IncompatibleProtocol(
+        spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+    ));
     sync(&harness, cx);
     assert_eq!(
         harness.launch_title(cx),

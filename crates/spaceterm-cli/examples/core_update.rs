@@ -134,7 +134,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     if !matches!(
         service.inspect_candidate(archive, signature, &args[5], MAJOR + 1),
-        Err(CoreError::IncompatibleProtocol)
+        Err(CoreError::IncompatibleProtocol(_))
     ) {
         return Err("an unsupported required major was accepted".into());
     }

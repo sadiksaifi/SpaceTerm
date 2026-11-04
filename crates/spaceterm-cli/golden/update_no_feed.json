@@ -1,0 +1,19 @@
+{
+  "command": "update",
+  "data": {},
+  "error": {
+    "class": "unavailable",
+    "code": "no_update_feed",
+    "details": {},
+    "message": "This SpaceTerm Core build takes updates only from the desktop or a local archive.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

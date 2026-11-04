@@ -7,6 +7,8 @@ pub struct Output {
     pub envelope: Envelope<Value>,
     pub text: String,
     pub diagnostics: String,
+    /// The `notice:` line about a version that waits for a restart, for stderr after the result.
+    pub notice: Option<String>,
 }
 
 impl Output {
@@ -21,6 +23,7 @@ impl Output {
             envelope: Envelope::ok(command, Some(core), value(data)),
             text,
             diagnostics: scope::verbose(target),
+            notice: None,
         }
     }
     pub fn failed(
@@ -34,6 +37,7 @@ impl Output {
             envelope: Envelope::error(command, core, failure, data),
             text,
             diagnostics: String::new(),
+            notice: None,
         }
     }
     pub fn confirmation(
@@ -55,10 +59,27 @@ impl Output {
             },
             text,
             diagnostics: String::new(),
+            notice: None,
         }
     }
     pub fn write(&self, mode: Mode, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
-        render(
+        self.write_to(
+            mode,
+            crate::admin::terminal(libc::STDERR_FILENO),
+            stdout,
+            stderr,
+        )
+    }
+
+    /// [`Self::write`], with whether stderr is a terminal given.
+    pub(crate) fn write_to(
+        &self,
+        mode: Mode,
+        stderr_terminal: bool,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+    ) -> u8 {
+        let exit = render(
             &self.envelope,
             &self.text,
             &self.diagnostics,
@@ -66,7 +87,9 @@ impl Output {
             crate::interrupt::finish(self.envelope.exit()),
             stdout,
             stderr,
-        )
+        );
+        crate::notice::print(self.notice.as_deref(), exit, mode, stderr_terminal, stderr);
+        exit
     }
 }
 

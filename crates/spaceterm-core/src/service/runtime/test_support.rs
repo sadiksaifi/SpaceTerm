@@ -1,23 +1,45 @@
 //! Signed archive fixtures replace only cryptographic trust and native code-signature observation.
 use super::*;
+use crate::update::facts::Protocols;
 use ring::signature::KeyPair;
-use std::{cell::Cell, os::unix::fs::PermissionsExt};
+use std::{
+    cell::{Cell, RefCell},
+    os::unix::fs::PermissionsExt,
+};
 
 pub(crate) const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub(crate) const VERSION: &str = "dev.aaaaaaaaaaaa";
 thread_local! { static FIXTURE_TRUST: Cell<bool> = const { Cell::new(false) }; }
-thread_local! { static FIXTURE_MAJOR: Cell<u16> = const { Cell::new(crate::protocol::MAJOR) }; }
+thread_local! { static FIXTURE_BUILD: RefCell<Option<(String, Protocols)>> = const { RefCell::new(None) }; }
 
-/// Builds fixtures inside `run` that declare protocol `major`, as a later release would.
+/// Builds fixtures inside `run` that declare work protocol `major`, as a later release would.
 pub(crate) fn with_major<T>(major: u16, run: impl FnOnce() -> T) -> T {
-    struct Restore(u16);
+    let mut protocols = Protocols::CURRENT;
+    protocols.work.major = major;
+    with_build(VERSION, protocols, run)
+}
+
+/// Builds fixtures inside `run` that declare `version` and `protocols`. A Release `version`
+/// keeps [`COMMIT`]; a development one must name it.
+pub(crate) fn with_build<T>(version: &str, protocols: Protocols, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(String, Protocols)>);
     impl Drop for Restore {
         fn drop(&mut self) {
-            FIXTURE_MAJOR.set(self.0);
+            FIXTURE_BUILD.set(self.0.take());
         }
     }
-    let _restore = Restore(FIXTURE_MAJOR.replace(major));
+    let _restore = Restore(FIXTURE_BUILD.replace(Some((version.to_owned(), protocols))));
     run()
+}
+
+/// The build document fixtures declare now.
+fn manifest(identity: &str) -> serde_json::Value {
+    let (version, protocols) = FIXTURE_BUILD.with_borrow(|build| {
+        build
+            .clone()
+            .unwrap_or((VERSION.to_owned(), Protocols::CURRENT))
+    });
+    serde_json::json!({"schema":1,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":version,"protocols":protocols})
 }
 
 pub(super) fn active() -> bool {
@@ -54,8 +76,23 @@ pub(crate) fn sign_with_production_trust(archive: &Path, signature: &Path) {
 fn production_pair() -> ring::signature::Ed25519KeyPair {
     ring::signature::Ed25519KeyPair::from_seed_unchecked(&[43; 32]).unwrap()
 }
-pub(super) fn native_build(identity: &str) -> Vec<u8> {
-    serde_json::json!({"schema":1,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":VERSION,"protocol_major":FIXTURE_MAJOR.get()}).to_string().into_bytes()
+/// What a fixture installation's executable reports: the build document its bytes hold, as an
+/// executable reports the build it was compiled from, or else the installation's signed one.
+pub(super) fn native_build(installation: &Path, identity: &str) -> Vec<u8> {
+    let compiled = Layout::host(identity).and_then(|layout| {
+        let path = installation.join(layout.executable());
+        let mut first = [0];
+        std::fs::File::open(&path)
+            .ok()?
+            .read_exact(&mut first)
+            .ok()?;
+        (first == *b"{")
+            .then(|| std::fs::read(&path).ok())
+            .flatten()
+    });
+    compiled
+        .or_else(|| std::fs::read(installation.join("build.json")).ok())
+        .unwrap_or_default()
 }
 pub(super) fn sign(archive: &Path, signature: &Path) {
     std::fs::write(
@@ -86,7 +123,7 @@ pub(crate) fn with_artifact<T>(
     std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     let archive = directory.join("archive.tar.gz");
     let signature = directory.join("artifact.sig");
-    let manifest = serde_json::json!({"schema":1,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":VERSION,"protocol_major":FIXTURE_MAJOR.get()}).to_string();
+    let manifest = manifest(identity).to_string();
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(encoder);
     let layout = super::Layout::host(identity).unwrap();

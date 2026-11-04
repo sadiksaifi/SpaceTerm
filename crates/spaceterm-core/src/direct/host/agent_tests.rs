@@ -195,7 +195,8 @@ fn admit(
             name: &format!("Test{}", name.name_suffix()).into(),
             agent: Some(name),
         })
-        .unwrap();
+        .unwrap()
+        .0;
     crate::connection::io::spawn_link(carrier, Arc::new(|_| {})).unwrap()
 }
 

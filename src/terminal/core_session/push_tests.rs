@@ -280,6 +280,11 @@ impl ConnectedPane {
                                 spaceterm_core::connection::link::LinkEvent::Health(health) => {
                                     spaceterm_core::connection::link::LinkEvent::Health(*health)
                                 }
+                                spaceterm_core::connection::link::LinkEvent::UpdateFacts(facts) => {
+                                    spaceterm_core::connection::link::LinkEvent::UpdateFacts(
+                                        Arc::clone(facts),
+                                    )
+                                }
                             });
                         }
                     }),

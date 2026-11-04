@@ -27,7 +27,10 @@ fn hidden_build_metadata_is_available_without_environment_or_display() {
     assert_eq!(info["target"], env!("SPACETERM_CLI_TARGET"));
     assert_eq!(info["version"], env!("SPACETERM_CLI_VERSION"));
     assert_eq!(info["commit"], env!("SPACETERM_CLI_COMMIT"));
-    assert_eq!(info["protocol_major"], spaceterm_core::protocol::MAJOR);
+    assert_eq!(
+        info["protocols"],
+        serde_json::to_value(spaceterm_core::update::facts::Protocols::CURRENT).unwrap()
+    );
     assert_eq!(info.as_object().unwrap().len(), 7, "{info}");
 }
 

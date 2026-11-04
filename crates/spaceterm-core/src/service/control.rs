@@ -128,22 +128,12 @@ impl Wording {
     }
 }
 
-/// Whether an update confirmation installs the candidate or returns to the previous version.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UpdateChange {
-    /// Replaces the approved runtime with the verified candidate.
-    Update,
-    /// Returns to the retained previous runtime after the candidate never became ready.
-    Return,
-}
-
-/// Shared copy for confirming one exact server update or return, without service access or an
+/// Shared copy for confirming one exact SpaceTerm Core update, without service access or an
 /// authority grant. Each build is named by version and abbreviated commit, so two builds of one
 /// version read apart.
 pub struct UpdateWording {
     /// The Machine the copy names: This Mac, This Computer, or the selected machine's name.
     machine: String,
-    change: UpdateChange,
     previous: String,
     candidate: String,
     running: bool,
@@ -154,7 +144,6 @@ impl UpdateWording {
     /// `previous` is the approved build and `candidate` the verified build it changes to.
     /// `running` and `stopped` are the observation the confirmation binds.
     pub fn local(
-        change: UpdateChange,
         previous: &RetainedInstallation,
         candidate: &RetainedInstallation,
         running: bool,
@@ -162,7 +151,6 @@ impl UpdateWording {
     ) -> Self {
         Self::for_machine(
             this_computer(),
-            change,
             BuildName::of(previous),
             BuildName::of(candidate),
             running,
@@ -175,7 +163,6 @@ impl UpdateWording {
     /// reported, without a local installation directory.
     pub fn for_machine(
         machine: &str,
-        change: UpdateChange,
         previous: BuildName<'_>,
         candidate: BuildName<'_>,
         running: bool,
@@ -184,7 +171,6 @@ impl UpdateWording {
         let (previous, candidate) = build_labels(previous, candidate);
         Self {
             machine: machine.into(),
-            change,
             previous,
             candidate,
             running,
@@ -193,32 +179,21 @@ impl UpdateWording {
     }
 
     pub fn title(&self) -> &'static str {
-        match self.change {
-            UpdateChange::Update => "Update SpaceTerm Core",
-            UpdateChange::Return => "Return to Previous Version",
-        }
+        "Update SpaceTerm Core"
     }
 
     pub fn confirm_label(&self) -> String {
-        match self.change {
-            UpdateChange::Update => self.title().into(),
-            UpdateChange::Return => format!("Return to {}", self.previous),
-        }
+        self.title().into()
     }
 
     pub fn message(&self) -> String {
         let Self {
-            machine,
-            previous,
-            candidate,
-            ..
+            machine, candidate, ..
         } = self;
-        match self.change {
-            UpdateChange::Update if self.stopped && !self.running => {
-                format!("Update the stopped SpaceTerm Core on {machine} to {candidate}?")
-            }
-            UpdateChange::Update => format!("Update SpaceTerm Core on {machine} to {candidate}?"),
-            UpdateChange::Return => format!("Return SpaceTerm Core on {machine} to {previous}?"),
+        if self.stopped && !self.running {
+            format!("Update the stopped SpaceTerm Core on {machine} to {candidate}?")
+        } else {
+            format!("Update SpaceTerm Core on {machine} to {candidate}?")
         }
     }
 
@@ -229,23 +204,21 @@ impl UpdateWording {
             candidate,
             ..
         } = self;
-        match self.change {
-            UpdateChange::Update if self.running => format!(
+        if self.running {
+            format!(
                 "It changes from {previous} to {candidate}. All Terminal Sessions on it end for \
                  every client, and Workspaces are kept."
-            ),
-            UpdateChange::Update if self.stopped => format!(
+            )
+        } else if self.stopped {
+            format!(
                 "It changes from {previous} to {candidate}. It isn\u{2019}t running, so no \
                  Terminal Sessions end, and it stays stopped until you start it."
-            ),
-            UpdateChange::Update => format!(
+            )
+        } else {
+            format!(
                 "It changes from {previous} to {candidate}. It isn\u{2019}t running, so no \
                  Terminal Sessions end."
-            ),
-            UpdateChange::Return => format!(
-                "Version {candidate} never started. Version {previous} and your Workspaces are \
-                 unchanged, and SpaceTerm Core stays stopped until you start it."
-            ),
+            )
         }
     }
 }
@@ -457,14 +430,8 @@ mod tests {
             commit: "0123456789abcdef0123456789abcdef01234567",
             package: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
         };
-        let wording = UpdateWording::for_machine(
-            "penguin",
-            UpdateChange::Update,
-            build("0.6.8"),
-            build("0.7.0"),
-            true,
-            false,
-        );
+        let wording =
+            UpdateWording::for_machine("penguin", build("0.6.8"), build("0.7.0"), true, false);
         assert_eq!(
             wording.message(),
             "Update SpaceTerm Core on penguin to 0.7.0 (commit 0123456)?"
@@ -475,15 +442,8 @@ mod tests {
              Sessions on it end for every client, and Workspaces are kept."
         );
         let observed = |running, stopped| {
-            UpdateWording::for_machine(
-                "penguin",
-                UpdateChange::Update,
-                build("0.6.8"),
-                build("0.7.0"),
-                running,
-                stopped,
-            )
-            .detail()
+            UpdateWording::for_machine("penguin", build("0.6.8"), build("0.7.0"), running, stopped)
+                .detail()
         };
         assert_eq!(
             observed(false, true),
@@ -494,19 +454,6 @@ mod tests {
             observed(false, false),
             "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). It isn\u{2019}t \
              running, so no Terminal Sessions end."
-        );
-        let returning = UpdateWording::for_machine(
-            "penguin",
-            UpdateChange::Return,
-            build("0.6.8"),
-            build("0.7.0"),
-            false,
-            true,
-        );
-        assert_eq!(
-            returning.detail(),
-            "Version 0.7.0 (commit 0123456) never started. Version 0.6.8 (commit 0123456) and \
-             your Workspaces are unchanged, and SpaceTerm Core stays stopped until you start it."
         );
     }
 }

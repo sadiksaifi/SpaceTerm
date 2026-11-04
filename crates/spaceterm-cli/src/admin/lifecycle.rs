@@ -6,13 +6,15 @@
 use super::{Context, Opened, Pending, Reply, Routed};
 use crate::contract::{
     self, Code, Confirmation, ConfirmationData, CoreStart, Envelope, Failure, MachineRef, Observed,
-    Receipt, ReceiptState, RecoveredOperation, ServiceAction, ServiceEffects, ServiceOperation,
+    Receipt, ReceiptState, RecoveredOperation, RestartTarget, ServiceAction, ServiceEffects,
+    ServiceOperation, Warning, WarningCode, WarningDetails,
 };
 use spaceterm_core::service::Service;
 use spaceterm_core::service::control::Controller;
 use spaceterm_core::service::lane::admin::{self, Verdict};
 use spaceterm_core::service::lane::client::Outcome;
 use spaceterm_core::service::lane::{LaneAction, LaneEffects, LaneOperationState, LaneReceipt};
+use spaceterm_core::update::facts::UpdateFacts;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +129,13 @@ fn preview(
     pending: &Pending,
 ) -> Reply {
     let command = kind.command();
+    // A Core that reports no facts still previews; its restart then names no breaking change.
+    let facts = match kind {
+        Kind::Restart => admin::facts(&mut opened.session)
+            .ok()
+            .map(|(_, facts)| facts),
+        Kind::Stop => None,
+    };
     let previewed = admin::preview(&mut opened.session, kind.action());
     let admin::Preview {
         token,
@@ -139,10 +148,12 @@ fn preview(
             return Reply::failure(command, Some(routed.machine), super::lane_failure(error));
         }
     };
-    let summary = summary(kind, super::display_name(&routed.machine));
+    let previewed = service_effects(&effects, facts.as_ref());
+    let summary = summary(kind, super::display_name(&routed.machine), &previewed);
     if context.interactive() {
-        let warnings: Vec<_> = super::recovered_warning(&opened.recovered)
+        let warnings: Vec<_> = major_warning(previewed.to_major)
             .into_iter()
+            .chain(super::recovered_warning(&opened.recovered))
             .collect();
         contract::write_warnings(&warnings, &mut std::io::stderr().lock());
         eprint!("{summary}");
@@ -172,24 +183,72 @@ fn preview(
             routed.machine,
             token,
             expires_at,
-            &effects,
+            previewed,
             opened.recovered,
         ),
         text,
     )
 }
 
-/// The preview text: the action, the machine it acts on, and what ends and what is kept.
-pub(crate) fn summary(kind: Kind, machine: &str) -> String {
+/// What a preview shows: the effects for the envelope, and the protocol major the restart
+/// moves to, for the warning.
+pub(crate) struct Previewed {
+    pub(crate) effects: ServiceEffects,
+    pub(crate) to_major: Option<u16>,
+}
+
+/// The preview text: the action, the machine it acts on, the Pending Version a restart moves
+/// to and whether that breaks devices, and what ends and what is kept.
+pub(crate) fn summary(kind: Kind, machine: &str, previewed: &Previewed) -> String {
     const ENDS: &str = "All Terminal Sessions on it end for every client.";
     match kind {
         Kind::Stop => format!(
             "Stop SpaceTerm Core on {machine}?\n{ENDS} Workspaces are kept, and SpaceTerm Core stays stopped until you start it again with: spaceterm start\n"
         ),
-        Kind::Restart => format!(
-            "Restart SpaceTerm Core on {machine}?\n{ENDS} Workspaces are kept, and each Pane starts a new shell when you use it.\n"
-        ),
+        Kind::Restart => {
+            let Some(target) = &previewed.effects.pending else {
+                return format!(
+                    "Restart SpaceTerm Core on {machine}?\n{ENDS} Workspaces are kept, and each Pane starts a new shell when you use it.\n"
+                );
+            };
+            let mut text = format!(
+                "Restart SpaceTerm Core on {machine} from {} into {}?\n{ENDS} Workspaces are kept, and each Pane starts a new shell when you use it.\n",
+                target.from, target.to
+            );
+            if target.breaking {
+                if target.stranded.is_empty() {
+                    text.push_str(&format!(
+                        "{} changes the protocol. Older clients can\u{2019}t connect until they update.\n",
+                        target.to
+                    ));
+                } else {
+                    let names: Vec<&str> =
+                        target.stranded.iter().map(|v| v.name.as_str()).collect();
+                    text.push_str(&format!(
+                        "{} changes the protocol. These devices can\u{2019}t connect until they update: {}\n",
+                        target.to,
+                        names.join(", ")
+                    ));
+                }
+            }
+            text
+        }
     }
+}
+
+/// After a restart into another work protocol major, work commands need a matching CLI.
+pub(crate) fn major_warning(to_major: Option<u16>) -> Option<Warning> {
+    let core_major = to_major?;
+    let client_major = spaceterm_core::protocol::MAJOR;
+    (core_major != client_major).then(|| {
+        Warning::new(
+            WarningCode::ClientMajorDiffers,
+            WarningDetails::Major {
+                client_major,
+                core_major,
+            },
+        )
+    })
 }
 
 /// The confirmation envelope of a Stop or Restart preview.
@@ -198,27 +257,57 @@ pub(crate) fn preview_envelope(
     core: MachineRef,
     token: String,
     expires_at: String,
-    effects: &LaneEffects,
+    previewed: Previewed,
     recovered: Vec<RecoveredOperation>,
 ) -> Envelope<ConfirmationData<ServiceEffects>> {
-    super::with_recovered(
-        Envelope::confirmation(
-            command,
-            Some(core),
-            Confirmation {
-                token,
-                expires_at,
-                effects: service_effects(effects),
-            },
-        ),
-        recovered,
-    )
+    let mut envelope = Envelope::confirmation(
+        command,
+        Some(core),
+        Confirmation {
+            token,
+            expires_at,
+            effects: previewed.effects,
+        },
+    );
+    envelope.warnings.extend(major_warning(previewed.to_major));
+    super::with_recovered(envelope, recovered)
 }
 
-pub fn service_effects(effects: &LaneEffects) -> ServiceEffects {
-    ServiceEffects {
-        ends_sessions: effects.ends_sessions,
-        sessions: effects.sessions.clone(),
+/// The effects of a lane preview. A restart into a Pending Version names both versions, and
+/// `facts` says whether the Pending Version is breaking and which Paired Devices it strands.
+pub(crate) fn service_effects(effects: &LaneEffects, facts: Option<&UpdateFacts>) -> Previewed {
+    let pending = match (&effects.from, &effects.to) {
+        (Some(from), Some(to)) => {
+            let waiting = facts
+                .and_then(|facts| facts.pending.as_ref())
+                .filter(|pending| pending.version.as_str() == to.version);
+            Some(RestartTarget {
+                from: from.version.clone(),
+                to: to.version.clone(),
+                breaking: waiting.is_some_and(|pending| pending.breaking),
+                stranded: waiting
+                    .map(|pending| {
+                        pending
+                            .stranded
+                            .iter()
+                            .map(|device| crate::contract::DeviceRef {
+                                id: super::hex(&device.pairing),
+                                name: device.name.clone(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+        }
+        _ => None,
+    };
+    Previewed {
+        effects: ServiceEffects {
+            ends_sessions: effects.ends_sessions,
+            sessions: effects.sessions.clone(),
+            pending,
+        },
+        to_major: effects.to_major,
     }
 }
 
@@ -421,7 +510,6 @@ pub fn settle(action: ServiceAction, outcome: Outcome) -> Settled {
 
 fn unconfirmed(receipt: &LaneReceipt) -> Failure {
     match receipt.action {
-        LaneAction::Update { .. } | LaneAction::Return => Failure::new(Code::ActivationUnresolved),
         LaneAction::Stop | LaneAction::Restart | LaneAction::Network { .. } => {
             Failure::new(Code::OutcomeUnconfirmed)
         }
@@ -434,8 +522,6 @@ pub fn receipt_of(receipt: &LaneReceipt) -> Receipt {
         action: match receipt.action {
             LaneAction::Stop => ServiceAction::Stop,
             LaneAction::Restart => ServiceAction::Restart,
-            LaneAction::Update { .. } => ServiceAction::Update,
-            LaneAction::Return => ServiceAction::Return,
             LaneAction::Network { .. } => ServiceAction::Network,
         },
         state: match receipt.state {

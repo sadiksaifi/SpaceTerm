@@ -65,6 +65,45 @@ impl LaneHost for Direct {
     }
 }
 
+/// [`Direct`] whose Status takes `1` to read its counters, as slow lane work holds the
+/// connection that asked for it.
+struct SlowStatus(Direct, Duration);
+impl LaneHost for SlowStatus {
+    fn fence(
+        &self,
+        admit: &mut dyn FnMut(&[[u8; 32]]) -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        self.0.fence(admit)
+    }
+    fn release_fence(&self) {
+        self.0.release_fence();
+    }
+    fn sessions(&self) -> Vec<[u8; 32]> {
+        self.0.sessions()
+    }
+    fn terminal_counters(&self) -> crate::diagnostics::TerminalCounterSnapshot {
+        std::thread::sleep(self.1);
+        self.0.terminal_counters()
+    }
+    fn devices(&self) -> Result<Vec<LaneDevice>, CoreError> {
+        self.0.devices()
+    }
+    fn network(&self) -> Result<LaneNetwork, CoreError> {
+        self.0.network()
+    }
+    fn change_network(
+        &self,
+        access: NetworkAccess,
+        caller: Option<&NetworkCaller>,
+        decide: &mut dyn FnMut(&NetworkPlan) -> Result<bool, CoreError>,
+    ) -> Result<Option<crate::service::lane::network::ListenerView>, CoreError> {
+        self.0.change_network(access, caller, decide)
+    }
+    fn listener(&self) -> Result<crate::service::lane::network::ListenerView, CoreError> {
+        self.0.listener()
+    }
+}
+
 const LOCAL: Actor = Actor {
     pairing: None,
     client: [8; 32],
@@ -139,6 +178,7 @@ fn open_lane(endpoint: &str, paired: &PairedDevice, credential: &DeviceCredentia
             agent: None,
         })
         .unwrap()
+        .0
 }
 
 fn call(stream: &mut Stream, request: &LaneRequest) -> Result<LaneReply, CoreError> {
@@ -396,6 +436,7 @@ mod flow {
             paired.clone(),
             "Laptop CLI".into(),
             None,
+            Arc::default(),
         )
     }
 
@@ -479,12 +520,12 @@ mod flow {
     fn a_narrowing_that_slow_lane_work_delays_still_listens_before_it_settles_done() {
         let fixture = Fixture::new();
         let every = fixture.listen_at(Ipv4Addr::UNSPECIFIED.into());
-        // Another device's lane is inside a release fetch that outlasts the change, so its
-        // thread holds a connection of the every-interface listener the narrowing retires.
-        let lane = crate::service::lane::tests::serving_with_feed(
+        // Another device's lane is inside a Status that outlasts the change, so its thread
+        // holds a connection of the every-interface listener the narrowing retires.
+        let lane = crate::service::lane::tests::serving_with(
             &fixture.paths,
-            Arc::new(Direct(Arc::clone(&fixture.state))),
-            Arc::new(crate::service::lane::tests::SlowFeed(
+            Arc::new(SlowStatus(
+                Direct(Arc::clone(&fixture.state)),
                 crate::protocol::limits::STALL_AFTER + Duration::from_secs(5),
             )),
         );
@@ -492,8 +533,8 @@ mod flow {
         let (endpoint, other, credential) =
             device_at(&fixture, every.port(), Ipv4Addr::LOCALHOST.into());
         let mut busy = open_lane(&endpoint, &other, &credential);
-        let fetching = std::thread::spawn(move || {
-            let _ = call(&mut busy, &LaneRequest::StageFetch);
+        let reading = std::thread::spawn(move || {
+            let _ = call(&mut busy, &LaneRequest::Status);
             busy
         });
         std::thread::sleep(Duration::from_millis(300));
@@ -513,14 +554,14 @@ mod flow {
         };
         assert_eq!(receipt.state, LaneOperationState::Done);
         assert!(started.elapsed() < crate::service::lane::admin::NETWORK_WAIT);
-        // Done means the narrowed listener accepts, although the fetch still runs.
+        // Done means the narrowed listener accepts, although the Status still runs.
         let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap()
         else {
             panic!()
         };
         assert_eq!(status.listener, ListenerState::Listening { addr: narrowed });
-        assert!(!fetching.is_finished() || started.elapsed() > Duration::from_secs(5));
-        drop(fetching.join());
+        assert!(!reading.is_finished() || started.elapsed() > Duration::from_secs(5));
+        drop(reading.join());
     }
 
     #[test]
@@ -542,7 +583,8 @@ mod flow {
                 name: &"Studio CLI".into(),
                 agent: None,
             })
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(call(&mut kept, &LaneRequest::Status).is_ok());
         let (endpoint, paired, credential) =
             device_at(&fixture, every.port(), Ipv4Addr::LOCALHOST.into());
@@ -721,7 +763,8 @@ fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_stra
             name: &"Studio CLI".into(),
             agent: None,
         })
-        .unwrap();
+        .unwrap()
+        .0;
     assert!(call(&mut kept, &LaneRequest::Status).is_ok());
     // The caller reaches the server over IPv4 and asks for IPv6 only.
     let caller = fixture.enroll(&DeviceCredential::generate().unwrap());
@@ -734,7 +777,7 @@ fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_stra
     let mut previewing = Scripted::new(vec![LaneRequest::Preview {
         action: network(access),
     }]);
-    lane.serve(&mut previewing, actor, route, &|| Ok(()))
+    lane.serve(&mut previewing, actor.into(), route, &|| Ok(()))
         .unwrap();
     let (token, effects) = preview(previewing.replies.remove(0));
     assert_eq!(effects.caller, Some(LaneCallerEffect::Disconnected));
@@ -754,7 +797,7 @@ fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_stra
             )
             .unwrap();
     }));
-    lane.serve(&mut executing, actor, route, &|| Ok(()))
+    lane.serve(&mut executing, actor.into(), route, &|| Ok(()))
         .unwrap();
     assert!(matches!(executing.replies[0], LaneReply::Accepted { .. }));
     // No connected device keeps a route now, so the change was refused, not applied.
@@ -875,14 +918,14 @@ fn an_applied_change_whose_listener_never_accepts_settles_unresolved_not_done() 
 fn a_narrowing_that_a_later_change_supersedes_before_it_listens_settles_unresolved() {
     let fixture = Fixture::new();
     let every = fixture.listen_at(Ipv4Addr::UNSPECIFIED.into());
-    // A device's lane sits in a release fetch, so the every-interface listener a narrowing
+    // A device's lane sits in a slow Status, so the every-interface listener a narrowing
     // retires keeps routing to its connection and the narrowed bind waits.
-    let lane = crate::service::lane::tests::serving_with_feed(
+    let lane = crate::service::lane::tests::serving_with(
         &fixture.paths,
-        Arc::new(Direct(Arc::clone(&fixture.state))),
-        Arc::new(crate::service::lane::tests::SlowFeed(Duration::from_secs(
-            8,
-        ))),
+        Arc::new(SlowStatus(
+            Direct(Arc::clone(&fixture.state)),
+            Duration::from_secs(8),
+        )),
     );
     let _serving = Serving::start(&fixture, &lane);
     let credential = DeviceCredential::generate().unwrap();
@@ -892,8 +935,8 @@ fn a_narrowing_that_a_later_change_supersedes_before_it_listens_settles_unresolv
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), every.port())
     );
     let mut busy = open_lane(&endpoint, &other, &credential);
-    let fetching = std::thread::spawn(move || {
-        let _ = call(&mut busy, &LaneRequest::StageFetch);
+    let reading = std::thread::spawn(move || {
+        let _ = call(&mut busy, &LaneRequest::Status);
         busy
     });
     std::thread::sleep(Duration::from_millis(300));
@@ -943,5 +986,5 @@ fn a_narrowing_that_a_later_change_supersedes_before_it_listens_settles_unresolv
         std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(resolve(), LaneOperationState::Unresolved);
-    drop(fetching.join());
+    drop(reading.join());
 }

@@ -180,12 +180,16 @@ fn serve(service: bool, owned: bool) -> Result<(), CoreError> {
     // SpaceTerm Core's one counter set: its Terminal Sessions record into it and its lane reports
     // it.
     let counters = std::sync::Arc::new(spaceterm_core::diagnostics::TerminalCounters::default());
+    // Admission offers this build's version to every client.
+    let version = spaceterm_core::update::facts::Version::parse(env!("SPACETERM_CLI_VERSION"))
+        .map_err(|_| CoreError::StartupFailed)?;
     let panes = spaceterm_core::panes(std::sync::Arc::clone(&counters), |sync| {
         Ok(spaceterm::runtime::Served::new(
             spaceterm::runtime::WorkspaceHost::account_service(sync, counters)?
                 .with_session_context(spaceterm::runtime::CoreSessionContext::current(IDENTITY)?),
         ))
-    });
+    })
+    .with_version(version);
     if service {
         spaceterm_core::service::run(IDENTITY, panes)
     } else if owned {

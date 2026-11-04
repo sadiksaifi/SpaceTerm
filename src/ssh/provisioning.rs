@@ -920,7 +920,7 @@ fn map_direct_error(error: DirectError) -> SetupFailure {
 }
 fn map_core_error(error: CoreError) -> SetupFailure {
     match error {
-        CoreError::IncompatibleProtocol => {
+        CoreError::IncompatibleProtocol(_) => {
             SetupFailure::Incompatible(IncompatibilityKind::Protocol)
         }
         CoreError::AuthorizationRequired => {

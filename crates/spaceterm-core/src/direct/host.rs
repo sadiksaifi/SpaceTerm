@@ -580,6 +580,59 @@ impl State {
         let _ = self.store.save(&self.record);
         Ok(())
     }
+    /// Records the work versions `paired`'s admitted Hello offered, so [`Self::stranded`] can
+    /// tell which devices a Core of another work major would strand. A failed write keeps the
+    /// earlier record and never refuses the connection.
+    pub(crate) fn note_offered(
+        &mut self,
+        paired: &PairedDevice,
+        offered: &[crate::protocol::version::ProtocolVersion],
+    ) {
+        let Ok(mut entries) = self.store.load_offered() else {
+            return;
+        };
+        let live: std::collections::BTreeSet<_> = self
+            .record
+            .devices
+            .iter()
+            .filter(|device| !device.revoked)
+            .map(|device| device.info.pairing)
+            .collect();
+        entries.retain(|entry| entry.pairing != paired.pairing && live.contains(&entry.pairing));
+        entries.push(storage::Offered {
+            pairing: paired.pairing,
+            majors: offered
+                .iter()
+                .map(|version| version.major)
+                .take(2)
+                .collect(),
+        });
+        let _ = self.store.save_offered(&entries);
+    }
+
+    /// The Paired Devices a Core of work major `major` would strand: those whose last admitted
+    /// Hello offered no version with it. A device admitted under no record is not counted.
+    pub(crate) fn stranded(&self, major: u16) -> Vec<crate::update::facts::StrandedDevice> {
+        let Ok(entries) = self.store.load_offered() else {
+            return Vec::new();
+        };
+        self.record
+            .devices
+            .iter()
+            .filter(|device| !device.revoked)
+            .filter(|device| {
+                entries.iter().any(|entry| {
+                    entry.pairing == device.info.pairing && !entry.majors.contains(&major)
+                })
+            })
+            .take(crate::update::facts::MAX_STRANDED)
+            .map(|device| crate::update::facts::StrandedDevice {
+                pairing: device.info.pairing,
+                name: bounded_name(device.info.name.as_str()),
+            })
+            .collect()
+    }
+
     fn expire(&mut self) -> Result<(), DirectError> {
         let now = wire::now()?;
         self.invitations.retain(|v| v.expires > now);
@@ -1521,17 +1574,18 @@ pub(crate) fn serve(
         client,
         agent,
         name,
-        ..
-    } = match crate::protocol::admit_direct_machine(&mut stream, &paired)? {
+        status,
+        offered,
+    } = match crate::protocol::admit_direct_machine(&mut stream, &paired, &environment.versions)? {
         crate::protocol::Admission::Work(admitted) => admitted,
-        crate::protocol::Admission::Service(actor) => {
+        crate::protocol::Admission::Service(admitted) => {
             return serve_lane(
                 stream,
                 &paired,
                 generation,
                 &state,
                 environment,
-                actor,
+                admitted,
                 stopping,
             );
         }
@@ -1625,6 +1679,10 @@ pub(crate) fn serve(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .note_connection(&paired)?;
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .note_offered(&paired, &offered);
     let peer = crate::connection::service::Peer {
         client,
         connection,
@@ -1633,8 +1691,27 @@ pub(crate) fn serve(
             generation,
         }),
     };
-    crate::host::serve_admitted(Box::new(carrier), peer, name, outbox, waker, environment);
+    crate::host::serve_admitted(
+        Box::new(carrier),
+        crate::host::Served {
+            peer,
+            name,
+            work: status.work,
+        },
+        outbox,
+        waker,
+        environment,
+    );
     Ok(())
+}
+
+/// `name` cut at a character boundary to [`crate::update::facts::MAX_DEVICE_NAME_BYTES`].
+fn bounded_name(name: &str) -> String {
+    let mut end = name.len().min(crate::update::facts::MAX_DEVICE_NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_owned()
 }
 
 /// Serves a paired service-lane connection. It is registered for its whole life, so revoking its
@@ -1646,9 +1723,10 @@ fn serve_lane(
     generation: [u8; 32],
     state: &Shared,
     environment: &crate::host::Environment,
-    actor: crate::service::operations::Actor,
+    admitted: crate::protocol::AdmittedLane,
     stopping: &LaneStop,
 ) -> Result<(), CoreError> {
+    let actor = admitted.actor;
     let lane = environment.lane.as_ref().ok_or(CoreError::Unsupported)?;
     let connection = crate::protocol::random()?;
     let route = stream.destination();
@@ -1670,7 +1748,7 @@ fn serve_lane(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .note_connection(paired)?;
-    lane.serve(&mut stream, actor, route, &|| {
+    lane.serve(&mut stream, admitted, route, &|| {
         state
             .lock()
             .unwrap_or_else(|e| e.into_inner())

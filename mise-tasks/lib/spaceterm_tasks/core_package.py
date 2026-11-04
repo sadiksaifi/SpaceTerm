@@ -52,28 +52,47 @@ SHARED_RESOURCES = "share/spaceterm"
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
-# The file that owns the SpaceTerm Protocol major. `crates/spaceterm-cli/build.rs` stamps the
-# same major into server builds.
-PROTOCOL_MAJOR_SOURCE = "crates/spaceterm-core/src/protocol/major.rs"
-PROTOCOL_MAJOR_LINE = re.compile(r"^pub const MAJOR: u16 = ([1-9][0-9]*);$", re.MULTILINE)
+# The file that owns the protocol versions. `crates/spaceterm-cli/build.rs` stamps the same
+# versions into Core build documents as `protocols`.
+PROTOCOL_SOURCE = "crates/spaceterm-core/src/protocol/version.rs"
+PROTOCOL_NAMES = {"work": "WORK", "service": "SERVICE", "desktop_channel": "DESKTOP_CHANNEL"}
+
+
+def protocol_line(constant):
+    """Matches the one-line declaration of the protocol version `constant`."""
+    return re.compile(
+        rf"^pub const {constant}: ProtocolVersion = ProtocolVersion "
+        r"\{ major: ([1-9][0-9]*), minor: (0|[1-9][0-9]*) \};$",
+        re.MULTILINE,
+    )
+
+
+def protocols(root=ROOT):
+    """Returns the `protocols` object of the source tree at `root`."""
+    text = (root / PROTOCOL_SOURCE).read_text()
+    result = {}
+    for key, constant in PROTOCOL_NAMES.items():
+        found = protocol_line(constant).findall(text)
+        if len(found) != 1:
+            raise TaskError("the protocol source must declare each protocol version once")
+        result[key] = {"major": int(found[0][0]), "minor": int(found[0][1])}
+    return result
 
 
 def protocol_major(root=ROOT):
-    """Returns the SpaceTerm Protocol major of the source tree at `root`."""
-    found = PROTOCOL_MAJOR_LINE.findall((root / PROTOCOL_MAJOR_SOURCE).read_text())
-    if len(found) != 1:
-        raise TaskError("the protocol major source must declare one major")
-    return int(found[0])
+    """Returns the work protocol major of the source tree at `root`."""
+    return protocols(root)["work"]["major"]
 
 
-PROTOCOL_MAJOR = protocol_major()
+PROTOCOLS = protocols()
+PROTOCOL_MAJOR = PROTOCOLS["work"]["major"]
 BUILD_KEYS = {
     "schema",
     "identity",
     "target",
     "commit",
     "version",
-    "protocol_major",
+    "protocols",
     "source_sha256",
 }
 
@@ -161,6 +180,26 @@ def host_target():
     return target
 
 
+def valid_protocols(value):
+    """Whether `value` is a build document's `protocols` object."""
+
+    def version(item):
+        return (
+            isinstance(item, dict)
+            and set(item) == {"major", "minor"}
+            and type(item["major"]) is int
+            and type(item["minor"]) is int
+            and 0 < item["major"] <= 65535
+            and 0 <= item["minor"] <= 65535
+        )
+
+    return (
+        isinstance(value, dict)
+        and set(value) == set(PROTOCOL_NAMES)
+        and all(version(item) for item in value.values())
+    )
+
+
 def document(data):
     def unique(pairs):
         result = {}
@@ -177,8 +216,7 @@ def document(data):
             or set(value) != BUILD_KEYS
             or type(value["schema"]) is not int
             or value["schema"] != 1
-            or type(value["protocol_major"]) is not int
-            or not 0 < value["protocol_major"] <= 65535
+            or not valid_protocols(value["protocols"])
             or (
                 value["source_sha256"] is not None
                 and not re.fullmatch(r"[0-9a-f]{64}", value["source_sha256"])
@@ -848,7 +886,7 @@ def stage_desktop_artifact(archive, signature, destination, expected=None, *, id
 def compatible_candidate(info, identity, *, target=None):
     if info["identity"] != identity or info["target"] != (target or host_target()):
         raise TaskError("the server candidate has a different identity or target")
-    if info["protocol_major"] != PROTOCOL_MAJOR:
+    if info["protocols"]["work"]["major"] != PROTOCOL_MAJOR:
         raise TaskError("the server candidate has an incompatible protocol major")
 
 

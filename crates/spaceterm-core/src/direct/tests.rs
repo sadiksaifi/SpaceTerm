@@ -94,7 +94,7 @@ pub(crate) fn admitted(
     name: &str,
     _paired: &PairedDevice,
 ) -> Result<CoreLink, CoreError> {
-    let carrier = connection.admit((client, &name.into()))?;
+    let (carrier, _) = connection.admit((client, &name.into()))?;
     Ok(spawn_link(carrier, Arc::new(|_| {})).unwrap())
 }
 
@@ -298,12 +298,15 @@ impl Fixture {
             let (waker, wake) = Waker::new().unwrap();
             crate::host::serve_admitted(
                 Box::new(UnixCarrier::new(core).unwrap()),
-                Peer {
-                    client: [9; 32],
-                    connection: [10; 32],
-                    pairing: None,
+                crate::host::Served {
+                    peer: Peer {
+                        client: [9; 32],
+                        connection: [10; 32],
+                        pairing: None,
+                    },
+                    name: "Local".into(),
+                    work: crate::protocol::version::WORK,
                 },
-                "Local".into(),
                 Outbox::new(wake),
                 waker,
                 &environment,
@@ -1136,7 +1139,8 @@ fn a_paired_device_reaches_the_service_lane_as_its_own_pairing() {
             name: &name,
             agent: None,
         })
-        .unwrap();
+        .unwrap()
+        .0;
     let mut call = |request: LaneRequest| {
         let deadline = Instant::now() + Duration::from_secs(5);
         Preamble::send(
@@ -1519,7 +1523,8 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
                 name: &"Test CLI agent-1".into(),
                 agent: Some(&agent),
             })
-            .unwrap();
+            .unwrap()
+            .0;
         spawn_link(carrier, Arc::new(|_| {})).unwrap()
     };
     assert!(matches!(

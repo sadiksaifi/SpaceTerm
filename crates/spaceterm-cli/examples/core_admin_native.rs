@@ -1,5 +1,6 @@
 //! Native acceptance of server administration (spec section 12F) against an installed server:
-//! status, Stop, Restart, Update by upload and across protocol majors, return, the service
+//! status, Stop, Restart, install by upload and a restart into it, across protocol majors, the
+//! automatic return from a version that does not start, the service
 //! operation crash windows, stale and expired tokens, a Session started after a preview, a full
 //! ledger, local-only commands and pairing.
 //!
@@ -13,8 +14,8 @@
 //! core_admin_native [--identity ID] [--target NAME] [--cli PATH]
 //!     [--machine PREFIX] [--machine-cli PATH] [--machine-fixture PATH]
 //!     [--network all|IP|IP:PORT|off] [--candidate ARCHIVE SIGNATURE]
-//!     [--next-major ARCHIVE SIGNATURE] [--broken ARCHIVE SIGNATURE]
-//!     [--restore ARCHIVE SIGNATURE] [--expiry] [--case NAME]...
+//!     [--next-major ARCHIVE SIGNATURE] [--broken ARCHIVE SIGNATURE] [--expiry]
+//!     [--case NAME]...
 //! core_admin_native fixture ID ACTION [ARGUMENT]...
 //! ```
 //!
@@ -22,7 +23,9 @@
 //! `SPACETERM_ADMIN_TARGET=penguin` and `SPACETERM_ADMIN_MACHINE="ssh penguin"`. Without
 //! `--target`, the target is this machine's own SpaceTerm Core. Stop runs on the target machine
 //! itself, because a paired machine can't stop it. Update cases run only when their
-//! archives are given. `--expiry` waits out a token's ten-minute lifetime.
+//! archives are given, and each archive must be newer than the version the target runs, because
+//! SpaceTerm Core never installs an older one. `--expiry` waits out a token's ten-minute
+//! lifetime.
 //!
 //! A SIGKILL'd server leaves an unresolved same-boot run that refuses every start until the
 //! machine restarts, so the "server ended after Admitted" window ends the server with SIGTERM.
@@ -77,7 +80,6 @@ struct Options {
     candidate: Option<(String, String)>,
     next_major: Option<(String, String)>,
     broken: Option<(String, String)>,
-    restore: Option<(String, String)>,
     expiry: bool,
     /// Where `expired-token-issue` keeps a token for a later `expired-token-check`, so the
     /// ten-minute wait can pass while other work runs.
@@ -112,7 +114,6 @@ impl Options {
             candidate: pair("CANDIDATE"),
             next_major: pair("NEXT_MAJOR"),
             broken: pair("BROKEN"),
-            restore: pair("RESTORE"),
             expiry: env("EXPIRY").is_some(),
             token_file: env("TOKEN_FILE"),
             cases: env("CASES")
@@ -140,7 +141,6 @@ impl Options {
                 "--candidate" => options.candidate = Some((value()?, value()?)),
                 "--next-major" => options.next_major = Some((value()?, value()?)),
                 "--broken" => options.broken = Some((value()?, value()?)),
-                "--restore" => options.restore = Some((value()?, value()?)),
                 "--expiry" => options.expiry = true,
                 "--token-file" => options.token_file = Some(value()?),
                 "--case" => options.cases.push(value()?),
@@ -330,7 +330,7 @@ fn run(options: &Options) -> Result<()> {
         cases.push(("update-next-major", update_next_major));
     }
     if options.broken.is_some() {
-        cases.push(("return", return_through_update));
+        cases.push(("return", automatic_return));
     }
     let mut failed = 0;
     for (name, case) in cases.into_iter().filter(|(name, _)| options.wants(name)) {
@@ -345,11 +345,6 @@ fn run(options: &Options) -> Result<()> {
                 println!("FAILED {name}: {error}");
             }
         }
-    }
-    if let Some((archive, signature)) = &options.restore {
-        options.ensure_running()?;
-        update_with(options, archive, signature, "restore")?;
-        println!("restored the original runtime");
     }
     if failed > 0 {
         return Err(format!("{failed} cases failed").into());
@@ -561,42 +556,50 @@ fn stop(options: &Options) -> Result<String> {
     Ok("stopped on the machine, then a local Start".into())
 }
 
+/// Installs an archive, which ends nothing, then restarts into it after confirmation. The
+/// envelope holds both results, `install` and `result`, and the restart preview.
 fn update_with(options: &Options, archive: &str, signature: &str, what: &str) -> Result<Ran> {
-    let preview = options
+    let install = options
         .cli(&["update", "--archive", archive, "--signature", signature])?
-        .expect(3, what)?;
-    let token = preview.token()?;
-    let ran = options.cli(&[
-        "update",
-        "--archive",
-        archive,
-        "--signature",
-        signature,
-        "--confirm",
-        &token,
-    ])?;
+        .expect(0, what)?;
+    if install.envelope["data"]["pending"].is_null() {
+        return Err(format!("{what} left no Pending Version").into());
+    }
+    let preview = options.cli(&["restart"])?.expect(3, "restart preview")?;
+    let ran = options.cli(&["restart", "--confirm", &preview.token()?])?;
     Ok(Ran {
         exit: ran.exit,
-        envelope: serde_json::json!({ "preview": preview.envelope, "result": ran.envelope }),
+        envelope: serde_json::json!({
+            "install": install.envelope,
+            "preview": preview.envelope,
+            "result": ran.envelope,
+        }),
     })
+}
+
+/// The version the target's SpaceTerm Core runs now.
+fn running_version(options: &Options) -> Result<Value> {
+    let status = options.cli(&["status"])?.expect(0, "status")?;
+    Ok(status.envelope["data"]["runtime"]["version"].clone())
 }
 
 fn update_upload(options: &Options) -> Result<String> {
     let (archive, signature) = options.candidate.as_ref().ok_or("no candidate")?;
-    let ran = update_with(options, archive, signature, "update preview")?;
+    let ran = update_with(options, archive, signature, "install")?;
     let result = &ran.envelope["result"];
     if ran.exit != 0 || result["data"]["receipt"]["state"] != "done" {
         return Err(format!(
-            "the update settled as {}",
+            "the restart settled as {}",
             result["data"]["receipt"]["state"]
         )
         .into());
     }
     options.await_running()?;
-    Ok(format!(
-        "updated to {}",
-        result["data"]["version"]["version"]
-    ))
+    let installed = ran.envelope["install"]["data"]["pending"]["version"].clone();
+    if running_version(options)? != installed {
+        return Err(format!("the restart did not run {installed}").into());
+    }
+    Ok(format!("installed and restarted into {installed}"))
 }
 
 fn update_next_major(options: &Options) -> Result<String> {
@@ -605,21 +608,18 @@ fn update_next_major(options: &Options) -> Result<String> {
         .as_ref()
         .ok_or("no next-major candidate")?;
     options.fixture("start-session", &[])?;
-    let ran = update_with(options, archive, signature, "next-major preview")?;
-    let preview = &ran.envelope["preview"];
-    let warned = preview["warnings"]
-        .as_array()
-        .is_some_and(|w| w.iter().any(|w| w["code"] == "client_major_differs"));
-    if !warned {
-        return Err("the preview did not warn about the protocol major".into());
+    let ran = update_with(options, archive, signature, "next-major install")?;
+    if ran.envelope["install"]["data"]["pending"]["breaking"] != true {
+        return Err("the next-major Pending Version is not breaking".into());
     }
+    let preview = &ran.envelope["preview"];
     if preview["data"]["confirmation"]["effects"]["ends_sessions"].as_u64() < Some(1) {
-        return Err("the preview does not end the running Session".into());
+        return Err("the restart preview does not end the running Session".into());
     }
     let result = &ran.envelope["result"];
     if ran.exit != 0 || result["data"]["receipt"]["state"] != "done" {
         return Err(format!(
-            "the update settled as {}",
+            "the restart settled as {}",
             result["data"]["receipt"]["state"]
         )
         .into());
@@ -627,34 +627,29 @@ fn update_next_major(options: &Options) -> Result<String> {
     // The lane answers the next-major server, though work commands need a matching CLI.
     let status = options
         .cli(&["status"])?
-        .expect(0, "status after the update")?;
+        .expect(0, "status after the restart")?;
     if status.envelope["data"]["sessions"] != 0 {
-        return Err("Sessions survived an update".into());
+        return Err("Sessions survived a restart".into());
     }
     Ok("Sessions ended, the lane reconnected across majors, and the receipt is done".into())
 }
 
-fn return_through_update(options: &Options) -> Result<String> {
+/// A version that does not become ready returns SpaceTerm Core to the version it ran, which
+/// skips it from then on.
+fn automatic_return(options: &Options) -> Result<String> {
     let (archive, signature) = options.broken.as_ref().ok_or("no broken candidate")?;
-    let ran = update_with(options, archive, signature, "broken preview")?;
+    let before = running_version(options)?;
+    let ran = update_with(options, archive, signature, "broken install")?;
     let state = ran.envelope["result"]["data"]["receipt"]["state"].clone();
-    if ran.exit == 0 {
-        return Err("a candidate that cannot start updated the server".into());
-    }
-    // On the machine, `update` settles the failed activation and offers return.
-    let preview = options
-        .machine_cli(&["update"])?
-        .expect(3, "return preview")?;
-    if preview.envelope["data"]["confirmation"]["effects"]["kind"] != "return" {
-        return Err("the machine's update did not offer return".into());
+    options.await_running()?;
+    if running_version(options)? != before {
+        return Err("a version that cannot start kept running".into());
     }
     options
-        .machine_cli(&["update", "--confirm", &preview.token()?])?
-        .expect(0, "return")?;
-    options.machine_cli(&["start"])?.expect(0, "local start")?;
-    options.await_running()?;
+        .cli(&["update", "--archive", archive, "--signature", signature])?
+        .expect_code(4, "version_skipped", "the skipped version again")?;
     Ok(format!(
-        "the broken update settled as {state}, then returned"
+        "the restart settled as {state}, SpaceTerm Core returned to {before} and skips the version"
     ))
 }
 

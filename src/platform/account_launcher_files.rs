@@ -71,7 +71,9 @@ fn failure(error: CoreError) -> ToolFailure {
         CoreError::ServiceBusy => ToolFailure::Busy,
         CoreError::CandidateMissing => ToolFailure::NoCorePackage,
         CoreError::CandidateChanged => ToolFailure::RestartRequired,
-        CoreError::RuntimeUnavailable | CoreError::IncompatibleProtocol => ToolFailure::Unverified,
+        CoreError::RuntimeUnavailable | CoreError::IncompatibleProtocol(_) => {
+            ToolFailure::Unverified
+        }
         CoreError::UnsafeStorage => ToolFailure::UnsafeStorage,
         _ => ToolFailure::StorageUnavailable,
     }
@@ -88,7 +90,12 @@ mod tests {
             (CoreError::CandidateMissing, ToolFailure::NoCorePackage),
             (CoreError::CandidateChanged, ToolFailure::RestartRequired),
             (CoreError::RuntimeUnavailable, ToolFailure::Unverified),
-            (CoreError::IncompatibleProtocol, ToolFailure::Unverified),
+            (
+                CoreError::IncompatibleProtocol(
+                    spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+                ),
+                ToolFailure::Unverified,
+            ),
             (CoreError::UnsafeStorage, ToolFailure::UnsafeStorage),
             (CoreError::Changed, ToolFailure::StorageUnavailable),
             (

@@ -1,29 +1,33 @@
 //! The administration steps every SpaceTerm Client shares over a server's service lane: settle
-//! the operations this identity left pending, read Status and the update check, preview Stop,
-//! Restart, Update, Return or a Network Access change, and execute a confirmed preview until it
-//! settles.
+//! the operations this identity left pending, read Status and the update facts, install a new
+//! version from the Core's feed or by pushing an archive, preview Stop, Restart or a Network
+//! Access change, and execute a confirmed preview until it settles.
 //!
 //! The CLI and the desktop present each result their own way. Both take the same steps here, so
 //! a confirmation, a dispatched operation and its settlement mean the same on either.
 use super::client::{Lane, LaneError, Leftover, Outcome, Session, settle_leftover};
 use super::network::{LaneNetworkEffects, NetworkAccess};
 use super::{
-    LaneAction, LaneCheck, LaneEffects, LaneOperationState, LaneReceipt, LaneReply, LaneRequest,
-    LaneStatus, LaneUpdateKind, LaneVersion,
+    LaneAction, LaneEffects, LaneOperationState, LaneReceipt, LaneReply, LaneRequest, LaneStatus,
+    MAX_CHUNK,
 };
 use crate::CoreError;
 use crate::service::operations::OperationId;
 use crate::storage::Directory;
+use crate::update::facts::{UpdateFacts, Version};
+use base64::Engine;
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 /// How long a read or a preview may take.
 pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
-/// How long the server may take to fetch and verify a candidate it stages.
+/// How long the server may take to fetch, verify and install a release from its feed, or to
+/// verify and install the last chunk of a push.
 pub const STAGE_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// How long a Stop is followed: until the server closes the lane.
 pub const STOP_WAIT: Duration = Duration::from_secs(90);
 /// How long any other action is followed: until it settles, or until a server that replaces
-/// itself, as Restart, Update and Return do, returns.
+/// itself, as Restart and Update do, returns.
 pub const RETURN_WAIT: Duration = Duration::from_secs(180);
 /// How long a Network Access change is followed. It covers the server's own
 /// [`super::network::LISTEN_LIMIT`] for the new listener, and a reconnect after it. One the new
@@ -132,15 +136,6 @@ pub fn status(session: &mut Session) -> Result<LaneStatus, LaneError> {
     }
 }
 
-/// The server's approved build, the newest signed release for it, and what it has staged. The
-/// check is passive: it stages and recovers nothing.
-pub fn check(session: &mut Session) -> Result<LaneCheck, LaneError> {
-    match session.call(&LaneRequest::Check, Instant::now() + REQUEST_LIMIT)? {
-        LaneReply::Check(check) => Ok(check),
-        _ => Err(LaneError::Core(CoreError::Protocol)),
-    }
-}
-
 /// A server's preview of one action: the token that confirms it, until `expires_at`, and what
 /// it affects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,84 +208,101 @@ pub fn preview_network(
     }
 }
 
-/// The return to the previous runtime the server offers, when its settled state allows one.
-pub fn probe_return(session: &mut Session) -> Result<Option<Preview>, LaneError> {
-    offered_return(session.request(
-        &LaneRequest::Preview {
-            action: LaneAction::Return,
+/// The Core's update facts and the run of the Core that reported them.
+pub fn facts(session: &mut Session) -> Result<(String, UpdateFacts), LaneError> {
+    match session.call(&LaneRequest::Facts {}, Instant::now() + REQUEST_LIMIT)? {
+        LaneReply::Facts { boot, facts } => Ok((boot, *facts)),
+        _ => Err(LaneError::Core(CoreError::Protocol)),
+    }
+}
+
+/// Asks the Core to install the release its own feed names. Returns whether it installed a
+/// version now, and its facts after. A Core that never fetches a feed answers `no_update_feed`.
+pub fn install_from_feed(session: &mut Session) -> Result<(bool, UpdateFacts), LaneError> {
+    installed(session.call(&LaneRequest::StageFetch, Instant::now() + STAGE_LIMIT)?)
+}
+
+fn installed(reply: LaneReply) -> Result<(bool, UpdateFacts), LaneError> {
+    match reply {
+        LaneReply::Installed { installed, facts } => Ok((installed, *facts)),
+        _ => Err(LaneError::Core(CoreError::Protocol)),
+    }
+}
+
+/// A signed SpaceTerm Core archive to push, with what its sender verified about it.
+pub struct PushArchive<'a> {
+    /// The version its build document names.
+    pub version: &'a Version,
+    pub length: u64,
+    /// 64 lowercase hex digits.
+    pub sha256: &'a str,
+    /// The raw 64-byte Ed25519 signature.
+    pub signature: &'a [u8],
+}
+
+/// Pushes `archive`, whose bytes `bytes` yields in order, and installs it as the Core's Pending
+/// Version. `progress` sees the bytes the Core acknowledged. The Core refuses a version it would
+/// not install before any byte is sent.
+pub fn push(
+    session: &mut Session,
+    archive: &PushArchive<'_>,
+    bytes: &mut dyn Read,
+    progress: &mut dyn FnMut(u64),
+) -> Result<UpdateFacts, LaneError> {
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let reply = session.call(
+        &LaneRequest::StageUpload {
+            version: archive.version.to_string(),
+            length: archive.length,
+            sha256: archive.sha256.to_owned(),
+            signature: encode(archive.signature),
         },
         Instant::now() + REQUEST_LIMIT,
-    ))
-}
-
-/// The return a server offers, from its reply to `Preview { Return }`. `return_unavailable`
-/// means no return applies, so an update proceeds.
-pub fn offered_return(reply: Result<LaneReply, CoreError>) -> Result<Option<Preview>, LaneError> {
-    match reply? {
-        LaneReply::Preview {
-            token,
-            expires_at,
-            effects,
-        } if effects.kind == Some(LaneUpdateKind::Return) => Ok(Some(Preview {
-            action: LaneAction::Return,
-            token,
-            expires_at,
-            effects,
-        })),
-        LaneReply::Error { code } if code == "return_unavailable" => Ok(None),
-        LaneReply::Error { code } => Err(LaneError::Code(code)),
-        _ => Err(LaneError::Core(CoreError::Protocol)),
-    }
-}
-
-/// Asks the server to fetch, verify and stage the newest signed release for itself.
-pub fn stage_fetch(session: &mut Session) -> Result<LaneVersion, LaneError> {
-    let reply = session.call(&LaneRequest::StageFetch, Instant::now() + STAGE_LIMIT)?;
-    staged(reply)
-}
-
-/// The candidate a `Staged` reply names.
-pub fn staged(reply: LaneReply) -> Result<LaneVersion, LaneError> {
-    match reply {
-        LaneReply::Staged {
-            installation,
-            version,
-            commit,
-        } => Ok(LaneVersion {
-            version,
-            commit,
-            sha256: installation,
-        }),
-        _ => Err(LaneError::Core(CoreError::Protocol)),
-    }
-}
-
-/// The change Update offers a running server.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UpdatePlan {
-    /// The settled state allows return to the previous runtime, which is offered instead.
-    Return(Preview),
-    /// The server staged `candidate` from its signed release feed.
-    Update {
-        candidate: LaneVersion,
-        preview: Preview,
-    },
-}
-
-/// Prepares Update the way `spaceterm update` does without local files: a return the
-/// server offers comes first, otherwise the server stages its newest release and previews it.
-pub fn plan_update(session: &mut Session) -> Result<UpdatePlan, LaneError> {
-    if let Some(preview) = probe_return(session)? {
-        return Ok(UpdatePlan::Return(preview));
-    }
-    let candidate = stage_fetch(session)?;
-    let preview = preview(
-        session,
-        LaneAction::Update {
-            installation: candidate.sha256.clone(),
-        },
     )?;
-    Ok(UpdatePlan::Update { candidate, preview })
+    let LaneReply::UploadProgress { upload, .. } = reply else {
+        return Err(LaneError::Core(CoreError::Protocol));
+    };
+    let mut buffer = vec![0; MAX_CHUNK];
+    let mut offset = 0u64;
+    progress(0);
+    loop {
+        let count = read_full(bytes, &mut buffer)
+            .map_err(|_| LaneError::Core(CoreError::CandidateMissing))?;
+        if count == 0 || offset + count as u64 > archive.length {
+            return Err(LaneError::Core(CoreError::CandidateChanged));
+        }
+        let last = offset + count as u64 == archive.length;
+        let reply = session.call(
+            &LaneRequest::UploadChunk {
+                upload: upload.clone(),
+                offset,
+                data: encode(&buffer[..count]),
+            },
+            Instant::now() + if last { STAGE_LIMIT } else { REQUEST_LIMIT },
+        )?;
+        offset += count as u64;
+        progress(offset);
+        match reply {
+            LaneReply::UploadProgress { next_offset, .. } if next_offset == offset && !last => {}
+            reply @ LaneReply::Installed { .. } if last => {
+                return installed(reply).map(|(_, facts)| facts);
+            }
+            _ => return Err(LaneError::Core(CoreError::Protocol)),
+        }
+    }
+}
+
+fn read_full(from: &mut dyn Read, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match from.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
 }
 
 /// Executes a confirmed preview of any action and follows it under [`Lane::perform`]. The
@@ -368,49 +380,6 @@ pub fn verdict(outcome: &Outcome) -> Verdict {
 mod tests {
     use super::*;
 
-    fn effects(kind: LaneUpdateKind) -> LaneEffects {
-        LaneEffects {
-            ends_sessions: 0,
-            sessions: Vec::new(),
-            start_requires_machine: false,
-            from: None,
-            to: None,
-            kind: Some(kind),
-            to_major: None,
-        }
-    }
-
-    #[test]
-    fn a_running_core_offers_return_only_when_its_preview_is_a_return() {
-        let preview = |kind| {
-            Ok(LaneReply::Preview {
-                token: "c1-00".into(),
-                expires_at: "2026-10-30T12:10:00Z".into(),
-                effects: effects(kind),
-            })
-        };
-        assert!(matches!(
-            offered_return(preview(LaneUpdateKind::Return)),
-            Ok(Some(Preview { action: LaneAction::Return, token, .. })) if token == "c1-00"
-        ));
-        assert_eq!(
-            offered_return(Ok(LaneReply::Error {
-                code: "return_unavailable".into()
-            })),
-            Ok(None)
-        );
-        assert_eq!(
-            offered_return(Ok(LaneReply::Error {
-                code: "not_installed".into()
-            })),
-            Err(LaneError::Code("not_installed".into()))
-        );
-        assert_eq!(
-            offered_return(preview(LaneUpdateKind::Update)),
-            Err(LaneError::Core(CoreError::Protocol))
-        );
-    }
-
     fn receipt(state: LaneOperationState, code: Option<&str>) -> LaneReceipt {
         LaneReceipt {
             operation: "00".into(),
@@ -473,15 +442,7 @@ mod tests {
         );
         // A change settles within the server's listener limit, and the caller then reconnects.
         assert!(NETWORK_WAIT >= super::super::network::LISTEN_LIMIT + Duration::from_secs(10));
-        for action in [
-            LaneAction::Restart,
-            LaneAction::Return,
-            LaneAction::Update {
-                installation: "00".into(),
-            },
-        ] {
-            assert_eq!(wait(&action), RETURN_WAIT, "{action:?}");
-        }
+        assert_eq!(wait(&LaneAction::Restart), RETURN_WAIT);
     }
 
     #[test]

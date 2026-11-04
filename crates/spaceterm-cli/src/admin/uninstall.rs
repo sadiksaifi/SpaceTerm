@@ -37,6 +37,7 @@ pub fn run(context: &Context<'_>, token: Option<&str>) -> Reply {
             let effects = ServiceEffects {
                 ends_sessions: u32::try_from(sessions.len()).unwrap_or(u32::MAX),
                 sessions: sessions.iter().map(|id| super::hex(id)).collect(),
+                pending: None,
             };
             let text = format!(
                 "Uninstall SpaceTerm Core from this machine? Every Terminal Session on it ends, for every client. {KEPT}\nConfirm with: spaceterm uninstall --confirm {token}\n"

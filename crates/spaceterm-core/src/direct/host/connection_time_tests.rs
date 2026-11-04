@@ -58,3 +58,46 @@ fn retained_connection_times_outside_the_supported_unix_range_are_refused() {
         Err(DirectError::StorageUnavailable)
     ));
 }
+
+#[test]
+fn a_work_major_strands_the_devices_whose_last_hello_offered_none_of_it() {
+    use crate::protocol::version::ProtocolVersion;
+    let v = |major| ProtocolVersion { major, minor: 0 };
+    let fixture = Fixture::new();
+    fixture.enable();
+    let current = fixture.enroll(&DeviceCredential::generate().unwrap());
+    let behind = fixture.enroll(&DeviceCredential::generate().unwrap());
+    // Admitted under no record, so the Core cannot know which majors it speaks.
+    fixture.enroll(&DeviceCredential::generate().unwrap());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.note_offered(&current, &[v(3), v(2)]);
+        state.note_offered(&behind, &[v(1)]);
+        // The last admitted Hello replaces the one before it.
+        state.note_offered(&behind, &[v(2), v(1)]);
+        let pairings = |major| {
+            state
+                .stranded(major)
+                .into_iter()
+                .map(|device| device.pairing)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pairings(3), vec![behind.pairing]);
+        assert_eq!(pairings(2), Vec::<[u8; 32]>::new());
+        assert_eq!(pairings(1), vec![current.pairing]);
+        state.stop();
+    }
+    let reopened = State::open(&fixture.paths).unwrap();
+    let pairings: Vec<_> = reopened
+        .lock()
+        .unwrap()
+        .stranded(3)
+        .into_iter()
+        .map(|device| device.pairing)
+        .collect();
+    assert_eq!(
+        pairings,
+        vec![behind.pairing],
+        "the record survives a restart"
+    );
+}

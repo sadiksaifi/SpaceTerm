@@ -98,9 +98,9 @@ class LinuxPrefixTests(unittest.TestCase):
             )
         for name in ("core-nonproduction-trust.json", "core-resources.json"):
             shutil.copyfile(ROOT / "packaging" / name, self.root / "packaging" / name)
-        major = self.root / core_package.PROTOCOL_MAJOR_SOURCE
+        major = self.root / core_package.PROTOCOL_SOURCE
         major.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / core_package.PROTOCOL_MAJOR_SOURCE, major)
+        shutil.copyfile(ROOT / core_package.PROTOCOL_SOURCE, major)
         (self.root / ".gitignore").write_text("target/\nrecord\n__pycache__/\n")
         for arguments in (
             ("init", "-q"),
@@ -133,7 +133,7 @@ class LinuxPrefixTests(unittest.TestCase):
                 "target": target,
                 "commit": "a" * 40,
                 "version": "dev.aaaaaaaaaaaa",
-                "protocol_major": core_package.PROTOCOL_MAJOR,
+                "protocols": core_package.PROTOCOLS,
             }
             if target == "x86_64-unknown-linux-gnu":
                 source = f"""

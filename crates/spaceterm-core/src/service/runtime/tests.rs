@@ -253,7 +253,7 @@ fn signed_candidate_discovery_refuses_another_protocol_major() {
                 &pin,
                 Some(crate::protocol::MAJOR + 1),
             );
-            assert!(matches!(result, Err(CoreError::IncompatibleProtocol)));
+            assert!(matches!(result, Err(CoreError::IncompatibleProtocol(_))));
             let service = Service::for_identity("spaceterm-development").unwrap();
             let pin = digest(&std::fs::read(archive).unwrap());
             let metadata = service
@@ -332,15 +332,17 @@ fn matching_digest_never_bypasses_signature_or_signed_compatibility_validation()
                     let mut info: serde_json::Value =
                         serde_json::from_slice(&entries[0].1).unwrap();
                     match change {
-                        0 => info["protocol_major"] = (crate::protocol::MAJOR + 1).into(),
+                        0 => {
+                            info["protocols"]["work"]["major"] = (crate::protocol::MAJOR + 1).into()
+                        }
                         1 => {
-                            info["protocol_major"] = crate::protocol::MAJOR.into();
+                            info["protocols"]["work"]["major"] = crate::protocol::MAJOR.into();
                             info["capabilities"] = serde_json::json!([]);
                         }
                         2 => info
                             .as_object_mut()
                             .unwrap()
-                            .remove("protocol_major")
+                            .remove("protocols")
                             .map(|_| ())
                             .unwrap(),
                         _ => unreachable!(),
@@ -875,10 +877,23 @@ fn signed_manifest_cannot_claim_a_different_compiled_build() {
         &root.join("source"),
         "spaceterm-development",
         |archive, signature| {
+            let main = format!(
+                "core/{}",
+                Layout::host("spaceterm-development")
+                    .unwrap()
+                    .executable()
+                    .display()
+            );
             rewrite(archive, signature, |entries| {
-                let mut info: serde_json::Value = serde_json::from_slice(&entries[0].1).unwrap();
+                let compiled = entries[0].1.clone();
+                let mut info: serde_json::Value = serde_json::from_slice(&compiled).unwrap();
                 info["version"] = "1.2.3".into();
                 entries[0].1 = serde_json::to_vec(&info).unwrap();
+                entries
+                    .iter_mut()
+                    .find(|(name, _, _)| *name == main)
+                    .unwrap()
+                    .1 = compiled;
             });
             let parent = root.join("installations");
             assert_eq!(
@@ -971,7 +986,7 @@ fn native_update_inspection_accepts_a_signed_new_major_without_weakening_pins() 
             rewrite(archive, signature, |entries| {
                 let mut manifest: serde_json::Value =
                     serde_json::from_slice(&entries[0].1).unwrap();
-                manifest["protocol_major"] = (crate::protocol::MAJOR + 1).into();
+                manifest["protocols"]["work"]["major"] = (crate::protocol::MAJOR + 1).into();
                 entries[0].1 = serde_json::to_vec(&manifest).unwrap();
             });
             let service = Service::for_identity("spaceterm-development").unwrap();
@@ -980,12 +995,16 @@ fn native_update_inspection_accepts_a_signed_new_major_without_weakening_pins() 
                 service
                     .inspect_update_candidate(archive, signature, &pin)
                     .unwrap()
-                    .protocol_major,
+                    .protocols
+                    .work
+                    .major,
                 crate::protocol::MAJOR + 1
             );
             assert_eq!(
                 service.inspect_candidate(archive, signature, &pin, crate::protocol::MAJOR,),
-                Err(CoreError::IncompatibleProtocol)
+                Err(CoreError::IncompatibleProtocol(
+                    crate::protocol::version::Incompatible::CallerTooOld
+                ))
             );
             assert_eq!(
                 service.inspect_update_candidate(archive, signature, &"0".repeat(64)),

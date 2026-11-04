@@ -1364,7 +1364,7 @@ fn native_core_setup_acceptance() {
         "setup returned local file authority"
     );
     assert_eq!(
-        core.refresh().unwrap().protocol_major,
+        core.refresh().unwrap().work.major,
         spaceterm_core::protocol::MAJOR
     );
     let spawns = fixture.adapter.seal();
@@ -1423,7 +1423,7 @@ fn native_core_setup_acceptance() {
     });
     let core = relaunched.core(&route).unwrap();
     assert_eq!(
-        core.refresh().unwrap().protocol_major,
+        core.refresh().unwrap().work.major,
         spaceterm_core::protocol::MAJOR
     );
     assert!(
@@ -1544,7 +1544,7 @@ fn native_core_setup_refresh_overlaps_first_pane_without_losing_admission() {
                                     cycle,
                                     "refresh-protocol",
                                     started,
-                                    if status.protocol_major == spaceterm_core::protocol::MAJOR {
+                                    if status.work == spaceterm_core::protocol::version::WORK {
                                         Ok(())
                                     } else {
                                         Err(CoreError::Protocol)

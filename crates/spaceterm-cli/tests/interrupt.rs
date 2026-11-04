@@ -904,21 +904,37 @@ fn an_interrupt_after_a_desktop_request_settles_its_answer_within_the_grace() {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let mut request = Vec::new();
-        stream.read_to_end(&mut request).unwrap();
-        assert!(String::from_utf8_lossy(&request).contains("\"open\""));
+        // Each Desktop Channel message is JSON after its big-endian u32 length.
+        let read = |stream: &mut std::os::unix::net::UnixStream| {
+            let mut length = [0; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut message = vec![0; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut message).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&message).unwrap()
+        };
+        let write = |stream: &mut std::os::unix::net::UnixStream, value: serde_json::Value| {
+            let message = serde_json::to_vec(&value).unwrap();
+            stream
+                .write_all(&(message.len() as u32).to_be_bytes())
+                .unwrap();
+            stream.write_all(&message).unwrap();
+        };
+        let hello = read(&mut stream);
+        write(
+            &mut stream,
+            serde_json::json!({
+                "identity": IDENTITY,
+                "selected": hello["versions"][0],
+                "desktop": hello["versions"][0],
+            }),
+        );
+        let request = read(&mut stream);
+        assert!(request["body"].get("open").is_some(), "{request}");
         // The request reached the desktop, so Ctrl-C now must wait for its answer.
         process.interrupt();
         if let Some(after) = answer_after {
             std::thread::sleep(after);
-            let reply = serde_json::json!({
-                "schema": spaceterm::desktop_channel::SCHEMA,
-                "identity": IDENTITY,
-                "body": "done",
-            });
-            stream
-                .write_all(&serde_json::to_vec(&reply).unwrap())
-                .unwrap();
+            write(&mut stream, serde_json::json!({ "body": "done" }));
             drop(stream);
             let (output, _) = process.wait(Duration::from_secs(3));
             let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();

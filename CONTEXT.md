@@ -74,7 +74,7 @@ _Avoid_: shim, alias, CLI install
 
 **SpaceTerm Protocol**: The versioned exchange of Core state, terminal presentation, and client operations between a SpaceTerm Client and SpaceTerm Core over one multiplexed connection, on which the Core pushes changes as they happen.
 
-**Service lane**: The admission-time exchange for administering SpaceTerm Core, independent of the work protocol major, over an authenticated account-local or paired connection.
+**Service lane**: The admission-time exchange for administering SpaceTerm Core, with its own protocol version, independent of the work protocol's, over an authenticated account-local or paired connection.
 
 **SSH Setup**: Temporary OpenSSH provisioning inside Add Machine that installs or reuses SpaceTerm Core on the remote computer and enrolls the client for paired QUIC access.
 

@@ -76,7 +76,7 @@ pub(super) fn local_status(
     service: Option<ServiceStatus>,
 ) -> Option<ObservedCoreStatus> {
     match (connection, service) {
-        (LocalCoreStatus::Failed(CoreError::IncompatibleProtocol), _) => {
+        (LocalCoreStatus::Failed(CoreError::IncompatibleProtocol(_)), _) => {
             Some(ObservedCoreStatus::NeedsUpdate)
         }
         (LocalCoreStatus::Connected(_), _) => Some(ObservedCoreStatus::Running),

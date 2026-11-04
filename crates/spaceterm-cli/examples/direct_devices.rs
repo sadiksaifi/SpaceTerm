@@ -608,7 +608,7 @@ mod exercise {
         let name = format!("direct541-owner-{}", &hex(&random()?)[..6]);
         let owner = api(MachineConnection::for_development_client(&name))?;
         require(
-            api(owner.refresh())?.protocol_major == spaceterm_core::protocol::MAJOR,
+            api(owner.refresh())?.work == spaceterm_core::protocol::version::WORK,
             "expected this build's protocol major",
         )?;
         let mut connection = api(support::connect(&owner))?;
@@ -1017,7 +1017,7 @@ mod exercise {
             connector.clone(),
         ))?;
         require(
-            api(core.refresh())?.protocol_major == spaceterm_core::protocol::MAJOR,
+            api(core.refresh())?.work == spaceterm_core::protocol::version::WORK,
             "QUIC did not negotiate this build's protocol major",
         )?;
         send_json(output, json!({"paired": paired}))?;

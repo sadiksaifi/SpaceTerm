@@ -13,6 +13,7 @@ use super::message::{
     EffectDone, Fatal, Frame, FrameAck, Input, InventoryRevision, PaneMessage, Ping, Pong, Reply,
     Request, View,
 };
+use crate::update::facts::UpdateFacts;
 use serde::{Serialize, de::DeserializeOwned};
 
 const MORE: u8 = 0x80;
@@ -40,6 +41,7 @@ pub enum Kind {
     CorePong = 0x47,
     Goodbye = 0x48,
     Accessibility = 0x49,
+    UpdateFacts = 0x4a,
 }
 
 impl Kind {
@@ -64,6 +66,7 @@ impl Kind {
             0x47 => Self::CorePong,
             0x48 => Self::Goodbye,
             0x49 => Self::Accessibility,
+            0x4a => Self::UpdateFacts,
             _ => return None,
         })
     }
@@ -94,6 +97,7 @@ impl Kind {
             Self::Accessibility => limits::MAX_ACCESSIBILITY_BYTES,
             Self::Pane => limits::MAX_PANE_EVENT_BYTES,
             Self::Inventory => limits::MAX_INVENTORY_BYTES,
+            Self::UpdateFacts => limits::MAX_UPDATE_FACTS_BYTES,
         }
     }
 
@@ -224,6 +228,7 @@ pub fn encode_core(message: &CoreMessage) -> Result<WireMessage, EncodeError> {
         CoreMessage::Accessibility(value) => encode(Kind::Accessibility, value),
         CoreMessage::Pane(value) => encode(Kind::Pane, value),
         CoreMessage::Inventory(value) => encode(Kind::Inventory, value),
+        CoreMessage::UpdateFacts(value) => encode(Kind::UpdateFacts, value),
         CoreMessage::Ping(value) => encode(Kind::CorePing, value),
         CoreMessage::Pong(value) => encode(Kind::CorePong, value),
         CoreMessage::Goodbye(value) => encode(Kind::Goodbye, value),
@@ -343,6 +348,7 @@ impl Assembler {
             Kind::Inventory => {
                 CoreMessage::Inventory(Box::new(decode::<InventoryRevision>(&body)?))
             }
+            Kind::UpdateFacts => CoreMessage::UpdateFacts(Box::new(decode::<UpdateFacts>(&body)?)),
             Kind::CorePing => CoreMessage::Ping(decode::<Ping>(&body)?),
             Kind::CorePong => CoreMessage::Pong(decode::<Pong>(&body)?),
             Kind::Goodbye => CoreMessage::Goodbye(decode::<Fatal>(&body)?),

@@ -1122,3 +1122,65 @@ fn a_row_with_too_many_cells_is_refused_before_its_lengths_are_walked() {
     update.rows[0].runs[0].cells = Cells::Explicit(vec![0; usize::from(pane::MAX_COLUMNS)]);
     assert_eq!(update.validate(), Ok(()));
 }
+
+#[test]
+fn update_facts_travel_as_their_own_kind_within_their_bound() {
+    use crate::update::facts::*;
+    let version = |text: &str| Version::parse(text).unwrap();
+    let largest = UpdateFacts {
+        revision: u64::MAX,
+        platform: Platform::MacosArm64,
+        running: version(&format!("{0}.{0}.{0}", u64::MAX)),
+        pending: Some(PendingVersion {
+            version: version("dev.0123456789ab.dirty"),
+            protocols: Protocols::CURRENT,
+            breaking: true,
+            installed_at: u64::MAX - OVERDUE_AFTER,
+            overdue_since: Some(u64::MAX),
+            stranded: (0..MAX_STRANDED)
+                .map(|n| StrandedDevice {
+                    pairing: [n as u8; 32],
+                    name: "\u{1f427}".repeat(MAX_DEVICE_NAME_BYTES / 4),
+                })
+                .collect(),
+        }),
+        sessions: u32::MAX,
+        operation: Some(Operation::Installing {
+            version: version("1.0.0"),
+            received: u64::MAX,
+            total: u64::MAX,
+        }),
+        check: UpdateCheck::Failing {
+            since: u64::MAX,
+            last_success: Some(u64::MAX),
+            reason: CheckFailure::SystemTooOld,
+        },
+        skipped: Some(version("1.0.0")),
+        last_failure: Some(UpdateFailure {
+            id: u64::MAX,
+            at: u64::MAX,
+            version: version("1.0.0"),
+            kind: FailureKind::Install(InstallFailure::Verification),
+        }),
+    };
+    let message = CoreMessage::UpdateFacts(Box::new(largest.clone()));
+    let wire = encode_core(&message).unwrap();
+    assert_eq!(wire.frames[0][4], 0x4a);
+    core_round_trip(message);
+
+    let regressed = UpdateFacts {
+        operation: Some(Operation::Installing {
+            version: version("1.0.0"),
+            received: 2,
+            total: 1,
+        }),
+        ..largest
+    };
+    let wire = encode_core(&CoreMessage::UpdateFacts(Box::new(regressed))).unwrap();
+    assert_eq!(
+        Assembler::default()
+            .core(RawFrame::parse(&wire.frames[0]).unwrap())
+            .err(),
+        Some(DecodeError::OutOfBounds)
+    );
+}

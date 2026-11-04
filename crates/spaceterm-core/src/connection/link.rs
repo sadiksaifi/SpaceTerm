@@ -20,6 +20,7 @@ use crate::protocol::{
     Operation, PaneEvent, Ping, Pong, RawFrame, Refusal, Reply, ReplyBody, Request, RequestId,
     View, limits,
 };
+use crate::update::facts::UpdateFacts;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
@@ -62,7 +63,6 @@ impl From<LinkError> for crate::CoreError {
         match error {
             LinkError::Goodbye(Fatal::Stopping) => Self::NotRunning,
             LinkError::Goodbye(Fatal::Revoked) => Self::AuthenticationRefused,
-            LinkError::Goodbye(Fatal::Incompatible) => Self::IncompatibleProtocol,
             LinkError::Goodbye(Fatal::Capacity) => Self::Capacity,
             // The link stays usable; a brief stall is worth a retry.
             LinkError::Busy => Self::Protocol,
@@ -96,6 +96,8 @@ pub enum Health {
 pub enum LinkEvent {
     Inventory(Arc<InventoryRevision>),
     Health(Health),
+    /// The Core's newest update facts: the first after admission, then each change.
+    UpdateFacts(Arc<UpdateFacts>),
 }
 
 pub enum ChannelEvent {
@@ -192,6 +194,8 @@ struct State {
     closed: Option<LinkError>,
     /// The newest inventory revision, and how many this link received.
     inventory: Option<(u64, Arc<InventoryRevision>)>,
+    /// The newest update facts this link received.
+    update_facts: Option<Arc<UpdateFacts>>,
     /// Bytes of every frame received, headers included.
     received_bytes: u64,
 }
@@ -226,6 +230,7 @@ impl CoreLink {
                     liveness: Liveness::new(now),
                     closed: None,
                     inventory: None,
+                    update_facts: None,
                     received_bytes: 0,
                 }),
                 revisions: Condvar::new(),
@@ -265,6 +270,12 @@ impl CoreLink {
     /// it holds.
     pub fn inventory(&self) -> Option<(u64, Arc<InventoryRevision>)> {
         self.lock().inventory.clone()
+    }
+
+    /// The newest update facts this link received. The Core pushes them as its first message
+    /// after admission and again after every change.
+    pub fn update_facts(&self) -> Option<Arc<UpdateFacts>> {
+        self.lock().update_facts.clone()
     }
 
     /// Waits until this link received more than `seen` revisions, and returns the newest. Fails
@@ -458,6 +469,11 @@ impl CoreLink {
                 let _ = self.send(&ClientMessage::Pong(Pong { nonce }), true);
             }
             CoreMessage::Pong(_) => {}
+            CoreMessage::UpdateFacts(facts) => {
+                let facts: Arc<UpdateFacts> = Arc::from(facts);
+                self.lock().update_facts = Some(Arc::clone(&facts));
+                self.shared.events.deliver(LinkEvent::UpdateFacts(facts));
+            }
             CoreMessage::Goodbye(fatal) => {
                 self.fail(LinkError::Goodbye(fatal));
                 return Err(LinkError::Goodbye(fatal));

@@ -1,5 +1,7 @@
 //! The transient service helper. It runs one admitted service operation outside the server it
-//! stops or replaces: `spaceterm internal helper --operation ID --identity X`.
+//! stops or replaces: `spaceterm internal helper --operation ID --identity X`. Without an
+//! operation it finishes an activation a reboot interrupted: `spaceterm internal helper
+//! --identity X`.
 //!
 //! The helper must outlive the service manager's Stop of the server that launched it. On Linux
 //! it therefore runs in its own transient user unit, outside the server unit's control group. On
@@ -36,6 +38,37 @@ pub fn launch(identity: &str, op: &OperationId) -> Result<(), CoreError> {
     let mut argv = vec![program.into_os_string()];
     argv.extend(arguments(identity, op));
     spawn_detached(&format!("{identity}-service-{}", op.short()), &argv)
+}
+
+/// The arguments of the recovery helper of `identity`, after its executable.
+pub(crate) fn recovery_arguments(identity: &str) -> [OsString; 4] {
+    ["internal", "helper", "--identity", identity].map(OsString::from)
+}
+
+/// Starts the helper that finishes an activation a reboot interrupted, detached from the server
+/// that found it. That server refuses to run until the activation settles. The helper runs
+/// from `previous`, the installation the activation started from, never from the candidate.
+pub(crate) fn launch_recovery(identity: &str, previous: &std::path::Path) -> Result<(), CoreError> {
+    let layout = super::runtime::Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
+    super::runtime::verify(previous, identity)?;
+    let program = previous.join(layout.executable());
+    let mut argv = vec![program.into_os_string()];
+    argv.extend(recovery_arguments(identity));
+    spawn_detached(&format!("{identity}-service-recovery"), &argv)
+}
+
+/// The recovery helper's own work: finishes the interrupted activation under the helper lock.
+/// The activation either starts the Pending Version or returns to the previous one. Another
+/// helper that holds the lock is finishing it already.
+pub fn recover(identity: &str) -> Result<(), CoreError> {
+    let paths = crate::host::Paths::for_identity(identity)?;
+    let data = Directory::open(&paths.data, false)?;
+    let Some(_helper) = data.try_lock(HELPER_LOCK)? else {
+        return Ok(());
+    };
+    Service::for_identity(identity)?
+        .recover_activation()
+        .map(drop)
 }
 
 /// The helper's own work: takes the helper lock, claims its record, runs the same control a local
@@ -89,7 +122,6 @@ fn perform(identity: &str, record: &Record) -> Result<State, CoreError> {
             };
             service.activate(approval)?.phase
         }
-        Action::Return => service.return_to_previous(service.prepare_return()?)?.phase,
         // The lane applies Network Access changes itself and never launches a helper for one.
         Action::Network(_) => return Err(CoreError::Unsupported),
     };
@@ -101,7 +133,7 @@ pub(crate) fn activation_outcome(phase: super::activation::ActivationPhase) -> S
     use super::activation::ActivationPhase;
     match phase {
         ActivationPhase::Completed { .. } => State::Done,
-        ActivationPhase::Failed { .. } => State::Failed {
+        ActivationPhase::Returned { .. } => State::Failed {
             code: "startup_failed".to_owned(),
         },
         ActivationPhase::Activating | ActivationPhase::Uncertain => State::Unresolved,

@@ -10,7 +10,13 @@
 //! Within v1, fields are only added. Removing, renaming or retyping one creates
 //! `spaceterm.cli.v2`.
 use serde::{Serialize, Serializer};
-use spaceterm_core::{CoreError, direct::DirectError, hierarchy, protocol::Fatal, worktree};
+use spaceterm_core::{
+    CoreError,
+    direct::DirectError,
+    hierarchy,
+    protocol::{Fatal, version::Incompatible},
+    worktree,
+};
 
 pub const SCHEMA: &str = "spaceterm.cli.v1";
 /// A broken stdout pipe stops output and exits with this status, without a message.
@@ -415,8 +421,9 @@ pub enum Details {
     Operation(OperationDetails),
     /// `timeout`.
     Timeout(TimeoutDetails),
-    /// `incompatible_protocol`.
-    Protocol(ProtocolDetails),
+    /// `incompatible_protocol`, and `desktop_incompatible` when the two share no Desktop
+    /// Channel major.
+    Incompatible(IncompatibleDetails),
 }
 
 impl Serialize for Details {
@@ -434,7 +441,7 @@ impl Serialize for Details {
             Self::RunUnconfirmed(details) => details.serialize(serializer),
             Self::Operation(details) => details.serialize(serializer),
             Self::Timeout(details) => details.serialize(serializer),
-            Self::Protocol(details) => details.serialize(serializer),
+            Self::Incompatible(details) => details.serialize(serializer),
         }
     }
 }
@@ -651,11 +658,22 @@ pub struct TimeoutDetails {
     pub elapsed_ms: u64,
 }
 
+/// `details` when the CLI and the other side share no protocol major.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct ProtocolDetails {
-    pub client_major: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub core_major: Option<u16>,
+pub struct IncompatibleDetails {
+    /// The older side, which the person updates.
+    pub update: Update,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Update {
+    /// SpaceTerm Core on the machine the command reached.
+    Machine,
+    /// The desktop app.
+    Desktop,
+    /// SpaceTerm Core on this machine, which ships this CLI.
+    Core,
 }
 
 // Exit classes and codes
@@ -821,9 +839,17 @@ codes! {
     Stopped = "stopped", Unavailable, false, "SpaceTerm Core was stopped. Start it with: spaceterm start.";
     Changed = "changed", Target, true, "The target changed. Review it and try again.";
     ActivationUnresolved = "activation_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm whether SpaceTerm Core restarted on the new version.";
-    ReturnUnavailable = "return_unavailable", Failed, false, "The previous SpaceTerm Core version can\u{2019}t be restored safely.";
     CandidateUnverified = "candidate_unverified", Failed, false, "SpaceTerm couldn\u{2019}t verify the SpaceTerm Core package.";
     NoCandidate = "no_candidate", Target, false, "There is no SpaceTerm Core package to install.";
+    // Update sources.
+    NotNewer = "not_newer", Target, false, "SpaceTerm Core on that machine already has this version or a newer one.";
+    VersionSkipped = "version_skipped", Target, false, "This SpaceTerm Core version failed to start on that machine, so it is skipped until a newer one appears.";
+    NoUpdateFeed = "no_update_feed", Unavailable, false, "This SpaceTerm Core build takes updates only from the desktop or a local archive.";
+    FeedUnreachable = "feed_unreachable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t reach its update feed. Check the network.";
+    ProxyUnreachable = "proxy_unreachable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t reach its update feed through the proxy. Check the proxy setting.";
+    SystemTooOld = "system_too_old", Unavailable, false, "The newest SpaceTerm Core needs a newer operating system on that machine.";
+    DiskFull = "disk_full", Failed, true, "SpaceTerm Core couldn\u{2019}t install the update because the disk is full. Nothing changed.";
+    DownloadFailed = "download_failed", Failed, true, "SpaceTerm Core couldn\u{2019}t download the update. Nothing changed.";
     AuthorizationRequired = "authorization_required", ActionRequired, false, "Administrator authorization is required.";
     NotRunning = "not_running", Unavailable, true, "SpaceTerm Core is not running.";
     StorageUnavailable = "storage_unavailable", Unavailable, false, "Storage is unavailable.";
@@ -902,7 +928,6 @@ pub fn from_core_error(error: CoreError) -> Failure {
         CoreError::Stopped => Code::Stopped,
         CoreError::Changed => Code::Changed,
         CoreError::ActivationUnresolved => Code::ActivationUnresolved,
-        CoreError::ReturnUnavailable => Code::ReturnUnavailable,
         CoreError::RuntimeUnavailable => Code::CandidateUnverified,
         CoreError::CandidateMissing => Code::NoCandidate,
         CoreError::AuthorizationRequired => Code::AuthorizationRequired,
@@ -911,7 +936,17 @@ pub fn from_core_error(error: CoreError) -> Failure {
         CoreError::IncompatibleState => Code::IncompatibleState,
         CoreError::UnsafeStorage => Code::UnsafeStorage,
         CoreError::AuthenticationRefused => Code::AuthenticationRefused,
-        CoreError::IncompatibleProtocol => Code::IncompatibleProtocol,
+        CoreError::IncompatibleProtocol(older) => {
+            return Failure::with(
+                Code::IncompatibleProtocol,
+                Details::Incompatible(IncompatibleDetails {
+                    update: match older {
+                        Incompatible::ListenerTooOld => Update::Machine,
+                        Incompatible::CallerTooOld => Update::Core,
+                    },
+                }),
+            );
+        }
         CoreError::CandidateChanged => Code::CandidateChanged,
         CoreError::Protocol => Code::ProtocolError,
         CoreError::StartupFailed => Code::StartupFailed,
@@ -1046,7 +1081,6 @@ pub enum WarningCode {
     InvitationWithdrawn,
     HistoryGap,
     CoverageCoalesced,
-    CandidateOlder,
     ClientMajorDiffers,
     PrivateCredentialFile,
 }
@@ -1059,7 +1093,6 @@ impl WarningCode {
         Self::InvitationWithdrawn,
         Self::HistoryGap,
         Self::CoverageCoalesced,
-        Self::CandidateOlder,
         Self::ClientMajorDiffers,
         Self::PrivateCredentialFile,
     ];
@@ -1072,7 +1105,6 @@ impl WarningCode {
             Self::InvitationWithdrawn => "invitation_withdrawn",
             Self::HistoryGap => "history_gap",
             Self::CoverageCoalesced => "coverage_coalesced",
-            Self::CandidateOlder => "candidate_older",
             Self::ClientMajorDiffers => "client_major_differs",
             Self::PrivateCredentialFile => "private_credential_file",
         }
@@ -1093,9 +1125,8 @@ impl WarningCode {
             Self::InvitationWithdrawn => "The Invitation Link was withdrawn.",
             Self::HistoryGap => "Some rows were discarded before they could be read.",
             Self::CoverageCoalesced => "Some screen states were coalesced and are not shown.",
-            Self::CandidateOlder => "The SpaceTerm Core package is older than the running version.",
             Self::ClientMajorDiffers => {
-                "After this update, work commands need a CLI with SpaceTerm Core's protocol major."
+                "After this restart, work commands need a CLI with SpaceTerm Core's protocol major."
             }
         }
     }
@@ -1186,28 +1217,28 @@ pub struct ConfirmationData<E: Serialize> {
     pub confirmation: Confirmation<E>,
 }
 
-/// `effects` of `stop` and `restart`.
+/// `effects` of `stop`, `restart` and `uninstall`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceEffects {
     pub ends_sessions: u32,
     pub sessions: Vec<String>,
+    /// `restart` into a Pending Version: the versions it moves between. `null` for a restart
+    /// into the running version, and for `stop` and `uninstall`.
+    pub pending: Option<RestartTarget>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpdateKind {
-    Update,
-    Return,
-}
-
-/// `effects` of `update`.
+/// The Pending Version a restart moves SpaceTerm Core to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct UpdateEffects {
-    pub from: Version,
-    pub to: Version,
-    pub kind: UpdateKind,
-    pub ends_sessions: u32,
-    pub sessions: Vec<String>,
+pub struct RestartTarget {
+    /// The version SpaceTerm Core runs now.
+    pub from: String,
+    /// The Pending Version.
+    pub to: String,
+    /// Its work or service protocol major differs from the running version's.
+    pub breaking: bool,
+    /// Paired Devices that can't connect after the restart until they update. Empty unless
+    /// `breaking`.
+    pub stranded: Vec<DeviceRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1413,6 +1444,7 @@ pub enum SetupStepName {
     Start,
     Network,
     AutomaticStart,
+    UpdateProxy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1453,12 +1485,55 @@ pub struct CoreSetup {
     pub automatic_start: bool,
     pub launcher: Launcher,
     pub path_ok: bool,
+    /// The HTTP proxy SpaceTerm Core checks its update feed through. `null` for a direct
+    /// connection.
+    pub update_proxy: Option<String>,
 }
 
+/// `pending` of `status` and `update`: the installed version that waits for a restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct StagedVersion {
+pub struct PendingStatus {
     pub version: String,
-    pub sha256: String,
+    /// Its work or service protocol major differs from the running version's, so its restart
+    /// always asks and `stranded` devices stop working until they update.
+    pub breaking: bool,
+    /// RFC 3339.
+    pub installed_at: String,
+    /// RFC 3339, one day after `installed_at`. `null` before then.
+    pub overdue_since: Option<String>,
+    pub stranded: Vec<DeviceRef>,
+}
+
+/// `update_check` of `status`: the state of SpaceTerm Core's own feed checks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UpdateCheckStatus {
+    pub state: UpdateCheckState,
+    /// RFC 3339. `null` when no check has succeeded.
+    pub last_success_at: Option<String>,
+    /// RFC 3339. `null` unless `state` is `failing`.
+    pub failing_since: Option<String>,
+    /// `null` unless `state` is `failing`.
+    pub reason: Option<UpdateCheckReason>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckState {
+    /// Preflight and Development builds never check a feed.
+    Disabled,
+    Never,
+    Checking,
+    Succeeded,
+    Failing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckReason {
+    Network,
+    Proxy,
+    Verification,
+    SystemTooOld,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1500,7 +1575,8 @@ pub struct CoreStatus {
     pub automatic_start: bool,
     pub linger: Option<bool>,
     pub runtime: Version,
-    pub staged: Vec<StagedVersion>,
+    pub pending: Option<PendingStatus>,
+    pub update_check: UpdateCheckStatus,
     pub activation: Activation,
     pub sessions: u32,
     pub network: StatusNetwork,
@@ -1552,8 +1628,6 @@ pub struct CoreStart {
 pub enum ServiceAction {
     Stop,
     Restart,
-    Update,
-    Return,
     Network,
 }
 
@@ -1632,20 +1706,17 @@ pub struct CoreNetwork {
     pub receipt: Option<Receipt>,
 }
 
-/// `update --check`.
+/// `update`: what installing found, and the version that now waits for a restart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct UpdateCheck {
-    pub approved: Version,
-    pub latest: Option<Version>,
-    pub staged: Vec<Version>,
-}
-
-/// `update` after confirmation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct UpdateOperation {
-    pub operation: String,
-    pub receipt: Receipt,
-    pub version: Version,
+pub struct CoreUpdate {
+    /// Whether this command installed a version. False when SpaceTerm Core already had it or
+    /// its feed named nothing newer.
+    pub installed: bool,
+    /// The version SpaceTerm Core runs.
+    pub running: String,
+    pub pending: Option<PendingStatus>,
+    /// The Terminal Sessions a restart into `pending` ends.
+    pub sessions: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -2194,7 +2265,6 @@ mod tests {
             (E::Stopped, "stopped", 5),
             (E::Changed, "changed", 4),
             (E::ActivationUnresolved, "activation_unresolved", 7),
-            (E::ReturnUnavailable, "return_unavailable", 1),
             (E::RuntimeUnavailable, "candidate_unverified", 1),
             (E::CandidateMissing, "no_candidate", 4),
             (E::AuthorizationRequired, "authorization_required", 3),
@@ -2203,7 +2273,13 @@ mod tests {
             (E::IncompatibleState, "incompatible_state", 5),
             (E::UnsafeStorage, "unsafe_storage", 5),
             (E::AuthenticationRefused, "authentication_refused", 3),
-            (E::IncompatibleProtocol, "incompatible_protocol", 5),
+            (
+                E::IncompatibleProtocol(
+                    spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+                ),
+                "incompatible_protocol",
+                5,
+            ),
             (E::CandidateChanged, "candidate_changed", 5),
             (E::Protocol, "protocol_error", 5),
             (E::StartupFailed, "startup_failed", 1),
@@ -2225,6 +2301,23 @@ mod tests {
                 reason: ControlledReason::Stale
             })
         );
+    }
+
+    #[test]
+    fn an_incompatible_protocol_names_the_side_to_update() {
+        for (older, update) in [
+            (Incompatible::ListenerTooOld, "machine"),
+            (Incompatible::CallerTooOld, "core"),
+        ] {
+            let failure = from_core_error(CoreError::IncompatibleProtocol(older));
+            let envelope =
+                serde_json::to_value(Envelope::error("list", None, failure, ())).unwrap();
+            assert_eq!(envelope["error"]["code"], "incompatible_protocol");
+            assert_eq!(
+                envelope["error"]["details"],
+                serde_json::json!({"update": update})
+            );
+        }
     }
 
     #[test]
@@ -2444,6 +2537,7 @@ mod tests {
                 effects: ServiceEffects {
                     ends_sessions: 1,
                     sessions: vec!["0e".repeat(32)],
+                    pending: None,
                 },
             },
         );

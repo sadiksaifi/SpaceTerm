@@ -68,7 +68,7 @@ class CoreArchiveTests(unittest.TestCase):
         self.info = {
             "schema": 1,
             "source_sha256": None,
-            "protocol_major": core_package.PROTOCOL_MAJOR,
+            "protocols": core_package.PROTOCOLS,
             "identity": "spaceterm-preflight",
             "target": "x86_64-unknown-linux-gnu",
             "commit": self.commit,
@@ -337,7 +337,18 @@ class CoreArchiveTests(unittest.TestCase):
             self.assertRaisesRegex(TaskError, "protocol major"),
         ):
             core_package.compatible_candidate(
-                {**self.info, "protocol_major": core_package.PROTOCOL_MAJOR + 1},
+                {
+                    **self.info,
+                    "protocols": {
+                        **core_package.PROTOCOLS,
+                        **{
+                            "work": {
+                                **core_package.PROTOCOLS["work"],
+                                "major": core_package.PROTOCOL_MAJOR + 1,
+                            }
+                        },
+                    },
+                },
                 self.info["identity"],
             )
 

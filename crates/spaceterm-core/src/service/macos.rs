@@ -30,15 +30,39 @@ impl LaunchAgent {
             identity: identity.into(),
         })
     }
-    fn contents(&self, runtime: &Path) -> Result<Vec<u8>, CoreError> {
+    /// The executable of `runtime`, escaped for a property list string.
+    fn escaped(&self, runtime: &Path) -> Result<String, CoreError> {
         let executable = runtime.join(self.executable()?);
         let executable = executable.to_str().ok_or(CoreError::RuntimeUnavailable)?;
-        let executable = executable
+        Ok(executable
             .replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;")
-            .replace('\'', "&apos;");
+            .replace('\'', "&apos;"))
+    }
+    /// The recovery agent's label, beside the server's.
+    fn recovery_label(&self) -> String {
+        format!("{}.recovery", self.label)
+    }
+    /// An agent that runs `runtime`'s recovery helper once when launchd loads it at the next
+    /// login. SpaceTerm only writes it, so it never runs during the activation that armed it.
+    fn recovery_contents(&self, runtime: &Path) -> Result<Vec<u8>, CoreError> {
+        let executable = self.escaped(runtime)?;
+        Ok(format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>{}</string>
+<key>ProgramArguments</key><array><string>{executable}</string><string>internal</string><string>helper</string><string>--identity</string><string>{}</string></array>
+<key>RunAtLoad</key><true/>
+<key>ProcessType</key><string>Interactive</string>
+<key>LimitLoadToSessionType</key><string>Aqua</string>
+<key>Umask</key><integer>63</integer>
+</dict></plist>
+"#, self.recovery_label(), self.identity).into_bytes())
+    }
+    fn contents(&self, runtime: &Path) -> Result<Vec<u8>, CoreError> {
+        let executable = self.escaped(runtime)?;
         Ok(format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -100,6 +124,23 @@ impl LaunchAgent {
     }
 }
 impl Supervisor for LaunchAgent {
+    fn arm_recovery(&self, runtime: &Path) -> Result<(), CoreError> {
+        super::publish_entry(
+            &self
+                .directory
+                .join(format!("{}.plist", self.recovery_label())),
+            &self.recovery_contents(runtime)?,
+        )
+    }
+    fn disarm_recovery(&self) -> Result<(), CoreError> {
+        let label = self.recovery_label();
+        if command("/bin/launchctl", &["list".into(), label.clone().into()]).is_ok() {
+            // SAFETY: geteuid has no preconditions.
+            let target = format!("gui/{}/{label}", unsafe { libc::geteuid() });
+            command("/bin/launchctl", &["bootout".into(), target.into()])?;
+        }
+        super::remove_entry(&self.directory.join(format!("{label}.plist")))
+    }
     fn replace(&self, previous: &Path, candidate: &Path) -> Result<(), CoreError> {
         self.registration()
             .check(&self.contents(previous)?, false)

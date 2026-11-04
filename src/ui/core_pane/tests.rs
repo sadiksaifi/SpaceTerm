@@ -242,7 +242,9 @@ fn a_restored_pane_that_stopped_reconnecting_names_the_failure() {
 fn an_incompatible_machine_is_named_without_claiming_which_side_is_older() {
     let connection = Connection::new(CorePaneStatus::Connected);
     let mut view = CorePaneView::new(connection.clone());
-    connection.set(CorePaneStatus::Failed(CoreError::IncompatibleProtocol));
+    connection.set(CorePaneStatus::Failed(CoreError::IncompatibleProtocol(
+        spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+    )));
     view.sync();
 
     assert_eq!(
