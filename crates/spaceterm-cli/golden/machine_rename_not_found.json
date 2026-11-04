@@ -1,0 +1,17 @@
+{
+  "command": "machine.rename",
+  "data": {},
+  "error": {
+    "class": "target",
+    "code": "not_found",
+    "details": {
+      "level": "machine"
+    },
+    "message": "No machine matches.",
+    "retryable": false
+  },
+  "machine": null,
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

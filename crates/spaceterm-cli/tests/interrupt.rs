@@ -283,7 +283,7 @@ fn late_result_child() {
         json: true,
         ..Default::default()
     };
-    interrupt::install("server.restart", mode).unwrap();
+    interrupt::install("restart", mode).unwrap();
     interrupt::dispatch().unwrap();
     std::io::stderr().write_all(b"ready\n").unwrap();
     while !interrupt::interrupted() {
@@ -294,7 +294,7 @@ fn late_result_child() {
     assert!(settle_by <= Instant::now() + interrupt::GRACE);
     std::thread::sleep(settle_by.saturating_duration_since(Instant::now()));
     let envelope = contract::Envelope::ok(
-        "server.restart",
+        "restart",
         None,
         serde_json::json!({ "operation": "0f".repeat(16) }),
     );
@@ -612,7 +612,7 @@ fn ctrl_c_during_first_prompt_wait_never_sends_the_command() {
     let executable = std::path::Path::new(env!("CARGO_BIN_EXE_spaceterm"));
     let core = lifecycle::Core(
         Command::new(executable)
-            .args(["server", "run", "--identity", IDENTITY])
+            .args(["internal", "serve", "--identity", IDENTITY])
             .env(
                 "SHELL",
                 std::env::var("SPACETERM_TEST_ZSH").unwrap_or_else(|_| "/bin/zsh".into()),
@@ -825,7 +825,7 @@ fn ctrl_c_before_dispatch_exits_130_and_after_dispatch_resolves_first() {
         .unwrap()
         .lock("service-operations.lock", false)
         .unwrap();
-    let stopping = fixture.spawn(&["server", "stop", "--confirm", "c1-00"]);
+    let stopping = fixture.spawn(&["stop", "--confirm", "c1-00"]);
     std::thread::sleep(Duration::from_millis(1500));
     stopping.interrupt();
     let (output, _) = stopping.wait(Duration::from_secs(2));

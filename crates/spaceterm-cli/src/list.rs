@@ -124,7 +124,7 @@ pub fn collect(
 pub fn build(
     snapshot: &Snapshot,
     target: &Resolved,
-    core: ListMachine,
+    machine: ListMachine,
     live: &[PaneFacts],
 ) -> Result<List, Code> {
     let repos = snapshot
@@ -219,7 +219,7 @@ pub fn build(
     }
     Ok(List {
         revision: snapshot.inventory.revision,
-        core,
+        machine,
         workspaces,
     })
 }
@@ -267,7 +267,7 @@ pub fn text(list: &List) -> String {
     let mut output = String::new();
     output.push_str(&format!(
         "{} ({} {})\n",
-        list.core.name, list.core.os, list.core.version
+        list.machine.name, list.machine.os, list.machine.version
     ));
     for workspace in &list.workspaces {
         output.push_str(&format!(

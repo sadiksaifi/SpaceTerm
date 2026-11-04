@@ -1223,8 +1223,8 @@ fn stale_session_fences_leave_control_and_ended_sessions_unchanged() {
 #[test]
 #[ignore = "starts real PTYs; run on one thread with cli:io:test"]
 fn end_all_sessions_preview_and_confirmation_end_only_the_reviewed_sessions() {
+    use crate::admin::end_all_sessions;
     use crate::contract::{MachineRef, Mode as OutputMode};
-    use crate::server::end_all_sessions;
     use crate::work::dispatch::Dispatch;
     use spaceterm_core::hierarchy::Inventory;
 

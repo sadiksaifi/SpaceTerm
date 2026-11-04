@@ -48,7 +48,7 @@ impl Output {
                 schema: envelope.schema,
                 command: envelope.command,
                 status: envelope.status,
-                core: envelope.core,
+                machine: envelope.machine,
                 data: Data::new(value(envelope.data.body)),
                 error: envelope.error,
                 warnings: envelope.warnings,

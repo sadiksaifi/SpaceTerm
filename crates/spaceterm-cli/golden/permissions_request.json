@@ -1,0 +1,16 @@
+{
+  "command": "permissions.request",
+  "data": {
+    "outcome": "requested",
+    "permission": "microphone"
+  },
+  "error": null,
+  "machine": {
+    "id": "abababababababababababababababababababababababababababababababab",
+    "name": "local",
+    "route": "local"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": []
+}

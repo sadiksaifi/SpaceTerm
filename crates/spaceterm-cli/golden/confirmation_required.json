@@ -1,27 +1,26 @@
 {
-  "schema": "spaceterm.cli.v1",
-  "command": "server.stop",
-  "status": "confirmation_required",
-  "server": null,
+  "command": "stop",
   "data": {
     "confirmation": {
-      "token": "c1-00",
-      "expires_at": "2026-10-30T12:00:00Z",
       "effects": {
         "ends_sessions": 1,
         "sessions": [
           "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
-        ],
-        "start_requires_machine": true
-      }
+        ]
+      },
+      "expires_at": "2026-10-30T12:00:00Z",
+      "token": "c1-00"
     }
   },
   "error": {
-    "code": "confirmation_required",
     "class": "action_required",
+    "code": "confirmation_required",
+    "details": {},
     "message": "Review the effects, then repeat the command with --confirm.",
-    "retryable": false,
-    "details": {}
+    "retryable": false
   },
+  "machine": null,
+  "schema": "spaceterm.cli.v1",
+  "status": "confirmation_required",
   "warnings": []
 }

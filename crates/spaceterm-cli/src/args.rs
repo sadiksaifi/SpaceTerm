@@ -8,13 +8,15 @@ use spaceterm_core::protocol::AgentName;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Runs the SpaceTerm Server, and controls servers on this machine and on paired machines.
+/// SpaceTerm Core's command line: administer SpaceTerm Core on this machine and on paired
+/// machines, and work in their Workspaces.
 #[derive(Debug, Parser)]
 #[command(
     name = "spaceterm",
     version = env!("SPACETERM_CLI_VERSION"),
     disable_help_subcommand = true,
-    propagate_version = true
+    propagate_version = true,
+    help_template = HELP
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -23,13 +25,54 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// The top-level help. Clap lists subcommands under one heading, so this template groups them by
+/// what they act on. Each line repeats its command's own summary; a test keeps the two equal.
+const HELP: &str = "\
+{about-with-newline}
+{usage-heading} {usage}
+
+SpaceTerm Core on this machine. [--machine] marks commands that also reach a paired machine.
+  setup             Set up SpaceTerm Core on this machine
+  status            Show SpaceTerm Core status [--machine]
+  start             Start SpaceTerm Core on this machine
+  stop              Stop SpaceTerm Core on this machine. Every Terminal Session ends
+  restart           Restart SpaceTerm Core. Every Terminal Session ends [--machine]
+  update            Update SpaceTerm Core. The desktop updates itself [--machine]
+  network           Show or change Network Access [--machine]
+  pair              Let another device pair with this machine
+  unpair            Revoke another Paired Device
+  permissions       Show the System Permissions of this machine's Terminal Sessions, or set one up
+  end-all-sessions  End every Terminal Session on this machine, keeping Workspaces
+  uninstall         Uninstall SpaceTerm Core from this machine, keeping its data
+
+Machines this CLI reaches. These commands reject --machine.
+  machine           Add, list, rename and remove machines
+
+Work on the selected machine:
+  list              Show Workspaces, Worktrees, Tabs and Panes
+  workspace         Create, rename, pin, unpin and kill Workspaces
+  worktree          Create and remove Worktrees
+  tab               Create and close Tabs
+  pane              Split, close, run in, type into, read and release Panes
+
+The desktop on this machine. These commands reject --machine.
+  open              Open a local file, or its File Preview, in the desktop showing this Terminal Session
+  show              Bring the desktop's own view to a Workspace, Tab or Pane
+
+Shell:
+  completion        Print shell completions
+
+Options:
+{options}{after-help}
+";
+
 /// Flags every command accepts.
 #[derive(Debug, Args)]
 pub struct Global {
-    /// `local`, a Saved Connection name, or `id:ROUTE`. Defaults to SPACETERM_MACHINE, then
-    /// `local`.
+    /// `local`, a machine name from `spaceterm machine list`, or `id:ROUTE`. Defaults to
+    /// SPACETERM_MACHINE, then `local`.
     #[arg(long, global = true, value_name = "NAME|id:ROUTE")]
-    pub core: Option<String>,
+    pub machine: Option<String>,
     /// Act as this agent identity. Defaults to SPACETERM_AS.
     #[arg(long = "as", global = true, value_name = "AGENT")]
     pub agent: Option<AgentName>,
@@ -53,75 +96,74 @@ pub struct Global {
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant, reason = "parsed once per process")]
 pub enum Command {
-    /// Set up, pair and administer servers.
-    #[command(
-        subcommand,
-        after_help = "Uninstall:\n  curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --headless --uninstall"
-    )]
+    #[command(flatten)]
     Core(CoreCommand),
-    /// Join servers, and list or remove Saved Connections.
+    /// Add, list, rename and remove machines.
     #[command(subcommand)]
-    Connection(ConnectionCommand),
+    Machine(MachineCommand),
     /// Show Workspaces, Worktrees, Tabs and Panes.
     List(ListArgs),
     /// Create, rename, pin, unpin and kill Workspaces.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
-    /// Open and close Tabs.
+    /// Create and remove Worktrees.
+    #[command(subcommand)]
+    Worktree(WorktreeCommand),
+    /// Create and close Tabs.
     #[command(subcommand)]
     Tab(TabCommand),
     /// Split, close, run in, type into, read and release Panes.
     #[command(subcommand)]
     Pane(PaneCommand),
-    /// Create and remove Worktrees.
-    #[command(subcommand)]
-    Worktree(WorktreeCommand),
     /// Open a local file, or its File Preview, in the desktop showing this Terminal Session.
     Open(OpenArgs),
     /// Bring the desktop's own view to a Workspace, Tab or Pane.
     Show(ShowArgs),
-    /// Report the desktop's Terminal Diagnostics counters.
-    #[command(hide = true)]
-    Diagnostics,
     /// Print shell completions.
-    #[command(hide = true)]
     Completion {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Report the desktop's Terminal Diagnostics counters.
+    #[command(hide = true)]
+    Diagnostics,
+    /// Steps launchd, systemd, the installer, permission probes and SSH Setup run.
+    #[command(hide = true, subcommand)]
+    Internal(InternalCommand),
 }
 
+/// SpaceTerm Core on this machine. `status`, `restart`, `update` and `network` also reach a
+/// paired machine with `--machine`.
 #[derive(Debug, Subcommand)]
 pub enum CoreCommand {
-    /// Make this machine a server.
+    /// Set up SpaceTerm Core on this machine.
     Setup {
         /// `all`, `off`, an IP, or an address with a port.
         #[arg(long, value_name = "all|IP|IP:PORT|[IPV6]:PORT|off", value_parser = network)]
         network: Option<Network>,
-        /// Start the server when you log in or the machine boots.
+        /// Start SpaceTerm Core when you log in or the machine boots.
         #[arg(long, value_enum)]
         automatic_start: Option<Toggle>,
     },
-    /// Let another device pair with this server.
-    Pair {
-        /// Advertise this DNS name or IP, with an optional port.
-        #[arg(long, value_name = "HOST[:PORT]")]
-        address: Option<String>,
-    },
-    /// Show the server's service, Network Access and paired devices.
+    /// Show SpaceTerm Core status.
+    ///
+    /// Its service, version, Network Access and paired devices, on this machine or with
+    /// --machine on a paired one.
     Status,
-    /// Start the server.
+    /// Start SpaceTerm Core on this machine.
     Start,
-    /// Stop the server.
+    /// Stop SpaceTerm Core on this machine. Every Terminal Session ends.
     Stop(Confirm),
-    /// Restart the server.
+    /// Restart SpaceTerm Core. Every Terminal Session ends.
     Restart(Confirm),
-    /// Update the server, or return to the previous version.
+    /// Update SpaceTerm Core. The desktop updates itself.
+    ///
+    /// Also returns to the previous version when that is still possible.
     Update {
         /// Only check for an update.
         #[arg(long, conflicts_with = "confirm")]
         check: bool,
-        /// Install this server archive instead of the signed feed's.
+        /// Install this SpaceTerm Core archive instead of the signed feed's.
         #[arg(long, value_name = "FILE", requires = "signature")]
         archive: Option<PathBuf>,
         #[arg(long, value_name = "FILE", requires = "archive")]
@@ -129,22 +171,20 @@ pub enum CoreCommand {
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
     },
-    /// Change the server's Network Access, on its own machine or from a Paired Device.
+    /// Show or change Network Access.
     Network {
-        /// `all`, `off`, an IP, or an address with a port.
+        /// `all`, `off`, an IP, or an address with a port. Without it, show Network Access.
         #[arg(value_name = "all|IP|IP:PORT|[IPV6]:PORT|off", value_parser = network)]
-        access: Network,
-        #[arg(long, value_name = "TOKEN")]
+        access: Option<Network>,
+        #[arg(long, value_name = "TOKEN", requires = "access")]
         confirm: Option<String>,
     },
-    /// Show the System Permissions programs in this machine's Terminal Sessions inherit, or set
-    /// one up. Only this machine's own server has them.
-    Permissions {
-        #[command(subcommand)]
-        action: Option<PermissionsCommand>,
+    /// Let another device pair with this machine.
+    Pair {
+        /// Advertise this DNS name or IP, with an optional port.
+        #[arg(long, value_name = "ADDRESS[:PORT]")]
+        address: Option<String>,
     },
-    /// End every Terminal Session on this machine, retaining the server and organization.
-    EndAllSessions(Confirm),
     /// Revoke another Paired Device.
     Unpair {
         /// An exact device name, or `id:PAIRING`.
@@ -152,21 +192,20 @@ pub enum CoreCommand {
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
     },
-    /// Run the server.
-    #[command(hide = true)]
-    Run {
-        /// Run as the account service.
-        #[arg(long, conflicts_with = "owned")]
-        service: bool,
-        /// Run until the supervisor closes standard input. Development only.
-        #[arg(long)]
-        owned: bool,
-        /// The identity the service unit names. It must be this executable's.
-        #[arg(long)]
-        identity: Option<String>,
+    /// Show the System Permissions of this machine's Terminal Sessions, or set one up.
+    ///
+    /// Programs in Terminal Sessions inherit them from SpaceTerm Core on this machine.
+    Permissions {
+        #[command(subcommand)]
+        action: Option<PermissionsCommand>,
     },
-    #[command(hide = true, subcommand)]
-    Provision(ProvisionCommand),
+    /// End every Terminal Session on this machine, keeping Workspaces.
+    EndAllSessions(Confirm),
+    /// Uninstall SpaceTerm Core from this machine, keeping its data.
+    ///
+    /// Removes the account service and the CLI launcher. Workspaces, settings, pairings and
+    /// installed versions remain.
+    Uninstall(Confirm),
 }
 
 /// Setting up one System Permission on this machine.
@@ -186,7 +225,6 @@ pub enum PermissionName {
     Camera,
     ScreenRecording,
     /// Device Control on macOS 27 and later.
-    #[value(alias = "device-control")]
     Accessibility,
 }
 
@@ -222,17 +260,33 @@ impl PermissionName {
     }
 }
 
-/// Steps the installer, the runtime verifier, SSH Setup and the service helper run.
+/// Steps launchd, systemd, the installer, permission probes and SSH Setup run. Their names and
+/// flags are an interface with those callers.
 #[derive(Debug, Subcommand)]
-pub enum ProvisionCommand {
+pub enum InternalCommand {
+    /// Run SpaceTerm Core: as the account service, owned by a Development supervisor, or in the
+    /// foreground.
+    Serve {
+        /// Run as the account service.
+        #[arg(long, conflicts_with = "owned")]
+        service: bool,
+        /// Run until the supervisor closes standard input. Development only.
+        #[arg(long)]
+        owned: bool,
+        /// The identity the service unit names. It must be this executable's.
+        #[arg(long)]
+        identity: Option<String>,
+    },
+    /// Run one transient service operation for SpaceTerm Core.
+    Helper {
+        #[arg(long)]
+        operation: String,
+        #[arg(long)]
+        identity: String,
+    },
     /// Retain an unpacked installation for the installer.
     Retain {
         installation: PathBuf,
-    },
-    /// Remove the account service and only its managed CLI launcher.
-    Uninstall {
-        #[arg(long, value_name = "TOKEN")]
-        confirm: Option<String>,
     },
     SshDiscover,
     SshDirectStatus,
@@ -256,18 +310,35 @@ pub enum ProvisionCommand {
     },
     BuildInfo,
     Check,
-    /// Report this process's own System Permissions, as the server's probe child.
+    /// Report this process's own System Permissions, as SpaceTerm Core's probe child.
     PermissionReport,
-    /// Ask the system for one System Permission, as the server's request child.
+    /// Ask the system for one System Permission, as SpaceTerm Core's request child.
     PermissionRequest {
         permission: PermissionName,
     },
-    ServiceRun {
-        #[arg(long)]
-        operation: String,
-        #[arg(long)]
-        identity: String,
-    },
+}
+
+impl InternalCommand {
+    /// The dotted command path the envelope reports, such as `internal.serve`.
+    pub const fn path(&self) -> &'static str {
+        match self {
+            Self::Serve { .. } => "internal.serve",
+            Self::Helper { .. } => "internal.helper",
+            Self::Retain { .. } => "internal.retain",
+            Self::SshDiscover => "internal.ssh-discover",
+            Self::SshDirectStatus => "internal.ssh-direct-status",
+            Self::SshDirectPrepare { .. } => "internal.ssh-direct-prepare",
+            Self::SshDirect { .. } => "internal.ssh-direct",
+            Self::SshDirectCancel => "internal.ssh-direct-cancel",
+            Self::SshStart => "internal.ssh-start",
+            Self::SshInstall { .. } => "internal.ssh-install",
+            Self::SshEnableLinger { .. } => "internal.ssh-enable-linger",
+            Self::BuildInfo => "internal.build-info",
+            Self::Check => "internal.check",
+            Self::PermissionReport => "internal.permission-report",
+            Self::PermissionRequest { .. } => "internal.permission-request",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -276,23 +347,26 @@ pub struct Confirm {
     pub confirm: Option<String>,
 }
 
+/// The machines this CLI reaches: its Saved Connections. Their names are the values
+/// `--machine` takes.
 #[derive(Debug, Subcommand)]
-pub enum ConnectionCommand {
-    /// Join a server with its Invitation Link, read from stdin or a prompt.
+pub enum MachineCommand {
+    /// Add a machine with its Invitation Link, read from stdin or a prompt.
     Add {
+        /// The name `--machine` takes. Defaults to the machine's own name.
         name: Option<String>,
-        /// Give consent without a prompt.
+        /// Trust the invitation's pinned fingerprint without a prompt.
         #[arg(long)]
-        join: bool,
+        trust: bool,
         /// Connect to this DNS name or IP, with an optional port, instead of the invitation's.
-        #[arg(long, value_name = "HOST[:PORT]")]
+        #[arg(long, value_name = "ADDRESS[:PORT]")]
         address: Option<String>,
     },
-    /// Show Saved Connections.
+    /// Show the machines this CLI reaches.
     List,
-    /// Rename the CLI's saved connection only, preserving its pairing.
+    /// Rename a machine for this CLI only, keeping its pairing.
     Rename { old: String, new: String },
-    /// Unpair This Computer from a server.
+    /// Remove a machine and unpair this device from it.
     Remove {
         name: String,
         #[arg(long, value_name = "TOKEN")]
@@ -304,16 +378,16 @@ pub enum ConnectionCommand {
 #[derive(Debug, Args)]
 pub struct Scope {
     /// A Workspace: `current`, `id:HEX` or its name.
-    #[arg(long, value_name = "W", value_parser = selector)]
+    #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
     pub workspace: Option<Selector>,
     /// A Worktree: `current`, `path:DIR`, a branch or `main-worktree`.
-    #[arg(long, value_name = "T", value_parser = selector)]
+    #[arg(long, value_name = "WORKTREE", value_parser = selector)]
     pub worktree: Option<Selector>,
     /// A Tab: `current`, `id:HEX` or what one of its Panes shows.
-    #[arg(long, value_name = "B", value_parser = selector)]
+    #[arg(long, value_name = "TAB", value_parser = selector)]
     pub tab: Option<Selector>,
     /// A Pane: `current`, `id:HEX` or what it shows.
-    #[arg(long, value_name = "P", value_parser = selector)]
+    #[arg(long, value_name = "PANE", value_parser = selector)]
     pub pane: Option<Selector>,
 }
 
@@ -339,32 +413,32 @@ pub enum WorkspaceCommand {
     /// Create a Workspace.
     Create {
         name: String,
-        /// Pin the Workspace to this directory. Quote `~/` for a remote server.
+        /// Pin the Workspace to this directory. Quote `~/` for a paired machine.
         #[arg(long, value_name = "DIR")]
         directory: Option<PathBuf>,
     },
     /// Rename a Workspace.
     Rename {
         new_name: String,
-        #[arg(long, value_name = "W", value_parser = selector)]
+        #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
         workspace: Option<Selector>,
     },
     /// Set a Workspace's Pinned Directory.
     Pin {
-        /// Directory on the selected server. Quote `~/` for a remote server.
+        /// Directory on the selected machine. Quote `~/` for a paired machine.
         #[arg(value_name = "DIR")]
         directory: PathBuf,
-        #[arg(long, value_name = "W", value_parser = selector)]
+        #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
         workspace: Option<Selector>,
     },
     /// Clear a Workspace's Pinned Directory.
     Unpin {
-        #[arg(long, value_name = "W", value_parser = selector)]
+        #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
         workspace: Option<Selector>,
     },
     /// Kill a Workspace, for every client.
     Kill {
-        #[arg(long, value_name = "W", value_parser = selector)]
+        #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
         workspace: Option<Selector>,
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
@@ -373,23 +447,23 @@ pub enum WorkspaceCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TabCommand {
-    /// Open a Tab.
+    /// Create a Tab.
     Create {
-        #[arg(long, value_name = "W", value_parser = selector)]
+        #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
         workspace: Option<Selector>,
-        #[arg(long, value_name = "T", value_parser = selector)]
+        #[arg(long, value_name = "WORKTREE", value_parser = selector)]
         worktree: Option<Selector>,
         /// The source Pane.
-        #[arg(long, value_name = "P", value_parser = selector)]
+        #[arg(long, value_name = "PANE", value_parser = selector)]
         pane: Option<Selector>,
     },
     /// Close one Tab, or every Tab of the Worktree with --all.
     Close {
-        #[arg(long, value_name = "W", value_parser = selector)]
+        #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
         workspace: Option<Selector>,
-        #[arg(long, value_name = "T", value_parser = selector)]
+        #[arg(long, value_name = "WORKTREE", value_parser = selector)]
         worktree: Option<Selector>,
-        #[arg(long, value_name = "B", value_parser = selector, conflicts_with = "all")]
+        #[arg(long, value_name = "TAB", value_parser = selector, conflicts_with = "all")]
         tab: Option<Selector>,
         #[arg(long)]
         all: bool,
@@ -547,22 +621,19 @@ pub enum WorktreeCommand {
     /// Create a Worktree.
     Create {
         branch: String,
-        #[arg(long, value_name = "W", value_parser = selector)]
+        #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
         workspace: Option<Selector>,
         /// Start a new branch from this ref. Defaults to the Main Worktree's branch.
         #[arg(long, value_name = "REF")]
         base: Option<String>,
         #[arg(long, value_name = "DIR")]
         path: Option<PathBuf>,
-        /// Also open a Tab in the new Worktree.
-        #[arg(long)]
-        open: bool,
     },
     /// Remove a Worktree.
     Remove {
-        #[arg(long, value_name = "W", value_parser = selector)]
+        #[arg(long, value_name = "WORKSPACE", value_parser = selector)]
         workspace: Option<Selector>,
-        #[arg(long, value_name = "T", value_parser = selector)]
+        #[arg(long, value_name = "WORKTREE", value_parser = selector)]
         worktree: Option<Selector>,
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
@@ -581,7 +652,7 @@ pub enum ReadFormat {
     Ansi,
 }
 
-/// `server setup --network`.
+/// `setup --network` and `network`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Network {
     All,
@@ -600,30 +671,12 @@ impl Command {
     /// The dotted command path the envelope reports, such as `pane.run`.
     pub fn path(&self) -> &'static str {
         match self {
-            Self::Core(command) => match command {
-                CoreCommand::Setup { .. } => "server.setup",
-                CoreCommand::Pair { .. } => "server.pair",
-                CoreCommand::Status => "server.status",
-                CoreCommand::Start => "server.start",
-                CoreCommand::Stop(_) => "server.stop",
-                CoreCommand::Restart(_) => "server.restart",
-                CoreCommand::Update { .. } => "server.update",
-                CoreCommand::Network { .. } => "server.network",
-                CoreCommand::Permissions { action } => match action {
-                    None => "server.permissions",
-                    Some(PermissionsCommand::Request { .. }) => "server.permissions.request",
-                    Some(PermissionsCommand::Settings { .. }) => "server.permissions.settings",
-                },
-                CoreCommand::EndAllSessions(_) => "server.end-all-sessions",
-                CoreCommand::Unpair { .. } => "server.unpair",
-                CoreCommand::Run { .. } => "server.run",
-                CoreCommand::Provision(_) => "server.provision",
-            },
-            Self::Connection(command) => match command {
-                ConnectionCommand::Add { .. } => "connection.add",
-                ConnectionCommand::List => "connection.list",
-                ConnectionCommand::Rename { .. } => "connection.rename",
-                ConnectionCommand::Remove { .. } => "connection.remove",
+            Self::Core(command) => command.path(),
+            Self::Machine(command) => match command {
+                MachineCommand::Add { .. } => "machine.add",
+                MachineCommand::List => "machine.list",
+                MachineCommand::Rename { .. } => "machine.rename",
+                MachineCommand::Remove { .. } => "machine.remove",
             },
             Self::List(_) => "list",
             Self::Workspace(command) => match command {
@@ -653,6 +706,31 @@ impl Command {
             Self::Show(_) => "show",
             Self::Diagnostics => "diagnostics",
             Self::Completion { .. } => "completion",
+            Self::Internal(command) => command.path(),
+        }
+    }
+}
+
+impl CoreCommand {
+    /// The dotted command path the envelope reports, such as `permissions.request`.
+    pub const fn path(&self) -> &'static str {
+        match self {
+            Self::Setup { .. } => "setup",
+            Self::Status => "status",
+            Self::Start => "start",
+            Self::Stop(_) => "stop",
+            Self::Restart(_) => "restart",
+            Self::Update { .. } => "update",
+            Self::Network { .. } => "network",
+            Self::Pair { .. } => "pair",
+            Self::Unpair { .. } => "unpair",
+            Self::Permissions { action } => match action {
+                None => "permissions",
+                Some(PermissionsCommand::Request { .. }) => "permissions.request",
+                Some(PermissionsCommand::Settings { .. }) => "permissions.settings",
+            },
+            Self::EndAllSessions(_) => "end-all-sessions",
+            Self::Uninstall(_) => "uninstall",
         }
     }
 }
@@ -719,6 +797,22 @@ fn command_text(text: &str) -> Result<String, String> {
         return Err(String::new());
     }
     Ok(text.to_owned())
+}
+
+/// The tree shell completions describe: the visible commands only. Clap's generators also
+/// complete hidden subcommands, so they are left out here.
+pub fn completion_tree() -> clap::Command {
+    use clap::CommandFactory;
+    let full = Cli::command();
+    clap::Command::new("spaceterm")
+        .version(env!("SPACETERM_CLI_VERSION"))
+        .disable_help_subcommand(true)
+        .args(full.get_arguments().cloned())
+        .subcommands(
+            full.get_subcommands()
+                .filter(|subcommand| !subcommand.is_hide_set())
+                .cloned(),
+        )
 }
 
 /// A clap error as a bounded usage failure. It names the argument from the command tree and
@@ -797,27 +891,25 @@ mod tests {
     #[test]
     fn every_visible_command_parses() {
         for args in [
-            &[
-                "server",
-                "setup",
-                "--network",
-                "all",
-                "--automatic-start",
-                "on",
-            ][..],
-            &["server", "setup", "--network", "192.0.2.1:7000"],
-            &["server", "pair", "--address", "203.0.113.5"],
-            &["server", "status"],
-            &["server", "start"],
-            &["server", "stop", "--confirm", "c1-00"],
-            &["server", "restart"],
-            &["server", "update", "--check"],
-            &["server", "update", "--archive", "a", "--signature", "s"],
-            &["server", "unpair", "id:9c1d44e0"],
-            &["connection", "add", "penguin", "--join"],
-            &["connection", "list"],
-            &["connection", "rename", "penguin", "lab"],
-            &["connection", "remove", "penguin"],
+            &["setup", "--network", "all", "--automatic-start", "on"][..],
+            &["setup", "--network", "192.0.2.1:7000"],
+            &["pair", "--address", "203.0.113.5"],
+            &["status", "--machine", "penguin"],
+            &["start"],
+            &["stop", "--confirm", "c1-00"],
+            &["restart", "--machine", "penguin"],
+            &["update", "--check"],
+            &["update", "--archive", "a", "--signature", "s"],
+            &["network"],
+            &["network", "off", "--confirm", "c1-00"],
+            &["unpair", "id:9c1d44e0"],
+            &["permissions", "request", "microphone"],
+            &["end-all-sessions"],
+            &["uninstall", "--confirm", "c1-00"],
+            &["machine", "add", "penguin", "--trust"],
+            &["machine", "list"],
+            &["machine", "rename", "penguin", "lab"],
+            &["machine", "remove", "penguin"],
             &["list", "--workspace", "api"],
             &[
                 "workspace",
@@ -845,13 +937,91 @@ mod tests {
             &["pane", "read", "--tail", "20", "--wait-for", "Listening on"],
             &["pane", "read", "--wait-idle", "2s", "--format", "ansi"],
             &["pane", "release"],
-            &["worktree", "create", "feature-y", "--open"],
+            &["worktree", "create", "feature-y"],
             &["worktree", "remove", "--worktree", "feature-x"],
             &["open", "notes.md", "--preview"],
             &["show", "--tab", "id:0be4f3"],
+            &["completion", "zsh"],
             &["--as", "agent-1", "--json", "--timeout", "30s", "list"],
         ] {
             parse(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn launchd_systemd_probes_and_ssh_setup_reach_the_internal_steps() {
+        for (args, path) in [
+            (
+                &["internal", "serve", "--service", "--identity", "spaceterm"][..],
+                "internal.serve",
+            ),
+            (&["internal", "serve", "--owned"], "internal.serve"),
+            (
+                &[
+                    "internal",
+                    "helper",
+                    "--operation",
+                    "00",
+                    "--identity",
+                    "spaceterm",
+                ],
+                "internal.helper",
+            ),
+            (
+                &["internal", "retain", "/tmp/installation"],
+                "internal.retain",
+            ),
+            (&["internal", "build-info"], "internal.build-info"),
+            (&["internal", "check"], "internal.check"),
+            (
+                &["internal", "permission-report"],
+                "internal.permission-report",
+            ),
+            (
+                &["internal", "permission-request", "camera"],
+                "internal.permission-request",
+            ),
+            (&["internal", "ssh-discover"], "internal.ssh-discover"),
+            (
+                &["internal", "ssh-direct-status"],
+                "internal.ssh-direct-status",
+            ),
+            (
+                &["internal", "ssh-direct-prepare", "all"],
+                "internal.ssh-direct-prepare",
+            ),
+            (&["internal", "ssh-direct", "all"], "internal.ssh-direct"),
+            (
+                &["internal", "ssh-direct-cancel"],
+                "internal.ssh-direct-cancel",
+            ),
+            (&["internal", "ssh-start"], "internal.ssh-start"),
+            (
+                &["internal", "ssh-install", "a", "s", "00"],
+                "internal.ssh-install",
+            ),
+            (
+                &["internal", "ssh-enable-linger", "--password-stdin"],
+                "internal.ssh-enable-linger",
+            ),
+        ] {
+            let cli = parse(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+            assert_eq!(cli.command.path(), path, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn removed_names_no_longer_parse() {
+        for args in [
+            &["server", "status"][..],
+            &["connection", "list"],
+            &["--server", "local", "list"],
+            &["machine", "add", "--join"],
+            &["worktree", "create", "feature-y", "--open"],
+            &["permissions", "request", "device-control"],
+            &["internal", "uninstall"],
+        ] {
+            parse(args).expect_err(&format!("{args:?}"));
         }
     }
 
@@ -865,8 +1035,9 @@ mod tests {
             &["pane", "read", "--wait-for", "x", "--wait-idle", "1s"],
             &["pane", "read", "--wait-regex", "x", "--wait-for", "y"],
             &["pane", "send", "--key", "Enter", "--paste"],
-            &["server", "update", "--check", "--confirm", "c1-00"],
-            &["server", "update", "--archive", "a"],
+            &["update", "--check", "--confirm", "c1-00"],
+            &["update", "--archive", "a"],
+            &["network", "--confirm", "c1-00"],
             &["pane", "split", "--right", "--down"],
             &["--timeout", "0s", "list"],
             &["--timeout", "-5s", "list"],
@@ -912,27 +1083,35 @@ mod tests {
     }
 
     #[test]
-    fn help_lists_the_visible_tree_without_hidden_commands() {
+    fn grouped_help_lists_each_visible_command_once_with_its_own_summary() {
         let mut command = Cli::command();
-        let help = command.render_long_help().to_string();
-        for visible in [
-            "server",
-            "connection",
-            "list",
-            "workspace",
-            "tab",
-            "pane",
-            "worktree",
-            "open",
-            "show",
-        ] {
-            assert!(help.contains(visible), "{visible}");
+        let help = command.render_help().to_string();
+        let mut listed = 0;
+        for subcommand in command.get_subcommands() {
+            let name = subcommand.get_name();
+            let lines: Vec<_> = help
+                .lines()
+                .filter(|line| {
+                    line.split_whitespace().next() == Some(name) && line.starts_with("  ")
+                })
+                .collect();
+            if subcommand.is_hide_set() {
+                assert!(lines.is_empty(), "{name} is hidden but listed");
+                continue;
+            }
+            let about = subcommand.get_about().unwrap().to_string();
+            assert_eq!(lines.len(), 1, "{name} is listed {} times", lines.len());
+            assert!(
+                lines[0].trim_start()[name.len()..]
+                    .trim_start()
+                    .starts_with(&about),
+                "{name}: {:?} does not start with {about:?}",
+                lines[0]
+            );
+            listed += 1;
         }
-        assert!(!help.contains("completion"));
-        let core = command.find_subcommand_mut("server").unwrap();
-        let help = core.render_long_help().to_string();
-        assert!(help.contains("setup") && help.contains("unpair"));
-        assert!(!help.contains("provision") && !help.contains("  run"));
+        assert_eq!(listed, 21);
+        assert!(help.contains("--machine <NAME|id:ROUTE>"));
     }
 
     #[test]

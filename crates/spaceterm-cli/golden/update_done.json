@@ -1,0 +1,27 @@
+{
+  "command": "update",
+  "data": {
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "action": "update",
+      "boot": "2222222222222222222222222222222222222222222222222222222222222222",
+      "code": null,
+      "operation": "0123456789abcdef0123456789abcdef",
+      "state": "done"
+    },
+    "version": {
+      "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "version": "0.8.0"
+    }
+  },
+  "error": null,
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
+  "warnings": []
+}

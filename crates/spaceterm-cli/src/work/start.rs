@@ -68,7 +68,7 @@ fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
             let data = error.operational_data();
             return Output::failed(
                 cli.command.path(),
-                error.core.map(|core| *core),
+                error.machine.map(|machine| *machine),
                 error.failure,
                 data,
                 String::new(),

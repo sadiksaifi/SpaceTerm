@@ -1,6 +1,7 @@
-//! Installer, runtime-verifier and temporary SSH Setup steps. No public command grammar lives here.
+//! `spaceterm internal`: the service helper, installer, runtime-verifier, permission-probe and
+//! temporary SSH Setup steps. No public command grammar lives here.
 use spaceterm_cli::{
-    args::ProvisionCommand,
+    args::InternalCommand,
     contract::{self, Code, Failure},
 };
 use spaceterm_core::{
@@ -51,15 +52,15 @@ fn write_setup(value: &impl serde::Serialize) -> Result<(), Error> {
         .map_err(Error::Output)
 }
 
-pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
+pub fn run(command: &InternalCommand) -> Result<(), Error> {
     match command {
-        ProvisionCommand::BuildInfo => {
+        InternalCommand::BuildInfo => {
             std::io::stdout()
                 .lock()
                 .write_all(include_bytes!(concat!(env!("OUT_DIR"), "/build-info.json")))
                 .map_err(Error::Output)?;
         }
-        ProvisionCommand::PermissionReport => {
+        InternalCommand::PermissionReport => {
             let report = spaceterm_core::permissions::probe_report()
                 .ok_or(Error::Failure(Failure::new(Code::Unsupported)))?;
             std::io::stdout()
@@ -67,19 +68,19 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
                 .write_all(report.as_bytes())
                 .map_err(Error::Output)?;
         }
-        ProvisionCommand::PermissionRequest { permission } => {
+        InternalCommand::PermissionRequest { permission } => {
             spaceterm_core::permissions::request_in_process(permission.permission())
                 .ok_or(Error::Failure(Failure::new(Code::Unsupported)))?
                 .map_err(|failure| Error::Failure(contract::from_lane_code(failure.code())))?;
         }
-        ProvisionCommand::Check => {
+        InternalCommand::Check => {
             crate::check::run()?;
             std::io::stdout()
                 .lock()
                 .write_all(b"Server checks passed.\n")
                 .map_err(Error::Output)?;
         }
-        ProvisionCommand::SshDiscover => {
+        InternalCommand::SshDiscover => {
             let discovery = spaceterm_core::provisioning::discover(IDENTITY)?;
             let mut value = serde_json::to_value(discovery).map_err(|_| CoreError::Protocol)?;
             value["target"] = env!("SPACETERM_CLI_TARGET").into();
@@ -87,11 +88,11 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
             value["commit"] = env!("SPACETERM_CLI_COMMIT").into();
             write_setup(&value)?;
         }
-        ProvisionCommand::SshDirectStatus => {
+        InternalCommand::SshDirectStatus => {
             setup_pipe()?;
             write_setup(&spaceterm_core::provisioning::direct_status(IDENTITY)?)?;
         }
-        ProvisionCommand::SshDirect { address } => {
+        InternalCommand::SshDirect { address } => {
             setup_pipe()?;
             let request = read_setup::<spaceterm_core::provisioning::SetupRequest>()?;
             let policy =
@@ -100,7 +101,7 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
                 IDENTITY, policy, request,
             )?)?;
         }
-        ProvisionCommand::SshDirectPrepare { address } => {
+        InternalCommand::SshDirectPrepare { address } => {
             setup_pipe()?;
             let request = read_setup::<spaceterm_core::provisioning::SetupRequest>()?;
             let policy =
@@ -108,19 +109,19 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
             spaceterm_core::provisioning::prepare_direct(IDENTITY, policy, request)?;
             write_setup(&serde_json::json!({"prepared":true}))?;
         }
-        ProvisionCommand::SshDirectCancel => {
+        InternalCommand::SshDirectCancel => {
             setup_pipe()?;
             let request = read_setup::<spaceterm_core::provisioning::SetupCancellation>()?;
             write_setup(&spaceterm_core::provisioning::cancel_direct(
                 IDENTITY, request,
             )?)?;
         }
-        ProvisionCommand::SshStart => {
+        InternalCommand::SshStart => {
             setup_pipe()?;
             let approved = read_setup::<spaceterm_core::service::SetupStartObservation>()?;
             write_setup(&Service::for_identity(IDENTITY)?.start_for_setup(&approved)?)?;
         }
-        ProvisionCommand::SshInstall {
+        InternalCommand::SshInstall {
             archive,
             signature,
             sha256,
@@ -134,14 +135,14 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
             )?;
             service.install(&candidate.directory)?;
         }
-        ProvisionCommand::SshEnableLinger { password_stdin } => {
+        InternalCommand::SshEnableLinger { password_stdin } => {
             Service::for_identity(IDENTITY)?.enable_linger(if *password_stdin {
                 LingerAuthorization::RemoteStdin
             } else {
                 LingerAuthorization::RemoteNoninteractive
             })?;
         }
-        ProvisionCommand::ServiceRun {
+        InternalCommand::Helper {
             operation,
             identity,
         } => {
@@ -155,8 +156,8 @@ pub fn run(command: &ProvisionCommand) -> Result<(), Error> {
                 &spaceterm_core::service::operations::OperationId(bytes),
             )?;
         }
-        // Retention and uninstall use the envelope contract in main.rs.
-        ProvisionCommand::Retain { .. } | ProvisionCommand::Uninstall { .. } => unreachable!(),
+        // Serving and retention run in main.rs.
+        InternalCommand::Serve { .. } | InternalCommand::Retain { .. } => unreachable!(),
     }
     Ok(())
 }

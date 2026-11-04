@@ -1,4 +1,4 @@
-//! Select a single server before any credential or transport is opened.
+//! Select a single machine before any credential or transport is opened.
 use super::{CredentialProvider, store_failure, usage};
 use crate::args::{Command, CoreCommand, Global};
 use crate::contract::{
@@ -21,7 +21,7 @@ use std::time::Instant;
 pub struct AdmittedRoute {
     pub connection: MachineConnection,
     pub link: spaceterm_core::connection::link::CoreLink,
-    pub core: MachineRef,
+    pub machine: MachineRef,
     pub recovered: Vec<crate::contract::RecoveredOperation>,
 }
 
@@ -31,14 +31,14 @@ pub enum Route {
 }
 #[derive(Debug)]
 pub struct ResolutionError {
-    pub core: Option<Box<MachineRef>>,
+    pub machine: Option<Box<MachineRef>>,
     pub failure: Failure,
     pub data: CandidatesData,
 }
 impl From<Failure> for ResolutionError {
     fn from(failure: Failure) -> Self {
         Self {
-            core: None,
+            machine: None,
             failure,
             data: CandidatesData {
                 candidates: Vec::new(),
@@ -53,32 +53,32 @@ pub fn selected<'a>(
 ) -> Result<&'a str, Failure> {
     let text = explicit.or(environment).unwrap_or("local");
     if text.is_empty() || text.len() > 128 || text.chars().any(char::is_control) {
-        return Err(usage("--server"));
+        return Err(usage("--machine"));
     }
     if let Some(prefix) = text.strip_prefix("id:") {
-        IdPrefix::parse(prefix).ok_or_else(|| usage("--server"))?;
+        IdPrefix::parse(prefix).ok_or_else(|| usage("--machine"))?;
     }
     Ok(text)
 }
 
-/// Store commands and machine-only commands reject their route before reading local state.
+/// `machine` commands, and commands that act only on this machine, reject a paired route
+/// before reading local state.
 pub fn validate_command(command: &Command, selector: &str) -> Result<(), Failure> {
     if selector == "local" {
         return Ok(());
     }
     match command {
-        Command::Connection(_) => Err(usage("--server")),
+        Command::Machine(_) => Err(usage("--machine")),
         Command::Core(
-            CoreCommand::Setup { .. }
-            | CoreCommand::Pair { .. }
-            | CoreCommand::Start
-            | CoreCommand::EndAllSessions(_)
-            | CoreCommand::Permissions { .. }
-            | CoreCommand::Unpair { .. }
-            | CoreCommand::Run { .. }
-            | CoreCommand::Provision(_),
-        ) => Err(Code::LocalOnly.into()),
-        // The desktop on this machine presents only this machine's server to these commands.
+            CoreCommand::Status
+            | CoreCommand::Restart(_)
+            | CoreCommand::Update { .. }
+            | CoreCommand::Network { .. },
+        ) => Ok(()),
+        // A stopped SpaceTerm Core can't be started from a paired machine, so neither stops there.
+        Command::Core(_) | Command::Internal(_) => Err(Code::LocalOnly.into()),
+        // The desktop on this machine presents only this machine's SpaceTerm Core to these
+        // commands.
         Command::Open(_) | Command::Show(_) | Command::Diagnostics => Err(Code::LocalOnly.into()),
         _ => Ok(()),
     }
@@ -91,7 +91,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
     }
     let records = store.load().map_err(store_failure)?;
     let matches: Vec<_> = if let Some(prefix) = selector.strip_prefix("id:") {
-        let prefix = IdPrefix::parse(prefix).ok_or_else(|| usage("--server"))?;
+        let prefix = IdPrefix::parse(prefix).ok_or_else(|| usage("--machine"))?;
         records
             .into_iter()
             .filter(|record| prefix.matches(&record.route))
@@ -105,7 +105,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
     match matches.len() {
         0 => Err(Failure::with(
             Code::NotFound,
-            Details::Target(TargetDetails::level(Level::Core)),
+            Details::Target(TargetDetails::level(Level::Machine)),
         )
         .into()),
         1 => Ok(Route::Paired(Box::new(
@@ -113,7 +113,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
         ))),
         _ => {
             let details = TargetDetails {
-                level: Level::Core,
+                level: Level::Machine,
                 parent: None,
                 count: Some(matches.len() as u32),
                 ids: matches
@@ -124,7 +124,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
             let candidates = matches
                 .into_iter()
                 .map(|record| Candidate {
-                    level: Level::Core,
+                    level: Level::Machine,
                     id: Some(super::hex(&record.route)),
                     label: record.name,
                     path: None,
@@ -134,7 +134,7 @@ pub fn resolve(selector: &str, store: &ConnectionStore) -> Result<Route, Resolut
                 })
                 .collect();
             Err(ResolutionError {
-                core: None,
+                machine: None,
                 failure: Failure::with(Code::AmbiguousTarget, Details::Target(details)),
                 data: CandidatesData { candidates },
             })
@@ -228,7 +228,7 @@ impl Route {
         Ok(AdmittedRoute {
             connection,
             link,
-            core: self.reference(&core),
+            machine: self.reference(&core),
             recovered,
         })
     }
@@ -306,16 +306,16 @@ pub fn from_global(global: &Global, identity: &str) -> Result<Route, ResolutionE
 }
 
 pub fn selector(global: &Global) -> Result<String, Failure> {
-    let environment = if global.core.is_none() {
+    let environment = if global.machine.is_none() {
         std::env::var_os("SPACETERM_MACHINE")
     } else {
         None
     };
     let environment = environment
         .as_ref()
-        .map(|value| value.to_str().ok_or_else(|| usage("--server")))
+        .map(|value| value.to_str().ok_or_else(|| usage("--machine")))
         .transpose()?;
-    selected(global.core.as_deref(), environment).map(str::to_owned)
+    selected(global.machine.as_deref(), environment).map(str::to_owned)
 }
 
 pub struct RoutedConnection {
@@ -359,7 +359,7 @@ pub fn connect(
         .map_err(|error| {
             let mut error = ResolutionError::from(crate::contract::from_core_error(error));
             if let Route::Paired(saved) = &selected {
-                error.core = Some(Box::new(selected.reference(&saved.paired.pin.core)));
+                error.machine = Some(Box::new(selected.reference(&saved.paired.pin.core)));
             }
             error
         })?;
@@ -377,6 +377,43 @@ impl ResolutionError {
             serde_json::json!({})
         } else {
             serde_json::json!({"candidates": self.data.candidates})
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_command;
+    use crate::args::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn paired_routes_admit_remote_admin_verbs_and_work_commands() {
+        for args in [
+            &["status"][..],
+            &["restart"],
+            &["restart", "--confirm", "c1-00"],
+            &["update"],
+            &["update", "--archive", "a.tar", "--signature", "a.sig"],
+            &["network"],
+            &["network", "off", "--confirm", "c1-00"],
+            &["list"],
+            &["workspace", "create", "api", "--directory", "/srv/api"],
+            &["worktree", "create", "feature"],
+            &["tab", "create"],
+            &["pane", "split"],
+            &["pane", "read"],
+        ] {
+            let cli = Cli::try_parse_from(
+                ["spaceterm", "--machine", "penguin"]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+            )
+            .unwrap();
+            assert!(
+                validate_command(&cli.command, "penguin").is_ok(),
+                "{args:?}"
+            );
         }
     }
 }

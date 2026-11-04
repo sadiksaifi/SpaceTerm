@@ -10,7 +10,7 @@
 //! on a pty. A command prefix such as `ssh penguin` reaches a remote machine.
 //!
 //! ```text
-//! core_admin_native [--identity ID] [--server NAME] [--cli PATH]
+//! core_admin_native [--identity ID] [--target NAME] [--cli PATH]
 //!     [--machine PREFIX] [--machine-cli PATH] [--machine-fixture PATH]
 //!     [--network all|IP|IP:PORT|off] [--candidate ARCHIVE SIGNATURE]
 //!     [--next-major ARCHIVE SIGNATURE] [--broken ARCHIVE SIGNATURE]
@@ -19,8 +19,9 @@
 //! ```
 //!
 //! Each option also reads `SPACETERM_ADMIN_<OPTION>` with dashes as underscores, for example
-//! `SPACETERM_ADMIN_CORE=penguin` and `SPACETERM_ADMIN_MACHINE="ssh penguin"`. Without
-//! `--server`, the target is this machine's own server. Update cases run only when their
+//! `SPACETERM_ADMIN_TARGET=penguin` and `SPACETERM_ADMIN_MACHINE="ssh penguin"`. Without
+//! `--target`, the target is this machine's own SpaceTerm Core. Stop runs on the target machine
+//! itself, because a paired machine can't stop it. Update cases run only when their
 //! archives are given. `--expiry` waits out a token's ten-minute lifetime.
 //!
 //! A SIGKILL'd server leaves an unresolved same-boot run that refuses every start until the
@@ -67,7 +68,7 @@ fn main() -> ExitCode {
 
 struct Options {
     identity: String,
-    core: String,
+    target: String,
     cli: String,
     machine: Vec<String>,
     machine_cli: String,
@@ -100,7 +101,7 @@ impl Options {
                 .unwrap_or_else(|_| identity.to_owned())
         };
         let mut options = Self {
-            core: env("SERVER").unwrap_or_else(|| "local".into()),
+            target: env("TARGET").unwrap_or_else(|| "local".into()),
             cli: env("CLI").unwrap_or_else(|| launcher(&identity)),
             machine: env("MACHINE")
                 .map(|v| v.split_whitespace().map(str::to_owned).collect())
@@ -128,7 +129,7 @@ impl Options {
             };
             match flag.as_str() {
                 "--identity" => options.identity = value()?,
-                "--server" => options.core = value()?,
+                "--target" => options.target = value()?,
                 "--cli" => options.cli = value()?,
                 "--machine" => {
                     options.machine = value()?.split_whitespace().map(str::to_owned).collect()
@@ -219,7 +220,7 @@ impl Options {
     fn cli(&self, arguments: &[&str]) -> Result<Ran> {
         let mut command = Command::new(&self.cli);
         command
-            .args(["--server", &self.core])
+            .args(["--machine", &self.target])
             .args(arguments)
             .arg("--json");
         let (exit, stdout) = output(&mut command)?;
@@ -269,11 +270,11 @@ impl Options {
         Ok(String::from_utf8(stdout)?.trim().to_owned())
     }
 
-    /// Waits until the target answers `server status` with a running server.
+    /// Waits until the target answers `status` with a running SpaceTerm Core.
     fn await_running(&self) -> Result<()> {
         let deadline = Instant::now() + RETURN;
         loop {
-            let ran = self.cli(&["server", "status"])?;
+            let ran = self.cli(&["status"])?;
             if ran.exit == 0 && ran.envelope["data"]["running"] == true {
                 return Ok(());
             }
@@ -287,13 +288,12 @@ impl Options {
     /// Starts the server on its machine if it is not running, and waits for it.
     fn ensure_running(&self) -> Result<()> {
         if self
-            .cli(&["server", "status"])
+            .cli(&["status"])
             .is_ok_and(|ran| ran.exit == 0 && ran.envelope["data"]["running"] == true)
         {
             return Ok(());
         }
-        self.machine_cli(&["server", "start"])?
-            .expect(0, "local start")?;
+        self.machine_cli(&["start"])?.expect(0, "local start")?;
         self.await_running()
     }
 }
@@ -358,7 +358,7 @@ fn run(options: &Options) -> Result<()> {
 }
 
 fn status(options: &Options) -> Result<String> {
-    let ran = options.cli(&["server", "status"])?.expect(0, "status")?;
+    let ran = options.cli(&["status"])?.expect(0, "status")?;
     let data = &ran.envelope["data"];
     if data["lane_major"] != 1 || data["running"] != true {
         return Err("status names no running server on lane major 1".into());
@@ -370,54 +370,44 @@ fn status(options: &Options) -> Result<String> {
 }
 
 fn local_only(options: &Options) -> Result<String> {
-    if options.core == "local" {
+    if options.target == "local" {
         return Ok("skipped: the target is this machine".into());
     }
     let started = Instant::now();
     for arguments in [
-        &["server", "start"][..],
-        &["server", "pair"],
-        &["server", "setup", "--network", "off"],
-        &["server", "unpair", "id:abcdef"],
+        &["start"][..],
+        &["stop"],
+        &["pair"],
+        &["setup", "--network", "off"],
+        &["unpair", "id:abcdef"],
     ] {
         options
             .cli(arguments)?
-            .expect_code(5, "local_only", arguments[1])?;
+            .expect_code(5, "local_only", arguments[0])?;
     }
     // A refusal before any connection is immediate.
     if started.elapsed() > Duration::from_secs(5) {
         return Err("local-only refusals waited on the network".into());
     }
-    Ok("start, pair, setup and unpair exit 5 without connecting".into())
+    Ok("start, stop, pair, setup and unpair exit 5 without connecting".into())
 }
 
 fn stale_token(options: &Options) -> Result<String> {
     options
-        .cli(&[
-            "server",
-            "stop",
-            "--confirm",
-            &format!("c1-{}", "0".repeat(64)),
-        ])?
+        .machine_cli(&["stop", "--confirm", &format!("c1-{}", "0".repeat(64))])?
         .expect_code(4, "changed", "a forged token")?;
-    let token = options
-        .cli(&["server", "restart"])?
-        .expect(3, "preview")?
-        .token()?;
+    let token = options.cli(&["restart"])?.expect(3, "preview")?.token()?;
     options
-        .cli(&["server", "stop", "--confirm", &token])?
+        .machine_cli(&["stop", "--confirm", &token])?
         .expect_code(4, "changed", "a Restart token used for Stop")?;
     Ok("forged and foreign tokens are changed".into())
 }
 
 fn session_after_preview(options: &Options) -> Result<String> {
-    let token = options
-        .cli(&["server", "restart"])?
-        .expect(3, "preview")?
-        .token()?;
+    let token = options.cli(&["restart"])?.expect(3, "preview")?.token()?;
     options.fixture("start-session", &[])?;
     options
-        .cli(&["server", "restart", "--confirm", &token])?
+        .cli(&["restart", "--confirm", &token])?
         .expect_code(4, "changed", "a Session started after the preview")?;
     Ok("a new Session changes the observation".into())
 }
@@ -425,12 +415,9 @@ fn session_after_preview(options: &Options) -> Result<String> {
 fn capacity(options: &Options) -> Result<String> {
     options.fixture("fill-ledger", &[])?;
     let result = (|| {
-        let token = options
-            .cli(&["server", "restart"])?
-            .expect(3, "preview")?
-            .token()?;
+        let token = options.cli(&["restart"])?.expect(3, "preview")?.token()?;
         options
-            .cli(&["server", "restart", "--confirm", &token])?
+            .cli(&["restart", "--confirm", &token])?
             .expect_code(5, "capacity", "a full ledger")
     })();
     options.fixture("clear-ledger", &[])?;
@@ -438,10 +425,10 @@ fn capacity(options: &Options) -> Result<String> {
 }
 
 fn restart(options: &Options) -> Result<String> {
-    let preview = options.cli(&["server", "restart"])?.expect(3, "preview")?;
+    let preview = options.cli(&["restart"])?.expect(3, "preview")?;
     let token = preview.token()?;
     let ran = options
-        .cli(&["server", "restart", "--confirm", &token])?
+        .cli(&["restart", "--confirm", &token])?
         .expect(0, "restart")?;
     let data = &ran.envelope["data"];
     if data["receipt"]["state"] != "done" || data["observed"] != "restarted" {
@@ -452,30 +439,27 @@ fn restart(options: &Options) -> Result<String> {
 
 fn token_after_restart(options: &Options) -> Result<String> {
     let token = options
-        .cli(&["server", "stop"])?
+        .machine_cli(&["stop"])?
         .expect(3, "preview")?
         .token()?;
-    let restart = options
-        .cli(&["server", "restart"])?
-        .expect(3, "preview")?
-        .token()?;
+    let restart = options.cli(&["restart"])?.expect(3, "preview")?.token()?;
     options
-        .cli(&["server", "restart", "--confirm", &restart])?
+        .cli(&["restart", "--confirm", &restart])?
         .expect(0, "restart")?;
     options
-        .cli(&["server", "stop", "--confirm", &token])?
+        .machine_cli(&["stop", "--confirm", &token])?
         .expect_code(4, "changed", "a token from before a restart")?;
     Ok("a restart forgets every token".into())
 }
 
 fn expired_token(options: &Options) -> Result<String> {
     let token = options
-        .cli(&["server", "stop"])?
+        .machine_cli(&["stop"])?
         .expect(3, "preview")?
         .token()?;
     std::thread::sleep(Duration::from_secs(10 * 60 + 5));
     options
-        .cli(&["server", "stop", "--confirm", &token])?
+        .machine_cli(&["stop", "--confirm", &token])?
         .expect_code(4, "changed", "an expired token")?;
     Ok("a token expires after ten minutes".into())
 }
@@ -484,7 +468,7 @@ fn expired_token(options: &Options) -> Result<String> {
 fn expired_token_issue(options: &Options) -> Result<String> {
     let path = options.token_file.as_ref().ok_or("no --token-file")?;
     let token = options
-        .cli(&["server", "stop"])?
+        .machine_cli(&["stop"])?
         .expect(3, "preview")?
         .token()?;
     let issued = std::time::SystemTime::now()
@@ -508,7 +492,7 @@ fn expired_token_check(options: &Options) -> Result<String> {
         return Err(format!("the token is only {age} s old").into());
     }
     options
-        .cli(&["server", "stop", "--confirm", token])?
+        .machine_cli(&["stop", "--confirm", token])?
         .expect_code(4, "changed", "an expired token")?;
     std::fs::remove_file(path)?;
     Ok(format!("a token {age} s old is changed"))
@@ -518,9 +502,7 @@ fn admitted_crash(options: &Options) -> Result<String> {
     let operation = OperationId::random()?.to_string();
     options.fixture("inject-admitted", &[&operation])?;
     options.fixture("end-server", &[])?;
-    options
-        .machine_cli(&["server", "start"])?
-        .expect(0, "local start")?;
+    options.machine_cli(&["start"])?.expect(0, "local start")?;
     options.await_running()?;
     let state = options.fixture("ledger-state", &[&operation])?;
     options.fixture("clear-ledger", &[])?;
@@ -531,16 +513,12 @@ fn admitted_crash(options: &Options) -> Result<String> {
 }
 
 fn helper_killed(options: &Options) -> Result<String> {
-    let token = options
-        .cli(&["server", "restart"])?
-        .expect(3, "preview")?
-        .token()?;
+    let token = options.cli(&["restart"])?.expect(3, "preview")?.token()?;
     let mut command = Command::new(&options.cli);
     command
         .args([
-            "--server",
-            &options.core,
-            "server",
+            "--machine",
+            &options.target,
             "restart",
             "--confirm",
             &token,
@@ -566,69 +544,29 @@ fn helper_killed(options: &Options) -> Result<String> {
     Ok(format!("killed {killed}; settled as {state}, exit {exit}"))
 }
 
+/// Stop on the target machine itself. A paired machine gets `local_only`, as `local-only` checks.
 fn stop(options: &Options) -> Result<String> {
-    let preview = options.cli(&["server", "stop"])?.expect(3, "preview")?;
-    if preview.envelope["data"]["confirmation"]["effects"]["start_requires_machine"] != true {
-        return Err("the Stop preview does not say Start needs the machine".into());
+    let preview = options.machine_cli(&["stop"])?.expect(3, "preview")?;
+    let ran = options.machine_cli(&["stop", "--confirm", &preview.token()?])?;
+    if !matches!(ran.exit, 0 | 7) {
+        return Err(format!(
+            "stop exited {}, observed {:?}",
+            ran.exit,
+            ran.envelope["data"]["observed"].as_str()
+        )
+        .into());
     }
-    let ran = options.cli(&["server", "stop", "--confirm", &preview.token()?])?;
-    let operation = ran.envelope["data"]["operation"]
-        .as_str()
-        .unwrap_or("")
-        .to_owned();
-    let local = options.core == "local";
-    match (local, ran.exit, ran.envelope["data"]["observed"].as_str()) {
-        (false, 7, Some("shutdown")) | (true, 0 | 7, _) => {}
-        (_, exit, observed) => {
-            return Err(format!("stop exited {exit}, observed {observed:?}").into());
-        }
-    }
-    options
-        .machine_cli(&["server", "start"])?
-        .expect(0, "local start")?;
-    // The first lane connection after the Start settles the Stop, so every status read while
-    // waiting for the server is checked.
-    let deadline = Instant::now() + RETURN;
-    let mut settled = local;
-    loop {
-        let ran = options.cli(&["server", "status"])?;
-        settled |= ran.envelope["data"]["recovered_operations"]
-            .as_array()
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item["operation"] == operation.as_str()
-                        && item["kind"] == "service"
-                        && item["outcome"]["state"] == "applied"
-                })
-            });
-        if ran.exit == 0 && ran.envelope["data"]["running"] == true {
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err("the server did not return".into());
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
-    if !settled {
-        return Err("the next lane connection did not settle the Stop".into());
-    }
-    Ok("shutdown, then a local Start and a settled receipt".into())
+    options.machine_cli(&["start"])?.expect(0, "local start")?;
+    options.await_running()?;
+    Ok("stopped on the machine, then a local Start".into())
 }
 
 fn update_with(options: &Options, archive: &str, signature: &str, what: &str) -> Result<Ran> {
     let preview = options
-        .cli(&[
-            "server",
-            "update",
-            "--archive",
-            archive,
-            "--signature",
-            signature,
-        ])?
+        .cli(&["update", "--archive", archive, "--signature", signature])?
         .expect(3, what)?;
     let token = preview.token()?;
     let ran = options.cli(&[
-        "server",
         "update",
         "--archive",
         archive,
@@ -688,7 +626,7 @@ fn update_next_major(options: &Options) -> Result<String> {
     }
     // The lane answers the next-major server, though work commands need a matching CLI.
     let status = options
-        .cli(&["server", "status"])?
+        .cli(&["status"])?
         .expect(0, "status after the update")?;
     if status.envelope["data"]["sessions"] != 0 {
         return Err("Sessions survived an update".into());
@@ -703,19 +641,17 @@ fn return_through_update(options: &Options) -> Result<String> {
     if ran.exit == 0 {
         return Err("a candidate that cannot start updated the server".into());
     }
-    // On the machine, `server update` settles the failed activation and offers return.
+    // On the machine, `update` settles the failed activation and offers return.
     let preview = options
-        .machine_cli(&["server", "update"])?
+        .machine_cli(&["update"])?
         .expect(3, "return preview")?;
     if preview.envelope["data"]["confirmation"]["effects"]["kind"] != "return" {
         return Err("the machine's update did not offer return".into());
     }
     options
-        .machine_cli(&["server", "update", "--confirm", &preview.token()?])?
+        .machine_cli(&["update", "--confirm", &preview.token()?])?
         .expect(0, "return")?;
-    options
-        .machine_cli(&["server", "start"])?
-        .expect(0, "local start")?;
+    options.machine_cli(&["start"])?.expect(0, "local start")?;
     options.await_running()?;
     Ok(format!(
         "the broken update settled as {state}, then returned"
@@ -732,21 +668,14 @@ fn setup(options: &Options) -> Result<String> {
     };
     for (toggle, enabled) in [("off", false), ("on", true)] {
         let ran = options
-            .machine_cli(&[
-                "server",
-                "setup",
-                "--network",
-                network,
-                "--automatic-start",
-                toggle,
-            ])?
+            .machine_cli(&["setup", "--network", network, "--automatic-start", toggle])?
             .expect(0, "setup")?;
         if ran.envelope["data"]["automatic_start"] != enabled {
             return Err(format!("automatic start is not {toggle}").into());
         }
     }
     let again = options
-        .machine_cli(&["server", "setup", "--network", network])?
+        .machine_cli(&["setup", "--network", network])?
         .expect(0, "setup again")?;
     let all_settled = again.envelope["data"]["steps"]
         .as_array()
@@ -843,7 +772,7 @@ fn ledger_state(identity: &str, operation: &str) -> Result<String> {
 
 /// The server process's own pattern, from its unit's argv.
 fn core_pattern(identity: &str) -> String {
-    format!("server run --service --identity {identity}")
+    format!("internal serve --service --identity {identity}")
 }
 
 /// Ends the server cleanly with SIGTERM and waits until it has exited. Its supervisor does not
@@ -908,10 +837,7 @@ fn start_session(identity: &str) -> Result<String> {
 /// The pairing checks a person at the server's machine would see: no invitation without a
 /// terminal, the advertised address in the link, and Ctrl-C withdrawing the invitation.
 fn pair_checks(cli: &str) -> Result<String> {
-    for arguments in [
-        &["server", "pair", "--json"][..],
-        &["server", "pair", "--no-input"],
-    ] {
+    for arguments in [&["pair", "--json"][..], &["pair", "--no-input"]] {
         let status = Command::new(cli)
             .args(arguments)
             .stdin(Stdio::null())
@@ -924,7 +850,7 @@ fn pair_checks(cli: &str) -> Result<String> {
     }
     // An IP, and a DNS name with a port, as a NAT or cloud machine advertises itself.
     for address in ["203.0.113.5", "build.example.test:9300"] {
-        let (link, exit, withdrawn) = pair_on_pty(cli, &["server", "pair", "--address", address])?;
+        let (link, exit, withdrawn) = pair_on_pty(cli, &["pair", "--address", address])?;
         let invitation = spaceterm_core::direct::Invitation::parse(&link)
             .map_err(|_| "the first line is no Invitation Link")?;
         if !invitation.endpoint().contains(address) {

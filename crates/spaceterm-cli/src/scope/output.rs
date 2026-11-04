@@ -77,7 +77,7 @@ fn name(level: Level) -> &'static str {
         Level::Worktree => "worktree",
         Level::Tab => "tab",
         Level::Pane => "pane",
-        _ => "server",
+        _ => "machine",
     }
 }
 

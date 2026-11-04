@@ -105,7 +105,7 @@ fn native_client() {
     let name = std::env::var("SPACETERM_TEST_CONNECTION_NAME").expect("unique fixture name");
     assert!(name.starts_with("cli722-e-native-"));
     let global = Global {
-        core: None,
+        machine: None,
         agent: None,
         json: true,
         quiet: false,
@@ -114,9 +114,9 @@ fn native_client() {
         timeout: Some(Duration::from_secs(30)),
     };
     let added = execute(
-        &ConnectionCommand::Add {
+        &MachineCommand::Add {
             name: Some(name.clone()),
-            join: true,
+            trust: true,
             address: None,
         },
         &global,
@@ -132,7 +132,7 @@ fn native_client() {
         "native join completed"
     );
     let mut targeting = Global {
-        core: Some(name.clone()),
+        machine: Some(name.clone()),
         agent: None,
         json: true,
         quiet: false,
@@ -172,13 +172,13 @@ fn native_client() {
         base.connection.admitted_machine_id().unwrap(),
         agent.connection.admitted_machine_id().unwrap()
     );
-    emit(serde_json::json!({"admitted":true, "route":base.core.route}));
+    emit(serde_json::json!({"admitted":true, "route":base.machine.route}));
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
         let output = if line == "work" {
             let cli = crate::args::Cli::try_parse_from([
                 "spaceterm",
-                "--server",
+                "--machine",
                 &name,
                 "--json",
                 "workspace",
@@ -200,17 +200,16 @@ fn native_client() {
         } else if line == "status" {
             let cli = crate::args::Cli::try_parse_from([
                 "spaceterm",
-                "--server",
+                "--machine",
                 &name,
                 "--json",
-                "server",
                 "status",
             ])
             .unwrap();
             let crate::args::Command::Core(command) = &cli.command else {
                 unreachable!()
             };
-            let reply = crate::server::run(IDENTITY, &cli.global, command);
+            let reply = crate::admin::run(IDENTITY, &cli.global, command);
             assert_eq!(
                 reply.write(
                     (&cli.global).into(),
@@ -222,10 +221,10 @@ fn native_client() {
             );
             None
         } else if line == "list" {
-            Some(execute(&ConnectionCommand::List, &global, IDENTITY))
+            Some(execute(&MachineCommand::List, &global, IDENTITY))
         } else if line == "preview" {
             Some(execute(
-                &ConnectionCommand::Remove {
+                &MachineCommand::Remove {
                     name: name.clone(),
                     confirm: None,
                 },
@@ -234,7 +233,7 @@ fn native_client() {
             ))
         } else if let Some(token) = line.strip_prefix("remove ") {
             Some(execute(
-                &ConnectionCommand::Remove {
+                &MachineCommand::Remove {
                     name: name.clone(),
                     confirm: Some(token.into()),
                 },

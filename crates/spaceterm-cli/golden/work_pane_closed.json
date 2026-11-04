@@ -1,12 +1,5 @@
 {
-  "schema": "spaceterm.cli.v1",
   "command": "pane.close",
-  "status": "ok",
-  "server": {
-    "name": "fixture",
-    "route": "local",
-    "id": "0909090909090909090909090909090909090909090909090909090909090909"
-  },
   "data": {
     "closed": [
       "1515151515151515151515151515151515151515151515151515151515151515"
@@ -40,5 +33,12 @@
     ]
   },
   "error": null,
+  "machine": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "fixture",
+    "route": "local"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "ok",
   "warnings": []
 }

@@ -1,28 +1,21 @@
 {
-  "schema": "spaceterm.cli.v1",
   "command": "pane.read",
-  "status": "error",
-  "server": {
-    "name": "local",
-    "route": "local",
-    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
-  },
   "data": {
     "candidates": [
       {
-        "level": "tab",
+        "directory": "/home/build/api",
         "id": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
         "label": "cargo test",
-        "directory": "/home/build/api",
-        "worktree": null,
-        "panes": 1
+        "level": "tab",
+        "panes": 1,
+        "worktree": null
       }
     ],
     "recovered_operations": [
       {
-        "operation": "7",
         "identity": "base",
         "kind": "mutation",
+        "operation": "7",
         "outcome": {
           "state": "applied",
           "target": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
@@ -31,26 +24,33 @@
     ]
   },
   "error": {
-    "code": "ambiguous_target",
     "class": "target",
-    "message": "More than one Tab matches.",
-    "retryable": false,
+    "code": "ambiguous_target",
     "details": {
-      "level": "tab",
       "count": 2,
       "ids": [
         "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
         "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
-      ]
-    }
+      ],
+      "level": "tab"
+    },
+    "message": "More than one Tab matches.",
+    "retryable": false
   },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "local",
+    "route": "local"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
   "warnings": [
     {
       "code": "recovered_operation",
-      "message": "SpaceTerm settled an earlier command first. See data.recovered_operations.",
       "details": {
         "count": 1
-      }
+      },
+      "message": "SpaceTerm settled an earlier command first. See data.recovered_operations."
     }
   ]
 }

@@ -1,0 +1,29 @@
+{
+  "command": "restart",
+  "data": {
+    "observed": "restarted",
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "action": "restart",
+      "boot": "2222222222222222222222222222222222222222222222222222222222222222",
+      "code": "startup_failed",
+      "operation": "0123456789abcdef0123456789abcdef",
+      "state": "failed"
+    }
+  },
+  "error": {
+    "class": "failed",
+    "code": "startup_failed",
+    "details": {},
+    "message": "The Terminal Session could not start.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

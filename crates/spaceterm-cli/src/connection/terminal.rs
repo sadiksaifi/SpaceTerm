@@ -102,7 +102,7 @@ impl InteractionIo for Terminal {
     ) -> Result<bool, Failure> {
         self.answer(
             &format!(
-                "Join {} at {}? Server fingerprint: {}. [y/N] ",
+                "Add {} at {}? Trust its fingerprint {}? [y/N] ",
                 invitation.machine_name(),
                 invitation.endpoint(),
                 invitation.machine_pin().fingerprint()
@@ -112,7 +112,7 @@ impl InteractionIo for Terminal {
     }
     fn confirm_removal(&mut self, name: &str, deadline: Instant) -> Result<bool, Failure> {
         self.answer(
-            &format!("Unpair this computer from {name}? [y/N] "),
+            &format!("Remove {name} and unpair this device from it? [y/N] "),
             deadline,
         )
     }
@@ -131,7 +131,7 @@ impl InteractionIo for Terminal {
         } else {
             writeln!(
                 std::io::stderr().lock(),
-                "Comparison Code: {}. Compare it on the server, then approve this device.",
+                "Comparison Code: {}. Compare it on that machine, then approve this device.",
                 event.data.code
             )
             .map_err(super::OutputError::from)

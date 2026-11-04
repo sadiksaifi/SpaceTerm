@@ -35,7 +35,7 @@ impl Core {
             .join("spaceterm");
         Ok(Self(
             Command::new(executable)
-                .args(["server", "run", "--identity", "spaceterm-development"])
+                .args(["internal", "serve", "--identity", "spaceterm-development"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

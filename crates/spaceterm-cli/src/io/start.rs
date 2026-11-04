@@ -57,7 +57,7 @@ fn selected(cli: &Cli, command: &PaneCommand, credentials: &CliCredentials<'_>) 
             let data = error.operational_data();
             return Output::failed(
                 path,
-                error.core.map(|core| *core),
+                error.machine.map(|machine| *machine),
                 error.failure,
                 data,
                 String::new(),

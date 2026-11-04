@@ -1,12 +1,12 @@
-//! CLI-owned Saved Connections, pairing, and server route selection.
+//! `spaceterm machine`: the CLI's Saved Connections, pairing, and machine route selection.
 pub mod route;
 mod terminal;
-use crate::args::{ConnectionCommand, Global};
+use crate::args::{Global, MachineCommand};
 use crate::contract::Mode;
 use crate::contract::{
-    self, Code, ComparisonEvent, Confirmation, ConnectionAdd, ConnectionList, ConnectionRemove,
-    ConnectionRename, Details, Empty, Envelope, Failure, ListedConnection, OutputError, Revocation,
-    UsageDetails, UsageKind, Warning, WarningCode, WarningDetails,
+    self, Code, ComparisonEvent, Confirmation, Details, Empty, Envelope, Failure, ListedMachine,
+    MachineAdd, MachineList, MachineRemove, MachineRename, OutputError, Revocation, UsageDetails,
+    UsageKind, Warning, WarningCode, WarningDetails,
 };
 use crate::state::{CliState, RouteKey};
 use connections::enrollment::{self, PairingClient, PairingNetwork};
@@ -142,24 +142,24 @@ impl CommandOutput {
     }
 }
 
-pub fn execute(command: &ConnectionCommand, global: &Global, identity: &str) -> CommandOutput {
+pub fn execute(command: &MachineCommand, global: &Global, identity: &str) -> CommandOutput {
     let path = command_path(command);
-    let environment = if global.core.is_none() {
+    let environment = if global.machine.is_none() {
         std::env::var_os("SPACETERM_MACHINE")
     } else {
         None
     };
     let environment = match environment
         .as_ref()
-        .map(|value| value.to_str().ok_or_else(|| usage("--server")))
+        .map(|value| value.to_str().ok_or_else(|| usage("--machine")))
         .transpose()
     {
         Ok(environment) => environment,
         Err(failure) => return CommandOutput::failure(path, failure),
     };
-    match route::selected(global.core.as_deref(), environment) {
+    match route::selected(global.machine.as_deref(), environment) {
         Ok("local") => {}
-        Ok(_) => return CommandOutput::failure(path, usage("--server")),
+        Ok(_) => return CommandOutput::failure(path, usage("--machine")),
         Err(failure) => return CommandOutput::failure(path, failure),
     }
     let root = match spaceterm_core::cli_state_root(identity) {
@@ -198,34 +198,34 @@ pub struct Connections<'a> {
 }
 
 impl Connections<'_> {
-    pub fn run(&mut self, command: &ConnectionCommand) -> CommandOutput {
+    pub fn run(&mut self, command: &MachineCommand) -> CommandOutput {
         let path = command_path(command);
         if self
             .global
-            .core
+            .machine
             .as_deref()
-            .is_some_and(|core| core != "local")
+            .is_some_and(|machine| machine != "local")
         {
-            return CommandOutput::failure(path, usage("--server"));
+            return CommandOutput::failure(path, usage("--machine"));
         }
         let duration =
             self.global
                 .timeout
-                .unwrap_or(if matches!(command, ConnectionCommand::Add { .. }) {
+                .unwrap_or(if matches!(command, MachineCommand::Add { .. }) {
                     Duration::from_secs(300)
                 } else {
                     Duration::from_secs(30)
                 });
         let deadline = Instant::now() + duration;
         let result = match command {
-            ConnectionCommand::List => self.list(),
-            ConnectionCommand::Rename { old, new } => self.rename(old, new, deadline),
-            ConnectionCommand::Add {
+            MachineCommand::List => self.list(),
+            MachineCommand::Rename { old, new } => self.rename(old, new, deadline),
+            MachineCommand::Add {
                 name,
-                join,
+                trust,
                 address,
-            } => self.add(name.as_deref(), *join, address.as_deref(), deadline),
-            ConnectionCommand::Remove { name, confirm } => {
+            } => self.add(name.as_deref(), *trust, address.as_deref(), deadline),
+            MachineCommand::Remove { name, confirm } => {
                 self.remove(name, confirm.as_deref(), deadline)
             }
         };
@@ -258,11 +258,12 @@ impl Connections<'_> {
     fn list(&self) -> Result<CommandOutput, Failure> {
         let mut rows = self.store.load().map_err(store_failure)?;
         rows.extend(self.store.pending().map_err(store_failure)?);
-        let mut connections = Vec::with_capacity(rows.len());
+        let mut machines = Vec::with_capacity(rows.len());
         for row in rows {
-            connections.push(ListedConnection {
+            machines.push(ListedMachine {
                 name: row.name.clone(),
                 route: format!("id:{}", hex(&row.route)),
+                id: hex(&row.paired.pin.core),
                 endpoint: row.endpoint.clone(),
                 fingerprint: row.paired.pin.fingerprint(),
                 store: store_kind(row.credential_store),
@@ -270,18 +271,19 @@ impl Connections<'_> {
                 held_outcomes: self.held.count(&row.route)?,
             });
         }
-        connections.sort_by(|left, right| {
+        machines.sort_by(|left, right| {
             left.name
                 .cmp(&right.name)
                 .then(left.route.cmp(&right.route))
         });
-        let lines = connections
+        let lines = machines
             .iter()
             .map(|row| {
                 format!(
-                    "{}\t{}\t{}\t{}\t{}{}\theld outcomes: {}",
+                    "{}\t{}\tid:{}\t{}\t{}\t{}{}\theld outcomes: {}",
                     row.name,
                     row.route,
+                    row.id,
                     row.endpoint,
                     row.fingerprint,
                     kind_name(row.store),
@@ -295,7 +297,7 @@ impl Connections<'_> {
             })
             .collect();
         Ok(CommandOutput::envelope(
-            Envelope::ok("connection.list", None, ConnectionList { connections }),
+            Envelope::ok("machine.list", None, MachineList { machines }),
             lines,
         ))
     }
@@ -316,9 +318,9 @@ impl Connections<'_> {
             })?;
         Ok(CommandOutput::envelope(
             Envelope::ok(
-                "connection.rename",
+                "machine.rename",
                 None,
-                ConnectionRename {
+                MachineRename {
                     previous_name: old.to_owned(),
                     name: renamed.name,
                     route: format!("id:{}", hex(&renamed.route)),
@@ -330,7 +332,7 @@ impl Connections<'_> {
     fn add(
         &mut self,
         name: Option<&str>,
-        join: bool,
+        trust: bool,
         address: Option<&str>,
         deadline: Instant,
     ) -> Result<CommandOutput, Failure> {
@@ -342,7 +344,7 @@ impl Connections<'_> {
         if let Some(address) = address {
             spaceterm_core::direct::Endpoint::parse(address).map_err(|_| usage("--address"))?;
         }
-        if !join && !self.allows_input() {
+        if !trust && !self.allows_input() {
             return Err(Code::InteractionRequired.into());
         }
         self.checkpoint(deadline)?;
@@ -372,7 +374,7 @@ impl Connections<'_> {
         {
             return Err(reserved_name());
         }
-        if !join && !self.io.consent(&invitation, deadline)? {
+        if !trust && !self.io.consent(&invitation, deadline)? {
             return Err(Code::InteractionRequired.into());
         }
         self.checkpoint(deadline)?;
@@ -422,7 +424,7 @@ impl Connections<'_> {
                 Ok(()) => {}
                 Err(OutputError::BrokenPipe) => {
                     let mut result =
-                        CommandOutput::failure("connection.add", Code::OutputFailed.into());
+                        CommandOutput::failure("machine.add", Code::OutputFailed.into());
                     result.exit = contract::EXIT_BROKEN_PIPE;
                     return Ok(result);
                 }
@@ -432,8 +434,8 @@ impl Connections<'_> {
                 self.checkpoint(deadline)?;
                 match joining.finish(&|| self.io.interrupted()) {
                     Ok(Some(connection)) => {
-                        let data = ConnectionAdd {
-                            connection: connection_data(&connection),
+                        let data = MachineAdd {
+                            machine: connection_data(&connection),
                         };
                         let lines = vec![format!(
                             "Saved {} ({}) at {}.",
@@ -449,9 +451,9 @@ impl Connections<'_> {
                             None
                         };
                         let mut envelope = if let Some(failure) = &failure {
-                            Envelope::error("connection.add", None, failure.clone(), data)
+                            Envelope::error("machine.add", None, failure.clone(), data)
                         } else {
-                            Envelope::ok("connection.add", None, data)
+                            Envelope::ok("machine.add", None, data)
                         };
                         if pending > 0 {
                             envelope.warnings.push(pending_warning());
@@ -510,26 +512,29 @@ impl Connections<'_> {
             } else {
                 #[derive(Serialize)]
                 struct Effects {
-                    connection: contract::Connection,
-                    unpairs_this_computer: bool,
+                    machine: contract::SavedMachine,
+                    unpairs_this_device: bool,
                 }
                 let token = format!("c1-{}", hex(&preview.token));
                 let lines = vec![
                     format!(
-                        "Unpair this computer from {} at {}.",
+                        "Remove {} and unpair this device from it at {}.",
                         preview.connection.name, preview.connection.endpoint
                     ),
-                    format!("Repeat with --confirm {token}"),
+                    format!(
+                        "Confirm with: spaceterm machine remove {} --confirm {token}",
+                        crate::shell::word(name)
+                    ),
                 ];
                 let envelope = Envelope::confirmation(
-                    "connection.remove",
+                    "machine.remove",
                     None,
                     Confirmation {
                         token,
                         expires_at: timestamp(preview.expires)?,
                         effects: Effects {
-                            connection: connection_data(&preview.connection),
-                            unpairs_this_computer: true,
+                            machine: connection_data(&preview.connection),
+                            unpairs_this_device: true,
                         },
                     },
                 );
@@ -560,7 +565,7 @@ impl Connections<'_> {
             .map_err(|_| Failure::new(Code::OutcomeUnconfirmed))?
             .iter()
             .any(|row| row.route == removed.route);
-        let data = ConnectionRemove {
+        let data = MachineRemove {
             removed: removed.name.clone(),
             revocation: if pending {
                 Revocation::Pending
@@ -576,9 +581,9 @@ impl Connections<'_> {
             })
         });
         let mut envelope = if let Some(failure) = &failure {
-            Envelope::error("connection.remove", None, failure.clone(), data)
+            Envelope::error("machine.remove", None, failure.clone(), data)
         } else {
-            Envelope::ok("connection.remove", None, data)
+            Envelope::ok("machine.remove", None, data)
         };
         if pending {
             envelope.warnings.push(pending_warning());
@@ -594,12 +599,12 @@ impl Connections<'_> {
     }
 }
 
-fn command_path(command: &ConnectionCommand) -> &'static str {
+fn command_path(command: &MachineCommand) -> &'static str {
     match command {
-        ConnectionCommand::Add { .. } => "connection.add",
-        ConnectionCommand::List => "connection.list",
-        ConnectionCommand::Rename { .. } => "connection.rename",
-        ConnectionCommand::Remove { .. } => "connection.remove",
+        MachineCommand::Add { .. } => "machine.add",
+        MachineCommand::List => "machine.list",
+        MachineCommand::Rename { .. } => "machine.rename",
+        MachineCommand::Remove { .. } => "machine.remove",
     }
 }
 pub(super) fn usage(argument: &str) -> Failure {
@@ -632,7 +637,7 @@ pub(super) fn store_failure(error: StoreError) -> Failure {
         StoreError::NameTaken => reserved_name(),
         StoreError::NotFound => Failure::with(
             Code::NotFound,
-            Details::Target(contract::TargetDetails::level(contract::Level::Connection)),
+            Details::Target(contract::TargetDetails::level(contract::Level::Machine)),
         ),
     }
 }
@@ -680,7 +685,7 @@ fn slug(name: &str) -> String {
     }
     let slug = slug.trim_end_matches('-');
     if slug.is_empty() || slug == "local" {
-        "server".into()
+        "machine".into()
     } else {
         slug.into()
     }
@@ -711,10 +716,11 @@ fn kind_name(kind: contract::StoreKind) -> &'static str {
         contract::StoreKind::PrivateFile => "private file",
     }
 }
-fn connection_data(connection: &SavedConnection) -> contract::Connection {
-    contract::Connection {
+fn connection_data(connection: &SavedConnection) -> contract::SavedMachine {
+    contract::SavedMachine {
         name: connection.name.clone(),
         route: format!("id:{}", hex(&connection.route)),
+        id: hex(&connection.paired.pin.core),
         endpoint: connection.endpoint.clone(),
         fingerprint: connection.paired.pin.fingerprint(),
         store: store_kind(connection.credential_store),

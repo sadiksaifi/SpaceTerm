@@ -1,12 +1,5 @@
 {
-  "schema": "spaceterm.cli.v1",
   "command": "worktree.remove",
-  "status": "confirmation_required",
-  "server": {
-    "name": "fixture",
-    "route": "local",
-    "id": "0909090909090909090909090909090909090909090909090909090909090909"
-  },
   "data": {
     "confirmation": {
       "effects": {
@@ -28,11 +21,18 @@
     }
   },
   "error": {
-    "code": "confirmation_required",
     "class": "action_required",
+    "code": "confirmation_required",
+    "details": {},
     "message": "Review the effects, then repeat the command with --confirm.",
-    "retryable": false,
-    "details": {}
+    "retryable": false
   },
+  "machine": {
+    "id": "0909090909090909090909090909090909090909090909090909090909090909",
+    "name": "fixture",
+    "route": "local"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "confirmation_required",
   "warnings": []
 }

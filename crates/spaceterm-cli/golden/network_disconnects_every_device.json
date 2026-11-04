@@ -1,0 +1,19 @@
+{
+  "command": "network",
+  "data": {},
+  "error": {
+    "class": "unavailable",
+    "code": "disconnects_every_device",
+    "details": {},
+    "message": "This change would leave no connected device a route to that machine. Make it on the machine itself.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

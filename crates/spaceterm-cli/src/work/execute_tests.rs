@@ -588,7 +588,7 @@ fn worktree_creation_uses_the_main_branch_and_opens_exactly_one_tab() {
         (false, true, "origin"),
         (false, false, "unclaimed"),
     ] {
-        for open in [false, true] {
+        {
             let initial = fixture().inventory;
             let mut updated = initial.clone();
             let mut tab = updated.workspaces[0].tabs[0].clone();
@@ -620,10 +620,7 @@ fn worktree_creation_uses_the_main_branch_and_opens_exactly_one_tab() {
                 outcomes: VecDeque::from([Ok(Outcome::Accepted { target: id(40) })]),
                 ..Default::default()
             }));
-            let mut args = vec!["worktree", "create", "feature/new", "--workspace", "api"];
-            if open {
-                args.push("--open");
-            }
+            let args = ["worktree", "create", "feature/new", "--workspace", "api"];
             let core = hex(&id(9));
             let pane = hex(&id(21));
             let mut environment = env();
@@ -790,7 +787,7 @@ fn unconfirmed_worktree_creation_never_retries_or_opens_another_tab() {
         ..Default::default()
     }));
     let output = run_script(
-        &["worktree", "create", "new", "--workspace", "api", "--open"],
+        &["worktree", "create", "new", "--workspace", "api"],
         &env(),
         &script,
     );
