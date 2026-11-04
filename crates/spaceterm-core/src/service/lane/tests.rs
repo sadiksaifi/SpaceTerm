@@ -700,6 +700,32 @@ fn a_paired_device_removes_the_machine_with_one_admitted_uninstall() {
 }
 
 #[test]
+fn a_core_without_the_uninstall_capability_refuses_its_preview_and_execution() {
+    with_lane(|mut lane| {
+        let (token, _) = preview(&lane.lane, LaneAction::Uninstall);
+        Arc::get_mut(&mut lane.lane).unwrap().capabilities =
+            crate::protocol::capability::Capabilities::fake(&[
+                crate::protocol::capability::Capability::Restart,
+            ]);
+        let refused = lane.lane.answer(
+            LaneRequest::Preview {
+                action: LaneAction::Uninstall,
+            },
+            &ACTOR,
+        );
+        assert_eq!(code(refused), "unsupported");
+        assert_eq!(
+            code(execute(&lane.lane, LaneAction::Uninstall, &token, 1)),
+            "unsupported"
+        );
+        assert!(!lane.host.fenced.load(Ordering::SeqCst));
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+        // Another capability the Core still has is unaffected.
+        preview(&lane.lane, LaneAction::Restart);
+    });
+}
+
+#[test]
 fn a_spent_foreign_or_changed_observation_token_is_refused_as_changed() {
     with_lane(|lane| {
         let (token, _) = preview(&lane.lane, LaneAction::Restart);

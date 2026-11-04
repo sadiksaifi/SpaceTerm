@@ -181,7 +181,6 @@ fn before_rename(_temporary: &Path) {
 }
 
 /// Remove only a link into this identity's retained installations, under the service lock.
-#[cfg(any(feature = "client", test))]
 pub(in crate::service) fn remove(
     home: &Path,
     identity: &str,

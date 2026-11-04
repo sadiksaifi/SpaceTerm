@@ -31,6 +31,7 @@ use crate::permissions::{
     SystemPermissions,
 };
 use crate::protocol::Preamble;
+use crate::protocol::capability::{Capabilities, Capability, Unavailable};
 use crate::storage::Directory;
 use crate::update::facts::{UpdateFacts, Version};
 use crate::update::source::FactsSource;
@@ -156,8 +157,9 @@ pub enum LaneAction {
     Network { access: NetworkAccess },
     /// Remove Machine: stops SpaceTerm Core, revokes every pairing and removes the service,
     /// the launcher and every installed version. Workspace data stays. Gated by
-    /// [`crate::protocol::capability::Capability::Uninstall`]. Once the helper starts, the Core
-    /// answers no further request, so the caller treats `Accepted` as the outcome.
+    /// [`Capability::Uninstall`], as Restart is by [`Capability::Restart`]. Once the helper
+    /// starts, the Core answers no further request, so the caller treats `Accepted` as the
+    /// outcome.
     Uninstall,
 }
 
@@ -366,12 +368,34 @@ pub struct LaneCore {
     connections: AtomicU64,
     launch: Box<Launcher>,
     permissions: Arc<dyn SystemPermissions>,
+    /// What this Core's service lane can do. Tests withhold capabilities.
+    capabilities: Capabilities,
     /// The Permission Setups whose preparations run, and their cancellations.
     setups: Mutex<setups::Setups>,
     /// Held for each whole `Execute`, and while the fence watcher releases the fence.
     executing: Mutex<()>,
     /// A fence watcher runs. The watcher clears it only under `executing`.
     watching: AtomicBool,
+}
+
+/// The capability a previewed or executed action needs, when it is not part of every service
+/// lane.
+const fn required(action: &LaneAction) -> Option<Capability> {
+    match action {
+        LaneAction::Restart => Some(Capability::Restart),
+        LaneAction::Uninstall => Some(Capability::Uninstall),
+        LaneAction::Stop | LaneAction::Network { .. } => None,
+    }
+}
+
+/// Whether `request` previews or executes an action newer than the connection's `selected`
+/// service lane version.
+fn newer_than(request: &LaneRequest, selected: crate::protocol::version::ProtocolVersion) -> bool {
+    matches!(
+        request,
+        LaneRequest::Preview { action } | LaneRequest::Execute { action, .. }
+            if required(action).is_some_and(|capability| capability.since().1 > selected)
+    )
 }
 
 /// The part of an observation that does not depend on the Session set, and the effects it
@@ -431,6 +455,10 @@ impl LaneCore {
             connections: AtomicU64::new(0),
             launch,
             permissions,
+            capabilities: Capabilities::new(
+                Err(Unavailable::NotConnected),
+                Ok(crate::protocol::version::SERVICE),
+            ),
             setups: Mutex::default(),
             executing: Mutex::new(()),
             watching: AtomicBool::new(false),
@@ -487,7 +515,9 @@ impl LaneCore {
             authorized()?;
             let caller = NetworkCaller::of(&actor, route);
             let (reply, launch) = match serde_json::from_slice::<LaneRequest>(&bytes) {
-                Ok(request) if request.since() > selected => (error(&CoreError::Unsupported), None),
+                Ok(request) if request.since() > selected || newer_than(&request, selected) => {
+                    (error(&CoreError::Unsupported), None)
+                }
                 Ok(request) => self.respond(request, &actor, caller, connection),
                 Err(_) => (error(&CoreError::Protocol), None),
             };
@@ -522,6 +552,14 @@ impl LaneCore {
         caller: Option<NetworkCaller>,
         connection: u64,
     ) -> (LaneReply, Option<Dispatch>) {
+        // An action this Core's service lane does not have is refused before its preview or
+        // admission, from the same table clients read.
+        if let LaneRequest::Preview { action } | LaneRequest::Execute { action, .. } = &request
+            && let Some(capability) = required(action)
+            && self.capabilities.check(capability).is_err()
+        {
+            return (error(&CoreError::Unsupported), None);
+        }
         // Stop runs only on the Machine itself: nothing could start SpaceTerm Core again from a
         // paired device.
         if actor.pairing.is_some()
