@@ -1,0 +1,83 @@
+name: Compatibility
+
+# Pairs this commit with each release in .github/compatibility.toml, both ways: this commit's
+# CLI against the release's Core, and the release's CLI against this commit's Core.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Plan compatibility pairs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    # install_args selects this job's tools; keep mise run from installing the rest.
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      any: ${{ steps.plan.outputs.any }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: "python"
+      - name: Plan pairs from the listed releases
+        id: plan
+        run: mise run compat:plan
+
+  pair:
+    name: ${{ matrix.candidate == 'client' && 'This CLI' || 'This Core' }} with ${{ matrix.release }}
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: jdx/mise-action@v5
+      - name: Install Linux build packages
+        timeout-minutes: 10
+        run: mise bootstrap packages apply --yes --update
+      - name: Fetch locked Rust dependencies
+        timeout-minutes: 10
+        run: mise run setup:deps
+      - name: Authorize boot startup for the release Core's user service
+        if: matrix.candidate == 'client'
+        timeout-minutes: 5
+        run: sudo loginctl enable-linger "$USER"
+      - name: Pair
+        timeout-minutes: 40
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ matrix.release }}
+          CANDIDATE: ${{ matrix.candidate }}
+        run: mise run compat:pair "$RELEASE" --candidate "$CANDIDATE"
+
+  compatible:
+    name: Compatible with listed releases
+    needs: [plan, pair]
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every planned pair to pass
+        env:
+          PLAN: ${{ needs.plan.result }}
+          PAIR: ${{ needs.pair.result }}
+        run: |
+          test "$PLAN" = success
+          test "$PAIR" = success || test "$PAIR" = skipped
