@@ -4,6 +4,7 @@
     "confirmation": {
       "effects": {
         "ends_sessions": 1,
+        "pending": null,
         "sessions": [
           "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
         ]

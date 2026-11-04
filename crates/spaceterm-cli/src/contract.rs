@@ -1081,6 +1081,7 @@ pub enum WarningCode {
     InvitationWithdrawn,
     HistoryGap,
     CoverageCoalesced,
+    ClientMajorDiffers,
     PrivateCredentialFile,
 }
 
@@ -1092,6 +1093,7 @@ impl WarningCode {
         Self::InvitationWithdrawn,
         Self::HistoryGap,
         Self::CoverageCoalesced,
+        Self::ClientMajorDiffers,
         Self::PrivateCredentialFile,
     ];
 
@@ -1103,6 +1105,7 @@ impl WarningCode {
             Self::InvitationWithdrawn => "invitation_withdrawn",
             Self::HistoryGap => "history_gap",
             Self::CoverageCoalesced => "coverage_coalesced",
+            Self::ClientMajorDiffers => "client_major_differs",
             Self::PrivateCredentialFile => "private_credential_file",
         }
     }
@@ -1122,6 +1125,9 @@ impl WarningCode {
             Self::InvitationWithdrawn => "The Invitation Link was withdrawn.",
             Self::HistoryGap => "Some rows were discarded before they could be read.",
             Self::CoverageCoalesced => "Some screen states were coalesced and are not shown.",
+            Self::ClientMajorDiffers => {
+                "After this restart, work commands need a CLI with SpaceTerm Core's protocol major."
+            }
         }
     }
 }
@@ -1158,6 +1164,8 @@ pub enum WarningDetails {
     Recovered { count: u32 },
     /// `history_gap`.
     Gap { missing_rows: u64 },
+    /// `client_major_differs`.
+    Major { client_major: u16, core_major: u16 },
 }
 
 impl Serialize for WarningDetails {
@@ -1170,10 +1178,23 @@ impl Serialize for WarningDetails {
         struct Gap {
             missing_rows: u64,
         }
+        #[derive(Serialize)]
+        struct Major {
+            client_major: u16,
+            core_major: u16,
+        }
         match *self {
             Self::None => Empty {}.serialize(serializer),
             Self::Recovered { count } => Recovered { count }.serialize(serializer),
             Self::Gap { missing_rows } => Gap { missing_rows }.serialize(serializer),
+            Self::Major {
+                client_major,
+                core_major,
+            } => Major {
+                client_major,
+                core_major,
+            }
+            .serialize(serializer),
         }
     }
 }
@@ -1196,11 +1217,28 @@ pub struct ConfirmationData<E: Serialize> {
     pub confirmation: Confirmation<E>,
 }
 
-/// `effects` of `stop` and `restart`.
+/// `effects` of `stop`, `restart` and `uninstall`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ServiceEffects {
     pub ends_sessions: u32,
     pub sessions: Vec<String>,
+    /// `restart` into a Pending Version: the versions it moves between. `null` for a restart
+    /// into the running version, and for `stop` and `uninstall`.
+    pub pending: Option<RestartTarget>,
+}
+
+/// The Pending Version a restart moves SpaceTerm Core to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RestartTarget {
+    /// The version SpaceTerm Core runs now.
+    pub from: String,
+    /// The Pending Version.
+    pub to: String,
+    /// Its work or service protocol major differs from the running version's.
+    pub breaking: bool,
+    /// Paired Devices that can't connect after the restart until they update. Empty unless
+    /// `breaking`.
+    pub stranded: Vec<DeviceRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -2500,6 +2538,7 @@ mod tests {
                 effects: ServiceEffects {
                     ends_sessions: 1,
                     sessions: vec!["0e".repeat(32)],
+                    pending: None,
                 },
             },
         );

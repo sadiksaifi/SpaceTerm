@@ -261,11 +261,94 @@ fn a_stop_preview_names_the_sessions_it_ends_and_exits_3() {
         core(),
         format!("c1-{}", "ab".repeat(32)),
         EXPIRES.into(),
-        &stop_effects(),
+        lifecycle::service_effects(&stop_effects(), None),
         Vec::new(),
     );
     assert_exit(&envelope, 3);
     assert_golden("stop_preview", &envelope);
+}
+
+/// The lane's preview of a restart into the Pending Version 0.8.0 on work major `to_major`.
+fn restart_effects(to_major: u16) -> LaneEffects {
+    LaneEffects {
+        ends_sessions: 1,
+        sessions: vec!["0e".repeat(32)],
+        start_requires_machine: false,
+        from: Some(lane_version("0.7.0", 'a')),
+        to: Some(lane_version("0.8.0", 'b')),
+        kind: None,
+        to_major: Some(to_major),
+    }
+}
+
+#[test]
+fn a_breaking_restart_preview_names_its_versions_and_stranded_devices_and_warns() {
+    let next = spaceterm_core::protocol::MAJOR + 1;
+    let facts = facts(Some(pending(true, false)), UpdateCheck::Never);
+    let previewed = lifecycle::service_effects(&restart_effects(next), Some(&facts));
+    assert_eq!(
+        lifecycle::summary(lifecycle::Kind::Restart, "penguin", &previewed),
+        "Restart SpaceTerm Core on penguin from 0.7.0 into 0.8.0?\nAll Terminal Sessions on it \
+         end for every client. Workspaces are kept, and each Pane starts a new shell when you use \
+         it.\n0.8.0 changes the protocol. These devices can\u{2019}t connect until they update: \
+         old-mini\n"
+    );
+    let envelope = lifecycle::preview_envelope(
+        "restart",
+        core(),
+        format!("c1-{}", "cd".repeat(32)),
+        EXPIRES.into(),
+        previewed,
+        Vec::new(),
+    );
+    assert_exit(&envelope, 3);
+    assert_golden("restart_preview", &envelope);
+}
+
+#[test]
+fn a_restart_into_a_compatible_pending_version_names_it_without_a_warning() {
+    let compatible = facts(Some(pending(false, false)), UpdateCheck::Never);
+    let previewed = lifecycle::service_effects(
+        &restart_effects(spaceterm_core::protocol::MAJOR),
+        Some(&compatible),
+    );
+    let target = previewed.effects.pending.clone().unwrap();
+    assert_eq!(
+        (target.from.as_str(), target.to.as_str()),
+        ("0.7.0", "0.8.0")
+    );
+    assert!(!target.breaking && target.stranded.is_empty());
+    assert_eq!(
+        lifecycle::summary(lifecycle::Kind::Restart, "penguin", &previewed),
+        "Restart SpaceTerm Core on penguin from 0.7.0 into 0.8.0?\nAll Terminal Sessions on it \
+         end for every client. Workspaces are kept, and each Pane starts a new shell when you use \
+         it.\n"
+    );
+    let envelope = lifecycle::preview_envelope(
+        "restart",
+        core(),
+        "c1-00".into(),
+        EXPIRES.into(),
+        previewed,
+        Vec::new(),
+    );
+    assert!(envelope.warnings.is_empty());
+    // Facts of another Pending Version say nothing about this one.
+    let other = facts(Some(pending(true, false)), UpdateCheck::Never);
+    let mut moved = restart_effects(spaceterm_core::protocol::MAJOR);
+    moved.to = Some(lane_version("0.9.0", 'c'));
+    let target = lifecycle::service_effects(&moved, Some(&other))
+        .effects
+        .pending
+        .unwrap();
+    assert!(!target.breaking && target.stranded.is_empty());
+    // A restart into the running version names no versions.
+    assert_eq!(
+        lifecycle::service_effects(&stop_effects(), None)
+            .effects
+            .pending,
+        None
+    );
 }
 
 fn receipt(

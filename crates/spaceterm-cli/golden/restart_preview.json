@@ -1,0 +1,50 @@
+{
+  "command": "restart",
+  "data": {
+    "confirmation": {
+      "effects": {
+        "ends_sessions": 1,
+        "pending": {
+          "breaking": true,
+          "from": "0.7.0",
+          "stranded": [
+            {
+              "id": "9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+              "name": "old-mini"
+            }
+          ],
+          "to": "0.8.0"
+        },
+        "sessions": [
+          "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+        ]
+      },
+      "expires_at": "2026-10-30T12:10:00Z",
+      "token": "c1-cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    }
+  },
+  "error": {
+    "class": "action_required",
+    "code": "confirmation_required",
+    "details": {},
+    "message": "Review the effects, then repeat the command with --confirm.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "confirmation_required",
+  "warnings": [
+    {
+      "code": "client_major_differs",
+      "details": {
+        "client_major": 1,
+        "core_major": 2
+      },
+      "message": "After this restart, work commands need a CLI with SpaceTerm Core's protocol major."
+    }
+  ]
+}
