@@ -113,10 +113,10 @@ fn read_only_volume(path: &Path) -> bool {
     volume.f_flags & libc::MNT_RDONLY as u32 != 0
 }
 
-/// Copies the app at `original` into Applications, replacing an older copy there by moving it
-/// to the Trash, and opens the copy once this process exits.
+/// Copies the app at `original` into Applications and opens the copy once this process exits.
+/// An older copy there goes to the Trash only after the new copy took its place.
 fn move_and_reopen(original: &Path) -> Option<()> {
-    let name = original.file_name()?;
+    let name = original.file_name()?.to_owned();
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let shared = Path::new("/Applications");
     let folder = if writable(shared) {
@@ -126,28 +126,23 @@ fn move_and_reopen(original: &Path) -> Option<()> {
         std::fs::create_dir_all(&personal).ok()?;
         personal
     };
-    let destination = folder.join(name);
-    if destination.symlink_metadata().is_ok() {
-        let trash = home.join(".Trash");
-        let mut trashed = trash.join(name);
-        let mut copy = 1;
-        while trashed.symlink_metadata().is_ok() {
-            copy += 1;
-            let mut numbered = Path::new(name).file_stem()?.to_owned();
-            numbered.push(format!(" {copy}.app"));
-            trashed = trash.join(numbered);
-        }
-        std::fs::rename(&destination, &trashed).ok()?;
-    }
-    // ditto keeps the bundle's code signature, extended attributes and symbolic links.
-    run(Command::new("/usr/bin/ditto")
-        .arg(original)
-        .arg(&destination))?;
-    // The person already opened this copy once, so Gatekeeper need not ask again or run the
-    // moved app from a translocated copy.
-    let _ = run(Command::new("/usr/bin/xattr")
-        .args(["-d", "-r", "com.apple.quarantine"])
-        .arg(&destination));
+    let destination = install(
+        original,
+        &folder,
+        |source, staging| {
+            // ditto keeps the bundle's code signature, extended attributes and symbolic links.
+            let copied = run(Command::new("/usr/bin/ditto").arg(source).arg(staging)).is_some();
+            // The person already opened this copy once, so Gatekeeper need not ask again or run
+            // the moved app from a translocated copy.
+            if copied {
+                let _ = run(Command::new("/usr/bin/xattr")
+                    .args(["-d", "-r", "com.apple.quarantine"])
+                    .arg(staging));
+            }
+            copied
+        },
+        |previous| trash(previous, &name, &home.join(".Trash")),
+    )?;
     Command::new("/bin/sh")
         .args([
             "-c",
@@ -165,6 +160,73 @@ fn move_and_reopen(original: &Path) -> Option<()> {
     Some(())
 }
 
+/// Puts a complete copy of the app at `source` into `folder` under the same name, and returns
+/// where. `copy` fills a hidden staging path in `folder` first, so `folder` never holds a
+/// partial app. An app already there moves aside, the staged copy takes its name, and only then
+/// does `discard` receive the old app. Any failure puts the old app back and removes the staged
+/// copy.
+fn install(
+    source: &Path,
+    folder: &Path,
+    copy: impl FnOnce(&Path, &Path) -> bool,
+    discard: impl FnOnce(&Path),
+) -> Option<PathBuf> {
+    let name = source.file_name()?;
+    let destination = folder.join(name);
+    let hidden = |role: &str| {
+        let mut hidden = std::ffi::OsString::from(".");
+        hidden.push(name);
+        hidden.push(format!(".{role}-{}", std::process::id()));
+        folder.join(hidden)
+    };
+    let staging = hidden("staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    if !copy(source, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return None;
+    }
+    let previous = destination
+        .symlink_metadata()
+        .is_ok()
+        .then(|| hidden("previous"));
+    if let Some(previous) = &previous
+        && std::fs::rename(&destination, previous).is_err()
+    {
+        let _ = std::fs::remove_dir_all(&staging);
+        return None;
+    }
+    if std::fs::rename(&staging, &destination).is_err() {
+        if let Some(previous) = &previous {
+            let _ = std::fs::rename(previous, &destination);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return None;
+    }
+    if let Some(previous) = previous {
+        discard(&previous);
+    }
+    Some(destination)
+}
+
+/// Moves the replaced app at `previous` into `trash` as `name`, numbered when the Trash already
+/// holds one. An app the Trash cannot take is removed, so Applications keeps no hidden copy.
+fn trash(previous: &Path, name: &std::ffi::OsStr, trash: &Path) {
+    let mut trashed = trash.join(name);
+    let mut copy = 1;
+    while trashed.symlink_metadata().is_ok() {
+        copy += 1;
+        let Some(stem) = Path::new(name).file_stem() else {
+            break;
+        };
+        let mut numbered = stem.to_owned();
+        numbered.push(format!(" {copy}.app"));
+        trashed = trash.join(numbered);
+    }
+    if std::fs::rename(previous, &trashed).is_err() {
+        let _ = std::fs::remove_dir_all(previous);
+    }
+}
+
 fn writable(directory: &Path) -> bool {
     CString::new(directory.as_os_str().as_bytes())
         // SAFETY: The path is NUL-terminated; access only reads it.
@@ -180,4 +242,109 @@ fn run(command: &mut Command) -> Option<()> {
         .ok()
         .filter(std::process::ExitStatus::success)
         .map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder for one test, removed when the test ends.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "spaceterm-app-location-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An app bundle whose one file reads `contents`.
+    fn app(at: &Path, contents: &str) {
+        std::fs::create_dir_all(at.join("Contents")).unwrap();
+        std::fs::write(at.join("Contents/Info.plist"), contents).unwrap();
+    }
+
+    fn contents(app: &Path) -> String {
+        std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap()
+    }
+
+    fn entries(folder: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Copies as ditto does, into a directory it creates.
+    fn copy_tree(source: &Path, target: &Path) -> bool {
+        Command::new("/bin/cp")
+            .arg("-R")
+            .arg(source)
+            .arg(target)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// A copy that fails partway leaves the installed app as it was and nothing else behind.
+    #[test]
+    fn a_failed_copy_leaves_the_installed_app_untouched() {
+        let disk_image = Folder::new();
+        let applications = Folder::new();
+        let source = disk_image.0.join("SpaceTerm.app");
+        app(&source, "new");
+        app(&applications.0.join("SpaceTerm.app"), "old");
+        let mut discarded = Vec::new();
+
+        let installed = install(
+            &source,
+            &applications.0,
+            |_, staging| {
+                std::fs::create_dir_all(staging.join("Contents")).unwrap();
+                false
+            },
+            |previous| discarded.push(previous.to_owned()),
+        );
+
+        assert_eq!(installed, None);
+        assert_eq!(entries(&applications.0), ["SpaceTerm.app"]);
+        assert_eq!(contents(&applications.0.join("SpaceTerm.app")), "old");
+        assert!(discarded.is_empty());
+    }
+
+    /// The new copy takes the installed app's place whole, and the old app goes only after.
+    #[test]
+    fn a_complete_copy_replaces_the_installed_app_before_the_old_one_goes() {
+        let disk_image = Folder::new();
+        let applications = Folder::new();
+        let source = disk_image.0.join("SpaceTerm.app");
+        app(&source, "new");
+        let destination = applications.0.join("SpaceTerm.app");
+        app(&destination, "old");
+        let mut discarded = Vec::new();
+
+        let installed = install(&source, &applications.0, copy_tree, |previous| {
+            discarded.push((contents(previous), contents(&destination)));
+            std::fs::remove_dir_all(previous).unwrap();
+        });
+
+        assert_eq!(installed.as_deref(), Some(destination.as_path()));
+        assert_eq!(entries(&applications.0), ["SpaceTerm.app"]);
+        assert_eq!(contents(&destination), "new");
+        assert_eq!(discarded, [("old".to_owned(), "new".to_owned())]);
+    }
 }
