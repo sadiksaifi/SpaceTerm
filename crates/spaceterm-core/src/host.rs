@@ -295,8 +295,7 @@ struct HostService {
 }
 impl PaneService for HostService {
     fn restore(&mut self, store: crate::organization::OrganizationStore) -> Result<(), CoreError> {
-        let restored = self.inner.restore(store);
-        restored
+        self.inner.restore(store)
     }
     fn admitted(&mut self, peer: &Peer, name: ClientName, outbox: Outbox) {
         self.inner.admitted(peer, name, outbox)
@@ -354,11 +353,10 @@ impl PaneService for HostService {
         self.inner.ticker(wake)
     }
     fn tick(&mut self, now: Instant) -> Option<Instant> {
-        let next = self.inner.tick(now);
-        next
+        self.inner.tick(now)
     }
     fn disconnected(&mut self, peer: &Peer) {
-        self.inner.disconnected(peer);
+        self.inner.disconnected(peer)
     }
     fn shutdown(&mut self) -> Result<(), CoreError> {
         self.inner.shutdown()
