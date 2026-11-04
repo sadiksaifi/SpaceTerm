@@ -221,10 +221,6 @@ impl StatusMenu {
 
     /// The person opened the menu. A Start refused while SpaceTerm Core was off in Login Items
     /// runs now if the item is on, after the menu's own wait ended.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "only the native status menu calls it")
-    )]
     pub(crate) fn opened(&self, cx: &mut App) {
         LocalCoreOperations::start_if_login_item_on(
             self.host.login_item(),

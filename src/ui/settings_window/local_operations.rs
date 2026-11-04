@@ -98,10 +98,6 @@ impl LocalCoreOperations {
 
     /// Reads SpaceTerm Core's item once, off the event thread, while a refused Start waits, and
     /// runs that Start through `surface` if the item is on.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "only the native status menu calls it")
-    )]
     pub(crate) fn start_if_login_item_on(
         off: crate::local_startup::LoginItemRead,
         surface: Surface,
