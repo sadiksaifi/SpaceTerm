@@ -4,10 +4,7 @@ use spaceterm_cli::{
     args::InternalCommand,
     contract::{self, Code, Failure},
 };
-use spaceterm_core::{
-    CoreError,
-    service::{LingerAuthorization, Service},
-};
+use spaceterm_core::{CoreError, service::Service};
 use std::io::{Read, Write};
 
 const IDENTITY: &str = env!("SPACETERM_CLI_IDENTITY");
@@ -140,13 +137,6 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
                 spaceterm_core::protocol::MAJOR,
             )?;
             service.install(&candidate.directory)?;
-        }
-        InternalCommand::SshEnableLinger { password_stdin } => {
-            Service::for_identity(IDENTITY)?.enable_linger(if *password_stdin {
-                LingerAuthorization::RemoteStdin
-            } else {
-                LingerAuthorization::RemoteNoninteractive
-            })?;
         }
         InternalCommand::Helper {
             operation,

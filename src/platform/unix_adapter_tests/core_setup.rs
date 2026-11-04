@@ -1688,7 +1688,7 @@ fn native_machine_setup_save_failure_keeps_cleanup_without_publishing_a_connecti
 }
 
 #[test]
-fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_files() {
+fn installer_runs_the_verified_archive_and_cleans_temporary_files() {
     use std::io::Write;
     let serial = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
     let root = crate::platform::unix_adapter_tests::short_temporary_root()
@@ -1697,20 +1697,14 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
         .mode(0o700)
         .create(&root)
         .unwrap();
-    for (authorization_required, password, input, expected_code) in [
-        (false, false, None, 0),
-        (true, false, None, 77),
-        (true, true, Some("fixture"), 0),
-        (true, true, Some("wrong"), 77),
-    ] {
+    for (helper_exit, expected_code) in [(0, 0), (1, 1)] {
         let mut bytes = Vec::new();
         {
             let compressed =
                 flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
             let mut archive = tar::Builder::new(compressed);
             let helper = format!(
-                "#!/bin/sh\n[ \"$1\" = internal ] || exit 91\nshift\ncase $1 in ssh-enable-linger) if [ \"${{2-}}\" = --password-stdin ]; then IFS= read -r password; test \"$password\" = fixture; else exit {}; fi;; ssh-install) test -f \"$2\" && test -f \"$3\";; *) exit 91;; esac\n",
-                if authorization_required { 1 } else { 0 },
+                "#!/bin/sh\n[ \"$1\" = internal ] || exit 91\nshift\ncase $1 in ssh-install) test -f \"$2\" && test -f \"$3\" && exit {helper_exit};; *) exit 91;; esac\n",
             );
             let mut header = tar::Header::new_gnu();
             header.set_size(helper.len() as u64);
@@ -1729,15 +1723,8 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
             archive.into_inner().unwrap().finish().unwrap();
         }
         let script = crate::platform::unix_ssh_process::UnixSshProcessAdapter
-            .install(
-                identity(),
-                bytes.len(),
-                &[1; 64],
-                &hex_digest(&bytes),
-                password,
-            )
-            .replace("${TMPDIR:-/tmp}", root.to_str().unwrap())
-            .replace("if [ \"$(uname -s)\" = Linux ]; then", "if true; then");
+            .install(identity(), bytes.len(), &[1; 64], &hex_digest(&bytes))
+            .replace("${TMPDIR:-/tmp}", root.to_str().unwrap());
         let mut child = std::process::Command::new("/bin/sh")
             .args(["-c", &script])
             .stdin(std::process::Stdio::piped())
@@ -1746,9 +1733,6 @@ fn installer_frames_linux_authorization_before_the_archive_and_cleans_temporary_
             .spawn()
             .unwrap();
         let mut writer = child.stdin.take().unwrap();
-        if let Some(input) = input {
-            writeln!(writer, "{input}").unwrap();
-        }
         writer.write_all(&bytes).unwrap();
         drop(writer);
         assert_eq!(child.wait().unwrap().code(), Some(expected_code));
@@ -1775,7 +1759,9 @@ fn native_core_setup_refuses_linux_installation_without_operating_system_authori
     let result = setup_with_approvals(&backend, &fixture.adapter, (true, true), &progress);
     assert_eq!(
         result,
-        Err(SetupFailure::Refused(RefusalKind::AuthorizationRefused))
+        Err(SetupFailure::Unsupported(
+            spaceterm_core::provisioning::SetupRefusal::LingerDeclined
+        ))
     );
     fixture.assert_no_connection();
     assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
@@ -1829,14 +1815,12 @@ impl SshCoreBootstrap for LostEnrollmentReply {
         archive_length: usize,
         signature: &[u8],
         digest: &str,
-        password: bool,
     ) -> String {
         crate::platform::unix_ssh_process::UnixSshProcessAdapter.install(
             identity,
             archive_length,
             signature,
             digest,
-            password,
         )
     }
 }
@@ -1978,10 +1962,9 @@ raise SystemExit(86)
         length: usize,
         signature: &[u8],
         digest: &str,
-        password: bool,
     ) -> String {
         crate::platform::unix_ssh_process::UnixSshProcessAdapter
-            .install(identity, length, signature, digest, password)
+            .install(identity, length, signature, digest)
     }
 }
 
@@ -2173,7 +2156,7 @@ impl SshCoreBootstrap for BlockingDiscovery {
             "printf authenticated > '{witness}'; while :; do printf . || exit; /bin/sleep 0.05; done\n"
         )
     }
-    fn install(&self, _: &str, _: usize, _: &[u8], _: &str, _: bool) -> String {
+    fn install(&self, _: &str, _: usize, _: &[u8], _: &str) -> String {
         panic!("the blocking fixture never installs a server")
     }
 }
@@ -2217,7 +2200,7 @@ impl SshCoreBootstrap for StoppedDiscovery {
         let witness = self.0.to_str().unwrap().replace('\'', "'\\''");
         format!("printf x >> '{witness}'; printf '%s\\n' '{response}'\n")
     }
-    fn install(&self, _: &str, _: usize, _: &[u8], _: &str, _: bool) -> String {
+    fn install(&self, _: &str, _: usize, _: &[u8], _: &str) -> String {
         panic!("the stopped-discovery fixture never installs a server")
     }
 }

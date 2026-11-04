@@ -67,6 +67,17 @@ pub struct SetupRequest {
 pub struct SetupCancellation {
     pub pin: MachinePin,
     pub operation: [u8; 32],
+    /// The Network Access to restore after the cancellation, when setup changed it. Add Machine
+    /// restores it when the enrolled device could not reach SpaceTerm Core over UDP.
+    pub restore: Option<NetworkRestore>,
+}
+
+/// Network Access as it was before setup changed it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkRestore {
+    pub policy: Option<NetworkPolicy>,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,10 +169,34 @@ pub fn setup_direct(
     })
 }
 
-/// Revoke only the pairing allocated by this setup operation, including after a lost reply.
+/// Revoke only the pairing allocated by this setup operation, including after a lost reply, then
+/// restore Network Access when the request names how it was.
 pub fn cancel_direct(
     identity: &str,
     request: SetupCancellation,
+) -> Result<SetupCancellationReply, CoreError> {
+    let reply = cancel_setup(identity, &request)?;
+    if let Some(restore) = request.restore {
+        // An earlier policy is kept as the configured one even while access is off.
+        match manage(
+            identity,
+            SETUP,
+            Management::SetPolicy {
+                policy: restore.policy,
+                enabled: restore.enabled,
+            },
+        )? {
+            ManagementReply::Status(status) if status.pin == request.pin => {}
+            ManagementReply::Status(_) => return Err(DirectError::PinMismatch.into()),
+            _ => return Err(CoreError::Protocol),
+        }
+    }
+    Ok(reply)
+}
+
+fn cancel_setup(
+    identity: &str,
+    request: &SetupCancellation,
 ) -> Result<SetupCancellationReply, CoreError> {
     match manage(
         identity,

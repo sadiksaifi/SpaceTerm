@@ -925,20 +925,13 @@ done
         archive_length: usize,
         signature: &[u8],
         digest: &str,
-        password: bool,
     ) -> String {
-        transfer_script(
-            "ssh-install",
-            identity,
-            archive_length,
-            signature,
-            digest,
-            Some(password),
-        )
+        transfer_script("ssh-install", identity, archive_length, signature, digest)
     }
 }
 
-/// Transfer and install one client-verified server artifact.
+/// Transfer and install one client-verified server artifact. SSH preflight authorized linger
+/// before this runs.
 #[cfg(feature = "desktop")]
 fn transfer_script(
     action: &str,
@@ -946,27 +939,11 @@ fn transfer_script(
     archive_length: usize,
     signature: &[u8],
     digest: &str,
-    linger: Option<bool>,
 ) -> String {
     use base64::Engine;
     let signature = base64::engine::general_purpose::STANDARD.encode(signature);
     let work = action.trim_start_matches("ssh-");
-    let password = linger == Some(true);
-    let read_authorization = if password {
-        "IFS= read -r authorization\n"
-    } else {
-        ""
-    };
     let executable = executable_case(identity, "executable");
-    let authorize = match linger {
-        Some(true) => String::from(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/core/$executable\" internal ssh-enable-linger --password-stdin || exit 77\nunset authorization\nfi\n",
-        ),
-        Some(false) => String::from(
-            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/core/$executable\" internal ssh-enable-linger || exit 77\nfi\n",
-        ),
-        None => String::new(),
-    };
     format!(
         r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -975,12 +952,12 @@ unset SPACETERM_MACHINE SPACETERM_AS
 umask 077
 work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-{work}.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
-{read_authorization}cat > "$work/artifact.tar.gz"
+cat > "$work/artifact.tar.gz"
 [ "$(wc -c < "$work/artifact.tar.gz")" -eq {archive_length} ] || exit 75
 printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
 mkdir "$work/runtime"
 tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
-{executable}{authorize}"$work/runtime/core/$executable" internal {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
+{executable}"$work/runtime/core/$executable" internal {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
 "#,
         quote(&signature),
         quote(action),

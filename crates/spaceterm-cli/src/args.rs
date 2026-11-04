@@ -311,11 +311,6 @@ pub enum InternalCommand {
         signature: PathBuf,
         sha256: String,
     },
-    SshEnableLinger {
-        /// Read the sudo password from stdin.
-        #[arg(long)]
-        password_stdin: bool,
-    },
     BuildInfo,
     Check,
     /// Report this process's own System Permissions, as SpaceTerm Core's probe child.
@@ -340,7 +335,6 @@ impl InternalCommand {
             Self::SshDirectCancel => "internal.ssh-direct-cancel",
             Self::SshStart => "internal.ssh-start",
             Self::SshInstall { .. } => "internal.ssh-install",
-            Self::SshEnableLinger { .. } => "internal.ssh-enable-linger",
             Self::BuildInfo => "internal.build-info",
             Self::Check => "internal.check",
             Self::PermissionReport => "internal.permission-report",
@@ -1033,10 +1027,6 @@ mod tests {
             (
                 &["internal", "ssh-install", "a", "s", "00"],
                 "internal.ssh-install",
-            ),
-            (
-                &["internal", "ssh-enable-linger", "--password-stdin"],
-                "internal.ssh-enable-linger",
             ),
         ] {
             let cli = parse(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));

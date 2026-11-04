@@ -41,6 +41,35 @@ printf 'SPACETERM_PREFLIGHT 1 os=%s arch=%s uid=%s system=%s manager=%s linger=%
   "$os" "$arch" "$uid" "$system" "$manager" "$linger" "$gui" "$filevault"
 "#;
 
+/// The exit status of a linger script that needs a password, or whose authorization failed.
+pub const LINGER_REFUSED: i32 = 77;
+
+/// Enables linger for the SSH account without a password, through `sudo -n`. It exits 0 once
+/// `loginctl` reports linger, and [`LINGER_REFUSED`] otherwise.
+pub const LINGER: &str = r#"set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+uid=$(id -u)
+linger() { [ "$(/usr/bin/loginctl show-user "$uid" --property=Linger --value 2>/dev/null)" = yes ]; }
+linger && exit 0
+/usr/bin/sudo -n -- /usr/bin/loginctl enable-linger "$uid" </dev/null >/dev/null 2>&1 || exit 77
+linger || exit 77
+"#;
+
+/// [`LINGER`] with the account password as the first line of standard input, for `sudo -S`.
+pub const LINGER_WITH_PASSWORD: &str = r#"set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+uid=$(id -u)
+IFS= read -r authorization || exit 77
+linger() { [ "$(/usr/bin/loginctl show-user "$uid" --property=Linger --value 2>/dev/null)" = yes ]; }
+linger && exit 0
+printf '%s
+' "$authorization" | /usr/bin/sudo -S -p '' -- /usr/bin/loginctl enable-linger "$uid" >/dev/null 2>&1 || exit 77
+unset authorization
+linger || exit 77
+"#;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum System {
     Macos,

@@ -264,9 +264,6 @@ const fn incompatibility_detail(kind: IncompatibilityKind) -> &'static str {
 
 const fn refusal_detail(kind: RefusalKind) -> &'static str {
     match kind {
-        RefusalKind::AuthorizationRefused => {
-            "This computer didn\u{2019}t allow SpaceTerm Core to run after logout."
-        }
         RefusalKind::InstallRefused => "The remote computer refused the installation.",
         RefusalKind::MissingArtifact => {
             "This SpaceTerm installation doesn\u{2019}t include a SpaceTerm Core package for this computer. Reinstall SpaceTerm, then try again."
