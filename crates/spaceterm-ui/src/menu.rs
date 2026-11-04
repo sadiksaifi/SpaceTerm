@@ -797,6 +797,7 @@ pub struct Menu<A: Clone + 'static> {
     leading_icon: Option<TriggerIconBuilder>,
     icon_trigger: bool,
     button: Option<(ButtonVariant, ButtonSize, ButtonShape)>,
+    contextual_style: Option<(ButtonVariantStyle, Rgba)>,
 }
 
 impl<A: Clone + 'static> Menu<A> {
@@ -813,6 +814,7 @@ impl<A: Clone + 'static> Menu<A> {
             leading_icon: None,
             icon_trigger: false,
             button: None,
+            contextual_style: None,
         }
     }
 
@@ -833,6 +835,13 @@ impl<A: Clone + 'static> Menu<A> {
         self
     }
 
+    /// Supplies complete paints for a button trigger, resolved for a contextual meaning such as
+    /// a warning. See [`crate::Button::contextual_style`].
+    pub fn contextual_style(mut self, style: ButtonVariantStyle, focus_border: Rgba) -> Self {
+        self.contextual_style = Some((style, focus_border));
+        self
+    }
+
     /// Uses a compact icon-only trigger while retaining the label as its logical name.
     pub fn icon_trigger(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
@@ -848,9 +857,14 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style = menu_style(self.core.size, cx);
         let enabled = self.core.is_enabled();
-        let button = self
-            .button
-            .map(|(variant, size, shape)| resolve_button_style(variant, size, shape, cx));
+        let contextual_style = self.contextual_style;
+        let button = self.button.map(|(variant, size, shape)| {
+            let style = resolve_button_style(variant, size, shape, cx);
+            match contextual_style {
+                Some((paints, focus_border)) => style.contextual(paints, focus_border),
+                None => style,
+            }
+        });
         let (foreground, disclosure_foreground) = match button {
             Some(button) => {
                 let paint = if enabled {
