@@ -330,7 +330,23 @@ struct Live {
     sessions: u32,
     operation: Option<Operation>,
     facts: UpdateFacts,
+    /// A silent restart that settled while this server kept running waits until then before
+    /// the next one, so a helper that keeps failing does not fence the server every second.
+    silent_after: Option<Instant>,
 }
+
+/// A change a client confirmed over the service lane, which the engine owns while it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Confirmed {
+    /// A restart into the installation named by `candidate`, or into the running version.
+    Restart {
+        candidate: Option<[u8; 32]>,
+    },
+    Stop,
+}
+
+/// How long a silent restart that settled without the server stopping waits before it retries.
+const SILENT_RETRY: Duration = Duration::from_secs(300);
 
 /// An install in progress. It reports `Installing` progress until it ends. Dropping it without
 /// [`Installing::install`] or [`Installing::fail`] records no failure, as a desktop push that
@@ -367,6 +383,7 @@ impl Updates {
                 sessions: 0,
                 operation: None,
                 facts: placeholder(&running),
+                silent_after: None,
             }),
             running,
             protocols,
@@ -487,6 +504,8 @@ impl Updates {
             if live.operation.is_some() {
                 return Err(RestartRefusal::Busy);
             }
+            // Another process, such as a local installer, may have changed the record.
+            live.record = load(&self.shared.data).map_err(RestartRefusal::Core)?;
             let pending = live.record.pending.clone();
             if request == Restart::Silent {
                 let pending = pending.as_ref().ok_or(RestartRefusal::NothingPending)?;
@@ -500,7 +519,11 @@ impl Updates {
                     boot: boot().map_err(RestartRefusal::Core)?,
                     digest: pending.digest.clone(),
                 };
-                if live.record.silent.as_ref() == Some(&attempt) {
+                if live.record.silent.as_ref() == Some(&attempt)
+                    || live
+                        .silent_after
+                        .is_some_and(|after| Instant::now() < after)
+                {
                     return Err(RestartRefusal::NothingPending);
                 }
                 // Recorded before admission, so a start that fails returns to a runtime that
@@ -538,6 +561,76 @@ impl Updates {
             return Err(refusal);
         }
         Ok(Restarting { to })
+    }
+
+    /// Owns `change` as the update operation, so every client's facts show `Restarting` or
+    /// `Stopping`, then runs `admit`, the lane's admission of the confirmed change. A failed
+    /// admission ends the operation again.
+    ///
+    /// # Errors
+    /// Returns ServiceBusy while another update operation runs, Changed when `candidate` is not
+    /// the Pending Version, and what `admit` returns.
+    pub(crate) fn confirm<T>(
+        &self,
+        change: Confirmed,
+        admit: impl FnOnce() -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        {
+            let mut live = self.shared.lock();
+            if live.operation.is_some() {
+                return Err(CoreError::ServiceBusy);
+            }
+            // Another process, such as a local installer, may have changed the record.
+            live.record = load(&self.shared.data)?;
+            live.operation = Some(match change {
+                Confirmed::Stop => Operation::Stopping,
+                Confirmed::Restart { candidate } => {
+                    let pending = live.record.pending.as_ref();
+                    let digest = pending
+                        .map(|pending| digest_bytes(&pending.digest))
+                        .transpose()?;
+                    if digest != candidate {
+                        return Err(CoreError::Changed);
+                    }
+                    Operation::Restarting {
+                        to: pending
+                            .map_or_else(|| self.shared.running.clone(), |p| p.version.clone()),
+                    }
+                }
+            });
+        }
+        self.refresh();
+        let admitted = admit();
+        if admitted.is_err() {
+            self.shared.lock().operation = None;
+            self.refresh();
+        }
+        admitted
+    }
+
+    /// Every admitted service operation settled while this server still runs, so a restart or
+    /// Stop it owned did not stop it. That operation ends, and a silent restart may try again
+    /// after [`SILENT_RETRY`].
+    pub(crate) fn operations_settled(&self) {
+        let mut live = self.shared.lock();
+        if !matches!(
+            live.operation,
+            Some(Operation::Restarting { .. } | Operation::Stopping)
+        ) {
+            return;
+        }
+        live.operation = None;
+        if live.record.silent.is_some()
+            && let Ok(record) = change(&self.shared.data, |record| {
+                record.silent = None;
+                record.clone()
+            })
+        {
+            live.record = record;
+            live.silent_after = Some(Instant::now() + SILENT_RETRY);
+        }
+        drop(live);
+        self.refresh();
     }
 
     /// Begin a feed check. Facts report `Checking` until the check is dropped or
