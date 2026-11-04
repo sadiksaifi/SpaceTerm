@@ -658,10 +658,23 @@ impl DirectConnections {
 
     /// Removes every saved route, unpair request and pending enrollment here, with this
     /// device's key for each, and asks no Core. Uninstalling SpaceTerm with its data deleted
-    /// does this before it deletes the records. Every key is tried, and any key that stays
-    /// fails with [`DirectError::CredentialUnavailable`].
+    /// does this before it deletes the records. Records that startup hasn't read are read now.
+    /// Every key is tried, and any key that stays fails with
+    /// [`DirectError::CredentialUnavailable`]. Records that can't be read fail with
+    /// [`DirectError::StorageUnavailable`], since the keys they name can't be found.
     pub fn forget_every_machine(&self) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut result = Ok(());
+        if !state.inventory_loaded {
+            match self.0.records.load() {
+                Ok(document) => {
+                    state.document = document;
+                    state.inventory_loaded = true;
+                }
+                Err(_) => result = Err(DirectError::StorageUnavailable),
+            }
+        }
+        let loaded = state.inventory_loaded;
         let mut keys = Vec::new();
         for key in state.document.routes.iter().map(|r| r.credential).chain(
             state
@@ -688,8 +701,11 @@ impl DirectConnections {
             })
             .collect();
         // The caller deletes the record file next, so a save that fails here leaves nothing
-        // the person sees. The keys below are what the records can't take with them.
-        let _ = self.0.save(&mut state);
+        // the person sees. The keys below are what the records can't take with them. Records
+        // that couldn't be read stay as they are.
+        if loaded {
+            let _ = self.0.save(&mut state);
+        }
         drop(state);
         for core in cores {
             core.disconnect();
@@ -705,7 +721,6 @@ impl DirectConnections {
                 cleanup(route);
             }
         }
-        let mut result = Ok(());
         for key in &keys {
             if credentials::remove_asked(self.0.credentials.as_ref(), key).is_err() {
                 result = Err(DirectError::CredentialUnavailable);

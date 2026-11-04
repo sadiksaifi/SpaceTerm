@@ -138,7 +138,10 @@ fn opting_in_also_deletes_workspaces_paired_devices_and_settings(cx: &mut TestAp
             Step::Observe,
             Step::ReadCliCredentials,
             Step::RemoveCore(sessions(1), Data::Delete),
-            Step::DeleteData { machines: true },
+            Step::DeleteData {
+                cli: CliCredentials::default(),
+                machines: true
+            },
             Step::RemoveApp,
         ],
         "the command-line tool's keys are read before SpaceTerm Core's data goes, and the \
@@ -221,6 +224,41 @@ fn an_app_that_cannot_remove_itself_says_how_to_finish(cx: &mut TestAppContext) 
     );
 }
 
+/// A SpaceTerm Core removal that fails partway may already have deleted the command-line tool's
+/// records, so the retry reads none. The keys the first attempt read still go with the data.
+#[gpui::test]
+fn a_retry_after_a_partial_core_removal_still_removes_the_command_line_tools_keys(
+    cx: &mut TestAppContext,
+) {
+    let removal = ScriptedRemoval::new(0);
+    *removal.cli.lock().unwrap() = vec![CliCredentials::read(&[0x61, 0x62])];
+    *removal.core.lock().unwrap() = Err(RemovalFailure::Core);
+    let cx = open(Some(&removal), cx);
+
+    click(UNINSTALL_SELECTOR, cx);
+    click(SUPPRESSION, cx);
+    click_modal(CONFIRM_SELECTOR, cx);
+    assert!(shows(
+        "SpaceTerm couldn’t remove SpaceTerm Core from this computer, so try again.",
+        cx
+    ));
+    click_modal(DISMISS_SELECTOR, cx);
+
+    *removal.core.lock().unwrap() = Ok(());
+    click(UNINSTALL_SELECTOR, cx);
+    click(SUPPRESSION, cx);
+    click_modal(CONFIRM_SELECTOR, cx);
+
+    assert_eq!(
+        removal.steps().into_iter().rev().nth(1),
+        Some(Step::DeleteData {
+            cli: CliCredentials::read(&[0x61, 0x62]),
+            machines: false,
+        }),
+        "the retry deletes the keys the first attempt read"
+    );
+}
+
 #[gpui::test]
 fn data_that_stays_is_named_instead_of_saying_it_was_deleted(cx: &mut TestAppContext) {
     let removal = ScriptedRemoval::new(0);
@@ -257,7 +295,10 @@ fn the_data_goes_even_when_the_app_cannot_remove_itself(cx: &mut TestAppContext)
             Step::Observe,
             Step::ReadCliCredentials,
             Step::RemoveCore(sessions(0), Data::Delete),
-            Step::DeleteData { machines: false },
+            Step::DeleteData {
+                cli: CliCredentials::default(),
+                machines: false
+            },
             Step::RemoveApp,
         ]
     );

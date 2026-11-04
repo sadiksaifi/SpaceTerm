@@ -1132,6 +1132,52 @@ fn forgetting_every_machine_removes_route_and_enrollment_keys_and_reports_a_kept
     assert!(document.routes.is_empty() && document.pending.is_empty());
 }
 
+/// Records startup never read are read for the removal, and records that can't be read fail it,
+/// since the keys they name can't be found.
+#[test]
+fn forgetting_every_machine_reads_unloaded_records_and_fails_on_unreadable_ones() {
+    struct Unreadable;
+    impl Records for Unreadable {
+        fn load(&self) -> Result<Document, spaceterm_core::direct::DirectError> {
+            Err(DirectError::StorageUnavailable)
+        }
+        fn save(&self, _: &Document) -> Result<Durability, SaveError> {
+            panic!("records that couldn't be read must not be replaced")
+        }
+    }
+    let unreadable = DirectConnections::new(
+        "spaceterm-development",
+        Arc::new(Unreadable),
+        Arc::new(Credentials::default()),
+        Network::new(Answer::Lost),
+        None,
+    );
+    unreadable.resume_retained();
+    assert_eq!(
+        unreadable.forget_every_machine(),
+        Err(DirectError::StorageUnavailable)
+    );
+
+    let records = Arc::new(MemoryRecords::default());
+    records.0.lock().unwrap().routes = vec![saved(1, 0x61)];
+    let credentials = Arc::new(Credentials::default());
+    credentials
+        .values
+        .lock()
+        .unwrap()
+        .insert([0x61; 32], Zeroizing::new(b"secret".to_vec()));
+    let unloaded = DirectConnections::new(
+        "spaceterm-development",
+        records.clone(),
+        credentials.clone(),
+        Network::new(Answer::Lost),
+        None,
+    );
+    assert_eq!(unloaded.forget_every_machine(), Ok(()));
+    assert!(credentials.values.lock().unwrap().is_empty());
+    assert!(records.0.lock().unwrap().routes.is_empty());
+}
+
 /// Removing a route runs its cleanup once the removal is saved, so what the client retained for
 /// it goes with it. Disconnect keeps the route and what it retained.
 #[test]

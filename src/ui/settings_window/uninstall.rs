@@ -85,6 +85,18 @@ pub(super) struct CliCredentials {
     unread: bool,
 }
 
+impl CliCredentials {
+    /// Adds what an earlier attempt read.
+    fn merge(&mut self, earlier: Self) {
+        for item in earlier.items {
+            if !self.items.contains(&item) {
+                self.items.push(item);
+            }
+        }
+        self.unread |= earlier.unread;
+    }
+}
+
 /// How an uninstall ended once SpaceTerm Core was removed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Ended {
@@ -130,6 +142,10 @@ pub(super) struct UninstallRow {
     removal: Arc<dyn SpaceTermRemoval>,
     working: bool,
     progress: Option<ProgressDialogHandle>,
+    /// The command-line tool's keys that earlier attempts read. A SpaceTerm Core removal that
+    /// fails partway may already have deleted the records that name them, so each attempt adds
+    /// them to its own read until one deletes the data.
+    cli: CliCredentials,
     _task: Option<Task<()>>,
 }
 
@@ -139,6 +155,7 @@ impl UninstallRow {
             removal,
             working: false,
             progress: None,
+            cli: CliCredentials::default(),
             _task: None,
         }
     }
@@ -336,6 +353,7 @@ impl SettingsWindow {
             return;
         };
         let removal = Arc::clone(&row.removal);
+        let retained = row.cli.clone();
         let here = self.here();
         // The registry is read here, on the window's thread, and used in the background.
         let machines = self
@@ -371,15 +389,22 @@ impl SettingsWindow {
                     .spawn(async move {
                         // SpaceTerm Core's data holds the command-line tool's records, so their
                         // keys are read before it goes.
-                        let cli = (data == Data::Delete).then(|| removal.cli_credentials());
-                        removal.remove_core(&observed, data).map(|()| cli)
+                        let cli = (data == Data::Delete).then(|| {
+                            let mut cli = removal.cli_credentials();
+                            cli.merge(retained);
+                            cli
+                        });
+                        (removal.remove_core(&observed, data), cli)
                     })
                     .await
             };
             let cli = match core {
-                Ok(cli) => cli,
-                Err(failure) => {
+                (Ok(()), cli) => cli,
+                (Err(failure), cli) => {
                     let _ = settings.update_in(cx, |settings, window, cx| {
+                        if let (Some(cli), Some(row)) = (cli, settings.uninstall.as_mut()) {
+                            row.cli = cli;
+                        }
                         settings.uninstall_stopped(failure, window, cx);
                     });
                     return;
@@ -669,8 +694,10 @@ pub(super) mod testing {
         Observe,
         ReadCliCredentials,
         RemoveCore(Observed, Data),
-        /// Deleting the data, and whether it was given the desktop's registry.
+        /// Deleting the data, with the command-line tool's keys it was given and whether it was
+        /// given the desktop's registry.
         DeleteData {
+            cli: CliCredentials,
             machines: bool,
         },
         RemoveApp,
@@ -682,7 +709,23 @@ pub(super) mod testing {
         pub(in crate::ui::settings_window) core: Mutex<Result<(), RemovalFailure>>,
         pub(in crate::ui::settings_window) app: Mutex<Result<(), AppKept>>,
         pub(in crate::ui::settings_window) data: Mutex<Result<(), DataKept>>,
+        /// What each attempt reads of the command-line tool's keys, in order. Later attempts
+        /// read none.
+        pub(in crate::ui::settings_window) cli: Mutex<Vec<CliCredentials>>,
         pub(in crate::ui::settings_window) steps: Mutex<Vec<Step>>,
+    }
+
+    impl CliCredentials {
+        /// The keys `items` name, read from records that could be read.
+        pub(in crate::ui::settings_window) fn read(items: &[u8]) -> Self {
+            Self {
+                items: items
+                    .iter()
+                    .map(|key| (StoreKind::Keychain, [*key; 32]))
+                    .collect(),
+                unread: false,
+            }
+        }
     }
 
     impl ScriptedRemoval {
@@ -695,6 +738,7 @@ pub(super) mod testing {
                 core: Mutex::new(Ok(())),
                 app: Mutex::new(Ok(())),
                 data: Mutex::new(Ok(())),
+                cli: Mutex::default(),
                 steps: Mutex::default(),
             })
         }
@@ -716,7 +760,12 @@ pub(super) mod testing {
 
         fn cli_credentials(&self) -> CliCredentials {
             self.record(Step::ReadCliCredentials);
-            CliCredentials::default()
+            let mut reads = self.cli.lock().unwrap();
+            if reads.is_empty() {
+                CliCredentials::default()
+            } else {
+                reads.remove(0)
+            }
         }
 
         fn remove_core(&self, observed: &Observed, data: Data) -> Result<(), RemovalFailure> {
@@ -726,10 +775,11 @@ pub(super) mod testing {
 
         fn delete_data(
             &self,
-            _: CliCredentials,
+            cli: CliCredentials,
             machines: Option<DirectConnections>,
         ) -> Result<(), DataKept> {
             self.record(Step::DeleteData {
+                cli,
                 machines: machines.is_some(),
             });
             *self.data.lock().unwrap()
