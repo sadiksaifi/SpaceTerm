@@ -678,7 +678,11 @@ impl ServiceAction {
     const fn starts_service(self) -> bool {
         matches!(
             self,
-            Self::Install | Self::Start | Self::Restart | Self::AuthorizeInstall | Self::AuthorizeStart
+            Self::Install
+                | Self::Start
+                | Self::Restart
+                | Self::AuthorizeInstall
+                | Self::AuthorizeStart
         )
     }
 

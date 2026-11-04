@@ -15,12 +15,11 @@ use super::{
     AUTHORIZE_START_SELECTOR, AuthorizationPrompt, AuthorizedRequest, CoreServiceControl,
     INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice, LocalCoreControl,
     LocalCorePresentation, LocalCoreStatus, OPEN_LOGIN_ITEMS_SELECTOR, OfferedLocalMachine,
-    OfferedMachine,
-    RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR, SERVICE_CHECK_SELECTOR,
-    START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR, STOP_SELECTOR,
-    ServiceAction, ServiceConfirmation, ServicePresentation, ServiceStartup, ServiceState,
-    UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR, UNINSTALL_SELECTOR, present,
-    present_service,
+    OfferedMachine, RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR,
+    SERVICE_CHECK_SELECTOR, START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR,
+    STOP_SELECTOR, ServiceAction, ServiceConfirmation, ServicePresentation, ServiceStartup,
+    ServiceState, UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR, UNINSTALL_SELECTOR,
+    present, present_service,
 };
 use crate::appearance::Appearance;
 use crate::machine_connection::CoreError;

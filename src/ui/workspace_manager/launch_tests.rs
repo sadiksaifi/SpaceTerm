@@ -460,11 +460,8 @@ fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &m
 /// that, starts nothing and says the item is off instead.
 #[gpui::test]
 fn start_after_turning_off_in_login_items_starts_nothing(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness_reading_background_item(
-        vec![Ok(LaunchOutcome::Stopped)],
-        [false, true],
-        cx,
-    );
+    let (harness, cx) =
+        launch_harness_reading_background_item(vec![Ok(LaunchOutcome::Stopped)], [false, true], cx);
     cx.run_until_parked();
     assert_eq!(harness.launch.steps(), ["run"]);
 

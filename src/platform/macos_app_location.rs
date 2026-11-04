@@ -455,7 +455,10 @@ mod tests {
             },
         );
 
-        assert_eq!(installed, Some(Installation::Installed(destination.clone())));
+        assert_eq!(
+            installed,
+            Some(Installation::Installed(destination.clone()))
+        );
         assert_eq!(entries(&applications.0), ["SpaceTerm.app"]);
         assert_eq!(contents(&destination), "new");
         assert_eq!(discarded, [("old".to_owned(), "new".to_owned())]);
@@ -482,7 +485,10 @@ mod tests {
                 copied.get()
             },
             || {
-                assert!(copied.get(), "the check runs after the copy, just before the swap");
+                assert!(
+                    copied.get(),
+                    "the check runs after the copy, just before the swap"
+                );
                 true
             },
             |previous| discarded.push(previous.to_owned()),
