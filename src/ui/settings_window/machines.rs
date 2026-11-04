@@ -1134,8 +1134,8 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                     "Off in Login Items",
                     "settings-server-service-state-login-item-off",
                     guidance(
-                        "SpaceTerm Core is turned off in Login Items. Turn it on in System \
-                         Settings to connect.",
+                        "SpaceTerm Core is off in Login Items. Turn it on in System Settings \
+                         to connect.",
                     ),
                 ),
                 ServicePhase::NotRunning => (

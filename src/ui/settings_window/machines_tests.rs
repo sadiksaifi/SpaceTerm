@@ -1262,6 +1262,11 @@ fn a_stopped_core_off_in_login_items_offers_login_items(cx: &mut TestAppContext)
     cx.run_until_parked();
 
     assert_eq!(status(&window, cx), "Off in Login Items");
+    assert_eq!(
+        service_presentation(&window, cx).explanation,
+        "SpaceTerm Core is off in Login Items. Turn it on in System Settings to connect.",
+        "the row says what the launch screen says"
+    );
     assert!(rendered(OPEN_LOGIN_ITEMS_SELECTOR, cx));
     assert!(service.changes().is_empty());
 }
