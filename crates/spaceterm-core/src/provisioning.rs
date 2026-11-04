@@ -37,9 +37,33 @@ pub enum SetupRefusal {
     /// The user declined to let SpaceTerm Core keep running after logout on a remote Linux
     /// machine. Remote Linux requires linger.
     LingerDeclined,
-    /// Network Access was enabled but no QUIC packet reached SpaceTerm Core at `port`. Setup
-    /// turned Network Access off again. Try Again turns it on.
-    UdpBlocked { port: u16 },
+    /// Setup changed Network Access, but no QUIC packet reached SpaceTerm Core at `port`. Setup
+    /// put Network Access back as it was, and `access` is what SpaceTerm Core then reported.
+    /// Try Again changes it again.
+    UdpBlocked { port: u16, access: RestoredAccess },
+}
+
+/// Network Access after setup put it back, as SpaceTerm Core reported it then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoredAccess {
+    /// Network Access is off.
+    Off,
+    /// Network Access is on, at the address it had before setup.
+    On,
+    /// SpaceTerm Core didn't report Network Access after it put it back.
+    Unknown,
+}
+
+impl RestoredAccess {
+    /// What `status`, read after the restore, says. `None` is a read that failed.
+    pub fn read(status: Option<&DirectStatus>) -> Self {
+        match status {
+            Some(status) if status.enabled => Self::On,
+            Some(_) => Self::Off,
+            None => Self::Unknown,
+        }
+    }
 }
 
 /// The exit status of an SSH setup enrollment step when another program holds the Network
@@ -82,6 +106,16 @@ pub struct SetupCancellation {
 pub struct NetworkRestore {
     pub policy: Option<NetworkPolicy>,
     pub enabled: bool,
+}
+
+impl NetworkRestore {
+    /// Network Access as `status`, read before setup changed it, reports it.
+    pub fn before(status: &DirectStatus) -> Self {
+        Self {
+            policy: status.policy.clone(),
+            enabled: status.enabled,
+        }
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -316,6 +350,56 @@ fn ssh_local_address(connection: &str) -> Option<std::net::IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn direct_status(enabled: bool, bind: Option<&str>) -> DirectStatus {
+        DirectStatus {
+            setup_generation: 0,
+            pin: MachinePin {
+                build: "spaceterm".into(),
+                core: [1; 32],
+                public_key: [2; 32],
+                certificate: [3; 32],
+            },
+            policy: bind.map(|bind| NetworkPolicy::new(bind.parse().unwrap()).unwrap()),
+            enabled,
+            machine_name: "penguin".into(),
+            listener: crate::direct::ListenerState::Off,
+            network_addresses: Err(DirectError::Transport),
+        }
+    }
+
+    /// A blocked UDP port puts Network Access back exactly as it was: off when setup turned it
+    /// on, and on at its earlier address when setup only moved it.
+    #[test]
+    fn a_restore_puts_network_access_back_as_it_was_before_setup() {
+        for (enabled, bind) in [
+            (false, None),
+            (false, Some("192.0.2.8:9231")),
+            (true, Some("127.0.0.1:9231")),
+        ] {
+            let before = direct_status(enabled, bind);
+            assert_eq!(
+                NetworkRestore::before(&before),
+                NetworkRestore {
+                    policy: before.policy.clone(),
+                    enabled,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn restored_access_reads_what_the_core_reported_after_the_restore() {
+        assert_eq!(
+            RestoredAccess::read(Some(&direct_status(false, Some("192.0.2.8:9231")))),
+            RestoredAccess::Off
+        );
+        assert_eq!(
+            RestoredAccess::read(Some(&direct_status(true, Some("127.0.0.1:9231")))),
+            RestoredAccess::On
+        );
+        assert_eq!(RestoredAccess::read(None), RestoredAccess::Unknown);
+    }
     #[test]
     fn ssh_socket_metadata_accepts_only_the_complete_connection_tuple() {
         assert_eq!(

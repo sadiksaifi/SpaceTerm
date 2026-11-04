@@ -34,8 +34,9 @@ use spaceterm_core::{
     direct::{DirectError, DirectStatus, MachinePin, NetworkPolicy},
     pane::control::ClientName,
     provisioning::{
-        AccountDiscovery, NetworkRestore, SetupCancellation, SetupCancellationReply, SetupRefusal,
-        SetupReply as EnrollmentResponse, SetupRequest as EnrollmentRequest,
+        AccountDiscovery, NetworkRestore, RestoredAccess, SetupCancellation,
+        SetupCancellationReply, SetupRefusal, SetupReply as EnrollmentResponse,
+        SetupRequest as EnrollmentRequest,
         preflight::{self, Preflight},
     },
     service::{SetupStartObservation, verify_candidate_bytes},
@@ -621,23 +622,22 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         }
         // No QUIC packet reached SpaceTerm Core. Setup revokes its pairing and puts Network
         // Access back as it was, which Try Again changes again.
-        let restored = session.is_some_and(|session| {
+        let Some(session) = session.filter(|session| {
             session.cancel_enrollment(
                 prepared.operation(),
                 &status.pin,
-                Some(NetworkRestore {
-                    policy: status.policy.clone(),
-                    enabled: status.enabled,
-                }),
+                Some(NetworkRestore::before(&status)),
             )
-        });
-        if restored {
-            let _ = self.direct.confirm_setup_cancelled(&prepared);
-            return Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
-                port: bind.port(),
-            }));
-        }
-        Err(SetupFailure::Unreachable { address })
+        }) else {
+            return Err(SetupFailure::Unreachable { address });
+        };
+        let _ = self.direct.confirm_setup_cancelled(&prepared);
+        // The refusal says what is on now, as SpaceTerm Core reports it after the restore.
+        let restored = session.direct_status(&CancellationToken::default()).ok();
+        Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
+            port: bind.port(),
+            access: RestoredAccess::read(restored.as_ref()),
+        }))
     }
 }
 

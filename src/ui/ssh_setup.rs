@@ -17,7 +17,7 @@ use gpui::{App, AppContext, Entity, EventEmitter, Global, SharedString, Window, 
 use crate::cancellation::CancellationToken;
 use crate::domain::SshDestination;
 use crate::ssh::askpass::AskPassAttemptFactory;
-use spaceterm_core::provisioning::{MINIMUM_GLIBC, MINIMUM_MACOS, SetupRefusal};
+use spaceterm_core::provisioning::{MINIMUM_GLIBC, MINIMUM_MACOS, RestoredAccess, SetupRefusal};
 
 use crate::ssh::provisioning::{
     IncompatibilityKind, RefusalKind, SetupApprovalHandler, SetupFailure, SetupOffer,
@@ -179,6 +179,17 @@ pub(crate) fn phase_detail(phase: SetupPhase, name: &str) -> SharedString {
 
 /// What the sheet says while Try Again turns Network Access on `name` back on, until pairing
 /// begins.
+/// What a blocked UDP port left Network Access as, as SpaceTerm Core reported it.
+fn restored_access(access: RestoredAccess, n: &str) -> String {
+    match access {
+        RestoredAccess::Off => format!("Network Access on {n} is off again."),
+        RestoredAccess::On => format!("Network Access on {n} is on again at its earlier address."),
+        RestoredAccess::Unknown => {
+            format!("SpaceTerm couldn\u{2019}t read whether Network Access on {n} is on.")
+        }
+    }
+}
+
 pub(crate) fn restoring_network(name: &str) -> SharedString {
     format!("Turning Network Access on {name} back on\u{2026}").into()
 }
@@ -209,8 +220,10 @@ pub(crate) fn problem(failure: &SetupFailure, name: &str) -> SetupProblem {
     match failure {
         SetupFailure::Unsupported(refusal) => SetupProblem {
             explanation: refusal_sentence(*refusal, n).into(),
-            footnote: matches!(refusal, SetupRefusal::UdpBlocked { .. })
-                .then(|| format!("Network Access on {n} is off again.").into()),
+            footnote: match refusal {
+                SetupRefusal::UdpBlocked { access, .. } => Some(restored_access(*access, n).into()),
+                _ => None,
+            },
             retry: retry_refusal(*refusal),
         },
         SetupFailure::Unreachable { address } => SetupProblem::new(
@@ -323,7 +336,7 @@ fn refusal_sentence(refusal: SetupRefusal, n: &str) -> String {
         SetupRefusal::LingerDeclined => format!(
             "Setup stopped because {n} must let SpaceTerm Core keep running after you log out."
         ),
-        SetupRefusal::UdpBlocked { port } => format!(
+        SetupRefusal::UdpBlocked { port, .. } => format!(
             "SpaceTerm can\u{2019}t reach {n} on UDP port {port}, so allow that port in {n}\u{2019}s firewall and try again."
         ),
     }

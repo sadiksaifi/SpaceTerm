@@ -44,7 +44,7 @@ use crate::direct_connections::{DirectConnections, DirectRouteId, JoinId, JoinSt
 use crate::domain::SshDestination;
 use crate::machine_connection::direct::{DirectError, Endpoint, Invitation, default_port};
 use crate::machine_connection::pane::control::ClientName;
-use spaceterm_core::provisioning::SetupRefusal;
+use spaceterm_core::provisioning::{RestoredAccess, SetupRefusal};
 
 use crate::ssh::provisioning::{
     SetupAddress, SetupFailure, SetupOffer, SetupPhase, SetupProgress, SetupRequest,
@@ -1454,9 +1454,13 @@ impl AddMachineSheet {
             _ => None,
         };
         let setup = Setup {
+            // Only a Network Access SpaceTerm Core confirmed off is turned back on.
             restoring_network: matches!(
                 outcome,
-                SetupFailure::Unsupported(SetupRefusal::UdpBlocked { .. })
+                SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
+                    access: RestoredAccess::Off,
+                    ..
+                })
             ),
             ..setup
         };

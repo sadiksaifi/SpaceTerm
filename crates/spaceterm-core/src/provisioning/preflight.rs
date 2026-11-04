@@ -320,8 +320,15 @@ mod tests {
         let json =
             serde_json::to_string(&SetupRefusal::NobodyLoggedIn { filevault: true }).unwrap();
         assert_eq!(json, r#"{"refusal":"nobody_logged_in","filevault":true}"#);
-        let json = serde_json::to_string(&SetupRefusal::UdpBlocked { port: 9231 }).unwrap();
-        assert_eq!(json, r#"{"refusal":"udp_blocked","port":9231}"#);
+        let json = serde_json::to_string(&SetupRefusal::UdpBlocked {
+            port: 9231,
+            access: super::super::RestoredAccess::Off,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"refusal":"udp_blocked","port":9231,"access":"off"}"#
+        );
         let json = serde_json::to_string(&SetupRefusal::GlibcTooOld {
             found: Some((2, 31)),
         })

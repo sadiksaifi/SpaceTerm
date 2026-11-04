@@ -23,7 +23,7 @@ use crate::settings::storage::testing::MemoryStorage;
 use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
 use crate::ssh::provisioning::{SetupOperation, SshSetupBackend, own_port};
 use crate::ui::appearance_runtime;
-use spaceterm_core::provisioning::SetupRefusal;
+use spaceterm_core::provisioning::{RestoredAccess, SetupRefusal};
 
 /// What the scripted computer does with one setup.
 enum Outcome {
@@ -939,6 +939,7 @@ fn a_blocked_udp_port_is_named_and_try_again_turns_network_access_back_on(cx: &m
             vec![
                 Outcome::Finish(Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
                     port: 9231,
+                    access: RestoredAccess::Off,
                 }))),
                 Outcome::UntilCancelled,
             ]
@@ -960,6 +961,49 @@ fn a_blocked_udp_port_is_named_and_try_again_turns_network_access_back_on(cx: &m
     assert_eq!(sheet.computers.asked().len(), 2, "Try Again sets up again");
     sheet.choose(SheetAction::Cancel.selector());
     sheet.settle(|sheet| !sheet.open());
+}
+
+/// Network Access that was already on before setup moved it stays on after the restore, and the
+/// sheet never says it is off or that Try Again turns it back on.
+#[gpui::test]
+fn a_blocked_udp_port_says_network_access_that_stayed_on_is_on(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![
+                Outcome::Finish(Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
+                    port: 9231,
+                    access: RestoredAccess::On,
+                }))),
+                Outcome::UntilCancelled,
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+
+    assert!(sheet.says("Network Access on penguin is on again at its earlier address."));
+    assert!(!sheet.says("Network Access on penguin is off again."));
+
+    sheet.choose(SheetAction::TryAgain.selector());
+    sheet.settle(|sheet| sheet.computers.asked().len() == 2);
+    assert!(!sheet.says("Turning Network Access on penguin back on\u{2026}"));
+    sheet.choose(SheetAction::Cancel.selector());
+    sheet.settle(|sheet| !sheet.open());
+
+    let unknown = crate::ui::ssh_setup::problem(
+        &SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
+            port: 9231,
+            access: RestoredAccess::Unknown,
+        }),
+        "penguin",
+    );
+    assert_eq!(
+        unknown.footnote.as_deref(),
+        Some("SpaceTerm couldn\u{2019}t read whether Network Access on penguin is on.")
+    );
 }
 
 /// A machine this computer can't reach at an address says where. Back offers that address for
