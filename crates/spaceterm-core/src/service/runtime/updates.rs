@@ -245,6 +245,27 @@ pub(in crate::service) fn record_start_failure(
     })
 }
 
+/// Applies the outcome the activation journal proves to the update record. The activation
+/// writes its journal first, so a power loss or a lost helper can leave the record behind it.
+/// Both applications are idempotent.
+fn reconcile(data: &Directory, state: &State) -> Result<(), CoreError> {
+    use super::super::activation::Outcome;
+    match state
+        .activation
+        .as_ref()
+        .and_then(|operation| operation.outcome())
+    {
+        Some(Outcome::Completed { candidate }) => record_completed(data, candidate),
+        Some(Outcome::Returned {
+            activation,
+            candidate,
+            version,
+            failure,
+        }) => record_start_failure(data, activation, candidate, version, failure),
+        None => Ok(()),
+    }
+}
+
 /// Whether the volume holding `path` has less than `needed` bytes free for this account.
 pub(in crate::service) fn storage_full(path: &Path, needed: u64) -> bool {
     use std::os::unix::ffi::OsStrExt;
@@ -336,6 +357,7 @@ impl Updates {
     pub fn open(service: Service) -> Result<Self, CoreError> {
         let (data, state) = service.read()?.ok_or(CoreError::NotInstalled)?;
         let (running, protocols) = approved(&service, &state)?;
+        reconcile(&data, &state)?;
         let record = load(&data)?;
         let shared = Shared {
             service,

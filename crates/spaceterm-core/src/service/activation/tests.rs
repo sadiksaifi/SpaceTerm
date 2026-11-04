@@ -421,7 +421,11 @@ fn interrupted(
         started_at: None,
         ready: false,
         failed: false,
-        failure: None,
+        failure: matches!(
+            step,
+            Step::ReturnApproved | Step::ReturnStartDispatched | Step::Returned
+        )
+        .then_some(StartFailure::NotReady),
     });
     data.write_json(c"service.json", &state).unwrap();
     *supervisor.approved.lock().unwrap() = if matches!(
@@ -1147,5 +1151,73 @@ fn a_candidate_that_becomes_ready_completes_and_drops_its_snapshot() {
         }
         let facts = update_facts(&service);
         assert_eq!((facts.skipped, facts.last_failure), (None, None));
+    });
+}
+
+/// The update record names `candidate` as the Pending Version, as an install leaves it.
+fn pending_record(service: &Service, candidate: &RetainedInstallation) {
+    let data = Directory::open(&service.paths.data, false).unwrap();
+    data.write_json(
+        c"updates.json",
+        &serde_json::json!({
+            "pending": {
+                "digest": candidate.directory.file_name().unwrap().to_str().unwrap(),
+                "version": candidate.version,
+                "protocols": crate::update::facts::Protocols::CURRENT,
+                "installed_at": 10
+            },
+            "skipped": null, "last_failure": null, "failures": 0,
+            "check": "never", "silent": null, "activation": null
+        }),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_ready_candidate_is_no_longer_pending_even_when_its_helper_never_recorded_it() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::StartDispatched,
+            false,
+        );
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        let run = Run {
+            boot: boot().unwrap(),
+            token: crate::protocol::random().unwrap(),
+        };
+        admit_run(&mut state, &run).unwrap();
+        state.run = Some(run);
+        data.write_json(c"service.json", &state).unwrap();
+        pending_record(&service, &candidate);
+        // The candidate commits readiness, and a power loss ends the helper before it records it.
+        ready(&service.paths).unwrap();
+        assert_eq!(update_facts(&service).pending, None);
+    });
+}
+
+#[test]
+fn a_return_whose_failure_was_never_recorded_is_recorded_once_from_the_journal() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::ReturnApproved,
+            true,
+        );
+        pending_record(&service, &candidate);
+        let version = crate::update::facts::Version::parse(&candidate.version).unwrap();
+        for _ in 0..2 {
+            let facts = update_facts(&service);
+            assert_eq!(facts.pending, None);
+            assert_eq!(facts.skipped, Some(version.clone()));
+            assert_eq!(facts.last_failure.map(|failure| failure.id), Some(1));
+        }
     });
 }

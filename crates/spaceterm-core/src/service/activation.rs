@@ -169,7 +169,39 @@ pub(super) struct Operation {
     /// Why the candidate did not become ready, once the return began.
     failure: Option<StartFailure>,
 }
+/// How an activation ended, as the update record must name it.
+pub(super) enum Outcome<'a> {
+    /// The candidate became ready and runs now.
+    Completed { candidate: &'a str },
+    /// The candidate did not become ready, and the Core returned to the previous version.
+    Returned {
+        activation: [u8; 32],
+        candidate: &'a str,
+        version: &'a str,
+        failure: StartFailure,
+    },
+}
+
 impl Operation {
+    /// The outcome this journal proves, once the activation is past its last change to the
+    /// update record.
+    pub(super) fn outcome(&self) -> Option<Outcome<'_>> {
+        match (self.step, self.failure) {
+            (Step::Completed, _) if self.ready => Some(Outcome::Completed {
+                candidate: &self.candidate.digest,
+            }),
+            (
+                Step::ReturnApproved | Step::ReturnStartDispatched | Step::Returned,
+                Some(failure),
+            ) => Some(Outcome::Returned {
+                activation: self.id,
+                candidate: &self.candidate.digest,
+                version: &self.candidate.version,
+                failure,
+            }),
+            _ => None,
+        }
+    }
     pub(super) fn pending(&self) -> bool {
         !matches!(self.step, Step::Completed | Step::Returned)
     }
