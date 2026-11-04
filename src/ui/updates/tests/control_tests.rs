@@ -217,9 +217,42 @@ fn a_restart_with_no_sessions_performs_at_once(cx: &mut gpui::TestAppContext) {
     visual.simulate_click(button.center(), gpui::Modifiers::none());
     visual.run_until_parked();
     assert_eq!(
-        machines.performed(),
+        machines.executed_actions(),
         vec![(PENGUIN, MachineAction::Restart)]
     );
+}
+
+/// When the Core refuses a restart's preview, the window previews again and asks; it never
+/// restarts again by itself.
+#[gpui::test]
+fn a_refused_restart_never_runs_again_by_itself(cx: &mut gpui::TestAppContext) {
+    let (_, _, machines) = services(cx);
+    // The application-wide owner of update prompts hears each window action's outcome.
+    cx.update(crate::ui::updates::init);
+    let visual = hosted(cx);
+    machines.emit(MachineUpdatesEvent::Machines(vec![waiting(
+        PENGUIN, "penguin", 0,
+    )]));
+    visual.run_until_parked();
+    click("update-control", visual);
+    assert_eq!(
+        machines.executed_actions(),
+        vec![(PENGUIN, MachineAction::Restart)]
+    );
+
+    machines.emit(MachineUpdatesEvent::Finished {
+        machine: PENGUIN,
+        action: MachineAction::Restart,
+        outcome: Err(crate::updates::machines::ActionFailure::Changed),
+    });
+    visual.run_until_parked();
+    assert_eq!(machines.asked().len(), 2, "it previews again");
+    assert_eq!(
+        machines.executed_actions().len(),
+        1,
+        "a refused restart waits for a fresh confirmation"
+    );
+    assert!(machines.performed().is_empty());
 }
 
 #[gpui::test]
@@ -245,7 +278,10 @@ fn two_items_open_a_compact_menu_with_one_line_per_machine_and_restart_all(
     assert!(visual.debug_bounds("update-row-2").is_some());
     assert!(visual.debug_bounds("update-row-3").is_none());
     assert!(visual.debug_bounds("update-restart-all").is_some());
-    assert!(machines.performed().is_empty(), "opening performs nothing");
+    assert!(
+        machines.executed_actions().is_empty(),
+        "opening performs nothing"
+    );
 }
 
 /// A window whose root holds the title-bar control under a modal layer, as a Workspace Window
@@ -298,12 +334,15 @@ fn the_title_bar_restart_asks_and_only_the_approved_work_restarts(cx: &mut gpui:
     tree.text("Restart SpaceTerm Core on penguin?");
     tree.text("This will close your 3 running sessions.");
     assert!(
-        machines.performed().is_empty(),
+        machines.executed_actions().is_empty(),
         "an open alert performs nothing"
     );
 
     click(CANCEL, visual);
-    assert!(machines.performed().is_empty(), "Cancel performs nothing");
+    assert!(
+        machines.executed_actions().is_empty(),
+        "Cancel performs nothing"
+    );
 
     // A fourth session opens while the alert says three: approving asks again.
     click("update-control", visual);
@@ -313,14 +352,14 @@ fn the_title_bar_restart_asks_and_only_the_approved_work_restarts(cx: &mut gpui:
     visual.run_until_parked();
     click(CONFIRM, visual);
     assert!(
-        machines.performed().is_empty(),
+        machines.executed_actions().is_empty(),
         "an approval for three sessions never closes four"
     );
     A11yTree::read(visual).text("This will close your 4 running sessions.");
 
     click(CONFIRM, visual);
     assert_eq!(
-        machines.performed(),
+        machines.executed_actions(),
         vec![(PENGUIN, MachineAction::Restart)]
     );
 }
@@ -410,7 +449,7 @@ fn an_overdue_restart_with_sessions_open_never_runs_by_itself(cx: &mut gpui::Tes
     assert_eq!(shown.len(), 1);
     assert_eq!(shown[0].1, "Restart overdue on penguin");
     assert!(
-        machines.performed().is_empty(),
+        machines.executed_actions().is_empty(),
         "the reminder restarts nothing"
     );
 
@@ -418,7 +457,7 @@ fn an_overdue_restart_with_sessions_open_never_runs_by_itself(cx: &mut gpui::Tes
     reminders.click(&shown[0].0);
     cx.run_until_parked();
     assert!(
-        machines.performed().is_empty(),
+        machines.executed_actions().is_empty(),
         "the click restarts nothing unasked"
     );
 }
@@ -491,5 +530,5 @@ fn the_menu_reads_in_full_and_its_information_stays_reachable(cx: &mut gpui::Tes
     assert!(row["aria"]["keyboard_shortcut"].is_null());
     let recent = tree.node("Recent");
     assert_ne!(recent["aria"]["disabled"], true, "Recent opens");
-    assert!(machines.performed().is_empty());
+    assert!(machines.executed_actions().is_empty());
 }

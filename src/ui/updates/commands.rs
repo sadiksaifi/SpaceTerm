@@ -2,6 +2,8 @@
 //! the agreed confirmation before closing sessions, or an alert with the full sentence. Normal
 //! update actions never open Settings.
 
+use std::rc::Rc;
+
 use gpui::{AnyWindowHandle, App, Context, SharedString, WeakEntity, Window};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
@@ -10,8 +12,8 @@ use spaceterm_ui::{
 
 use super::{UpdateControl, front_workspace_window, service, whats_new};
 use crate::updates::UpdateState;
-use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice, Surface};
-use crate::updates::machines::{ActionFailure, MachineAction};
+use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
+use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
 use crate::updates::presentation::{
     self, Command, Confirmation, DesktopAction, Explanation, ItemKey,
 };
@@ -45,6 +47,9 @@ fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
                 updates.update(cx, |updates, cx| updates.dismiss_failure(cx));
             }
         }
+        Command::Machine(machine, action @ (MachineAction::Restart | MachineAction::Stop)) => {
+            request(vec![(machine, action)], false, presenter, cx);
+        }
         Command::Machine(machine, action) => {
             if let Some(store) = MachineUpdates::global(cx) {
                 store.update(cx, |store, cx| {
@@ -52,7 +57,8 @@ fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
                 });
             }
         }
-        Command::Confirm(confirmation) => confirm(confirmation, presenter, cx),
+        // The confirmation is built again from the Cores' previews before it shows.
+        Command::Confirm(confirmation) => request(confirmation.actions, false, presenter, cx),
         Command::Explain(explanation) => explain(explanation, presenter, cx),
     }
 }
@@ -152,33 +158,23 @@ pub(super) fn confirmation_alert(confirmation: &Confirmation) -> Alert<Answer> {
     .intent(AlertIntent::Critical)
 }
 
-/// Asks first, then performs the confirmation's actions only while its approval holds. When the
-/// sessions, the running Core or the Pending Version changed while the alert was open, the
-/// approval covers other work, so the control asks again with what is true now.
-fn confirm(confirmation: Confirmation, presenter: Presenter, cx: &mut App) {
-    let alert = confirmation_alert(&confirmation);
-    let again = presenter.clone();
-    present_in(
-        presenter,
-        alert,
-        move |answer, cx| {
-            if answer != Answer::Proceed {
-                return;
-            }
-            let Some(store) = MachineUpdates::global(cx) else {
-                return;
-            };
-            let approved = store.update(cx, |store, cx| {
-                store.perform_approved(&confirmation, Surface::Window, cx)
-            });
-            if approved.is_err()
-                && let Some(command) = presentation::current(cx).ask_again(&confirmation)
-            {
-                perform(command, again, cx);
-            }
-        },
-        cx,
-    );
+/// Restarts or stops on the Cores' own previews, confirming through `presenter`.
+fn request(
+    actions: Vec<(MachineId, MachineAction)>,
+    always: bool,
+    presenter: Presenter,
+    cx: &mut App,
+) {
+    let ask: store::Ask = Rc::new(move |confirmation: Confirmation, answered, cx| {
+        let alert = confirmation_alert(&confirmation);
+        present_in(
+            presenter.clone(),
+            alert,
+            move |answer, cx| answered(answer == Answer::Proceed, cx),
+            cx,
+        );
+    });
+    store::request(actions, always, Surface::Window, ask, cx);
 }
 
 pub(super) fn explanation_alert(explanation: &Explanation) -> Alert<Answer> {
@@ -225,18 +221,16 @@ pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
     let (Surface::Window, Err(failure)) = (notice.surface, notice.outcome) else {
         return;
     };
-    // The Core's preview found other sessions than the person saw: ask again.
+    // The Core refused its preview: the sessions or the Pending Version changed since. The
+    // window previews again and always asks, so nothing runs again by itself.
     if failure == ActionFailure::Changed {
-        let presentation = presentation::current(cx);
-        let command = presentation
-            .machine(notice.machine)
-            .and_then(|view| match notice.action {
-                MachineAction::Restart => Some(view.restart_command()),
-                MachineAction::Stop => Some(view.stop_command()),
-                _ => None,
-            });
-        if let Some(command) = command {
-            perform(command, Presenter::Front, cx);
+        if matches!(notice.action, MachineAction::Restart | MachineAction::Stop) {
+            request(
+                vec![(notice.machine, notice.action.clone())],
+                true,
+                Presenter::Front,
+                cx,
+            );
         }
         return;
     }

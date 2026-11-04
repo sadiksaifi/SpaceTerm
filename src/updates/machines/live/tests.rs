@@ -343,6 +343,15 @@ fn finished(events: &Events, expected: &MachineAction) -> Result<(), ActionFailu
     })
 }
 
+/// The adapter's preview of `action` on `machine`.
+fn previewed(
+    adapter: &LiveMachines,
+    machine: MachineId,
+    action: MachineAction,
+) -> Result<MachinePreview, ActionFailure> {
+    adapter.preview(machine, action).recv_blocking().unwrap()
+}
+
 fn listing(events: &Events) -> Vec<MachineId> {
     until(events, "the Machines", |event| match event {
         MachineUpdatesEvent::Machines(machines) => {
@@ -467,20 +476,18 @@ fn actions_become_lane_requests_and_stop_stays_local() {
     let (adapter, events) = started(&sources, RESTART_LIMIT);
     all_reported(&events, &[LOCAL, PENGUIN]);
 
-    for action in [
-        MachineAction::Install,
-        MachineAction::CheckAgain,
-        MachineAction::Restart,
-    ] {
+    for action in [MachineAction::Install, MachineAction::CheckAgain] {
         adapter.perform(PENGUIN, action.clone());
         assert_eq!(finished(&events, &action), Ok(()));
     }
-    adapter.perform(PENGUIN, MachineAction::Stop);
+    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap());
+    assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     assert_eq!(
-        finished(&events, &MachineAction::Stop),
-        Err(ActionFailure::Failed)
+        previewed(&adapter, PENGUIN, MachineAction::Stop),
+        Err(ActionFailure::Failed),
+        "Stop is This Mac's alone"
     );
-    adapter.perform(LOCAL, MachineAction::Stop);
+    adapter.execute(previewed(&adapter, LOCAL, MachineAction::Stop).unwrap());
     assert_eq!(finished(&events, &MachineAction::Stop), Ok(()));
 
     assert_eq!(
@@ -498,12 +505,11 @@ fn actions_become_lane_requests_and_stop_stays_local() {
     );
 }
 
-/// A Restart whose Core previews more sessions than the facts the person saw, or of a Core
-/// whose facts are unknown, executes nothing and asks again.
+/// Restart and Stop never run through `perform`, with facts known or not: only a preview the
+/// person confirmed runs them, so nothing reaches the Core.
 #[test]
-fn a_restart_runs_only_on_the_sessions_the_person_saw() {
-    let lane = ScriptedLane::new([Ok(facts(1, 3, Some("0.9.0")))]);
-    lane.preview_ends(6);
+fn perform_never_restarts_or_stops() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, Some("0.9.0")))]);
     let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
     let unreported_lane =
         ScriptedLane::new([Err(ActionFailure::Unavailable(Unavailable::CoreTooOld))]);
@@ -522,22 +528,15 @@ fn a_restart_runs_only_on_the_sessions_the_person_saw() {
         (facts_seen && unreported_seen).then_some(())
     });
 
-    adapter.perform(PENGUIN, MachineAction::Restart);
-    assert_eq!(
-        finished(&events, &MachineAction::Restart),
-        Err(ActionFailure::Changed)
-    );
-    assert_eq!(lane.actions(), ["preview Restart"], "nothing executes");
-
-    adapter.perform(LOCAL, MachineAction::Restart);
-    assert_eq!(
-        finished(&events, &MachineAction::Restart),
-        Err(ActionFailure::Changed)
-    );
-    assert!(
-        unreported_lane.actions().is_empty(),
-        "unknown facts never restart silently"
-    );
+    for (id, action) in [
+        (PENGUIN, MachineAction::Restart),
+        (LOCAL, MachineAction::Restart),
+        (LOCAL, MachineAction::Stop),
+    ] {
+        adapter.perform(id, action.clone());
+        assert_eq!(finished(&events, &action), Err(ActionFailure::Failed));
+    }
+    assert!(lane.actions().is_empty() && unreported_lane.actions().is_empty());
 }
 
 /// A preview reports what the Core itself will end, and executing it runs exactly that
@@ -599,7 +598,7 @@ fn a_restart_that_does_not_come_back_reads_cant_confirm() {
     let (adapter, events) = started(&sources, Duration::from_millis(300));
     changed(&events, "the facts", |update| update.facts.is_some());
 
-    adapter.perform(PENGUIN, MachineAction::Restart);
+    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap());
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     // The Core closes its lane to restart and does not come back.
     let unconfirmed = changed(&events, "the unconfirmed restart", |update| {

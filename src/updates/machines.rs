@@ -143,9 +143,7 @@ pub(crate) trait MachineUpdatesAdapter {
         events: async_channel::Sender<MachineUpdatesEvent>,
     ) -> Result<(), MachineUpdatesError>;
     /// Performs an action that needs no confirmation: Install, Check Again, Dismiss Failure or
-    /// Start. A Restart or Stop given here runs only when the Core's own preview matches the
-    /// facts this adapter last reported; otherwise it finishes with
-    /// [`ActionFailure::Changed`] and nothing runs. Unknown facts never restart silently.
+    /// Start. Restart and Stop run only through [`Self::preview`] and [`Self::execute`].
     fn perform(&self, machine: MachineId, action: MachineAction);
     /// Asks the Machine's Core to preview a Restart or Stop.
     fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer;

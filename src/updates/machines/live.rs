@@ -269,9 +269,7 @@ impl MachineUpdatesAdapter for LiveMachines {
             return;
         };
         let performed = action.clone();
-        self.spawn_action(shared, machine, action, move |shared| {
-            act(shared, machine, &target, &performed)
-        });
+        self.spawn_action(shared, machine, action, move |_| act(&target, &performed));
     }
 
     fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
@@ -388,59 +386,23 @@ fn run_previewed(
     outcome
 }
 
-fn act(
-    shared: &Shared,
-    id: MachineId,
-    target: &Target,
-    action: &MachineAction,
-) -> Result<(), ActionFailure> {
+fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
     match action {
         MachineAction::DismissFailure(_) => return Ok(()),
         MachineAction::Start if target.known.local => return target.known.machine.start(),
-        // Start reverses a deliberate local Stop. Stop is This Mac's or This Computer's alone.
-        MachineAction::Start | MachineAction::Stop if !target.known.local => {
+        // Restart and Stop run only through `execute`, on a preview the person confirmed. Start
+        // reverses a deliberate local Stop, so it is This Mac's or This Computer's alone.
+        MachineAction::Restart | MachineAction::Stop | MachineAction::Start => {
             return Err(ActionFailure::Failed);
         }
-        _ => {}
+        MachineAction::Install | MachineAction::CheckAgain => {}
     }
     let Reach::Lane { lane, .. } = target.known.machine.reach() else {
         return Err(ActionFailure::Unreachable);
     };
     match action {
         MachineAction::Install => lane.install(target.push.as_deref()),
-        MachineAction::CheckAgain => lane.check(),
-        MachineAction::Restart | MachineAction::Stop => {
-            let change = change_of(target.known.local, action)?;
-            // Without its own preview, only facts this adapter reported can stand for what the
-            // person confirmed, and only when the Core previews exactly those. Unknown facts
-            // never restart silently.
-            let Some(facts) = &target.facts else {
-                return Err(ActionFailure::Changed);
-            };
-            let lane_preview = lane.preview(change)?;
-            let previewed = MachinePreview {
-                machine: id,
-                action: action.clone(),
-                sessions: lane_preview.effects.ends_sessions,
-                target: previewed_target(&lane_preview),
-                id: 0,
-            };
-            let pending = facts.pending.as_ref().map(|pending| &pending.version);
-            let target_changed = change == LaneChange::Restart
-                && previewed
-                    .target
-                    .as_ref()
-                    .is_some_and(|to| Some(to) != pending);
-            if previewed.sessions != facts.sessions || target_changed {
-                return Err(ActionFailure::Changed);
-            }
-            let previewed = MachinePreview {
-                target: previewed.target.or_else(|| pending.cloned()),
-                ..previewed
-            };
-            run_previewed(shared, id, lane.as_ref(), &previewed, lane_preview)
-        }
-        MachineAction::Start | MachineAction::DismissFailure(_) => Ok(()),
+        _ => lane.check(),
     }
 }
 

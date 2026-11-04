@@ -19,7 +19,9 @@ use spaceterm_core::update::facts::{
 };
 
 use super::machines::store::MachineUpdates;
-use super::machines::{ActionFailure, MachineAction, MachineId, MachineLink, MachineUpdate};
+use super::machines::{
+    ActionFailure, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
+};
 use super::policy::{DAY, UpdateStage};
 use super::{UpdateError, UpdateService, UpdateState};
 
@@ -87,11 +89,11 @@ pub(crate) struct Confirmation {
     pub(crate) approval: Approval,
 }
 
-/// What a confirmation described for each Machine it affects: the sessions it closes, the Core
-/// that runs and the Pending Version it restarts into. Every surface checks
-/// [`Approval::holds`] against the current facts before it performs an approved action, and
-/// asks again with [`Presentation::ask_again`] when it does not hold. The Core's own preview
-/// refuses a changed session count with [`ActionFailure::Changed`] as the lane-side guard.
+/// What a confirmation described for each Machine it affects whose facts are known: the sessions
+/// it closes, the Core that runs and the Pending Version it restarts into. A surface checks
+/// [`Approval::holds`] against the current facts before it executes the approved previews, and
+/// previews again when it does not hold. The Core refuses its own preview's token once the
+/// sessions or the Pending Version changed, which also covers a Machine without facts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Approval {
     machines: Vec<Described>,
@@ -125,6 +127,8 @@ impl Approval {
         Self {
             machines: views
                 .iter()
+                // Without facts there is nothing to compare; the Core's token guards alone.
+                .filter(|view| view.running.is_some())
                 .map(|view| Described {
                     machine: view.machine,
                     sessions: view.sessions,
@@ -442,17 +446,22 @@ impl MachineView {
         if self.sessions == 0 {
             return Command::Machine(self.machine, MachineAction::Stop);
         }
-        Command::Confirm(Confirmation {
+        Command::Confirm(self.stop_confirmation())
+    }
+
+    fn stop_confirmation(&self) -> Confirmation {
+        let stays = "SpaceTerm Core stays stopped until you start it again.";
+        let message = match self.sessions {
+            0 => stays.to_owned(),
+            n => format!("This will close your {}. {stays}", running_sessions(n)),
+        };
+        Confirmation {
             title: format!("Stop SpaceTerm Core on {}?", self.place()).into(),
-            message: format!(
-                "This will close your {}. SpaceTerm Core stays stopped until you start it again.",
-                running_sessions(self.sessions)
-            )
-            .into(),
+            message: message.into(),
             button: "Stop".into(),
             actions: vec![(self.machine, MachineAction::Stop)],
             approval: Approval::of(std::slice::from_ref(self)),
-        })
+        }
     }
 
     /// The full sentence: the tooltip, the accessibility description and the alert text.
@@ -1568,21 +1577,33 @@ impl Presentation {
         })
     }
 
-    /// What a surface offers now for the work `stale` asked about, when its approval no longer
-    /// holds: the current confirmation, or the action itself when nothing asks any more.
-    pub(crate) fn ask_again(&self, stale: &Confirmation) -> Option<Command> {
-        match stale.actions.as_slice() {
-            [(machine, MachineAction::Restart)] => Some(self.machine(*machine)?.restart_command()),
-            [(machine, MachineAction::Stop)] => Some(self.machine(*machine)?.stop_command()),
-            actions if actions.len() > 1 => match self.restart_all() {
-                Some(all) => Some(all.command),
-                // One waiting Machine is left: its own restart.
-                None => self
-                    .machines
-                    .iter()
-                    .find(|view| view.state.waiting().is_some())
-                    .map(MachineView::restart_command),
-            },
+    /// The confirmation for the Restarts or the Stop `previews` describe, with the sessions each
+    /// Core itself will end. None when nothing asks: no session closes and no breaking change
+    /// waits, unless `always`, as after a Core refused a preview the person never saw. A
+    /// Machine no longer listed is left out.
+    pub(crate) fn previewed(
+        &self,
+        previews: &[MachinePreview],
+        always: bool,
+    ) -> Option<Confirmation> {
+        let views: Vec<MachineView> = previews
+            .iter()
+            .filter_map(|preview| {
+                let mut view = self.machine(preview.machine)?.clone();
+                view.sessions = preview.sessions;
+                Some(view)
+            })
+            .collect();
+        match previews.first().map(|preview| &preview.action) {
+            Some(MachineAction::Stop) => {
+                let [view] = views.as_slice() else {
+                    return None;
+                };
+                (always || view.sessions > 0).then(|| view.stop_confirmation())
+            }
+            Some(MachineAction::Restart) if !views.is_empty() => (always
+                || views.iter().any(MachineView::restart_asks))
+            .then(|| restart_confirmation(&views)),
             _ => None,
         }
     }
