@@ -1,7 +1,8 @@
 """Package and verify the Preflight or release application bundle and disk image.
 
 Only a release tag selects the SpaceTerm identity; every other package is SpaceTerm
-Preflight.
+Preflight. A release embeds its release notes. Outside a dry run it is signed with Developer ID,
+and the app and the disk image are each notarized and stapled.
 """
 
 import json
@@ -17,15 +18,17 @@ import tomllib
 from contextlib import nullcontext
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, macos_codesign, macos_signing, sparkle
+from spaceterm_tasks import ROOT, TaskError, macos_codesign, macos_notary, macos_signing, sparkle
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
     DIST,
     PREFLIGHT_VERSION,
+    RELEASE_NOTES,
     TERMINFO,
     checked,
     packaged_environment,
+    release_notes_file,
     release_version,
     require_clean_checkout,
     selected_identity,
@@ -43,14 +46,20 @@ def require_apple_silicon():
         raise TaskError("SpaceTerm packages only on Apple Silicon Macs")
 
 
-def package(release_tag=None):
-    """Build, bundle, and verify one identity, then move the app and disk image into dist/."""
+def package(release_tag=None, notes=None):
+    """Build, bundle, and verify one identity, then move the app and disk image into dist/.
+
+    A release embeds the release notes file `notes`.
+    """
     require_apple_silicon()
     if release_tag:
         require_clean_checkout()
-        if macos_codesign.signing_identity(os.environ) != macos_codesign.ADHOC:
+        release_notes_file(release_tag, notes)
+        # Refuse missing signing and notarization inputs before the build, not after it.
+        if macos_notary.required(os.environ):
             macos_signing.signing_credentials(os.environ)
-    package_bundle(release_tag)
+            macos_notary.credentials(os.environ)
+    package_bundle(release_tag, notes)
 
 
 def signer(release_tag):
@@ -60,7 +69,7 @@ def signer(release_tag):
     return macos_codesign.signing_identity(os.environ), macos_codesign.team_id(os.environ)
 
 
-def package_bundle(release_tag=None):
+def package_bundle(release_tag=None, notes=None):
     name = selected_identity(release_tag)
     template = identity(name)
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION
@@ -79,6 +88,7 @@ def package_bundle(release_tag=None):
     config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
     identity_name, team = signer(release_tag)
     if release_tag:
+        environment[RELEASE_NOTES] = str(release_notes_file(release_tag, notes))
         updater = sparkle.directory()
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]
@@ -118,6 +128,7 @@ def package_bundle(release_tag=None):
         dmg = output / f"{app_name}_{version}_aarch64.dmg"
         # cargo-packager signs every native file with the app's entitlements and never
         # reseals nested bundles. SpaceTerm signs instead, after the app and before the image.
+        # A release notarizes and staples the app there too, so the image holds a stapled app.
         config["before-each-package-command"] = (
             f"{shlex.quote(sys.executable)} -m spaceterm_tasks.package_macos sign-app"
         )
@@ -126,6 +137,7 @@ def package_bundle(release_tag=None):
             "SPACETERM_PACKAGER_IDENTITY": identity_name,
             "SPACETERM_PACKAGER_ENTITLEMENTS": str(identity_directory(name) / "Entitlements.plist"),
             **({"SPACETERM_PACKAGER_TEAM": team} if team else {}),
+            **({"SPACETERM_PACKAGER_RELEASE": "1"} if release_tag else {}),
         }
         print(f"Packaging {app_name}.app and {app_name}.dmg with cargo-packager")
         signing = (
@@ -133,7 +145,10 @@ def package_bundle(release_tag=None):
             if identity_name != macos_codesign.ADHOC
             else nullcontext()
         )
-        with signing:
+        notarizing = macos_notary.notary() if release_tag else nullcontext()
+        with signing, notarizing as notary:
+            if notary is not None:
+                hook.update(notary.environment())
             packaged = subprocess.run(
                 ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
                 cwd=ROOT,
@@ -144,6 +159,8 @@ def package_bundle(release_tag=None):
             macos_codesign.sign_disk_image(
                 dmg, identity_name, template["CFBundleIdentifier"], environment=environment
             )
+            if release_tag:
+                macos_notary.notarize(dmg, notary, environment)
         staged_dmg = Path(temporary) / f"{app_name}.dmg"
         dmg.rename(staged_dmg)
         verify(app, staged_dmg, release_tag)
@@ -166,6 +183,8 @@ def verify(app=None, dmg=None, release_tag=None):
     identity_name, team = signer(release_tag)
     if identity_name != macos_codesign.ADHOC:
         macos_codesign.verify_disk_image(dmg, identity(name)["CFBundleIdentifier"], team)
+    if release_tag:
+        macos_notary.assess(dmg)
     with tempfile.TemporaryDirectory(prefix="spaceterm-verify-") as temporary:
         mount = Path(temporary) / "mount"
         mount.mkdir()
@@ -265,6 +284,8 @@ def verify_bundle(app, name, release_tag, label):
         identity=identity_name,
         label=f"{label} app",
     )
+    if release_tag:
+        macos_notary.assess(app)
     framework = contents / "Frameworks" / "Sparkle.framework"
     if framework.exists() != bool(release_tag):
         raise TaskError(f"{label} updater framework must ship with releases only")
@@ -296,6 +317,8 @@ def sign_app(environment):
         team=environment.get("SPACETERM_PACKAGER_TEAM"),
         environment=macos_signing.signing_environment(environment),
     )
+    if environment.get("SPACETERM_PACKAGER_RELEASE") == "1":
+        macos_notary.notarize(app, macos_notary.from_environment(environment), environment)
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["sign-app"]:

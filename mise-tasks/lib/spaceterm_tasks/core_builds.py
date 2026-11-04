@@ -12,7 +12,7 @@ from spaceterm_tasks import ROOT, TaskError
 from spaceterm_tasks.core_catalog import stage_catalog
 from spaceterm_tasks.core_package import TARGETS, host_target, package
 from spaceterm_tasks.packaging import checked
-from spaceterm_tasks.release import sha256
+from spaceterm_tasks.update_signing import sha256
 
 NONPRODUCTION = ("spaceterm-development", "spaceterm-preflight")
 

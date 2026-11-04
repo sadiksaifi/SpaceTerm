@@ -13,12 +13,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, core_package, macos_codesign
-from tests.core_artifact_fixture import configure_trust, prepare
+from spaceterm_tasks import ROOT, core_package, macos_codesign, macos_signing, update_signing
+from tests.core_artifact_fixture import SEED, configure_trust, prepare
 from tests.macos_signing_fixture import NAME, TEAM, certificate
 
 
 class PackageTests(unittest.TestCase):
+    """Preflight packages for real, and release packages as a dry run: ad hoc under the
+    hardened runtime, signed with the fixture update key, not notarized."""
+
     @classmethod
     def setUpClass(cls):
         temporary = tempfile.TemporaryDirectory(prefix="spaceterm-package-certificate-")
@@ -76,10 +79,9 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     "arguments": sys.argv[2:],
     "packaged": os.environ.get("SPACETERM_PACKAGED"),
     "release_tag": os.environ.get("SPACETERM_RELEASE_TAG"),
-    "private_inputs": [name for name in (
-        "MACOS_SIGNING_CERTIFICATE_P12", "MACOS_SIGNING_CERTIFICATE_PASSWORD",
-        "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "UPDATE_SIGNING_KEY",
-    ) if name in os.environ],
+    "release_notes": os.environ.get("SPACETERM_RELEASE_NOTES"),
+    "private_inputs": [name for name in {list(macos_signing.SIGNING_INPUTS)!r}
+                       if name in os.environ],
     "signing_available": os.environ["BUILD_SIGNING_FINGERPRINT"] in subprocess.run(
         ["security", "find-identity", "-p", "codesigning"],
         capture_output=True, text=True, check=True,
@@ -93,6 +95,8 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
         self.record = Path(self.directory.name) / "build.json"
+        self.notes = Path(self.directory.name) / "release-notes.md"
+        self.notes.write_text("### Features\n\n- Add terminal panes\n")
         self.env = {
             **os.environ,
             **self.credentials,
@@ -101,6 +105,8 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             "BUILD_RECORD": str(self.record),
             "BUILD_SIGNING_FINGERPRINT": self.fingerprint,
             # Release packaging here is the dry run: a self-signed certificate has no Team ID.
+            update_signing.DRY_RUN: "1",
+            update_signing.SIGNING_SECRET: update_signing.encoded_seed(SEED),
             macos_codesign.TEAM_ID: TEAM,
             macos_codesign.SIGNING_IDENTITY: macos_codesign.ADHOC,
         }
@@ -186,7 +192,14 @@ int main(int argc, char **argv) {{
         )
         self.compile_executable(self.artifact, self.compiled_identities[self.artifact], digest)
         if release_tag:
-            return self.task("release/package/macos.py", release_tag)
+            return self.task(
+                "release/desktop/macos.py",
+                release_tag,
+                "--notes",
+                str(self.notes),
+                "--core",
+                self.env["SPACETERM_CLI_ARTIFACTS"],
+            )
         return self.task("preflight/package/macos.py")
 
     def executable_uuid(self, executable):
@@ -264,6 +277,9 @@ int main(int argc, char **argv) {{
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
         self.assertNotIn("spaceterm", {path.name for path in bundled.parent.iterdir()})
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
+        self.assertEqual(
+            json.loads(self.record.read_text())["release_notes"], str(self.notes.resolve())
+        )
         self.assertEqual(json.loads(self.record.read_text())["private_inputs"], [])
         self.assertFalse(json.loads(self.record.read_text())["signing_available"])
         catalog = bundled.parent.parent / "Resources/core-artifacts"
@@ -283,6 +299,20 @@ int main(int argc, char **argv) {{
         ):
             self.assertIn("(adhoc,runtime)", macos_codesign.details(code))
         self.assertEqual(macos_codesign.signed_entitlements(app), {})
+        self.assertIn("Dry run: notarization and stapling skipped for SpaceTerm.app", result.stdout)
+        self.assertIn("Dry run: notarization and stapling skipped for SpaceTerm.dmg", result.stdout)
+        self.assertEqual(
+            {path.name for path in (self.root / "dist/release-desktop-macos").iterdir()},
+            {"SpaceTerm-0.0.1-macos-arm64.dmg", "appcast.xml"},
+        )
+
+    def test_release_packaging_requires_the_release_notes_before_building(self):
+        self.compile_executable(self.artifact, "SpaceTerm")
+        self.notes.unlink()
+        result = self.package("v0.0.1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("embeds its release notes", result.stderr)
+        self.assertFalse(self.record.exists())
 
     def test_verification_rejects_a_tampered_core_catalog(self):
         self.compile_executable(self.artifact, "SpaceTerm Preflight")
@@ -299,8 +329,10 @@ int main(int argc, char **argv) {{
         for changes, message in (
             ({macos_codesign.TEAM_ID: None}, macos_codesign.TEAM_ID),
             ({macos_codesign.SIGNING_IDENTITY: None}, macos_codesign.SIGNING_IDENTITY),
+            ({update_signing.DRY_RUN: None}, "a release signs with Developer ID"),
             (
                 {
+                    update_signing.DRY_RUN: None,
                     macos_codesign.SIGNING_IDENTITY: NAME,
                     "MACOS_SIGNING_CERTIFICATE_P12": None,
                     "MACOS_SIGNING_CERTIFICATE_PASSWORD": None,

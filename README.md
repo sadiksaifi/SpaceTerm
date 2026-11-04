@@ -19,12 +19,6 @@ curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/inst
 
 On a machine you only connect to from elsewhere, leave out `--desktop`. You get SpaceTerm Core on its own, and `spaceterm setup` starts it.
 
-On a Mac, you can also install with Homebrew:
-
-```sh
-brew install --cask sadiksaifi/tap/spaceterm
-```
-
 ## Workspace hierarchy
 
 ```mermaid

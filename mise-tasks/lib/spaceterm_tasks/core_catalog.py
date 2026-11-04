@@ -11,7 +11,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from spaceterm_tasks import TaskError, release
+from spaceterm_tasks import TaskError, update_signing
 from spaceterm_tasks.core_package import MAX_ARCHIVE, TARGETS, host_target, verified_copy
 
 FILES = {"artifact.tar.gz": MAX_ARCHIVE, "artifact.sig": 64, "artifact.sha256": 65}
@@ -160,7 +160,7 @@ def stage_catalog(archive, signature, destination, identity, *, source=None, req
                 _copy_pair_file(archive, local / "artifact.tar.gz", MAX_ARCHIVE)
                 _copy_pair_file(signature, local / "artifact.sig", 64)
                 (local / "artifact.sha256").write_text(
-                    release.sha256(local / "artifact.tar.gz") + "\n"
+                    update_signing.sha256(local / "artifact.tar.gz") + "\n"
                 )
                 target = host_target()
                 entries = {target: _verify_target(local, identity, target, directory / "verified")}

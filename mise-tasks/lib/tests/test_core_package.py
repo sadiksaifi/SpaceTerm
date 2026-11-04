@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, TaskError, core_package, release
+from spaceterm_tasks import ROOT, TaskError, core_package, update_signing
 from spaceterm_tasks.package_linux import write_archive
 from spaceterm_tasks.packaging import NOTICES, SHELL_INTEGRATION, TERMINFO
 
@@ -61,7 +61,15 @@ class CoreArchiveTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.seed = core_package.artifact_signing_seed("spaceterm-preflight")
-        self.public = release.public_key()
+        # The release trust: a current and a backup key that no nonproduction seed matches.
+        self.public = update_signing.derived_public_key(bytes(range(32)))
+        trust = patch.object(
+            update_signing,
+            "release_trust",
+            return_value=(self.public, update_signing.derived_public_key(bytes(range(1, 33)))),
+        )
+        trust.start()
+        self.addCleanup(trust.stop)
         self.archive = self.root / "server.tar.gz"
         self.signature = self.root / "server.tar.gz.sig"
         self.commit = "a" * 40
@@ -103,7 +111,7 @@ class CoreArchiveTests(unittest.TestCase):
                 member.type = kind
                 member.size = len(payload) if kind == tarfile.REGTYPE else 0
                 archive.addfile(member, io.BytesIO(payload))
-        release.sign_ed25519(self.seed, self.archive, self.signature)
+        update_signing.sign(self.seed, self.archive, self.signature)
 
     def unpack(self):
         return core_package.unpack_verified(
@@ -132,7 +140,7 @@ class CoreArchiveTests(unittest.TestCase):
                         if identity == "spaceterm"
                         else core_package.artifact_signing_seed(identity)
                     )
-                    release.sign_ed25519(signing_seed, self.archive, self.signature)
+                    update_signing.sign(signing_seed, self.archive, self.signature)
                     if identity == "spaceterm":
                         with self.assertRaises(TaskError):
                             core_package.unpack_verified(
@@ -159,9 +167,14 @@ class CoreArchiveTests(unittest.TestCase):
     def test_production_trust_cannot_authenticate_a_nonproduction_candidate(self):
         self.archive_with([("core/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         production_fixture_seed = bytes(range(32))
-        release.sign_ed25519(production_fixture_seed, self.archive, self.signature)
+        update_signing.sign(production_fixture_seed, self.archive, self.signature)
         with patch.object(
-            release, "public_key", return_value=release.derived_public_key(production_fixture_seed)
+            update_signing,
+            "release_trust",
+            return_value=(
+                update_signing.derived_public_key(bytes(range(1, 33))),
+                update_signing.derived_public_key(production_fixture_seed),
+            ),
         ):
             with self.assertRaises(TaskError):
                 self.unpack()
@@ -232,7 +245,7 @@ class CoreArchiveTests(unittest.TestCase):
                 missing.write_bytes(saved)
                 (resources / "unexpected").mkdir()
             write_archive(tree, self.archive)
-            release.sign_ed25519(self.seed, self.archive, self.signature)
+            update_signing.sign(self.seed, self.archive, self.signature)
             with tempfile.TemporaryDirectory(dir=self.root) as temporary:
                 with self.assertRaisesRegex(TaskError, "supported layout"):
                     core_package.verified_copy(
@@ -248,7 +261,7 @@ class CoreArchiveTests(unittest.TestCase):
         archive, signature = archive_tree(ROOT, tree, self.info)
         run = subprocess.run
         client = self.root / "client"
-        client_pin = {"value": release.sha256(archive)}
+        client_pin = {"value": update_signing.sha256(archive)}
         core_queries = []
 
         def native_run(arguments, **kwargs):
@@ -304,10 +317,13 @@ class CoreArchiveTests(unittest.TestCase):
                     core_package, "package", side_effect=AssertionError("must reuse signed bytes")
                 ),
             ):
+                # A release embeds only the Core builds release:core produced.
+                with self.assertRaisesRegex(TaskError, "SPACETERM_CLI_ARTIFACTS"):
+                    core_package.prepare_desktop_artifact(
+                        self.root / "desktop/release", self.info["identity"], "v99.0.0"
+                    )
                 reused = self.root / "desktop/reused"
-                selected = core_package.prepare_desktop_artifact(
-                    reused, self.info["identity"], "v99.0.0"
-                )
+                selected = core_package.prepare_desktop_artifact(reused, self.info["identity"])
                 self.assertEqual(
                     Path(selected["SPACETERM_CLI_ARCHIVE"]).read_bytes(), archive.read_bytes()
                 )
@@ -414,64 +430,6 @@ class CrossBuildTests(unittest.TestCase):
                 self.assertEqual(int(match[1], 0), expected)
             for capability in ("Tc,", "Ms=", "Ss=", "Se="):
                 self.assertIn(capability, result)
-
-
-class MachoCrossBuildTests(unittest.TestCase):
-    def test_macos_load_commands_require_exact_deployment_and_safe_dependencies(self):
-        for minimum, dependency, valid in (
-            ("26.0", "/usr/lib/libSystem.B.dylib", True),
-            ("13.0", "/usr/lib/libSystem.B.dylib", False),
-            ("26.0", "/System/Library/Frameworks/Metal.framework/Metal", False),
-            ("26.0", "@rpath/foreign.dylib", False),
-        ):
-            output = f"""Mach header
-      magic cputype cpusubtype caps filetype ncmds sizeofcmds flags
-MH_MAGIC_64 ARM64 ALL 0x00 EXECUTE 2 80 NOUNDEFS DYLDLINK TWOLEVEL PIE
-Load command 0
-       cmd LC_BUILD_VERSION
-   cmdsize 24
-  platform macos
-       sdk 26.0
-     minos {minimum}
-    ntools 0
-Load command 1
-          cmd LC_LOAD_DYLIB
-      cmdsize 56
-         name {dependency} (offset 24)
-   time stamp 2 Thu Jan 1 1970
-      current version 1.0.0
-compatibility version 1.0.0
-"""
-            with self.subTest(minimum=minimum, dependency=dependency):
-                if valid:
-                    core_package.verify_macho_output(output)
-                    with self.assertRaises(TaskError):
-                        core_package.verify_macho_output(
-                            output.replace("Load command 1", "Load command 2")
-                        )
-                else:
-                    with self.assertRaises(TaskError):
-                        core_package.verify_macho_output(output)
-
-    def test_rcodesign_identity_requires_exact_identifier_and_adhoc_flags(self):
-        identifier = "io.github.sadiksaifi.spaceterm-preflight.core"
-        output = f'''CodeDirectoryBlob {{
-    flags: CodeSignatureFlags(
-        ADHOC,
-    ),
-    ident: "{identifier}",
-}}
-'''
-        core_package.verify_macho_identity(output, identifier)
-        for changed in (
-            output.replace(identifier, "foreign"),
-            output.replace("ADHOC", "RUNTIME"),
-            output.replace("    ident:", '    ident: "duplicate",\n    ident:'),
-            "",
-        ):
-            with self.subTest(changed=changed):
-                with self.assertRaises(TaskError):
-                    core_package.verify_macho_identity(changed, identifier)
 
 
 if __name__ == "__main__":

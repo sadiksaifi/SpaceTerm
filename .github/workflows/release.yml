@@ -1,41 +1,74 @@
 name: Release
 
+# A tag push releases. Every other run is a dry run of the same jobs: a generated update key,
+# ad hoc code signatures, no notarization, no protected environment and nothing published.
 on:
   push:
     tags: ["v[0-9]*.[0-9]*.[0-9]*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .mise.toml
+      - mise.lock
+      - mise-tasks/**
+      - packaging/**
+      - cliff.toml
+      - build.rs
+      - build/**
+      - crates/spaceterm-cli/build.rs
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: release
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'push' && 'release' || format('release-dry-run-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
+  # The Developer ID Team ID. The Release Core compiles it into the requirement it checks
+  # retained runtimes against, and signing, verification and install.sh use it.
+  SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+  # "Developer ID Application: <name> (<Team ID>)" for a release; a dry run signs ad hoc.
+  SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
 
 jobs:
-  tag:
-    name: Validate release tag
+  plan:
+    name: Plan the release
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     # install_args selects this job's tools; keep mise run from installing the rest.
     env:
       MISE_TASK_RUN_AUTO_INSTALL: "false"
     outputs:
-      tag: ${{ steps.release.outputs.tag }}
+      tag: ${{ steps.release.outputs.tag || steps.dry-run.outputs.tag }}
+      dry-run-key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: jdx/mise-action@v5
         with:
-          install_args: "node npm:tagsmith"
+          install_args: "python node npm:tagsmith"
       - name: Validate annotated release tag
+        if: github.event_name == 'push'
         id: release
         timeout-minutes: 5
         run: mise run release:validate "$GITHUB_REF_NAME"
+      - name: Tag the dry run
+        if: github.event_name != 'push'
+        id: dry-run
+        run: mise run release:dry-run:tag
+      - name: Generate the dry-run update key
+        if: github.event_name != 'push'
+        id: key
+        # A throwaway Ed25519 seed. Nothing it signs verifies under the release trust.
+        run: echo "key=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
 
-  validate:
+  validate-macos:
     name: Validate macOS
-    needs: tag
+    needs: plan
     runs-on: macos-26
     timeout-minutes: 75
     steps:
@@ -51,114 +84,9 @@ jobs:
         timeout-minutes: 60
         run: mise run validate:macos
 
-  core-artifacts:
-    name: Package signed native server (${{ matrix.target }})
-    needs: tag
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-26
-            target: aarch64-apple-darwin
-            platform: darwin-arm64
-          - os: ubuntu-26.04
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x86_64
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-      - uses: jdx/mise-action@v5
-      - name: Install Linux build packages
-        if: runner.os == 'Linux'
-        timeout-minutes: 10
-        run: mise bootstrap packages apply --yes --update
-      - name: Fetch locked Rust dependencies
-        timeout-minutes: 10
-        run: mise run setup:deps
-      - name: Build and verify signed native server
-        timeout-minutes: 30
-        env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-          MACOS_SIGNING_CERTIFICATE_P12: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_CERTIFICATE_P12 || '' }}
-          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD || '' }}
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: mise run core:package --identity spaceterm --release-tag "$RELEASE_TAG" --catalog dist/core-artifacts
-      - name: Upload signed native server catalog target
-        uses: actions/upload-artifact@v7
-        with:
-          name: server-catalog-${{ matrix.target }}
-          path: dist/core-artifacts/
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload signed CLI release assets
-        uses: actions/upload-artifact@v7
-        with:
-          name: server-release-${{ matrix.platform }}
-          path: dist/release-core-${{ matrix.platform }}/
-          if-no-files-found: error
-          retention-days: 7
-
-  package:
-    name: Package and sign Apple Silicon
-    needs: [tag, core-artifacts]
-    runs-on: macos-26
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-      - uses: jdx/mise-action@v5
-      - name: Install the Xcode Metal toolchain
-        timeout-minutes: 10
-        run: mise run setup:metal:macos
-      - name: Fetch locked Rust dependencies
-        timeout-minutes: 10
-        run: mise run setup:deps
-      - name: Collect both signed native server targets
-        uses: actions/download-artifact@v8
-        with:
-          pattern: server-catalog-*
-          merge-multiple: true
-          path: target/release-core-artifacts
-      - name: Build and verify Apple Silicon package
-        timeout-minutes: 35
-        env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-          MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
-          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-          SPACETERM_CLI_ARTIFACTS: ${{ github.workspace }}/target/release-core-artifacts
-          SPACETERM_CLI_ARCHIVE: ${{ github.workspace }}/target/release-core-artifacts/aarch64-apple-darwin/artifact.tar.gz
-          SPACETERM_CLI_SIGNATURE: ${{ github.workspace }}/target/release-core-artifacts/aarch64-apple-darwin/artifact.sig
-        run: mise run release:package:macos "$RELEASE_TAG"
-      - name: Sign and verify update assets
-        timeout-minutes: 10
-        env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: mise run release:assets:macos "$RELEASE_TAG"
-      - name: Record signed asset checksum
-        id: assets
-        run: echo "checksum=$(shasum -a 256 dist/release/SHA256SUMS | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
-      - name: Upload signed release assets
-        uses: actions/upload-artifact@v7
-        with:
-          name: signed-release-assets
-          path: dist/release/
-          if-no-files-found: error
-          retention-days: 7
-    outputs:
-      checksum: ${{ steps.assets.outputs.checksum }}
-
   validate-linux:
     name: Validate Linux
-    needs: tag
+    needs: plan
     runs-on: ubuntu-26.04
     timeout-minutes: 100
     steps:
@@ -185,9 +113,135 @@ jobs:
         timeout-minutes: 60
         run: mise run validate:linux
 
-  package-linux:
-    name: Package and sign x86_64 Linux
-    needs: [tag, core-artifacts]
+  notes:
+    name: Write the release notes
+    needs: plan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: "python git-cliff"
+      - name: Tag the dry run
+        if: github.event_name != 'push'
+        run: mise run release:dry-run:tag
+      - name: Run git-cliff
+        run: mise run release:notes --output dist/release-notes.md
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  core:
+    name: Build and sign SpaceTerm Core (${{ matrix.target }})
+    # Signing starts only after both platforms pass validation.
+    needs: [plan, validate-macos, validate-linux]
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            target: aarch64-apple-darwin
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: jdx/mise-action@v5
+      - name: Tag the dry run
+        if: github.event_name != 'push'
+        run: mise run release:dry-run:tag
+      - name: Install Linux build packages
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: mise bootstrap packages apply --yes --update
+      - name: Fetch locked Rust dependencies
+        timeout-minutes: 10
+        run: mise run setup:deps
+      - name: Build, sign, notarize and staple SpaceTerm Core
+        timeout-minutes: 100
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          UPDATE_SIGNING_KEY: ${{ github.event_name == 'push' && secrets.UPDATE_SIGNING_KEY || needs.plan.outputs.dry-run-key }}
+          MACOS_SIGNING_CERTIFICATE_P12: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.MACOS_SIGNING_CERTIFICATE_P12 || '' }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD || '' }}
+          APP_STORE_CONNECT_API_KEY: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_API_KEY || '' }}
+          APP_STORE_CONNECT_KEY_ID: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_KEY_ID || '' }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_ISSUER_ID || '' }}
+        run: mise run release:core "$RELEASE_TAG"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: core-${{ matrix.target }}
+          path: dist/release-core/
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop-macos:
+    name: Package, sign and notarize the macOS desktop
+    needs: [plan, notes, core]
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    runs-on: macos-26
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: jdx/mise-action@v5
+      - name: Tag the dry run
+        if: github.event_name != 'push'
+        run: mise run release:dry-run:tag
+      - name: Install the Xcode Metal toolchain
+        timeout-minutes: 10
+        run: mise run setup:metal:macos
+      - name: Fetch locked Rust dependencies
+        timeout-minutes: 10
+        run: mise run setup:deps
+      - name: Collect both signed Core builds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: core-*
+          merge-multiple: true
+          path: dist/release-core
+      - name: Collect the release notes
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: dist
+      - name: Package, sign, notarize and staple the app, disk image and appcast
+        timeout-minutes: 130
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          UPDATE_SIGNING_KEY: ${{ github.event_name == 'push' && secrets.UPDATE_SIGNING_KEY || needs.plan.outputs.dry-run-key }}
+          MACOS_SIGNING_CERTIFICATE_P12: ${{ github.event_name == 'push' && secrets.MACOS_SIGNING_CERTIFICATE_P12 || '' }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ github.event_name == 'push' && secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD || '' }}
+          APP_STORE_CONNECT_API_KEY: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_API_KEY || '' }}
+          APP_STORE_CONNECT_KEY_ID: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_KEY_ID || '' }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_ISSUER_ID || '' }}
+        run: mise run release:desktop:macos "$RELEASE_TAG" --notes dist/release-notes.md --core dist/release-core
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-macos
+          path: dist/release-desktop-macos/
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop-linux:
+    name: Package the x86_64 Linux desktop
+    # It holds no secret: release:assemble signs its archive.
+    needs: [plan, notes, core]
     runs-on: ubuntu-26.04
     # mise pins Zig's glibc target and the Ubuntu 22.04 native-library sysroot.
     timeout-minutes: 75
@@ -197,53 +251,46 @@ jobs:
           fetch-depth: 0
           submodules: recursive
       - uses: jdx/mise-action@v5
+      - name: Tag the dry run
+        if: github.event_name != 'push'
+        run: mise run release:dry-run:tag
       - name: Install Linux build packages
         timeout-minutes: 10
         run: mise bootstrap packages apply --yes --update
       - name: Fetch locked Rust dependencies
         timeout-minutes: 10
         run: mise run setup:deps
-      - name: Collect both signed native server targets
+      - name: Collect both signed Core builds
         uses: actions/download-artifact@v8
         with:
-          pattern: server-catalog-*
+          pattern: core-*
           merge-multiple: true
-          path: target/release-core-artifacts
-      - name: Build and verify x86_64 Linux package
-        timeout-minutes: 45
-        env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-          SPACETERM_CLI_ARTIFACTS: ${{ github.workspace }}/target/release-core-artifacts
-          SPACETERM_CLI_ARCHIVE: ${{ github.workspace }}/target/release-core-artifacts/x86_64-unknown-linux-gnu/artifact.tar.gz
-          SPACETERM_CLI_SIGNATURE: ${{ github.workspace }}/target/release-core-artifacts/x86_64-unknown-linux-gnu/artifact.sig
-        run: mise run release:package:linux "$RELEASE_TAG"
-      - name: Sign and verify Linux update assets
-        timeout-minutes: 10
-        env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: mise run release:assets:linux "$RELEASE_TAG"
-      - name: Record signed asset checksum
-        id: assets
-        run: echo "checksum=$(sha256sum dist/release-linux/SHA256SUMS | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
-      - name: Upload signed Linux release assets
-        uses: actions/upload-artifact@v7
+          path: dist/release-core
+      - name: Collect the release notes
+        uses: actions/download-artifact@v8
         with:
-          name: signed-linux-release-assets
-          path: dist/release-linux/
+          name: release-notes
+          path: dist
+      - name: Package the Linux desktop
+        timeout-minutes: 50
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          # A dry run trusts its generated key. A release trusts packaging/update-trust.json.
+          UPDATE_SIGNING_KEY: ${{ github.event_name != 'push' && needs.plan.outputs.dry-run-key || '' }}
+        run: mise run release:desktop:linux "$RELEASE_TAG" --notes dist/release-notes.md --core dist/release-core
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-linux
+          path: dist/release-desktop-linux/
           if-no-files-found: error
           retention-days: 7
-    outputs:
-      checksum: ${{ steps.assets.outputs.checksum }}
 
   publish:
-    name: Publish verified release
-    needs: [tag, validate, package, validate-linux, package-linux]
+    name: Sign the feeds and publish the release
+    needs: [plan, notes, core, desktop-macos, desktop-linux]
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    env:
-      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -251,96 +298,50 @@ jobs:
         with:
           fetch-depth: 0
       - uses: jdx/mise-action@v5
-        with:
-          install_args: "python git-cliff"
-      - name: Download signed release assets
+      - name: Tag the dry run
+        if: github.event_name != 'push'
+        run: mise run release:dry-run:tag
+      - name: Install Linux packages that verification runs
+        timeout-minutes: 10
+        run: mise bootstrap packages apply --yes --update
+      - name: Collect both signed Core builds
         uses: actions/download-artifact@v8
         with:
-          name: signed-release-assets
-          path: dist/release
-      - name: Download signed Linux release assets
+          pattern: core-*
+          merge-multiple: true
+          path: dist/release-core
+      - name: Collect the macOS desktop
         uses: actions/download-artifact@v8
         with:
-          name: signed-linux-release-assets
-          path: dist/release-linux
-      - name: Download macOS CLI release assets
+          name: desktop-macos
+          path: dist/release-desktop-macos
+      - name: Collect the Linux desktop
         uses: actions/download-artifact@v8
         with:
-          name: server-release-darwin-arm64
-          path: dist/release-core-darwin-arm64
-      - name: Download Linux CLI release assets
+          name: desktop-linux
+          path: dist/release-desktop-linux
+      - name: Collect the release notes
         uses: actions/download-artifact@v8
         with:
-          name: server-release-linux-x86_64
-          path: dist/release-core-linux-x86_64
-      - name: Verify transferred assets
+          name: release-notes
+          path: dist
+      - name: Sign the feeds and the Linux desktop archive
+        timeout-minutes: 15
         env:
-          CHECKSUM: ${{ needs.package.outputs.checksum }}
-          LINUX_CHECKSUM: ${{ needs.package-linux.outputs.checksum }}
-        run: |
-          printf '%s  %s\n' "$CHECKSUM" dist/release/SHA256SUMS | shasum -a 256 -c -
-          printf '%s  %s\n' "$LINUX_CHECKSUM" dist/release-linux/SHA256SUMS | shasum -a 256 -c -
-          (cd dist/release && shasum -a 256 -c SHA256SUMS)
-          (cd dist/release-linux && shasum -a 256 -c SHA256SUMS)
-          (cd dist/release-core-darwin-arm64 && shasum -a 256 -c SHA256SUMS)
-          (cd dist/release-core-linux-x86_64 && shasum -a 256 -c SHA256SUMS)
-      - name: Publish complete GitHub release
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          UPDATE_SIGNING_KEY: ${{ github.event_name == 'push' && secrets.UPDATE_SIGNING_KEY || needs.plan.outputs.dry-run-key }}
+        run: mise run release:assemble "$RELEASE_TAG"
+      - name: Publish the GitHub release
         timeout-minutes: 10
         env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
-        run: mise run release:publish "$RELEASE_TAG"
-
-  homebrew:
-    name: Update Homebrew cask
-    needs: [tag, package, publish]
-    # brew bump-cask-pr edits the tapped cask in place.
-    runs-on: macos-26
-    timeout-minutes: 15
-    env:
-      MISE_TASK_RUN_AUTO_INSTALL: "false"
-      HOMEBREW_NO_AUTO_UPDATE: "1"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+        run: mise run release:publish "$RELEASE_TAG" --notes dist/release-notes.md
+      - name: Keep the dry-run assets for inspection
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v7
         with:
-          install_args: python
-      - name: Download signed release assets
-        uses: actions/download-artifact@v8
-        with:
-          name: signed-release-assets
-          path: dist/release
-      - name: Verify transferred checksums
-        env:
-          CHECKSUM: ${{ needs.package.outputs.checksum }}
-        run: printf '%s  %s\n' "$CHECKSUM" dist/release/SHA256SUMS | shasum -a 256 -c -
-      - uses: actions/checkout@v7
-        with:
-          repository: sadiksaifi/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_PAT }}
-          path: homebrew-tap
-      - name: Tap the checkout
-        run: |
-          taps="$(brew --repository)/Library/Taps/sadiksaifi"
-          mkdir -p "$taps"
-          rm -rf "$taps/homebrew-tap"
-          ln -s "$GITHUB_WORKSPACE/homebrew-tap" "$taps/homebrew-tap"
-      - name: Update cask
-        env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-        run: mise run release:cask:macos "$RELEASE_TAG"
-      - name: Commit and push cask
-        working-directory: homebrew-tap
-        env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add Casks/spaceterm.rb
-          if git diff --cached --quiet; then
-            echo "The cask already matches SpaceTerm ${RELEASE_TAG}."
-            exit 0
-          fi
-          git commit -m "release: spaceterm version ${RELEASE_TAG}" \
-            -m "Release: https://github.com/sadiksaifi/SpaceTerm/releases/tag/${RELEASE_TAG}"
-          git push
+          name: dry-run-release
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7

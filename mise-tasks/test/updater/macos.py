@@ -18,7 +18,7 @@ from pathlib import Path
 from spaceterm_tasks import ROOT, macos_codesign
 from spaceterm_tasks import sparkle as SPARKLE
 from spaceterm_tasks.macos_signing import release_keychain
-from spaceterm_tasks.release import verify_feed
+from spaceterm_tasks.release import verify_appcast
 from tests.macos_signing_fixture import NAME, certificate
 
 
@@ -149,7 +149,7 @@ def main():
                     if signed:
                         verify_certificate(app, fingerprint)
                     apps.append(app)
-                archive = directory / "SpaceTerm-0.1.1-darwin-arm64.dmg"
+                archive = directory / "SpaceTerm-0.1.1-macos-arm64.dmg"
                 run(
                     "hdiutil",
                     "create",
@@ -171,13 +171,15 @@ def main():
                     "1",
                     "--download-url-prefix",
                     prefix,
+                    "--full-release-notes-url",
+                    "https://github.com/sadiksaifi/SpaceTerm/releases/tag/v0.1.1",
                     "--link",
                     "https://github.com/sadiksaifi/SpaceTerm/releases/tag/v0.1.1",
                     str(directory),
                     input=key,
                 )
                 feed = directory / "appcast.xml"
-                signature = verify_feed(feed, archive, "0.1.1")
+                signature = verify_appcast(feed, archive, "0.1.1")
                 run(
                     str(sparkle / "bin/sign_update"),
                     "--ed-key-file",

@@ -109,6 +109,7 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     "arguments": sys.argv[2:],
     "packaged": os.environ.get("SPACETERM_PACKAGED"),
     "release_tag": os.environ.get("SPACETERM_RELEASE_TAG"),
+    "release_notes": os.environ.get("SPACETERM_RELEASE_NOTES"),
 }}))
 binary = sys.argv[sys.argv.index("--bin") + 1]
 assert binary == "spaceterm-desktop", "the desktop builds no sibling server executable"
@@ -118,6 +119,8 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
         self.record = Path(self.directory.name) / "build.json"
+        self.notes = Path(self.directory.name) / "release-notes.md"
+        self.notes.write_text("### Features\n\n- Add terminal panes\n")
         self.artifact = self.root / "target/release/spaceterm-desktop"
         self.env = {
             **os.environ,
@@ -186,7 +189,14 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             self.compiled_identity, *self.compiled_definitions, candidate_digest=digest
         )
         if release_tag:
-            return self.task("release/package/linux.py", release_tag)
+            return self.task(
+                "release/desktop/linux.py",
+                release_tag,
+                "--notes",
+                str(self.notes),
+                "--core",
+                self.env["SPACETERM_CLI_ARTIFACTS"],
+            )
         return self.task("preflight/package/linux.py")
 
     def members(self, archive):
@@ -231,7 +241,9 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             self.assertEqual(packaged.read(), self.artifact.read_bytes())
         record = json.loads(self.record.read_text())
         self.assertIn("--no-default-features", record["arguments"])
-        self.assertEqual((record["packaged"], record["release_tag"]), ("1", None))
+        self.assertEqual(
+            (record["packaged"], record["release_tag"], record["release_notes"]), ("1", None, None)
+        )
 
     def test_packaging_rejects_an_artifact_different_from_the_compiled_pin(self):
         self.compile_executable("SpaceTerm Preflight 0.0.0")
@@ -261,7 +273,26 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         members = self.members(self.root / "dist/spaceterm-linux-x86_64.tar.gz")
         self.assertIn("spaceterm/bin/spaceterm-desktop", members)
         self.assertNotIn("spaceterm/bin/spaceterm", members)
-        self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
+        self.assertIn(
+            "spaceterm/share/spaceterm/core-artifacts/aarch64-apple-darwin/artifact.sig", members
+        )
+        record = json.loads(self.record.read_text())
+        self.assertEqual(record["release_tag"], "v0.0.1")
+        self.assertEqual(record["release_notes"], str(self.notes.resolve()))
+        released = (
+            self.root / "dist/release-desktop-linux/spaceterm-desktop-0.0.1-linux-x86_64.tar.gz"
+        )
+        self.assertEqual(
+            released.read_bytes(), (self.root / "dist/spaceterm-linux-x86_64.tar.gz").read_bytes()
+        )
+
+    def test_release_packaging_requires_the_release_notes_before_building(self):
+        self.compile_executable("SpaceTerm 0.0.1")
+        self.notes.unlink()
+        result = self.package("v0.0.1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("embeds its release notes", result.stderr)
+        self.assertFalse(self.record.exists())
 
     def test_release_archive_rejects_an_executable_of_another_version(self):
         self.compile_executable("SpaceTerm 0.0.2")

@@ -22,10 +22,12 @@ from spaceterm_tasks.macos_bundle import identity, identity_directory
 from spaceterm_tasks.packaging import (
     DIST,
     NOTICES,
+    RELEASE_NOTES,
     SHELL_INTEGRATION,
     TERMINFO,
     checked,
     packaged_environment,
+    release_notes_file,
     release_version,
     require_clean_checkout,
     selected_identity,
@@ -104,14 +106,20 @@ def write_archive(tree, archive):
         output.add(tree, arcname=tree.name, filter=normalized)
 
 
-def package(release_tag=None):
-    """Build, stage, archive, and verify one identity, then move the archive into dist/."""
+def package(release_tag=None, notes=None):
+    """Build, stage, archive, and verify one identity, then move the archive into dist/.
+
+    A release embeds the release notes file `notes`.
+    """
     require_x86_64_linux()
     if release_tag:
         require_clean_checkout()
+    notes_file = release_notes_file(release_tag, notes)
     name = selected_identity(release_tag)
     display_name = identity(name)["CFBundleName"]
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
+    if notes_file is not None:
+        environment[RELEASE_NOTES] = str(notes_file)
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
     from spaceterm_tasks.core_package import prepare_desktop_artifact

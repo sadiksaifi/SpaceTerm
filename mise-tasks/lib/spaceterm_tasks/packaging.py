@@ -4,6 +4,7 @@ import filecmp
 import os
 import re
 import subprocess
+from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError
 
@@ -13,6 +14,8 @@ TERMINFO_IDENTITY = "xterm-spaceterm|SpaceTerm truthful xterm-compatible termina
 NOTICES = ROOT / "assets" / "THIRD-PARTY-NOTICES.txt"
 SHELL_INTEGRATION = ROOT / "assets" / "shell-integration"
 PREFLIGHT_VERSION = "0.0.0"
+# Names the git-cliff notes file a release desktop build embeds (build/release_notes.rs).
+RELEASE_NOTES = "SPACETERM_RELEASE_NOTES"
 STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 ASKPASS_HELPER_MODE = "broker-v1"
 
@@ -22,6 +25,15 @@ def release_version(tag):
     if not STABLE_TAG.fullmatch(tag):
         raise TaskError("a release tag is v followed by a canonical stable SemVer")
     return tag[1:]
+
+
+def release_notes_file(release_tag, notes):
+    """The notes file a release desktop embeds, or None for any other build."""
+    if not release_tag:
+        return None
+    if notes is None or not Path(notes).is_file():
+        raise TaskError("a release desktop embeds its release notes; run release:notes")
+    return Path(notes).resolve()
 
 
 def selected_identity(release_tag):
@@ -51,7 +63,7 @@ def packaged_environment(release_tag, removed=()):
     environment = {
         key: value
         for key, value in os.environ.items()
-        if key not in ("SPACETERM_RELEASE_TAG", *removed)
+        if key not in ("SPACETERM_RELEASE_TAG", RELEASE_NOTES, *removed)
     }
     # Leaves the SpaceTerm Development identity.
     environment["SPACETERM_PACKAGED"] = "1"

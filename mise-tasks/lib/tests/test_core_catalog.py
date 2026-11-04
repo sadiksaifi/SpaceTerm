@@ -11,7 +11,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, core_package, macos_codesign, release
+from spaceterm_tasks import ROOT, TaskError, core_package, macos_codesign, update_signing
 from spaceterm_tasks.core_catalog import stage_catalog, verify_catalog
 from spaceterm_tasks.package_linux import write_archive
 
@@ -111,7 +111,7 @@ int main(int argc, char **argv) {{
         entry.mkdir(parents=True)
         shutil.copyfile(archive, entry / "artifact.tar.gz")
         shutil.copyfile(signature, entry / "artifact.sig")
-        (entry / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+        (entry / "artifact.sha256").write_text(update_signing.sha256(archive) + "\n")
         from spaceterm_tasks.core_catalog import collect_target
 
         destination = self.root / "collected"
@@ -153,7 +153,9 @@ int main(int argc, char **argv) {{
         target = destination / self.target
         self.assertEqual((target / "artifact.tar.gz").read_bytes(), archive.read_bytes())
         self.assertEqual((target / "artifact.sig").read_bytes(), signature.read_bytes())
-        self.assertEqual((target / "artifact.sha256").read_text(), release.sha256(archive) + "\n")
+        self.assertEqual(
+            (target / "artifact.sha256").read_text(), update_signing.sha256(archive) + "\n"
+        )
         self.assertEqual(verify_catalog(destination, self.identity)[self.target]["build"], info)
 
     def catalog(self, **changed):
@@ -166,7 +168,7 @@ int main(int argc, char **argv) {{
             directory.mkdir()
             shutil.copyfile(archive, directory / "artifact.tar.gz")
             shutil.copyfile(signature, directory / "artifact.sig")
-            (directory / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+            (directory / "artifact.sha256").write_text(update_signing.sha256(archive) + "\n")
             originals[target] = (archive, signature, info)
         return source, originals
 
@@ -206,11 +208,11 @@ int main(int argc, char **argv) {{
             json.dumps({**info, "commit": "c" * 40, "version": "dev.cccccccccccc"})
         )
         write_archive(tree, archive)
-        release.sign_ed25519(core_package.artifact_signing_seed(self.identity), archive, signature)
+        update_signing.sign(core_package.artifact_signing_seed(self.identity), archive, signature)
         target = source / self.target
         shutil.copyfile(archive, target / "artifact.tar.gz")
         shutil.copyfile(signature, target / "artifact.sig")
-        (target / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+        (target / "artifact.sha256").write_text(update_signing.sha256(archive) + "\n")
         local, local_signature, _ = self.artifact(self.target)
         with self.assertRaisesRegex(TaskError, "executable differs"):
             stage_catalog(
@@ -233,12 +235,12 @@ int main(int argc, char **argv) {{
         for truncated in (False, True):
             terminfo.write_bytes(data[:-1] if truncated else data)
             write_archive(tree, archive)
-            release.sign_ed25519(
+            update_signing.sign(
                 core_package.artifact_signing_seed(self.identity), archive, signature
             )
             shutil.copyfile(archive, source / target / "artifact.tar.gz")
             shutil.copyfile(signature, source / target / "artifact.sig")
-            (source / target / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+            (source / target / "artifact.sha256").write_text(update_signing.sha256(archive) + "\n")
             destination = self.root / ("refused" if truncated else "accepted")
             if truncated:
                 with self.assertRaisesRegex(TaskError, "terminfo"):
@@ -286,7 +288,7 @@ int main(int argc, char **argv) {{
                     resources = core_package.resource_directory(self.target, self.identity)
                     (tree / resources / "shell-integration/zsh/.zshenv").unlink()
                 write_archive(tree, archive)
-                release.sign_ed25519(
+                update_signing.sign(
                     core_package.artifact_signing_seed(self.identity), archive, signature
                 )
                 with self.assertRaises(TaskError):

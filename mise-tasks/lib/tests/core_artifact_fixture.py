@@ -6,17 +6,25 @@ import shutil
 import subprocess
 import sys
 
-from spaceterm_tasks import core_package, macos_codesign, release
+from spaceterm_tasks import core_package, macos_codesign, update_signing
 from spaceterm_tasks.core_builds import _source
 from spaceterm_tasks.package_linux import write_archive
 
 SEED = bytes(range(32))
 
 
+BACKUP_SEED = bytes(range(1, 33))
+
+
 def configure_trust(root):
+    """Trust SEED as the current update key and BACKUP_SEED as the backup, as a release does."""
+    current = update_signing.derived_public_key(SEED)
+    (root / update_signing.TRUST).write_text(
+        json.dumps({"current": current, "backup": update_signing.derived_public_key(BACKUP_SEED)})
+    )
     path = root / "packaging/macos/spaceterm/Info.plist"
     info = plistlib.loads(path.read_bytes())
-    info["SUPublicEDKey"] = release.derived_public_key(SEED)
+    info["SUPublicEDKey"] = current
     path.write_bytes(plistlib.dumps(info))
 
 
@@ -27,6 +35,8 @@ def prepare(
     *,
     include_catalog=False,
 ):
+    """A signed Core fixture. A release fixture is a dry run's: ad hoc under the hardened
+    runtime, signed with SEED."""
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -90,7 +100,7 @@ int main(int argc, char **argv) {{
         local.mkdir(parents=True)
         shutil.copyfile(archive, local / "artifact.tar.gz")
         shutil.copyfile(signature, local / "artifact.sig")
-        (local / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+        (local / "artifact.sha256").write_text(update_signing.sha256(archive) + "\n")
         target = "x86_64-unknown-linux-gnu" if sys.platform == "darwin" else "aarch64-apple-darwin"
         foreign = directory / "foreign/core"
         executable = foreign / core_package.executable_path(target, expected["identity"])
@@ -109,7 +119,7 @@ int main(int argc, char **argv) {{
         output.mkdir()
         shutil.copyfile(other_archive, output / "artifact.tar.gz")
         shutil.copyfile(other_signature, output / "artifact.sig")
-        (output / "artifact.sha256").write_text(release.sha256(other_archive) + "\n")
+        (output / "artifact.sha256").write_text(update_signing.sha256(other_archive) + "\n")
         environment["SPACETERM_CLI_ARTIFACTS"] = str(catalog)
     return archive, signature
 
@@ -153,5 +163,5 @@ def archive_tree(root, tree, expected):
         if expected["identity"] == "spaceterm"
         else core_package.artifact_signing_seed(expected["identity"])
     )
-    release.sign_ed25519(seed, archive, signature)
+    update_signing.sign(seed, archive, signature)
     return archive, signature

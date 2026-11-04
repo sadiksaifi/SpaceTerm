@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 from spaceterm_tasks import ROOT
-from spaceterm_tasks.release import INSTALLER, RELEASES
+from spaceterm_tasks.release import INSTALLER_SOURCE, RELEASES
 
 TRUST = json.loads((ROOT / "packaging/update-trust.json").read_text())
 TEAM_ID = "ABCDE12345"
@@ -83,7 +83,7 @@ esac
 
 def render(directory, kind="release", team_id=TEAM_ID, current=None, backup=None):
     """Fill install.sh as the release pipeline does, with optional test update keys."""
-    text = INSTALLER.read_text()
+    text = INSTALLER_SOURCE.read_text()
     text = text.replace("@RELEASE_KIND@", kind).replace("@TEAM_ID@", team_id)
     for name, key in (("current", current), ("backup", backup)):
         if key is not None:

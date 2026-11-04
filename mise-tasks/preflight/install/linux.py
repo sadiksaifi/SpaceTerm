@@ -8,13 +8,13 @@ import subprocess
 
 from spaceterm_tasks import TaskError, main
 from spaceterm_tasks.package_linux import archive_path, package
-from spaceterm_tasks.release import INSTALLER
+from spaceterm_tasks.release import INSTALLER_SOURCE
 
 
 def install():
     package()
     archive = archive_path("preflight")
-    if subprocess.run(["sh", str(INSTALLER), "--archive", str(archive)]).returncode:
+    if subprocess.run(["sh", str(INSTALLER_SOURCE), "--archive", str(archive)]).returncode:
         raise TaskError("SpaceTerm Preflight could not be installed")
 
 

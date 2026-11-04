@@ -9,7 +9,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, core_package, release
+from spaceterm_tasks import ROOT, TaskError, core_package, update_signing
 from spaceterm_tasks.core_builds import _source
 
 
@@ -40,9 +40,7 @@ def _commit(root, description):
 
 
 def _record(archive, signature, role, target):
-    release.verify_ed25519(
-        core_package.artifact_public_key("spaceterm-preflight"), archive, signature
-    )
+    update_signing.verify(core_package.artifact_trust("spaceterm-preflight"), archive, signature)
     with tarfile.open(archive, "r:gz") as source:
         stream = source.extractfile("core/build.json")
         if stream is None:
@@ -60,7 +58,7 @@ def _record(archive, signature, role, target):
     return {
         "archive": str(archive),
         "signature": str(signature),
-        "sha256": release.sha256(archive),
+        "sha256": update_signing.sha256(archive),
         "protocol_major": info["protocols"]["work"]["major"],
         "version": info["version"],
     }
@@ -115,12 +113,10 @@ def _broken_verification(destination, target, result):
         for member in source:
             if member.name != omitted:
                 output.addfile(member, source.extractfile(member) if member.isfile() else None)
-    release.sign_ed25519(
+    update_signing.sign(
         core_package.artifact_signing_seed("spaceterm-preflight"), broken, signature
     )
-    release.verify_ed25519(
-        core_package.artifact_public_key("spaceterm-preflight"), broken, signature
-    )
+    update_signing.verify(core_package.artifact_trust("spaceterm-preflight"), broken, signature)
     # Its signature is genuine; the missing resource must still refuse verification.
     with tempfile.TemporaryDirectory(prefix="spaceterm-broken-fixture-") as temporary:
         try:
@@ -140,7 +136,7 @@ def _broken_verification(destination, target, result):
     result[target]["broken"] = {
         "archive": str(broken),
         "signature": str(signature),
-        "sha256": release.sha256(broken),
+        "sha256": update_signing.sha256(broken),
     }
 
 
