@@ -1,10 +1,12 @@
 //! `uninstall [--delete-data]`: remove SpaceTerm Core's account service, its managed CLI
-//! launcher and every installed version from this machine. Workspaces, Machine Settings,
+//! launcher and every installed version from this machine, then the SpaceTerm app as
+//! [`spaceterm::installed_app`] finds it. Workspaces, Machine Settings,
 //! pairings and saved machines remain unless `--delete-data` is given. Then SpaceTerm Core's
 //! data root, this CLI's state and its credential items go too. While SpaceTerm Core runs, a
 //! preview names the Terminal Sessions that end and takes a confirmation first.
 use super::{Context, Reply};
 use crate::contract::{self, Code, Confirmation, Empty, Envelope, Failure, ServiceEffects};
+use spaceterm::installed_app::{Account, AppIdentity, InstalledApp};
 use spaceterm_connections::{
     self as connections,
     credentials::{CredentialProvider, Interaction},
@@ -34,6 +36,15 @@ pub fn run(context: &Context<'_>, delete_data: bool, token: Option<&str>) -> Rep
         Ok(service) => service,
         Err(error) => return Reply::failure(COMMAND, None, contract::from_core_error(error)),
     };
+    // Found before SpaceTerm Core goes, while its data root still marks what must stay.
+    let apps = Account::current(context.identity).map_or_else(Vec::new, |account| {
+        InstalledApp::installed(&AppIdentity::for_identity(context.identity), &account)
+    });
+    let (subject, verb) = if apps.is_empty() {
+        ("SpaceTerm Core", "is")
+    } else {
+        ("SpaceTerm and SpaceTerm Core", "are")
+    };
     // The data root holds the CLI's saved machines, so read their credential items before
     // uninstall deletes the records that name them.
     let credentials = if delete_data {
@@ -47,15 +58,18 @@ pub fn run(context: &Context<'_>, delete_data: bool, token: Option<&str>) -> Rep
     let result = service
         .uninstall_cli(token, choice)
         .map_err(contract::from_core_error);
-    if matches!(result, Ok(CliUninstall::Completed))
-        && let Err(failure) = remove_credentials(context, &credentials)
-    {
-        return Reply::failure(COMMAND, None, failure);
+    if matches!(result, Ok(CliUninstall::Completed)) {
+        if let Err(failure) = remove_credentials(context, &credentials) {
+            return Reply::failure(COMMAND, None, failure);
+        }
+        if apps.iter().filter(|app| app.remove().is_err()).count() > 0 {
+            return Reply::failure(COMMAND, None, Failure::new(Code::AppNotRemoved));
+        }
     }
     match result {
         Ok(CliUninstall::Completed) => Reply::new(
             &Envelope::ok(COMMAND, None, Empty {}),
-            format!("SpaceTerm Core is uninstalled from this machine. {what}\n"),
+            format!("{subject} {verb} uninstalled from this machine. {what}\n"),
         ),
         Ok(CliUninstall::Preview {
             token,
@@ -74,7 +88,7 @@ pub fn run(context: &Context<'_>, delete_data: bool, token: Option<&str>) -> Rep
                 pending: None,
             };
             let text = format!(
-                "Uninstall SpaceTerm Core from this machine? Every Terminal Session on it ends, for every client. {what}\nConfirm with: spaceterm uninstall{flag} --confirm {token}\n"
+                "Uninstall {subject} from this machine? Every Terminal Session on it ends, for every client. {what}\nConfirm with: spaceterm uninstall{flag} --confirm {token}\n"
             );
             Reply::new(
                 &Envelope::confirmation(

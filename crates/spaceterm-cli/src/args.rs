@@ -43,7 +43,7 @@ SpaceTerm Core on this machine. [--machine] marks commands that also reach a pai
   unpair            Revoke another Paired Device
   permissions       Show the System Permissions of this machine's Terminal Sessions, or set one up
   end-all-sessions  End every Terminal Session on this machine, keeping Workspaces
-  uninstall         Uninstall SpaceTerm Core from this machine, keeping its data unless asked
+  uninstall         Uninstall SpaceTerm and SpaceTerm Core, keeping their data unless asked
 
 Machines this CLI reaches. These commands reject --machine.
   machine           Add, list, rename and remove machines
@@ -201,10 +201,11 @@ pub enum CoreCommand {
     },
     /// End every Terminal Session on this machine, keeping Workspaces.
     EndAllSessions(Confirm),
-    /// Uninstall SpaceTerm Core from this machine, keeping its data unless asked.
+    /// Uninstall SpaceTerm and SpaceTerm Core, keeping their data unless asked.
     ///
-    /// Removes the account service, the CLI launcher and every installed version. Workspaces,
-    /// Machine Settings, pairings and saved machines remain unless --delete-data is given.
+    /// Removes the account service, the CLI launcher, every installed version and the SpaceTerm
+    /// app. Workspaces, Machine Settings, pairings and saved machines remain unless
+    /// --delete-data is given.
     Uninstall {
         /// Also delete SpaceTerm Core's data on this machine, this CLI's saved machines and
         /// their credentials.

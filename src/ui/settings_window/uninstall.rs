@@ -5,7 +5,6 @@
 //! The alert names the Terminal Sessions that end, as SpaceTerm Core observed them. SpaceTerm
 //! Core refuses the uninstall when those sessions changed before the person confirmed.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +18,7 @@ use spaceterm_ui::{
 };
 
 use crate::application_identity::ApplicationIdentity;
+use crate::installed_app::{Account, AppIdentity, InstalledApp, remove_directory};
 use crate::machine_connection::CoreError;
 pub(crate) use crate::machine_connection::service::Data;
 use crate::machine_connection::service::{CliUninstall, Service};
@@ -464,120 +464,6 @@ fn in_window(
     });
 }
 
-/// The SpaceTerm this process runs from, as its installer laid it out.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum InstalledApp {
-    /// `<bundle>.app/Contents/MacOS/<executable>`.
-    Bundle(PathBuf),
-    /// `<root>/bin/spaceterm-desktop` beside `<root>/share/spaceterm`, with the launcher
-    /// `~/.local/bin/<root name>-desktop`, and the icon and desktop entry `install.sh` added for
-    /// `application_id`.
-    Tree {
-        root: PathBuf,
-        home: PathBuf,
-        data_home: PathBuf,
-        application_id: &'static str,
-    },
-}
-
-impl InstalledApp {
-    /// The installed app running `executable`, or `None` for a build that runs from elsewhere,
-    /// such as a source checkout.
-    fn locate(executable: &Path) -> Option<Self> {
-        if cfg!(target_os = "macos") {
-            let macos = executable.parent()?;
-            let contents = macos.parent()?;
-            let bundle = contents.parent()?;
-            return (macos.file_name()? == "MacOS"
-                && contents.file_name()? == "Contents"
-                && bundle.extension()? == "app")
-                .then(|| Self::Bundle(bundle.to_path_buf()));
-        }
-        let bin = executable.parent()?;
-        let root = bin.parent()?;
-        if executable.file_name()? != "spaceterm-desktop"
-            || bin.file_name()? != "bin"
-            || !root.join("share").join("spaceterm").is_dir()
-        {
-            return None;
-        }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|home| home.is_absolute())?;
-        let data_home = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| home.join(".local").join("share"));
-        Some(Self::Tree {
-            root: root.to_path_buf(),
-            home,
-            data_home,
-            application_id: ApplicationIdentity::current().application_id(),
-        })
-    }
-
-    /// Removes what `install.sh` installed for this app and nothing else.
-    fn remove(&self) -> std::io::Result<()> {
-        match self {
-            Self::Bundle(bundle) => remove_directory(bundle),
-            Self::Tree {
-                root,
-                home,
-                data_home,
-                application_id,
-            } => {
-                // install.sh names the tree and its launcher after the build identity, such as
-                // `spaceterm-preflight` and `spaceterm-preflight-desktop`.
-                if let Some(name) = root.file_name() {
-                    let mut launcher = name.to_owned();
-                    launcher.push("-desktop");
-                    let launcher = home.join(".local").join("bin").join(launcher);
-                    if std::fs::read_link(&launcher)
-                        .is_ok_and(|target| target == root.join("bin").join("spaceterm-desktop"))
-                    {
-                        std::fs::remove_file(&launcher)?;
-                    }
-                }
-                let icon = data_home
-                    .join("icons/hicolor/scalable/apps")
-                    .join(format!("{application_id}.svg"));
-                if std::fs::symlink_metadata(&icon).is_ok_and(|icon| icon.is_symlink()) {
-                    std::fs::remove_file(&icon)?;
-                }
-                remove_file(
-                    &data_home
-                        .join("applications")
-                        .join(format!("{application_id}.desktop")),
-                )?;
-                if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
-                    let mut staging = std::ffi::OsString::from(".");
-                    staging.push(name);
-                    staging.push(".update");
-                    remove_directory(&parent.join(staging))?;
-                }
-                remove_directory(root)
-            }
-        }
-    }
-}
-
-fn remove_file(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        result => result,
-    }
-}
-
-/// Removes a directory and everything in it. A symbolic link in its place is refused.
-fn remove_directory(path: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
-        Ok(_) => Err(std::io::ErrorKind::InvalidInput.into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 /// The production removal: this account's SpaceTerm Core service, the installed app and this
 /// desktop's own directories.
 struct InstalledSpaceTerm {
@@ -588,11 +474,16 @@ struct InstalledSpaceTerm {
 
 /// The removal this build offers, or `None` when it doesn't run from an installed app.
 pub(super) fn installed(service: &Service) -> Option<Arc<dyn SpaceTermRemoval>> {
-    let app = InstalledApp::locate(&std::env::current_exe().ok()?)?;
+    let identity = ApplicationIdentity::current().directory_name();
+    let app = InstalledApp::running(
+        &std::env::current_exe().ok()?,
+        &AppIdentity::for_identity(identity),
+        &Account::current(identity)?,
+    )?;
     Some(Arc::new(InstalledSpaceTerm {
         service: service.clone(),
         app,
-        directories: AppDirectories::resolve(ApplicationIdentity::current().directory_name()).ok(),
+        directories: AppDirectories::resolve(identity).ok(),
     }))
 }
 
