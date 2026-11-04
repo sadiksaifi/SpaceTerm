@@ -10,7 +10,7 @@ use crate::application_identity::ApplicationIdentity;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::settings::SettingsDocument;
 use crate::ui::sidebar_window::form::action_button;
-use crate::updates::policy::{CheckInterval, ReminderInterval, UpdatePreferences};
+use crate::updates::policy::{CheckInterval, UpdatePreferences};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateService, UpdateState};
 
 /// The status row's label names the running build, so the page answers "which version" first.
@@ -229,38 +229,6 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    pub(super) fn render_update_reminder_interval(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.editor.document().updates.reminder_interval;
-        let owner = cx.weak_entity();
-        SegmentedControl::new(
-            "settings-update-reminder-interval",
-            "Overdue update reminders",
-            &current,
-            [
-                (ReminderInterval::TwoHours, "2 hours", "two-hours"),
-                (ReminderInterval::FourHours, "4 hours", "four-hours"),
-                (ReminderInterval::EightHours, "8 hours", "eight-hours"),
-                (ReminderInterval::Daily, "Daily", "daily"),
-            ]
-            .into_iter()
-            .map(|(interval, label, slug)| {
-                SegmentedOption::new(interval, label)
-                    .debug_selector(format!("settings-update-reminder-interval-{slug}"))
-            })
-            .collect(),
-        )
-        .expect("four reminder intervals are within the bounded option set")
-        .disabled(!self.editor.editable())
-        .debug_selector("settings-update-reminder-interval")
-        .on_change(move |change, _, cx| {
-            let interval = *change.requested();
-            let _ = owner.update(cx, |settings, cx| {
-                settings.edit(move |draft| draft.updates.reminder_interval = interval, cx);
-            });
-        })
-        .into_any_element()
-    }
-
     /// Whether an update preference row differs from its default. `None` for any other row.
     pub(super) fn update_preference_differs(&self, row: SettingsRowId) -> Option<bool> {
         let mut reset = self.editor.document().updates;
@@ -286,9 +254,6 @@ fn reset_update_preference(row: SettingsRowId, preferences: &mut UpdatePreferenc
             preferences.automatic_downloads = defaults.automatic_downloads;
         }
         SettingsRowId::UpdateCheckInterval => preferences.check_interval = defaults.check_interval,
-        SettingsRowId::UpdateReminderInterval => {
-            preferences.reminder_interval = defaults.reminder_interval;
-        }
         _ => return None,
     }
     Some(())
@@ -299,9 +264,6 @@ pub(super) fn update_row_description(row: SettingsRowId) -> Option<&'static str>
     Some(match row {
         SettingsRowId::AutomaticUpdateDownloads => "Updates install when you quit SpaceTerm.",
         SettingsRowId::UpdateCheckInterval => "SpaceTerm checks when it opens.",
-        SettingsRowId::UpdateReminderInterval => {
-            "Overdue update reminders return after this interval."
-        }
         _ => return None,
     })
 }

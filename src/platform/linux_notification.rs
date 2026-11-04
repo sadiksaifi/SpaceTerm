@@ -412,6 +412,47 @@ fn notify(
         .map_err(SessionBusError::from)
 }
 
+/// Freedesktop notifications for overdue updates, one per reminder.
+pub(super) struct LinuxUpdateReminders {
+    bus: Option<SessionBus>,
+    identity: ApplicationIdentity,
+}
+
+impl LinuxUpdateReminders {
+    pub(super) fn new(bus: Option<SessionBus>, identity: ApplicationIdentity) -> Self {
+        Self { bus, identity }
+    }
+}
+
+impl crate::updates::reminders::UpdateReminderAdapter for LinuxUpdateReminders {
+    fn notify(&self, _key: &str, title: &str, body: &str) {
+        let Some(bus) = &self.bus else { return };
+        let identity = self.identity;
+        let (title, body) = (title.to_owned(), body.to_owned());
+        let _ = bus.dispatch(move |connection| {
+            let hints = HashMap::from([
+                ("desktop-entry", Value::from(identity.application_id())),
+                ("urgency", Value::from(1u8)),
+            ]);
+            let _ = Proxy::new(connection, NAME, PATH, NAME).and_then(|proxy| {
+                proxy.call::<_, _, u32>(
+                    "Notify",
+                    &(
+                        identity.display_name(),
+                        0u32,
+                        "",
+                        title.as_str(),
+                        body.as_str(),
+                        Vec::<&str>::new(),
+                        hints,
+                        -1i32,
+                    ),
+                )
+            });
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1273,7 +1273,6 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             | SettingsRowId::UpdateStatus
             | SettingsRowId::AutomaticUpdateDownloads
             | SettingsRowId::UpdateCheckInterval
-            | SettingsRowId::UpdateReminderInterval
             | SettingsRowId::Shortcut(_)
             | SettingsRowId::SettingsFile
             | SettingsRowId::ExportSettings
@@ -2802,7 +2801,6 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
             SettingsRowId::UpdateCheckInterval => "settings-update-check-interval",
-            SettingsRowId::UpdateReminderInterval => "settings-update-reminder-interval",
             SettingsRowId::SettingsFile => "settings-file-frame",
             SettingsRowId::ExportSettings => "settings-document-export",
             SettingsRowId::ImportSettings => "settings-import",

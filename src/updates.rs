@@ -9,6 +9,7 @@ pub(crate) mod presentation;
 pub(crate) mod push;
 pub(crate) mod release_feed;
 pub(crate) mod release_notes;
+pub(crate) mod reminders;
 
 use policy::{UpdateHistory, UpdatePreferences, UpdateStage};
 use std::rc::Rc;
@@ -568,10 +569,7 @@ impl ApplicationUpdates {
                     .saturating_add(preferences.check_interval.seconds())
             })
             .filter(|due| *due > time);
-        let change = self
-            .history
-            .next_change(time, preferences.reminder_interval)
-            .filter(|due| *due > time);
+        let change = self.history.next_change(time).filter(|due| *due > time);
         check.into_iter().chain(change).min()
     }
 
@@ -672,9 +670,7 @@ impl ApplicationUpdates {
         if outstanding
             && self.launch == LaunchState::Open
             && cx.active_window().is_some()
-            && self
-                .history
-                .reminder_due(time, preferences.reminder_interval)
+            && self.history.reminder_due(time)
         {
             self.reminder = Some(self.stage);
             self.history.reminded(time);
@@ -777,6 +773,25 @@ impl ApplicationUpdates {
     pub(crate) fn request_install_confirmation(&mut self, cx: &mut Context<Self>) {
         if matches!(self.model.state, UpdateState::Ready { .. }) && !self.model.confirmation_open {
             cx.emit(UpdateNotice::ReadyToInstall);
+        }
+    }
+
+    /// Installs the ready release and relaunches into it without asking: relaunching keeps every
+    /// Terminal Session running. Retries an authorized installation that a cancelled quit left.
+    pub(crate) fn relaunch(&mut self, cx: &mut Context<Self>) {
+        if let Some(token) = self.model.confirmation() {
+            self.finish_install_confirmation(token, true, cx);
+        } else {
+            self.retry_install(cx);
+        }
+    }
+
+    /// Clears a failed download or installation. The release stays pending, and the next
+    /// scheduled check tries again.
+    pub(crate) fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.model.state, UpdateState::Failed { .. }) {
+            self.model.state = UpdateState::Idle;
+            cx.notify();
         }
     }
 
@@ -1226,7 +1241,7 @@ mod tests {
     /// timer runs to the next due time measured from the wake.
     #[gpui::test]
     fn a_wake_from_sleep_runs_due_work_once_and_times_the_next(cx: &mut gpui::TestAppContext) {
-        use policy::{DAY, ReminderInterval};
+        use policy::DAY;
         const START: u64 = 1_000_000;
         let adapter = Rc::new(RecordingAdapter::available());
         let executor = cx.executor();
@@ -1292,7 +1307,7 @@ mod tests {
             "the check has not finished"
         );
         assert!(
-            !saved.reminder_due(woke, ReminderInterval::TwoHours),
+            !saved.reminder_due(woke),
             "the history retains the reminder shown on wake"
         );
         found(&adapter, cx);

@@ -63,10 +63,7 @@ impl MachineUpdates {
         let entity = cx.new(|cx: &mut Context<Self>| {
             let events = cx.spawn(async move |this, cx| {
                 while let Ok(event) = receiver.recv().await {
-                    if this
-                        .update(cx, |this, cx| this.receive(event, cx))
-                        .is_err()
-                    {
+                    if this.update(cx, |this, cx| this.receive(event, cx)).is_err() {
                         return;
                     }
                 }
@@ -252,7 +249,9 @@ mod tests {
             "0.8.0",
             Some("0.9.0"),
         ))));
-        adapter.emit(MachineUpdatesEvent::Changed(Box::new(update("0.9.0", None))));
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(update(
+            "0.9.0", None,
+        ))));
         adapter.emit(MachineUpdatesEvent::Finished {
             machine: [2; 32],
             action: MachineAction::Restart,

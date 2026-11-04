@@ -12,14 +12,15 @@
 use std::collections::BTreeSet;
 
 use gpui::{App, SharedString};
+use spaceterm_core::protocol::capability::Unavailable;
 use spaceterm_core::protocol::version::Incompatible;
 use spaceterm_core::update::facts::{
     CheckFailure, FailureKind, InstallFailure, Operation, StartFailure, UpdateCheck, Version,
 };
 
-use super::machines::{MachineAction, MachineId, MachineLink, MachineUpdate};
-use super::policy::{DAY, UpdateStage};
 use super::machines::store::MachineUpdates;
+use super::machines::{ActionFailure, MachineAction, MachineId, MachineLink, MachineUpdate};
+use super::policy::{DAY, UpdateStage};
 use super::{UpdateError, UpdateService, UpdateState};
 
 /// How long a Machine's update checks fail before it shows "Can't check".
@@ -336,7 +337,8 @@ impl MachineView {
         self.sessions > 0 || self.state.waiting().is_some_and(|(_, s)| !s.is_empty())
     }
 
-    fn restart_command(&self) -> Command {
+    /// Restarts at once, or asks first when sessions close or other devices stop working.
+    pub(crate) fn restart_command(&self) -> Command {
         if self.restart_asks() {
             Command::Confirm(restart_confirmation(std::slice::from_ref(self)))
         } else {
@@ -1199,7 +1201,7 @@ impl DesktopState {
 }
 
 /// Which pending item a row or button belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ItemKey {
     Desktop,
     Machine(MachineId),
@@ -1577,7 +1579,9 @@ impl Presentation {
 pub(crate) fn current(cx: &App) -> Presentation {
     let unavailable = UpdateState::Unavailable;
     let running = env!("SPACETERM_VERSION");
-    let desktop = cx.try_global::<UpdateService>().map(|service| service.0.read(cx));
+    let desktop = cx
+        .try_global::<UpdateService>()
+        .map(|service| service.0.read(cx));
     let facts = match desktop {
         Some(updates) => DesktopFacts {
             state: updates.state(),
@@ -1602,6 +1606,49 @@ pub(crate) fn current(cx: &App) -> Presentation {
         }
         None => Presentation::new(facts, &[], &Dismissed::new(), now),
     }
+}
+
+/// The alert for an action on a Machine that did not succeed: its title and full sentence.
+/// `Changed` asks again instead, so it has no alert.
+pub(crate) fn action_failure(
+    name: &str,
+    local: bool,
+    action: &MachineAction,
+    failure: ActionFailure,
+) -> Option<(SharedString, SharedString)> {
+    let place = if local {
+        LOCAL_PLACE.to_owned()
+    } else {
+        name.to_owned()
+    };
+    let verb = match action {
+        MachineAction::Install => "update",
+        MachineAction::Restart => "restart",
+        MachineAction::CheckAgain => "check",
+        MachineAction::Start => "start",
+        MachineAction::Stop => "stop",
+        MachineAction::DismissFailure(_) => return None,
+    };
+    let message = match failure {
+        ActionFailure::Changed => return None,
+        ActionFailure::Unavailable(Unavailable::CoreTooOld) => format!(
+            "SpaceTerm Core on {place} is too old to {verb} from this SpaceTerm. Update it on              {place} first."
+        ),
+        ActionFailure::Unavailable(Unavailable::ClientTooOld) => format!(
+            "This SpaceTerm is too old for SpaceTerm Core on {place}. Update SpaceTerm, then try              again."
+        ),
+        ActionFailure::Unavailable(Unavailable::NotConnected) | ActionFailure::Unreachable => {
+            format!("SpaceTerm can't reach {place}. Try again when it is connected.")
+        }
+        ActionFailure::Busy => format!(
+            "SpaceTerm Core on {place} is busy with another update. Try again when it finishes."
+        ),
+        ActionFailure::Failed => format!("SpaceTerm Core on {place} couldn't {verb}."),
+    };
+    Some((
+        format!("Couldn't {verb} SpaceTerm Core on {place}").into(),
+        message.into(),
+    ))
 }
 
 /// The confirmation for restarting one or more Machines into their Pending Versions.

@@ -538,7 +538,6 @@ pub(crate) fn local_core_manager(
     cx: &mut Context<WorkspaceManager>,
 ) -> WorkspaceManager {
     // Every Workspace Window's update control reads this computer's server update state.
-    crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
     let mut manager =
         WorkspaceManager::new_with_adapters(home_directory.clone(), adapters, sidebar, window, cx);
     LocalCore::new(session_factory, home_directory).present(&mut manager, window, cx);
@@ -603,7 +602,6 @@ fn open_workspace_window(
                 cx,
             );
         }
-        crate::ui::updates::machine_rows::testing::install_up_to_date(cx);
         WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),
             adapters,

@@ -23,39 +23,17 @@ impl CheckInterval {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ReminderInterval {
-    #[default]
-    TwoHours,
-    FourHours,
-    EightHours,
-    Daily,
-}
-impl ReminderInterval {
-    pub(crate) fn seconds(self) -> u64 {
-        match self {
-            Self::TwoHours => 7200,
-            Self::FourHours => 4 * 3600,
-            Self::EightHours => 8 * 3600,
-            Self::Daily => DAY,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct UpdatePreferences {
     pub(crate) automatic_downloads: bool,
     pub(crate) check_interval: CheckInterval,
-    pub(crate) reminder_interval: ReminderInterval,
 }
 impl Default for UpdatePreferences {
     fn default() -> Self {
         Self {
             automatic_downloads: true,
             check_interval: CheckInterval::Daily,
-            reminder_interval: ReminderInterval::TwoHours,
         }
     }
 }
@@ -138,7 +116,9 @@ impl UpdateHistory {
         }
     }
 
-    pub(crate) fn reminder_due(&mut self, now: u64, interval: ReminderInterval) -> bool {
+    /// Whether the daily reminder is due: the release is a day old or more, and a day has passed
+    /// since the last reminder or the stage changed since it.
+    pub(crate) fn reminder_due(&mut self, now: u64) -> bool {
         let stage = self.stage(now);
         if stage == UpdateStage::Optional {
             return false;
@@ -146,31 +126,21 @@ impl UpdateHistory {
         if stage != self.reminder_stage {
             return true;
         }
-        let interval = if stage == UpdateStage::Warning {
-            DAY
-        } else {
-            interval.seconds()
-        };
         self.last_reminder
-            .is_none_or(|last| self.high_water.saturating_sub(last) >= interval)
+            .is_none_or(|last| self.high_water.saturating_sub(last) >= DAY)
     }
 
     /// The first time after `now` at which [`Self::stage`] or [`Self::reminder_due`] changes:
-    /// the release turning one or two days old, or the reminder interval ending. A reminder that
-    /// is already due changes only when the person sees it, so it adds no time.
-    pub(crate) fn next_change(&mut self, now: u64, interval: ReminderInterval) -> Option<u64> {
+    /// the release turning one or two days old, or a day passing since the last reminder. A
+    /// reminder that is already due changes only when the person sees it, so it adds no time.
+    pub(crate) fn next_change(&mut self, now: u64) -> Option<u64> {
         let stage = self.stage(now);
         self.version.as_ref()?;
         // Both rules read the high-water time, which follows the clock once it passes the mark.
         let ahead = |moment: u64| (moment > self.high_water).then_some(moment);
         let reminder = match self.last_reminder {
             Some(last) if stage != UpdateStage::Optional && stage == self.reminder_stage => {
-                let gap = if stage == UpdateStage::Warning {
-                    DAY
-                } else {
-                    interval.seconds()
-                };
-                ahead(last.saturating_add(gap))
+                ahead(last.saturating_add(DAY))
             }
             _ => None,
         };
@@ -301,46 +271,42 @@ mod tests {
     /// differs, so a scheduler that waits for it misses nothing and wakes for nothing.
     #[test]
     fn the_next_change_is_the_first_moment_the_stage_or_a_reminder_changes() {
-        let interval = ReminderInterval::TwoHours;
         let mut history = UpdateHistory::default();
-        assert_eq!(
-            history.next_change(1_000, interval),
-            None,
-            "no release, no change"
-        );
+        assert_eq!(history.next_change(1_000), None, "no release, no change");
         history.observe("0.1.0", "0.1.1", 1_000, 1_000);
         let warning = 1_000 + DAY;
-        assert_eq!(history.next_change(1_001, interval), Some(warning));
-        assert!(!history.clone().reminder_due(warning - 1, interval));
-        assert!(history.clone().reminder_due(warning, interval));
+        assert_eq!(history.next_change(1_001), Some(warning));
+        assert!(!history.clone().reminder_due(warning - 1));
+        assert!(history.clone().reminder_due(warning));
         assert_eq!(
-            history.next_change(warning, interval),
+            history.next_change(warning),
             Some(1_000 + 2 * DAY),
             "a due reminder waits for the person, not for time"
         );
         history.reminded(warning);
         let overdue = 1_000 + 2 * DAY;
-        assert_eq!(history.next_change(warning, interval), Some(overdue));
+        assert_eq!(history.next_change(warning), Some(overdue));
         history.reminded(overdue);
-        let again = overdue + interval.seconds();
-        assert_eq!(history.next_change(overdue, interval), Some(again));
-        assert!(!history.clone().reminder_due(again - 1, interval));
-        assert!(history.clone().reminder_due(again, interval));
+        let again = overdue + DAY;
+        assert_eq!(history.next_change(overdue), Some(again));
+        assert!(!history.clone().reminder_due(again - 1));
+        assert!(history.clone().reminder_due(again));
         // A clock set back changes nothing until it passes the high-water time again.
-        assert_eq!(history.next_change(10, interval), Some(again));
+        assert_eq!(history.next_change(10), Some(again));
     }
 
     #[test]
-    fn reminders_escalate_once_and_respect_the_retained_interval() {
+    fn reminders_start_after_one_day_and_repeat_daily() {
         let mut history = UpdateHistory::default();
         history.observe("0.1.0", "0.1.1", 1_000, 1_000);
-        assert!(!history.reminder_due(1_001, ReminderInterval::TwoHours));
-        assert!(history.reminder_due(87_400, ReminderInterval::TwoHours));
+        assert!(!history.reminder_due(1_001));
+        assert!(history.reminder_due(87_400));
         history.reminded(87_400);
-        assert!(!history.reminder_due(100_000, ReminderInterval::TwoHours));
-        assert!(history.reminder_due(173_800, ReminderInterval::TwoHours));
+        assert!(!history.reminder_due(100_000));
+        // The stage turns overdue at two days, which reminds at once.
+        assert!(history.reminder_due(173_800));
         history.reminded(173_800);
-        assert!(!history.reminder_due(180_999, ReminderInterval::TwoHours));
-        assert!(history.reminder_due(181_000, ReminderInterval::TwoHours));
+        assert!(!history.reminder_due(173_800 + DAY - 1));
+        assert!(history.reminder_due(173_800 + DAY));
     }
 }

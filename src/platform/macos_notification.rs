@@ -17,6 +17,7 @@ use crate::terminal::attention_notification::{
 use crate::terminal::attention_runtime::AttentionFailure;
 
 const NOTIFICATION_IDENTIFIER: &str = "io.github.sadiksaifi.spaceterm.terminal-attention";
+const REMINDER_IDENTIFIER: &str = "io.github.sadiksaifi.spaceterm.update-reminder";
 fn process_has_application_bundle_identity() -> bool {
     NSBundle::mainBundle().bundleIdentifier().is_some()
 }
@@ -130,6 +131,36 @@ impl NotificationAdapter for UserNotificationAdapter {
         center.removePendingNotificationRequestsWithIdentifiers(&identifiers);
         center.removeDeliveredNotificationsWithIdentifiers(&identifiers);
         Ok(())
+    }
+}
+
+impl crate::updates::reminders::UpdateReminderAdapter for UserNotificationAdapter {
+    /// Asks for provisional authorization when the person has not decided, then delivers.
+    fn notify(&self, key: &str, title: &str, body: &str) {
+        let Some(center) = notification_center() else {
+            return;
+        };
+        let identifier = format!("{REMINDER_IDENTIFIER}.{key}");
+        let (title, body) = (title.to_owned(), body.to_owned());
+        let deliver = RcBlock::new(
+            move |_granted: Bool, _error: *mut objc2_foundation::NSError| {
+                let content = UNMutableNotificationContent::new();
+                content.setTitle(&NSString::from_str(&title));
+                content.setBody(&NSString::from_str(&body));
+                content.setThreadIdentifier(&NSString::from_str(REMINDER_IDENTIFIER));
+                let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+                    &NSString::from_str(&identifier),
+                    &content,
+                    None,
+                );
+                UNUserNotificationCenter::currentNotificationCenter()
+                    .addNotificationRequest_withCompletionHandler(&request, None);
+            },
+        );
+        center.requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Provisional,
+            &deliver,
+        );
     }
 }
 

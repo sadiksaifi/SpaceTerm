@@ -188,7 +188,6 @@ fn desktop_profile(
                     "Reinstall SpaceTerm to Update",
                     "Run the SpaceTerm install script to install the update.",
                 ),
-                overdue_read_only_update: "Update overdue. Reinstall with the install script.",
             },
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
@@ -283,6 +282,9 @@ fn compose(
         adapters: crate::app::ApplicationCapabilities {
             updates,
             machine_updates: machine_updates(),
+            update_reminders: Some(Rc::new(
+                super::linux_notification::LinuxUpdateReminders::new(bus.clone(), identity),
+            )),
             selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
             settings_file,
             application_menu: Rc::new(

@@ -1688,7 +1688,6 @@ impl SettingsWindow {
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
-            SettingsRowId::UpdateReminderInterval => self.render_update_reminder_interval(cx),
             SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
             SettingsRowId::SettingsFile => self.render_settings_file(appearance, cx),
             SettingsRowId::ExportSettings => {
@@ -2620,9 +2619,9 @@ impl SettingsWindow {
             ),
             SettingsRowId::SidebarDefaultState => Some("The sidebar state in each new window."),
             SettingsRowId::TerminalFontFamily => Some("Only monospace fonts."),
-            SettingsRowId::AutomaticUpdateDownloads
-            | SettingsRowId::UpdateCheckInterval
-            | SettingsRowId::UpdateReminderInterval => updates::update_row_description(row),
+            SettingsRowId::AutomaticUpdateDownloads | SettingsRowId::UpdateCheckInterval => {
+                updates::update_row_description(row)
+            }
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }

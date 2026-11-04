@@ -24,28 +24,6 @@ use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{NativeServiceOrigin, NativeServiceStatus, SelectionCopy};
 use crate::ui::{ChooseWorkspace, NewWorkspace, WorkspaceManager};
 
-struct NativeLocalUpdates;
-
-impl crate::ui::updates::LocalUpdateObservation for NativeLocalUpdates {
-    fn observe(&self) -> crate::ui::updates::LocalUpdateFacts {
-        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-        let service = spaceterm_core::service::Service::for_identity(identity);
-        let core = service
-            .as_ref()
-            .ok()
-            .and_then(|service| service.passive_machine_id().ok().flatten());
-        let update = if crate::local_startup::owned_foreground() {
-            Ok(("Development SpaceTerm Core".into(), false))
-        } else {
-            service
-                .as_ref()
-                .map_err(|error| *error)
-                .and_then(crate::ui::settings_window::core_update::passive_update)
-        };
-        crate::ui::updates::LocalUpdateFacts { core, update }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StartupDependenciesError {
     #[error("Home directory unavailable")]
@@ -1006,7 +984,6 @@ pub(crate) fn open(
         if let Some(placement) = placement {
             placement.finish(window);
         }
-        crate::ui::updates::install_local_updates(Arc::new(NativeLocalUpdates), cx);
         // Both enrollment methods publish into this paired connection registry.
         crate::ui::direct_machines::install(direct_machines.clone(), cx);
         // Paired server cards stop, restart and update each server over its service lane.
@@ -1293,6 +1270,8 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) updates: Rc<dyn crate::updates::UpdateAdapter>,
     /// Reports each Machine's SpaceTerm Core updates. None installs no Machine updates.
     pub(crate) machine_updates: Option<Rc<dyn crate::updates::machines::MachineUpdatesAdapter>>,
+    /// Shows the daily overdue update notifications. None shows none.
+    pub(crate) update_reminders: Option<Rc<dyn crate::updates::reminders::UpdateReminderAdapter>>,
     pub(crate) application_menu: Rc<dyn ApplicationMenuAdapter>,
     pub(crate) desktop_events: Rc<dyn crate::platform::desktop_events::DesktopEventAdapter>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
@@ -1557,6 +1536,9 @@ pub(crate) fn initialize_application(
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(machines) = &host.adapters.machine_updates {
         crate::updates::machines::store::MachineUpdates::install(Rc::clone(machines), cx);
+    }
+    if let Some(reminders) = &host.adapters.update_reminders {
+        crate::updates::reminders::UpdateReminders::install(Rc::clone(reminders), cx);
     }
     cx.set_global(SelectedFileAccess(Arc::clone(
         &host.adapters.selected_files,
@@ -2434,6 +2416,7 @@ mod runtime_tests {
             adapters: ApplicationCapabilities {
                 updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
                 machine_updates: None,
+                update_reminders: None,
                 selected_files: Arc::new(NoSelectedFiles),
                 settings_file: Rc::new(
                     crate::platform::settings_file::testing::RecordingSettingsFile::default(),
