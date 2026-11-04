@@ -609,8 +609,12 @@ impl Updates {
         {
             return Err(InstallError::Busy);
         }
+        // Another engine, such as a second local installer, may have installed since this one
+        // read the record. The service lock serializes installs, so decide on the record now.
         {
-            let live = self.shared.lock();
+            let record = load(data).map_err(InstallError::Core)?;
+            let mut live = self.shared.lock();
+            live.record = record;
             self.shared.admits_version(&live, version)?;
         }
         let size = std::fs::metadata(archive.archive).map_or(0, |v| v.len());

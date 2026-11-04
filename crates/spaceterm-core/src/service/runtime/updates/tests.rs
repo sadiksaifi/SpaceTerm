@@ -645,3 +645,50 @@ mod feed_checks {
         });
     }
 }
+
+#[test]
+fn a_second_engine_refuses_an_older_release_than_one_another_engine_installed() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let first = Updates::open(machine.service.clone()).unwrap();
+        let second = Updates::open(machine.service.clone()).unwrap();
+        install(&first, &machine, "1.2.0", Protocols::CURRENT, Source::Local).unwrap();
+        assert_eq!(
+            install(
+                &second,
+                &machine,
+                "1.1.0",
+                Protocols::CURRENT,
+                Source::Local
+            ),
+            Err(InstallError::NotNewer)
+        );
+        assert_eq!(installations(&machine), ["1.0.0", "1.2.0"]);
+    });
+}
+
+#[test]
+fn a_full_disk_at_start_keeps_the_version_pending() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Feed,
+        )
+        .unwrap();
+        let digest = pending_digest(&data).unwrap().unwrap();
+        record_start_failure(&data, [3; 32], &digest, "1.1.0", StartFailure::DiskFull).unwrap();
+        let facts = Updates::stored(&machine.service).unwrap();
+        assert_eq!(facts.pending.map(|p| p.version), Some(version("1.1.0")));
+        assert_eq!(facts.skipped, None);
+        assert_eq!(
+            facts.last_failure.map(|f| f.kind),
+            Some(FailureKind::Start(StartFailure::DiskFull))
+        );
+    });
+}
