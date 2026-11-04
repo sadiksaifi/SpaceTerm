@@ -57,8 +57,12 @@ impl CredentialStore for NoCredentials {
     }
 }
 
+const SUPPORTED_LINUX: &[u8] = b"SPACETERM_PREFLIGHT 1 os=linux arch=x86_64 uid=501 system=2.39 manager=1 linger=1 gui=0 filevault=0\n";
+
 #[derive(Clone)]
 struct ProcessAdapter {
+    /// What SSH preflight reports. A supported Linux account with linger by default.
+    preflight: Arc<Mutex<Vec<u8>>>,
     discovery: Arc<Mutex<Vec<u8>>>,
     status: Arc<Mutex<Option<DirectStatus>>>,
     effects: Arc<Mutex<Vec<Vec<OsString>>>>,
@@ -164,10 +168,25 @@ impl SshProcessAdapter for ProcessAdapter {
                 ),
             ));
         }
+        let mut linger_refused = false;
         let (success, stdout, stderr) = if resolve {
             (true, self.resolved.lock().unwrap().clone(), vec![])
         } else if request.arguments() == [OsString::from("-V")] {
             (true, vec![], b"OpenSSH_9.9p2\n".to_vec())
+        } else if request.arguments().last().is_some_and(|command| {
+            command
+                .to_string_lossy()
+                .contains(spaceterm_core::provisioning::preflight::MARKER)
+        }) {
+            (true, self.preflight.lock().unwrap().clone(), vec![])
+        } else if request
+            .arguments()
+            .last()
+            .is_some_and(|command| command.to_string_lossy().contains("enable-linger"))
+        {
+            // The account can't authorize linger: the script refuses with its status.
+            linger_refused = true;
+            (false, vec![], vec![])
         } else if request
             .arguments()
             .last()
@@ -213,7 +232,14 @@ impl SshProcessAdapter for ProcessAdapter {
             stdout
         };
         Ok(SpawnedSshProcess::new(
-            FixtureProcess::Captured(ProcessExit::new(success, Some(if success { 0 } else { 1 }))),
+            FixtureProcess::Captured(ProcessExit::new(
+                success,
+                Some(match (success, linger_refused) {
+                    (true, _) => 0,
+                    (false, true) => spaceterm_core::provisioning::preflight::LINGER_REFUSED,
+                    (false, false) => 1,
+                }),
+            )),
             SshProcessPipes::new(
                 Some(Box::new(std::io::sink())),
                 Some(Box::new(Cursor::new(stdout))),
@@ -290,6 +316,7 @@ impl Fixture {
             Arc::new(NoCredentials),
         );
         let adapter = ProcessAdapter {
+            preflight: Arc::new(Mutex::new(SUPPORTED_LINUX.to_vec())),
             discovery: Arc::new(Mutex::new(discovery)),
             status: Arc::default(),
             effects: Arc::default(),
@@ -453,6 +480,54 @@ impl<F: Fn(SetupOffer, &CancellationToken) -> bool + Send + Sync> SetupApprovalH
     fn approve(&self, offer: SetupOffer, cancellation: &CancellationToken) -> bool {
         (self.0)(offer, cancellation)
     }
+}
+
+#[test]
+fn an_unsupported_computer_is_refused_before_discovery_or_any_offer() {
+    let fixture = Fixture::new(b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec());
+    write_signed_package(&fixture.catalog, b"authenticated executable");
+    *fixture.adapter.preflight.lock().unwrap() =
+        b"SPACETERM_PREFLIGHT 1 os=macos arch=arm64 uid=501 system=26.1 manager=0 linger=0 gui=0 filevault=1\n"
+            .to_vec();
+    let result = fixture.setup(Arc::new(Approvals(|_, _: &CancellationToken| {
+        panic!("a refused computer is offered nothing")
+    })));
+    assert_eq!(
+        result,
+        Err(SetupFailure::Unsupported(
+            spaceterm_core::provisioning::SetupRefusal::NobodyLoggedIn { filevault: true }
+        ))
+    );
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn declined_linger_on_a_remote_linux_machine_refuses_before_upload() {
+    let fixture = Fixture::new(b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec());
+    write_signed_package(&fixture.catalog, b"authenticated executable");
+    *fixture.adapter.preflight.lock().unwrap() = String::from_utf8(SUPPORTED_LINUX.to_vec())
+        .unwrap()
+        .replace("linger=1", "linger=0")
+        .into_bytes();
+    let result = fixture.setup(Arc::new(Approvals(|_, _: &CancellationToken| {
+        panic!("setup offers nothing before linger")
+    })));
+    assert_eq!(
+        result,
+        Err(SetupFailure::Unsupported(
+            spaceterm_core::provisioning::SetupRefusal::LingerDeclined
+        ))
+    );
+    // The fixture fails every linger script and the password prompt, and nothing is uploaded.
+    let effects = fixture.adapter.effects.lock().unwrap();
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !effect.last().unwrap().to_string_lossy().contains("ssh-install"))
+    );
+    drop(effects);
+    assert_eq!(fixture.backend.process_counts().active(), 0);
 }
 
 #[test]
