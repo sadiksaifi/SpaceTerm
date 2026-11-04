@@ -6,7 +6,6 @@ use std::rc::Rc;
 
 use gpui::App;
 use spaceterm_core::service::ServiceStatus;
-use spaceterm_core::update::facts::Version;
 
 use super::model::{Command, Menu};
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice, Surface};
@@ -34,44 +33,8 @@ pub(crate) trait StatusHost {
 enum Message {
     /// The person closed an explanation that runs this command next.
     Answered(presentation::Command),
-    /// The person approved a confirmation.
-    Approved(Approval),
-}
-
-/// An approved confirmation and what it described: each affected Machine's sessions and the
-/// version its restart goes to. A change to either before dispatch asks again.
-struct Approval {
-    actions: Vec<(MachineId, MachineAction)>,
-    observed: Vec<Observed>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct Observed {
-    machine: MachineId,
-    sessions: u32,
-    target: Option<Version>,
-}
-
-/// What a confirmation of `actions` describes now.
-fn observe(actions: &[(MachineId, MachineAction)], cx: &App) -> Vec<Observed> {
-    let machines: &[MachineUpdate] =
-        MachineUpdates::global(cx).map_or(&[], |store| store.read(cx).machines());
-    actions
-        .iter()
-        .map(|(machine, _)| {
-            let facts = machines
-                .iter()
-                .find(|update| update.machine == *machine)
-                .and_then(|update| update.facts.as_ref());
-            Observed {
-                machine: *machine,
-                sessions: facts.map_or(0, |facts| facts.sessions),
-                target: facts
-                    .and_then(|facts| facts.pending.as_ref())
-                    .map(|pending| pending.version.clone()),
-            }
-        })
-        .collect()
+    /// The person approved this confirmation.
+    Approved(presentation::Confirmation),
 }
 
 pub(crate) struct StatusMenu {
@@ -142,45 +105,22 @@ impl StatusMenu {
         self.render(cx);
     }
 
-    /// Performs an approved confirmation while it still describes the Machines. Otherwise the
-    /// menu runs what it offers now, which asks again, or restarts at once at zero sessions.
-    fn approved(&self, approval: Approval, cx: &mut App) {
-        if observe(&approval.actions, cx) == approval.observed {
-            for (machine, action) in approval.actions {
-                act(machine, action, cx);
-            }
+    /// Performs an approved confirmation while its approval holds. Otherwise the menu runs
+    /// what it offers now, which asks again, or restarts at once at zero sessions.
+    fn approved(&self, confirmation: presentation::Confirmation, cx: &mut App) {
+        let Some(store) = MachineUpdates::global(cx) else {
+            return;
+        };
+        let approved = store.update(cx, |store, cx| {
+            store.perform_approved(&confirmation, Surface::StatusMenu, cx)
+        });
+        if approved.is_ok() {
             return;
         }
         self.render(cx);
-        let Some((machine, action)) = approval.actions.first() else {
-            return;
-        };
-        let command = if approval.actions.len() == 1 {
-            self.command_for(*machine, action)
-        } else {
-            self.restart_all_for(*machine, action)
-        };
-        if let Some(command) = command {
+        if let Some(command) = presentation::current(cx).ask_again(&confirmation) {
             self.run(command, cx);
         }
-    }
-
-    /// The Restart All the menu now offers that includes `action` on `machine`.
-    fn restart_all_for(
-        &self,
-        machine: MachineId,
-        action: &MachineAction,
-    ) -> Option<presentation::Command> {
-        let menu = self.menu.borrow();
-        menu.as_ref()?.commands().find_map(|command| match command {
-            Command::Update(presentation::Command::Confirm(confirmation))
-                if confirmation.actions.len() > 1
-                    && confirmation.actions.contains(&(machine, action.clone())) =>
-            {
-                Some(presentation::Command::Confirm(confirmation))
-            }
-            _ => None,
-        })
     }
 
     /// An action this menu performed finished.
@@ -302,15 +242,11 @@ impl StatusMenu {
                     confirm: Some(confirmation.button.to_string()),
                 };
                 let messages = self.messages.clone();
-                let approval = Approval {
-                    observed: observe(&confirmation.actions, cx),
-                    actions: confirmation.actions,
-                };
                 self.host.alert(
                     alert,
                     Box::new(move |approved| {
                         if approved {
-                            let _ = messages.send_blocking(Message::Approved(approval));
+                            let _ = messages.send_blocking(Message::Approved(confirmation));
                         }
                     }),
                     cx,

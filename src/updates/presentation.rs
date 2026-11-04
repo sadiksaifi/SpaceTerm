@@ -83,6 +83,72 @@ pub(crate) struct Confirmation {
     /// The destructive button: "Restart" or "Stop".
     pub(crate) button: SharedString,
     pub(crate) actions: Vec<(MachineId, MachineAction)>,
+    /// The work the alert described. Approving it authorizes exactly that work.
+    pub(crate) approval: Approval,
+}
+
+/// What a confirmation described for each Machine it affects: the sessions it closes, the Core
+/// that runs and the Pending Version it restarts into. Every surface checks
+/// [`Approval::holds`] against the current facts before it performs an approved action, and
+/// asks again with [`Presentation::ask_again`] when it does not hold. The Core's own preview
+/// refuses a changed session count with [`ActionFailure::Changed`] as the lane-side guard.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Approval {
+    machines: Vec<Described>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Described {
+    machine: MachineId,
+    sessions: u32,
+    running: Option<Version>,
+    target: Option<Version>,
+    breaking: bool,
+}
+
+impl Described {
+    fn of(update: &MachineUpdate) -> Self {
+        let facts = update.facts.as_ref();
+        let pending = facts.and_then(|facts| facts.pending.as_ref());
+        Self {
+            machine: update.machine,
+            sessions: facts.map_or(0, |facts| facts.sessions),
+            running: facts.map(|facts| facts.running.clone()),
+            target: pending.map(|pending| pending.version.clone()),
+            breaking: pending.is_some_and(|pending| pending.breaking),
+        }
+    }
+}
+
+impl Approval {
+    fn of(views: &[MachineView]) -> Self {
+        Self {
+            machines: views
+                .iter()
+                .map(|view| Described {
+                    machine: view.machine,
+                    sessions: view.sessions,
+                    running: view.running.clone(),
+                    target: view.state.waiting().map(|(to, _, _)| to.clone()),
+                    breaking: view
+                        .state
+                        .waiting()
+                        .is_some_and(|(_, breaking, _)| breaking),
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether `machines` still show the work the alert described: the same sessions, running
+    /// Core and Pending Version on every affected Machine. Other changes keep the approval.
+    pub(crate) fn holds(&self, machines: &[MachineUpdate]) -> bool {
+        self.machines.iter().all(|described| {
+            machines
+                .iter()
+                .find(|update| update.machine == described.machine)
+                .is_some_and(|update| Described::of(update) == *described)
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,12 +219,15 @@ pub(crate) enum MachineState {
     /// A Pending Version waits for a restart.
     Ready {
         to: Version,
+        /// Its protocol majors differ from the running Core's, so its restart always asks.
+        breaking: bool,
         stranded: Vec<String>,
     },
     /// The Pending Version has waited a day or more.
     Overdue {
         to: Version,
         days: u64,
+        breaking: bool,
         stranded: Vec<String>,
     },
     /// The Core is too old for this desktop. `push` is the version this desktop can send.
@@ -223,11 +292,20 @@ impl MachineState {
         )
     }
 
-    fn waiting(&self) -> Option<(&Version, &[String])> {
+    /// The waiting Pending Version, whether it is breaking, and the devices it strands.
+    fn waiting(&self) -> Option<(&Version, bool, &[String])> {
         match self {
-            Self::Ready { to, stranded } | Self::Overdue { to, stranded, .. } => {
-                Some((to, stranded))
+            Self::Ready {
+                to,
+                breaking,
+                stranded,
             }
+            | Self::Overdue {
+                to,
+                breaking,
+                stranded,
+                ..
+            } => Some((to, *breaking, stranded)),
             _ => None,
         }
     }
@@ -343,7 +421,11 @@ impl MachineView {
 
     /// Whether restarting asks first: it closes sessions or crosses a breaking change.
     fn restart_asks(&self) -> bool {
-        self.sessions > 0 || self.state.waiting().is_some_and(|(_, s)| !s.is_empty())
+        self.sessions > 0
+            || self
+                .state
+                .waiting()
+                .is_some_and(|(_, breaking, _)| breaking)
     }
 
     /// Restarts at once, or asks first when sessions close or other devices stop working.
@@ -355,7 +437,8 @@ impl MachineView {
         }
     }
 
-    fn stop_command(&self) -> Command {
+    /// Stops at once with no sessions open, otherwise asks first.
+    pub(crate) fn stop_command(&self) -> Command {
         if self.sessions == 0 {
             return Command::Machine(self.machine, MachineAction::Stop);
         }
@@ -368,6 +451,7 @@ impl MachineView {
             .into(),
             button: "Stop".into(),
             actions: vec![(self.machine, MachineAction::Stop)],
+            approval: Approval::of(std::slice::from_ref(self)),
         })
     }
 
@@ -462,7 +546,7 @@ impl MachineView {
                 days(*waited)
             ));
         }
-        if let Some((_, stranded)) = self.state.waiting()
+        if let Some((_, _, stranded)) = self.state.waiting()
             && !stranded.is_empty()
         {
             text.push(' ');
@@ -474,7 +558,10 @@ impl MachineView {
     /// The title-bar label: at most two words.
     fn control_label(&self) -> &'static str {
         match &self.state {
+            // The ellipsis says the button asks first.
+            MachineState::Ready { .. } if self.restart_asks() => "Restart…",
             MachineState::Ready { .. } => "Restart",
+            MachineState::Overdue { .. } if self.restart_asks() => "Restart overdue…",
             MachineState::Overdue { .. } => "Restart overdue",
             MachineState::CoreTooOld { .. } => "Update needed",
             MachineState::Installing { .. } => "Installing…",
@@ -967,10 +1054,12 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
             Some(_) => MachineState::Overdue {
                 to: pending.version.clone(),
                 days: (now.saturating_sub(pending.installed_at) / DAY).max(1),
+                breaking: pending.breaking,
                 stranded,
             },
             None => MachineState::Ready {
                 to: pending.version.clone(),
+                breaking: pending.breaking,
                 stranded,
             },
         };
@@ -1479,6 +1568,25 @@ impl Presentation {
         })
     }
 
+    /// What a surface offers now for the work `stale` asked about, when its approval no longer
+    /// holds: the current confirmation, or the action itself when nothing asks any more.
+    pub(crate) fn ask_again(&self, stale: &Confirmation) -> Option<Command> {
+        match stale.actions.as_slice() {
+            [(machine, MachineAction::Restart)] => Some(self.machine(*machine)?.restart_command()),
+            [(machine, MachineAction::Stop)] => Some(self.machine(*machine)?.stop_command()),
+            actions if actions.len() > 1 => match self.restart_all() {
+                Some(all) => Some(all.command),
+                // One waiting Machine is left: its own restart.
+                None => self
+                    .machines
+                    .iter()
+                    .find(|view| view.state.waiting().is_some())
+                    .map(MachineView::restart_command),
+            },
+            _ => None,
+        }
+    }
+
     pub(crate) fn extra_header(&self) -> ExtraHeader {
         let running = env!("SPACETERM_VERSION");
         let (version, state): (&str, Option<String>) = match &self.desktop {
@@ -1683,8 +1791,18 @@ fn restart_confirmation(views: &[MachineView]) -> Confirmation {
         ),
     };
     let breaking = views.iter().filter_map(|view| {
-        let (_, stranded) = view.state.waiting()?;
-        (!stranded.is_empty()).then(|| stranded_sentence(&view.place(), stranded))
+        let (to, breaking, stranded) = view.state.waiting()?;
+        if !stranded.is_empty() {
+            Some(stranded_sentence(&view.place(), stranded))
+        } else {
+            breaking.then(|| {
+                format!(
+                    "SpaceTerm Core {to} is a breaking update for {}, so it restarts only when \
+                     you ask.",
+                    view.place()
+                )
+            })
+        }
     });
     let message: Vec<String> = message.into_iter().chain(breaking).collect();
     Confirmation {
@@ -1695,6 +1813,7 @@ fn restart_confirmation(views: &[MachineView]) -> Confirmation {
             .iter()
             .map(|view| (view.machine, MachineAction::Restart))
             .collect(),
+        approval: Approval::of(views),
     }
 }
 

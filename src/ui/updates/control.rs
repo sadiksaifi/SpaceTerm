@@ -4,14 +4,14 @@
 //! a compact menu with one line per Machine, "Restart All…" and Recent.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, AnyWindowHandle, App, Context, Pixels, Rgba, SharedString, Window, div};
+use gpui::{AnyElement, App, Context, Pixels, Rgba, SharedString, Window, div};
 use spaceterm_ui::{
     Button, ButtonPaint, ButtonShape, ButtonSize, ButtonVariant, ButtonVariantStyle,
     DeterminateProgress, Icon, IconName, Menu, MenuAlignment, MenuEntry, MenuPlacement,
     MenuPlacementConfig, MenuSize, ProgressRing, ProgressSize, ProgressState, Tooltip,
 };
 
-use super::commands;
+use super::commands::{self, Presenter};
 use super::service;
 use crate::ui::appearance::{chrome, gpui_color};
 use crate::ui::chrome_icons::IconRole;
@@ -122,7 +122,7 @@ fn variant(tone: Tone) -> ButtonVariant {
 }
 
 /// One item: a plain button that performs its command, or a status while the item works.
-fn single(item: Item, size: Pixels, window: AnyWindowHandle, cx: &App) -> AnyElement {
+fn single(item: Item, size: Pixels, presenter: Presenter, cx: &App) -> AnyElement {
     let inherited = item.tone == Tone::Action;
     let (mark, fraction) = (item.glyph, item.fraction);
     let button = Button::new("update-control", item.label)
@@ -142,9 +142,11 @@ fn single(item: Item, size: Pixels, window: AnyWindowHandle, cx: &App) -> AnyEle
         });
     match item.command {
         Some(command) => button
-            .on_activate(move |_, _, cx| commands::perform(command.clone(), Some(window), cx))
+            .on_activate(move |_, _, cx| commands::perform(command.clone(), presenter.clone(), cx))
             .into_any_element(),
-        None => button.into_any_element(),
+        // Work in progress: a focusable status in the blue progress paint, never a disabled
+        // button.
+        None => button.status().into_any_element(),
     }
 }
 
@@ -161,12 +163,15 @@ fn row_entry(row: MenuRow, index: usize, warning: Rgba) -> MenuEntry<Choice> {
         Some(button) => Choice::Perform(button.command.clone()),
         None => Choice::Status,
     };
-    let disabled = matches!(choice, Choice::Status);
+    let informational = matches!(choice, Choice::Status);
     let (mark, fraction, tone) = (row.glyph, row.fraction, row.tone);
     let mut entry = MenuEntry::action(row.name.clone(), choice)
-        .shortcut(trailing(&row))
-        .disabled(disabled)
+        .detail(trailing(&row))
+        .description(row.sentence.clone())
         .debug_selector(format!("update-row-{index}"));
+    if informational {
+        entry = entry.informational();
+    }
     if let Some(mark) = mark {
         entry = entry.icon(move |foreground, size| {
             let tint = if tone == Some(Tone::Problem) {
@@ -203,7 +208,7 @@ fn menu_entries(presentation: &Presentation, warning: Rgba, cx: &App) -> Vec<Men
     let restart_all = presentation.restart_all();
     let recent: Vec<MenuEntry<Choice>> = crate::updates::recent_lines(cx)
         .into_iter()
-        .map(|line| MenuEntry::action(line, Choice::Status).disabled(true))
+        .map(|line| MenuEntry::action(line, Choice::Status).informational())
         .collect();
     if restart_all.is_some() || !recent.is_empty() {
         entries.push(MenuEntry::separator());
@@ -211,7 +216,8 @@ fn menu_entries(presentation: &Presentation, warning: Rgba, cx: &App) -> Vec<Men
     if let Some(all) = restart_all {
         entries.push(
             MenuEntry::action(all.label, Choice::Perform(all.command))
-                .shortcut(all.trailing)
+                .detail(all.trailing)
+                .description(all.sentence)
                 .debug_selector("update-restart-all"),
         );
     }
@@ -230,16 +236,16 @@ impl Render for UpdateControl {
         }
         let appearance = chrome(cx);
         let size = appearance.icons.metrics(IconRole::Caption).glyph_size;
-        let handle = window.window_handle();
+        let presenter = Presenter::Control(window.window_handle(), cx.weak_entity());
         let warning = warning_color(cx);
         let element = match control {
             Control::Hidden => unreachable!("handled above"),
-            Control::Single(item) => single(item, size, handle, cx),
+            Control::Single(item) => single(item, size, presenter, cx),
             Control::Menu {
                 label,
                 tone,
                 glyph: mark,
-                sentence: _,
+                sentence,
             } => {
                 let inherited = tone == Tone::Action;
                 Menu::new(
@@ -253,6 +259,11 @@ impl Render for UpdateControl {
                     let (style, focus) = warning_style(cx);
                     menu.contextual_style(style, focus)
                 })
+                .accessibility_description(sentence.clone())
+                .tooltip(
+                    Tooltip::new("update-control-menu-tooltip", sentence)
+                        .debug_selector("update-control-menu-tooltip"),
+                )
                 .size(MenuSize::Wide)
                 .placement(MenuPlacementConfig::new(
                     MenuPlacement::Bottom,
@@ -261,7 +272,7 @@ impl Render for UpdateControl {
                 .debug_selector("update-control-menu")
                 .on_activate(move |activation, _, cx| {
                     if let Choice::Perform(command) = activation.action() {
-                        commands::perform(command.clone(), Some(handle), cx);
+                        commands::perform(command.clone(), presenter.clone(), cx);
                     }
                 })
                 .into_any_element()

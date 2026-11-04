@@ -2,11 +2,13 @@ use std::sync::Mutex;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::Bool;
+use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{AllocAnyThread as _, DefinedClass as _, define_class, msg_send};
 use objc2_foundation::{NSArray, NSBundle, NSInteger, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-    UNNotificationSetting, UNUserNotificationCenter,
+    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+    UNNotificationSetting, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 
 use crate::application_identity::ApplicationIdentity;
@@ -134,7 +136,87 @@ impl NotificationAdapter for UserNotificationAdapter {
     }
 }
 
-impl crate::updates::reminders::UpdateReminderAdapter for UserNotificationAdapter {
+/// What the reminder delegate reports clicks to.
+struct ReminderDelegateIvars {
+    activated: async_channel::Sender<String>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and define_class! drops the ivars.
+    #[unsafe(super(NSObject))]
+    #[name = "SpaceTermUpdateReminderDelegate"]
+    #[ivars = ReminderDelegateIvars]
+    struct ReminderDelegate;
+
+    unsafe impl NSObjectProtocol for ReminderDelegate {}
+
+    unsafe impl UNUserNotificationCenterDelegate for ReminderDelegate {
+        /// An overdue reminder shows even while SpaceTerm is in front, because it is due only
+        /// while a window is active. Other notifications keep the default of showing nothing.
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        fn will_present(
+            &self,
+            _center: &UNUserNotificationCenter,
+            notification: &UNNotification,
+            completion: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+        ) {
+            let identifier = notification.request().identifier().to_string();
+            completion.call((if reminder_key(&identifier).is_some() {
+                UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List
+            } else {
+                UNNotificationPresentationOptions(0)
+            },));
+        }
+
+        #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+        fn did_receive(
+            &self,
+            _center: &UNUserNotificationCenter,
+            response: &UNNotificationResponse,
+            completion: &block2::DynBlock<dyn Fn()>,
+        ) {
+            let identifier = response.notification().request().identifier().to_string();
+            if let Some(key) = reminder_key(&identifier) {
+                let _ = self.ivars().activated.try_send(key.to_owned());
+            }
+            completion.call(());
+        }
+    }
+);
+
+/// The reminder key a notification identifier carries, if it is a reminder's.
+fn reminder_key(identifier: &str) -> Option<&str> {
+    identifier
+        .strip_prefix(REMINDER_IDENTIFIER)?
+        .strip_prefix('.')
+}
+
+/// Overdue update reminders in Notification Center. Clicking one reports its key.
+pub(crate) struct MacosUpdateReminders {
+    /// The center holds its delegate weakly, so the reminders keep it.
+    delegate: std::cell::RefCell<Option<Retained<ReminderDelegate>>>,
+}
+
+impl MacosUpdateReminders {
+    pub(crate) fn new() -> Self {
+        Self {
+            delegate: std::cell::RefCell::new(None),
+        }
+    }
+}
+
+impl crate::updates::reminders::UpdateReminderAdapter for MacosUpdateReminders {
+    fn activations(&self, activated: async_channel::Sender<String>) {
+        let Some(center) = notification_center() else {
+            return;
+        };
+        let delegate = ReminderDelegate::alloc().set_ivars(ReminderDelegateIvars { activated });
+        // SAFETY: NSObject's init is its designated initializer.
+        let delegate: Retained<ReminderDelegate> = unsafe { msg_send![super(delegate), init] };
+        center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        *self.delegate.borrow_mut() = Some(delegate);
+    }
+
     /// Asks for provisional authorization when the person has not decided, then delivers.
     fn notify(&self, key: &str, title: &str, body: &str) {
         let Some(center) = notification_center() else {

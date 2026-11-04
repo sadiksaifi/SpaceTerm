@@ -14,7 +14,11 @@ use super::{
     ActionFailure, MachineAction, MachineId, MachineUpdate, MachineUpdatesAdapter,
     MachineUpdatesEvent,
 };
-use crate::updates::presentation::Dismissed;
+use crate::updates::presentation::{Confirmation, Dismissed};
+
+/// The facts changed since the person approved a confirmation, so it authorizes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stale;
 
 /// Where the person asked for an action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +110,25 @@ impl MachineUpdates {
         }
         self.performed.push((machine, action.clone(), surface));
         self.adapter.perform(machine, action);
+    }
+
+    /// Performs every action `confirmation` asked about, if the person's approval still holds:
+    /// the affected Machines show the sessions, running Core and Pending Version the alert
+    /// described. Otherwise performs nothing and returns [`Stale`], and the surface asks again
+    /// with [`crate::updates::presentation::Presentation::ask_again`].
+    pub(crate) fn perform_approved(
+        &mut self,
+        confirmation: &Confirmation,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) -> Result<(), Stale> {
+        if !confirmation.approval.holds(&self.machines) {
+            return Err(Stale);
+        }
+        for (machine, action) in confirmation.actions.iter().cloned() {
+            self.perform(machine, action, surface, cx);
+        }
+        Ok(())
     }
 
     fn receive(&mut self, event: MachineUpdatesEvent, cx: &mut Context<Self>) {

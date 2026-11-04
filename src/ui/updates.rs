@@ -26,6 +26,7 @@ use super::WorkspaceManager;
 use super::settings_window::SettingsWindow;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice};
+use crate::updates::reminders::{ReminderActivated, UpdateReminders};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
 
 actions!(spaceterm, [CheckForUpdates]);
@@ -52,6 +53,11 @@ pub(crate) fn init(cx: &mut App) {
     subscriptions.extend(MachineUpdates::global(cx).map(|machines| {
         cx.subscribe(&machines, |_, notice: &MachineUpdatesNotice, cx| {
             commands::receive_failure(notice, cx);
+        })
+    }));
+    subscriptions.extend(UpdateReminders::global(cx).map(|reminders| {
+        cx.subscribe(&reminders, |_, clicked: &ReminderActivated, cx| {
+            commands::reminder_clicked(clicked.0, cx);
         })
     }));
     cx.set_global(UpdatePrompts {
@@ -850,6 +856,7 @@ mod tests {
             message: "This will close your 3 running sessions.".into(),
             button: "Restart".into(),
             actions: Vec::new(),
+            approval: crate::updates::presentation::Approval::default(),
         };
         assert_eq!(
             commands::confirmation_alert(&confirmation).validate(&policy),

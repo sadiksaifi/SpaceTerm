@@ -166,7 +166,7 @@ fn compose(
                 &direct_machines,
             )),
             update_reminders: Some(Rc::new(
-                super::macos_notification::UserNotificationAdapter::new(identity),
+                super::macos_notification::MacosUpdateReminders::new(),
             )),
             selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
             settings_file,

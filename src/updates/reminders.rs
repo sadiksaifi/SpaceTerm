@@ -1,13 +1,14 @@
 //! Daily notifications about overdue updates. The desktop's own reminder follows its update
 //! history: one day after the release, then daily, and once when the next launch starts to
 //! require it. A Machine whose Pending Version waits a day or more is named once a day with its
-//! session count; SpaceTerm never restarts it while sessions are open.
+//! session count; SpaceTerm never restarts it while sessions are open. Clicking a notification
+//! emits [`ReminderActivated`], and the window layer runs what the item's control does now.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{App, AppContext, Context, Entity, Global, Subscription, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 
 use super::UpdateService;
 use super::machines::store::MachineUpdates;
@@ -19,9 +20,16 @@ const RECHECK: Duration = Duration::from_secs(60 * 60);
 
 /// Shows operating-system notifications.
 pub(crate) trait UpdateReminderAdapter {
+    /// Sends the `key` of each notification the person clicks to `activated`. Called once,
+    /// before the first notification.
+    fn activations(&self, activated: async_channel::Sender<String>);
     /// Shows `title` and `body`, replacing an earlier notification with the same `key`.
     fn notify(&self, key: &str, title: &str, body: &str);
 }
+
+/// The person clicked the notification about this item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReminderActivated(pub(crate) ItemKey);
 
 pub(crate) struct UpdateReminders {
     adapter: Rc<dyn UpdateReminderAdapter>,
@@ -33,9 +41,34 @@ pub(crate) struct UpdateReminders {
 
 /// Keeps the scheduler alive for the application's life.
 struct InstalledReminders {
-    _scheduler: Entity<UpdateReminders>,
+    scheduler: Entity<UpdateReminders>,
 }
 impl Global for InstalledReminders {}
+
+impl EventEmitter<ReminderActivated> for UpdateReminders {}
+
+/// The notification key of `key`: "desktop", or the Machine ID in hex.
+fn key_text(key: ItemKey) -> String {
+    match key {
+        ItemKey::Desktop => "desktop".to_owned(),
+        ItemKey::Machine(machine) => machine.iter().map(|byte| format!("{byte:02x}")).collect(),
+    }
+}
+
+fn parse_key(text: &str) -> Option<ItemKey> {
+    if text == "desktop" {
+        return Some(ItemKey::Desktop);
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut machine = [0u8; 32];
+    for (slot, pair) in machine.iter_mut().zip(bytes.chunks(2)) {
+        *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(ItemKey::Machine(machine))
+}
 
 impl UpdateReminders {
     /// Starts the schedule. The update services must already be installed.
@@ -48,6 +81,20 @@ impl UpdateReminders {
             if let Some(machines) = MachineUpdates::global(cx) {
                 subscriptions.push(cx.observe(&machines, |this, _, cx| this.deliver(cx)));
             }
+            let (activated, clicks) = async_channel::unbounded();
+            adapter.activations(activated);
+            cx.spawn(async move |this, cx| {
+                while let Ok(key) = clicks.recv().await {
+                    let Some(key) = parse_key(&key) else { continue };
+                    if this
+                        .update(cx, |_, cx| cx.emit(ReminderActivated(key)))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+            .detach();
             let recheck = cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(RECHECK).await;
@@ -63,7 +110,12 @@ impl UpdateReminders {
                 _recheck: recheck,
             }
         });
-        cx.set_global(InstalledReminders { _scheduler: entity });
+        cx.set_global(InstalledReminders { scheduler: entity });
+    }
+
+    pub(crate) fn global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<InstalledReminders>()
+            .map(|installed| installed.scheduler.clone())
     }
 
     fn deliver(&mut self, cx: &mut Context<Self>) {
@@ -105,11 +157,8 @@ impl UpdateReminders {
     }
 
     fn show(&self, reminder: &Reminder) {
-        let key = match reminder.key {
-            ItemKey::Desktop => "desktop".to_owned(),
-            ItemKey::Machine(machine) => machine.iter().map(|byte| format!("{byte:02x}")).collect(),
-        };
-        self.adapter.notify(&key, &reminder.title, &reminder.body);
+        self.adapter
+            .notify(&key_text(reminder.key), &reminder.title, &reminder.body);
     }
 }
 
@@ -121,9 +170,26 @@ pub(crate) mod testing {
     #[derive(Default)]
     pub(crate) struct RecordingReminders {
         pub(crate) shown: RefCell<Vec<(String, String, String)>>,
+        activated: RefCell<Option<async_channel::Sender<String>>>,
+    }
+
+    impl RecordingReminders {
+        /// Clicks the notification shown with `key`, as the person would.
+        pub(crate) fn click(&self, key: &str) {
+            self.activated
+                .borrow()
+                .as_ref()
+                .expect("the scheduler started")
+                .try_send(key.to_owned())
+                .expect("the scheduler listens");
+        }
     }
 
     impl super::UpdateReminderAdapter for RecordingReminders {
+        fn activations(&self, activated: async_channel::Sender<String>) {
+            *self.activated.borrow_mut() = Some(activated);
+        }
+
         fn notify(&self, key: &str, title: &str, body: &str) {
             self.shown
                 .borrow_mut()

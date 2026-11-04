@@ -248,46 +248,248 @@ fn two_items_open_a_compact_menu_with_one_line_per_machine_and_restart_all(
     assert!(machines.performed().is_empty(), "opening performs nothing");
 }
 
-#[gpui::test]
-fn the_agreed_confirmation_restarts_only_after_the_person_confirms(cx: &mut gpui::TestAppContext) {
-    struct AlertHost;
+/// A window whose root holds the title-bar control under a modal layer, as a Workspace Window
+/// does, so the control's own alerts present.
+struct Host {
+    control: Entity<UpdateControl>,
+}
 
-    impl Render for AlertHost {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            spaceterm_ui::ModalLayer::new(gpui::div().size_full())
-        }
+impl Render for Host {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        spaceterm_ui::ModalLayer::new(gpui::div().size_full().child(self.control.clone()))
     }
+}
 
+fn hosted(cx: &mut gpui::TestAppContext) -> &mut gpui::VisualTestContext {
+    let (_, visual) = cx.add_window_view(|window, cx| Host {
+        control: cx.new(|cx| UpdateControl::new(window, cx)),
+    });
+    visual.update(|window, _| window.activate_window());
+    visual
+}
+
+fn click(selector: &'static str, cx: &mut gpui::VisualTestContext) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} renders"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+}
+
+const CONFIRM: &str = "modal-action-update-confirm-proceed";
+const CANCEL: &str = "modal-action-update-confirm-cancel";
+
+#[gpui::test]
+fn the_title_bar_restart_asks_and_only_the_approved_work_restarts(cx: &mut gpui::TestAppContext) {
     let (_, _, machines) = services(cx);
+    let visual = hosted(cx);
     machines.emit(MachineUpdatesEvent::Machines(vec![waiting(
         PENGUIN, "penguin", 3,
     )]));
-    cx.run_until_parked();
-    let (host, visual) = cx.add_window_view(|_, _| AlertHost);
-    let presentation = visual.update(|_, cx| crate::updates::presentation::current(cx));
-    let Some(crate::updates::presentation::Command::Confirm(confirmation)) = presentation
-        .machine(PENGUIN)
-        .map(crate::updates::presentation::MachineView::restart_command)
-    else {
-        panic!("a restart that closes sessions asks first");
-    };
-    visual.update(|window, cx| {
-        host.update(cx, |_, cx| commands::confirm(confirmation, window, cx));
-    });
     visual.run_until_parked();
+    A11yTree::read(visual).node("Restart…");
 
+    click("update-control", visual);
+    assert!(
+        visual.debug_bounds(CONFIRM).is_some(),
+        "the agreed alert asks"
+    );
     let tree = A11yTree::read(visual);
     tree.text("Restart SpaceTerm Core on penguin?");
     tree.text("This will close your 3 running sessions.");
-    assert!(machines.performed().is_empty());
+    assert!(
+        machines.performed().is_empty(),
+        "an open alert performs nothing"
+    );
 
-    let restart = visual
-        .debug_bounds("modal-action-update-confirm-proceed")
-        .unwrap();
-    visual.simulate_click(restart.center(), gpui::Modifiers::none());
+    click(CANCEL, visual);
+    assert!(machines.performed().is_empty(), "Cancel performs nothing");
+
+    // A fourth session opens while the alert says three: approving asks again.
+    click("update-control", visual);
+    machines.emit(MachineUpdatesEvent::Changed(Box::new(waiting(
+        PENGUIN, "penguin", 4,
+    ))));
     visual.run_until_parked();
+    click(CONFIRM, visual);
+    assert!(
+        machines.performed().is_empty(),
+        "an approval for three sessions never closes four"
+    );
+    A11yTree::read(visual).text("This will close your 4 running sessions.");
+
+    click(CONFIRM, visual);
     assert_eq!(
         machines.performed(),
         vec![(PENGUIN, MachineAction::Restart)]
     );
+}
+
+struct RecordingMovement;
+
+impl crate::platform::window_movement::WindowMovementFactory for RecordingMovement {
+    fn create(
+        &self,
+    ) -> Rc<dyn crate::platform::window_movement::OperatingSystemWindowDragPlatform> {
+        Rc::new(
+            crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform::default(),
+        )
+    }
+}
+
+#[gpui::test]
+fn installing_from_the_title_bar_performs_it_without_settings(cx: &mut gpui::TestAppContext) {
+    use crate::settings::storage::testing::MemoryStorage;
+
+    let machines = Rc::new(ScriptedMachines::default());
+    let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| {
+        ApplicationUpdates::install(adapter.clone(), cx);
+        MachineUpdates::install(machines.clone(), cx);
+        // Settings could open here, so a stray Settings request would show.
+        crate::ui::appearance_runtime::install(
+            crate::settings::Settings::load(MemoryStorage::with_document(
+                &crate::settings::SettingsDocument::default(),
+            )),
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        crate::ui::settings_window::configure_window_chrome(
+            Rc::new(RecordingMovement),
+            Default::default(),
+            crate::theme_registry::testing::offline(),
+            cx,
+        );
+    });
+    let visual = hosted(cx);
+    let mut too_old = waiting(PENGUIN, "penguin", 3);
+    too_old.link =
+        MachineLink::Incompatible(spaceterm_core::protocol::version::Incompatible::ListenerTooOld);
+    too_old.facts.as_mut().unwrap().pending = None;
+    machines.emit(MachineUpdatesEvent::Machines(vec![too_old]));
+    visual.run_until_parked();
+    A11yTree::read(visual).node("Update needed");
+    let windows = visual.update(|_, cx| cx.windows().len());
+
+    click("update-control", visual);
+    assert_eq!(
+        machines.performed(),
+        vec![(PENGUIN, MachineAction::Install)]
+    );
+    visual.update(|_, cx| {
+        assert_eq!(
+            cx.windows().len(),
+            windows,
+            "no window, Settings included, opens"
+        );
+    });
+}
+
+#[gpui::test]
+fn an_overdue_restart_with_sessions_open_never_runs_by_itself(cx: &mut gpui::TestAppContext) {
+    use crate::updates::reminders::UpdateReminders;
+    use crate::updates::reminders::testing::RecordingReminders;
+
+    let machines = Rc::new(ScriptedMachines::default());
+    let reminders = Rc::new(RecordingReminders::default());
+    cx.update(|cx| {
+        MachineUpdates::install(machines.clone(), cx);
+        UpdateReminders::install(reminders.clone(), cx);
+    });
+    let _ = manual_updates(cx);
+    let mut overdue = waiting(PENGUIN, "penguin", 3);
+    let pending = overdue.facts.as_mut().unwrap().pending.as_mut().unwrap();
+    pending.installed_at = crate::updates::now() - 2 * crate::updates::policy::DAY;
+    pending.overdue_since = Some(pending.installed_at + crate::updates::policy::DAY);
+    machines.emit(MachineUpdatesEvent::Machines(vec![overdue]));
+    cx.run_until_parked();
+
+    let shown = reminders.shown.borrow().clone();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].1, "Restart overdue on penguin");
+    assert!(
+        machines.performed().is_empty(),
+        "the reminder restarts nothing"
+    );
+
+    // Clicking it does what the control does, which asks first with sessions open.
+    reminders.click(&shown[0].0);
+    cx.run_until_parked();
+    assert!(
+        machines.performed().is_empty(),
+        "the click restarts nothing unasked"
+    );
+}
+
+#[gpui::test]
+fn work_in_progress_is_a_focusable_status(cx: &mut gpui::TestAppContext) {
+    let (_, _, machines) = services(cx);
+    let visual = hosted(cx);
+    let mut installing = waiting(PENGUIN, "penguin", 0);
+    let facts = installing.facts.as_mut().unwrap();
+    facts.pending = None;
+    facts.operation = Some(spaceterm_core::update::facts::Operation::Installing {
+        version: Version::parse("0.9.0").unwrap(),
+        received: 1,
+        total: 2,
+    });
+    machines.emit(MachineUpdatesEvent::Machines(vec![installing]));
+    visual.run_until_parked();
+
+    let tree = A11yTree::read(visual);
+    let status = tree.node("Installing…");
+    assert_eq!(status["aria"]["role"], "Status");
+    assert_ne!(status["aria"]["disabled"], true);
+    assert_eq!(
+        status["aria"]["description"],
+        "Installing SpaceTerm Core 0.9.0 on penguin."
+    );
+    assert!(tree.with_role("Button").is_empty(), "nothing to press");
+}
+
+#[gpui::test]
+fn the_menu_reads_in_full_and_its_information_stays_reachable(cx: &mut gpui::TestAppContext) {
+    let (_, _, machines) = services(cx);
+    let visual = hosted(cx);
+    let restarting = |machine, name| {
+        let mut update = waiting(machine, name, 0);
+        update.facts.as_mut().unwrap().operation =
+            Some(spaceterm_core::update::facts::Operation::Restarting {
+                to: Version::parse("0.9.0").unwrap(),
+            });
+        update
+    };
+    machines.emit(MachineUpdatesEvent::Machines(vec![
+        restarting(PENGUIN, "penguin"),
+        restarting(BUILD_BOX, "build-box"),
+    ]));
+    visual.update(|_, cx| crate::updates::record_recent("penguin updated to 0.9.0".into(), cx));
+    visual.run_until_parked();
+
+    let tree = A11yTree::read(visual);
+    let trigger = tree.node("2 updates");
+    assert_ne!(
+        trigger["aria"]["disabled"], true,
+        "two working items still open the menu"
+    );
+    assert_eq!(
+        trigger["aria"]["description"],
+        "2 updates need you. Open the menu to see each machine."
+    );
+
+    click("update-control-menu", visual);
+    let tree = A11yTree::read(visual);
+    let row = tree.node("penguin");
+    assert_eq!(row["aria"]["role"], "Label", "a working row is information");
+    assert_ne!(row["aria"]["disabled"], true);
+    assert_eq!(
+        row["aria"]["description"],
+        "Restarting SpaceTerm Core on penguin."
+    );
+    assert!(row["aria"]["keyboard_shortcut"].is_null());
+    let recent = tree.node("Recent");
+    assert_ne!(recent["aria"]["disabled"], true, "Recent opens");
+    assert!(machines.performed().is_empty());
 }

@@ -416,41 +416,94 @@ fn notify(
 pub(super) struct LinuxUpdateReminders {
     bus: Option<SessionBus>,
     identity: ApplicationIdentity,
+    /// The reminder key of each notification this service showed, by its id.
+    shown: Arc<Mutex<HashMap<u32, String>>>,
+    _subscription: std::cell::RefCell<Option<BusSubscription>>,
 }
 
 impl LinuxUpdateReminders {
     pub(super) fn new(bus: Option<SessionBus>, identity: ApplicationIdentity) -> Self {
-        Self { bus, identity }
+        Self {
+            bus,
+            identity,
+            shown: Arc::default(),
+            _subscription: std::cell::RefCell::new(None),
+        }
     }
 }
 
 impl crate::updates::reminders::UpdateReminderAdapter for LinuxUpdateReminders {
-    fn notify(&self, _key: &str, title: &str, body: &str) {
+    /// Follows ActionInvoked for the reminders' own ids. Another service's signal, or one for an
+    /// id this service did not show, is ignored.
+    fn activations(&self, activated: async_channel::Sender<String>) {
+        let Some(bus) = &self.bus else { return };
+        let Some(rule) = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .path(PATH)
+            .ok()
+            .and_then(|rule| rule.interface(NAME).ok())
+            .and_then(|rule| rule.member("ActionInvoked").ok())
+            .map(|rule| rule.build().to_owned())
+        else {
+            return;
+        };
+        let shown = Arc::clone(&self.shown);
+        let subscription = bus.subscribe(rule.into(), move |message| {
+            if let Ok((id, action)) = message.body().deserialize::<(u32, String)>()
+                && action == "default"
+                && let Some(key) = lock_shown(&shown).remove(&id)
+            {
+                let _ = activated.try_send(key);
+            }
+        });
+        *self._subscription.borrow_mut() = subscription.ok();
+    }
+
+    fn notify(&self, key: &str, title: &str, body: &str) {
         let Some(bus) = &self.bus else { return };
         let identity = self.identity;
-        let (title, body) = (title.to_owned(), body.to_owned());
+        let shown = Arc::clone(&self.shown);
+        let (key, title, body) = (key.to_owned(), title.to_owned(), body.to_owned());
         let _ = bus.dispatch(move |connection| {
             let hints = HashMap::from([
                 ("desktop-entry", Value::from(identity.application_id())),
                 ("urgency", Value::from(1u8)),
             ]);
-            let _ = Proxy::new(connection, NAME, PATH, NAME).and_then(|proxy| {
+            // Replaces this key's earlier reminder, if the service still shows it.
+            let replaces = lock_shown(&shown)
+                .iter()
+                .find_map(|(id, shown)| (*shown == key).then_some(*id))
+                .unwrap_or(0);
+            let id = Proxy::new(connection, NAME, PATH, NAME).and_then(|proxy| {
                 proxy.call::<_, _, u32>(
                     "Notify",
                     &(
                         identity.display_name(),
-                        0u32,
+                        replaces,
                         "",
                         title.as_str(),
                         body.as_str(),
-                        Vec::<&str>::new(),
+                        vec!["default", "Open"],
                         hints,
                         -1i32,
                     ),
                 )
             });
+            if let Ok(id) = id {
+                let mut shown = lock_shown(&shown);
+                shown.retain(|_, shown| *shown != key);
+                shown.insert(id, key);
+            }
         });
     }
+}
+
+fn lock_shown(
+    shown: &Mutex<HashMap<u32, String>>,
+) -> std::sync::MutexGuard<'_, HashMap<u32, String>> {
+    shown
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

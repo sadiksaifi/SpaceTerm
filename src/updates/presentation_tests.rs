@@ -92,7 +92,7 @@ fn the_control_is_hidden_until_something_needs_doing_or_reading() {
 fn restarting_a_core_with_sessions_asks_with_the_agreed_alert() {
     let presentation = present(&[waiting(machine(PENGUIN, "penguin", 3), NOW - 60)]);
     let item = single(&presentation);
-    assert_eq!(item.label.as_ref(), "Restart");
+    assert_eq!(item.label.as_ref(), "Restart…", "it asks first");
     assert_eq!(item.tone, Tone::Action);
     assert_eq!(item.glyph, Glyph::Restart);
     let Some(Command::Confirm(confirmation)) = item.command else {
@@ -192,7 +192,7 @@ fn after_one_day_the_desktop_update_is_overdue_and_reminds() {
 fn an_overdue_core_restart_names_the_machine_and_its_sessions() {
     let presentation = present(&[waiting(machine(PENGUIN, "penguin", 3), NOW - DAY - 60)]);
     let item = single(&presentation);
-    assert_eq!(item.label.as_ref(), "Restart overdue");
+    assert_eq!(item.label.as_ref(), "Restart overdue…");
     assert_eq!(item.tone, Tone::Problem);
     assert!(matches!(item.command, Some(Command::Confirm(_))));
     assert_eq!(
@@ -399,11 +399,13 @@ fn every_label_has_at_most_two_words() {
         MachineState::Connecting,
         MachineState::Ready {
             to: version("0.9.0"),
+            breaking: true,
             stranded: Vec::new(),
         },
         MachineState::Overdue {
             to: version("0.9.0"),
             days: 1,
+            breaking: false,
             stranded: Vec::new(),
         },
         MachineState::CoreTooOld { push: None },
@@ -504,4 +506,76 @@ fn the_menu_bar_extra_uses_one_line_pattern_and_offers_stop_only_on_the_local_ma
     assert_eq!(title.as_ref(), "Stop SpaceTerm Core…");
     let remote = rows[1].items.as_ref().unwrap();
     assert_eq!(remote.len(), 1);
+}
+
+#[test]
+fn a_breaking_restart_asks_even_with_no_sessions_and_no_stranded_devices() {
+    let mut breaking = waiting(machine(PENGUIN, "penguin", 0), NOW - 60);
+    let pending = breaking.facts.as_mut().unwrap().pending.as_mut().unwrap();
+    pending.breaking = true;
+    let presentation = present(&[breaking]);
+    let item = single(&presentation);
+    assert_eq!(item.label.as_ref(), "Restart…");
+    let Some(Command::Confirm(confirmation)) = item.command else {
+        panic!("a breaking restart always asks");
+    };
+    assert_eq!(
+        confirmation.message.as_ref(),
+        "SpaceTerm Core 0.9.0 is a breaking update for penguin, so it restarts only when you ask."
+    );
+}
+
+#[test]
+fn an_approval_holds_only_while_the_described_work_is_unchanged() {
+    let described = waiting(machine(PENGUIN, "penguin", 3), NOW - 60);
+    let presentation = present(std::slice::from_ref(&described));
+    let Some(Command::Confirm(confirmation)) = single(&presentation).command else {
+        panic!("a restart that closes sessions asks first");
+    };
+    assert!(
+        confirmation
+            .approval
+            .holds(std::slice::from_ref(&described))
+    );
+
+    // Unrelated changes keep it: a later check.
+    let mut checked = described.clone();
+    checked.facts.as_mut().unwrap().check = UpdateCheck::Succeeded { at: NOW };
+    assert!(confirmation.approval.holds(&[checked]));
+
+    let mut more = described.clone();
+    more.facts.as_mut().unwrap().sessions = 4;
+    assert!(!confirmation.approval.holds(std::slice::from_ref(&more)));
+    let mut retargeted = described.clone();
+    retargeted
+        .facts
+        .as_mut()
+        .unwrap()
+        .pending
+        .as_mut()
+        .unwrap()
+        .version = version("0.9.1");
+    assert!(!confirmation.approval.holds(&[retargeted]));
+    assert!(
+        !confirmation.approval.holds(&[]),
+        "a removed Machine holds nothing"
+    );
+
+    // Asking again names what is true now.
+    let Some(Command::Confirm(again)) =
+        present(std::slice::from_ref(&more)).ask_again(&confirmation)
+    else {
+        panic!("four sessions still ask");
+    };
+    assert_eq!(
+        again.message.as_ref(),
+        "This will close your 4 running sessions."
+    );
+    let mut closed = described.clone();
+    closed.facts.as_mut().unwrap().sessions = 0;
+    assert_eq!(
+        present(&[closed]).ask_again(&confirmation),
+        Some(Command::Machine(PENGUIN, MachineAction::Restart)),
+        "with no sessions left, the restart needs no question"
+    );
 }
