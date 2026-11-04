@@ -1046,6 +1046,35 @@ fn try_again_says_it_turns_network_access_back_on_only_once_allowed(cx: &mut Tes
     sheet.settle(|sheet| !sheet.open());
 }
 
+/// While Try Again is still signing in and checking, before anything turns Network Access on,
+/// the sheet reads as setup's own steps.
+#[gpui::test]
+fn try_again_reads_as_its_own_steps_before_network_access_is_allowed(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![
+                Outcome::Finish(Err(unreachable(
+                    NetworkAfter::Restored(RestoredAccess::Off),
+                    Some(9231),
+                ))),
+                Outcome::UntilCancelled,
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+
+    sheet.choose(SheetAction::TryAgain.selector());
+    sheet.settle(|sheet| sheet.says("Setting up penguin"));
+    assert!(sheet.says("Connecting over SSH\u{2026}"));
+    assert!(!sheet.says("Turning Network Access on penguin back on\u{2026}"));
+    sheet.choose(SheetAction::Cancel.selector());
+    sheet.settle(|sheet| !sheet.open());
+}
+
 /// Network Access that was already on before setup moved it stays on after the restore, and the
 /// sheet never says it is off or that Try Again turns it back on.
 #[gpui::test]
