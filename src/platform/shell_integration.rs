@@ -29,6 +29,8 @@ pub struct ShellEnvironment {
     pub xdg_data_dirs: Option<OsString>,
     pub zdotdir: Option<OsString>,
     pub env: Option<OsString>,
+    /// The PATH a Session's shell inherits, which the Session's own CLI goes in front of.
+    pub path: Option<OsString>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -75,6 +77,34 @@ fn prepend_path(
         value.push(prior);
     }
     Some(value)
+}
+
+/// `root` first on the `separator`-delimited `prior` list, which keeps its order without empty
+/// entries or another copy of `root`.
+pub(super) fn prepend_path_once(
+    root: &std::ffi::OsStr,
+    prior: &std::ffi::OsStr,
+    separator: char,
+) -> Option<OsString> {
+    if !separator.is_ascii() || separator.is_ascii_control() {
+        return None;
+    }
+    let mut rest = OsString::new();
+    for entry in prior
+        .as_encoded_bytes()
+        .split(|byte| *byte == separator as u8)
+    {
+        if entry.is_empty() || entry == root.as_encoded_bytes() {
+            continue;
+        }
+        if !rest.is_empty() {
+            rest.push(separator.to_string());
+        }
+        // SAFETY: `entry` is a run of `prior`'s encoded bytes split only at an ASCII byte, which
+        // `OsStr::from_encoded_bytes_unchecked` accepts.
+        rest.push(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(entry) });
+    }
+    prepend_path(root, &rest, separator)
 }
 
 pub fn plan_shell_integration(
@@ -286,6 +316,7 @@ mod tests {
             xdg_data_dirs: Some(OsString::from("/opt/share")),
             zdotdir: Some(OsString::from("/Users/me/.config/zsh")),
             env: Some(OsString::from("/Users/me/.shenv")),
+            path: None,
         };
 
         let zsh = plan_shell_integration(

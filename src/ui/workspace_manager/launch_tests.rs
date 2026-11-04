@@ -10,8 +10,8 @@ use spaceterm_core::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 use super::*;
 use crate::machine_connection::CoreError;
 use crate::ui::workspace_manager::launch::{
-    LAUNCH_AUTHORIZE_SELECTOR, LAUNCH_RETRY_SELECTOR, LAUNCH_SELECTOR, LAUNCH_START_SELECTOR,
-    LaunchOutcome, WorkspaceCoreConnector, WorkspaceMachineConnection,
+    LAUNCH_AUTHORIZE_SELECTOR, LAUNCH_LOGIN_ITEMS_SELECTOR, LAUNCH_RETRY_SELECTOR, LAUNCH_SELECTOR,
+    LAUNCH_START_SELECTOR, LaunchOutcome, WorkspaceCoreConnector, WorkspaceMachineConnection,
 };
 use crate::ui::workspace_manager::launch_testing::ScriptedLaunch;
 use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
@@ -398,6 +398,44 @@ fn a_stopped_core_stays_stopped_until_start_core(cx: &mut TestAppContext) {
     sync(&harness, cx);
     assert_eq!(harness.rows(cx), 1);
     assert_eq!(harness.launch_title(cx), None);
+}
+
+/// The person turned SpaceTerm Core off in Login Items. The window says so and opens that list,
+/// and never starts it: once the person turns it on and comes back, launch runs again.
+#[gpui::test]
+fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::LoginItemOff), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("SpaceTerm Core is turned off in Login Items")
+    );
+    assert!(cx.debug_bounds(LAUNCH_START_SELECTOR).is_none());
+
+    harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items"]);
+
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items", "run"]);
+    assert_eq!(harness.rows(cx), 1);
+}
+
+/// macOS blocked the background item SpaceTerm Core installs, so the window asks for approval in
+/// Login Items rather than reporting a failure.
+#[gpui::test]
+fn a_blocked_background_item_asks_for_approval_in_login_items(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::BackgroundItemBlocked)], cx);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("SpaceTerm Core needs your approval")
+    );
+
+    harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items"]);
 }
 
 /// A paired server presented while the local server is stopped makes this window the presenting
@@ -1064,6 +1102,97 @@ fn workspace_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContex
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     cx.debug_bounds(selector).is_some()
+}
+
+/// The status line 2 of the window's only Workspace row shows in place of its directory.
+fn workspace_row_status(
+    harness: &LaunchHarness,
+    cx: &mut VisualTestContext,
+) -> Option<&'static str> {
+    harness.manager.read_with(cx, |manager, _| {
+        let id = manager
+            .workspaces
+            .iter()
+            .next()
+            .expect("one Workspace row")
+            .id();
+        manager
+            .workspace_row_facts(id)
+            .and_then(|facts| facts.row.status)
+            .map(|status| status.text)
+    })
+}
+
+/// Stopping This Mac's SpaceTerm Core while one of its Workspaces is active follows the No-Tabs
+/// rule. Its row says Stopped in the quiet color, and the stage is one empty Pane offering Start
+/// SpaceTerm Core, with no Tab and no New Tab. No update control shows, so the Pane rises to the
+/// window's top.
+#[gpui::test]
+fn a_core_stopped_in_session_leaves_an_empty_pane_that_offers_start(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![ready(), ready()], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert!(cx.debug_bounds("create-tab-button").is_some());
+
+    harness.edits.set_connected(false);
+    harness.edits.set_error(CoreError::Stopped);
+    sync(&harness, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    assert_eq!(workspace_row_status(&harness, cx), Some("Stopped"));
+    assert!(cx.debug_bounds("tab-bar").is_none());
+    assert!(cx.debug_bounds("create-tab-button").is_none());
+    let stage = cx
+        .debug_bounds("empty-workspace-stage")
+        .expect("the stage renders");
+    let pane = cx
+        .debug_bounds("empty-workspace-pane")
+        .expect("the stage draws an empty Pane");
+    let inset = cx.update(|_, cx| {
+        crate::ui::workspace_frame::WorkspaceFrame::for_appearance(
+            crate::ui::appearance::chrome(cx),
+            cx,
+        )
+        .window_edge_inset()
+    });
+    assert_eq!(pane.top() - stage.top(), inset);
+
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+}
+
+/// A stopped Workspace's row menu offers Start SpaceTerm Core, as its empty Pane does.
+#[gpui::test]
+fn a_stopped_workspace_row_offers_start_core(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![ready(), ready()], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    let id = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .iter()
+            .next()
+            .expect("one Workspace row")
+            .id()
+    });
+    let row: &'static str =
+        Box::leak(format!("workspace-row-{}-active", id.get()).into_boxed_str());
+    right_click(row, cx);
+    assert!(
+        cx.debug_bounds("workspace-menu-row-start-core").is_none(),
+        "a running server needs no Start"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    harness.edits.set_connected(false);
+    harness.edits.set_error(CoreError::Stopped);
+    sync(&harness, cx);
+    right_click(row, cx);
+    click("workspace-menu-row-start-core", cx);
+
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
 }
 
 #[gpui::test]

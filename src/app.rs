@@ -1470,6 +1470,10 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
         restore_default_window(cx, &reopened_host);
     });
     application.run(move |cx| {
+        if crate::local_startup::leave_disk_image() {
+            cx.quit();
+            return;
+        }
         if let Err(error) = initialize_application(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();

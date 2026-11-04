@@ -83,7 +83,7 @@ impl LaunchAgent {
             .map(super::runtime::Layout::executable)
             .ok_or(CoreError::RuntimeUnavailable)
     }
-    fn registration(&self) -> registration::Registration {
+    pub(super) fn registration(&self) -> registration::Registration {
         registration::Registration {
             directory: self.directory.clone(),
             name: self.name.clone(),

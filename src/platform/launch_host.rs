@@ -219,6 +219,7 @@ pub(super) fn shell_launch_planner_with(
             xdg_data_dirs: read("XDG_DATA_DIRS"),
             zdotdir: read("ZDOTDIR"),
             env: read("ENV"),
+            path: read("PATH"),
         },
         policy,
         HOST_RUNTIME_ENVIRONMENT,

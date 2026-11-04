@@ -62,8 +62,8 @@ pub struct SessionEnvironment {
     pub core: [u8; 32],
     pub pane: [u8; 32],
     pub session: [u8; 32],
-    /// The server's own `spaceterm` executable. Shell integration puts its directory first on
-    /// `PATH`.
+    /// The server's own `spaceterm` executable. Its directory starts the Session's `PATH`, and
+    /// shell integration puts it first again after the startup files run.
     pub cli: PathBuf,
 }
 
@@ -192,6 +192,8 @@ impl ShellLaunchPlanner {
             environment,
             integration: Some(integration.status),
             terminal_name: terminal_identity.term,
+            inherited_path: inherited.path.clone(),
+            path_list_separator: self.policy.path_list_separator,
         })
     }
 }
@@ -206,6 +208,9 @@ pub struct PreparedShellLaunch {
     environment: Vec<(OsString, OsString)>,
     integration: Option<ShellIntegrationStatus>,
     terminal_name: &'static str,
+    /// The PATH the shell inherits, kept so a Session can put its own CLI in front of it.
+    inherited_path: Option<OsString>,
+    path_list_separator: char,
 }
 
 impl PreparedShellLaunch {
@@ -226,7 +231,20 @@ impl PreparedShellLaunch {
         launch
             .environment
             .push((cli.into(), session.cli.as_os_str().to_owned()));
+        if let Some(path) = launch.session_path(&session.cli) {
+            launch.environment.push(("PATH".into(), path));
+        }
         launch
+    }
+
+    /// The inherited PATH with `cli`'s directory first and nowhere else, so `spaceterm` names
+    /// this Session's own server even when shell integration is off.
+    fn session_path(&self, cli: &Path) -> Option<OsString> {
+        super::shell_integration::prepend_path_once(
+            cli.parent()?.as_os_str(),
+            self.inherited_path.as_deref().unwrap_or_default(),
+            self.path_list_separator,
+        )
     }
 
     #[cfg_attr(
@@ -330,6 +348,7 @@ mod tests {
             xdg_data_dirs: Some("/custom/share".into()),
             zdotdir: Some("/private/zsh config".into()),
             env: Some("/private/bash env".into()),
+            path: None,
         };
         for (shell, kind, arguments) in [
             ("/opt/bin/bash", ShellKind::Bash, vec!["--posix", "-l"]),
@@ -532,6 +551,40 @@ mod tests {
             assert_eq!(error, ShellLaunchFailure::DirectoryUnavailable);
             assert!(!format!("{error:?} {error}").contains("private-project"));
             assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+
+    /// Every Session finds `spaceterm` before any other on PATH, with or without shell
+    /// integration, and the rest of the inherited PATH keeps its order without a second copy.
+    #[test]
+    fn a_machine_session_puts_its_cli_first_on_path() {
+        let resources = crate::terminal::testing::ShellResourcesFixture::new();
+        let session = SessionEnvironment {
+            identity: "spaceterm".into(),
+            core: [0; 32],
+            pane: [1; 32],
+            session: [2; 32],
+            cli: "/opt/space term/bin/spaceterm".into(),
+        };
+        for mode in [
+            ShellIntegrationMode::Automatic,
+            ShellIntegrationMode::Disabled,
+        ] {
+            let launch = ShellLaunchPlanner::for_test("/bin/sh".into(), resources.path().into())
+                .with_environment(
+                    mode,
+                    ShellEnvironment {
+                        path: Some("/usr/bin:/opt/space term/bin:/bin".into()),
+                        ..ShellEnvironment::default()
+                    },
+                )
+                .local(&std::env::temp_dir())
+                .unwrap()
+                .with_session_environment(&session);
+            assert_eq!(
+                env_value(&launch, "PATH"),
+                Some(OsStr::new("/opt/space term/bin:/usr/bin:/bin"))
+            );
         }
     }
 

@@ -713,6 +713,12 @@ fn render_header(
     heading_font: gpui::Font,
     divided: bool,
 ) -> AnyElement {
+    // An Alert's message follows its title at the body's own top padding.
+    let bottom_padding = if snapshot.kind == ModalKind::Alert && has_body(&snapshot.semantics) {
+        px(0.0)
+    } else {
+        metrics.section_gap
+    };
     let (title, description) = match &snapshot.semantics {
         PreparedModalSemantics::Alert { visible_title, .. } => (visible_title.clone(), None),
         PreparedModalSemantics::Dialog {
@@ -733,7 +739,7 @@ fn render_header(
         .overflow_y_scroll()
         .px(metrics.surface_padding)
         .pt(metrics.surface_padding)
-        .pb(metrics.section_gap)
+        .pb(bottom_padding)
         .when(divided, |header| {
             header
                 .border_b(shell.hairline())
@@ -1025,6 +1031,10 @@ fn render_body(
                         .w_full()
                         .min_w_0()
                         .p(metrics.surface_padding)
+                        // An Alert's title sits one action gap above its message.
+                        .when(snapshot.kind == ModalKind::Alert, |content| {
+                            content.pt(metrics.action_gap)
+                        })
                         .child(content),
                 ),
         )

@@ -98,6 +98,8 @@ pub(super) enum WorkspaceMenuCommand {
     PinDirectory,
     UnpinDirectory,
     Reconnect,
+    /// Starts This Mac's SpaceTerm Core after the person stopped it.
+    StartCore,
     /// Removes this client's Workspace Attachment, leaving the Workspace and its Terminal
     /// Sessions running on its server. It has no default Shortcut.
     Detach,
@@ -213,6 +215,8 @@ pub(super) struct WorkspaceRow {
     /// so being offline never withholds it; an attachment write SpaceTerm could not confirm does,
     /// until SpaceTerm reopens.
     pub(super) detaches: bool,
+    /// The person stopped this computer's server, which owns the Workspace.
+    pub(super) stopped: bool,
 }
 
 impl WorkspaceRowViewModel {

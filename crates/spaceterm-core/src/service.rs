@@ -203,6 +203,14 @@ impl Service {
             supervisor,
         }
     }
+    /// The LaunchAgent file macOS lists under Login Items & Extensions as this server's
+    /// background item, whether or not it exists. Reading the path reaches no service.
+    #[cfg(target_os = "macos")]
+    pub fn login_item(&self) -> Result<PathBuf, CoreError> {
+        Ok(macos::LaunchAgent::new(&self.paths, &self.identity)?
+            .registration()
+            .path())
+    }
     /// Where this account's signed installations are retained.
     pub fn installations_directory(&self) -> PathBuf {
         self.paths.data.join("installations")
