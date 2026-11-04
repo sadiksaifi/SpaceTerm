@@ -78,7 +78,12 @@ impl EmbeddedCores {
     pub(crate) fn offer(&self, facts: &UpdateFacts) -> Option<Version> {
         let build = self.build(facts.platform)?;
         let mut installed = vec![facts.running.clone()];
-        installed.extend(facts.pending.as_ref().map(|pending| pending.version.clone()));
+        installed.extend(
+            facts
+                .pending
+                .as_ref()
+                .map(|pending| pending.version.clone()),
+        );
         ordering::admit(&build.version, &installed, facts.skipped.as_ref())
             .ok()
             .map(|()| build.version.clone())
@@ -204,7 +209,10 @@ mod tests {
     #[test]
     fn the_embedded_build_is_offered_only_to_a_core_that_would_install_it() {
         let cores = catalog("0.9.0");
-        assert_eq!(cores.offer(&facts("0.8.0", None, None)), Some(version("0.9.0")));
+        assert_eq!(
+            cores.offer(&facts("0.8.0", None, None)),
+            Some(version("0.9.0"))
+        );
         assert_eq!(cores.offer(&facts("0.9.0", None, None)), None);
         assert_eq!(cores.offer(&facts("1.0.0", None, None)), None);
         assert_eq!(cores.offer(&facts("0.8.0", Some("0.9.0"), None)), None);
@@ -242,7 +250,11 @@ mod tests {
             ("candidate_unverified", ActionFailure::Failed),
             ("disk_full", ActionFailure::Failed),
         ] {
-            assert_eq!(super::failure(&LaneError::Code(code.into())), failure, "{code}");
+            assert_eq!(
+                super::failure(&LaneError::Code(code.into())),
+                failure,
+                "{code}"
+            );
         }
         assert_eq!(
             super::failure(&LaneError::Core(spaceterm_core::CoreError::Direct(
