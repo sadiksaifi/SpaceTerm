@@ -632,13 +632,11 @@ fn remove_machine_uninstalls_core_there_and_unpairs_in_one_step(cx: &mut TestApp
         preview: preview(LaneAction::Uninstall, effects(1)),
         settled: Vec::new(),
     });
-    // The Core answers nothing once its uninstall starts, so an admitted uninstall ends with
-    // no receipt.
+    // The Core answers nothing once its uninstall starts, so the lane returns at admission.
     *remote.perform.lock().unwrap() = Ok(Performed {
-        outcome: Outcome::Unconfirmed {
+        outcome: Outcome::Shutdown {
             operation: "0123456789abcdef0123456789abcdef".into(),
             boot: "a".into(),
-            last: None,
         },
         settled: Vec::new(),
     });

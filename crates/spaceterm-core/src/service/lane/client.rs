@@ -193,8 +193,9 @@ pub fn within<T: Send + 'static>(
 /// the flow never learned which run of the server admitted the operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Stop was admitted, or may have been, and the server closed the lane. Completion is
-    /// confirmed on the machine that runs the server, after its next start.
+    /// Stop was admitted, or may have been, and the server closed the lane, or the server admitted
+    /// Remove Machine's uninstall. `boot` names the admitting run when the flow learned it.
+    /// Completion is confirmed on the machine that runs the server.
     Shutdown { operation: String, boot: String },
     /// The operation settled. `boot` is the run of the server that admitted it.
     Settled { receipt: LaneReceipt, boot: String },
@@ -231,7 +232,11 @@ pub(crate) fn perform(
     let id = OperationId::random()?;
     admitted(&id)?;
     let operation = id.to_string();
-    let stop = action == LaneAction::Stop;
+    // Stop and Uninstall end the Core that answers the lane, so a closed lane is their outcome.
+    let stop = matches!(action, LaneAction::Stop | LaneAction::Uninstall);
+    // Once its helper starts, an uninstalling Core answers nothing more, so its admission is
+    // the outcome.
+    let admitted_is_outcome = action == LaneAction::Uninstall;
     let execute = LaneRequest::Execute {
         action,
         token,
@@ -251,6 +256,12 @@ pub(crate) fn perform(
         };
     let mut last = None;
     loop {
+        if admitted_is_outcome && let Some(admitted) = boot.take() {
+            return Ok(Outcome::Shutdown {
+                operation,
+                boot: admitted,
+            });
+        }
         if current.is_none() && (boot.is_none() || !stop) {
             current = Session::open_within(connector, &request_deadline(Instant::now())).ok();
         }

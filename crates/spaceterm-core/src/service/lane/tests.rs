@@ -1494,6 +1494,37 @@ mod flow {
         });
     }
 
+    /// Once its helper starts, the Core answers nothing more, so Remove Machine's uninstall
+    /// returns as soon as the Core admits it rather than waiting out the lane's deadline.
+    #[test]
+    fn an_uninstall_returns_as_soon_as_the_core_admits_it() {
+        with_lane(|lane| {
+            let switch = Arc::new(Switch::default());
+            switch.up(lane.lane.clone());
+            let (session, token) = previewed(&switch, LaneAction::Uninstall);
+            let started = Instant::now();
+            let outcome = client::perform(
+                &(switch.clone() as Arc<dyn Connector>),
+                session,
+                LaneAction::Uninstall,
+                token,
+                Duration::from_secs(20),
+                &mut |_| Ok(()),
+                &|| None,
+            )
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "took {:?}",
+                started.elapsed()
+            );
+            let Outcome::Shutdown { boot, .. } = outcome else {
+                panic!("expected an admitted uninstall, got {outcome:?}");
+            };
+            assert_eq!(boot, hex(&lane.lane.boot));
+        });
+    }
+
     #[test]
     fn a_stop_reports_shutdown_and_a_later_connection_settles_it() {
         with_lane(|lane| {
