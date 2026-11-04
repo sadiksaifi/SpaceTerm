@@ -44,6 +44,8 @@ use crate::direct_connections::{DirectConnections, DirectRouteId, JoinId, JoinSt
 use crate::domain::SshDestination;
 use crate::machine_connection::direct::{DirectError, Endpoint, Invitation, default_port};
 use crate::machine_connection::pane::control::ClientName;
+use spaceterm_core::provisioning::SetupRefusal;
+
 use crate::ssh::provisioning::{
     SetupAddress, SetupFailure, SetupOffer, SetupPhase, SetupProgress, SetupRequest,
 };
@@ -268,6 +270,8 @@ fn link_problem(error: DirectError) -> &'static str {
 struct Setup {
     destination: SshDestination,
     address: Option<SetupAddress>,
+    /// Trying again after UDP was blocked, which turns Network Access back on.
+    restoring_network: bool,
 }
 
 /// Where adding a server stands.
@@ -763,8 +767,7 @@ impl AddMachineSheet {
                 join_title(core)
             }
         };
-        let quoted =
-            |destination: &SshDestination| format!("\u{201C}{}\u{201D}", destination.as_str());
+        let quoted = |destination: &SshDestination| destination.as_str().to_owned();
         let shape = match &self.stage {
             Stage::Form => {
                 let (primary, focus) = match self.method {
@@ -1257,6 +1260,7 @@ impl AddMachineSheet {
             Setup {
                 destination,
                 address,
+                restoring_network: false,
             },
             window,
             cx,
@@ -1272,9 +1276,12 @@ impl AddMachineSheet {
         let (Some(backend), Some(prompts)) = (factory.backend(), factory.prompts(window, cx))
         else {
             self.stage = Stage::SetupProblem {
-                problem: crate::ui::ssh_setup::problem(&SetupFailure::Unavailable(
-                    crate::ssh::provisioning::UnavailableKind::SshFailed,
-                )),
+                problem: crate::ui::ssh_setup::problem(
+                    &SetupFailure::Unavailable(
+                        crate::ssh::provisioning::UnavailableKind::SshFailed,
+                    ),
+                    setup.destination.as_str(),
+                ),
                 setup,
                 unreachable: None,
             };
@@ -1344,8 +1351,8 @@ impl AddMachineSheet {
             if let Stage::SettingUp { setup, .. } = std::mem::replace(&mut self.stage, Stage::Form)
             {
                 self.stage = Stage::SetupProblem {
+                    problem: crate::ui::ssh_setup::start_failure(setup.destination.as_str()),
                     setup,
-                    problem: crate::ui::ssh_setup::start_failure(),
                     unreachable: None,
                 };
             }
@@ -1443,11 +1450,18 @@ impl AddMachineSheet {
             return;
         }
         let unreachable = match &outcome {
-            SetupFailure::Unreachable { address } => Some(address.clone()),
+            SetupFailure::Unreachable { address, .. } => Some(address.clone()),
             _ => None,
         };
+        let setup = Setup {
+            restoring_network: matches!(
+                outcome,
+                SetupFailure::Unsupported(SetupRefusal::UdpBlocked { .. })
+            ),
+            ..setup
+        };
         self.stage = Stage::SetupProblem {
-            problem: crate::ui::ssh_setup::problem(&outcome),
+            problem: crate::ui::ssh_setup::problem(&outcome, setup.destination.as_str()),
             setup,
             unreachable,
         };
@@ -2206,15 +2220,27 @@ impl AddMachineSheet {
                     )
                 } else {
                     (
-                        format!(
-                            "Setting up \u{201C}{}\u{201D}\u{2026}",
-                            setup.destination.as_str()
-                        )
-                        .into(),
-                        phase
-                            .map(crate::ui::ssh_setup::phase_detail)
-                            .unwrap_or("Connecting over SSH\u{2026}")
-                            .into(),
+                        format!("Setting up {}\u{2026}", setup.destination.as_str()).into(),
+                        // Until pairing begins, Try Again after a blocked UDP port is turning
+                        // Network Access back on.
+                        if setup.restoring_network
+                            && !matches!(
+                                phase,
+                                Some(SetupPhase::Enrolling | SetupPhase::Connecting)
+                            )
+                        {
+                            crate::ui::ssh_setup::restoring_network(setup.destination.as_str())
+                        } else {
+                            phase.map_or_else(
+                                || "Connecting over SSH\u{2026}".into(),
+                                |phase| {
+                                    crate::ui::ssh_setup::phase_detail(
+                                        phase,
+                                        setup.destination.as_str(),
+                                    )
+                                },
+                            )
+                        },
                     )
                 };
                 text.container(accesskit::Role::Status)
@@ -2224,12 +2250,10 @@ impl AddMachineSheet {
             }
             Stage::SetupProblem { problem, .. } => text
                 .container(accesskit::Role::Alert)
-                .child(text.line(
-                    "state",
-                    SharedString::new_static(problem.state),
-                    colors.text,
-                ))
-                .child(text.line("detail", problem.explanation.clone(), colors.text_secondary))
+                .child(text.line("detail", problem.explanation.clone(), colors.text))
+                .when_some(problem.footnote.clone(), |container, footnote| {
+                    container.child(text.line("footnote", footnote, colors.text_secondary))
+                })
                 .into_any_element(),
             Stage::Joining { join, core } => {
                 let joining = join.and_then(|join| self.join_status(join));

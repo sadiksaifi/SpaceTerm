@@ -23,6 +23,7 @@ use crate::settings::storage::testing::MemoryStorage;
 use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
 use crate::ssh::provisioning::{SetupOperation, SshSetupBackend};
 use crate::ui::appearance_runtime;
+use spaceterm_core::provisioning::SetupRefusal;
 
 /// What the scripted computer does with one setup.
 enum Outcome {
@@ -803,7 +804,7 @@ fn an_installation_offer_waits_for_install_and_setup_goes_on(cx: &mut TestAppCon
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Install SpaceTerm Core on \u{201C}penguin\u{201D}?");
+    sheet.settle(|sheet| sheet.title() == "Install SpaceTerm Core on penguin?");
 
     assert!(sheet.says("SpaceTerm may ask for your sudo password on that computer."));
     assert!(
@@ -833,7 +834,7 @@ fn a_stopped_core_starts_only_after_the_person_chooses_start_core(cx: &mut TestA
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Core on \u{201C}penguin\u{201D}?");
+    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Core on penguin?");
 
     sheet.choose(SheetAction::Start.selector());
     sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
@@ -862,7 +863,7 @@ fn network_access_changes_only_after_the_person_allows_it(cx: &mut TestAppContex
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Allow Network Access on \u{201C}penguin\u{201D}?");
+    sheet.settle(|sheet| sheet.title() == "Allow Network Access on penguin?");
 
     assert!(sheet.says("at 192.168.1.20:9231"));
     assert!(sheet.says("reach it at studio.local:9231"));
@@ -891,7 +892,7 @@ fn cancelling_an_offer_declines_it_and_adds_no_core(cx: &mut TestAppContext) {
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Core on \u{201C}penguin\u{201D}?");
+    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Core on penguin?");
 
     sheet.choose(SheetAction::Cancel.selector());
     sheet.settle(|sheet| !sheet.open());
@@ -917,7 +918,7 @@ fn cancelling_setup_keeps_the_sheet_until_setup_stops(cx: &mut TestAppContext) {
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+    sheet.settle(|sheet| sheet.says("Setting up penguin"));
 
     sheet.choose(SheetAction::Cancel.selector());
     sheet.settle(|sheet| !sheet.open());
@@ -927,10 +928,42 @@ fn cancelling_setup_keeps_the_sheet_until_setup_stops(cx: &mut TestAppContext) {
     assert_eq!(sheet.selected(), Some(MachineChoice::Local));
 }
 
-/// A server this computer can't reach over the network says where it tried. Back offers that
-/// address for editing, and Try Again repeats the same setup.
+/// A machine this computer can't reach over UDP names the port in one sentence and says that
+/// Network Access is off again. Try Again says it turns Network Access back on.
 #[gpui::test]
-fn an_unreachable_address_says_where_and_back_offers_it_for_editing(cx: &mut TestAppContext) {
+fn a_blocked_udp_port_is_named_and_try_again_turns_network_access_back_on(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![
+                Outcome::Finish(Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
+                    port: 9231,
+                }))),
+                Outcome::UntilCancelled,
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+
+    assert!(sheet.says(
+        "SpaceTerm can\u{2019}t reach penguin on UDP port 9231, so allow that port in penguin\u{2019}s firewall and try again."
+    ));
+    assert!(sheet.says("Network Access on penguin is off again."));
+
+    sheet.choose(SheetAction::TryAgain.selector());
+    sheet.settle(|sheet| sheet.says("Turning Network Access on penguin back on\u{2026}"));
+    assert_eq!(sheet.computers.asked().len(), 2, "Try Again sets up again");
+    sheet.choose(SheetAction::Cancel.selector());
+    sheet.settle(|sheet| !sheet.open());
+}
+
+/// A machine this computer can't reach at an address says where. Back offers that address for
+/// editing.
+#[gpui::test]
+fn back_after_an_unreachable_address_offers_it_for_editing(cx: &mut TestAppContext) {
     let (mut sheet, route) = open_settings(
         |route| {
             vec![
@@ -945,9 +978,10 @@ fn an_unreachable_address_says_where_and_back_offers_it_for_editing(cx: &mut Tes
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
-
-    assert!(sheet.says("couldn\u{2019}t reach it at 10.1.2.3:9231"));
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+    assert!(sheet.says(
+        "SpaceTerm can\u{2019}t reach penguin at 10.1.2.3:9231, so check the address and try again."
+    ));
 
     sheet.choose(SheetAction::Back.selector());
     assert_eq!(sheet.title(), "Add Machine");
@@ -965,6 +999,108 @@ fn an_unreachable_address_says_where_and_back_offers_it_for_editing(cx: &mut Tes
     );
 }
 
+/// Each machine SpaceTerm Core can't run on is refused in one sentence that names it. Only a
+/// missing login session can change while the sheet is open, so only it offers Try Again.
+#[gpui::test]
+fn each_refused_machine_reads_as_one_sentence(cx: &mut TestAppContext) {
+    let cases = [
+        (
+            SetupRefusal::IntelMac,
+            "penguin is an Intel Mac, and SpaceTerm Core supports only Apple silicon.",
+            false,
+        ),
+        (
+            SetupRefusal::ArmLinux,
+            "penguin runs Linux on ARM, which SpaceTerm Core doesn\u{2019}t support.",
+            false,
+        ),
+        (
+            SetupRefusal::GlibcTooOld {
+                found: Some((2, 31)),
+            },
+            "penguin has glibc 2.31, and SpaceTerm Core needs glibc 2.35 or later.",
+            false,
+        ),
+        (
+            SetupRefusal::GlibcTooOld { found: None },
+            "penguin has no glibc, and SpaceTerm Core needs glibc 2.35 or later.",
+            false,
+        ),
+        (
+            SetupRefusal::MacosTooOld {
+                found: Some((15, 6)),
+            },
+            "penguin runs macOS 15.6, and SpaceTerm Core needs macOS 26 or later.",
+            false,
+        ),
+        (
+            SetupRefusal::OtherSystem,
+            "penguin runs an operating system that SpaceTerm Core doesn\u{2019}t support.",
+            false,
+        ),
+        (
+            SetupRefusal::RootAccount,
+            "SpaceTerm Core can\u{2019}t run as root, so sign in to penguin with a regular account.",
+            false,
+        ),
+        (
+            SetupRefusal::NoUserManager,
+            "penguin has no systemd user manager, which SpaceTerm Core needs.",
+            false,
+        ),
+        (
+            SetupRefusal::NobodyLoggedIn { filevault: false },
+            "penguin has nobody logged in, so turn on automatic login on penguin and try again.",
+            true,
+        ),
+        (
+            SetupRefusal::NobodyLoggedIn { filevault: true },
+            "penguin needs someone logged in before SpaceTerm Core can run there.",
+            true,
+        ),
+    ];
+    let (mut sheet, _) = open_settings(
+        |_| {
+            cases
+                .iter()
+                .map(|(refusal, _, _)| Outcome::Finish(Err(SetupFailure::Unsupported(*refusal))))
+                .collect()
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    for (refusal, sentence, retry) in cases {
+        sheet.choose(SheetAction::SetUp.selector());
+        sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+        assert!(sheet.says(sentence), "{refusal:?} reads {sentence}");
+        assert_eq!(sheet.find("Try Again").is_some(), retry, "{refusal:?}");
+        sheet.choose(SheetAction::Back.selector());
+    }
+}
+
+/// Declining to let a Linux machine keep SpaceTerm Core running after logout stops setup with
+/// the reason, and Try Again asks again.
+#[gpui::test]
+fn a_declined_linger_says_why_setup_stopped(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![Outcome::Finish(Err(SetupFailure::Unsupported(
+                SetupRefusal::LingerDeclined,
+            )))]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+    assert!(sheet.says(
+        "Setup stopped because penguin must let SpaceTerm Core keep running after you log out."
+    ));
+    assert!(sheet.find("Try Again").is_some());
+}
+
 /// A save SpaceTerm couldn't confirm may already be listed, so the sheet offers no Try Again that
 /// could pair this computer twice.
 #[gpui::test]
@@ -980,7 +1116,7 @@ fn an_unconfirmed_save_offers_no_try_again(cx: &mut TestAppContext) {
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
 
     assert!(sheet.says("couldn\u{2019}t confirm it saved the connection"));
     assert!(sheet.find("Try Again").is_none());
@@ -1055,7 +1191,7 @@ fn declining_a_sign_in_before_any_change_returns_to_the_form(cx: &mut TestAppCon
         .block_test(sheet.computers.starts.recv())
         .expect("the setup worker starts");
     sheet.cx.run_until_parked();
-    assert!(sheet.says("Setting up \u{201C}penguin\u{201D}"));
+    assert!(sheet.says("Setting up penguin"));
     assert!(sheet.find("Set Up").is_none());
     let completion = sheet.cx.update(|window, cx| {
         open_sheet(window, cx)
@@ -1113,10 +1249,10 @@ fn declining_a_sign_in_after_a_start_reports_the_unconfirmed_start(cx: &mut Test
         sheet.begin(AddMachineRequest::Ssh(None));
         sheet.fill("penguin");
         sheet.choose(SheetAction::SetUp.selector());
-        sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+        sheet.settle(|sheet| sheet.says("Setting up penguin"));
 
         sheet.decline_prompt();
-        sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+        sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
 
         assert!(sheet.says(expected));
         assert!(sheet.open());
