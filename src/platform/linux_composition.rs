@@ -176,6 +176,7 @@ fn desktop_profile(
                     "Run the SpaceTerm install script to install the update.",
                 ),
                 uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this computer.",
+                uninstall_app_remedy: "run install.sh --uninstall",
             },
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
