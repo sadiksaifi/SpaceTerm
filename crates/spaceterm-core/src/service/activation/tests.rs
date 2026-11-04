@@ -28,6 +28,10 @@ struct SupervisorFixture {
     started: Mutex<Vec<PathBuf>>,
     /// What a server that never becomes ready changes in the retained state meanwhile.
     meddles: Mutex<Option<Meddle>>,
+    /// Start runs the server, then reports a failure, as a service manager can after launch.
+    start_reports_failure: AtomicBool,
+    /// Changing automatic startup fails once a Start was dispatched.
+    policy_fails_after_start: AtomicBool,
 }
 impl SupervisorFixture {
     /// The server's own run: it admits itself into the service state, then marks readiness.
@@ -93,12 +97,20 @@ impl Supervisor for SupervisorFixture {
         }
         self.running.store(true, Ordering::SeqCst);
         self.serve(ready);
+        if self.start_reports_failure.load(Ordering::SeqCst) {
+            return Err(CoreError::ServiceUnavailable);
+        }
         Ok(())
     }
     fn ready_deadline(&self) -> Duration {
         Duration::from_secs(1)
     }
     fn set_automatic_start(&self, enabled: bool) -> Result<(), CoreError> {
+        if self.policy_fails_after_start.load(Ordering::SeqCst)
+            && self.starts.load(Ordering::SeqCst) > 0
+        {
+            return Err(CoreError::ServiceUnavailable);
+        }
         self.automatic_start.store(enabled, Ordering::SeqCst);
         Ok(())
     }
@@ -185,6 +197,8 @@ fn with_service_identity(
                 hangs: Mutex::new(Vec::new()),
                 started: Mutex::new(Vec::new()),
                 meddles: Mutex::new(None),
+                start_reports_failure: AtomicBool::new(false),
+                policy_fails_after_start: AtomicBool::new(false),
             });
             let service = Service::new(
                 fixture.paths.clone(),
@@ -1219,5 +1233,48 @@ fn a_return_whose_failure_was_never_recorded_is_recorded_once_from_the_journal()
             assert_eq!(facts.skipped, Some(version.clone()));
             assert_eq!(facts.last_failure.map(|failure| failure.id), Some(1));
         }
+    });
+}
+
+#[test]
+fn a_start_that_reports_failure_after_its_candidate_became_ready_completes() {
+    with_service(|service, previous, candidate, supervisor| {
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(candidate.directory.clone());
+        supervisor
+            .start_reports_failure
+            .store(true, Ordering::SeqCst);
+        let _ = update_running(&service, &previous, &candidate, &supervisor);
+        assert_eq!(
+            service.activation_status().unwrap().unwrap().phase,
+            ActivationPhase::Completed { running: true }
+        );
+        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+    });
+}
+
+#[test]
+fn a_startup_policy_failure_after_readiness_leaves_the_update_completed() {
+    with_service(|service, previous, candidate, supervisor| {
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(candidate.directory.clone());
+        supervisor
+            .policy_fails_after_start
+            .store(true, Ordering::SeqCst);
+        assert_eq!(
+            update_running(&service, &previous, &candidate, &supervisor).map(|v| v.phase),
+            Err(CoreError::ServiceUnavailable),
+            "the caller learns that automatic startup did not change"
+        );
+        assert_eq!(
+            service.activation_status().unwrap().unwrap().phase,
+            ActivationPhase::Completed { running: true }
+        );
     });
 }

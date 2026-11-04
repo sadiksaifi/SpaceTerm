@@ -457,6 +457,9 @@ impl Service {
     }
 
     fn resume_steps(&self, data: &Directory) -> Result<(), CoreError> {
+        // A failed change to automatic startup fails no start. It is reported once the
+        // activation settles, and a later start or Stop sets the policy again.
+        let mut policy = Ok(());
         loop {
             let Some(mut state) = Self::state(data)? else {
                 return Ok(());
@@ -535,19 +538,31 @@ impl Service {
                         operation.step = Step::StartDispatched;
                         operation.started_at = Some(unix_now());
                     })?;
-                    let started = self
-                        .supervisor
-                        .start()
-                        .and_then(|()| self.supervisor.set_automatic_start(state.automatic_start));
-                    if started.is_err() {
-                        self.set_step(data, operation.id, Step::StartFailed)?;
+                    if self.supervisor.start().is_err() {
+                        // The candidate may have become ready before its Start reported failure.
+                        self.transition(
+                            data,
+                            operation.id,
+                            Step::StartDispatched,
+                            Step::StartFailed,
+                        )?;
+                        continue;
+                    }
+                    if let Err(error) = self.supervisor.set_automatic_start(state.automatic_start) {
+                        policy = Err(error);
                     }
                 }
                 Step::StartDispatched => {
                     // The candidate marks readiness durably before it publishes its endpoint.
                     // Neither a timeout nor an absent process permits another native Start.
                     if !self.await_step(data, &operation, Step::StartDispatched)? {
-                        self.set_step(data, operation.id, Step::StartFailed)?;
+                        // Readiness may commit after the wait read the step for the last time.
+                        self.transition(
+                            data,
+                            operation.id,
+                            Step::StartDispatched,
+                            Step::StartFailed,
+                        )?;
                     }
                 }
                 Step::Completed if operation.ready || state.stopped => {
@@ -556,12 +571,12 @@ impl Service {
                         runtime::updates::record_completed(data, &operation.candidate.digest)?;
                         remove_snapshot(data)?;
                     }
-                    return Ok(());
+                    return policy;
                 }
                 Step::Completed => {
                     // Ready is recorded by the candidate's own run. A running candidate that
                     // is not ready yet stays Activating until its deadline passes.
-                    return Ok(());
+                    return policy;
                 }
                 Step::StartFailed => {
                     // Durable dispatch marker precedes the Stop of the candidate.
@@ -615,7 +630,9 @@ impl Service {
                         operation.started_at = Some(unix_now());
                     })?;
                     self.supervisor.start()?;
-                    self.supervisor.set_automatic_start(state.automatic_start)?;
+                    if let Err(error) = self.supervisor.set_automatic_start(state.automatic_start) {
+                        policy = Err(error);
+                    }
                 }
                 Step::ReturnStartDispatched => {
                     // The previous version's own run records Returned once it is ready. One
@@ -627,7 +644,7 @@ impl Service {
                 Step::Returned => {
                     self.repoint_cli_locked(&self.runtime(&state));
                     remove_snapshot(data)?;
-                    return Ok(());
+                    return policy;
                 }
             }
         }
@@ -705,6 +722,31 @@ impl Service {
         }
         check_cleanup(state)?;
         self.prove_quiescent()
+    }
+    /// Moves the activation from `from` to `to` only if it is still at `from`, in one hold of
+    /// the intent lock that the started server's readiness also takes.
+    fn transition(
+        &self,
+        data: &Directory,
+        id: [u8; 32],
+        from: Step,
+        to: Step,
+    ) -> Result<(), CoreError> {
+        let _intent = data.lock("service-intent.lock", false)?;
+        let mut state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
+        let operation = state
+            .activation
+            .as_mut()
+            .ok_or(CoreError::ActivationUnresolved)?;
+        if operation.id != id {
+            return Err(CoreError::Changed);
+        }
+        if operation.step != from {
+            return Ok(());
+        }
+        operation.step = to;
+        operation.failed = false;
+        data.write_json(c"service.json", &state)
     }
     fn set_step(&self, data: &Directory, id: [u8; 32], step: Step) -> Result<(), CoreError> {
         self.change(data, id, |operation| operation.step = step)
