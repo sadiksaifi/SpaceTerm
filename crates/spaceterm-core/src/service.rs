@@ -945,6 +945,22 @@ pub(crate) fn check_runtime(paths: &Paths, supervised: bool) -> Result<(), CoreE
 /// Reboot proves the previous boot's processes ended; ordinary client launches grant no recovery.
 pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
     let service = Service::for_identity(identity)?;
+    let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
+    crate::host::install_shutdown_signals()?;
+    run_approved(&service, &executable, |paths| {
+        crate::host::serve_runtime(paths, Some(panes), true)
+    })
+}
+
+/// Admits this run of `executable` as the approved runtime's, then `serve`s it. Boot and every
+/// other start run the approved runtime first: a Pending Version runs only after a restart moved
+/// the approval to it.
+fn run_approved(
+    service: &Service,
+    executable: &Path,
+    serve: impl FnOnce(&Paths) -> Result<(), CoreError>,
+) -> Result<(), CoreError> {
+    let identity = service.identity.as_str();
     let (data, _) = service.read()?.ok_or(CoreError::NotInstalled)?;
     let intent = data.lock("service-intent.lock", false)?;
     let mut state = Service::state(&data)?.ok_or(CoreError::NotInstalled)?;
@@ -957,7 +973,7 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
         if check_cleanup(state).is_ok()
             && let Some(operation) = &state.activation
         {
-            let _ = helper::launch_recovery(identity, &operation.previous_installation(&service));
+            let _ = helper::launch_recovery(identity, &operation.previous_installation(service));
         }
         CoreError::ActivationUnresolved
     };
@@ -969,13 +985,11 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
         return Err(refuse(&state));
     }
     check_cleanup(&state)?;
-    let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
     let layout = runtime::Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
     if executable != service.runtime(&state).join(layout.executable()) {
         return Err(CoreError::RuntimeUnavailable);
     }
     runtime::verify(&service.runtime(&state), identity)?;
-    crate::host::install_shutdown_signals()?;
     let run = Run {
         boot: boot()?,
         token: crate::protocol::random()?,
@@ -989,7 +1003,7 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
     data.write_json(c"service.json", &state)?;
     drop(intent);
     // A startup that fails has returned from its cleanup too, so its run ends either way.
-    let served = match crate::host::serve_runtime(&service.paths, Some(panes), true) {
+    let served = match serve(&service.paths) {
         Ok(()) | Err(CoreError::Stopped) => Ok(()),
         Err(error) => Err(error),
     };

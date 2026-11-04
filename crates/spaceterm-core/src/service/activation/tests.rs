@@ -1393,3 +1393,66 @@ fn the_previous_runtime_recovers_an_unready_candidate_from_boot_until_the_activa
         });
     }
 }
+
+/// The restarts a running server admitted, as `(candidate, silent)`.
+#[derive(Default)]
+struct Admitted(Mutex<Vec<(Option<[u8; 32]>, bool)>>);
+impl runtime::updates::Restarter for Admitted {
+    fn restart(
+        self: Arc<Self>,
+        candidate: Option<[u8; 32]>,
+        silent: bool,
+    ) -> Result<(), runtime::updates::RestartRefusal> {
+        self.0.lock().unwrap().push((candidate, silent));
+        Ok(())
+    }
+}
+
+#[test]
+fn boot_runs_the_approved_version_first_and_then_restarts_into_the_pending_one() {
+    with_service(|service, previous, candidate, _| {
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        state.stopped = false;
+        data.write_json(c"service.json", &state).unwrap();
+        pending_record(&service, &candidate);
+        let executable = previous.directory.join(
+            runtime::Layout::host(&service.identity)
+                .unwrap()
+                .executable(),
+        );
+        let admitted = Arc::new(Admitted::default());
+        let restarter: Arc<dyn runtime::updates::Restarter> = admitted.clone();
+        let mut served = None;
+        run_approved(&service, &executable, |paths| {
+            let data = Directory::open(&paths.data, false)?;
+            served = Service::state(&data)?.map(|state| state.installation);
+            let updates = runtime::updates::Updates::open(service.clone())?;
+            updates.run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
+                None
+            })?;
+            updates.set_sessions(0);
+            Ok(())
+        })
+        .unwrap();
+        let digest = |installation: &RetainedInstallation| {
+            installation
+                .directory
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            served,
+            Some(digest(&previous)),
+            "the approved version serves first"
+        );
+        let mut pending = [0; 32];
+        for (index, byte) in pending.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&digest(&candidate)[index * 2..index * 2 + 2], 16).unwrap();
+        }
+        assert_eq!(*admitted.0.lock().unwrap(), [(Some(pending), true)]);
+    });
+}
