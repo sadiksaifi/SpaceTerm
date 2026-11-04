@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from spaceterm_tasks import ROOT, TaskError, release
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.core_package import (
-    PROTOCOL_MAJOR,
+    PROTOCOLS,
     SHARED_RESOURCES,
     TARGETS,
     artifact_public_key,
@@ -77,23 +77,25 @@ def candidate_tag(listed):
     return f"v{major}.{minor + 1}.0"
 
 
-def expected(candidate, release_major, current=PROTOCOL_MAJOR):
-    """The outcomes ADR 0035 allows each command of a pair, by the release's work major.
+# Each command admits on one protocol: `list` on the work protocol, `status` on the service lane.
+LANES = {"list": "work", "status": "service"}
 
-    A client speaks its work major and the previous one, and a Core speaks one, so this commit's
-    CLI works with a Core one major behind, while that release's CLI is refused as too old. An
-    outcome is `ok`, or `cli_too_old` for an `incompatible_protocol` refusal that names the CLI's
-    side as the older one. The service lane has its own major, which no build document records, so
-    a release CLI's `status` may also be refused as too old.
+
+def expected(candidate, release, current=PROTOCOLS):
+    """The outcome ADR 0035 allows each command of a pair, from both builds' `protocols`.
+
+    A client speaks its major and the previous one, and a Core speaks one, so this commit's CLI
+    works with a Core one major behind, while that release's CLI is refused as too old. An
+    outcome is `ok`, or `cli_too_old` for an `incompatible_protocol` refusal that names the
+    CLI's side as the older one.
     """
-    if release_major not in (current, current - 1):
-        raise TaskError("a listed release's work major is this commit's or the previous one")
-    if candidate == "client":
-        return {"list": {"ok"}, "status": {"ok"}}
-    return {
-        "list": {"ok"} if release_major == current else {"cli_too_old"},
-        "status": {"ok", "cli_too_old"},
-    }
+    allowed = {}
+    for command, lane in LANES.items():
+        mine, theirs = current[lane]["major"], release[lane]["major"]
+        if theirs not in (mine, mine - 1):
+            raise TaskError(f"a listed release's {lane} major is this commit's or the previous one")
+        allowed[command] = "ok" if candidate == "client" or theirs == mine else "cli_too_old"
+    return allowed
 
 
 def pair(tag, candidate, path=RELEASES):
@@ -104,8 +106,8 @@ def pair(tag, candidate, path=RELEASES):
     with tempfile.TemporaryDirectory(prefix="spaceterm-compatibility-") as temporary:
         directory = Path(temporary)
         built = build_candidate(candidate_tag(listed), directory / "candidate")
-        published, major = fetch(tag, directory / "release")
-        allowed = expected(candidate, major)
+        published, protocols = fetch(tag, directory / "release")
+        allowed = expected(candidate, protocols)
         environment = _environment(directory / "account")
         if candidate == "client":
             install(published, environment)
@@ -157,7 +159,7 @@ def build_candidate(tag, destination):
 
 def fetch(tag, destination):
     """Release `tag`'s authenticated Linux Core archive, unpacked as the installer stages it,
-    and its work major."""
+    and its protocol versions."""
     name = release.machine_archive_name(tag[1:], TARGET)
     destination.mkdir()
     download = destination / "download"
@@ -193,13 +195,15 @@ def fetch(tag, destination):
     found = tuple(build.get(key) for key in ("identity", "version", "target"))
     if found != ("spaceterm", tag[1:], TARGET):
         raise TaskError("the release archive is not that release's Linux Core")
-    major = build.get("protocol_major")
-    if not isinstance(major, int):
-        raise TaskError("the release archive names no work major")
+    protocols = build.get("protocols")
+    if not isinstance(protocols, dict) or not all(
+        isinstance((protocols.get(lane) or {}).get("major"), int) for lane in LANES.values()
+    ):
+        raise TaskError("the release archive names no protocol versions")
     tree = destination / "server"
     shutil.copyfile(archive, tree / "artifact.tar.gz")
     shutil.copyfile(signature, tree / "artifact.sig")
-    return tree, major
+    return tree, protocols
 
 
 def install(tree, environment):
@@ -222,18 +226,18 @@ def set_up_account(environment):
 
 
 def exercise(client, environment, allowed, core=None):
-    """Require each of `client`'s commands to end in an outcome `allowed` names for it.
+    """Require each of `client`'s commands to end in the outcome `allowed` names for it.
 
     `list` admits on the work protocol and `status` on the service lane, so each negotiates its
     own version. `list` is retried while the Core starts; `core` is its process when this pair
     started it.
     """
     deadline = time.monotonic() + STARTUP
-    while (outcome := _outcome(client, ["list"], environment)) not in allowed["list"]:
+    while (outcome := _outcome(client, ["list"], environment)) != allowed["list"]:
         if (core is not None and core.poll() is not None) or time.monotonic() >= deadline:
             raise TaskError(f"the client's list ended in {outcome}")
         time.sleep(0.25)
-    if (outcome := _outcome(client, ["status"], environment)) not in allowed["status"]:
+    if (outcome := _outcome(client, ["status"], environment)) != allowed["status"]:
         raise TaskError(f"the client's status ended in {outcome}")
 
 

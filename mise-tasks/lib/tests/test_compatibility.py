@@ -62,17 +62,23 @@ class CompatibilityPlanTests(unittest.TestCase):
         self.assertEqual(candidate_tag(["v1.2.0", "v2.0.3"]), "v2.1.0")
 
     def test_this_cli_works_one_major_back_and_that_releases_cli_is_refused_as_older(self):
-        works = {"list": {"ok"}, "status": {"ok"}}
-        self.assertEqual(expected("client", 3, current=3), works)
-        self.assertEqual(expected("client", 2, current=3), works)
+        def protocols(work, service):
+            return {"work": {"major": work, "minor": 0}, "service": {"major": service, "minor": 4}}
+
+        current = protocols(3, 2)
+        works = {"list": "ok", "status": "ok"}
+        for release in (protocols(3, 2), protocols(2, 2), protocols(3, 1), protocols(2, 1)):
+            with self.subTest(release=release):
+                self.assertEqual(expected("client", release, current), works)
+        self.assertEqual(expected("core", protocols(3, 2), current), works)
         self.assertEqual(
-            expected("core", 3, current=3), {"list": {"ok"}, "status": {"ok", "cli_too_old"}}
+            expected("core", protocols(2, 2), current), {"list": "cli_too_old", "status": "ok"}
         )
         self.assertEqual(
-            expected("core", 2, current=3),
-            {"list": {"cli_too_old"}, "status": {"ok", "cli_too_old"}},
+            expected("core", protocols(3, 1), current), {"list": "ok", "status": "cli_too_old"}
         )
-        for candidate in ("client", "core"):
-            for major in (1, 4):
-                with self.subTest(candidate=candidate, major=major), self.assertRaises(TaskError):
-                    expected(candidate, major, current=3)
+        for release in (protocols(1, 2), protocols(4, 2), protocols(3, 0), protocols(3, 3)):
+            for candidate in ("client", "core"):
+                with self.subTest(candidate=candidate, release=release):
+                    with self.assertRaises(TaskError):
+                        expected(candidate, release, current)
