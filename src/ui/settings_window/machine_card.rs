@@ -259,6 +259,8 @@ struct MenuItem {
     enabled: bool,
     destructive: bool,
     separator_before: bool,
+    /// Why the entry is unavailable, shown once above it.
+    note: Option<SharedString>,
 }
 
 impl MenuItem {
@@ -270,7 +272,13 @@ impl MenuItem {
             enabled,
             destructive: false,
             separator_before: false,
+            note: None,
         }
+    }
+
+    fn note(mut self, note: Option<SharedString>) -> Self {
+        self.note = note;
+        self
     }
 
     fn destructive(mut self) -> Self {
@@ -677,11 +685,20 @@ impl SettingsWindow {
         } else {
             reconnect.after_separator()
         });
-        menu.push(
-            MenuItem::new("Remove Machine\u{2026}", StatusStep::UnpairThisDevice, true)
-                .destructive()
-                .after_separator(),
-        );
+        // Remove Machine uninstalls SpaceTerm Core over the lane and unpairs in one step. A
+        // machine SpaceTerm doesn't reach is only removed here.
+        let remove = if self.remote_reachable(&route, cx) {
+            let blocked = self.remote_removal_blocked(&route);
+            MenuItem::new(
+                Change::Remove.label(),
+                StatusStep::Remote(Change::Remove),
+                ready && blocked.is_none(),
+            )
+            .note(blocked)
+        } else {
+            MenuItem::new(Change::Remove.label(), StatusStep::UnpairThisDevice, true)
+        };
+        menu.push(remove.destructive().after_separator());
         (buttons, menu)
     }
 
@@ -1398,12 +1415,14 @@ impl SettingsWindow {
                 if item.separator_before {
                     entries.push(MenuEntry::separator());
                 }
-                entries.push(
-                    MenuEntry::action(item.label, item.step)
-                        .disabled(!item.enabled)
-                        .destructive(item.destructive)
-                        .debug_selector(item.selector.to_string()),
-                );
+                let entry = MenuEntry::action(item.label, item.step)
+                    .disabled(!item.enabled)
+                    .destructive(item.destructive)
+                    .debug_selector(item.selector.to_string());
+                entries.push(match item.note {
+                    Some(note) => MenuEntry::section(note, vec![entry]),
+                    None => entry,
+                });
             }
             let owner = cx.weak_entity();
             let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;

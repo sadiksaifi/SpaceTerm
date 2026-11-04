@@ -104,7 +104,9 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Asks before Remove Machine unpairs this device from the selected machine, naming it.
+    /// Asks before Remove Machine removes the selected machine without reaching its service
+    /// lane. A machine that already unpaired this device has nothing left to revoke. Any other
+    /// keeps SpaceTerm Core and is asked to revoke this device once it answers.
     pub(super) fn confirm_unpair_this_device(
         &mut self,
         window: &mut Window,
@@ -114,17 +116,14 @@ impl SettingsWindow {
             return;
         };
         let owner = cx.weak_entity();
-        // A server that already unpaired this device has nothing left to revoke, so the step
-        // only removes what remains here.
         let revoked = status == DirectRouteStatus::Refused(RefusalReason::Revoked);
-        let title = format!("Remove \u{201C}{name}\u{201D}?");
+        let here = self.this_computer.to_lowercase();
+        let title = format!("Remove {name}?");
         let message = if revoked {
-            format!(
-                "Remove the saved connection from this computer. To reconnect to {name}, request a new invitation."
-            )
+            format!("{name} already unpaired this device, so this removes it from {here}.")
         } else {
             format!(
-                "SpaceTerm removes this connection and its Workspaces from this window and asks {name} to revoke access. Terminal Sessions keep running. To reconnect, you need a new invitation."
+                "SpaceTerm can\u{2019}t reach {name}, so this removes it from {here} and leaves SpaceTerm Core installed there."
             )
         };
         let result = Alert::new(
@@ -160,7 +159,13 @@ impl SettingsWindow {
             ) {
                 return;
             }
-            let _ = owner.update(cx, |settings, cx| settings.unpair_this_device(route, cx));
+            let _ = owner.update(cx, |settings, cx| {
+                if revoked {
+                    settings.forget_machine(route, cx);
+                } else {
+                    settings.unpair_this_device(route, cx);
+                }
+            });
         });
         if result.is_err() {
             eprintln!("failed to present the Remove Machine confirmation");
@@ -170,20 +175,38 @@ impl SettingsWindow {
     /// Removes the route here and records the revocation, which finishes on its own. The
     /// selection moves on at once, since the route is gone from this computer.
     fn unpair_this_device(&mut self, route: DirectRouteId, cx: &mut Context<Self>) {
+        self.remove_route(route, DirectConnections::unpair_self, cx);
+    }
+
+    /// Removes a route whose Core already revoked this device, with its key, asking that Core
+    /// nothing.
+    pub(super) fn forget_machine(&mut self, route: DirectRouteId, cx: &mut Context<Self>) {
+        self.remove_route(route, DirectConnections::forget, cx);
+    }
+
+    fn remove_route(
+        &mut self,
+        route: DirectRouteId,
+        remove: fn(
+            &DirectConnections,
+            &DirectRouteId,
+        ) -> Result<(), crate::machine_connection::direct::DirectError>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(rows) = self.direct_routes.as_mut() else {
             return;
         };
         let connections = rows.connections.clone();
         let task = cx.spawn(async move |settings, cx| {
-            let unpaired = cx
+            let removed = cx
                 .background_executor()
-                .spawn(async move { connections.unpair_self(&route) })
+                .spawn(async move { remove(&connections, &route) })
                 .await;
             let _ = settings.update(cx, |settings, cx| {
-                if let (Err(error), Some(rows)) = (unpaired, settings.direct_routes.as_mut()) {
+                if let (Err(error), Some(rows)) = (removed, settings.direct_routes.as_mut()) {
                     rows.problem = Some((route, AccessFailure::from(error)));
                 }
-                // The selection gives way to this computer's server once the route is gone.
+                // The selection gives way to this computer's machine once the route is gone.
                 settings.reconcile_machines(cx);
                 settings.sync_machine_location(cx);
                 cx.notify();

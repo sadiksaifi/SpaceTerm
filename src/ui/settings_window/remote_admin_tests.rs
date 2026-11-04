@@ -111,6 +111,36 @@ fn status(runtime: LaneVersion) -> LaneStatus {
     }
 }
 
+/// Remove Machine's confirmation follows the mockup: it names the machine, the sessions that
+/// close there, and that it unpairs.
+#[test]
+fn a_remove_confirmation_names_the_machine_and_the_sessions_that_close() {
+    let detail = |sessions| {
+        confirmation(
+            "build-box",
+            &preview(LaneAction::Uninstall, effects(sessions)),
+        )
+        .detail
+    };
+    let removal = confirmation("build-box", &preview(LaneAction::Uninstall, effects(1)));
+    assert_eq!(removal.message, "Remove build-box?");
+    assert_eq!(removal.confirm, "Remove");
+    assert_eq!(
+        detail(1),
+        "This will uninstall SpaceTerm Core on build-box, close your 1 running session there, \
+         and unpair it."
+    );
+    assert_eq!(
+        detail(3),
+        "This will uninstall SpaceTerm Core on build-box, close your 3 running sessions there, \
+         and unpair it."
+    );
+    assert_eq!(
+        detail(0),
+        "This will uninstall SpaceTerm Core on build-box and unpair it."
+    );
+}
+
 #[test]
 fn a_restart_confirmation_names_the_exact_sessions_that_end() {
     let confirmation = confirmation("penguin", &preview(LaneAction::Restart, effects(1)));
@@ -591,4 +621,125 @@ fn an_earlier_network_access_change_reads_as_an_earlier_change() {
         ended_message("penguin", &Ended::Changed(act, Settlement::Done)).0,
         "penguin changed its Network Access."
     );
+}
+
+/// Remove Machine previews the uninstall, names the machine and the sessions that close, and
+/// once the Core admits it, the machine leaves this computer with nothing left to unpair.
+#[gpui::test]
+fn remove_machine_uninstalls_core_there_and_unpairs_in_one_step(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    *remote.prepare.lock().unwrap() = Ok(Prepared {
+        preview: preview(LaneAction::Uninstall, effects(1)),
+        settled: Vec::new(),
+    });
+    *remote.perform.lock().unwrap() = Ok(Performed {
+        outcome: Outcome::Shutdown {
+            operation: "0123456789abcdef0123456789abcdef".into(),
+            boot: "a".into(),
+        },
+        settled: Vec::new(),
+    });
+    let machines = open_penguin(&remote, cx);
+    let route = machines.routes[0];
+
+    click(REMOVE_SELECTOR, machines.cx);
+    assert_eq!(*remote.prepared.lock().unwrap(), vec![Change::Remove]);
+    let tree = A11yTree::read(machines.cx);
+    assert!(tree.find_text("Remove penguin?").is_some());
+    assert!(
+        tree.find_text(
+            "This will uninstall SpaceTerm Core on penguin, close your 1 running session there, \
+             and unpair it."
+        )
+        .is_some()
+    );
+    assert!(
+        remote.performed.lock().unwrap().is_empty(),
+        "Remove asks first"
+    );
+
+    answer(CONFIRM_SELECTOR, machines.cx);
+    let direct = machines.direct.clone();
+    settle(machines.cx, |_| direct.route(&route).is_none());
+
+    assert_eq!(remote.performed.lock().unwrap().len(), 1);
+    assert!(
+        machines.direct.pending_unpairs().is_empty(),
+        "the uninstalled Core already revoked every pairing"
+    );
+    let selected = machines
+        .window
+        .read_with(machines.cx, |settings, _| settings.selected_machine());
+    assert_ne!(
+        selected,
+        Some(super::super::machine_list::MachineChoice::Direct(route)),
+        "the selection leaves the removed machine"
+    );
+}
+
+/// A Core too old to uninstall itself refuses, and Remove Machine then says why it's unavailable.
+#[gpui::test]
+fn remove_machine_says_why_a_core_too_old_to_uninstall_cant_be_removed(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    *remote.prepare.lock().unwrap() = Err(RemoteFailure::of_code("unsupported"));
+    let machines = open_penguin(&remote, cx);
+
+    click(REMOVE_SELECTOR, machines.cx);
+    assert!(!alert_open(machines.cx));
+    let reason = "Remove Machine needs a newer SpaceTerm Core on penguin. Update it first.";
+    assert!(
+        footnote(&machines).contains(reason),
+        "got {:?}",
+        footnote(&machines)
+    );
+
+    click(super::super::machine_card::MENU_SELECTOR, machines.cx);
+    let tree = A11yTree::read(machines.cx);
+    assert_eq!(
+        tree.node("Remove Machine\u{2026}")["aria"]["disabled"],
+        true
+    );
+    assert!(
+        machines.direct.route(&machines.routes[0]).is_some(),
+        "nothing was removed"
+    );
+}
+
+/// A reading that shows a Core whose service lane predates uninstall makes Remove Machine
+/// unavailable and says why before the person asks.
+#[gpui::test]
+fn a_reading_of_a_core_too_old_to_uninstall_disables_remove_machine(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    let mut old = status(version("0.9.0", "aaaaaaaaaa"));
+    old.lane_major = 0;
+    *remote.read.lock().unwrap() = Ok(Reading {
+        status: old,
+        check: LaneCheck {
+            approved: version("0.9.0", "aaaaaaaaaa"),
+            latest: None,
+            staged: Vec::new(),
+        },
+        settled: Vec::new(),
+    });
+    let machines = open_penguin(&remote, cx);
+
+    click(
+        super::super::machine_card::VERSION_CHECK_SELECTOR,
+        machines.cx,
+    );
+    machines.cx.run_until_parked();
+
+    assert!(
+        footnote(&machines)
+            .contains("Remove Machine needs a newer SpaceTerm Core on penguin. Update it first."),
+        "got {:?}",
+        footnote(&machines)
+    );
+    click(super::super::machine_card::MENU_SELECTOR, machines.cx);
+    let tree = A11yTree::read(machines.cx);
+    assert_eq!(
+        tree.node("Remove Machine\u{2026}")["aria"]["disabled"],
+        true
+    );
+    assert!(remote.prepared.lock().unwrap().is_empty());
 }
