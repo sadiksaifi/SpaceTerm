@@ -9,6 +9,8 @@ pub(crate) mod whats_new;
 
 pub(super) use control::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
+/// The application menu model, which only macOS presents, names these.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) use whats_new::{OpenWhatsNew, WHATS_NEW_TITLE};
 
 use gpui::{
@@ -28,6 +30,7 @@ use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateServic
 
 actions!(spaceterm, [CheckForUpdates]);
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) const CHECK_FOR_UPDATES_TITLE: &str = "Check for Updates…";
 pub(crate) const RELEASE_NOTES_TITLE: &str = "Release Notes";
 const RELEASE_NOTES_URL: &str = "https://github.com/sadiksaifi/SpaceTerm/releases/latest";

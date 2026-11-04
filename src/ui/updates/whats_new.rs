@@ -24,6 +24,7 @@ use crate::updates::release_notes::{self, NotesBlock, ReleaseNotes};
 actions!(spaceterm, [OpenWhatsNew]);
 
 /// The Help menu command, present only in a build that carries release notes.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) const WHATS_NEW_TITLE: &str = "What's New in SpaceTerm";
 const MODAL_ID: &str = "whats-new";
 
