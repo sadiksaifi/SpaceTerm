@@ -5,7 +5,6 @@
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -14,9 +13,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, core_package
-from tests.macos_signing_fixture import certificate
+from spaceterm_tasks import ROOT, core_package, macos_codesign
 from tests.core_artifact_fixture import configure_trust, prepare
+from tests.macos_signing_fixture import NAME, TEAM, certificate
 
 
 class PackageTests(unittest.TestCase):
@@ -41,14 +40,6 @@ class PackageTests(unittest.TestCase):
         major = self.root / core_package.PROTOCOL_SOURCE
         major.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / core_package.PROTOCOL_SOURCE, major)
-        config = self.root / "packaging/macos/spaceterm/Packager.toml"
-        config.write_text(
-            re.sub(
-                r'signing-identity = ".*"',
-                f'signing-identity = "{self.fingerprint}"',
-                config.read_text(),
-            )
-        )
         configure_trust(self.root)
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")
@@ -109,6 +100,9 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             "PYTHONPATH": str(self.root / "mise-tasks/lib"),
             "BUILD_RECORD": str(self.record),
             "BUILD_SIGNING_FINGERPRINT": self.fingerprint,
+            # Release packaging here is the dry run: a self-signed certificate has no Team ID.
+            macos_codesign.TEAM_ID: TEAM,
+            macos_codesign.SIGNING_IDENTITY: macos_codesign.ADHOC,
         }
         self.artifact = self.root / "target/aarch64-apple-darwin/release/spaceterm"
         self.env["BUILD_EXECUTABLE"] = str(self.artifact)
@@ -183,8 +177,6 @@ int main(int argc, char **argv) {{
             self.root,
             self.env,
             core_tag,
-            self.fingerprint,
-            self.credentials,
             include_catalog=True,
         )
         digest = (
@@ -281,13 +273,16 @@ int main(int argc, char **argv) {{
         )
         for value in self.credentials.values():
             self.assertNotIn(value, result.stdout + result.stderr)
-        requirement = self.run_command(
-            "codesign", "--display", "--requirements", "-", str(bundled)
-        ).stdout
-        self.assertEqual(
-            requirement.strip(),
-            f'designated => identifier "io.github.sadiksaifi.spaceterm" and certificate leaf = H"{self.fingerprint.lower()}"',
-        )
+        app = self.root / "dist/SpaceTerm.app"
+        framework = app / "Contents/Frameworks/Sparkle.framework"
+        self.assertFalse((framework / "Versions/B/XPCServices").exists())
+        for code in (
+            app,
+            framework / "Versions/B/Autoupdate",
+            framework / "Versions/B/Updater.app",
+        ):
+            self.assertIn("(adhoc,runtime)", macos_codesign.details(code))
+        self.assertEqual(macos_codesign.signed_entitlements(app), {})
 
     def test_verification_rejects_a_tampered_core_catalog(self):
         self.compile_executable(self.artifact, "SpaceTerm Preflight")
@@ -299,15 +294,33 @@ int main(int argc, char **argv) {{
         self.assertNotEqual(verified.returncode, 0)
         self.assertIn("compiled candidate pin", verified.stderr)
 
-    def test_release_requires_signing_secrets_before_building(self):
+    def test_release_requires_the_team_and_its_signing_secrets_before_building(self):
         self.compile_executable(self.artifact, "SpaceTerm")
-        self.env.pop("MACOS_SIGNING_CERTIFICATE_P12", None)
-        self.env.pop("MACOS_SIGNING_CERTIFICATE_PASSWORD", None)
-        result = self.package("v0.0.1")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("release signing", result.stderr)
-        self.assertFalse(self.record.exists())
-        self.assertFalse((self.root / "dist/SpaceTerm.app").exists())
+        for changes, message in (
+            ({macos_codesign.TEAM_ID: None}, macos_codesign.TEAM_ID),
+            ({macos_codesign.SIGNING_IDENTITY: None}, macos_codesign.SIGNING_IDENTITY),
+            (
+                {
+                    macos_codesign.SIGNING_IDENTITY: NAME,
+                    "MACOS_SIGNING_CERTIFICATE_P12": None,
+                    "MACOS_SIGNING_CERTIFICATE_PASSWORD": None,
+                },
+                "release signing certificate and password are required",
+            ),
+        ):
+            with self.subTest(message=message):
+                environment = dict(self.env)
+                for key, value in changes.items():
+                    if value is None:
+                        environment.pop(key, None)
+                    else:
+                        environment[key] = value
+                with patch.object(self, "env", environment):
+                    result = self.package("v0.0.1")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(self.record.exists())
+                self.assertFalse((self.root / "dist/SpaceTerm.app").exists())
 
     def test_release_packaging_rejects_a_dirty_checkout_before_building(self):
         self.compile_executable(self.artifact, "SpaceTerm")

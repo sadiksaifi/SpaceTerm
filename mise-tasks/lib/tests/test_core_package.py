@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, TaskError, release, core_package
+from spaceterm_tasks import ROOT, TaskError, core_package, release
 from spaceterm_tasks.package_linux import write_archive
 from spaceterm_tasks.packaging import NOTICES, SHELL_INTEGRATION, TERMINFO
 

@@ -22,10 +22,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 
-from spaceterm_tasks import ROOT, TaskError, macos_signing, release
+from spaceterm_tasks import ROOT, TaskError, macos_codesign, macos_signing, release
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.package_linux import verify_glibc_baseline, write_archive
 from spaceterm_tasks.packaging import (
@@ -328,9 +328,11 @@ def unpack_verified(
     return info
 
 
-def signer():
-    config = tomllib.loads((ROOT / "packaging/macos/spaceterm/Packager.toml").read_text())
-    return config["macos"]["signing-identity"]
+def signer(identity):
+    """The codesign identity and Team ID: ad hoc and none outside the release identity."""
+    if identity != "spaceterm":
+        return macos_codesign.ADHOC, None
+    return macos_codesign.signing_identity(os.environ), macos_codesign.team_id(os.environ)
 
 
 def compile_terminfo(destination, target):
@@ -578,10 +580,15 @@ def verify_tree(tree, expected, *, native=True):
         info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
         if info != core_info(identity):
             raise TaskError("the server Info.plist differs from its identity's")
-        if identity == "spaceterm":
-            macos_signing.verify_release_signature(bundle, signer(), identifier, "server")
-        else:
-            macos_signing.verify_adhoc_signature(bundle, identifier, "server")
+        codesign_identity, team = signer(identity)
+        macos_codesign.verify(
+            bundle,
+            identifier,
+            plistlib.loads(macos_codesign.CORE_ENTITLEMENTS.read_bytes()),
+            team=team,
+            identity=codesign_identity,
+            label="server",
+        )
         dependencies = checked(
             ["otool", "-L", str(executable)], "server dependencies unavailable", text=True
         ).lower()
@@ -736,8 +743,8 @@ def package(identity, release_tag=None, *, target=None):
         environment.pop("SPACETERM_PACKAGED", None)
     if target == TARGETS["darwin"]:
         environment["MACOSX_DEPLOYMENT_TARGET"] = "26.0"
-        if release_tag:
-            macos_signing.signing_credentials(signer(), os.environ)
+        if release_tag and signer(identity)[0] != macos_codesign.ADHOC:
+            macos_signing.signing_credentials(os.environ)
     from spaceterm_tasks.core_builds import _source
 
     source = _source(ROOT)[2]
@@ -793,40 +800,17 @@ def package(identity, release_tag=None, *, target=None):
             (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps(core_info(identity)))
             (bundle / "Contents/Info.plist").chmod(0o644)
             core = bundle
-            if release_tag:
-                requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(signer())}'
-                with macos_signing.release_keychain(signer(), os.environ):
-                    checked(
-                        [
-                            "codesign",
-                            "--force",
-                            "--sign",
-                            signer(),
-                            "--identifier",
-                            identifier,
-                            "--requirements",
-                            requirement,
-                            "--timestamp=none",
-                            str(core),
-                        ],
-                        "server code signing failed",
-                        env=environment,
-                    )
-            elif native:
-                checked(
-                    [
-                        "codesign",
-                        "--force",
-                        "--sign",
-                        "-",
-                        "--identifier",
-                        identifier,
-                        "--timestamp=none",
-                        str(core),
-                    ],
-                    "server code signing failed",
-                    env=environment,
+            if native:
+                codesign_identity, team = signer(identity)
+                signing = (
+                    macos_signing.release_keychain(codesign_identity, os.environ)
+                    if codesign_identity != macos_codesign.ADHOC
+                    else nullcontext()
                 )
+                with signing:
+                    macos_codesign.sign_core(
+                        core, codesign_identity, identifier, team=team, environment=environment
+                    )
             else:
                 signed = directory / "signed-server"
                 checked(

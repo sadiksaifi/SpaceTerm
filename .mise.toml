@@ -223,7 +223,7 @@ run = "shellcheck packaging/install.sh"
 
 [tasks."lint:plist:macos"]
 description = "Check the application identity property lists"
-run = "plutil -lint packaging/macos/development/Info.plist packaging/macos/preflight/Info.plist packaging/macos/preflight/Entitlements.plist packaging/macos/spaceterm/Info.plist packaging/macos/spaceterm/Entitlements.plist"
+run = "plutil -lint packaging/macos/core/Info.plist packaging/macos/core/Entitlements.plist packaging/macos/development/Info.plist packaging/macos/preflight/Info.plist packaging/macos/preflight/Entitlements.plist packaging/macos/spaceterm/Info.plist packaging/macos/spaceterm/Entitlements.plist"
 
 [tasks."lint:diff"]
 description = "Check the diff for whitespace errors"

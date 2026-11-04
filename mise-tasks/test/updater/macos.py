@@ -15,11 +15,11 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from spaceterm_tasks import ROOT
+from spaceterm_tasks import ROOT, macos_codesign
 from spaceterm_tasks import sparkle as SPARKLE
-from spaceterm_tasks.macos_signing import release_keychain, verify_release_signature
+from spaceterm_tasks.macos_signing import release_keychain
 from spaceterm_tasks.release import verify_feed
-from tests.macos_signing_fixture import certificate
+from tests.macos_signing_fixture import NAME, certificate
 
 
 def run(*arguments, **kwargs):
@@ -31,6 +31,19 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+def verify_certificate(app, fingerprint):
+    """The self-signed fixture has no Team ID, so pin its certificate throughout the bundle."""
+    run(
+        "codesign",
+        "--verify",
+        "--strict",
+        "--deep",
+        "-R",
+        f'=certificate leaf = H"{fingerprint.lower()}"',
+        str(app),
+    )
+
+
 def main():
     sparkle = SPARKLE.directory()
     with (
@@ -39,11 +52,11 @@ def main():
     ):
         root = Path(temporary)
         fingerprint, credentials = certificate(root / "signing")
-        signing.enter_context(release_keychain(fingerprint, {**os.environ, **credentials}))
-        server = http.server.ThreadingHTTPServer(
+        signing.enter_context(release_keychain(NAME, {**os.environ, **credentials}))
+        core = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0), functools.partial(QuietHandler, directory=root)
         )
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
         thread.start()
         try:
             seed = os.urandom(32)
@@ -98,7 +111,7 @@ def main():
                 directory.mkdir()
                 log = directory / "events"
                 log.touch()
-                feed_url = f"http://127.0.0.1:{server.server_port}/{scenario}/appcast.xml"
+                feed_url = f"http://127.0.0.1:{core.server_port}/{scenario}/appcast.xml"
                 apps = []
                 for version, name in (("0.1.0", "Installed"), ("0.1.1", "New")):
                     app = directory / name / "SpaceTermUpdateTest.app"
@@ -131,23 +144,10 @@ def main():
                         "SPTTestMode": mode,
                     }
                     (contents / "Info.plist").write_bytes(plistlib.dumps(plist))
-                    run(
-                        "codesign",
-                        "--force",
-                        "--deep",
-                        "--sign",
-                        fingerprint if signed else "-",
-                        "--timestamp=none",
-                        "--options",
-                        "runtime",
-                        "--entitlements",
-                        str(entitlements),
-                        str(app),
-                    )
+                    # The release order: Sparkle's code inside out, then the app.
+                    macos_codesign.sign_desktop(app, NAME if signed else "-", entitlements)
                     if signed:
-                        verify_release_signature(
-                            app, fingerprint, plist["CFBundleIdentifier"], scenario
-                        )
+                        verify_certificate(app, fingerprint)
                     apps.append(app)
                 archive = directory / "SpaceTerm-0.1.1-darwin-arm64.dmg"
                 run(
@@ -198,7 +198,7 @@ def main():
                 # Exercise the production generator and verifier, then serve the fixture locally.
                 feed.write_text(
                     feed.read_text().replace(
-                        prefix, f"http://127.0.0.1:{server.server_port}/{scenario}/"
+                        prefix, f"http://127.0.0.1:{core.server_port}/{scenario}/"
                     )
                 )
                 run(str(sparkle / "bin/sign_update"), "--ed-key-file", "-", str(feed), input=key)
@@ -260,16 +260,14 @@ def main():
                             "confirmed" in events and "relaunched" in events and version == "0.1.1"
                         ), events
                     if signed and version == "0.1.1":
-                        verify_release_signature(
-                            apps[0], fingerprint, plist["CFBundleIdentifier"], scenario
-                        )
+                        verify_certificate(apps[0], fingerprint)
                     print(f"{scenario}: passed", flush=True)
                 finally:
                     if process.poll() is None:
                         process.terminate()
                         process.wait(timeout=5)
         finally:
-            server.shutdown()
+            core.shutdown()
 
 
 if __name__ == "__main__":

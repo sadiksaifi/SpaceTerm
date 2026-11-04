@@ -6,9 +6,9 @@ import shutil
 import subprocess
 import sys
 
-from spaceterm_tasks import macos_signing, release, core_package
-from spaceterm_tasks.package_linux import write_archive
+from spaceterm_tasks import core_package, macos_codesign, release
 from spaceterm_tasks.core_builds import _source
+from spaceterm_tasks.package_linux import write_archive
 
 SEED = bytes(range(32))
 
@@ -24,8 +24,6 @@ def prepare(
     root,
     environment,
     release_tag=None,
-    fingerprint=None,
-    credentials=None,
     *,
     include_catalog=False,
 ):
@@ -79,44 +77,8 @@ int main(int argc, char **argv) {{
     if sys.platform == "darwin":
         identifier = core_package.core_identifier(expected["identity"])
         executable = tree / core_package.signed_path(expected["target"], expected["identity"])
-        if release_tag:
-            if fingerprint is None or credentials is None:
-                raise ValueError(
-                    "the native package fixture requires its disposable signing identity"
-                )
-            requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(fingerprint)}'
-            with macos_signing.release_keychain(fingerprint, credentials):
-                subprocess.run(
-                    [
-                        "codesign",
-                        "--force",
-                        "--sign",
-                        fingerprint,
-                        "--identifier",
-                        identifier,
-                        "--requirements",
-                        requirement,
-                        "--timestamp=none",
-                        str(executable),
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
-        else:
-            subprocess.run(
-                [
-                    "codesign",
-                    "--force",
-                    "--sign",
-                    "-",
-                    "--identifier",
-                    identifier,
-                    "--timestamp=none",
-                    str(executable),
-                ],
-                check=True,
-                capture_output=True,
-            )
+        # Release fixtures are a dry run: ad hoc, as the release Team ID cannot be faked.
+        macos_codesign.sign_core(executable, macos_codesign.ADHOC, identifier)
     archive, signature = archive_tree(root, tree, expected)
     environment["SPACETERM_CLI_ARCHIVE"] = str(archive)
     environment["SPACETERM_CLI_SIGNATURE"] = str(signature)

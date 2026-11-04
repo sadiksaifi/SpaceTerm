@@ -1,4 +1,4 @@
-"""Exercise native signing imports, rejection, cleanup, and cross-build identity."""
+"""Exercise native signing imports, rejection, cleanup, signing order and cross-build identity."""
 
 import os
 import plistlib
@@ -8,46 +8,146 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spaceterm_tasks import TaskError
-from spaceterm_tasks.macos_signing import (
-    release_keychain,
-    signing_environment,
-    verify_adhoc_signature,
-    verify_release_signature,
-)
+from spaceterm_tasks import TaskError, macos_codesign
+from spaceterm_tasks.macos_signing import release_keychain, signing_environment
 
-from tests.macos_signing_fixture import certificate
+from tests.macos_signing_fixture import NAME, TEAM, certificate
+
+CORE_ENTITLEMENTS = plistlib.loads(macos_codesign.CORE_ENTITLEMENTS.read_bytes())
+
+
+def compile_executable(path, source=b"int main(){return 0;}"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["xcrun", "clang", "-x", "c", "-", "-o", str(path)],
+        input=source,
+        env=signing_environment(os.environ),
+        check=True,
+        capture_output=True,
+    )
+
+
+def fixture_app(root, identifier, version=1):
+    app = root / "Fixture.app"
+    contents = app / "Contents"
+    (contents / "Info.plist").parent.mkdir(parents=True)
+    (contents / "Info.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleIdentifier": identifier,
+                "CFBundleExecutable": "Fixture",
+                "CFBundleVersion": str(version),
+                "CFBundlePackageType": "APPL",
+            }
+        )
+    )
+    compile_executable(contents / "MacOS/Fixture", f"int main(){{return {version};}}".encode())
+    return app
+
+
+class IdentityTests(unittest.TestCase):
+    def test_release_identity_names_the_teams_developer_id_certificate(self):
+        self.assertEqual(
+            macos_codesign.signing_identity(
+                {macos_codesign.TEAM_ID: TEAM, macos_codesign.SIGNING_IDENTITY: NAME}
+            ),
+            NAME,
+        )
+        self.assertEqual(
+            macos_codesign.signing_identity(
+                {macos_codesign.TEAM_ID: TEAM, macos_codesign.SIGNING_IDENTITY: "-"}
+            ),
+            "-",
+        )
+        for team, identity in (
+            ("", NAME),
+            ("abcde12345", NAME),
+            ("ABCDE1234", NAME),
+            (TEAM, ""),
+            (TEAM, "Developer ID Application: SpaceTerm Test (ZZZZZ99999)"),
+            (TEAM, f"Apple Development: SpaceTerm Test ({TEAM})"),
+            (TEAM, "9E07CD5C15C5C862A21B93EA55D4303BC19B7366"),
+        ):
+            with self.subTest(team=team, identity=identity), self.assertRaises(TaskError):
+                macos_codesign.signing_identity(
+                    {macos_codesign.TEAM_ID: team, macos_codesign.SIGNING_IDENTITY: identity}
+                )
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS csreq")
+    def test_team_requirement_is_the_developer_id_requirement(self):
+        self.assertEqual(
+            macos_codesign.canonical_requirement(
+                macos_codesign.designated_requirement("io.github.sadiksaifi.spaceterm", TEAM)
+            ),
+            'designated => identifier "io.github.sadiksaifi.spaceterm" and anchor apple generic'
+            " and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */"
+            " and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */"
+            f" and certificate leaf[subject.OU] = {TEAM}",
+        )
 
 
 @unittest.skipUnless(sys.platform == "darwin", "requires macOS codesign")
 class AdhocSigningTests(unittest.TestCase):
-    def test_nonproduction_native_signature_checks_identity_and_tampering_without_credentials(self):
+    def test_core_signature_checks_identity_runtime_entitlements_and_tampering(self):
         with tempfile.TemporaryDirectory() as temporary:
-            executable = Path(temporary) / "server"
-            clean = signing_environment(os.environ)
-            subprocess.run(
-                ["xcrun", "clang", "-x", "c", "-", "-o", str(executable)],
-                input=b"int main(){return 0;}",
-                env=clean,
-                check=True,
-                capture_output=True,
-            )
+            executable = Path(temporary) / "core"
+            compile_executable(executable)
             identifier = "io.github.sadiksaifi.spaceterm-preflight.core"
+            macos_codesign.sign_core(executable, "-", identifier)
+            macos_codesign.verify(executable, identifier, CORE_ENTITLEMENTS, label="core")
+            # A dry run signs ad hoc and still compiles the team's requirement.
+            macos_codesign.verify(executable, identifier, CORE_ENTITLEMENTS, team=TEAM)
+            for arguments, keywords in (
+                (("io.github.sadiksaifi.spaceterm.core", CORE_ENTITLEMENTS), {}),
+                ((identifier, {}), {}),
+                ((identifier, CORE_ENTITLEMENTS), {"team": TEAM, "identity": NAME}),
+            ):
+                with self.subTest(arguments=arguments), self.assertRaises(TaskError):
+                    macos_codesign.verify(executable, *arguments, **keywords)
             subprocess.run(
                 ["codesign", "--force", "--sign", "-", "--identifier", identifier, str(executable)],
-                env=clean,
                 check=True,
                 capture_output=True,
             )
-            verify_adhoc_signature(executable, identifier, "server")
             with self.assertRaises(TaskError):
-                verify_adhoc_signature(executable, "io.github.sadiksaifi.spaceterm.core", "server")
-            with self.assertRaises(TaskError):
-                verify_release_signature(executable, "0" * 40, identifier, "server")
+                macos_codesign.verify(executable, identifier, {}, label="core without runtime")
+            macos_codesign.sign_core(executable, "-", identifier)
             with executable.open("r+b") as output:
                 output.write(b"tampered")
             with self.assertRaises(TaskError):
-                verify_adhoc_signature(executable, identifier, "server")
+                macos_codesign.verify(executable, identifier, CORE_ENTITLEMENTS)
+
+    def test_desktop_signs_sparkle_inside_out_without_its_xpc_services(self):
+        from spaceterm_tasks import sparkle
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            identifier = "io.github.sadiksaifi.spaceterm.signing-test"
+            app = fixture_app(root, identifier)
+            frameworks = app / "Contents/Frameworks"
+            frameworks.mkdir()
+            subprocess.run(
+                [
+                    "ditto",
+                    str(sparkle.directory() / "Sparkle.framework"),
+                    str(frameworks / "Sparkle.framework"),
+                ],
+                check=True,
+            )
+            entitlements = root / "Entitlements.plist"
+            entitlements.write_bytes(plistlib.dumps({}))
+            macos_codesign.sign_desktop(app, "-", entitlements)
+            framework = frameworks / "Sparkle.framework"
+            self.assertFalse((framework / "XPCServices").exists())
+            self.assertFalse((framework / "Versions/B/XPCServices").exists())
+            macos_codesign.verify(app, identifier, {}, label="app")
+            for code in ("Versions/B/Autoupdate", "Versions/B/Updater.app", ""):
+                # Sparkle's own Autoupdate entitlement needs a provisioning profile; it is gone.
+                path = framework / code
+                macos_codesign.verify(path, macos_codesign.signing_identifier(path), {})
+            (frameworks / "Other.framework").mkdir()
+            with self.assertRaises(TaskError):
+                macos_codesign.sign_desktop(app, "-", entitlements)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "requires macOS Keychain and codesign")
@@ -67,114 +167,61 @@ class ReleaseSigningTests(unittest.TestCase):
 
     def test_invalid_credentials_fail_without_leaving_a_keychain(self):
         original = self.search_list()
-        for credentials, fingerprint in (
-            ({}, self.fingerprint),
-            ({**self.credentials, "MACOS_SIGNING_CERTIFICATE_P12": "not-base64"}, self.fingerprint),
-            (
-                {**self.credentials, "MACOS_SIGNING_CERTIFICATE_PASSWORD": "incorrect"},
-                self.fingerprint,
-            ),
-            (self.credentials, "0" * 40),
+        for credentials, identity in (
+            ({}, NAME),
+            ({**self.credentials, "MACOS_SIGNING_CERTIFICATE_P12": "not-base64"}, NAME),
+            ({**self.credentials, "MACOS_SIGNING_CERTIFICATE_PASSWORD": "incorrect"}, NAME),
+            (self.credentials, "Developer ID Application: Someone Else (ABCDE12345)"),
         ):
-            with self.subTest(fingerprint=fingerprint), self.assertRaises(TaskError):
-                with release_keychain(fingerprint, {**os.environ, **credentials}):
+            with self.subTest(identity=identity), self.assertRaises(TaskError):
+                with release_keychain(identity, {**os.environ, **credentials}):
                     self.fail("invalid signing inputs must not enter the packaging operation")
             self.assertEqual(self.search_list(), original)
-        fingerprint, credentials = certificate(self.root / "public-only", private=False)
+        _, credentials = certificate(self.root / "public-only", private=False)
         with self.assertRaises(TaskError):
-            with release_keychain(fingerprint, {**os.environ, **credentials}):
+            with release_keychain(NAME, {**os.environ, **credentials}):
                 self.fail("a certificate without its private key must be rejected")
         self.assertEqual(self.search_list(), original)
 
-    def test_signing_identity_survives_rebuilds_and_cleanup_runs_on_interruption(self):
+    def test_designated_requirement_survives_rebuilds_and_cleanup_runs_on_interruption(self):
         original = self.search_list()
         environment = {**os.environ, **self.credentials}
         clean = signing_environment(environment)
         self.assertNotIn("MACOS_SIGNING_CERTIFICATE_P12", clean)
         self.assertNotIn("MACOS_SIGNING_CERTIFICATE_PASSWORD", clean)
         identifier = "io.github.sadiksaifi.spaceterm.signing-test"
+        expected = macos_codesign.canonical_requirement(
+            macos_codesign.designated_requirement(identifier, TEAM)
+        )
+        entitlements = self.root / "Entitlements.plist"
+        entitlements.write_bytes(plistlib.dumps({}))
         requirements = []
         hashes = []
         with self.assertRaises(KeyboardInterrupt):
-            with release_keychain(self.fingerprint, environment):
+            with release_keychain(NAME, environment):
                 imported = self.search_list()
                 self.assertNotEqual(imported, original)
                 for version in (1, 2):
-                    app = self.root / f"build-{version}" / "Fixture.app"
-                    contents = app / "Contents"
-                    binaries = contents / "MacOS"
-                    binaries.mkdir(parents=True)
-                    (contents / "Info.plist").write_bytes(
-                        plistlib.dumps(
-                            {
-                                "CFBundleIdentifier": identifier,
-                                "CFBundleExecutable": "Fixture",
-                                "CFBundleVersion": str(version),
-                                "CFBundlePackageType": "APPL",
-                            }
-                        )
+                    app = fixture_app(self.root / f"build-{version}", identifier, version)
+                    macos_codesign.sign_desktop(
+                        app, NAME, entitlements, team=TEAM, environment=clean
                     )
-                    self.run_command(
-                        "xcrun",
-                        "clang",
-                        "-x",
-                        "c",
-                        "-",
-                        "-o",
-                        str(binaries / "Fixture"),
-                        input=f"int main(){{return {version};}}".encode(),
-                    )
-                    self.run_command(
-                        "codesign",
-                        "--force",
-                        "--sign",
-                        self.fingerprint,
-                        "--timestamp=none",
-                        str(app),
-                        env=clean,
-                    )
-                    verify_release_signature(app, self.fingerprint, identifier, "fixture")
                     requirements.append(
-                        self.run_command("codesign", "--display", "--requirements", "-", str(app))
+                        self.run_command(
+                            "codesign", "--display", "--requirements", "-", str(app), text=True
+                        ).strip()
                     )
-                    details = subprocess.run(
-                        ["codesign", "--display", "--verbose=4", str(app)],
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    ).stderr
+                    details = macos_codesign.details(app)
                     hashes.append(
                         next(line for line in details.splitlines() if line.startswith("CDHash="))
                     )
-                self.assertEqual(requirements[0], requirements[1])
+                # Keychain items, privacy grants and Login Items record this requirement, and
+                # every later build from the team satisfies it.
+                self.assertEqual(requirements, [expected, expected])
                 self.assertNotEqual(hashes[0], hashes[1])
-                # Even a valid root seal cannot admit an ad hoc nested executable.
-                helper = binaries / "Helper"
-                self.run_command(
-                    "xcrun",
-                    "clang",
-                    "-x",
-                    "c",
-                    "-",
-                    "-o",
-                    str(helper),
-                    input=b"int main(){return 0;}",
-                )
-                self.run_command("codesign", "--force", "--sign", "-", str(helper))
-                self.run_command(
-                    "codesign",
-                    "--force",
-                    "--sign",
-                    self.fingerprint,
-                    "--timestamp=none",
-                    str(app),
-                    env=clean,
-                )
+                # A self-signed certificate has no Team ID and no Apple chain.
                 with self.assertRaises(TaskError):
-                    verify_release_signature(app, self.fingerprint, identifier, "fixture")
-                self.run_command("codesign", "--force", "--sign", "-", str(app))
-                with self.assertRaises(TaskError):
-                    verify_release_signature(app, self.fingerprint, identifier, "fixture")
+                    macos_codesign.verify(app, identifier, {}, team=TEAM, identity=NAME)
                 raise KeyboardInterrupt()
         self.assertEqual(self.search_list(), original)
         for path in imported.decode().splitlines():

@@ -84,10 +84,9 @@ class PackagerConfigTests(unittest.TestCase):
                 self.assertEqual(
                     config["macos"]["minimum-system-version"], info["LSMinimumSystemVersion"]
                 )
-                self.assertEqual(
-                    config["macos"]["entitlements"],
-                    f"packaging/macos/{identity}/Entitlements.plist",
-                )
+                # SpaceTerm signs the app itself; cargo-packager must not sign it too.
+                self.assertNotIn("signing-identity", config["macos"])
+                self.assertNotIn("entitlements", config["macos"])
 
 
 if __name__ == "__main__":

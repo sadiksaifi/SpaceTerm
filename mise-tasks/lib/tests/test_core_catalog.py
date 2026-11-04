@@ -11,9 +11,9 @@ import threading
 import unittest
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, release, core_package
-from spaceterm_tasks.package_linux import write_archive
+from spaceterm_tasks import ROOT, TaskError, core_package, macos_codesign, release
 from spaceterm_tasks.core_catalog import stage_catalog, verify_catalog
+from spaceterm_tasks.package_linux import write_archive
 
 from tests.core_artifact_fixture import archive_tree, populate, seal_foreign
 
@@ -89,19 +89,10 @@ int main(int argc, char **argv) {{
             populate(ROOT, tree, laid_out)
             if sys.platform == "darwin":
                 identifier = core_package.core_identifier(info["identity"])
-                subprocess.run(
-                    [
-                        "codesign",
-                        "--force",
-                        "--sign",
-                        "-",
-                        "--identifier",
-                        identifier,
-                        "--timestamp=none",
-                        str(tree / core_package.signed_path(native_target, info["identity"])),
-                    ],
-                    check=True,
-                    capture_output=True,
+                macos_codesign.sign_core(
+                    tree / core_package.signed_path(native_target, info["identity"]),
+                    macos_codesign.ADHOC,
+                    identifier,
                 )
         else:
             executable.write_bytes(header)

@@ -1,6 +1,7 @@
 # cargo-packager configuration for the SpaceTerm identity.
 # Packaging adds the tag-derived version, the Info.plist with that version, and the build's
-# binaries directory.
+# binaries directory. SpaceTerm signs the app with Entitlements.plist beside this file,
+# so cargo-packager receives no signing identity.
 product-name = "SpaceTerm"
 identifier = "io.github.sadiksaifi.spaceterm"
 formats = ["app", "dmg"]
@@ -16,9 +17,6 @@ resources = [
 
 [macos]
 minimum-system-version = "26.0"
-# Pin the certificate, not its name: replacing it changes the System Permission identity.
-signing-identity = "9E07CD5C15C5C862A21B93EA55D4303BC19B7366"
-entitlements = "packaging/macos/spaceterm/Entitlements.plist"
 
 [dmg]
 window-size = { width = 600, height = 400 }

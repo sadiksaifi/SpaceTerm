@@ -199,6 +199,87 @@ fn real_shell_exit_command_emits_an_exited_event() {
     assert_eq!(exit_status, Some(TerminalSessionExit::Success));
 }
 
+/// A pane's shell reaches the local network with `ssh` and sends Apple Events with `osascript`,
+/// and neither ends in a crash or a sandbox denial. Under `cargo test` the test runner is the
+/// responsible process. The packaged SpaceTerm Core holds the hardened runtime entitlements for
+/// both, and the package tests sign and check that bundle.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_pane_runs_ssh_to_a_lan_host_and_osascript() {
+    let _isolation = crate::platform::unix_pty::lock_real_pty_test();
+    if crate::platform::unix_pty::isolate_real_pty_test(
+        "terminal::session::unix_adapter_tests::macos_pane_runs_ssh_to_a_lan_host_and_osascript",
+    ) {
+        return;
+    }
+    let startup = ShellStartupDirectory::new();
+    let (session, events, _accessibility) = TerminalRuntime::start(
+        native_pty_adapter_factory(),
+        test_launch_planner(startup.path()),
+        test_geometry(),
+        &std::env::current_dir().unwrap(),
+        Some("fixture.test"),
+        LocalFilesystemAuthority::testing(),
+        Arc::default(),
+    )
+    .unwrap();
+    let session = JoinedRealPtySession(session);
+    wait_for_shell_prompt(&session, &events);
+
+    // 10.255.255.1 is a private address no host answers. Without user configuration, ssh
+    // exits with 255 once the connection times out, is refused or is denied.
+    enter_command(
+        &session,
+        "ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=3 10.255.255.1 true; \
+         printf 'ssh-exit:%s\\n' $?; osascript -e 'return 1'; printf 'osascript-exit:%s\\n' $?",
+    );
+
+    // The echoed command shows each marker followed by "%s", and the output by a status.
+    let reported = |screen: &str, marker: &str| {
+        screen
+            .match_indices(marker)
+            .any(|(at, _)| screen[at + marker.len()..].starts_with(|v: char| v.is_ascii_digit()))
+    };
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+    let mut screen = String::new();
+    while Instant::now() < deadline && !reported(&screen, "osascript-exit:") {
+        match events.try_recv() {
+            Ok(TerminalSessionEvent::Screen(snapshot)) => {
+                screen = super::tests::screen_text(&snapshot);
+            }
+            Ok(TerminalSessionEvent::Failed(failure)) => {
+                panic!("terminal session failed: {failure}")
+            }
+            Ok(TerminalSessionEvent::Exited(status)) => panic!("shell exited early: {status}"),
+            Ok(_) => {}
+            Err(async_channel::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+            Err(async_channel::TryRecvError::Closed) => break,
+        }
+    }
+
+    let screen = screen.trim_end();
+    assert!(
+        screen.contains("ssh-exit:255"),
+        "ssh did not fail cleanly: {screen:?}"
+    );
+    assert!(
+        screen.contains("osascript-exit:0"),
+        "osascript failed: {screen:?}"
+    );
+    for denial in [
+        "Sandbox",
+        "deny(",
+        "Killed",
+        "Abort trap",
+        "Segmentation fault",
+    ] {
+        assert!(
+            !screen.contains(denial),
+            "the pane reported {denial:?}: {screen:?}"
+        );
+    }
+}
+
 struct JoinedRealPtySession(TerminalRuntime);
 
 impl std::ops::Deref for JoinedRealPtySession {

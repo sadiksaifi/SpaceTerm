@@ -9,7 +9,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, release, core_package
+from spaceterm_tasks import ROOT, TaskError, core_package, release
 from spaceterm_tasks.core_builds import _source
 
 

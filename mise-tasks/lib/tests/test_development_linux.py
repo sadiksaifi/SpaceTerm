@@ -14,8 +14,8 @@ import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, core_package
-from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
 from spaceterm_tasks.core_builds import _source
+from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
 
 from tests.core_artifact_fixture import archive_tree, populate, seal_foreign
 

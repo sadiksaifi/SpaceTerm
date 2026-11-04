@@ -568,13 +568,8 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
         let layout = Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
         let mut requirement = format!("identifier \"{}\"", bundle_identifier(identity));
         if identity == "spaceterm" {
-            let template = include_str!("../../../../packaging/macos/spaceterm/Packager.toml");
-            let signer = template
-                .lines()
-                .find_map(|line| line.strip_prefix("signing-identity = \""))
-                .and_then(|v| v.strip_suffix('"'))
-                .ok_or(CoreError::RuntimeUnavailable)?;
-            requirement.push_str(&format!(" and certificate leaf = H\"{signer}\""));
+            requirement.push_str(" and ");
+            requirement.push_str(&team_requirement().ok_or(CoreError::RuntimeUnavailable)?);
         }
         command(
             "/usr/bin/codesign",
@@ -591,6 +586,23 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
     #[cfg(not(target_os = "macos"))]
     let _ = (path, identity);
     Ok(())
+}
+/// Apple's Developer ID requirement for the release Team ID, which release packaging supplies as
+/// `SPACETERM_APPLE_TEAM_ID`. Every Release version from that team satisfies it.
+#[cfg(target_os = "macos")]
+fn team_requirement() -> Option<String> {
+    let team = option_env!("SPACETERM_APPLE_TEAM_ID")?;
+    (team.len() == 10
+        && team
+            .bytes()
+            .all(|v| v.is_ascii_digit() || v.is_ascii_uppercase()))
+    .then(|| {
+        format!(
+            "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and \
+             certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate \
+             leaf[subject.OU] = \"{team}\""
+        )
+    })
 }
 fn verify_executable(path: &Path, expected: &Build) -> Result<(), CoreError> {
     #[cfg(test)]

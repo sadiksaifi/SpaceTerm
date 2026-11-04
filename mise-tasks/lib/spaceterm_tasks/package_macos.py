@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,7 @@ import tomllib
 from contextlib import nullcontext
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, macos_signing, sparkle
+from spaceterm_tasks import ROOT, TaskError, macos_codesign, macos_signing, sparkle
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
@@ -47,11 +48,16 @@ def package(release_tag=None):
     require_apple_silicon()
     if release_tag:
         require_clean_checkout()
-        fingerprint = tomllib.loads(
-            (identity_directory("spaceterm") / "Packager.toml").read_text()
-        )["macos"]["signing-identity"]
-        macos_signing.signing_credentials(fingerprint, os.environ)
+        if macos_codesign.signing_identity(os.environ) != macos_codesign.ADHOC:
+            macos_signing.signing_credentials(os.environ)
     package_bundle(release_tag)
+
+
+def signer(release_tag):
+    """The codesign identity and Team ID: ad hoc and none outside a release."""
+    if not release_tag:
+        return macos_codesign.ADHOC, None
+    return macos_codesign.signing_identity(os.environ), macos_codesign.team_id(os.environ)
 
 
 def package_bundle(release_tag=None):
@@ -71,6 +77,7 @@ def package_bundle(release_tag=None):
     )
     environment["MACOSX_DEPLOYMENT_TARGET"] = MINIMUM_MACOS
     config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
+    identity_name, team = signer(release_tag)
     if release_tag:
         updater = sparkle.directory()
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
@@ -107,22 +114,36 @@ def package_bundle(release_tag=None):
     app_name = template["CFBundleName"]
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
         output = Path(temporary) / "output"
+        app = output / f"{app_name}.app"
+        dmg = output / f"{app_name}_{version}_aarch64.dmg"
+        # cargo-packager signs every native file with the app's entitlements and never
+        # reseals nested bundles. SpaceTerm signs instead, after the app and before the image.
+        config["before-each-package-command"] = (
+            f"{shlex.quote(sys.executable)} -m spaceterm_tasks.package_macos sign-app"
+        )
+        hook = {
+            "SPACETERM_PACKAGER_APP": str(app),
+            "SPACETERM_PACKAGER_IDENTITY": identity_name,
+            "SPACETERM_PACKAGER_ENTITLEMENTS": str(identity_directory(name) / "Entitlements.plist"),
+            **({"SPACETERM_PACKAGER_TEAM": team} if team else {}),
+        }
         print(f"Packaging {app_name}.app and {app_name}.dmg with cargo-packager")
         signing = (
-            macos_signing.release_keychain(config["macos"]["signing-identity"], os.environ)
-            if release_tag
+            macos_signing.release_keychain(identity_name, os.environ)
+            if identity_name != macos_codesign.ADHOC
             else nullcontext()
         )
         with signing:
             packaged = subprocess.run(
                 ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
                 cwd=ROOT,
-                env={"CI": "true", **environment},
+                env={"CI": "true", **environment, **hook},
             )
-        app = output / f"{app_name}.app"
-        dmg = output / f"{app_name}_{version}_aarch64.dmg"
-        if packaged.returncode or not app.is_dir() or not dmg.is_file():
-            raise TaskError("cargo-packager did not produce the application and disk image")
+            if packaged.returncode or not app.is_dir() or not dmg.is_file():
+                raise TaskError("cargo-packager did not produce the application and disk image")
+            macos_codesign.sign_disk_image(
+                dmg, identity_name, template["CFBundleIdentifier"], environment=environment
+            )
         staged_dmg = Path(temporary) / f"{app_name}.dmg"
         dmg.rename(staged_dmg)
         verify(app, staged_dmg, release_tag)
@@ -142,6 +163,9 @@ def verify(app=None, dmg=None, release_tag=None):
     dmg = Path(dmg) if dmg else DIST / f"{app_name}.dmg"
     verify_bundle(app, name, release_tag, "dist")
     checked(["hdiutil", "verify", str(dmg)], "disk image checksum verification failed")
+    identity_name, team = signer(release_tag)
+    if identity_name != macos_codesign.ADHOC:
+        macos_codesign.verify_disk_image(dmg, identity(name)["CFBundleIdentifier"], team)
     with tempfile.TemporaryDirectory(prefix="spaceterm-verify-") as temporary:
         mount = Path(temporary) / "mount"
         mount.mkdir()
@@ -232,24 +256,49 @@ def verify_bundle(app, name, release_tag, label):
         require_all=bool(release_tag),
     )
 
-    signature = ["codesign", "--verify", "--strict", *(["--deep"] if release_tag else []), str(app)]
-    checked(signature, f"{label} app signature verification failed")
-    details = subprocess.run(
-        ["codesign", "--display", "--verbose=4", str(app)], capture_output=True, text=True
-    ).stderr
-    if release_tag:
-        config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
-        macos_signing.verify_release_signature(
-            app, config["macos"]["signing-identity"], template["CFBundleIdentifier"], label
-        )
-    elif "Signature=adhoc" not in details:
-        raise TaskError(f"{label} app is not ad hoc signed")
-    entitlements = checked(
-        ["codesign", "--display", "--entitlements", ":-", str(app)],
-        f"{label} app entitlements could not be read",
+    identity_name, team = signer(release_tag)
+    macos_codesign.verify(
+        app,
+        template["CFBundleIdentifier"],
+        plistlib.loads((identity_directory(name) / "Entitlements.plist").read_bytes()),
+        team=team,
+        identity=identity_name,
+        label=f"{label} app",
     )
-    expected = plistlib.loads((identity_directory(name) / "Entitlements.plist").read_bytes())
-    if plistlib.loads(entitlements) != expected:
-        raise TaskError(f"{label} app entitlements differ from the {name} identity")
-    if release_tag and not (contents / "Frameworks" / "Sparkle.framework").is_dir():
-        raise TaskError(f"{label} updater framework is missing")
+    framework = contents / "Frameworks" / "Sparkle.framework"
+    if framework.exists() != bool(release_tag):
+        raise TaskError(f"{label} updater framework must ship with releases only")
+    if release_tag:
+        if (framework / "Versions/B/XPCServices").exists():
+            raise TaskError(f"{label} updater framework still holds its XPC Services")
+        for code in (framework / "Versions/B/Autoupdate", framework / "Versions/B/Updater.app"):
+            macos_codesign.verify(
+                code,
+                macos_codesign.signing_identifier(code),
+                {},
+                team=team,
+                identity=identity_name,
+                label=f"{label} updater {code.name}",
+            )
+
+
+def sign_app(environment):
+    """cargo-packager runs this before each format; sign the finished app before its image."""
+    if environment.get("CARGO_PACKAGER_FORMAT") != "dmg":
+        return
+    app = Path(environment["SPACETERM_PACKAGER_APP"])
+    # Extended attributes such as Finder information make codesign refuse a bundle.
+    checked(["xattr", "-cr", str(app)], "the app's extended attributes could not be cleared")
+    macos_codesign.sign_desktop(
+        app,
+        environment["SPACETERM_PACKAGER_IDENTITY"],
+        environment["SPACETERM_PACKAGER_ENTITLEMENTS"],
+        team=environment.get("SPACETERM_PACKAGER_TEAM"),
+        environment=macos_signing.signing_environment(environment),
+    )
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["sign-app"]:
+    from spaceterm_tasks import main
+
+    main(lambda: sign_app(os.environ))

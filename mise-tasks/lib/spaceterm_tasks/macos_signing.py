@@ -1,4 +1,4 @@
-"""Import release credentials into an isolated Keychain and verify stable code identity."""
+"""Import release credentials into an isolated Keychain for the duration of signing."""
 
 import base64
 import binascii
@@ -11,7 +11,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from spaceterm_tasks import TaskError
-from spaceterm_tasks.packaging import checked
 
 SIGNING_INPUTS = (
     "MACOS_SIGNING_CERTIFICATE_P12",
@@ -20,25 +19,6 @@ SIGNING_INPUTS = (
     "APPLE_CERTIFICATE_PASSWORD",
     "UPDATE_SIGNING_KEY",
 )
-MACH_O_MAGIC = {
-    bytes.fromhex(magic)
-    for magic in (
-        "feedface",
-        "cefaedfe",
-        "feedfacf",
-        "cffaedfe",
-        "cafebabe",
-        "bebafeca",
-        "cafebabf",
-        "bfbafeca",
-    )
-}
-
-
-def certificate_requirement(fingerprint):
-    if not re.fullmatch(r"[0-9A-Fa-f]{40}", fingerprint):
-        raise TaskError("release signing requires a pinned certificate fingerprint")
-    return f'certificate leaf = H"{fingerprint.lower()}"'
 
 
 def signing_environment(environment):
@@ -58,9 +38,8 @@ def security(arguments, environment):
     return result.stdout
 
 
-def signing_credentials(fingerprint, environment):
+def signing_credentials(environment):
     """Reject missing or malformed inputs without making a signing key available."""
-    certificate_requirement(fingerprint)
     encoded = environment.get("MACOS_SIGNING_CERTIFICATE_P12", "")
     password = environment.get("MACOS_SIGNING_CERTIFICATE_PASSWORD", "")
     if not encoded or not password:
@@ -75,9 +54,9 @@ def signing_credentials(fingerprint, environment):
 
 
 @contextmanager
-def release_keychain(fingerprint, environment):
-    """Require the pinned private identity; restore the search list and delete all imports."""
-    certificate, password = signing_credentials(fingerprint, environment)
+def release_keychain(identity, environment):
+    """Require exactly the named private identity; restore the search list and delete imports."""
+    certificate, password = signing_credentials(environment)
     clean = signing_environment(environment)
     original = shlex.split(security(["list-keychains", "-d", "user"], clean).decode())
     with tempfile.TemporaryDirectory(prefix="spaceterm-release-signing-") as temporary:
@@ -110,12 +89,10 @@ def release_keychain(fingerprint, environment):
             # Untrusted self-signed certificates are usable by codesign. Do not filter
             # with -v, which would exclude them. A certificate without its private key
             # does not appear in this list.
-            imported = {
-                value.upper() for value in re.findall(rb"\d+\) ([0-9A-Fa-f]{40}) ", identities)
-            }
-            if imported != {fingerprint.upper().encode()}:
+            imported = set(re.findall(rb'\d+\) [0-9A-Fa-f]{40} "([^"]*)"', identities))
+            if imported != {identity.encode()}:
                 raise TaskError(
-                    "release signing Keychain does not contain the pinned private identity"
+                    "release signing Keychain does not contain the named private identity"
                 )
             if any(
                 error != b"CSSMERR_TP_NOT_TRUSTED"
@@ -142,41 +119,3 @@ def release_keychain(fingerprint, environment):
             finally:
                 if keychain.exists():
                     security(["delete-keychain", str(keychain)], clean)
-
-
-def verify_release_signature(app, fingerprint, identifier, label):
-    """Require the pinned signer throughout the bundle and an invariant app requirement."""
-    requirement = certificate_requirement(fingerprint)
-    checked(
-        ["codesign", "--verify", "--strict", "--deep", "-R", f"={requirement}", str(app)],
-        f"{label} release signature does not match the pinned certificate",
-    )
-    designated = checked(
-        ["codesign", "--display", "--requirements", "-", str(app)],
-        f"{label} release designated requirement could not be read",
-        text=True,
-    ).strip()
-    if designated != f'designated => identifier "{identifier}" and {requirement}':
-        raise TaskError(f"{label} release designated requirement is not stable")
-    for path in app.rglob("*"):
-        if path.is_symlink() or not path.is_file():
-            continue
-        with path.open("rb") as binary:
-            native = binary.read(4) in MACH_O_MAGIC
-        if native:
-            checked(
-                ["codesign", "--verify", "--strict", "-R", f"={requirement}", str(path)],
-                f"{label} bundled executable does not match the pinned certificate",
-            )
-
-
-def verify_adhoc_signature(path, identifier, label):
-    checked(
-        ["codesign", "--verify", "--strict", "-R", f'=identifier "{identifier}"', str(path)],
-        f"{label} ad hoc signature or identifier is invalid",
-    )
-    result = subprocess.run(
-        ["codesign", "--display", "--verbose=4", str(path)], capture_output=True, text=True
-    )
-    if result.returncode or "Signature=adhoc" not in result.stderr.splitlines():
-        raise TaskError(f"{label} is not ad hoc signed")
