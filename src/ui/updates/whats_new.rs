@@ -61,14 +61,20 @@ pub(crate) fn open_whats_new(cx: &mut App) {
     if cx.has_global::<OpenSheet>() {
         return;
     }
-    let Some(handle) = front_workspace_window(cx) else {
-        return;
-    };
-    let this_year = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-    let this_year = release_notes::year_at(this_year);
-    let _ = handle.update(cx, |_, window, cx| present(notes, this_year, window, cx));
+    // Menu actions bubble while their window is borrowed. Open after dispatch releases it.
+    cx.defer(move |cx| {
+        if cx.has_global::<OpenSheet>() {
+            return;
+        }
+        let Some(handle) = front_workspace_window(cx) else {
+            return;
+        };
+        let this_year = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let this_year = release_notes::year_at(this_year);
+        let _ = handle.update(cx, |_, window, cx| present(notes, this_year, window, cx));
+    });
 }
 
 fn sheet(
@@ -224,6 +230,46 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             spaceterm_ui::ModalLayer::new(div().size_full())
         }
+    }
+
+    #[cfg(spaceterm_release_notes)]
+    #[gpui::test]
+    fn the_help_menu_action_opens_the_embedded_notes_in_the_workspace(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::ui::init).unwrap();
+        cx.update(super::init);
+        let (workspace, visual) = cx.add_window_view(|window, cx| {
+            crate::ui::WorkspaceManager::new_with_adapters(
+                std::env::temp_dir(),
+                crate::ui::workspace_manager::tests::workspace_adapters(),
+                crate::settings::sidebar::SidebarState::Expanded,
+                window,
+                cx,
+            )
+        });
+        visual.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.focus(window, cx));
+        });
+        visual.run_until_parked();
+
+        let action = crate::platform::application_menu_model::help_menu()
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                gpui::MenuItem::Action { name, action, .. } if name == WHATS_NEW_TITLE => {
+                    Some(action)
+                }
+                _ => None,
+            })
+            .expect("a build with notes offers them in Help");
+        visual.update(|window, cx| window.dispatch_action(action, cx));
+        visual.run_until_parked();
+
+        let tree = A11yTree::read(visual);
+        tree.node(&release_notes::embedded().unwrap().title());
+        tree.node("View on GitHub");
+        tree.node("Done");
     }
 
     #[gpui::test]
