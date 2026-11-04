@@ -555,6 +555,34 @@ mod tests {
         }
     }
 
+    struct OffInLoginItems;
+
+    impl LocalService for OffInLoginItems {
+        fn status(&self) -> Result<ServiceStatus, CoreError> {
+            Ok(ServiceStatus {
+                installed: true,
+                enabled: true,
+                running: false,
+                stopped: true,
+            })
+        }
+
+        fn start(&self) -> Result<(), CoreError> {
+            Err(CoreError::LoginItemOff)
+        }
+    }
+
+    /// The menu bar's Start reaches the service, which refuses a Core off in Login Items. The
+    /// refusal stays typed, so the menu can open Login Items instead of reporting a failure.
+    #[test]
+    fn a_start_refused_by_login_items_stays_that_failure() {
+        let machine = LocalMachine {
+            service: Arc::new(OffInLoginItems),
+            connect: Arc::new(|| Err(ActionFailure::Unreachable)),
+        };
+        assert_eq!(machine.start(), Err(ActionFailure::LoginItemOff));
+    }
+
     /// A deliberately stopped local Core reads Stopped from the service manager and is never
     /// dialed; a running one is.
     #[test]

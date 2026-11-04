@@ -16,6 +16,7 @@ pub fn code(error: &CoreError) -> &'static str {
         CoreError::ServiceBusy => "service_busy",
         CoreError::NotInstalled => "not_installed",
         CoreError::Stopped => "stopped",
+        CoreError::LoginItemOff => "login_item_off",
         CoreError::Changed => "changed",
         CoreError::ActivationUnresolved => "activation_unresolved",
         CoreError::RuntimeUnavailable => "candidate_unverified",

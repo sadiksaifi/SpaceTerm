@@ -57,6 +57,13 @@ pub enum CoreError {
     NotInstalled,
     #[error("The local SpaceTerm Core was stopped. Use Start SpaceTerm Core to start it again.")]
     Stopped,
+    /// The service's background item is off in Login Items & Extensions, because the person
+    /// turned it off or has not approved it yet. The service manager won't run it, and only the
+    /// person turns it on there.
+    #[error(
+        "SpaceTerm Core is off in Login Items. Turn it on in System Settings > General > Login Items & Extensions."
+    )]
+    LoginItemOff,
     #[error("SpaceTerm Core changed. Review and confirm again.")]
     Changed,
     #[error(

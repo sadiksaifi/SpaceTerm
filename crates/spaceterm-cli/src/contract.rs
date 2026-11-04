@@ -838,6 +838,7 @@ codes! {
     ServiceBusy = "service_busy", Unavailable, true, "Another SpaceTerm Core operation is running.";
     NotInstalled = "not_installed", Unavailable, false, "The SpaceTerm Core service is not installed.";
     Stopped = "stopped", Unavailable, false, "SpaceTerm Core was stopped. Start it with: spaceterm start.";
+    LoginItemOff = "login_item_off", ActionRequired, false, "SpaceTerm Core is off in Login Items. Turn it on in System Settings > General > Login Items & Extensions.";
     Changed = "changed", Target, true, "The target changed. Review it and try again.";
     ActivationUnresolved = "activation_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm whether SpaceTerm Core restarted on the new version.";
     CandidateUnverified = "candidate_unverified", Failed, false, "SpaceTerm couldn\u{2019}t verify the SpaceTerm Core package.";
@@ -930,6 +931,7 @@ pub fn from_core_error(error: CoreError) -> Failure {
         CoreError::ServiceBusy => Code::ServiceBusy,
         CoreError::NotInstalled => Code::NotInstalled,
         CoreError::Stopped => Code::Stopped,
+        CoreError::LoginItemOff => Code::LoginItemOff,
         CoreError::Changed => Code::Changed,
         CoreError::ActivationUnresolved => Code::ActivationUnresolved,
         CoreError::RuntimeUnavailable => Code::CandidateUnverified,

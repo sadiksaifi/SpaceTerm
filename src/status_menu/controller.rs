@@ -29,6 +29,11 @@ pub(crate) trait StatusHost {
     fn render(&self, menu: &Menu);
     /// Shows `alert` and passes `answered` whether the person chose its destructive button.
     fn alert(&self, alert: Alert, answered: Box<dyn FnOnce(bool) + Send>, cx: &mut App);
+    /// Opens System Settings at Login Items & Extensions, where the person turns SpaceTerm Core
+    /// on. It runs on the event thread.
+    fn open_login_items(&self) {
+        crate::local_startup::open_login_items();
+    }
 }
 
 enum Message {
@@ -164,6 +169,9 @@ impl StatusMenu {
                     self.request(vec![(notice.machine, notice.action.clone())], true, cx);
                 }
             }
+            // The Core starts nothing that is off in Login Items, so Start opens that list,
+            // where the person turns it on. Turning it on there starts it.
+            Err(ActionFailure::LoginItemOff) => self.host.open_login_items(),
             Err(failure) => {
                 if let Some((title, message)) = presentation::action_failure(
                     &notice.name,

@@ -166,6 +166,9 @@ impl Supervisor for LaunchAgent {
     fn startup(&self) -> ServiceStartup {
         ServiceStartup::AtLogin
     }
+    fn login_item_off(&self) -> bool {
+        login_items::requires_approval(&self.registration().path())
+    }
     fn install(&self, runtime: &Path) -> Result<(), CoreError> {
         self.registration().install(&self.contents(runtime)?)
     }
@@ -299,6 +302,35 @@ fn process(bytes: &[u8]) -> Result<Option<u32>, CoreError> {
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|pid| *pid > 0)
     }))
+}
+
+/// Login Items & Extensions, where macOS lists the agent as a background item the person turns
+/// on or off.
+mod login_items {
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
+    use objc2_foundation::{NSString, NSURL};
+    use std::path::Path;
+
+    #[link(name = "ServiceManagement", kind = "framework")]
+    unsafe extern "C" {}
+
+    /// `SMAppServiceStatusRequiresApproval`: the item is registered and off in Login Items,
+    /// because the person turned it off or has not approved it yet. System Settings shows both
+    /// the same way.
+    const REQUIRES_APPROVAL: isize = 2;
+
+    /// Whether launchd won't run the agent at `plist` until the person turns it on.
+    pub(super) fn requires_approval(plist: &Path) -> bool {
+        let (Some(class), Some(path)) = (AnyClass::get(c"SMAppService"), plist.to_str()) else {
+            return false;
+        };
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        // SAFETY: `+[SMAppService statusForLegacyURL:]` takes a file URL and returns an
+        // NSInteger status. It reads Background Task Management's record and changes nothing.
+        let status: isize = unsafe { msg_send![class, statusForLegacyURL: &*url] };
+        status == REQUIRES_APPROVAL
+    }
 }
 
 #[cfg(test)]

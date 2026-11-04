@@ -76,6 +76,9 @@ pub(crate) enum ActionFailure {
     /// The sessions or the Pending Version changed since the confirmation. Ask again.
     Changed,
     Unreachable,
+    /// This Mac's Core is off in Login Items, so it refused to start. Only the person turns it on,
+    /// there, and the surface opens that list instead of explaining a failure.
+    LoginItemOff,
     Failed,
 }
 

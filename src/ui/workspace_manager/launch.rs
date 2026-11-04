@@ -29,6 +29,11 @@ pub(super) const LAUNCH_SETTINGS_SELECTOR: &str = "server-launch-settings";
 pub(super) const LAUNCH_UPDATE_SELECTOR: &str = "server-launch-update";
 pub(super) const LAUNCH_LOGIN_ITEMS_SELECTOR: &str = "server-launch-login-items";
 const LAUNCH_QUIET_SELECTOR: &str = "server-launch-quiet";
+/// The launch alert's first action, the launch screen's default one.
+pub(super) const LAUNCH_ALERT_ACTION_SELECTOR: &str = "server-launch-alert-action";
+const LAUNCH_ALERT_SECOND_ACTION_SELECTOR: &str = "server-launch-alert-second-action";
+/// The launch alert's OK, or its Cancel beside an action.
+const LAUNCH_ALERT_CANCEL_SELECTOR: &str = "server-launch-alert-ok";
 
 /// How long a window's first launch may wait for the server before it says so. Opening an
 /// already running server finishes well inside this, so a person sees the window and then their
@@ -53,16 +58,18 @@ pub(crate) enum LaunchOutcome {
 /// The blocking steps of local launch. Each runs on a background thread.
 pub(crate) trait LocalLaunch: Send + Sync {
     /// Prepares or reuses the account's service and connects. Never reverses Stop and never asks
-    /// for authorization. It may install, enable and start the service, so launch runs it, and
-    /// [`Self::start`], only while [`Self::background_item_off`] is false.
+    /// for authorization. It may install, enable and start the service, except one off in Login
+    /// Items, which it refuses with [`CoreError::LoginItemOff`].
     fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError>;
     /// Whether macOS keeps SpaceTerm Core's background item off, because the person turned it
-    /// off in Login Items or has not approved it yet. Reads only: it changes nothing.
+    /// off in Login Items or has not approved it yet. Reads only: it changes nothing. Launch reads
+    /// it when an open connection fails, since only [`Self::run`] and [`Self::start`] refuse.
     fn background_item_off(&self) -> bool;
     /// Opens System Settings at Login Items, where the person turns SpaceTerm Core on. It must
     /// run on the event thread, so macOS brings System Settings forward.
     fn open_login_items(&self);
-    /// The person's explicit Start Server, which reverses their Stop.
+    /// The person's explicit Start Server, which reverses their Stop. It refuses with
+    /// [`CoreError::LoginItemOff`] and changes nothing while the item is off in Login Items.
     fn start(&self) -> Result<(), CoreError>;
     /// The person's explicit startup authorization. Cancelling the system prompt changes nothing.
     fn authorize(&self) -> Result<(), CoreError>;
@@ -219,10 +226,10 @@ pub(super) enum LaunchState {
         declined: bool,
     },
     Failed(CoreError),
-    /// The person turned SpaceTerm Core off in Login Items.
+    /// SpaceTerm Core's background item is off in Login Items: the person turned it off, or
+    /// macOS waits for them to approve it. System Settings shows both the same way, and the
+    /// person turns it on there in both.
     LoginItemOff,
-    /// macOS blocked SpaceTerm Core's background item until the person approves it.
-    BackgroundItemBlocked,
     /// This client refused the server, which keeps running with its Terminal Sessions.
     /// `update` is whether this SpaceTerm includes a verified server build to update it to.
     Incompatible {
@@ -276,8 +283,6 @@ pub(super) enum LaunchIcon {
     Stopped,
     /// Launch waits for the person's authorization.
     Authorization,
-    /// Launch waits for the person to approve SpaceTerm Core in Login Items.
-    Approval,
     /// Launch could not finish.
     Failure,
 }
@@ -288,7 +293,6 @@ impl LaunchIcon {
         match self {
             Self::Stopped => (IconName::Pause, EmptyStateTone::Quiet),
             Self::Authorization => (IconName::Lock, EmptyStateTone::Warning),
-            Self::Approval => (IconName::Shield, EmptyStateTone::Warning),
             Self::Failure => (IconName::CircleAlert, EmptyStateTone::Error),
         }
     }
@@ -328,6 +332,9 @@ const AUTHORIZING_DETAIL: &str =
 pub(super) const BUSY_TITLE: &str = "Waiting for SpaceTerm Core";
 const BUSY_DETAIL: &str =
     "Another SpaceTerm Core operation is running. Your Workspaces open when it finishes.";
+
+/// The title while SpaceTerm Core's background item is off in Login Items.
+pub(super) const LOGIN_ITEM_OFF_TITLE: &str = "SpaceTerm Core is off in Login Items";
 
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: CoreError) -> &'static str {
@@ -441,23 +448,14 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             icon: Some(LaunchIcon::Stopped),
             waiting: false,
         },
-        // Turning SpaceTerm Core off was the person's choice, so nothing warns.
+        // The wording claims no one's choice: the person may have turned it off, or never
+        // approved it. Either way it is a state to change, not a fault, so nothing warns.
         LaunchState::LoginItemOff => LaunchPresentation {
-            title: "SpaceTerm Core is turned off in Login Items",
+            title: LOGIN_ITEM_OFF_TITLE,
             detail: format!("Workspaces on {place} open when you turn it on.").into(),
             progress: None,
             actions: &[OpenLoginItems],
             icon: Some(LaunchIcon::Stopped),
-            waiting: false,
-        },
-        LaunchState::BackgroundItemBlocked => LaunchPresentation {
-            title: "SpaceTerm Core needs your approval",
-            detail: fixed(
-                "Turn on SpaceTerm Core in System Settings > General > Login Items & Extensions.",
-            ),
-            progress: None,
-            actions: &[OpenLoginItems],
-            icon: Some(LaunchIcon::Approval),
             waiting: false,
         },
         LaunchState::AuthorizationRequired { declined } => LaunchPresentation {
@@ -616,12 +614,6 @@ impl Drop for LocalLaunchState {
 /// What one background run reports back to the window.
 enum StepResult {
     Outcome(LaunchOutcome),
-    /// The person turned SpaceTerm Core off in Login Items, so macOS doesn't let it run. Launch
-    /// never turns it back on.
-    LoginItemOff,
-    /// macOS blocked the background item SpaceTerm Core installed, and waits for the person to
-    /// approve it in Login Items.
-    BackgroundItemBlocked,
     Failed(CoreError),
     /// The client refused the server. `update` is whether a verified build can update it.
     Incompatible(CoreError, bool),
@@ -657,7 +649,6 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
                     | LaunchState::AuthorizationRequired { .. }
                     | LaunchState::Failed(_)
                     | LaunchState::LoginItemOff
-                    | LaunchState::BackgroundItemBlocked
                     | LaunchState::Incompatible { .. }
             ) && manager.launch._task.is_none()
             {
@@ -727,11 +718,8 @@ impl WorkspaceManager {
         let adapter = Arc::clone(&launch.adapters.launch);
         let cancelled = Arc::clone(&launch.cancelled);
         let work = cx.background_spawn(async move {
-            // What the person turned off in Login Items stays off: neither their Start nor
-            // launch reaches a service macOS keeps off.
-            if adapter.background_item_off() {
-                return StepResult::LoginItemOff;
-            }
+            // The service refuses to start what is off in Login Items, so neither the person's
+            // Start nor launch turns it back on.
             let refused = match step {
                 Some(LaunchStep::Start) => adapter.start().err().map(StepResult::Failed),
                 // Only a cancelled or refused prompt leaves startup unchanged. Any other failure
@@ -752,8 +740,6 @@ impl WorkspaceManager {
             let observed = move || cancelled.load(Ordering::Acquire);
             match adapter.run(&observed) {
                 Ok(outcome) => StepResult::Outcome(outcome),
-                // macOS blocked the background item this launch installed, so it could not start.
-                Err(_) if adapter.background_item_off() => StepResult::BackgroundItemBlocked,
                 Err(error) if incompatible(error) => {
                     StepResult::Incompatible(error, adapter.update_offered())
                 }
@@ -778,8 +764,7 @@ impl WorkspaceManager {
         let state = match result {
             StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_core(window, cx),
             StepResult::Outcome(LaunchOutcome::Stopped) => LaunchState::Stopped,
-            StepResult::LoginItemOff => LaunchState::LoginItemOff,
-            StepResult::BackgroundItemBlocked => LaunchState::BackgroundItemBlocked,
+            StepResult::Failed(CoreError::LoginItemOff) => LaunchState::LoginItemOff,
             // The operation decides what launch finds next, so launch runs again once it ends.
             StepResult::Outcome(LaunchOutcome::ServiceBusy) => {
                 self.run_local_launch(Some(LaunchStep::WaitForService), window, cx);
@@ -809,7 +794,6 @@ impl WorkspaceManager {
                     | LaunchState::AuthorizationRequired { .. }
                     | LaunchState::Failed(_)
                     | LaunchState::LoginItemOff
-                    | LaunchState::BackgroundItemBlocked
                     | LaunchState::Incompatible { .. }
             )
         {
@@ -899,26 +883,71 @@ impl WorkspaceManager {
         LaunchState::Ready
     }
 
+    /// Explains a step that could not finish while the launch screen is hidden. The alert offers
+    /// the launch screen's own actions, such as Open Login Items, so nothing is left only to OK.
     fn present_launch_alert(
         presentation: LaunchPresentation,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use spaceterm_ui::{Alert, AlertIntent, ModalAction, ModalActionRole, ModalId};
+        use spaceterm_ui::{
+            Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionRole,
+            ModalId,
+        };
+        let mut buttons: Vec<ModalAction<Option<LaunchAction>>> = presentation
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(index, &action)| {
+                if index == 0 {
+                    ModalAction::new(
+                        Some(action),
+                        action.label(),
+                        ModalActionRole::Affirmative,
+                        LAUNCH_ALERT_ACTION_SELECTOR,
+                    )
+                    .with_emphasis(ModalActionEmphasis::Prominent)
+                    .default_action(true)
+                } else {
+                    ModalAction::new(
+                        Some(action),
+                        action.label(),
+                        ModalActionRole::Auxiliary,
+                        LAUNCH_ALERT_SECOND_ACTION_SELECTOR,
+                    )
+                }
+            })
+            .collect();
+        buttons.push(ModalAction::new(
+            None,
+            if buttons.is_empty() { "OK" } else { "Cancel" },
+            ModalActionRole::Cancel,
+            LAUNCH_ALERT_CANCEL_SELECTOR,
+        ));
+        let window_handle = window.window_handle();
+        let manager = cx.entity().downgrade();
         let _ = Alert::new(
             ModalId::new("server-launch-alert"),
             presentation.title,
             presentation.title,
             presentation.detail.to_string(),
-            vec![ModalAction::new(
-                (),
-                "OK",
-                ModalActionRole::Cancel,
-                "server-launch-alert-ok",
-            )],
+            buttons,
         )
         .intent(AlertIntent::Warning)
-        .present(window, cx, |_, _| {});
+        .present(window, cx, move |outcome, cx| {
+            let AlertOutcome::Activated {
+                action_id: Some(action),
+                ..
+            } = outcome
+            else {
+                return;
+            };
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = manager.update(cx, |manager, cx| {
+                    manager.run_launch_action(action, window, cx);
+                });
+            });
+        });
     }
 
     /// The launch screen this window presents in place of the empty view, if any.
@@ -1152,11 +1181,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let waiting = self.launch.turned_off
-            || matches!(
-                self.launch.state,
-                LaunchState::LoginItemOff | LaunchState::BackgroundItemBlocked
-            );
+        let waiting =
+            self.launch.turned_off || matches!(self.launch.state, LaunchState::LoginItemOff);
         if !active {
             self.launch.away = waiting;
         } else if std::mem::take(&mut self.launch.away) && waiting {
