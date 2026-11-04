@@ -276,7 +276,6 @@ fn restart_effects(to_major: u16) -> LaneEffects {
         start_requires_machine: false,
         from: Some(lane_version("0.7.0", 'a')),
         to: Some(lane_version("0.8.0", 'b')),
-        kind: None,
         to_major: Some(to_major),
     }
 }

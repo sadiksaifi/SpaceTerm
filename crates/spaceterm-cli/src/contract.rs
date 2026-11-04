@@ -1628,7 +1628,6 @@ pub struct CoreStart {
 pub enum ServiceAction {
     Stop,
     Restart,
-    Update,
     Network,
 }
 
