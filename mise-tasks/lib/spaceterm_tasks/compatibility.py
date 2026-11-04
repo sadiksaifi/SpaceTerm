@@ -19,13 +19,13 @@ import tomllib
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
-from spaceterm_tasks import ROOT, TaskError, release
+from spaceterm_tasks import ROOT, TaskError, release_feed, update_signing
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.core_package import (
     PROTOCOLS,
     SHARED_RESOURCES,
     TARGETS,
-    artifact_public_key,
+    artifact_trust,
     compile_terminfo,
 )
 from spaceterm_tasks.packaging import SHELL_INTEGRATION, packaged_environment
@@ -171,7 +171,7 @@ def build_candidate(tag, destination):
 def fetch(tag, destination):
     """Release `tag`'s authenticated Linux Core archive, unpacked as the installer stages it,
     and its protocol versions."""
-    name = release.machine_archive_name(tag[1:], TARGET)
+    name = release_feed.archive_name("core", tag[1:], "linux-x86_64")
     destination.mkdir()
     download = destination / "download"
     _checked(
@@ -190,7 +190,7 @@ def fetch(tag, destination):
         "download",
     )
     archive, signature = download / name, download / f"{name}.sig"
-    release.verify_ed25519(artifact_public_key("spaceterm"), archive, signature)
+    update_signing.verify(artifact_trust("spaceterm"), archive, signature)
     with tarfile.open(archive, "r:gz") as source:
         members = [
             member
