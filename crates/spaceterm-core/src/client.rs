@@ -693,10 +693,17 @@ impl MachineConnection {
             .store(generation, std::sync::atomic::Ordering::Release);
         Ok(link)
     }
-    /// Makes `link`, already admitted, this handle's shared connection while it stays live. Tests
-    /// use it to serve a handle in process, without a socket.
+    /// Makes `link` this handle's shared connection while it stays live, admitted at this build's
+    /// work version by a Core of this build running [`crate::UNVERSIONED`]. Tests use it to serve
+    /// a handle in process, without a socket.
     #[cfg(feature = "test-support")]
     pub fn adopt(&self, link: CoreLink) {
+        let version = crate::update::facts::Version::parse(crate::UNVERSIONED)
+            .unwrap_or_else(|_| unreachable!("UNVERSIONED is a valid version"));
+        self.record_work(&Ok(protocol::Negotiated {
+            selected: protocol::version::WORK,
+            core: protocol::CoreVersions::current(version),
+        }));
         *self.shared.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
     }
     /// Identifies the shared link: it changes each time [`Self::link`] connects a new one, and no

@@ -7,7 +7,8 @@ use crate::app::{
     MinimizeWindow, OpenApplicationHelp, ShowAboutApplication, ShowAllApplications,
     ZoomActiveWindow,
 };
-use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenWhatsNew, WHATS_NEW_TITLE};
+use crate::ui::updates::whats_new::{OpenWhatsNew, WHATS_NEW_TITLE};
+use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, CheckForUpdates};
 use crate::ui::{
     ChooseWorkspace, ClosePane, CloseTab, DecreaseTerminalFontSize, ExportTerminalDiagnostics,
     FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,

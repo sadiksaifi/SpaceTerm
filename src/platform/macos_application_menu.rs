@@ -2,7 +2,8 @@ use super::application_menu::{
     ApplicationMenuAdapter, ApplicationMenuCommand, ApplicationMenuError, MenuCommandHandler,
 };
 use crate::application_identity::ApplicationIdentity;
-use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, WHATS_NEW_TITLE};
+use crate::ui::updates::CHECK_FOR_UPDATES_TITLE;
+use crate::ui::updates::whats_new::WHATS_NEW_TITLE;
 #[cfg(test)]
 use crate::ui::{
     ChooseWorkspace, ClosePane, CloseTab, ExportTerminalDiagnostics, KillWorkspace, NewTab,

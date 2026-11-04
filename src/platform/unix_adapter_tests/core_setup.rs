@@ -1247,7 +1247,7 @@ fn disconnecting_a_saved_route_closes_its_retained_machine_handle() {
     let core = connections.core(&route).unwrap();
     let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), Instant::now());
     core.adopt(link.clone());
-    assert!(core.refresh().is_ok());
+    core.refresh().unwrap();
     let pending = link
         .request(spaceterm_core::protocol::Operation::Direct(
             spaceterm_core::direct::Management::Status,
