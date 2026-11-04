@@ -781,11 +781,6 @@ fn a_reading_of_a_core_too_old_to_uninstall_disables_remove_machine(cx: &mut Tes
     old.lane_major = 0;
     *remote.read.lock().unwrap() = Ok(Reading {
         status: old,
-        check: LaneCheck {
-            approved: version("0.9.0", "aaaaaaaaaa"),
-            latest: None,
-            staged: Vec::new(),
-        },
         settled: Vec::new(),
     });
     let machines = open_penguin(&remote, cx);
