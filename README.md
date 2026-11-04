@@ -14,8 +14,10 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 ## Install macOS/Linux
 
 ```sh
-curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --desktop
 ```
+
+On a machine you only connect to from elsewhere, leave out `--desktop`. You get SpaceTerm Core on its own, and `spaceterm setup` starts it.
 
 On a Mac, you can also install with Homebrew:
 
