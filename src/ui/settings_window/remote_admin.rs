@@ -657,6 +657,17 @@ fn earlier(settled: &[LaneReceipt]) -> Option<(Act, Settlement)> {
 }
 
 /// What a finished flow established about `act`.
+/// Whether `outcome` proves the Core admitted Remove Machine's uninstall. Once its helper
+/// starts, the Core answers nothing more, so admission is the evidence: a run that accepted the
+/// operation, and no receipt that says it failed. An outcome with no admitting run proves
+/// nothing, because the request may never have arrived.
+fn uninstall_admitted(outcome: &Outcome) -> bool {
+    match outcome {
+        Outcome::Settled { .. } => settlement(outcome) == Settlement::Done,
+        Outcome::Shutdown { boot, .. } | Outcome::Unconfirmed { boot, .. } => !boot.is_empty(),
+    }
+}
+
 fn settlement(outcome: &Outcome) -> Settlement {
     Settlement::of(admin::verdict(outcome))
 }
@@ -993,14 +1004,12 @@ impl SettingsWindow {
             let _ = settings.update(cx, |settings, cx| {
                 let removed = matches!(
                     &performed,
-                    Ok(performed) if act == Act::Uninstall && matches!(
-                        settlement(&performed.outcome),
-                        Settlement::Done | Settlement::Shutdown | Settlement::Uncertain
-                    )
+                    Ok(performed) if act == Act::Uninstall && uninstall_admitted(&performed.outcome)
                 );
                 if removed {
                     // The Core admitted its uninstall, which revokes every pairing, so the
-                    // machine leaves this computer too.
+                    // machine leaves this computer too. Anything less keeps the route, its key
+                    // and the pending operation, so a later check can settle it.
                     settings.remote_admin.routes.remove(&route);
                     settings.forget_machine(route, cx);
                     return;

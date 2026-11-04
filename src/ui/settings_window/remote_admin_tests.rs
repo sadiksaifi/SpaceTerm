@@ -632,10 +632,13 @@ fn remove_machine_uninstalls_core_there_and_unpairs_in_one_step(cx: &mut TestApp
         preview: preview(LaneAction::Uninstall, effects(1)),
         settled: Vec::new(),
     });
+    // The Core answers nothing once its uninstall starts, so an admitted uninstall ends with
+    // no receipt.
     *remote.perform.lock().unwrap() = Ok(Performed {
-        outcome: Outcome::Shutdown {
+        outcome: Outcome::Unconfirmed {
             operation: "0123456789abcdef0123456789abcdef".into(),
             boot: "a".into(),
+            last: None,
         },
         settled: Vec::new(),
     });
@@ -674,6 +677,70 @@ fn remove_machine_uninstalls_core_there_and_unpairs_in_one_step(cx: &mut TestApp
         selected,
         Some(super::super::machine_list::MachineChoice::Direct(route)),
         "the selection leaves the removed machine"
+    );
+}
+
+/// Confirms Remove Machine with the lane answering `performed`, and checks that the Machine, its
+/// key and its pairing stay, so a later check can settle what happened.
+fn removal_keeps_the_machine(
+    performed: Result<Performed, RemoteFailure>,
+    says: &str,
+    cx: &mut TestAppContext,
+) {
+    let remote = ScriptedRemote::new();
+    *remote.prepare.lock().unwrap() = Ok(Prepared {
+        preview: preview(LaneAction::Uninstall, effects(0)),
+        settled: Vec::new(),
+    });
+    *remote.perform.lock().unwrap() = performed;
+    let machines = open_penguin(&remote, cx);
+    let route = machines.routes[0];
+
+    click(REMOVE_SELECTOR, machines.cx);
+    answer(CONFIRM_SELECTOR, machines.cx);
+    let window = machines.window.clone();
+    settle(machines.cx, |cx| {
+        window.read_with(cx, |settings, cx| {
+            settings
+                .machine_card_footnote(cx)
+                .is_some_and(|footnote| footnote.contains(says))
+        })
+    });
+
+    assert_eq!(remote.performed.lock().unwrap().len(), 1);
+    assert!(
+        machines.direct.route(&route).is_some(),
+        "the Machine stays until its Core admits the uninstall"
+    );
+    assert!(
+        machines.direct.pending_unpairs().is_empty(),
+        "nothing was unpaired"
+    );
+}
+
+/// No Core run accepted the request, which may never have arrived.
+#[gpui::test]
+fn an_uninstall_no_core_admitted_keeps_the_machine_and_its_pairing(cx: &mut TestAppContext) {
+    removal_keeps_the_machine(
+        Ok(Performed {
+            outcome: Outcome::Unconfirmed {
+                operation: "0123456789abcdef0123456789abcdef".into(),
+                boot: String::new(),
+                last: None,
+            },
+            settled: Vec::new(),
+        }),
+        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its uninstall.",
+        cx,
+    );
+}
+
+#[gpui::test]
+fn an_uninstall_that_failed_keeps_the_machine_and_its_pairing(cx: &mut TestAppContext) {
+    removal_keeps_the_machine(
+        Err(RemoteFailure::Unreachable),
+        &RemoteFailure::Unreachable.explanation("penguin"),
+        cx,
     );
 }
 
