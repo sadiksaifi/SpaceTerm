@@ -1001,6 +1001,93 @@ fn an_uploaded_candidate_is_staged_and_previewed_as_an_update() {
     });
 }
 
+/// Installs a signed Release `version` as the Pending Version of `lane`'s Core.
+fn install_pending(lane: &Lane, version: &str) -> String {
+    let source = lane.service.paths.data.join("../pending-source");
+    let (archive, signature) = crate::service::runtime::test_support::with_build(
+        version,
+        crate::update::facts::Protocols::CURRENT,
+        || {
+            with_artifact(&source, &lane.service.identity, |archive, signature| {
+                (archive.to_owned(), signature.to_owned())
+            })
+        },
+    );
+    let sha256 =
+        hex(
+            ring::digest::digest(&ring::digest::SHA256, &std::fs::read(&archive).unwrap()).as_ref(),
+        );
+    runtime::updates::Updates::open(lane.service.clone())
+        .unwrap()
+        .install(runtime::updates::Archive {
+            archive: &archive,
+            signature: &signature,
+            sha256: &sha256,
+            source: runtime::updates::Source::Local,
+        })
+        .unwrap();
+    sha256
+}
+
+#[test]
+fn a_restart_moves_into_the_pending_version_when_one_waits() {
+    with_lane(|lane| {
+        let (_, effects) = preview(&lane.lane, LaneAction::Restart);
+        assert_eq!((effects.kind, effects.to), (None, None));
+        let sha256 = install_pending(&lane, "1.0.0");
+        lane.host.sessions.lock().unwrap().push([3; 32]);
+        let (token, effects) = preview(&lane.lane, LaneAction::Restart);
+        assert_eq!(effects.kind, Some(LaneUpdateKind::Update));
+        assert_eq!(
+            effects.to.as_ref().map(|to| to.version.as_str()),
+            Some("1.0.0")
+        );
+        assert_eq!(effects.ends_sessions, 1);
+        let reply = execute(&lane.lane, LaneAction::Restart, &token, 1);
+        assert!(matches!(reply, LaneReply::Accepted { .. }), "{reply:?}");
+        let record = lane
+            .lane
+            .ledger()
+            .unwrap()
+            .resolve(&OperationId([1; 16]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.action, Action::Update);
+        assert_eq!(record.candidate.map(|v| hex(&v)), Some(sha256));
+    });
+}
+
+#[test]
+fn a_restart_the_core_decides_on_waits_for_zero_sessions_and_leaves_no_record() {
+    use runtime::updates::{RestartRefusal, Restarter};
+    with_lane(|lane| {
+        lane.host.sessions.lock().unwrap().push([3; 32]);
+        assert_eq!(
+            Arc::clone(&lane.lane).restart(None, true),
+            Err(RestartRefusal::SessionsOpen)
+        );
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+        assert!(!lane.host.fenced.load(Ordering::SeqCst));
+        lane.host.sessions.lock().unwrap().clear();
+        assert_eq!(Arc::clone(&lane.lane).restart(None, true), Ok(()));
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        assert!(lane.host.fenced.load(Ordering::SeqCst));
+        let records = lane.lane.ledger().unwrap().records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            (records[0].actor, records[0].action),
+            (Actor::CORE, Action::Restart)
+        );
+        lane.lane
+            .ledger()
+            .unwrap()
+            .mark(&records[0].id, State::Done)
+            .unwrap();
+        assert!(lane.lane.settled().unwrap());
+        assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+    });
+}
+
 #[test]
 fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
     with_lane(|lane| {

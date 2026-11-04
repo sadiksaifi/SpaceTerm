@@ -108,7 +108,11 @@ pub struct Restarting {
 pub(crate) trait Restarter: Send + Sync {
     /// Restart into the installation named by `candidate`, or into the running version.
     /// `silent` refuses with SessionsOpen unless no Terminal Session is live under the fence.
-    fn restart(&self, candidate: Option<[u8; 32]>, silent: bool) -> Result<(), RestartRefusal>;
+    fn restart(
+        self: Arc<Self>,
+        candidate: Option<[u8; 32]>,
+        silent: bool,
+    ) -> Result<(), RestartRefusal>;
 }
 
 /// The Paired Devices that cannot connect to a Core of a work major: those whose last admitted

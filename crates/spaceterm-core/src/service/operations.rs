@@ -83,6 +83,15 @@ pub struct Actor {
     pub client: crate::hierarchy::Id,
 }
 
+impl Actor {
+    /// The Core itself, for a restart it decides on. No client acknowledges its records, so
+    /// settlement forgets them once they are terminal.
+    pub const CORE: Self = Self {
+        pairing: None,
+        client: [0; 32],
+    };
+}
+
 /// Why an admitted operation was never performed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NotPerformed {
@@ -315,6 +324,7 @@ impl Ledger {
     ) -> Result<(), CoreError> {
         let grace = launch_grace.unwrap_or(LAUNCH_GRACE).as_secs();
         self.change(|records| {
+            records.retain(|v| !(v.actor == Actor::CORE && v.state.terminal()));
             if records.iter().all(|v| v.state.terminal()) || evidence.helper_active()? {
                 return Ok(());
             }

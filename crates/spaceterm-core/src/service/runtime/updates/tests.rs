@@ -44,7 +44,11 @@ impl Supervisor for Untouched {
 #[derive(Default)]
 struct Admitted(Mutex<Vec<(Option<[u8; 32]>, bool)>>);
 impl Restarter for Admitted {
-    fn restart(&self, candidate: Option<[u8; 32]>, silent: bool) -> Result<(), RestartRefusal> {
+    fn restart(
+        self: Arc<Self>,
+        candidate: Option<[u8; 32]>,
+        silent: bool,
+    ) -> Result<(), RestartRefusal> {
         self.0.lock().unwrap().push((candidate, silent));
         Ok(())
     }

@@ -966,6 +966,7 @@ impl LaneCore {
             boot: self.boot,
             action: match action {
                 LaneAction::Stop => Action::Stop,
+                LaneAction::Restart if prepared.candidate.is_some() => Action::Update,
                 LaneAction::Restart => Action::Restart,
                 LaneAction::Update { .. } => Action::Update,
                 LaneAction::Network { .. } => return Err(CoreError::Protocol),
@@ -1276,8 +1277,34 @@ impl Admin<'_> {
             kind: None,
             to_major: None,
         };
-        let (running, candidate) = match action {
-            LaneAction::Stop | LaneAction::Restart => {
+        // Restart moves into the Pending Version when one waits, as Update does.
+        let pending = match action {
+            LaneAction::Restart => {
+                let (data, _) = self.service.read()?.ok_or(CoreError::NotInstalled)?;
+                runtime::updates::pending_digest(&data)?
+            }
+            _ => None,
+        };
+        let update = match (action, pending) {
+            (LaneAction::Update { installation }, _) => Some(installation.clone()),
+            (_, Some(pending)) => Some(pending),
+            _ => None,
+        };
+        let (running, candidate) = match (action, update) {
+            (LaneAction::Restart | LaneAction::Update { .. }, Some(installation)) => {
+                let candidate = self.installation(&installation)?;
+                let approval = self
+                    .service
+                    .prepare_activation(&candidate)?
+                    .ok_or(CoreError::CandidateMissing)?;
+                digest.update(approval.confirmation_token()?.as_bytes());
+                effects.from = Some(version_of(approval.previous()));
+                effects.to = Some(version_of(approval.candidate()));
+                effects.kind = Some(LaneUpdateKind::Update);
+                effects.to_major = protocol_major(approval.candidate());
+                (approval.running(), Some(digest_bytes(&installation)?))
+            }
+            (LaneAction::Stop, _) | (LaneAction::Restart, None) => {
                 let control = if *action == LaneAction::Stop {
                     super::control::Action::Stop
                 } else {
@@ -1290,20 +1317,8 @@ impl Admin<'_> {
                 effects.start_requires_machine = *action == LaneAction::Stop;
                 (confirmation.running(), None)
             }
-            LaneAction::Update { installation } => {
-                let candidate = self.installation(installation)?;
-                let approval = self
-                    .service
-                    .prepare_activation(&candidate)?
-                    .ok_or(CoreError::CandidateMissing)?;
-                digest.update(approval.confirmation_token()?.as_bytes());
-                effects.from = Some(version_of(approval.previous()));
-                effects.to = Some(version_of(approval.candidate()));
-                effects.kind = Some(LaneUpdateKind::Update);
-                effects.to_major = protocol_major(approval.candidate());
-                (approval.running(), Some(digest_bytes(installation)?))
-            }
-            LaneAction::Network { .. } => return Err(CoreError::Unsupported),
+            (LaneAction::Update { .. }, None) => return Err(CoreError::CandidateMissing),
+            (LaneAction::Network { .. }, _) => return Err(CoreError::Unsupported),
         };
         Ok(Prepared {
             service: digest
@@ -1420,6 +1435,58 @@ pub(crate) fn device(info: &crate::direct::DeviceInfo) -> LaneDevice {
         name: info.name.as_str().to_owned(),
         fingerprint: info.fingerprint(),
         last_connected_at: info.last_connected_at_unix_seconds.map(unix_timestamp),
+    }
+}
+
+impl runtime::updates::Restarter for LaneCore {
+    /// Admits a restart the Core decided on, as Execute admits one a client confirmed, and
+    /// launches its helper from this runtime.
+    fn restart(
+        self: Arc<Self>,
+        candidate: Option<[u8; 32]>,
+        silent: bool,
+    ) -> Result<(), runtime::updates::RestartRefusal> {
+        use runtime::updates::RestartRefusal;
+        let id = OperationId::random().map_err(RestartRefusal::Core)?;
+        let record = Record {
+            id,
+            actor: Actor::CORE,
+            core: self.core,
+            boot: self.boot,
+            action: if candidate.is_some() {
+                Action::Update
+            } else {
+                Action::Restart
+            },
+            observation_digest: [0; 32],
+            candidate,
+            state: State::Admitted,
+            updated_at: 0,
+            orphaned: false,
+        };
+        let admitted = {
+            let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
+            let mut open = false;
+            let mut admitted = None;
+            let fenced = self.host.fence(&mut |sessions| {
+                if silent && !sessions.is_empty() {
+                    open = true;
+                    return Err(CoreError::Changed);
+                }
+                admitted = Some(self.ledger()?.admit(record.clone())?);
+                Ok(())
+            });
+            match fenced {
+                Ok(()) => admitted,
+                Err(_) if open => return Err(RestartRefusal::SessionsOpen),
+                Err(CoreError::ServiceBusy) => return Err(RestartRefusal::Busy),
+                Err(error) => return Err(RestartRefusal::Core(error)),
+            }
+        };
+        if matches!(admitted, Some(Admission::New(_))) {
+            self.launch_helper(&id);
+        }
+        Ok(())
     }
 }
 

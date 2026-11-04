@@ -642,17 +642,30 @@ fn serve_runtime_ready(
     }
     // The lane settles what an earlier run left in the service-operation ledger before any
     // connection is accepted. A server without service state answers no lane.
-    let lane = crate::service::lane::LaneCore::start(
-        paths,
-        Arc::new(HostLane {
-            panes: Arc::clone(&panes),
-            counters,
-            fence,
-            direct: direct.clone(),
-            stop: Arc::clone(&stop),
-        }),
-    )
-    .ok();
+    let host_lane = Arc::new(HostLane {
+        panes: Arc::clone(&panes),
+        counters,
+        fence,
+        direct: direct.clone(),
+        stop: Arc::clone(&stop),
+    });
+    let lane = crate::service::lane::LaneCore::start(paths, Arc::clone(&host_lane) as _).ok();
+    // The lane holds the pane service, whose shutdown the server waits for, so the update
+    // watcher reaches it only weakly.
+    let watched = Arc::downgrade(&host_lane);
+    drop(host_lane);
+    // A supervised Core owns its updates. A Core that fails to read them still serves.
+    let updates = supervised
+        .then(|| {
+            crate::service::Service::for_paths(paths.clone())
+                .and_then(crate::service::updates::Updates::open)
+                .ok()
+        })
+        .flatten();
+    let restarter = lane.as_ref().map(|lane| {
+        let restarter: Arc<dyn crate::service::updates::Restarter> = Arc::clone(lane) as _;
+        Arc::downgrade(&restarter)
+    });
     let environment = Environment {
         panes: Arc::clone(&panes),
         sync: sync.clone(),
@@ -669,6 +682,20 @@ fn serve_runtime_ready(
     let readiness = ready();
     if readiness.is_err() {
         stop.request();
+    }
+    // Once ready, the engine follows the live Terminal Session count, so a Pending Version
+    // that is not breaking restarts silently at zero sessions, including right after boot.
+    if readiness.is_ok()
+        && let (Some(updates), Some(restarter)) = (&updates, restarter)
+    {
+        let host = watched;
+        let _ = updates.run(restarter, Arc::new(|_| Vec::new()), move || {
+            let host = host.upgrade()?;
+            (!host.stop.stopping()).then(|| {
+                let sessions = crate::service::lane::LaneHost::sessions(&*host).len();
+                u32::try_from(sessions).unwrap_or(u32::MAX)
+            })
+        });
     }
     let mut connections: Vec<Running> = Vec::new();
     let mut network: Vec<Running> = Vec::new();

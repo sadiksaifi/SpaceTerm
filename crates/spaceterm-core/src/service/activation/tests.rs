@@ -27,7 +27,7 @@ struct SupervisorFixture {
     /// Every runtime a Start was dispatched for, in order.
     started: Mutex<Vec<PathBuf>>,
     /// What a server that never becomes ready changes in the retained state meanwhile.
-    meddles: Mutex<Option<Box<dyn FnMut(&Directory) + Send>>>,
+    meddles: Mutex<Option<Meddle>>,
 }
 impl SupervisorFixture {
     /// The server's own run: it admits itself into the service state, then marks readiness.
@@ -61,6 +61,8 @@ impl SupervisorFixture {
         data.write_json(c"service.json", &state).unwrap();
     }
 }
+/// What a server that never becomes ready does to the retained state while it runs.
+type Meddle = Box<dyn FnMut(&Directory) + Send>;
 /// How long this fixture's service manager lets a stopping server finish.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 impl Supervisor for SupervisorFixture {
@@ -808,7 +810,7 @@ fn failed_candidate_never_reexecutes_even_after_a_simulated_boot_change() {
         assert!(matches!(status.phase, ActivationPhase::Returned { .. }));
         assert_eq!(
             *supervisor.started.lock().unwrap(),
-            [previous.directory.clone()],
+            std::slice::from_ref(&previous.directory),
             "the candidate never starts again"
         );
     });
