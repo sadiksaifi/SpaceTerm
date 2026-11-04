@@ -118,7 +118,7 @@ def package(release_tag=None):
 
     environment.update(
         prepare_desktop_artifact(
-            STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifact",
+            STAGE / DIRECTORIES[name] / "share/spaceterm/core-artifact",
             DIRECTORIES[name],
             release_tag,
             catalog_destination=STAGE / DIRECTORIES[name] / "share/spaceterm/core-artifacts",
@@ -187,7 +187,7 @@ def verify_tree(tree, name, release_tag):
     from spaceterm_tasks.core_package import verify_desktop_artifact
 
     verify_desktop_artifact(
-        tree / "share/spaceterm/server-artifact",
+        tree / "share/spaceterm/core-artifact",
         DIRECTORIES[name],
         release_tag,
         executable=executable,

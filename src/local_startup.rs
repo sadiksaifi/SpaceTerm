@@ -180,9 +180,9 @@ fn artifact_paths(
             .and_then(Path::parent)
             .ok_or(CandidateError::Unavailable)?;
         let resources = if macos {
-            root.join("Resources/server-artifact")
+            root.join("Resources/core-artifact")
         } else {
-            root.join("share/spaceterm/server-artifact")
+            root.join("share/spaceterm/core-artifact")
         };
         return Ok(ArtifactPaths {
             archive: resources.join("artifact.tar.gz"),
@@ -212,10 +212,9 @@ mod tests {
         assert_eq!(
             (paths.archive, paths.signature),
             (
-                "/Applications/SpaceTerm.app/Contents/Resources/server-artifact/artifact.tar.gz"
+                "/Applications/SpaceTerm.app/Contents/Resources/core-artifact/artifact.tar.gz"
                     .into(),
-                "/Applications/SpaceTerm.app/Contents/Resources/server-artifact/artifact.sig"
-                    .into(),
+                "/Applications/SpaceTerm.app/Contents/Resources/core-artifact/artifact.sig".into(),
             )
         );
     }
@@ -307,8 +306,8 @@ mod tests {
         assert_eq!(
             (paths.archive, paths.signature),
             (
-                "/opt/spaceterm/share/spaceterm/server-artifact/artifact.tar.gz".into(),
-                "/opt/spaceterm/share/spaceterm/server-artifact/artifact.sig".into(),
+                "/opt/spaceterm/share/spaceterm/core-artifact/artifact.tar.gz".into(),
+                "/opt/spaceterm/share/spaceterm/core-artifact/artifact.sig".into(),
             )
         );
     }

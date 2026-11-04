@@ -43,7 +43,7 @@ def prepare(
         "commit": commit,
         "version": release_tag[1:] if release_tag else "dev." + commit[:12],
     }
-    directory = root / "target/server-artifact-fixture"
+    directory = root / "target/core-artifact-fixture"
     shutil.rmtree(directory, ignore_errors=True)
     tree = directory / "core"
     executable = tree / core_package.executable_path(expected["target"], expected["identity"])

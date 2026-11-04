@@ -203,8 +203,8 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         identifier = "io.github.sadiksaifi.spaceterm-preflight"
         for name in (
             "spaceterm-preflight/bin/spaceterm-desktop",
-            "spaceterm-preflight/share/spaceterm/server-artifact/artifact.tar.gz",
-            "spaceterm-preflight/share/spaceterm/server-artifact/artifact.sig",
+            "spaceterm-preflight/share/spaceterm/core-artifact/artifact.tar.gz",
+            "spaceterm-preflight/share/spaceterm/core-artifact/artifact.sig",
             "spaceterm-preflight/share/spaceterm/core-artifacts/x86_64-unknown-linux-gnu/artifact.tar.gz",
             "spaceterm-preflight/share/spaceterm/core-artifacts/x86_64-unknown-linux-gnu/artifact.sig",
             "spaceterm-preflight/share/spaceterm/core-artifacts/x86_64-unknown-linux-gnu/artifact.sha256",

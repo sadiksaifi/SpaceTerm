@@ -79,7 +79,7 @@ def package_bundle(release_tag=None):
 
     environment.update(
         prepare_desktop_artifact(
-            STAGE / "server-artifact",
+            STAGE / "core-artifact",
             template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
             release_tag,
             catalog_destination=STAGE / "core-artifacts",
@@ -93,7 +93,7 @@ def package_bundle(release_tag=None):
     binaries.mkdir()
     shutil.copyfile(executable, binaries / template["CFBundleExecutable"])
     (binaries / template["CFBundleExecutable"]).chmod(0o755)
-    config["resources"].append({"src": str(STAGE / "server-artifact"), "target": "server-artifact"})
+    config["resources"].append({"src": str(STAGE / "core-artifact"), "target": "core-artifact"})
     config["resources"].append({"src": str(STAGE / "core-artifacts"), "target": "core-artifacts"})
     config["version"] = version
     # cargo-packager stamps CFBundleVersion with the build time; the identity's Info.plist
@@ -219,7 +219,7 @@ def verify_bundle(app, name, release_tag, label):
     from spaceterm_tasks.core_package import verify_desktop_artifact
 
     verify_desktop_artifact(
-        resources / "server-artifact",
+        resources / "core-artifact",
         template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
         release_tag,
         executable=executable,

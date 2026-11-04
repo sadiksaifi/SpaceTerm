@@ -345,7 +345,7 @@ class CoreArchiveTests(unittest.TestCase):
         with patch.dict(os.environ, {"SPACETERM_CLI_ARCHIVE": str(self.archive)}, clear=True):
             with self.assertRaisesRegex(TaskError, "both"):
                 core_package.prepare_desktop_artifact(
-                    self.root / "desktop/server-artifact", "spaceterm-preflight"
+                    self.root / "desktop/core-artifact", "spaceterm-preflight"
                 )
 
     def test_missing_desktop_artifact_is_classified_without_a_native_error(self):

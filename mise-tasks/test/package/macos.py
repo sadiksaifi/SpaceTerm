@@ -217,7 +217,7 @@ int main(int argc, char **argv) {{
             (bundled.parent.parent / "Resources/shell-integration/elvish/rc.elv").read_bytes(),
             (ROOT / "assets/shell-integration/elvish/rc.elv").read_bytes(),
         )
-        artifact = bundled.parent.parent / "Resources/server-artifact"
+        artifact = bundled.parent.parent / "Resources/core-artifact"
         self.assertEqual(
             (artifact / "artifact.tar.gz").read_bytes(),
             Path(self.env["SPACETERM_CLI_ARCHIVE"]).read_bytes(),
