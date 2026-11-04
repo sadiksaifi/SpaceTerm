@@ -44,7 +44,7 @@ impl DesktopEffects for GpuiEffects<'_> {
         crate::app::activate_default_window(self.0, token.as_deref());
     }
     fn open_invitation(&mut self, link: String) {
-        crate::ui::settings_window::open_add_server(Some(link), None, self.0);
+        crate::ui::settings_window::open_add_machine(Some(link), None, self.0);
     }
     /// Quit runs the application quit policy, including its confirmation.
     fn quit(&mut self) {
