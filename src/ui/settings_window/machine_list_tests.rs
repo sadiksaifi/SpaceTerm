@@ -220,7 +220,7 @@ fn listed(cx: &mut VisualTestContext) -> Vec<(String, bool)> {
     let list = tree
         .with_role("ListBox")
         .into_iter()
-        .find(|node| node["aria"]["label"] == super::MACHINE_LIST_NAME)
+        .find(|node| node["aria"]["label"] == "All Machines")
         .expect("All Machines lists the servers");
     tree.children(list)
         .into_iter()
@@ -304,14 +304,14 @@ fn all_machines_names_this_computer_first_then_each_paired_machine(cx: &mut Test
 fn the_picker_and_all_machines_share_one_selection_that_connects_nothing(cx: &mut TestAppContext) {
     let machines = open_machines(true, &["penguin"], cx);
     assert_eq!(
-        A11yTree::read(machines.cx).node(super::PICKER_NAME)["aria"]["value"],
+        A11yTree::read(machines.cx).node("Machine")["aria"]["value"],
         local_name()
     );
 
     select("penguin", machines.cx);
 
     let tree = A11yTree::read(machines.cx);
-    let picker = tree.node(super::PICKER_NAME);
+    let picker = tree.node("Machine");
     assert_eq!(picker["aria"]["role"], "ComboBox");
     assert_eq!(picker["aria"]["value"], "penguin");
     assert_eq!(picker["aria"]["description"], "Choose or add a machine");
@@ -328,7 +328,7 @@ fn the_picker_and_all_machines_share_one_selection_that_connects_nothing(cx: &mu
 
     click("settings-navigation-settings-section-git", machines.cx);
     assert_eq!(
-        A11yTree::read(machines.cx).node(super::PICKER_NAME)["aria"]["value"],
+        A11yTree::read(machines.cx).node("Machine")["aria"]["value"],
         "penguin",
         "Git presents the same server"
     );
@@ -468,7 +468,7 @@ fn picker_rows(name: &str, cx: &mut VisualTestContext) -> Vec<String> {
     let choices = tree
         .with_role("ListBox")
         .into_iter()
-        .find(|list| list["aria"]["label"] == super::PICKER_NAME)
+        .find(|list| list["aria"]["label"] == "Machine")
         .expect("the picker's choices are open");
     tree.descendants(choices)
         .into_iter()
@@ -509,7 +509,7 @@ fn the_picker_tells_apart_machines_that_share_a_name(cx: &mut TestAppContext) {
         "choosing the second row selects the server at its address"
     );
     let tree = A11yTree::read(machines.cx);
-    let picker = tree.node(super::PICKER_NAME);
+    let picker = tree.node("Machine");
     assert_eq!(picker["aria"]["value"], "studio");
     assert!(
         picker["aria"]["description"]
@@ -611,6 +611,36 @@ fn unpair_selected(cx: &mut VisualTestContext) {
     click(super::super::machine_card::MENU_SELECTOR, cx);
     click("settings-server-unpair", cx);
     answer_alert(UNPAIR_SELF_CONFIRM_SELECTOR, cx);
+}
+
+/// A paired machine's menu offers Remove Machine, whose alert names the machine it removes.
+#[gpui::test]
+fn remove_machine_asks_before_removing_the_named_machine(cx: &mut TestAppContext) {
+    let machines = open_machines(true, &["penguin"], cx);
+    select("penguin", machines.cx);
+
+    click(super::super::machine_card::MENU_SELECTOR, machines.cx);
+    assert!(
+        A11yTree::read(machines.cx)
+            .find("Remove Machine\u{2026}")
+            .is_some(),
+        "the menu offers Remove Machine"
+    );
+    click("settings-server-unpair", machines.cx);
+
+    let tree = A11yTree::read(machines.cx);
+    assert!(
+        tree.find_text("Remove \u{201C}penguin\u{201D}?").is_some(),
+        "the alert names the machine"
+    );
+    assert!(
+        tree.find("Remove").is_some(),
+        "the alert confirms with Remove"
+    );
+    assert!(
+        machines.direct.route(&machines.routes[0]).is_some(),
+        "nothing is removed before the person confirms"
+    );
 }
 
 #[gpui::test]

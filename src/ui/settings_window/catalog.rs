@@ -669,7 +669,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "status",
             "version",
             "update",
-            "update core",
+            "update spaceterm core",
             "core update",
             "upgrade",
             "check now",
@@ -679,10 +679,10 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "return to previous version",
             "finish update",
             "running",
-            "start core",
-            "stop core",
-            "restart core",
-            "uninstall core",
+            "start spaceterm core",
+            "stop spaceterm core",
+            "restart spaceterm core",
+            "uninstall spaceterm core",
             "install",
             "connect",
             "disconnect",
@@ -1511,9 +1511,6 @@ mod tests {
     #[test]
     fn a_machine_query_reaches_the_machine_rows() {
         for (query, row) in [
-            ("stop core", SettingsRowId::CoreStatus),
-            ("uninstall core", SettingsRowId::CoreStatus),
-            ("update core", SettingsRowId::CoreStatus),
             ("start at login", SettingsRowId::CoreAutoStart),
             ("end all", SettingsRowId::EndAllSessions),
             ("invite device", SettingsRowId::PairedDevices),
@@ -1527,8 +1524,27 @@ mod tests {
         }
     }
 
-    /// Settings Search is one of the ways in to Add Server, for a person who never opens the
-    /// server picker.
+    /// A person searches for an action by the name its button or menu entry shows.
+    #[test]
+    fn a_search_for_a_visible_core_action_reaches_the_machine_row() {
+        for query in [
+            "Start SpaceTerm Core",
+            "Stop SpaceTerm Core",
+            "Restart SpaceTerm Core",
+            "Update SpaceTerm Core",
+            "Uninstall SpaceTerm Core",
+        ] {
+            assert_eq!(
+                matching_rows(query).first(),
+                Some(&SettingsRowId::CoreStatus),
+                "{query:?} should rank {:?} first",
+                SettingsRowId::CoreStatus
+            );
+        }
+    }
+
+    /// Settings Search is one of the ways in to Add Machine, for a person who never opens the
+    /// machine picker.
     #[test]
     fn an_add_machine_query_reaches_add_machine_first() {
         for query in ["add machine", "join"] {

@@ -577,14 +577,15 @@ pub(crate) enum ServiceAction {
 }
 
 impl ServiceAction {
-    /// The button label. Start and Stop use the names the person knows the actions by.
+    /// The button label. Start and Stop use the names the person knows the actions by. Actions
+    /// that ask first end in an ellipsis.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Check => "Check Now",
             Self::Install => "Install",
             Self::Start => "Start SpaceTerm Core",
-            Self::Stop => "Stop SpaceTerm Core",
-            Self::Restart => "Restart SpaceTerm Core",
+            Self::Stop => "Stop SpaceTerm Core\u{2026}",
+            Self::Restart => "Restart SpaceTerm Core\u{2026}",
             Self::Uninstall => "Uninstall",
             Self::AuthorizeInstall => "Authorize and Install\u{2026}",
             Self::AuthorizeStart => "Authorize and Start\u{2026}",
@@ -1898,7 +1899,7 @@ impl SettingsWindow {
             });
         });
         if result.is_err() {
-            eprintln!("failed to present the SpaceTerm server startup authorization");
+            eprintln!("failed to present the SpaceTerm Core startup authorization");
         }
     }
 
@@ -1957,7 +1958,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| settings.run_core_service(action, cx));
         });
         if result.is_err() {
-            eprintln!("failed to present the SpaceTerm server service confirmation");
+            eprintln!("failed to present the SpaceTerm Core service confirmation");
         }
     }
 }

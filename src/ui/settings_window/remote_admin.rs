@@ -49,8 +49,8 @@ pub(crate) enum Change {
 impl Change {
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Stop => "Stop SpaceTerm Core",
-            Self::Restart => "Restart SpaceTerm Core",
+            Self::Stop => "Stop SpaceTerm Core\u{2026}",
+            Self::Restart => "Restart SpaceTerm Core\u{2026}",
             Self::Update => "Update\u{2026}",
         }
     }
@@ -968,7 +968,7 @@ impl SettingsWindow {
                         });
                     });
                     if result.is_err() {
-                        eprintln!("failed to present the paired server change confirmation");
+                        eprintln!("failed to present the paired machine change confirmation");
                     }
                     result.is_ok()
                 })

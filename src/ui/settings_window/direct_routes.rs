@@ -105,7 +105,7 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Asks before unpairing this device from the selected server, naming both.
+    /// Asks before Remove Machine unpairs this device from the selected machine, naming it.
     pub(super) fn confirm_unpair_this_device(
         &mut self,
         window: &mut Window,
@@ -118,11 +118,7 @@ impl SettingsWindow {
         // A server that already unpaired this device has nothing left to revoke, so the step
         // only removes what remains here.
         let revoked = status == DirectRouteStatus::Refused(RefusalReason::Revoked);
-        let title = if revoked {
-            format!("Remove Connection to \u{201C}{name}\u{201D}?")
-        } else {
-            format!("Unpair This Device From \u{201C}{name}\u{201D}?")
-        };
+        let title = format!("Remove \u{201C}{name}\u{201D}?");
         let message = if revoked {
             format!(
                 "Remove the saved connection from this computer. To reconnect to {name}, request a new invitation."
@@ -132,7 +128,6 @@ impl SettingsWindow {
                 "SpaceTerm removes this connection and its Workspaces from this window and asks {name} to revoke access. Terminal Sessions keep running. To reconnect, you need a new invitation."
             )
         };
-        let confirm = if revoked { "Remove" } else { "Unpair" };
         let result = Alert::new(
             ModalId::new("settings-direct-server-unpair"),
             title.clone(),
@@ -141,7 +136,7 @@ impl SettingsWindow {
             vec![
                 ModalAction::new(
                     true,
-                    confirm,
+                    "Remove",
                     ModalActionRole::Affirmative,
                     UNPAIR_SELF_CONFIRM_SELECTOR,
                 )
@@ -169,7 +164,7 @@ impl SettingsWindow {
             let _ = owner.update(cx, |settings, cx| settings.unpair_this_device(route, cx));
         });
         if result.is_err() {
-            eprintln!("failed to present the Unpair This Device confirmation");
+            eprintln!("failed to present the Remove Machine confirmation");
         }
     }
 

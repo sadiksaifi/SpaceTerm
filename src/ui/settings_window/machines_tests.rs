@@ -853,7 +853,11 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
             confirmation.detail.as_ref(),
             format!("All Terminal Sessions on it end for every client. {kept}")
         );
-        assert_eq!(confirmation.confirm, action.label());
+        // The menu entry ends in an ellipsis because it asks first; the confirmation does not.
+        assert_eq!(
+            confirmation.confirm,
+            action.label().trim_end_matches('\u{2026}')
+        );
     }
     // Uninstalling a server that is not running ends no Terminal Session.
     let idle =
@@ -1392,7 +1396,7 @@ fn assistive_technology_hears_the_core_state_and_stop_asks_first(cx: &mut TestAp
     // Cancel focused, so Escape keeps the server running.
     click(MENU_SELECTOR, cx);
     let tree = A11yTree::read(cx);
-    perform(cx, tree.node("Stop SpaceTerm Core"), Action::Click);
+    perform(cx, tree.node("Stop SpaceTerm Core\u{2026}"), Action::Click);
     cx.run_until_parked();
     assert!(alert_open(STOP_CONFIRM_SELECTOR, cx));
     let tree = A11yTree::read(cx);
@@ -1428,9 +1432,12 @@ fn the_status_menu_offers_stopping_only_a_running_machine(cx: &mut TestAppContex
     click(MENU_SELECTOR, cx);
     let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
 
-    assert_eq!(tree.node("Stop SpaceTerm Core")["aria"]["disabled"], true);
     assert_eq!(
-        tree.node("Restart SpaceTerm Core")["aria"]["disabled"],
+        tree.node("Stop SpaceTerm Core\u{2026}")["aria"]["disabled"],
+        true
+    );
+    assert_eq!(
+        tree.node("Restart SpaceTerm Core\u{2026}")["aria"]["disabled"],
         true
     );
     assert_ne!(

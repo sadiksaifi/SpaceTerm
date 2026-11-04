@@ -618,12 +618,12 @@ impl SettingsWindow {
         let menu = if installed {
             vec![
                 MenuItem::new(
-                    "Restart SpaceTerm Core",
+                    "Restart SpaceTerm Core\u{2026}",
                     StatusStep::Local(ServiceAction::Restart),
                     idle && offered(ServiceAction::Restart),
                 ),
                 MenuItem::new(
-                    "Stop SpaceTerm Core",
+                    "Stop SpaceTerm Core\u{2026}",
                     StatusStep::Local(ServiceAction::Stop),
                     idle && offered(ServiceAction::Stop),
                 ),
@@ -668,11 +668,6 @@ impl SettingsWindow {
             status,
             DirectRouteStatus::Connecting | DirectRouteStatus::Refused(RefusalReason::Revoked)
         );
-        let unpair = if self.this_computer == "This Mac" {
-            "Unpair This Mac\u{2026}"
-        } else {
-            "Unpair This Computer\u{2026}"
-        };
         let mut menu = Vec::new();
         // Stop and Restart reach the server over its service lane while SpaceTerm holds a
         // connection to it. Start needs the server's own computer, so the menu offers none.
@@ -699,7 +694,7 @@ impl SettingsWindow {
             reconnect.after_separator()
         });
         menu.push(
-            MenuItem::new(unpair, StatusStep::UnpairThisDevice, true)
+            MenuItem::new("Remove Machine\u{2026}", StatusStep::UnpairThisDevice, true)
                 .destructive()
                 .after_separator(),
         );
@@ -800,7 +795,7 @@ impl SettingsWindow {
             }
         });
         if result.is_err() {
-            eprintln!("failed to present the SpaceTerm server installation confirmation");
+            eprintln!("failed to present the SpaceTerm Core installation confirmation");
         }
     }
 }

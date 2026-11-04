@@ -879,7 +879,7 @@ impl SettingsWindow {
                         });
                     });
                     if result.is_err() {
-                        eprintln!("failed to present the SpaceTerm server update confirmation");
+                        eprintln!("failed to present the SpaceTerm Core update confirmation");
                     }
                     result.is_ok()
                 })
