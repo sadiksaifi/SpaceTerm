@@ -22,6 +22,7 @@ impl ShellResourcesFixture {
             "elvish/rc.elv",
             "fish/vendor_conf.d/spaceterm-shell-integration.fish",
             "nushell/vendor/autoload/spaceterm.nu",
+            "sh/spaceterm.sh",
             "zsh/.zshenv",
         ] {
             let path = root.join("shell-integration").join(relative);

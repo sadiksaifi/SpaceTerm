@@ -43,6 +43,7 @@ pub struct ShellIntegrationPlan {
 /// Captured compatibility and search-path facts, selected independently of the host at planning.
 #[derive(Clone)]
 pub struct ShellIntegrationPolicy {
+    /// Whether the shell can run SpaceTerm's startup files at all.
     pub supported: bool,
     pub path_list_separator: char,
     pub fallback_xdg_data_dirs: OsString,
@@ -106,6 +107,10 @@ pub(super) fn prepend_path_once(
     Some(value)
 }
 
+/// Plans the shell's SpaceTerm startup files. Every shell that can run them runs them after the
+/// user's own startup files, so they put the Session's CLI first on PATH again even when shell
+/// integration is disabled or the shell has none. Only applied integration also sets
+/// `SPACETERM_SHELL_INTEGRATION_VERSION`, which turns on prompt marks and reports.
 pub fn plan_shell_integration(
     shell: &Path,
     resource_root: &Path,
@@ -113,37 +118,92 @@ pub fn plan_shell_integration(
     inherited: &ShellEnvironment,
     policy: &ShellIntegrationPolicy,
 ) -> ShellIntegrationPlan {
-    if mode == ShellIntegrationMode::Disabled {
-        return empty_plan(ShellIntegrationStatus::Disabled);
-    }
-    let Some(kind) = detect_shell(shell) else {
-        return empty_plan(ShellIntegrationStatus::Unsupported);
+    let startup = detect_startup(shell).filter(|_| policy.supported);
+    let applied = match startup {
+        Some(Startup::Integrated(kind)) => Some(kind),
+        _ => None,
     };
-    if !policy.supported {
-        return empty_plan(ShellIntegrationStatus::Unsupported);
+    let status = match (mode, applied) {
+        (ShellIntegrationMode::Disabled, _) => ShellIntegrationStatus::Disabled,
+        (ShellIntegrationMode::Automatic, None) => ShellIntegrationStatus::Unsupported,
+        (ShellIntegrationMode::Automatic, Some(kind)) => ShellIntegrationStatus::Applied(kind),
+    };
+    let Some(startup) = startup else {
+        return empty_plan(status);
+    };
+    match startup_plan(startup, resource_root, inherited, policy) {
+        Ok(mut plan) => {
+            if let ShellIntegrationStatus::Applied(kind) = status {
+                plan.environment.insert(
+                    0,
+                    (
+                        OsString::from("SPACETERM_SHELL_INTEGRATION_VERSION"),
+                        OsString::from("1"),
+                    ),
+                );
+                // Fish 4 marks its prompts itself, without the Prompt Owner. SpaceTerm's
+                // integration marks them instead, and fish reads its features only at startup.
+                if kind == ShellKind::Fish {
+                    plan.arguments.extend([
+                        OsString::from("--features"),
+                        OsString::from("no-mark-prompt"),
+                    ]);
+                }
+            }
+            plan.status = status;
+            plan
+        }
+        Err(failure) => empty_plan(match status {
+            ShellIntegrationStatus::Applied(_) => failure,
+            status => status,
+        }),
     }
+}
 
+/// How a shell reaches SpaceTerm's startup files.
+#[derive(Clone, Copy)]
+enum Startup {
+    /// A shell with SpaceTerm's integration.
+    Integrated(ShellKind),
+    /// A POSIX shell that reads `ENV` after its login profile. Its file only restores PATH.
+    Posix,
+}
+
+fn startup_plan(
+    startup: Startup,
+    resource_root: &Path,
+    inherited: &ShellEnvironment,
+    policy: &ShellIntegrationPolicy,
+) -> Result<ShellIntegrationPlan, ShellIntegrationStatus> {
     let integration_root = resource_root.join("shell-integration");
-    let required = match kind {
-        ShellKind::Bash => integration_root.join("bash/spaceterm.bash"),
-        ShellKind::Elvish => integration_root.join("elvish/lib/spaceterm-integration.elv"),
-        ShellKind::Fish => {
+    let required = match startup {
+        Startup::Posix => integration_root.join("sh/spaceterm.sh"),
+        Startup::Integrated(ShellKind::Bash) => integration_root.join("bash/spaceterm.bash"),
+        Startup::Integrated(ShellKind::Elvish) => {
+            integration_root.join("elvish/lib/spaceterm-integration.elv")
+        }
+        Startup::Integrated(ShellKind::Fish) => {
             integration_root.join("fish/vendor_conf.d/spaceterm-shell-integration.fish")
         }
-        ShellKind::Nushell => integration_root.join("nushell/vendor/autoload/spaceterm.nu"),
-        ShellKind::Zsh => integration_root.join("zsh/.zshenv"),
+        Startup::Integrated(ShellKind::Nushell) => {
+            integration_root.join("nushell/vendor/autoload/spaceterm.nu")
+        }
+        Startup::Integrated(ShellKind::Zsh) => integration_root.join("zsh/.zshenv"),
     };
     if !required.is_file() {
-        return empty_plan(ShellIntegrationStatus::MissingResources);
+        return Err(ShellIntegrationStatus::MissingResources);
     }
 
     let mut arguments = Vec::new();
-    let mut environment = vec![(
-        OsString::from("SPACETERM_SHELL_INTEGRATION_VERSION"),
-        OsString::from("1"),
-    )];
-    match kind {
-        ShellKind::Bash => {
+    let mut environment = Vec::new();
+    match startup {
+        Startup::Posix => {
+            environment.push((OsString::from("ENV"), required.into_os_string()));
+            if let Some(value) = &inherited.env {
+                environment.push((OsString::from("SPACETERM_SH_ENV"), value.clone()));
+            }
+        }
+        Startup::Integrated(ShellKind::Bash) => {
             arguments.push(OsString::from("--posix"));
             environment.push((OsString::from("ENV"), required.into_os_string()));
             environment.push((OsString::from("SPACETERM_BASH_INJECT"), OsString::from("1")));
@@ -151,14 +211,14 @@ pub fn plan_shell_integration(
                 environment.push((OsString::from("SPACETERM_BASH_ENV"), value.clone()));
             }
         }
-        ShellKind::Elvish | ShellKind::Fish | ShellKind::Nushell => {
+        Startup::Integrated(kind @ (ShellKind::Elvish | ShellKind::Fish | ShellKind::Nushell)) => {
             let xdg_root = integration_root.into_os_string();
             let prior = inherited
                 .xdg_data_dirs
                 .as_deref()
                 .unwrap_or(&policy.fallback_xdg_data_dirs);
             let Some(xdg) = prepend_path(&xdg_root, prior, policy.path_list_separator) else {
-                return empty_plan(ShellIntegrationStatus::Unsupported);
+                return Err(ShellIntegrationStatus::Unsupported);
             };
             environment.push((
                 OsString::from("SPACETERM_SHELL_INTEGRATION_XDG_DIR"),
@@ -168,7 +228,7 @@ pub fn plan_shell_integration(
             if kind == ShellKind::Elvish {
                 let rc = resource_root.join("shell-integration/elvish/rc.elv");
                 if !rc.is_file() {
-                    return empty_plan(ShellIntegrationStatus::MissingResources);
+                    return Err(ShellIntegrationStatus::MissingResources);
                 }
                 arguments.extend([OsString::from("-rc"), rc.into_os_string()]);
             }
@@ -178,16 +238,8 @@ pub fn plan_shell_integration(
                     OsString::from("use spaceterm *; install"),
                 ]);
             }
-            // Fish 4 marks its prompts itself, without the Prompt Owner. SpaceTerm's integration
-            // marks them instead, and fish reads its features only at startup.
-            if kind == ShellKind::Fish {
-                arguments.extend([
-                    OsString::from("--features"),
-                    OsString::from("no-mark-prompt"),
-                ]);
-            }
         }
-        ShellKind::Zsh => {
+        Startup::Integrated(ShellKind::Zsh) => {
             environment.push((
                 OsString::from("ZDOTDIR"),
                 integration_root.join("zsh").into_os_string(),
@@ -197,11 +249,11 @@ pub fn plan_shell_integration(
             }
         }
     }
-    ShellIntegrationPlan {
-        status: ShellIntegrationStatus::Applied(kind),
+    Ok(ShellIntegrationPlan {
+        status: ShellIntegrationStatus::Unsupported,
         arguments,
         environment,
-    }
+    })
 }
 
 pub fn configured_mode(value: Option<&std::ffi::OsStr>) -> ShellIntegrationMode {
@@ -226,15 +278,18 @@ fn empty_plan(status: ShellIntegrationStatus) -> ShellIntegrationPlan {
     }
 }
 
-fn detect_shell(shell: &Path) -> Option<ShellKind> {
-    match shell.file_name()?.to_str()? {
-        "bash" => Some(ShellKind::Bash),
-        "elvish" => Some(ShellKind::Elvish),
-        "fish" => Some(ShellKind::Fish),
-        "nu" => Some(ShellKind::Nushell),
-        "zsh" => Some(ShellKind::Zsh),
-        _ => None,
-    }
+fn detect_startup(shell: &Path) -> Option<Startup> {
+    Some(match shell.file_name()?.to_str()? {
+        "bash" => Startup::Integrated(ShellKind::Bash),
+        "elvish" => Startup::Integrated(ShellKind::Elvish),
+        "fish" => Startup::Integrated(ShellKind::Fish),
+        "nu" => Startup::Integrated(ShellKind::Nushell),
+        "zsh" => Startup::Integrated(ShellKind::Zsh),
+        // Other POSIX shells, such as ksh, read their own rc file when ENV is unset, and a
+        // replaced ENV would skip it.
+        "sh" | "dash" => Startup::Posix,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -408,26 +463,84 @@ mod tests {
         }));
     }
 
+    /// Disabled integration and shells without integration still run SpaceTerm's startup files,
+    /// which restore PATH, but never turn on prompt marks and reports.
     #[test]
-    fn disabled_unsupported_and_missing_resources_leave_launch_untouched() {
-        let inherited = ShellEnvironment::default();
+    fn disabled_and_integrationless_shells_receive_only_the_startup_files() {
         let fixture = ShellResourcesFixture::new();
         let resources = fixture.path();
+        let integration = resources.join("shell-integration");
+        let inherited = ShellEnvironment {
+            env: Some(OsString::from("/Users/me/.shrc")),
+            ..ShellEnvironment::default()
+        };
+        let plan = |shell: &str, mode| {
+            plan_shell_integration(
+                Path::new(shell),
+                resources,
+                mode,
+                &inherited,
+                &ShellIntegrationPolicy::fixture(),
+            )
+        };
         let cases = [
-            plan_shell_integration(
-                Path::new("/bin/zsh"),
-                resources,
-                ShellIntegrationMode::Disabled,
-                &inherited,
-                &ShellIntegrationPolicy::fixture(),
+            (
+                plan("/bin/zsh", ShellIntegrationMode::Disabled),
+                ShellIntegrationStatus::Disabled,
+                Vec::<&str>::new(),
+                ("ZDOTDIR", integration.join("zsh").into_os_string()),
             ),
-            plan_shell_integration(
-                Path::new("/bin/sh"),
-                resources,
-                ShellIntegrationMode::Automatic,
-                &inherited,
-                &ShellIntegrationPolicy::fixture(),
+            (
+                plan("/bin/bash", ShellIntegrationMode::Disabled),
+                ShellIntegrationStatus::Disabled,
+                vec!["--posix"],
+                (
+                    "ENV",
+                    integration.join("bash/spaceterm.bash").into_os_string(),
+                ),
             ),
+            (
+                plan("/opt/bin/fish", ShellIntegrationMode::Disabled),
+                ShellIntegrationStatus::Disabled,
+                Vec::new(),
+                (
+                    "SPACETERM_SHELL_INTEGRATION_XDG_DIR",
+                    integration.clone().into_os_string(),
+                ),
+            ),
+            (
+                plan("/bin/sh", ShellIntegrationMode::Automatic),
+                ShellIntegrationStatus::Unsupported,
+                Vec::new(),
+                ("ENV", integration.join("sh/spaceterm.sh").into_os_string()),
+            ),
+        ];
+        for (plan, status, arguments, (name, value)) in cases {
+            assert_eq!(plan.status, status);
+            assert_eq!(plan.arguments, arguments);
+            assert!(
+                plan.environment
+                    .contains(&(OsString::from(name), value.clone())),
+                "{name}"
+            );
+            assert!(
+                plan.environment
+                    .iter()
+                    .all(|(name, _)| name != "SPACETERM_SHELL_INTEGRATION_VERSION")
+            );
+        }
+        let sh = plan("/bin/dash", ShellIntegrationMode::Disabled);
+        assert!(
+            sh.environment
+                .contains(&("SPACETERM_SH_ENV".into(), "/Users/me/.shrc".into()))
+        );
+    }
+
+    #[test]
+    fn unknown_shells_and_missing_resources_leave_launch_untouched() {
+        let inherited = ShellEnvironment::default();
+        let fixture = ShellResourcesFixture::new();
+        let cases = [
             plan_shell_integration(
                 Path::new("/bin/zsh"),
                 Path::new("/private/tmp/spaceterm-missing-resources"),
@@ -436,18 +549,24 @@ mod tests {
                 &ShellIntegrationPolicy::fixture(),
             ),
             plan_shell_integration(
-                Path::new("/fixture/unsupported"),
-                resources,
+                Path::new("/bin/sh"),
+                Path::new("/private/tmp/spaceterm-missing-resources"),
+                ShellIntegrationMode::Disabled,
+                &inherited,
+                &ShellIntegrationPolicy::fixture(),
+            ),
+            plan_shell_integration(
+                Path::new("/fixture/ksh"),
+                fixture.path(),
                 ShellIntegrationMode::Automatic,
                 &inherited,
                 &ShellIntegrationPolicy::fixture(),
             ),
         ];
 
-        assert_eq!(cases[0].status, ShellIntegrationStatus::Disabled);
-        assert_eq!(cases[1].status, ShellIntegrationStatus::Unsupported);
-        assert_eq!(cases[2].status, ShellIntegrationStatus::MissingResources);
-        assert_eq!(cases[3].status, ShellIntegrationStatus::Unsupported);
+        assert_eq!(cases[0].status, ShellIntegrationStatus::MissingResources);
+        assert_eq!(cases[1].status, ShellIntegrationStatus::Disabled);
+        assert_eq!(cases[2].status, ShellIntegrationStatus::Unsupported);
         assert!(
             cases
                 .iter()

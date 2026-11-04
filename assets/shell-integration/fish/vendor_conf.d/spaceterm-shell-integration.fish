@@ -5,24 +5,25 @@ if set -q SPACETERM_SHELL_INTEGRATION_XDG_DIR
     set --erase SPACETERM_SHELL_INTEGRATION_XDG_DIR
 end
 
+# The user's configuration runs after this file and may set PATH, so the server's own CLI goes
+# first at the first prompt, with or without the rest of the integration.
+function _spaceterm_cli_path --on-event fish_prompt
+    functions --erase _spaceterm_cli_path
+    set -q SPACETERM_CLI; or return
+    set --local dir (string replace --regex -- '/[^/]*$' '' "$SPACETERM_CLI")
+    set --local rest
+    for entry in $PATH
+        test "$entry" = "$dir"; or set --append rest $entry
+    end
+    set --global --export PATH $dir $rest
+end
+
 if status --is-interactive; and test "$SPACETERM_SHELL_INTEGRATION_VERSION" = 1; and not set -q _SPACETERM_INTEGRATION_LOADED
     set --global _SPACETERM_INTEGRATION_LOADED 1
     # The session's Prompt Owner marks this shell's own prompt markers; only hex is accepted.
     set --global _spaceterm_owner ''
     if string match --quiet --regex -- '^[0-9a-f]+$' "$SPACETERM_PROMPT_OWNER"
         set --global _spaceterm_owner ";spaceterm=$SPACETERM_PROMPT_OWNER"
-    end
-    # The user's configuration runs after this file and may set PATH, so the server's own CLI
-    # goes first at the first prompt.
-    function _spaceterm_cli_path --on-event fish_prompt
-        functions --erase _spaceterm_cli_path
-        set -q SPACETERM_CLI; or return
-        set --local dir (string replace --regex -- '/[^/]*$' '' "$SPACETERM_CLI")
-        set --local rest
-        for entry in $PATH
-            test "$entry" = "$dir"; or set --append rest $entry
-        end
-        set --global --export PATH $dir $rest
     end
     function _spaceterm_prompt --on-event fish_prompt
         printf '\e]7;file://localhost%s\a\e]133;A;redraw=1%s\a' (string escape --style=url -- "$PWD" | string replace --all '%2F' '/') "$_spaceterm_owner"

@@ -17,6 +17,21 @@ if [[ -n "${SPACETERM_BASH_INJECT:-}" ]]; then
     fi
 fi
 
+# The login profile already set PATH, so the server's own CLI goes first now, with or without
+# the rest of the integration. Every other entry keeps its place, empty entries included.
+if [[ -n "${SPACETERM_CLI:-}" && -n "${PATH+set}" ]]; then
+    _spaceterm_cli_dir="${SPACETERM_CLI%/*}"
+    _spaceterm_path="$PATH:"
+    _spaceterm_rest=
+    while [[ -n "$_spaceterm_path" ]]; do
+        _spaceterm_entry="${_spaceterm_path%%:*}"
+        _spaceterm_path="${_spaceterm_path#*:}"
+        [[ "$_spaceterm_entry" == "$_spaceterm_cli_dir" ]] || _spaceterm_rest="$_spaceterm_rest:$_spaceterm_entry"
+    done
+    export PATH="$_spaceterm_cli_dir$_spaceterm_rest"
+    unset _spaceterm_cli_dir _spaceterm_path _spaceterm_rest _spaceterm_entry
+fi
+
 if [[ $- == *i* && "$SPACETERM_SHELL_INTEGRATION_VERSION" == 1 && -z "${_SPACETERM_INTEGRATION_LOADED:-}" ]]; then
     _SPACETERM_INTEGRATION_LOADED=1
     _spaceterm_command_active=0
@@ -60,16 +75,6 @@ if [[ $- == *i* && "$SPACETERM_SHELL_INTEGRATION_VERSION" == 1 && -z "${_SPACETE
         printf '\e]7;file://localhost%s\a\e]133;A;redraw=last%s\a' "$(_spaceterm_encode "$PWD")" "$_spaceterm_owner"
         _spaceterm_command_active=1
     }
-    # The login profile already set PATH, so the server's own CLI goes first now.
-    if [[ -n "${SPACETERM_CLI:-}" ]]; then
-        _spaceterm_cli_dir="${SPACETERM_CLI%/*}"
-        PATH=":$PATH:"
-        PATH="${PATH//:"$_spaceterm_cli_dir":/:}"
-        PATH="${PATH#:}"
-        PATH="${PATH%:}"
-        export PATH="$_spaceterm_cli_dir${PATH:+:$PATH}"
-        unset _spaceterm_cli_dir
-    fi
     PROMPT_COMMAND="_spaceterm_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
     PS0='\[\e]133;C'"$_spaceterm_owner"'\a\]'
     PS1="${PS1}\[\e]133;B\a\]"

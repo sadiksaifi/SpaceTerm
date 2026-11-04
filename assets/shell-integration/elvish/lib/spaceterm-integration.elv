@@ -1,4 +1,3 @@
-if (eq $E:SPACETERM_SHELL_INTEGRATION_VERSION 1) {
 use re
 use str
 
@@ -6,6 +5,20 @@ if (has-env SPACETERM_SHELL_INTEGRATION_XDG_DIR) {
   set-env XDG_DATA_DIRS (str:replace $E:SPACETERM_SHELL_INTEGRATION_XDG_DIR":" "" $E:XDG_DATA_DIRS)
   unset-env SPACETERM_SHELL_INTEGRATION_XDG_DIR
 }
+
+# The user's configuration may set PATH after this module loads, so the server's own CLI goes
+# first at the first prompt, with or without the rest of the integration.
+var spaceterm-cli-path-pending = (has-env SPACETERM_CLI)
+fn spaceterm-cli-path {
+  if $spaceterm-cli-path-pending {
+    set spaceterm-cli-path-pending = $false
+    var dir = (str:trim-right (re:replace '[^/]*$' '' $E:SPACETERM_CLI) /)
+    set paths = [$dir (each {|entry| if (not-eq $entry $dir) { put $entry } } $paths)]
+  }
+}
+set edit:before-readline = (conj $edit:before-readline $spaceterm-cli-path~)
+
+if (eq $E:SPACETERM_SHELL_INTEGRATION_VERSION 1) {
 
 fn spaceterm-encode {|value|
   for byte [(str:to-utf8-bytes $value)] {
@@ -23,15 +36,7 @@ if (and (has-env SPACETERM_PROMPT_OWNER) (re:match '^[0-9a-f]+$' $E:SPACETERM_PR
   set spaceterm-owner = ';spaceterm='$E:SPACETERM_PROMPT_OWNER
 }
 
-# The user's configuration may set PATH after this module loads, so the server's own CLI goes
-# first at the first prompt.
-var spaceterm-cli-path = (has-env SPACETERM_CLI)
 fn spaceterm-prompt {
-  if $spaceterm-cli-path {
-    set spaceterm-cli-path = $false
-    var dir = (str:trim-right (re:replace '[^/]*$' '' $E:SPACETERM_CLI) /)
-    set paths = [$dir (each {|entry| if (not-eq $entry $dir) { put $entry } } $paths)]
-  }
   printf "\e]7;file://localhost%s\a\e]133;A;redraw=1%s\a" (spaceterm-encode $pwd) $spaceterm-owner
 }
 fn spaceterm-command {|_| printf "\e]133;B\a\e]133;C%s\a" $spaceterm-owner }

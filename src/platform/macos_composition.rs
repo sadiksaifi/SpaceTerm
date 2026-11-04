@@ -323,7 +323,7 @@ mod tests {
                 "ENV",
                 Some("/captured/env"),
                 "SPACETERM_BASH_ENV",
-                None,
+                Some("/captured/env"),
                 false,
             ),
             (
@@ -384,7 +384,8 @@ mod tests {
                     "SPACETERM_SHELL_INTEGRATION",
                     "XDG_DATA_DIRS",
                     "ZDOTDIR",
-                    "ENV"
+                    "ENV",
+                    "PATH"
                 ]
             );
             // Planning repeatedly uses the captured values after the reader has been dropped.
@@ -414,7 +415,9 @@ mod tests {
                     }
                 });
                 assert_eq!(lookup(expected_key), expected.as_deref(), "{shell}");
-                if !integrated {
+                // macOS's Bash 3.2 cannot run SpaceTerm's startup files, so it starts as is.
+                // Disabled integration still runs them for PATH.
+                if shell == "/bin/bash" {
                     assert_eq!(launch.arguments(), [OsStr::new("-l")]);
                 }
             }

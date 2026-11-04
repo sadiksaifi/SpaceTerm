@@ -152,7 +152,8 @@ fn account_shell() -> Option<PathBuf> {
     }
 }
 
-/// macOS ships Bash 3.2 as `/bin/bash`, which lacks the hooks the integration script needs.
+/// macOS ships Bash 3.2 as `/bin/bash`. In POSIX mode it reads its login profile but not `ENV`,
+/// so SpaceTerm's startup file never runs.
 #[cfg(target_os = "macos")]
 fn shell_integration_supported(shell: &Path) -> bool {
     shell != Path::new("/bin/bash")
