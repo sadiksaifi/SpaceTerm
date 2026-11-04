@@ -591,10 +591,10 @@ impl ApplicationUpdates {
         self.history.last_check
     }
 
-    /// Whether this build carries release notes the person has not opened since updating to it.
+    /// Whether this build came by an update whose release notes the person has not opened.
     /// Observers of [`UpdateService`] hear when this changes.
     pub(crate) fn release_notes_unread(&self) -> bool {
-        release_notes::embedded().is_some() && self.history.notes_unread(env!("SPACETERM_VERSION"))
+        self.history.notes_unread(env!("SPACETERM_VERSION"))
     }
 
     /// Records that the person opened this build's release notes.

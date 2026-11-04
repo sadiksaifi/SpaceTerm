@@ -1,5 +1,6 @@
 //! The What's new sheet: this build's release notes, embedded at build time, with a link to the
-//! release on GitHub. The notes count as read once the sheet opens.
+//! release on GitHub. The notes count as read once the sheet opens, not while it waits behind
+//! another modal.
 //!
 //! The title-bar update control and the menu-bar menu offer the sheet while
 //! [`release_notes_unread`] holds, and open it with [`open_whats_new`]. Both read the
@@ -12,7 +13,7 @@ use gpui::{App, Context, Global, SharedString, Window, accesskit, actions, div};
 use spaceterm_ui::{
     Dialog, DialogActionRequest, DialogCloseDecision, DialogInitialFocus, DialogOutcome,
     DialogPendingCompletion, DialogSize, ModalAction, ModalActionEmphasis, ModalActionRole,
-    ModalId,
+    ModalId, ModalLifecycleEvent,
 };
 
 use super::{front_workspace_window, service};
@@ -47,7 +48,8 @@ pub(super) fn init(cx: &mut App) {
     reason = "the title-bar update control and the menu-bar menu offer What's new from this"
 )]
 pub(crate) fn release_notes_unread(cx: &App) -> bool {
-    service(cx).is_some_and(|updates| updates.read(cx).release_notes_unread())
+    release_notes::embedded().is_some()
+        && service(cx).is_some_and(|updates| updates.read(cx).release_notes_unread())
 }
 
 /// The menu command that opens the sheet, such as "What's New in SpaceTerm 0.9", or nothing in a
@@ -60,8 +62,8 @@ pub(crate) fn whats_new_menu_title() -> Option<String> {
     release_notes::embedded().map(ReleaseNotes::menu_title)
 }
 
-/// Opens the What's new sheet in the front Workspace window and marks the notes read. A build
-/// without release notes, or without a Workspace window, shows nothing.
+/// Opens the What's new sheet in the front Workspace window. The notes count as read once it
+/// opens. A build without release notes, or without a Workspace window, shows nothing.
 pub(crate) fn open_whats_new(cx: &mut App) {
     let Some(notes) = release_notes::embedded() else {
         return;
@@ -76,15 +78,7 @@ pub(crate) fn open_whats_new(cx: &mut App) {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     let this_year = release_notes::year_at(this_year);
-    let presented = handle
-        .update(cx, |_, window, cx| present(notes, this_year, window, cx))
-        .unwrap_or(false);
-    if !presented {
-        return;
-    }
-    if let Some(updates) = service(cx) {
-        updates.update(cx, |updates, cx| updates.read_release_notes(cx));
-    }
+    let _ = handle.update(cx, |_, window, cx| present(notes, this_year, window, cx));
 }
 
 fn sheet(
@@ -122,7 +116,8 @@ fn sheet(
     }
 }
 
-/// Presents the sheet for `notes` in this window. Returns whether it opened.
+/// Presents the sheet for `notes` in this window, or queues it behind the modal already there.
+/// The notes count as read once the sheet opens. Returns whether the window took the sheet.
 fn present<T: 'static>(
     notes: &ReleaseNotes,
     this_year: i32,
@@ -148,8 +143,16 @@ fn present<T: 'static>(
     let on_result = |_: DialogOutcome<SheetAction>, cx: &mut App| {
         cx.remove_global::<OpenSheet>();
     };
+    // A queued sheet can be discarded unseen, so only an open one marks the notes read.
+    let on_lifecycle = |event: &ModalLifecycleEvent, cx: &mut App| {
+        if matches!(event, ModalLifecycleEvent::Opened(_))
+            && let Some(updates) = service(cx)
+        {
+            updates.update(cx, |updates, cx| updates.read_release_notes(cx));
+        }
+    };
     let presented = sheet(notes, this_year, body)
-        .present(window, cx, on_action, on_result)
+        .present_with_lifecycle(window, cx, on_action, on_result, on_lifecycle)
         .is_ok();
     if presented {
         cx.set_global(OpenSheet);
@@ -283,5 +286,43 @@ mod tests {
             !cx.update(|_, cx| cx.has_global::<OpenSheet>()),
             "a closed sheet can open again"
         );
+    }
+
+    #[gpui::test]
+    fn notes_count_as_read_once_the_sheet_opens_not_while_it_waits(cx: &mut gpui::TestAppContext) {
+        use crate::updates::policy::UpdateHistory;
+        use crate::updates::testing::RecordingAdapter;
+
+        let mut adapter = RecordingAdapter::available();
+        let mut history = UpdateHistory::default();
+        history.launched("0.0.1");
+        adapter.history = history;
+        let adapter = std::rc::Rc::new(adapter);
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(adapter.clone(), cx));
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
+        let unread = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| updates.read(cx).release_notes_unread())
+        };
+        let notes = ReleaseNotes::parse("0.9.0", "2026-11-03", NOTES).unwrap();
+        let (host, cx) = cx.add_window_view(|_, _| Host);
+        assert!(unread(cx), "this launch came by an update");
+
+        cx.update(|window, cx| {
+            host.update(cx, |_, cx| {
+                super::super::present_up_to_date(window, cx);
+                assert!(present(&notes, 2026, window, cx));
+            })
+        });
+        cx.run_until_parked();
+        let tree = A11yTree::read(cx);
+        assert!(tree.find_text("Released 3 November").is_none());
+        assert!(unread(cx), "a sheet waiting behind another stays unread");
+
+        a11y_testing::perform(cx, tree.node("OK"), accesskit::Action::Click);
+        cx.run_until_parked();
+        A11yTree::read(cx).text("Released 3 November");
+        assert!(!unread(cx), "an open sheet is read");
     }
 }
