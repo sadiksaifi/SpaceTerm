@@ -45,7 +45,6 @@ impl DirectRouteRows {
             cx.spawn(async move |settings, cx| {
                 while changes.recv().await.is_ok() {
                     let followed = settings.update(cx, |settings, cx| {
-                        settings.follow_remote_routes();
                         settings.reconcile_machines(cx);
                         settings.sync_machine_location(cx);
                         cx.notify();

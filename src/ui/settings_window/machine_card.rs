@@ -333,11 +333,6 @@ impl SettingsWindow {
                     Some((_, status, _)) => direct_state(status),
                     None => CoreState::new("Not connected", "Not connected", Tone::Idle),
                 };
-                // A server SpaceTerm stopped reads as stopped rather than as a connection that
-                // keeps retrying, until someone starts it on its own computer.
-                if !state.live && self.remote_stopped(route) {
-                    state = CoreState::new("Stopped", "Stopped", Tone::Idle);
-                }
                 state.operation = self.remote_operation(route);
                 state.checking |= self.remote_reading(route);
                 state
@@ -421,12 +416,6 @@ impl SettingsWindow {
             return None;
         }
         let name = self.machine_name(choice);
-        // The stop SpaceTerm made explains itself, including where to start the server again.
-        if let MachineChoice::Direct(route) = choice
-            && self.remote_stopped(route)
-        {
-            return None;
-        }
         if self.core_unreachable(choice) {
             let observed = machine_selection::facts(&choice.key(), cx)
                 .map(|facts| facts.observed_at)

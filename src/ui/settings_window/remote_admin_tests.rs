@@ -1,4 +1,4 @@
-//! Paired server Status, Stop, Restart and Update from the Servers card.
+//! Paired machine Status, Restart and Update from the Machines card.
 use gpui::{TestAppContext, VisualTestContext};
 use spaceterm_core::service::lane::{
     LaneActivation, LaneEffects, LaneNetwork, LaneOperationState, LaneReceipt,
@@ -112,21 +112,6 @@ fn status(runtime: LaneVersion) -> LaneStatus {
 }
 
 #[test]
-fn a_stop_confirmation_says_every_client_loses_access_and_where_start_happens() {
-    let confirmation = confirmation("penguin", &preview(LaneAction::Stop, effects(2)));
-
-    assert_eq!(confirmation.title, "Stop SpaceTerm Core");
-    assert_eq!(confirmation.message, "Stop SpaceTerm Core on penguin?");
-    assert_eq!(
-        confirmation.detail,
-        "Its 2 Terminal Sessions end for every client. Every client connected to it loses \
-         access, and Workspaces are kept. It stays stopped until someone starts it on its own \
-         computer."
-    );
-    assert_eq!(confirmation.confirm, "Stop SpaceTerm Core");
-}
-
-#[test]
 fn a_restart_confirmation_names_the_exact_sessions_that_end() {
     let confirmation = confirmation("penguin", &preview(LaneAction::Restart, effects(1)));
 
@@ -179,22 +164,14 @@ fn confirmation_detail(to_major: Option<u16>) -> String {
 
 #[test]
 fn an_outcome_the_client_cannot_confirm_says_so() {
-    let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Shutdown));
-    assert_eq!(
-        stop,
-        "penguin closed its connection while stopping, so SpaceTerm can\u{2019}t confirm the \
-         stop finished. Check on its own computer with \u{201C}spaceterm status\u{201D}, \
-         and start it again there."
+    let (closed, tone) = ended_message(
+        "penguin",
+        &Ended::Changed(Act::Restart, Settlement::Shutdown),
     );
-    assert_eq!(tone, CaptionTone::Warning);
-
-    // A Stop that ran out of time with the lane open proves no shutdown, so it reads as any
-    // other uncertain change.
-    let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Uncertain));
     assert_eq!(
-        stop,
-        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its stop. Check Now asks \
-         penguin again."
+        closed,
+        "penguin closed its connection before it confirmed its restart, so SpaceTerm \
+         can\u{2019}t confirm it finished."
     );
     assert_eq!(tone, CaptionTone::Warning);
 
@@ -213,11 +190,6 @@ fn an_outcome_the_client_cannot_confirm_says_so() {
 #[test]
 fn each_settled_change_reads_its_own_way() {
     let message = |ended| ended_message("penguin", &ended).0;
-    assert_eq!(
-        message(Ended::Changed(Act::Stop, Settlement::Done)),
-        "penguin stopped, and its Terminal Sessions ended for every client. Start it again on \
-         its own computer."
-    );
     assert_eq!(
         message(Ended::Changed(Act::Restart, Settlement::Done)),
         "penguin restarted."
