@@ -20,6 +20,7 @@ use crate::direct_connections::{
 };
 use crate::machine_connection::{CoreError, MachineConnection};
 use crate::updates::machines::{ActionFailure, MachineUpdatesError};
+use crate::updates::push::{self, EmbeddedCore};
 
 /// How long `WaitFacts` may take beyond the Core's own limit before the lane gives up.
 const WAIT_MARGIN: Duration = Duration::from_secs(10);
@@ -275,15 +276,18 @@ impl MachineLane for CoreLane {
     }
 
     fn check(&self) -> Result<(), ActionFailure> {
-        let mut session = self.open()?;
-        admin::check(&mut session).map(drop).map_err(lane_failure)
+        self.facts_call(&LaneRequest::Check, Instant::now() + admin::STAGE_LIMIT)
+            .map(drop)
     }
 
-    fn install(&self) -> Result<(), ActionFailure> {
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure> {
         let mut session = self.open()?;
-        admin::stage_fetch(&mut session)
-            .map(drop)
-            .map_err(lane_failure)
+        match build {
+            Some(build) => push::push(&mut session, build, &mut |_, _| {}).map(drop),
+            None => admin::install_from_feed(&mut session)
+                .map(drop)
+                .map_err(lane_failure),
+        }
     }
 
     fn change(&self, change: LaneChange, sessions: Option<u32>) -> Result<(), ActionFailure> {

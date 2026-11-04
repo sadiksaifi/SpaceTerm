@@ -109,9 +109,13 @@ pub(crate) fn composed(
     if let Some(preview) = preview::from_environment() {
         return std::rc::Rc::new(preview);
     }
-    std::rc::Rc::new(live::LiveMachines::new(std::sync::Arc::new(
-        live::desktop::DesktopSources::new(identity, direct.clone()),
-    )))
+    std::rc::Rc::new(live::LiveMachines::new(
+        std::sync::Arc::new(live::desktop::DesktopSources::new(identity, direct.clone())),
+        super::push::EmbeddedCores::new(
+            crate::platform::launch_host::core_artifact_catalog(),
+            identity,
+        ),
+    ))
 }
 
 pub(crate) trait MachineUpdatesAdapter {

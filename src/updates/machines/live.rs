@@ -12,8 +12,9 @@
 //! update facts and reads as [`MachineLink::Unreported`].
 //!
 //! Each action runs on its own thread and ends with one [`MachineUpdatesEvent::Finished`]:
-//! Install asks the Core to fetch its newest release (`StageFetch`), Check Again asks it to
-//! check (`Check`), Restart and Stop preview and execute the change over the lane, and Start runs
+//! Install pushes the offered embedded Core build, or asks the Core to fetch its newest release
+//! (`StageFetch`) when none is offered. Check Again asks it to check (`Check`), Restart and Stop
+//! preview and execute the change over the lane, and Start runs
 //! through the local service manager, because a stopped Core accepts no connection.
 
 pub(crate) mod desktop;
@@ -29,6 +30,8 @@ use gpui::SharedString;
 use spaceterm_core::protocol::capability::{Capabilities, Unavailable};
 use spaceterm_core::protocol::version::{self as protocol, Incompatible};
 use spaceterm_core::update::facts::{Operation, UpdateFacts, Version};
+
+use crate::updates::push::{EmbeddedCore, EmbeddedCores};
 
 use super::{
     ActionFailure, MachineAction, MachineId, MachineLink, MachineUpdate, MachineUpdatesAdapter,
@@ -69,8 +72,8 @@ pub(crate) trait MachineLane: Send + Sync {
     fn wait_facts(&self, boot: &str, revision: u64) -> Result<Observed, ActionFailure>;
     /// `Check`.
     fn check(&self) -> Result<(), ActionFailure>;
-    /// `StageFetch`: the Core fetches, verifies and installs its newest release.
-    fn install(&self) -> Result<(), ActionFailure>;
+    /// Pushes `build` when supplied, otherwise fetches from the Core's feed.
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure>;
     /// Previews `change`, executes it and follows it until it settles. `sessions` is the
     /// session count the person confirmed; a preview that ends a different number fails with
     /// `Changed` and executes nothing.
@@ -126,18 +129,24 @@ pub(crate) trait Sources: Send + Sync {
 /// followers.
 pub(crate) struct LiveMachines {
     sources: Arc<dyn Sources>,
+    embedded: Arc<EmbeddedCores>,
     restart_limit: Duration,
     shared: OnceLock<Arc<Shared>>,
 }
 
 impl LiveMachines {
-    pub(crate) fn new(sources: Arc<dyn Sources>) -> Self {
-        Self::with_restart_limit(sources, RESTART_LIMIT)
+    pub(crate) fn new(sources: Arc<dyn Sources>, embedded: EmbeddedCores) -> Self {
+        Self::with_restart_limit(sources, Arc::new(embedded), RESTART_LIMIT)
     }
 
-    pub(crate) fn with_restart_limit(sources: Arc<dyn Sources>, restart_limit: Duration) -> Self {
+    pub(crate) fn with_restart_limit(
+        sources: Arc<dyn Sources>,
+        embedded: Arc<EmbeddedCores>,
+        restart_limit: Duration,
+    ) -> Self {
         Self {
             sources,
+            embedded,
             restart_limit,
             shared: OnceLock::new(),
         }
@@ -151,6 +160,7 @@ impl MachineUpdatesAdapter for LiveMachines {
     ) -> Result<(), MachineUpdatesError> {
         let shared = Arc::new(Shared {
             events,
+            embedded: Arc::clone(&self.embedded),
             restart_limit: self.restart_limit,
             state: Mutex::new(State::default()),
             coordinator: Arc::new(Wake::default()),
@@ -224,6 +234,7 @@ struct Target {
     wake: Arc<Wake>,
     /// The sessions the facts the person saw reported.
     sessions: Option<u32>,
+    push: Option<Arc<EmbeddedCore>>,
 }
 
 fn act(
@@ -245,7 +256,7 @@ fn act(
         return Err(ActionFailure::Unreachable);
     };
     match action {
-        MachineAction::Install => lane.install(),
+        MachineAction::Install => lane.install(target.push.as_deref()),
         MachineAction::CheckAgain => lane.check(),
         MachineAction::Restart => {
             shared.expect_restart(id);
@@ -324,6 +335,7 @@ impl Wake {
 }
 
 struct Shared {
+    embedded: Arc<EmbeddedCores>,
     events: async_channel::Sender<MachineUpdatesEvent>,
     restart_limit: Duration,
     state: Mutex<State>,
@@ -382,6 +394,10 @@ impl Shared {
             known: entry.known.clone(),
             wake: Arc::clone(&entry.wake),
             sessions: entry.update.facts.as_ref().map(|facts| facts.sessions),
+            push: entry.update.facts.as_ref().and_then(|facts| {
+                entry.update.push.as_ref()?;
+                self.embedded.build(facts.platform)
+            }),
         })
     }
 
@@ -437,7 +453,6 @@ impl Shared {
                         link: MachineLink::Connected,
                         facts: None,
                         capabilities: unconnected(),
-                        // This desktop sends no embedded Core build yet.
                         push: None,
                     },
                     known: machine.clone(),
@@ -485,7 +500,9 @@ impl Shared {
     /// The Core answered with `observed` facts.
     fn observed(&self, id: MachineId, observed: &Observed, work: Result<(), Incompatible>) {
         let limit = self.restart_limit;
+        let push = self.embedded.offer(&observed.facts);
         self.publish(id, |entry| {
+            entry.update.push = push;
             entry.update.link = match work {
                 Ok(()) => MachineLink::Connected,
                 Err(incompatible) => MachineLink::Incompatible(incompatible),
@@ -522,6 +539,7 @@ impl Shared {
             entry.update.link = MachineLink::Unreported;
             entry.update.capabilities = reached(work);
             entry.update.facts = None;
+            entry.update.push = None;
             entry.restart = None;
         });
     }
