@@ -402,6 +402,9 @@ fn unavailable_detail(kind: UnavailableKind, n: &str) -> String {
         UnavailableKind::PortInUse => format!(
             "Another app on {n} is using that UDP port, so choose another port and try again."
         ),
+        UnavailableKind::LoginItemOff => format!(
+            "SpaceTerm Core is off in Login Items on {n}. Turn it on there, then try again."
+        ),
     }
 }
 

@@ -43,6 +43,9 @@ pub enum SetupRefusal {
 /// The exit status of an SSH setup enrollment step when another program holds the Network
 /// Access port. Nothing changed on the machine.
 pub const PORT_IN_USE: u8 = 78;
+/// The exit status of an SSH setup install or start step when SpaceTerm Core is off in Login
+/// Items on that Mac. The service started nothing.
+pub const LOGIN_ITEM_OFF: u8 = 79;
 
 /// The oldest macOS release SpaceTerm Core runs on, as (major, minor).
 pub const MINIMUM_MACOS: (u16, u16) = (26, 0);
