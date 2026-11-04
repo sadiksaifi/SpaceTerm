@@ -918,7 +918,7 @@ pub fn from_core_error(error: CoreError) -> Failure {
         CoreError::IncompatibleState => Code::IncompatibleState,
         CoreError::UnsafeStorage => Code::UnsafeStorage,
         CoreError::AuthenticationRefused => Code::AuthenticationRefused,
-        CoreError::IncompatibleProtocol => Code::IncompatibleProtocol,
+        CoreError::IncompatibleProtocol(_) => Code::IncompatibleProtocol,
         CoreError::CandidateChanged => Code::CandidateChanged,
         CoreError::Protocol => Code::ProtocolError,
         CoreError::StartupFailed => Code::StartupFailed,
@@ -2208,7 +2208,13 @@ mod tests {
             (E::IncompatibleState, "incompatible_state", 5),
             (E::UnsafeStorage, "unsafe_storage", 5),
             (E::AuthenticationRefused, "authentication_refused", 3),
-            (E::IncompatibleProtocol, "incompatible_protocol", 5),
+            (
+                E::IncompatibleProtocol(
+                    spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+                ),
+                "incompatible_protocol",
+                5,
+            ),
             (E::CandidateChanged, "candidate_changed", 5),
             (E::Protocol, "protocol_error", 5),
             (E::StartupFailed, "startup_failed", 1),

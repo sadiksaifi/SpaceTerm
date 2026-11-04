@@ -126,6 +126,8 @@ pub struct MachineConnection {
 struct SharedLink {
     link: Mutex<Option<CoreLink>>,
     subscribers: Mutex<Vec<Weak<dyn LinkSink>>>,
+    /// The latest admission on each lane, which the handle's capabilities follow.
+    admissions: Arc<Mutex<protocol::capability::Admissions>>,
     /// The generation of the latest link connected, or 0 before the first.
     generation: std::sync::atomic::AtomicU64,
 }
@@ -156,6 +158,11 @@ impl LinkSink for Fanout {
             LinkEvent::Health(health) => {
                 for sink in subscribers {
                     sink.deliver(LinkEvent::Health(health));
+                }
+            }
+            LinkEvent::UpdateFacts(facts) => {
+                for sink in subscribers {
+                    sink.deliver(LinkEvent::UpdateFacts(Arc::clone(&facts)));
                 }
             }
         }
@@ -527,11 +534,18 @@ impl MachineConnection {
                 return Err(CoreError::AuthenticationRefused);
             }
             // `with_direct` fixed the pin's build to this handle's identity.
-            let carrier = connection.admit(protocol::Caller {
+            let admitted = connection.admit(protocol::Caller {
                 client: &direct.paired.client,
                 name: &self.client_name(),
                 agent: self.agent(),
-            })?;
+            });
+            self.record_work(
+                &admitted
+                    .as_ref()
+                    .map(|(_, negotiated)| negotiated.clone())
+                    .map_err(Clone::clone),
+            );
+            let (carrier, _) = admitted?;
             return Ok((
                 carrier,
                 self.scope_for(
@@ -544,7 +558,7 @@ impl MachineConnection {
         let mut stream = host::connect(&self.paths)?;
         let base = self.base_client_id()?;
         let core = self.machine_id()?;
-        protocol::admit_client(
+        let admitted = protocol::admit_client(
             &mut stream,
             protocol::Caller {
                 client: &base,
@@ -553,13 +567,41 @@ impl MachineConnection {
             },
             &core,
             &self.identity,
-        )?;
+        );
+        self.record_work(&admitted);
+        admitted?;
         let carrier =
             crate::connection::unix::UnixCarrier::new(stream).map_err(|_| CoreError::Protocol)?;
         Ok((
             Box::new(carrier),
             self.scope_for(self.effective_client(&base), core),
         ))
+    }
+    fn record_work(&self, admitted: &Result<protocol::Negotiated, protocol::Refused>) {
+        self.admissions().record(protocol::Lane::Work, admitted);
+    }
+    fn admissions(&self) -> std::sync::MutexGuard<'_, protocol::capability::Admissions> {
+        self.shared
+            .admissions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+    /// What this Machine's connections can do now, from the versions their latest admissions
+    /// negotiated: the shared live work connection, and the latest service-lane admission of
+    /// this handle and its clones.
+    pub fn capabilities(&self) -> protocol::capability::Capabilities {
+        let live = self.live_link().is_some();
+        self.admissions().capabilities(live)
+    }
+    /// The versions the Core offered at the latest admission on either lane, also when it
+    /// refused this client. None before the first Offer.
+    pub fn core_versions(&self) -> Option<protocol::CoreVersions> {
+        self.admissions().core().cloned()
+    }
+    /// The newest update facts the shared live connection received. None without a live
+    /// connection or before its first facts. [`LinkEvent::UpdateFacts`] reports each change.
+    pub fn update_facts(&self) -> Option<Arc<crate::update::facts::UpdateFacts>> {
+        self.live_link().and_then(|link| link.update_facts())
     }
     /// Opens a new connection of its own, separate from the shared one. `events` receives its
     /// pushed inventory and health. Dropping every handle of the link closes it.
@@ -698,8 +740,9 @@ impl MachineConnection {
             self.machine_id()?;
         }
         self.link_with(cancelled)?;
+        let capabilities = self.admissions().capabilities(true);
         Ok(AuthenticatedStatus {
-            protocol_major: protocol::MAJOR,
+            work: capabilities.work().map_err(|_| CoreError::Protocol)?,
         })
     }
     /// Explicit first setup retains a nonsecret server identity. It never changes Stop intent.
@@ -816,6 +859,7 @@ impl MachineConnection {
                 direct.paired.clone(),
                 self.client_name(),
                 self.agent().cloned(),
+                Arc::clone(&self.shared.admissions),
             ));
         }
         Ok(crate::service::lane::client::Lane::local(
@@ -824,6 +868,7 @@ impl MachineConnection {
             self.base_client_id()?,
             self.client_name(),
             self.agent().cloned(),
+            Arc::clone(&self.shared.admissions),
         ))
     }
     /// The service operations this handle's Client Identity admitted over its lane and has not
@@ -973,9 +1018,14 @@ mod tests {
         let identity = paths.identity.clone();
         let peer = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            protocol::admit_core(&mut stream, &machine_id, &identity)
-                .unwrap()
-                .work()
+            protocol::admit_core(
+                &mut stream,
+                &machine_id,
+                &identity,
+                &protocol::CoreVersions::for_tests(),
+            )
+            .unwrap()
+            .work()
         });
         let link = handle.connect(Arc::new(|_: LinkEvent| {})).unwrap();
         let admitted = peer.join().unwrap();
@@ -1020,9 +1070,14 @@ mod tests {
         let pin = core.machine_id().unwrap();
         let peer = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            protocol::admit_core(&mut stream, &pin, &paths.identity)
-                .unwrap()
-                .work();
+            protocol::admit_core(
+                &mut stream,
+                &pin,
+                &paths.identity,
+                &protocol::CoreVersions::for_tests(),
+            )
+            .unwrap()
+            .work();
             stream.set_nonblocking(false).unwrap();
             let mut received = Vec::new();
             std::io::Read::read_to_end(&mut stream, &mut received).unwrap();
@@ -1035,7 +1090,7 @@ mod tests {
         assert_eq!(
             core.refresh(),
             Ok(AuthenticatedStatus {
-                protocol_major: protocol::MAJOR,
+                work: protocol::version::WORK,
             })
         );
         assert_eq!(
@@ -1080,10 +1135,14 @@ mod tests {
                     sockets.send(stream.try_clone().unwrap()).unwrap();
                     let identity = identity.clone();
                     std::thread::spawn(move || {
-                        let protocol::Admitted { client, name, .. } =
-                            protocol::admit_core(&mut stream, &pin, &identity)
-                                .unwrap()
-                                .work();
+                        let protocol::Admitted { client, name, .. } = protocol::admit_core(
+                            &mut stream,
+                            &pin,
+                            &identity,
+                            &protocol::CoreVersions::for_tests(),
+                        )
+                        .unwrap()
+                        .work();
                         let (sync, _) = crate::connection::sync::SyncWorker::spawn().unwrap();
                         let environment = host::Environment::for_tests(
                             crate::direct::tests::service(crate::direct::tests::Refusing),
@@ -1093,12 +1152,15 @@ mod tests {
                         let (waker, wake) = crate::connection::io::Waker::new().unwrap();
                         host::serve_admitted(
                             Box::new(crate::connection::unix::UnixCarrier::new(stream).unwrap()),
-                            crate::connection::service::Peer {
-                                client,
-                                connection: protocol::random().unwrap(),
-                                pairing: None,
+                            host::Served {
+                                peer: crate::connection::service::Peer {
+                                    client,
+                                    connection: protocol::random().unwrap(),
+                                    pairing: None,
+                                },
+                                name,
+                                work: protocol::version::WORK,
                             },
-                            name,
                             crate::connection::outbox::Outbox::new(wake),
                             waker,
                             &environment,

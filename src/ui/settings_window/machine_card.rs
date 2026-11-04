@@ -147,7 +147,7 @@ fn local_observed(
     let connected = matches!(connection, LocalCoreStatus::Connected(_));
     if matches!(
         connection,
-        LocalCoreStatus::Failed(CoreError::IncompatibleProtocol)
+        LocalCoreStatus::Failed(CoreError::IncompatibleProtocol(_))
     ) {
         return CoreState::new("Needs update", "Needs update", Tone::Problem);
     }
@@ -500,7 +500,7 @@ impl SettingsWindow {
                         | CoreError::NotRunning
                         | CoreError::StartupFailed
                         | CoreError::AuthorizationRequired
-                        | CoreError::IncompatibleProtocol
+                        | CoreError::IncompatibleProtocol(_)
                         | CoreError::ActivationUnresolved
                         | CoreError::AuthenticationRefused
                 );

@@ -1,7 +1,7 @@
 //! SpaceTerm Protocol messages, framing and bounds.
 //!
 //! Admission keeps its Hello/Offer preamble in `admission`, which every major reads the same way
-//! so an incompatible peer receives `IncompatibleProtocol`. After admission, both peers exchange
+//! so an incompatible peer learns which side is older ([`version::Incompatible`]). After admission, both peers exchange
 //! postcard messages in `len:u32be | kind:u8 | body` frames ([`frame`]). Nothing after admission
 //! is JSON.
 mod admission;
@@ -17,7 +17,7 @@ mod tests;
 pub mod version;
 
 pub(crate) use admission::*;
-pub use admission::{AgentName, InvalidAgentName, Lane};
+pub use admission::{AgentName, CoreVersions, InvalidAgentName, Lane, Negotiated};
 pub use frame::{DecodeError, Kind, RawFrame, WireMessage};
 pub use major::MAJOR;
 pub use message::{

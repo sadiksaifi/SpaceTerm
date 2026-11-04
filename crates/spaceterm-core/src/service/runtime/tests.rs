@@ -253,7 +253,7 @@ fn signed_candidate_discovery_refuses_another_protocol_major() {
                 &pin,
                 Some(crate::protocol::MAJOR + 1),
             );
-            assert!(matches!(result, Err(CoreError::IncompatibleProtocol)));
+            assert!(matches!(result, Err(CoreError::IncompatibleProtocol(_))));
             let service = Service::for_identity("spaceterm-development").unwrap();
             let pin = digest(&std::fs::read(archive).unwrap());
             let metadata = service
@@ -1002,7 +1002,9 @@ fn native_update_inspection_accepts_a_signed_new_major_without_weakening_pins() 
             );
             assert_eq!(
                 service.inspect_candidate(archive, signature, &pin, crate::protocol::MAJOR,),
-                Err(CoreError::IncompatibleProtocol)
+                Err(CoreError::IncompatibleProtocol(
+                    crate::protocol::version::Incompatible::CallerTooOld
+                ))
             );
             assert_eq!(
                 service.inspect_update_candidate(archive, signature, &"0".repeat(64)),

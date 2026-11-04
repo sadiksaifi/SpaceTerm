@@ -300,7 +300,7 @@ const BUSY_DETAIL: &str =
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: CoreError) -> &'static str {
     match error {
-        CoreError::IncompatibleState | CoreError::IncompatibleProtocol => {
+        CoreError::IncompatibleState | CoreError::IncompatibleProtocol(_) => {
             "Incompatible SpaceTerm Core"
         }
         CoreError::ActivationUnresolved => "SpaceTerm Core Update Unfinished",
@@ -335,7 +335,7 @@ fn failure_detail(error: CoreError) -> SharedString {
 const fn ends_opening(error: CoreError) -> bool {
     matches!(
         error,
-        CoreError::IncompatibleProtocol
+        CoreError::IncompatibleProtocol(_)
             | CoreError::ActivationUnresolved
             | CoreError::IncompatibleState
             | CoreError::StorageUnavailable
@@ -346,7 +346,7 @@ const fn ends_opening(error: CoreError) -> bool {
 
 /// Whether this client refused the server itself, which keeps running for its other clients.
 const fn incompatible(error: CoreError) -> bool {
-    matches!(error, CoreError::IncompatibleProtocol)
+    matches!(error, CoreError::IncompatibleProtocol(_))
 }
 
 /// What launch presents for a failure. A refused server offers the update journey only when a

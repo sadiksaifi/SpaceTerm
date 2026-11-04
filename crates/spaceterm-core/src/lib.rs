@@ -33,9 +33,10 @@ pub use client::{CliRoute, ClientScope, MachineConnection};
 pub use startup::{LocalStartup, StartupOutcome};
 pub use storage::{Directory, Lock, LockWait};
 
+/// An admitted work connection's negotiated protocol version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthenticatedStatus {
-    pub protocol_major: u16,
+    pub work: protocol::version::ProtocolVersion,
 }
 
 /// Bounded classifications. Native errors and peer-supplied values never cross this boundary.
@@ -80,8 +81,9 @@ pub enum CoreError {
     UnsafeStorage,
     #[error("SpaceTerm couldn\u{2019}t verify the machine or account for this connection.")]
     AuthenticationRefused,
+    /// The two sides share no protocol major. It names the older side.
     #[error("SpaceTerm and this SpaceTerm Core are incompatible.")]
-    IncompatibleProtocol,
+    IncompatibleProtocol(protocol::version::Incompatible),
     #[error(
         "SpaceTerm was updated or moved after it opened. Quit and reopen SpaceTerm to continue."
     )]
@@ -130,7 +132,20 @@ pub fn local_machine_id(identity: &str) -> Result<[u8; 32], CoreError> {
 pub struct PaneFactory {
     build: BuildPanes,
     counters: std::sync::Arc<diagnostics::TerminalCounters>,
+    version: Option<update::facts::Version>,
 }
+
+impl PaneFactory {
+    /// Names this run's release version, which admission offers to every client. Without it,
+    /// the run offers [`UNVERSIONED`].
+    pub fn with_version(mut self, version: update::facts::Version) -> Self {
+        self.version = Some(version);
+        self
+    }
+}
+
+/// The version a Core run reports when its host named none, as tests and examples do.
+pub const UNVERSIONED: &str = "0.0.0";
 
 type BuildPanes = Box<
     dyn FnOnce(
@@ -148,6 +163,7 @@ pub fn panes<P: connection::service::PaneService + 'static>(
             build(sync).map(|panes| Box::new(panes) as Box<dyn connection::service::PaneService>)
         }),
         counters,
+        version: None,
     }
 }
 

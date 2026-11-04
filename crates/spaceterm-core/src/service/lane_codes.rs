@@ -26,7 +26,7 @@ pub fn code(error: &CoreError) -> &'static str {
         CoreError::IncompatibleState => "incompatible_state",
         CoreError::UnsafeStorage => "unsafe_storage",
         CoreError::AuthenticationRefused => "authentication_refused",
-        CoreError::IncompatibleProtocol => "incompatible_protocol",
+        CoreError::IncompatibleProtocol(_) => "incompatible_protocol",
         CoreError::CandidateChanged => "candidate_changed",
         CoreError::Protocol => "protocol_error",
         CoreError::StartupFailed => "startup_failed",

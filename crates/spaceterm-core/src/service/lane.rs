@@ -1,9 +1,11 @@
-//! The service lane: bounded JSON administration that every protocol major reads the
-//! same way, so Status, Stop, Restart and Update work across majors.
+//! The service lane: bounded JSON administration with a protocol version of its own, which
+//! changes far less often than the work protocol's, so Status, Stop, Restart and Update keep
+//! working when a client and its Core share no work major.
 //!
-//! A client selects it with [`crate::protocol::Lane::Service`] in the admission preamble. Each
-//! frame is length-prefixed JSON of at most [`MAX_FRAME`] bytes. Fields may be added to these
-//! messages. They are never removed or renamed.
+//! A client selects it with [`crate::protocol::Lane::Service`] in the admission preamble, which
+//! negotiates the lane's `major.minor` ([`crate::protocol::version::SERVICE`]). Each frame is
+//! length-prefixed JSON of at most [`MAX_FRAME`] bytes. A minor adds only a request or reply
+//! variant ([`LaneRequest::since`]); adding, removing or renaming a field needs a new major.
 //!
 //! Installing never ends anything, so it runs in one step: `StageFetch` installs the release the
 //! Core's own feed names, and `StageUpload` with `UploadChunk` installs a pushed archive. Both
@@ -133,6 +135,15 @@ pub enum LaneRequest {
     ResetPermission {
         permission: SystemPermission,
     },
+}
+
+impl LaneRequest {
+    /// The first service lane version that has this request. A client never sends a request
+    /// that its admission's selected version lacks, and the lane refuses one as `unsupported`.
+    /// A minor adds a request by appending a variant above and naming its minor here.
+    pub const fn since(&self) -> crate::protocol::version::ProtocolVersion {
+        crate::protocol::version::ProtocolVersion { major: 1, minor: 0 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,9 +298,6 @@ pub struct LaneEffects {
     pub to_major: Option<u16>,
 }
 
-/// The lane major this server speaks.
-pub const LANE_MAJOR: u16 = 1;
-
 /// What the lane needs from the running server around it.
 pub trait LaneHost: Send + Sync {
     /// Runs `admit` under the hierarchy lock with the live Terminal Session IDs, and sets the
@@ -439,15 +447,18 @@ impl LaneCore {
     /// ends the lane without another answer. A host that stops severs the transport, which ends
     /// a read already waiting. A newly admitted operation starts only after its `Accepted`
     /// reply was written. `route` is the server address a paired connection reached.
+    /// Serves one admitted lane connection. A request that its selected version lacks is
+    /// answered `unsupported`.
     pub(crate) fn serve(
         self: &Arc<Self>,
         stream: &mut dyn Preamble,
-        actor: Actor,
+        admitted: crate::protocol::AdmittedLane,
         route: Option<std::net::SocketAddr>,
         authorized: &dyn Fn() -> Result<(), CoreError>,
     ) -> Result<(), CoreError> {
+        let crate::protocol::AdmittedLane { actor, selected } = admitted;
         let connection = self.connections.fetch_add(1, Ordering::Relaxed) + 1;
-        let served = self.serve_connection(stream, actor, route, authorized, connection);
+        let served = self.serve_connection(stream, actor, selected, route, authorized, connection);
         self.pushes.closed(connection);
         served
     }
@@ -456,6 +467,7 @@ impl LaneCore {
         self: &Arc<Self>,
         stream: &mut dyn Preamble,
         actor: Actor,
+        selected: crate::protocol::version::ProtocolVersion,
         route: Option<std::net::SocketAddr>,
         authorized: &dyn Fn() -> Result<(), CoreError>,
         connection: u64,
@@ -476,6 +488,7 @@ impl LaneCore {
             authorized()?;
             let caller = NetworkCaller::of(&actor, route);
             let (reply, launch) = match serde_json::from_slice::<LaneRequest>(&bytes) {
+                Ok(request) if request.since() > selected => (error(&CoreError::Unsupported), None),
                 Ok(request) => self.respond(request, &actor, caller, connection),
                 Err(_) => (error(&CoreError::Protocol), None),
             };
@@ -1185,7 +1198,7 @@ impl Admin<'_> {
                 sessions: 0,
                 network: offline_network(self.service)?,
                 devices: offline_devices(self.service)?,
-                lane_major: LANE_MAJOR,
+                lane_major: crate::protocol::version::SERVICE.major,
                 terminal_counters: live.map(LaneHost::terminal_counters),
             });
         };
@@ -1218,7 +1231,7 @@ impl Admin<'_> {
                 Some(host) => host.devices()?,
                 None => offline_devices(self.service)?,
             },
-            lane_major: LANE_MAJOR,
+            lane_major: crate::protocol::version::SERVICE.major,
             terminal_counters: live.map(LaneHost::terminal_counters),
         })
     }

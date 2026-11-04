@@ -12,6 +12,9 @@ pub struct ProtocolVersion {
 
 /// This build's work protocol version. Each version is 1.0 at the first release.
 pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+// The build document's major is the work major.
+const _: () = assert!(super::MAJOR == WORK.major);
+
 /// This build's service lane version.
 pub const SERVICE: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
 /// This build's Desktop Channel version.

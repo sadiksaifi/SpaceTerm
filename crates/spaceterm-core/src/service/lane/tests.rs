@@ -620,7 +620,7 @@ fn status_reports_the_approved_runtime_and_live_sessions() {
         assert_eq!(status.runtime.commit, COMMIT);
         assert_eq!(status.sessions, 1);
         assert_eq!(status.activation, LaneActivation::Settled);
-        assert_eq!(status.lane_major, LANE_MAJOR);
+        assert_eq!(status.lane_major, crate::protocol::version::SERVICE.major);
         assert_eq!(
             status.terminal_counters,
             Some(crate::diagnostics::TerminalCounterSnapshot {
@@ -1163,16 +1163,20 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
             (major, reply)
         });
         // Admission hands the lane connection to the caller with its actor.
-        let admitted =
-            crate::protocol::admit_core(&mut core, &lane.lane.core, &lane.lane.service.identity)
-                .unwrap();
+        let admitted = crate::protocol::admit_core(
+            &mut core,
+            &lane.lane.core,
+            &lane.lane.service.identity,
+            &crate::protocol::CoreVersions::for_tests(),
+        )
+        .unwrap();
         let crate::protocol::Admission::Service(actor) = admitted else {
             panic!("expected a service-lane connection");
         };
-        assert_eq!(actor.client, derived);
+        assert_eq!(actor.actor.client, derived);
         lane.lane.serve(&mut core, actor, None, &|| Ok(())).unwrap();
         let (major, reply) = peer.join().unwrap();
-        assert_eq!(major, crate::protocol::MAJOR);
+        assert_eq!(major.selected, crate::protocol::version::SERVICE);
         assert_eq!(code(reply), "not_found");
         // The admitted actor is the agent's own identity, so its tokens are its own.
         let (token, _) = preview(&lane.lane, LaneAction::Stop);
@@ -1235,7 +1239,9 @@ fn a_stopping_machine_closes_a_polling_lane_connection() {
             client.receive(MAX_FRAME, deadline).is_err()
         });
         let started = Instant::now();
-        lane.lane.serve(&mut core, ACTOR, None, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut core, ACTOR.into(), None, &|| Ok(()))
+            .unwrap();
         drop(core);
         assert!(peer.join().unwrap(), "the client saw the connection close");
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -1264,7 +1270,9 @@ fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
             }
             replies
         });
-        lane.lane.serve(&mut core, ACTOR, None, &|| Ok(())).unwrap();
+        lane.lane
+            .serve(&mut core, ACTOR.into(), None, &|| Ok(()))
+            .unwrap();
         let mut replies = peer.join().unwrap().into_iter();
         assert_eq!(code(replies.next().unwrap()), "protocol_error");
         assert!(matches!(replies.next().unwrap(), LaneReply::Status(_)));
@@ -1297,7 +1305,7 @@ mod flow {
         }
     }
     impl Connector for Switch {
-        fn connect(&self, _: Instant) -> Result<Box<dyn Preamble + Send>, CoreError> {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
             let lane = self
                 .lane
                 .lock()
@@ -1312,10 +1320,10 @@ mod flow {
             // The fixture's signing trust is per thread, so the serving thread holds it too.
             std::thread::spawn(move || {
                 crate::service::runtime::test_support::with_fixture_trust(|| {
-                    lane.serve(&mut core, LOCAL, None, &|| Ok(()))
+                    lane.serve(&mut core, LOCAL.into(), None, &|| Ok(()))
                 })
             });
-            Ok(Box::new(client))
+            Ok((Box::new(client), crate::protocol::version::SERVICE))
         }
     }
 
@@ -1530,7 +1538,7 @@ mod flow {
         lose: Arc<AtomicBool>,
     }
     impl Connector for Lossy {
-        fn connect(&self, _: Instant) -> Result<Box<dyn Preamble + Send>, CoreError> {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
             let lane = self
                 .lane
                 .lock()
@@ -1555,7 +1563,7 @@ mod flow {
                     let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
                 }
             });
-            Ok(Box::new(client))
+            Ok((Box::new(client), crate::protocol::version::SERVICE))
         }
     }
 
@@ -1655,7 +1663,7 @@ mod flow {
         stalled: Arc<AtomicBool>,
     }
     impl Connector for Stalling {
-        fn connect(&self, _: Instant) -> Result<Box<dyn Preamble + Send>, CoreError> {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
             let lane = self.lane.lock().unwrap().clone().unwrap();
             let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
             let stalled = self.stalled.clone();
@@ -1675,7 +1683,7 @@ mod flow {
                     let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
                 }
             });
-            Ok(Box::new(client))
+            Ok((Box::new(client), crate::protocol::version::SERVICE))
         }
     }
 

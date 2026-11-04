@@ -108,6 +108,7 @@ impl LinkSink for ControlWatch {
             }
             // The next request learns how the link ended.
             LinkEvent::Health(_) => true,
+            LinkEvent::UpdateFacts(_) => false,
         };
         if changed {
             self.state.wake.notify();

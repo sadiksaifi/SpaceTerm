@@ -205,7 +205,7 @@ impl LinkSink for CoreChanges {
                 self.link.swap(CLOSED, Ordering::AcqRel) != CLOSED
             }
             LinkEvent::Inventory(_) => self.link.swap(ADMITTED, Ordering::AcqRel) != ADMITTED,
-            LinkEvent::Health(Health::Live) => false,
+            LinkEvent::Health(Health::Live) | LinkEvent::UpdateFacts(_) => false,
         };
         if changed {
             let _ = self.requests.send(Request::Poll);

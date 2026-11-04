@@ -310,18 +310,25 @@ impl DirectConnection {
     pub(crate) fn admit<'a>(
         self,
         client: impl Into<crate::protocol::Caller<'a>>,
-    ) -> Result<Box<dyn crate::connection::carrier::Carrier>, CoreError> {
+    ) -> Result<
+        (
+            Box<dyn crate::connection::carrier::Carrier>,
+            crate::protocol::Negotiated,
+        ),
+        crate::protocol::Refused,
+    > {
         let mut stream = *self.stream;
-        crate::protocol::admit_transport(
+        let negotiated = crate::protocol::admit_transport(
             &mut stream,
             client,
             &self.paired.pin.core,
             &self.paired.pin.build,
         )?;
-        Ok(Box::new(stream.into_carrier()))
+        Ok((Box::new(stream.into_carrier()), negotiated))
     }
-    /// Admits this client to the service lane on the authenticated connection, whatever the
-    /// server's work major, and returns the stream the lane's JSON frames travel on.
+    /// Admits this client to the service lane on the authenticated connection, which needs a
+    /// shared service major whatever the work majors, and returns the stream the lane's JSON
+    /// frames travel on.
     #[cfg_attr(
         not(any(feature = "client", test)),
         allow(dead_code, reason = "the CLI administers paired servers over the lane")
@@ -329,14 +336,20 @@ impl DirectConnection {
     pub(crate) fn admit_service_lane(
         self,
         caller: crate::protocol::Caller<'_>,
-    ) -> Result<Box<crate::connection::quic::QuicStream>, CoreError> {
+    ) -> Result<
+        (
+            Box<crate::connection::quic::QuicStream>,
+            crate::protocol::Negotiated,
+        ),
+        crate::protocol::Refused,
+    > {
         let mut stream = self.stream;
-        crate::protocol::admit_service_lane(
+        let negotiated = crate::protocol::admit_service_lane(
             stream.as_mut(),
             caller,
             &self.paired.pin.core,
             &self.paired.pin.build,
         )?;
-        Ok(stream)
+        Ok((stream, negotiated))
     }
 }

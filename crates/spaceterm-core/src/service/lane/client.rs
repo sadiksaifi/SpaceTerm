@@ -4,8 +4,11 @@
 //! so the flow reconnects and follows that same operation ID.
 use super::{LaneAction, LaneReceipt, LaneReply, LaneRequest, MAX_FRAME, OperationId};
 use crate::CoreError;
-use crate::protocol::Preamble;
+use crate::protocol::capability::Admissions;
+use crate::protocol::version::ProtocolVersion;
+use crate::protocol::{Lane as Admitted, Preamble};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
@@ -22,9 +25,12 @@ const CHECK: Duration = Duration::from_millis(100);
 /// The thread name of lane I/O that [`within`] runs.
 const LANE_IO: &str = "spaceterm-lane-io";
 
+/// An admitted service-lane connection and the lane version its admission selected.
+pub(crate) type Connected = (Box<dyn Preamble + Send>, ProtocolVersion);
+
 /// Opens and admits a fresh service-lane connection.
 pub(crate) trait Connector: Send + Sync {
-    fn connect(&self, deadline: Instant) -> Result<Box<dyn Preamble + Send>, CoreError>;
+    fn connect(&self, deadline: Instant) -> Result<Connected, CoreError>;
 }
 
 /// Why a lane request did not produce the reply it asked for.
@@ -49,16 +55,33 @@ pub struct Session {
     /// `None` once a request was abandoned at its deadline, which leaves the connection
     /// mid-frame.
     stream: Option<Box<dyn Preamble + Send>>,
+    /// The lane version admission selected. No request it lacks is sent.
+    selected: ProtocolVersion,
     /// When the last request was sent, or the connection opened.
     used: Instant,
 }
 
 impl Session {
     pub(crate) fn open(connector: &dyn Connector, deadline: Instant) -> Result<Self, CoreError> {
+        let (stream, selected) = connector.connect(deadline)?;
         Ok(Self {
-            stream: Some(connector.connect(deadline)?),
+            stream: Some(stream),
+            selected,
             used: Instant::now(),
         })
+    }
+
+    /// The service lane version this session's admission selected.
+    pub fn selected(&self) -> ProtocolVersion {
+        self.selected
+    }
+
+    /// `request` as a frame, or `Unsupported` when the selected version lacks it.
+    fn frame(&self, request: &LaneRequest) -> Result<Vec<u8>, CoreError> {
+        if request.since() > self.selected {
+            return Err(CoreError::Unsupported);
+        }
+        frame(request)
     }
 
     /// Like [`Self::open`], but stops waiting as soon as `deadline()` passes.
@@ -68,12 +91,13 @@ impl Session {
     ) -> Result<Self, CoreError> {
         let connector = Arc::clone(connector);
         let fixed = deadline();
-        let stream = within(LANE_IO, &|| Some(deadline()), move || {
+        let (stream, selected) = within(LANE_IO, &|| Some(deadline()), move || {
             connector.connect(fixed)
         })
         .ok_or(CoreError::Protocol)??;
         Ok(Self {
             stream: Some(stream),
+            selected,
             used: Instant::now(),
         })
     }
@@ -84,7 +108,7 @@ impl Session {
         request: &LaneRequest,
         deadline: Instant,
     ) -> Result<LaneReply, CoreError> {
-        let bytes = frame(request)?;
+        let bytes = self.frame(request)?;
         let stream = self.stream.as_mut().ok_or(CoreError::Protocol)?;
         self.used = Instant::now();
         stream.send(&bytes, deadline)?;
@@ -99,7 +123,7 @@ impl Session {
         request: &LaneRequest,
         deadline: &dyn Fn() -> Instant,
     ) -> Result<LaneReply, CoreError> {
-        let bytes = frame(request)?;
+        let bytes = self.frame(request)?;
         let mut stream = self.stream.take().ok_or(CoreError::Protocol)?;
         self.used = Instant::now();
         let fixed = deadline();
@@ -372,15 +396,16 @@ struct Local {
     client: [u8; 32],
     name: crate::pane::control::ClientName,
     agent: Option<crate::protocol::AgentName>,
+    admissions: Arc<Mutex<Admissions>>,
 }
 
 impl Connector for Local {
-    fn connect(&self, deadline: Instant) -> Result<Box<dyn Preamble + Send>, CoreError> {
+    fn connect(&self, deadline: Instant) -> Result<Connected, CoreError> {
         if Instant::now() >= deadline {
             return Err(CoreError::NotRunning);
         }
         let mut stream = crate::host::connect(&self.paths)?;
-        crate::protocol::admit_service_lane(
+        let admitted = crate::protocol::admit_service_lane(
             &mut stream,
             crate::protocol::Caller {
                 client: &self.client,
@@ -389,9 +414,21 @@ impl Connector for Local {
             },
             &self.core,
             &self.paths.identity,
-        )?;
-        Ok(Box::new(stream))
+        );
+        record(&self.admissions, &admitted);
+        Ok((Box::new(stream), admitted?.selected))
     }
+}
+
+/// Records a lane admission in the Machine's admissions.
+fn record(
+    admissions: &Mutex<Admissions>,
+    admitted: &Result<crate::protocol::Negotiated, crate::protocol::Refused>,
+) {
+    admissions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record(Admitted::Service, admitted);
 }
 
 /// The service lane of a paired server, over its authenticated direct connection.
@@ -400,10 +437,11 @@ struct Paired {
     paired: crate::direct::PairedDevice,
     name: crate::pane::control::ClientName,
     agent: Option<crate::protocol::AgentName>,
+    admissions: Arc<Mutex<Admissions>>,
 }
 
 impl Connector for Paired {
-    fn connect(&self, deadline: Instant) -> Result<Box<dyn Preamble + Send>, CoreError> {
+    fn connect(&self, deadline: Instant) -> Result<Connected, CoreError> {
         if Instant::now() >= deadline {
             return Err(crate::direct::DirectError::Transport.into());
         }
@@ -411,12 +449,20 @@ impl Connector for Paired {
         if connection.paired() != &self.paired {
             return Err(CoreError::AuthenticationRefused);
         }
-        let stream = connection.admit_service_lane(crate::protocol::Caller {
+        let admitted = connection.admit_service_lane(crate::protocol::Caller {
             client: &self.paired.client,
             name: &self.name,
             agent: self.agent.as_ref(),
-        })?;
-        Ok(stream)
+        });
+        record(
+            &self.admissions,
+            &admitted
+                .as_ref()
+                .map(|(_, negotiated)| negotiated.clone())
+                .map_err(Clone::clone),
+        );
+        let (stream, negotiated) = admitted?;
+        Ok((stream, negotiated.selected))
     }
 }
 
@@ -434,6 +480,7 @@ impl Lane {
         client: [u8; 32],
         name: crate::pane::control::ClientName,
         agent: Option<crate::protocol::AgentName>,
+        admissions: Arc<Mutex<Admissions>>,
     ) -> Self {
         Self {
             connector: Arc::new(Local {
@@ -442,6 +489,7 @@ impl Lane {
                 client,
                 name,
                 agent,
+                admissions,
             }),
         }
     }
@@ -452,6 +500,7 @@ impl Lane {
         paired: crate::direct::PairedDevice,
         name: crate::pane::control::ClientName,
         agent: Option<crate::protocol::AgentName>,
+        admissions: Arc<Mutex<Admissions>>,
     ) -> Self {
         Self {
             connector: Arc::new(Paired {
@@ -459,6 +508,7 @@ impl Lane {
                 paired,
                 name,
                 agent,
+                admissions,
             }),
         }
     }

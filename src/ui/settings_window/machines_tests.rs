@@ -47,16 +47,22 @@ const SUBTITLE_PROGRESS: &str = "settings-server-progress-track";
 /// The confirmation Install asks before it installs a verified build.
 const INSTALL_CONFIRM_SELECTOR: &str = "settings-server-install-confirm";
 
+use spaceterm_core::protocol::version::Incompatible;
+
 macro_rules! core_error_cases {
     ($($variant:ident => ($retry:literal, $tone:ident)),+ $(,)?) => {
         fn every_error() -> impl Iterator<Item = (CoreError, bool, CaptionTone)> {
             fn expectation(error: CoreError) -> (bool, CaptionTone) {
                 match error {
                     $(CoreError::$variant => ($retry, CaptionTone::$tone),)+
+                    CoreError::IncompatibleProtocol(_) => (true, CaptionTone::Error),
                     CoreError::Direct(_) => (true, CaptionTone::Error),
                 }
             }
-            [$(CoreError::$variant,)+ CoreError::Direct(
+            [$(CoreError::$variant,)+
+                CoreError::IncompatibleProtocol(Incompatible::ListenerTooOld),
+                CoreError::IncompatibleProtocol(Incompatible::CallerTooOld),
+                CoreError::Direct(
                 crate::machine_connection::direct::DirectError::Transport
             )].into_iter().map(|error| {
                 let (retry, tone) = expectation(error);
@@ -82,7 +88,6 @@ core_error_cases! {
     IncompatibleState => (true, Error),
     UnsafeStorage => (true, Error),
     AuthenticationRefused => (true, Error),
-    IncompatibleProtocol => (true, Error),
     CandidateChanged => (false, Error),
     Protocol => (true, Error),
     StartupFailed => (true, Error),

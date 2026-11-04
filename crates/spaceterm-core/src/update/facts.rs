@@ -67,6 +67,13 @@ pub enum Platform {
 }
 
 impl Platform {
+    /// The platform this build runs on.
+    #[cfg(target_os = "macos")]
+    pub const HOST: Self = Self::MacosArm64;
+    /// The platform this build runs on.
+    #[cfg(not(target_os = "macos"))]
+    pub const HOST: Self = Self::LinuxX86_64;
+
     /// The name release assets and feeds use.
     pub const fn name(self) -> &'static str {
         match self {

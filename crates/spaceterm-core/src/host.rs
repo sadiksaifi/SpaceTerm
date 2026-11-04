@@ -247,6 +247,11 @@ pub(crate) struct Environment {
     pub(crate) stop: Arc<Stop>,
     /// Answers service-lane connections. `None` refuses them as unsupported.
     pub(crate) lane: Option<Arc<crate::service::lane::LaneCore>>,
+    /// This Core's update engine, whose facts every work connection receives. `None` when the
+    /// engine did not open, as without service state: work connections then receive none.
+    pub(crate) facts: Option<Arc<dyn crate::update::source::FactsSource>>,
+    /// The versions admission offers.
+    pub(crate) versions: protocol::CoreVersions,
 }
 
 #[cfg(test)]
@@ -271,6 +276,10 @@ impl Environment {
                 wake: Arc::new(|| {}),
             }),
             lane: None,
+            facts: None,
+            versions: protocol::CoreVersions::current(
+                crate::update::facts::Version::parse("1.4.0").unwrap_or_else(|_| unreachable!()),
+            ),
         }
     }
 }
@@ -286,7 +295,8 @@ struct HostService {
 }
 impl PaneService for HostService {
     fn restore(&mut self, store: crate::organization::OrganizationStore) -> Result<(), CoreError> {
-        self.inner.restore(store)
+        let restored = self.inner.restore(store);
+        restored
     }
     fn admitted(&mut self, peer: &Peer, name: ClientName, outbox: Outbox) {
         self.inner.admitted(peer, name, outbox)
@@ -344,10 +354,11 @@ impl PaneService for HostService {
         self.inner.ticker(wake)
     }
     fn tick(&mut self, now: Instant) -> Option<Instant> {
-        self.inner.tick(now)
+        let next = self.inner.tick(now);
+        next
     }
     fn disconnected(&mut self, peer: &Peer) {
-        self.inner.disconnected(peer)
+        self.inner.disconnected(peer);
     }
     fn shutdown(&mut self) -> Result<(), CoreError> {
         self.inner.shutdown()
@@ -574,11 +585,25 @@ fn serve_runtime_ready(
         }),
     });
     let (sync, sync_thread) = SyncWorker::spawn().map_err(|_| CoreError::StartupFailed)?;
-    let (inner, counters) = match panes {
-        Some(factory) => ((factory.build)(sync.clone())?, factory.counters),
+    let (inner, counters, version) = match panes {
+        Some(factory) => (
+            (factory.build)(sync.clone())?,
+            factory.counters,
+            factory.version,
+        ),
         // A host without Panes runs no Terminal Session, so nothing records into its counters.
-        None => (Box::new(NoPanes) as Box<dyn PaneService>, Arc::default()),
+        None => (
+            Box::new(NoPanes) as Box<dyn PaneService>,
+            Arc::default(),
+            None,
+        ),
     };
+    let version = match version {
+        Some(version) => version,
+        None => crate::update::facts::Version::parse(crate::UNVERSIONED)
+            .map_err(|_| CoreError::StartupFailed)?,
+    };
+    let versions = protocol::CoreVersions::current(version);
     let fence = Arc::new(AtomicBool::new(false));
     let mut panes: Box<dyn PaneService> = Box::new(HostService {
         inner,
@@ -675,6 +700,10 @@ fn serve_runtime_ready(
         }),
         stop: Arc::clone(&stop),
         lane,
+        facts: updates.as_ref().ok().map(|updates| {
+            Arc::new(updates.clone()) as Arc<dyn crate::update::source::FactsSource>
+        }),
+        versions,
     };
     SIGNAL_WAKE.store(ring.as_raw_fd(), Ordering::Release);
     let readiness = ready();
@@ -699,7 +728,18 @@ fn serve_runtime_ready(
         && let (Ok(updates), Some(restarter)) = (&updates, restarter)
     {
         let host = watched;
-        let _ = updates.run(restarter, Arc::new(|_| Vec::new()), move || {
+        // A Pending Version of another work major strands the Paired Devices whose last
+        // admitted Hello offered none of its major.
+        let paired = direct.clone();
+        let stranded = Arc::new(move |major| {
+            paired.as_ref().map_or_else(Vec::new, |state| {
+                state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .stranded(major)
+            })
+        });
+        let _ = updates.run(restarter, stranded, move || {
             let host = host.upgrade()?;
             (!host.stop.stopping()).then(|| {
                 let sessions = crate::service::lane::LaneHost::sessions(&*host).len();
@@ -963,16 +1003,20 @@ fn serve_local(
     wake: Arc<dyn Wake>,
     environment: &Environment,
 ) -> Result<(), CoreError> {
-    let protocol::Admitted { client, name, .. } =
-        match protocol::admit_core(&mut stream, &core, identity)? {
-            protocol::Admission::Work(admitted) => admitted,
-            // Account authority never changes while the server runs. Stopping severs this
-            // socket's reading, which ends the lane's wait for a request.
-            protocol::Admission::Service(actor) => {
-                let lane = environment.lane.as_ref().ok_or(CoreError::Unsupported)?;
-                return lane.serve(&mut stream, actor, None, &|| Ok(()));
-            }
-        };
+    let protocol::Admitted {
+        client,
+        name,
+        status,
+        ..
+    } = match protocol::admit_core(&mut stream, &core, identity, &environment.versions)? {
+        protocol::Admission::Work(admitted) => admitted,
+        // Account authority never changes while the server runs. Stopping severs this
+        // socket's reading, which ends the lane's wait for a request.
+        protocol::Admission::Service(admitted) => {
+            let lane = environment.lane.as_ref().ok_or(CoreError::Unsupported)?;
+            return lane.serve(&mut stream, admitted, None, &|| Ok(()));
+        }
+    };
     let peer = Peer {
         client,
         connection: protocol::random()?,
@@ -981,8 +1025,11 @@ fn serve_local(
     let carrier = UnixCarrier::new(stream).map_err(|_| CoreError::Protocol)?;
     serve_admitted(
         Box::new(carrier),
-        peer,
-        name,
+        Served {
+            peer,
+            name,
+            work: status.work,
+        },
         Outbox::new(wake),
         waker,
         environment,
@@ -1032,15 +1079,72 @@ pub(crate) fn spawn_network(
     })
 }
 
-/// Serves one admitted connection on this thread until it ends.
+/// Who an admitted work connection serves, and the work version it selected.
+pub(crate) struct Served {
+    pub(crate) peer: Peer,
+    pub(crate) name: ClientName,
+    pub(crate) work: crate::protocol::version::ProtocolVersion,
+}
+
+/// How often a work connection's facts follower checks that its connection still runs.
+const FOLLOW_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Sends one work connection the update facts now, then again after every change, until it is
+/// dropped. It follows on its own thread, which ends at its next recheck after the drop.
+struct FactsFollower {
+    ended: Arc<AtomicBool>,
+}
+impl FactsFollower {
+    fn start(source: Arc<dyn crate::update::source::FactsSource>, outbox: Outbox) -> Self {
+        let ended = Arc::new(AtomicBool::new(false));
+        let mut sent = source.facts();
+        let _ = outbox.update_facts(sent.clone());
+        let follow = {
+            let ended = Arc::clone(&ended);
+            move || {
+                while !ended.load(Ordering::Acquire) {
+                    let facts = source.wait(sent.revision, FOLLOW_RECHECK);
+                    if facts.revision == sent.revision || ended.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    if outbox.update_facts(facts.clone()).is_err() {
+                        return;
+                    }
+                    sent = facts;
+                }
+            }
+        };
+        let _ = std::thread::Builder::new()
+            .name("spaceterm-core-facts".into())
+            .spawn(follow);
+        Self { ended }
+    }
+}
+impl Drop for FactsFollower {
+    fn drop(&mut self) {
+        self.ended.store(true, Ordering::Release);
+    }
+}
+
+/// Serves one admitted connection on this thread until it ends. When its selected version has
+/// [`crate::protocol::capability::Capability::UpdateFacts`], its first message is the update
+/// facts, and it receives them again after every change.
 pub(crate) fn serve_admitted(
     carrier: Box<dyn crate::connection::carrier::Carrier>,
-    peer: Peer,
-    name: ClientName,
+    Served { peer, name, work }: Served,
     outbox: Outbox,
     waker: Waker,
     environment: &Environment,
 ) {
+    use crate::protocol::capability::{Capabilities, Capability, Unavailable};
+    let receives_facts = Capabilities::new(Ok(work), Err(Unavailable::NotConnected))
+        .check(Capability::UpdateFacts)
+        .is_ok();
+    let _facts = environment
+        .facts
+        .as_ref()
+        .filter(|_| receives_facts)
+        .map(|source| FactsFollower::start(Arc::clone(source), outbox.clone()));
     environment
         .panes
         .lock()
@@ -1125,12 +1229,15 @@ mod tests {
             threads.push(std::thread::spawn(move || {
                 serve_admitted(
                     Box::new(UnixCarrier::new(core).unwrap()),
-                    Peer {
-                        client: [1; 32],
-                        connection: [connection; 32],
-                        pairing: None,
+                    Served {
+                        peer: Peer {
+                            client: [1; 32],
+                            connection: [connection; 32],
+                            pairing: None,
+                        },
+                        name: "Test".into(),
+                        work: crate::protocol::version::WORK,
                     },
-                    "Test".into(),
                     Outbox::new(wake),
                     waker,
                     &environment,
@@ -1218,12 +1325,15 @@ mod tests {
             std::thread::spawn(move || {
                 serve_admitted(
                     Box::new(UnixCarrier::new(core).unwrap()),
-                    Peer {
-                        client: [1; 32],
-                        connection: [1; 32],
-                        pairing: None,
+                    Served {
+                        peer: Peer {
+                            client: [1; 32],
+                            connection: [1; 32],
+                            pairing: None,
+                        },
+                        name: "Test".into(),
+                        work: crate::protocol::version::WORK,
                     },
-                    "Test".into(),
                     Outbox::new(wake),
                     waker,
                     &environment,
@@ -1256,6 +1366,134 @@ mod tests {
             link.health(),
             Health::Closed(LinkError::Goodbye(Fatal::Stopping))
         );
+    }
+
+    /// The update facts are a work connection's first message, ahead of the inventory its
+    /// service pushes at admission, and they arrive again after each change.
+    #[test]
+    fn a_work_connection_hears_the_update_facts_first_and_after_each_change() {
+        use crate::connection::link::LinkEvent;
+        use crate::protocol::InventoryRevision;
+        use crate::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+        use crate::update::source::FactsSource;
+        /// Pushes an inventory at admission.
+        struct Inventory;
+        impl PaneService for Inventory {
+            fn admitted(&mut self, _: &Peer, _: ClientName, outbox: Outbox) {
+                outbox
+                    .inventory(InventoryRevision {
+                        inventory: crate::hierarchy::State::empty().inventory,
+                        next_sequence: 1,
+                    })
+                    .unwrap();
+            }
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                Dispatch::reply(Ok(crate::protocol::ReplyBody::Done))
+            }
+            fn sessions(&self) -> Vec<[u8; 32]> {
+                Vec::new()
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {}
+            fn shutdown(&mut self) -> Result<(), CoreError> {
+                Ok(())
+            }
+        }
+        /// Facts the test changes by hand.
+        struct Board(Mutex<UpdateFacts>, std::sync::Condvar);
+        impl FactsSource for Board {
+            fn facts(&self) -> UpdateFacts {
+                self.0.lock().unwrap().clone()
+            }
+            fn wait(&self, revision: u64, timeout: std::time::Duration) -> UpdateFacts {
+                let facts = self.0.lock().unwrap();
+                let (facts, _) = self
+                    .1
+                    .wait_timeout_while(facts, timeout, |facts| facts.revision == revision)
+                    .unwrap();
+                facts.clone()
+            }
+        }
+        let board = Arc::new(Board(
+            Mutex::new(UpdateFacts {
+                revision: 1,
+                platform: Platform::LinuxX86_64,
+                running: Version::parse("1.4.0").unwrap(),
+                pending: None,
+                sessions: 0,
+                operation: None,
+                check: UpdateCheck::Never,
+                skipped: None,
+                last_failure: None,
+            }),
+            std::sync::Condvar::new(),
+        ));
+        let (sync, _) = SyncWorker::spawn().unwrap();
+        let mut environment =
+            Environment::for_tests(Arc::new(Mutex::new(Box::new(Inventory))), sync, None);
+        environment.facts = Some(Arc::clone(&board) as _);
+        let (client, core) = UnixStream::pair().unwrap();
+        let (waker, wake) = Waker::new().unwrap();
+        let host_wake = Arc::clone(&wake);
+        let serving = {
+            let environment = environment.clone();
+            std::thread::spawn(move || {
+                serve_admitted(
+                    Box::new(UnixCarrier::new(core).unwrap()),
+                    Served {
+                        peer: Peer {
+                            client: [1; 32],
+                            connection: [1; 32],
+                            pairing: None,
+                        },
+                        name: "Test".into(),
+                        work: crate::protocol::version::WORK,
+                    },
+                    Outbox::new(wake),
+                    waker,
+                    &environment,
+                )
+            })
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let link = crate::connection::io::spawn_link(
+            Box::new(UnixCarrier::new(client).unwrap()),
+            Arc::new({
+                let events = Arc::clone(&events);
+                move |event: LinkEvent| {
+                    events.lock().unwrap().push(match event {
+                        LinkEvent::UpdateFacts(facts) => Some((facts.revision, facts.sessions)),
+                        LinkEvent::Inventory(_) => None,
+                        LinkEvent::Health(_) => return,
+                    });
+                }
+            }),
+        )
+        .unwrap();
+        // A change before the first facts are written would replace them in their slot.
+        link.next_inventory(0).unwrap();
+        {
+            let mut facts = board.0.lock().unwrap();
+            facts.revision = 2;
+            facts.sessions = 1;
+            board.1.notify_all();
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while events.lock().unwrap().len() < 3 && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [Some((1, 0)), None, Some((2, 1))],
+            "facts, then the inventory, then the changed facts"
+        );
+        assert_eq!(link.update_facts().map(|facts| facts.sessions), Some(1));
+        environment.stop.stopping.store(true, Ordering::Release);
+        host_wake.wake();
+        serving.join().unwrap();
     }
 
     #[test]
@@ -2404,10 +2642,9 @@ mod startup_tests {
                 (&fixture.device, &"Test".into()),
                 &fixture.pin,
                 "spaceterm-development",
-            ),
-            Ok(crate::AuthenticatedStatus {
-                protocol_major: protocol::MAJOR,
-            })
+            )
+            .map(|negotiated| negotiated.selected),
+            Ok(protocol::version::WORK)
         );
     }
 

@@ -97,7 +97,7 @@ pub(super) struct ConnectedCore {
 impl From<AuthenticatedStatus> for ConnectedCore {
     fn from(status: AuthenticatedStatus) -> Self {
         Self {
-            protocol_major: status.protocol_major,
+            protocol_major: status.work.major,
         }
     }
 }
@@ -368,7 +368,7 @@ pub(super) fn present(status: LocalCoreStatus) -> LocalCorePresentation {
                 }
                 // The refusal is scoped to this connection. The server and its Terminal Sessions
                 // keep running, and the Server row offers any verified update.
-                CoreError::IncompatibleProtocol => (
+                CoreError::IncompatibleProtocol(_) => (
                     SharedString::new_static(INCOMPATIBLE_PROTOCOL),
                     CaptionTone::Error,
                 ),
@@ -442,7 +442,7 @@ fn failure(error: CoreError) -> (&'static str, &'static str, bool) {
         CoreError::AuthenticationRefused => {
             ("Refused", "settings-local-server-state-refused", true)
         }
-        CoreError::IncompatibleProtocol => (
+        CoreError::IncompatibleProtocol(_) => (
             "Incompatible",
             "settings-local-server-state-incompatible",
             true,

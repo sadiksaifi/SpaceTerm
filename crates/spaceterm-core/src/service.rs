@@ -1909,7 +1909,7 @@ mod tests {
         fn ready(outcome: StartupOutcome) -> crate::MachineConnection {
             match outcome {
                 StartupOutcome::Ready { core, status } => {
-                    assert_eq!(status.protocol_major, protocol::MAJOR);
+                    assert_eq!(status.work, protocol::version::WORK);
                     core
                 }
                 _ => panic!("launch did not connect"),
@@ -2684,13 +2684,15 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut wire = protocol::Wire::new(&mut stream);
                 let hello: serde_json::Value = wire.read()?;
-                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "core":hello["core"], "core_major":protocol::MAJOR, "client":hello["client"]}))
+                wire.write(&serde_json::json!({"selected":null, "versions":{"version":"9.0.0","work":{"major":protocol::MAJOR + 1,"minor":0},"service":{"major":1,"minor":0}}, "build":hello["build"], "core":hello["core"], "client":hello["client"]}))
             }));
             assert!(matches!(
                 LocalStartup::with_service(supervisor.service())
                     .unwrap()
                     .run(no_provision, || false),
-                Err(CoreError::IncompatibleProtocol)
+                Err(CoreError::IncompatibleProtocol(
+                    protocol::version::Incompatible::CallerTooOld
+                ))
             ));
             assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
             assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);

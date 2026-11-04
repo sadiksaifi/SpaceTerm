@@ -66,6 +66,14 @@ impl Drop for Record {
     }
 }
 
+/// The work majors one pairing's last admitted Hello offered, highest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Offered {
+    pub pairing: PairingId,
+    pub majors: Vec<u16>,
+}
+
 pub(super) struct Store {
     directory: Directory,
     core: [u8; 32],
@@ -201,6 +209,23 @@ impl Store {
         self.validate(record)?;
         self.directory
             .write_json(c"direct.json", record)
+            .map_err(Into::into)
+    }
+    /// The work majors each pairing's last admitted Hello offered. They live in their own
+    /// file, so a Core that a restart moves to reads `direct.json` in the format it knows.
+    pub fn load_offered(&self) -> Result<Vec<Offered>, DirectError> {
+        let offered: Vec<Offered> = self
+            .directory
+            .read_json("paired-majors.json")?
+            .unwrap_or_default();
+        if offered.len() > MAX_DEVICES || offered.iter().any(|entry| entry.majors.len() > 2) {
+            return Err(DirectError::StorageUnavailable);
+        }
+        Ok(offered)
+    }
+    pub fn save_offered(&self, offered: &[Offered]) -> Result<(), DirectError> {
+        self.directory
+            .write_json(c"paired-majors.json", &offered)
             .map_err(Into::into)
     }
     pub fn pin(&self, record: &Record) -> Result<MachinePin, DirectError> {

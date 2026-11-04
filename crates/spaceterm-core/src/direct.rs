@@ -273,7 +273,7 @@ impl From<CoreError> for DirectError {
             CoreError::StorageUnavailable
             | CoreError::UnsafeStorage
             | CoreError::IncompatibleState => Self::StorageUnavailable,
-            CoreError::IncompatibleProtocol => Self::IncompatibleProtocol,
+            CoreError::IncompatibleProtocol(_) => Self::IncompatibleProtocol,
             CoreError::AuthenticationRefused => Self::AuthenticationRefused,
             CoreError::Capacity => Self::Capacity,
             _ => Self::Transport,

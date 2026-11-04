@@ -666,8 +666,16 @@ impl From<Build> for CandidateMetadata {
 impl Build {
     /// `None` accepts any work protocol major.
     fn require_compatibility(&self, required_major: Option<u16>) -> Result<(), CoreError> {
-        if required_major.is_some_and(|major| self.protocols.work.major != major) {
-            return Err(CoreError::IncompatibleProtocol);
+        if let Some(major) = required_major
+            && self.protocols.work.major != major
+        {
+            return Err(CoreError::IncompatibleProtocol(
+                if self.protocols.work.major > major {
+                    crate::protocol::version::Incompatible::CallerTooOld
+                } else {
+                    crate::protocol::version::Incompatible::ListenerTooOld
+                },
+            ));
         }
         Ok(())
     }

@@ -178,6 +178,7 @@ fn open_lane(endpoint: &str, paired: &PairedDevice, credential: &DeviceCredentia
             agent: None,
         })
         .unwrap()
+        .0
 }
 
 fn call(stream: &mut Stream, request: &LaneRequest) -> Result<LaneReply, CoreError> {
@@ -435,6 +436,7 @@ mod flow {
             paired.clone(),
             "Laptop CLI".into(),
             None,
+            Arc::default(),
         )
     }
 
@@ -581,7 +583,8 @@ mod flow {
                 name: &"Studio CLI".into(),
                 agent: None,
             })
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(call(&mut kept, &LaneRequest::Status).is_ok());
         let (endpoint, paired, credential) =
             device_at(&fixture, every.port(), Ipv4Addr::LOCALHOST.into());
@@ -760,7 +763,8 @@ fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_stra
             name: &"Studio CLI".into(),
             agent: None,
         })
-        .unwrap();
+        .unwrap()
+        .0;
     assert!(call(&mut kept, &LaneRequest::Status).is_ok());
     // The caller reaches the server over IPv4 and asks for IPv6 only.
     let caller = fixture.enroll(&DeviceCredential::generate().unwrap());
@@ -773,7 +777,7 @@ fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_stra
     let mut previewing = Scripted::new(vec![LaneRequest::Preview {
         action: network(access),
     }]);
-    lane.serve(&mut previewing, actor, route, &|| Ok(()))
+    lane.serve(&mut previewing, actor.into(), route, &|| Ok(()))
         .unwrap();
     let (token, effects) = preview(previewing.replies.remove(0));
     assert_eq!(effects.caller, Some(LaneCallerEffect::Disconnected));
@@ -793,7 +797,7 @@ fn a_device_that_leaves_while_accepted_is_written_stops_a_change_that_would_stra
             )
             .unwrap();
     }));
-    lane.serve(&mut executing, actor, route, &|| Ok(()))
+    lane.serve(&mut executing, actor.into(), route, &|| Ok(()))
         .unwrap();
     assert!(matches!(executing.replies[0], LaneReply::Accepted { .. }));
     // No connected device keeps a route now, so the change was refused, not applied.

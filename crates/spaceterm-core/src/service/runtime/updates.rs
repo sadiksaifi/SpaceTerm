@@ -888,7 +888,7 @@ fn verification(archive: &Path, error: CoreError) -> InstallError {
         CoreError::RuntimeUnavailable
         | CoreError::CandidateChanged
         | CoreError::CandidateMissing
-        | CoreError::IncompatibleProtocol => InstallError::Failed(InstallFailure::Verification),
+        | CoreError::IncompatibleProtocol(_) => InstallError::Failed(InstallFailure::Verification),
         CoreError::StorageUnavailable
             if archive
                 .parent()
