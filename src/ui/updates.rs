@@ -40,6 +40,11 @@ const CURRENT_VERSION: &str = env!("SPACETERM_VERSION");
 /// Installs the menu commands and the one application-wide owner of update prompts. The update
 /// service must already be installed.
 pub(crate) fn init(cx: &mut App) {
+    init_with(crate::local_startup::LoginItems::account(), cx);
+}
+
+/// [`init`], reaching SpaceTerm Core's item in Login Items through `login_items`.
+pub(crate) fn init_with(login_items: crate::local_startup::LoginItems, cx: &mut App) {
     cx.on_action(|_: &CheckForUpdates, cx| check_for_updates(cx));
     whats_new::init(cx);
     let Some(service) = cx.try_global::<UpdateService>().cloned() else {
@@ -63,6 +68,8 @@ pub(crate) fn init(cx: &mut App) {
     cx.set_global(UpdatePrompts {
         results: CheckResults::default(),
         install_requested: None,
+        login_items,
+        refused_start: None,
         _subscriptions: subscriptions,
     });
 }
@@ -72,6 +79,10 @@ struct UpdatePrompts {
     results: CheckResults,
     /// The user asked to install, so the confirmation is shown even over another prompt.
     install_requested: Option<InstallRequest>,
+    login_items: crate::local_startup::LoginItems,
+    /// Waits for the person to turn SpaceTerm Core on in Login Items after the service refused a
+    /// window's Start, then runs that Start.
+    refused_start: Option<gpui::Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -169,6 +180,35 @@ fn take_install_request(cx: &mut App) -> Option<InstallRequest> {
         return None;
     }
     cx.update_global::<UpdatePrompts, _>(|prompts, _| prompts.install_requested.take())
+}
+
+/// Opens Login Items after the service refused a window's action because SpaceTerm Core is off
+/// there. A refused Start runs once the person turns the item on.
+fn start_when_login_item_on(notice: &MachineUpdatesNotice, cx: &mut App) {
+    let Some(login_items) = cx
+        .try_global::<UpdatePrompts>()
+        .map(|prompts| prompts.login_items.clone())
+    else {
+        return;
+    };
+    (login_items.open)();
+    if notice.action != crate::updates::machines::MachineAction::Start {
+        return;
+    }
+    let machine = notice.machine;
+    let wait = crate::local_startup::when_login_item_on(login_items.off, cx, move |cx| {
+        if let Some(store) = MachineUpdates::global(cx) {
+            store.update(cx, |store, cx| {
+                store.perform(
+                    machine,
+                    crate::updates::machines::MachineAction::Start,
+                    crate::updates::machines::store::Surface::Window,
+                    cx,
+                );
+            });
+        }
+    });
+    cx.update_global::<UpdatePrompts, _>(|prompts, _| prompts.refused_start = Some(wait));
 }
 
 fn service(cx: &App) -> Option<Entity<ApplicationUpdates>> {

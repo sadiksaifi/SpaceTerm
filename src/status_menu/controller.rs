@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::App;
+use gpui::{App, Task};
 use spaceterm_core::service::ServiceStatus;
 
 use super::model::{Command, Menu};
@@ -34,6 +34,10 @@ pub(crate) trait StatusHost {
     fn open_login_items(&self) {
         crate::local_startup::open_login_items();
     }
+    /// Reads whether SpaceTerm Core is off in Login Items. The read runs off the event thread.
+    fn login_item(&self) -> crate::local_startup::LoginItemRead {
+        std::sync::Arc::new(crate::local_startup::background_item_off)
+    }
 }
 
 enum Message {
@@ -59,6 +63,9 @@ pub(crate) struct StatusMenu {
     confirmations: Rc<RefCell<Confirmations>>,
     /// The menu as last rendered.
     menu: RefCell<Option<Menu>>,
+    /// Waits for the person to turn SpaceTerm Core on in Login Items after the service refused
+    /// this menu's Start, then runs that Start.
+    refused_start: RefCell<Option<Task<()>>>,
 }
 
 impl StatusMenu {
@@ -71,6 +78,7 @@ impl StatusMenu {
             messages,
             confirmations: Rc::default(),
             menu: RefCell::default(),
+            refused_start: RefCell::default(),
         });
         if let Some(service) = cx
             .try_global::<UpdateService>()
@@ -170,8 +178,20 @@ impl StatusMenu {
                 }
             }
             // The Core starts nothing that is off in Login Items, so Start opens that list,
-            // where the person turns it on. Turning it on there starts it.
-            Err(ActionFailure::LoginItemOff) => self.host.open_login_items(),
+            // where the person turns it on. The menu remembers the Start and runs it once the
+            // item is on, so the person need not choose Start again.
+            Err(ActionFailure::LoginItemOff) => {
+                self.host.open_login_items();
+                if notice.action == MachineAction::Start {
+                    let machine = notice.machine;
+                    let wait = crate::local_startup::when_login_item_on(
+                        self.host.login_item(),
+                        cx,
+                        move |cx| act(machine, MachineAction::Start, cx),
+                    );
+                    *self.refused_start.borrow_mut() = Some(wait);
+                }
+            }
             Err(failure) => {
                 if let Some((title, message)) = presentation::action_failure(
                     &notice.name,
