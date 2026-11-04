@@ -165,6 +165,9 @@ pub enum RestoredAccess {
     On,
     /// Network Access changed after setup changed it, so the newer choice stays.
     Kept,
+    /// Another device paired, or another setup is pending, over the Network Access this setup
+    /// turned on, so it stays on.
+    InUse,
     /// Putting it back failed. Network Access stays on as setup turned it on.
     Failed,
 }

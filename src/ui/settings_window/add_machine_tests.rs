@@ -1125,6 +1125,12 @@ fn each_network_access_outcome_reads_as_its_own_footnote() {
             Some("Network Access on penguin changed during setup, so SpaceTerm left it as it is."),
         ),
         (
+            NetworkAfter::Restored(RestoredAccess::InUse),
+            Some(
+                "Another device began using Network Access on penguin during setup, so SpaceTerm left it on.",
+            ),
+        ),
+        (
             NetworkAfter::Restored(RestoredAccess::Failed),
             Some(
                 "SpaceTerm couldn\u{2019}t turn Network Access on penguin back to how it was, so it\u{2019}s still on.",
@@ -1141,6 +1147,31 @@ fn each_network_access_outcome_reads_as_its_own_footnote() {
         assert_eq!(problem.footnote.as_deref(), footnote, "{network:?}");
         assert!(problem.retry);
     }
+}
+
+/// Cancel after setup paired, when Network Access couldn't go back as it was, says setup stopped
+/// and what Network Access stayed as.
+#[gpui::test]
+fn cancel_that_left_network_access_on_says_so(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![Outcome::UntilCancelledThen(SetupFailure::Stopped {
+                network: NetworkAfter::Restored(RestoredAccess::Failed),
+            })]
+        },
+        cx,
+    );
+    sheet.begin(AddMachineRequest::Ssh(None));
+    sheet.fill("penguin");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.says("Setting up penguin"));
+
+    sheet.choose(SheetAction::Cancel.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add penguin");
+    assert!(sheet.says("Setup stopped before penguin was added."));
+    assert!(sheet.says(
+        "SpaceTerm couldn\u{2019}t turn Network Access on penguin back to how it was, so it\u{2019}s still on."
+    ));
 }
 
 /// A machine this computer can't reach at an address says where. Back offers that address for

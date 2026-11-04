@@ -1799,6 +1799,54 @@ fn a_setup_cancellation_that_cannot_restore_says_it_failed() {
     );
 }
 
+/// Another setup that began and then stopped while this one waited leaves nothing that relies
+/// on Network Access, so this setup still turns it back off.
+#[test]
+fn a_setup_cancellation_restores_after_another_setup_began_and_stopped() {
+    let fixture = Fixture::new();
+    let (pin, operation, restore) = set_up_elsewhere(&fixture, [99; 32]);
+    let other = setup(&fixture, [100; 32], &DeviceCredential::generate().unwrap());
+    reserve(&fixture, &other);
+    let Management::Setup {
+        operation: other, ..
+    } = other
+    else {
+        panic!()
+    };
+    assert!(matches!(
+        fixture.management(Management::CancelSetup {
+            pin: pin.clone(),
+            operation: other,
+            restore: None,
+        }),
+        Ok(ManagementReply::SetupCancelled { .. })
+    ));
+    assert_eq!(
+        cancel_and_restore(&fixture, &pin, operation, &restore),
+        Some(RestoredAccess::Off)
+    );
+    assert!(!direct_status(&fixture).enabled);
+}
+
+/// Another setup still pending over the Network Access this setup turned on relies on it, so
+/// it stays on, and the cancellation says another device uses it.
+#[test]
+fn a_setup_cancellation_leaves_network_access_another_setup_relies_on() {
+    let fixture = Fixture::new();
+    let (pin, operation, restore) = set_up_elsewhere(&fixture, [101; 32]);
+    let other = setup(&fixture, [102; 32], &DeviceCredential::generate().unwrap());
+    reserve(&fixture, &other);
+    assert_eq!(
+        cancel_and_restore(&fixture, &pin, operation, &restore),
+        Some(RestoredAccess::InUse)
+    );
+    let status = direct_status(&fixture);
+    assert_eq!(
+        (status.policy, status.enabled),
+        (Some(restore.installed.clone()), true)
+    );
+}
+
 #[test]
 fn prepared_setup_can_be_cancelled_over_quic_before_admission_and_after_restart() {
     let fixture = Fixture::new();
