@@ -12,10 +12,23 @@ const IDENTITY: &str = env!("SPACETERM_CLI_IDENTITY");
 pub enum Error {
     Failure(Failure),
     Output(std::io::Error),
+    /// A setup step's reserved exit status, which SSH setup reads without parsing text.
+    Exit(u8),
 }
 impl From<CoreError> for Error {
     fn from(error: CoreError) -> Self {
         Self::Failure(contract::from_core_error(error))
+    }
+}
+
+/// An enrollment step reports a held Network Access port by exit status, so SSH setup can say
+/// so in one sentence.
+fn enrollment_error(error: CoreError) -> Error {
+    match error {
+        CoreError::Direct(spaceterm_core::direct::DirectError::PortInUse) => {
+            Error::Exit(spaceterm_core::provisioning::PORT_IN_USE)
+        }
+        error => error.into(),
     }
 }
 
@@ -97,9 +110,10 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
                 spaceterm_core::direct::default_port(IDENTITY),
             )
             .map_err(CoreError::from)?;
-            write_setup(&spaceterm_core::provisioning::setup_direct(
-                IDENTITY, policy, request,
-            )?)?;
+            write_setup(
+                &spaceterm_core::provisioning::setup_direct(IDENTITY, policy, request)
+                    .map_err(enrollment_error)?,
+            )?;
         }
         InternalCommand::SshDirectPrepare { address } => {
             setup_pipe()?;
@@ -109,7 +123,8 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
                 spaceterm_core::direct::default_port(IDENTITY),
             )
             .map_err(CoreError::from)?;
-            spaceterm_core::provisioning::prepare_direct(IDENTITY, policy, request)?;
+            spaceterm_core::provisioning::prepare_direct(IDENTITY, policy, request)
+                .map_err(enrollment_error)?;
             write_setup(&serde_json::json!({"prepared":true}))?;
         }
         InternalCommand::SshDirectCancel => {
@@ -172,4 +187,22 @@ fn decode_id(value: &str) -> Option<[u8; 16]> {
         *byte = u8::from_str_radix(std::str::from_utf8(part).ok()?, 16).ok()?;
     }
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spaceterm_core::direct::DirectError;
+
+    #[test]
+    fn a_held_network_access_port_exits_with_its_reserved_status_and_others_keep_their_code() {
+        assert!(matches!(
+            enrollment_error(DirectError::PortInUse.into()),
+            Error::Exit(spaceterm_core::provisioning::PORT_IN_USE)
+        ));
+        assert!(matches!(
+            enrollment_error(DirectError::AddressUnavailable.into()),
+            Error::Failure(failure) if failure.code == Code::AddressUnavailable
+        ));
+    }
 }

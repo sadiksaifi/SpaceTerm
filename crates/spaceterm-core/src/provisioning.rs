@@ -42,6 +42,10 @@ pub enum SetupRefusal {
     UdpBlocked { port: u16 },
 }
 
+/// The exit status of an SSH setup enrollment step when another program holds the Network
+/// Access port. Nothing changed on the machine.
+pub const PORT_IN_USE: u8 = 78;
+
 /// The oldest macOS release SpaceTerm Core runs on, as (major, minor).
 pub const MINIMUM_MACOS: (u16, u16) = (26, 0);
 /// The oldest glibc SpaceTerm Core runs on, as (major, minor).

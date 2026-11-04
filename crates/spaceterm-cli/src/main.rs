@@ -113,6 +113,7 @@ fn main() -> ExitCode {
                     finish(command, cli.global.json, failure)
                 }
                 Err(provision::Error::Output(error)) => output_failed(&error),
+                Err(provision::Error::Exit(status)) => ExitCode::from(status),
             };
         }
         Command::Core(core) => {

@@ -286,6 +286,9 @@ const fn unavailable_detail(kind: UnavailableKind) -> &'static str {
         UnavailableKind::EndpointUnreachable => {
             "This computer couldn\u{2019}t reach the machine at that address."
         }
+        UnavailableKind::PortInUse => {
+            "Another app on the machine is using that UDP port. Choose another port, then try again."
+        }
         UnavailableKind::CredentialUnavailable => {
             "SpaceTerm couldn\u{2019}t store this device\u{2019}s key. Unlock your keychain or keyring, then try again."
         }

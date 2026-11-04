@@ -35,8 +35,8 @@ use spaceterm_core::{
     pane::control::ClientName,
     provisioning::{
         AccountDiscovery, NetworkRestore, SetupCancellation, SetupCancellationReply, SetupRefusal,
-        preflight::{self, Preflight},
         SetupReply as EnrollmentResponse, SetupRequest as EnrollmentRequest,
+        preflight::{self, Preflight},
     },
     service::{SetupStartObservation, verify_candidate_bytes},
 };
@@ -120,6 +120,9 @@ pub(crate) enum UnavailableKind {
     HostUnreachable,
     ServiceUnavailable,
     EndpointUnreachable,
+    /// Another program on the machine holds the UDP port Network Access asked for. Nothing
+    /// changed there.
+    PortInUse,
     CredentialUnavailable,
     Storage,
 }
@@ -128,7 +131,9 @@ pub(crate) enum SetupFailure {
     Cancelled,
     /// Add Machine refuses this computer. Each refusal reads as one sentence.
     Unsupported(spaceterm_core::provisioning::SetupRefusal),
-    Unreachable { address: SetupAddress },
+    Unreachable {
+        address: SetupAddress,
+    },
     Incompatible(IncompatibilityKind),
     Refused(RefusalKind),
     Unavailable(UnavailableKind),
@@ -882,6 +887,9 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             CapturedEffectError::NotAdmitted(error) => self.process_failure(error),
             CapturedEffectError::Unconfirmed => SetupFailure::Unconfirmed(operation),
         })?;
+        if output.exit.code() == Some(i32::from(spaceterm_core::provisioning::PORT_IN_USE)) {
+            return Err(SetupFailure::Unavailable(UnavailableKind::PortInUse));
+        }
         if !output.exit.is_success() {
             return Err(SetupFailure::Unconfirmed(operation));
         }
@@ -988,6 +996,7 @@ fn map_direct_error(error: DirectError) -> SetupFailure {
             SetupFailure::Unavailable(UnavailableKind::CredentialUnavailable)
         }
         DirectError::StorageUnavailable => SetupFailure::Unconfirmed(SetupOperation::Save),
+        DirectError::PortInUse => SetupFailure::Unavailable(UnavailableKind::PortInUse),
         DirectError::PolicyChanged => SetupFailure::Unconfirmed(SetupOperation::Enrollment),
         DirectError::IncompatibleProtocol => {
             SetupFailure::Incompatible(IncompatibilityKind::Protocol)
