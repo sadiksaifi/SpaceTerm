@@ -154,7 +154,9 @@ pub enum LaneAction {
     /// stopped Core can't be started remotely.
     Stop,
     Restart,
-    Network { access: NetworkAccess },
+    Network {
+        access: NetworkAccess,
+    },
     /// Remove Machine: stops SpaceTerm Core, revokes every pairing and removes the service,
     /// the launcher and every installed version. Workspace data stays. Gated by
     /// [`Capability::Uninstall`], as Restart is by [`Capability::Restart`]. Once the helper

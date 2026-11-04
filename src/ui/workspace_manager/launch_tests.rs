@@ -456,6 +456,32 @@ fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &m
     assert_eq!(harness.rows(cx), 1);
 }
 
+/// The person stopped SpaceTerm Core, then turned it off in Login Items. Start, chosen after
+/// that, starts nothing and says the item is off instead.
+#[gpui::test]
+fn start_after_turning_off_in_login_items_starts_nothing(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness_reading_background_item(
+        vec![Ok(LaunchOutcome::Stopped)],
+        [false, true],
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(harness.launch.steps(), ["run"]);
+
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("SpaceTerm Core is turned off in Login Items")
+    );
+    assert_eq!(
+        harness.launch.steps(),
+        ["run"],
+        "Start never turns on a service macOS keeps off"
+    );
+}
+
 /// macOS blocked the background item SpaceTerm Core installs, so the window asks for approval in
 /// Login Items rather than reporting a failure.
 #[gpui::test]

@@ -14,7 +14,8 @@ use super::{
     AUTHORIZE_CANCEL_SELECTOR, AUTHORIZE_CONFIRM_SELECTOR, AUTHORIZE_INSTALL_SELECTOR,
     AUTHORIZE_START_SELECTOR, AuthorizationPrompt, AuthorizedRequest, CoreServiceControl,
     INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice, LocalCoreControl,
-    LocalCorePresentation, LocalCoreStatus, OfferedLocalMachine, OfferedMachine,
+    LocalCorePresentation, LocalCoreStatus, OPEN_LOGIN_ITEMS_SELECTOR, OfferedLocalMachine,
+    OfferedMachine,
     RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR, SERVICE_CHECK_SELECTOR,
     START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR, STOP_SELECTOR,
     ServiceAction, ServiceConfirmation, ServicePresentation, ServiceStartup, ServiceState,
@@ -1201,6 +1202,60 @@ fn start_restores_a_stopped_core_without_asking(cx: &mut TestAppContext) {
     assert_eq!(service_presentation(&window, cx).state, "Running");
     assert_eq!(core.refreshes(), checks + 1);
     assert_eq!(status(&window, cx), "Running");
+}
+
+/// The person turned SpaceTerm Core off in Login Items while Settings was open. Start, chosen
+/// after that, reaches no service: the row says the item is off and offers Login Items. Once the
+/// person turns it on there and comes back, the row offers Start again.
+#[gpui::test]
+fn start_after_turning_off_in_login_items_offers_login_items_instead(cx: &mut TestAppContext) {
+    let (window, _core, service, cx) = open_machines_with_service(Ok(not_running()), cx);
+    assert!(rendered(START_SERVICE_SELECTOR, cx));
+
+    service.turn_off_in_login_items(true);
+    click(START_SERVICE_SELECTOR, cx);
+
+    assert!(
+        service.changes().is_empty(),
+        "Start never turns on a service macOS keeps off"
+    );
+    assert_eq!(status(&window, cx), "Off in Login Items");
+    let presented = service_presentation(&window, cx);
+    assert_eq!(presented.state, "Off in Login Items");
+    assert_eq!(
+        presented.actions,
+        vec![ServiceAction::OpenLoginItems, ServiceAction::Uninstall]
+    );
+    assert!(!rendered(START_SERVICE_SELECTOR, cx));
+
+    click(OPEN_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(service.calls().last(), Some(&ServiceCall::OpenLoginItems));
+    assert!(service.changes().is_empty());
+
+    // The person turns SpaceTerm Core on in System Settings and comes back.
+    service.turn_off_in_login_items(false);
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Not running");
+    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    click(START_SERVICE_SELECTOR, cx);
+    assert_eq!(service.changes(), vec![ServiceCall::Start]);
+}
+
+/// A read that finds a stopped SpaceTerm Core also off in Login Items presents Login Items, not
+/// Start, and changes nothing.
+#[gpui::test]
+fn a_stopped_core_off_in_login_items_offers_login_items(cx: &mut TestAppContext) {
+    let (window, _core, service, cx) = open_machines_with_service(Ok(stopped()), cx);
+    service.turn_off_in_login_items(true);
+    window.update(cx, |settings, cx| settings.check_core_service(cx));
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Off in Login Items");
+    assert!(rendered(OPEN_LOGIN_ITEMS_SELECTOR, cx));
+    assert!(service.changes().is_empty());
 }
 
 #[gpui::test]

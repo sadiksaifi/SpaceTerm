@@ -113,6 +113,7 @@ pub(super) const fn service_verb(action: ServiceAction) -> &'static str {
         ServiceAction::Restart => "Restarting\u{2026}",
         ServiceAction::Uninstall => "Uninstalling\u{2026}",
         ServiceAction::AuthorizeInstall | ServiceAction::AuthorizeStart => "Authorizing\u{2026}",
+        ServiceAction::OpenLoginItems => "Opening\u{2026}",
     }
 }
 
@@ -165,6 +166,10 @@ fn local_observed(
         }
         Some((Some(ServicePhase::NotRunning), _, _)) => {
             CoreState::new("Not running", "Not running", Tone::Attention)
+        }
+        // Turning SpaceTerm Core off was the person's choice, so nothing warns.
+        Some((Some(ServicePhase::TurnedOff), _, _)) => {
+            CoreState::new("Off in Login Items", "Off in Login Items", Tone::Idle)
         }
         Some((Some(ServicePhase::Running), _, _)) | None if connected => {
             CoreState::new("Running", "Running \u{b7} this account", Tone::Live).live()
@@ -304,7 +309,7 @@ impl SettingsWindow {
                 let service = self.core_service.as_ref().map(|row| {
                     let presentation = row.presentation();
                     (
-                        row.state.status.map(ServicePhase::of),
+                        row.state.phase(),
                         presentation.working,
                         presentation.authorization.is_some(),
                     )
@@ -458,11 +463,7 @@ impl SettingsWindow {
     /// Whether this computer has no installed server service, so only Install, not Start,
     /// brings its settings back.
     fn local_core_not_installed(&self) -> bool {
-        let service = self
-            .core_service
-            .as_ref()
-            .and_then(|row| row.state.status)
-            .map(ServicePhase::of);
+        let service = self.core_service.as_ref().and_then(|row| row.state.phase());
         let connection = self.local_core.as_ref().map(|row| row.current_status());
         service == Some(ServicePhase::NotInstalled)
             || matches!(
@@ -480,11 +481,7 @@ impl SettingsWindow {
                     .local_core
                     .as_ref()
                     .map_or(LocalCoreStatus::NotChecked, |row| row.current_status());
-                let phase = self
-                    .core_service
-                    .as_ref()
-                    .and_then(|row| row.state.status)
-                    .map(ServicePhase::of);
+                let phase = self.core_service.as_ref().and_then(|row| row.state.phase());
                 let LocalCoreStatus::Failed(error) = connection else {
                     return false;
                 };
@@ -594,6 +591,7 @@ impl SettingsWindow {
         let idle = presentation.working.is_none();
         let mut buttons = Vec::new();
         for action in [
+            ServiceAction::OpenLoginItems,
             ServiceAction::AuthorizeStart,
             ServiceAction::AuthorizeInstall,
             ServiceAction::Start,
@@ -1617,7 +1615,7 @@ fn button_rank(step: &StatusStep) -> Option<u8> {
     match step {
         StatusStep::Version(VersionStep::Local(UpdateAction::Update))
         | StatusStep::Remote(Change::Update) => Some(1),
-        StatusStep::Local(ServiceAction::Start) => Some(2),
+        StatusStep::Local(ServiceAction::Start | ServiceAction::OpenLoginItems) => Some(2),
         _ => None,
     }
 }
@@ -1702,6 +1700,7 @@ const fn service_progress(action: ServiceAction) -> &'static str {
         ServiceAction::AuthorizeInstall | ServiceAction::AuthorizeStart => {
             "Waiting for authorization\u{2026}"
         }
+        ServiceAction::OpenLoginItems => "Opening Login Items\u{2026}",
     }
 }
 

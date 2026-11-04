@@ -29,15 +29,25 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
 /// Whether macOS keeps this account's SpaceTerm Core from running because its background item is
 /// turned off in Login Items. Reading it changes nothing, so launch never turns the item back on.
 pub fn background_item_off() -> bool {
+    let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+    Service::for_identity(identity).is_ok_and(|service| service_background_item_off(&service))
+}
+
+/// The policy [`background_item_off`] applies, for a service already resolved. Launch and
+/// Settings both read it before any step that would install or start the service, so neither
+/// turns on an item the person turned off.
+pub fn service_background_item_off(service: &Service) -> bool {
     #[cfg(all(target_os = "macos", feature = "desktop"))]
     {
-        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-        Service::for_identity(identity)
-            .and_then(|service| service.login_item())
+        service
+            .login_item()
             .is_ok_and(|plist| crate::platform::macos_login_items::turned_off(&plist))
     }
     #[cfg(not(all(target_os = "macos", feature = "desktop")))]
-    false
+    {
+        let _ = service;
+        false
+    }
 }
 
 /// Opens System Settings at Login Items & Extensions, where the person turns SpaceTerm Core on.

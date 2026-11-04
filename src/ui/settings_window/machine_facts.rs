@@ -66,7 +66,7 @@ pub(super) fn service_status(status: ServiceStatus) -> ObservedCoreStatus {
         ServicePhase::Running => ObservedCoreStatus::Running,
         ServicePhase::Stopped => ObservedCoreStatus::Stopped,
         ServicePhase::NotInstalled => ObservedCoreStatus::NotInstalled,
-        ServicePhase::NotRunning => ObservedCoreStatus::Unavailable,
+        ServicePhase::NotRunning | ServicePhase::TurnedOff => ObservedCoreStatus::Unavailable,
     }
 }
 

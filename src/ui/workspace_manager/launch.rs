@@ -53,8 +53,8 @@ pub(crate) enum LaunchOutcome {
 /// The blocking steps of local launch. Each runs on a background thread.
 pub(crate) trait LocalLaunch: Send + Sync {
     /// Prepares or reuses the account's service and connects. Never reverses Stop and never asks
-    /// for authorization. It may install, enable and start the service, so launch runs it only
-    /// while [`Self::background_item_off`] is false.
+    /// for authorization. It may install, enable and start the service, so launch runs it, and
+    /// [`Self::start`], only while [`Self::background_item_off`] is false.
     fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError>;
     /// Whether macOS keeps SpaceTerm Core's background item off, because the person turned it
     /// off in Login Items or has not approved it yet. Reads only: it changes nothing.
@@ -716,6 +716,11 @@ impl WorkspaceManager {
         let adapter = Arc::clone(&launch.adapters.launch);
         let cancelled = Arc::clone(&launch.cancelled);
         let work = cx.background_spawn(async move {
+            // What the person turned off in Login Items stays off: neither their Start nor
+            // launch reaches a service macOS keeps off.
+            if adapter.background_item_off() {
+                return StepResult::LoginItemOff;
+            }
             let refused = match step {
                 Some(LaunchStep::Start) => adapter.start().err().map(StepResult::Failed),
                 // Only a cancelled or refused prompt leaves startup unchanged. Any other failure
@@ -732,10 +737,6 @@ impl WorkspaceManager {
             };
             if let Some(refused) = refused {
                 return refused;
-            }
-            // What the person turned off in Login Items stays off: launch reaches no service.
-            if adapter.background_item_off() {
-                return StepResult::LoginItemOff;
             }
             let observed = move || cancelled.load(Ordering::Acquire);
             match adapter.run(&observed) {

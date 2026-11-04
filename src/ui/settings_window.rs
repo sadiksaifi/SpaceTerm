@@ -715,6 +715,14 @@ impl SettingsWindow {
             if window.is_window_active() {
                 settings.refresh_capture_access(cx);
                 settings.refresh_permission_access(cx);
+                // The person may have turned SpaceTerm Core on in Login Items meanwhile.
+                if settings
+                    .core_service
+                    .as_ref()
+                    .is_some_and(|row| row.state.background_item_off)
+                {
+                    settings.check_core_service(cx);
+                }
             } else {
                 settings.shortcuts.end_search_capture(cx);
             }

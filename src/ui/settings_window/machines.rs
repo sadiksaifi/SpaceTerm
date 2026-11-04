@@ -130,6 +130,12 @@ pub(super) trait CoreServiceControl: Send + Sync {
     /// Changes only whether the server starts on its own at login or boot. A deliberate Stop
     /// stays in force. Enabling it at boot may need [`Self::authorize_startup`] first.
     fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, CoreError>;
+    /// Whether macOS keeps the service from running because the person turned its background
+    /// item off in Login Items. Reads only: it changes nothing.
+    fn background_item_off(&self) -> bool;
+    /// Opens System Settings at Login Items, where the person turns SpaceTerm Core on. Call it
+    /// on the event thread, so macOS brings System Settings forward.
+    fn open_login_items(&self);
 }
 
 impl CoreServiceControl for Service {
@@ -177,6 +183,15 @@ impl CoreServiceControl for Service {
 
     fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, CoreError> {
         Service::set_automatic_start(self, enabled)
+    }
+
+    fn background_item_off(&self) -> bool {
+        // The same policy launch reads, so Settings and the Workspace Window agree.
+        crate::local_startup::service_background_item_off(self)
+    }
+
+    fn open_login_items(&self) {
+        crate::local_startup::open_login_items();
     }
 }
 
@@ -550,6 +565,7 @@ pub(super) const INSTALL_SELECTOR: &str = "settings-server-service-install";
 /// Prefixes each build in Install's menu, followed by its position.
 pub(super) const INSTALL_CHOICE_SELECTOR: &str = "settings-server-service-install-choice";
 pub(super) const START_SERVICE_SELECTOR: &str = "settings-server-service-start";
+pub(super) const OPEN_LOGIN_ITEMS_SELECTOR: &str = "settings-server-service-open-login-items";
 pub(super) const STOP_SELECTOR: &str = "settings-server-service-stop";
 pub(super) const RESTART_SELECTOR: &str = "settings-server-service-restart";
 pub(super) const UNINSTALL_SELECTOR: &str = "settings-server-service-uninstall";
@@ -581,6 +597,9 @@ pub(crate) enum ServiceAction {
     AuthorizeInstall,
     /// Explains startup authorization, asks the operating system for it, then starts the server.
     AuthorizeStart,
+    /// Opens System Settings at Login Items, where the person turns SpaceTerm Core back on. It
+    /// changes nothing itself.
+    OpenLoginItems,
 }
 
 impl ServiceAction {
@@ -596,6 +615,7 @@ impl ServiceAction {
             Self::Uninstall => "Uninstall",
             Self::AuthorizeInstall => "Authorize and Install\u{2026}",
             Self::AuthorizeStart => "Authorize and Start\u{2026}",
+            Self::OpenLoginItems => "Open Login Items",
         }
     }
 
@@ -609,6 +629,7 @@ impl ServiceAction {
             Self::Uninstall => UNINSTALL_SELECTOR,
             Self::AuthorizeInstall => AUTHORIZE_INSTALL_SELECTOR,
             Self::AuthorizeStart => AUTHORIZE_START_SELECTOR,
+            Self::OpenLoginItems => OPEN_LOGIN_ITEMS_SELECTOR,
         }
     }
 
@@ -622,7 +643,8 @@ impl ServiceAction {
             | Self::Start
             | Self::Stop
             | Self::AuthorizeInstall
-            | Self::AuthorizeStart => "settings-server-service-primary",
+            | Self::AuthorizeStart
+            | Self::OpenLoginItems => "settings-server-service-primary",
             Self::Restart => "settings-server-service-secondary",
             Self::Uninstall => "settings-server-service-removal",
         }
@@ -641,13 +663,23 @@ impl ServiceAction {
             Self::AuthorizeStart => {
                 Some("Requires an administrator password to start SpaceTerm Core.")
             }
+            Self::OpenLoginItems => Some("Opens System Settings."),
             Self::Check | Self::Install | Self::Start => None,
         }
     }
 
     /// Whether the action changes the service. A check only reads it.
     const fn changes_service(self) -> bool {
-        !matches!(self, Self::Check)
+        !matches!(self, Self::Check | Self::OpenLoginItems)
+    }
+
+    /// Whether the action would install or start the service, which the person's Login Items
+    /// choice can forbid.
+    const fn starts_service(self) -> bool {
+        matches!(
+            self,
+            Self::Install | Self::Start | Self::Restart | Self::AuthorizeInstall | Self::AuthorizeStart
+        )
     }
 
     /// The progress badge and caption. Installing keeps a Stop the person chose, so it starts the
@@ -677,6 +709,8 @@ impl ServiceAction {
                 "Authorizing",
                 "Waiting for administrator authorization\u{2026}",
             ),
+            // Opening Login Items runs on the event thread and never waits.
+            Self::OpenLoginItems => ("Opening", "Opening Login Items\u{2026}"),
         }
     }
 }
@@ -755,7 +789,8 @@ impl ServiceConfirmation {
             | ServiceAction::Install
             | ServiceAction::Start
             | ServiceAction::AuthorizeInstall
-            | ServiceAction::AuthorizeStart => return None,
+            | ServiceAction::AuthorizeStart
+            | ServiceAction::OpenLoginItems => return None,
         };
         let wording = control::Wording::local(control, running, startup);
         Some(Self {
@@ -806,6 +841,9 @@ pub(crate) enum ServicePhase {
     Stopped,
     /// Installed and not stopped by the person, yet not running, such as after a crash.
     NotRunning,
+    /// Installed and not running because the person turned SpaceTerm Core off in Login Items.
+    /// Only they turn it back on, there.
+    TurnedOff,
 }
 
 impl ServicePhase {
@@ -822,6 +860,15 @@ impl ServicePhase {
         }
     }
 
+    /// Where the service stands, read from its status and its Login Items state. A running
+    /// process wins here too.
+    pub(crate) fn observed(status: ServiceStatus, background_item_off: bool) -> Self {
+        match Self::of(status) {
+            Self::Stopped | Self::NotRunning if background_item_off => Self::TurnedOff,
+            phase => phase,
+        }
+    }
+
     /// The steps offered from this phase, in the order the row shows them.
     pub(crate) fn actions(self) -> &'static [ServiceAction] {
         use ServiceAction as Action;
@@ -829,6 +876,7 @@ impl ServicePhase {
             Self::NotInstalled => &[Action::Install],
             Self::Running => &[Action::Stop, Action::Restart, Action::Uninstall],
             Self::Stopped | Self::NotRunning => &[Action::Start, Action::Uninstall],
+            Self::TurnedOff => &[Action::OpenLoginItems, Action::Uninstall],
         }
     }
 }
@@ -924,6 +972,16 @@ pub(super) struct ServiceState {
     pub(super) working: Option<ServiceAction>,
     /// The Install or Start refused for want of startup authorization, until the next action.
     pub(super) authorization: Option<PendingAuthorization>,
+    /// Whether the last read found SpaceTerm Core turned off in Login Items.
+    pub(super) background_item_off: bool,
+}
+
+impl ServiceState {
+    /// Where the service stands as of the last read. `None` until a read succeeds.
+    pub(super) fn phase(&self) -> Option<ServicePhase> {
+        self.status
+            .map(|status| ServicePhase::observed(status, self.background_item_off))
+    }
 }
 
 /// The presentation of one service state. A failed operation keeps the badge and steps of the
@@ -932,7 +990,7 @@ pub(super) struct ServiceState {
 /// and retries it.
 pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
     let guidance = |text: &'static str| (SharedString::new_static(text), CaptionTone::Guidance);
-    let phase = state.status.map(ServicePhase::of);
+    let phase = state.phase();
     // A Stop the person chose outlasts Uninstall, and installing again keeps it.
     let stopped = state.status.is_some_and(|status| status.stopped);
     let install_choices = if phase == Some(ServicePhase::NotInstalled) {
@@ -1066,6 +1124,15 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                          or open SpaceTerm, until you start it."
                     }),
                 ),
+                // Turning SpaceTerm Core off was the person's choice, so nothing warns.
+                ServicePhase::TurnedOff => (
+                    "Off in Login Items",
+                    "settings-server-service-state-login-item-off",
+                    guidance(
+                        "SpaceTerm Core is turned off in Login Items. Turn it on in System \
+                         Settings to connect.",
+                    ),
+                ),
                 ServicePhase::NotRunning => (
                     "Not running",
                     "settings-server-service-state-not-running",
@@ -1140,13 +1207,13 @@ fn authorization_caption(
     let (_, step) = pending.request.steps();
     let step = step.label().trim_end_matches('\u{2026}');
     let message = match (pending.declined, phase) {
-        (true, ServicePhase::NotInstalled | ServicePhase::Stopped) => {
+        (true, ServicePhase::NotInstalled | ServicePhase::Stopped | ServicePhase::TurnedOff) => {
             format!("Authorization didn\u{2019}t finish. Choose {step} to try again.")
         }
         (true, ServicePhase::NotRunning | ServicePhase::Running) => {
             format!("Choose {step} to try again.")
         }
-        (false, ServicePhase::NotInstalled | ServicePhase::Stopped) => {
+        (false, ServicePhase::NotInstalled | ServicePhase::Stopped | ServicePhase::TurnedOff) => {
             format!("Choose {step} to run SpaceTerm Core at startup.")
         }
         (false, ServicePhase::NotRunning | ServicePhase::Running) => {
@@ -1283,10 +1350,14 @@ fn perform_service_operation(
         use ServiceAction as Action;
         let authorizing = matches!(action, Action::AuthorizeInstall | Action::AuthorizeStart);
         let retry = installation.clone();
+        // What the person turned off in Login Items stays off: no step here installs or starts
+        // the service while it is. The row reads the service and offers Login Items instead.
+        let turned_off = action.starts_service() && control.background_item_off();
         let outcome = match (action, installation.as_deref()) {
+            _ if turned_off => control.status().await,
             (Action::Install, Some(installation)) => control.install(installation),
             (Action::Install, None) => Err(CoreError::RuntimeUnavailable),
-            (Action::Check, _) => control.status().await,
+            (Action::Check | Action::OpenLoginItems, _) => control.status().await,
             (Action::Start, _) => control.start().await,
             (Action::Stop, _) => control.stop(),
             (Action::Restart, _) => control.restart(),
@@ -1298,7 +1369,7 @@ fn perform_service_operation(
                 }
             }
         };
-        let authorized = authorizing && outcome.is_ok();
+        let authorized = authorizing && outcome.is_ok() && !turned_off;
         let (status, failure) = match outcome {
             Ok(status) => (Some(status), None),
             Err(error) if action == Action::Check => (None, Some(error)),
@@ -1336,6 +1407,8 @@ fn perform_service_operation(
                 request,
                 declined: authorizing,
             }),
+            // macOS can also block an item this Install just added.
+            background_item_off: turned_off || control.background_item_off(),
         };
         if authorized {
             // Authorization continues only the request the person approved, including its exact build.
@@ -1510,6 +1583,12 @@ impl SettingsWindow {
         }
         match action {
             ServiceAction::Check | ServiceAction::Start => self.run_core_service(action, cx),
+            // Settings reads the service again when the person comes back to this window.
+            ServiceAction::OpenLoginItems => {
+                if let Some(Ok(control)) = self.core_service.as_ref().map(|row| &row.control) {
+                    control.open_login_items();
+                }
+            }
             ServiceAction::Install => {
                 let choices = self
                     .core_service_presentation()
@@ -1921,9 +2000,7 @@ impl SettingsWindow {
         let Some(state) = self.core_service.as_ref().map(|row| &row.state) else {
             return;
         };
-        let running = state
-            .status
-            .is_some_and(|status| ServicePhase::of(status) == ServicePhase::Running);
+        let running = state.phase() == Some(ServicePhase::Running);
         let Some(confirmation) = ServiceConfirmation::for_action(action, running, state.startup)
         else {
             return;
@@ -2098,6 +2175,7 @@ pub(super) mod testing {
         Uninstall,
         AuthorizeStartup,
         SetAutomaticStart(bool),
+        OpenLoginItems,
     }
 
     /// What the operating system's authorization prompt does when the service asks.
@@ -2127,6 +2205,8 @@ pub(super) mod testing {
         /// What the next status read answers, as a read the service began before a later change
         /// would, ahead of what the service reports now.
         earlier: Mutex<Option<Result<ServiceStatus, CoreError>>>,
+        /// Whether the person turned SpaceTerm Core off in Login Items.
+        background_item_off: Mutex<bool>,
     }
 
     impl ScriptedService {
@@ -2159,7 +2239,20 @@ pub(super) mod testing {
                 prompt: Mutex::new(Prompt::Approve),
                 calls: Mutex::new(Vec::new()),
                 earlier: Mutex::new(None),
+                background_item_off: Mutex::new(false),
             })
+        }
+
+        /// Turns SpaceTerm Core off or on in Login Items, as the person does in System
+        /// Settings. macOS stops a running server it turns off.
+        pub(in crate::ui::settings_window) fn turn_off_in_login_items(&self, off: bool) {
+            *self.background_item_off.lock().expect("background item") = off;
+            if off {
+                let mut status = self.status.lock().expect("status");
+                if let Ok(status) = &mut *status {
+                    status.running = false;
+                }
+            }
         }
 
         pub(in crate::ui::settings_window) fn hold_start(
@@ -2212,7 +2305,9 @@ pub(super) mod testing {
                 .filter(|call| {
                     !matches!(
                         call,
-                        ServiceCall::Status | ServiceCall::RetainedInstallations
+                        ServiceCall::Status
+                            | ServiceCall::RetainedInstallations
+                            | ServiceCall::OpenLoginItems
                     )
                 })
                 .collect()
@@ -2310,6 +2405,17 @@ pub(super) mod testing {
 
         fn startup(&self) -> ServiceStartup {
             self.startup
+        }
+
+        fn background_item_off(&self) -> bool {
+            *self.background_item_off.lock().expect("background item")
+        }
+
+        fn open_login_items(&self) {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(ServiceCall::OpenLoginItems);
         }
 
         fn authorize_startup(&self) -> Result<(), CoreError> {
