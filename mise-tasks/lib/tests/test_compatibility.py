@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from spaceterm_tasks import TaskError
-from spaceterm_tasks.compatibility import RELEASES, candidate_tag, plan, releases
+from spaceterm_tasks.compatibility import RELEASES, candidate_tag, expected, plan, releases
 
 
 class CompatibilityPlanTests(unittest.TestCase):
@@ -60,3 +60,14 @@ class CompatibilityPlanTests(unittest.TestCase):
 
     def test_the_candidate_is_tagged_one_minor_past_the_newest_release(self):
         self.assertEqual(candidate_tag(["v1.2.0", "v2.0.3"]), "v2.1.0")
+
+    def test_this_cli_works_one_major_back_and_that_releases_cli_is_refused_as_older(self):
+        works = {"list": {"ok"}, "status": {"ok"}}
+        self.assertEqual(expected("client", 3, current=3), works)
+        self.assertEqual(expected("client", 2, current=3), works)
+        self.assertEqual(expected("core", 3, current=3), {"list": {"ok"}, "status": {"ok", "cli"}})
+        self.assertEqual(expected("core", 2, current=3), {"list": {"cli"}, "status": {"ok", "cli"}})
+        for candidate in ("client", "core"):
+            for major in (1, 4):
+                with self.subTest(candidate=candidate, major=major), self.assertRaises(TaskError):
+                    expected(candidate, major, current=3)
