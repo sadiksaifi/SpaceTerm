@@ -10,9 +10,9 @@ use gpui::{
     FocusHandle, Font, Global, HitboxBehavior, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Point, RenderOnce, Rgba, ScrollHandle, SharedString, Size,
-    StatefulInteractiveElement as _, Styled as _, Task, WeakEntity, WeakFocusHandle, Window,
-    WindowId, accesskit, actions, anchored, canvas, div, point, prelude::FluentBuilder as _, px,
-    size,
+    StatefulInteractiveElement as _, Styled as _, Task, TextRun, WeakEntity, WeakFocusHandle,
+    Window, WindowId, accesskit, actions, anchored, canvas, div, point,
+    prelude::FluentBuilder as _, px, size,
 };
 
 pub use crate::anchored_placement::{
@@ -897,6 +897,13 @@ impl<A: Clone + 'static> Menu<A> {
         self
     }
 
+    /// Widens the panel past its size's width so every row shows its label, detail and shortcut
+    /// in full. The window still bounds the panel.
+    pub fn fit_rows(mut self) -> Self {
+        self.core.fit_rows = true;
+        self
+    }
+
     /// Uses a compact icon-only trigger while retaining the label as its logical name.
     pub fn icon_trigger(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
@@ -1718,6 +1725,8 @@ struct MenuControl<A> {
     disabled: bool,
     icon_trigger: bool,
     fill_parent_width: bool,
+    /// The panel grows past its size's width to fit its widest row, within the window.
+    fit_rows: bool,
     fill_parent_height: bool,
     preserve_trigger_cursor: bool,
     debug_selector: Option<String>,
@@ -1752,6 +1761,7 @@ impl<A> MenuControl<A> {
             disabled: false,
             icon_trigger: false,
             fill_parent_width: false,
+            fit_rows: false,
             fill_parent_height: false,
             preserve_trigger_cursor: false,
             debug_selector: None,
@@ -1814,11 +1824,21 @@ impl<A: Clone + 'static> MenuControl<A> {
             window,
             cx,
         );
+        let mut panel_style = style;
+        if self.fit_rows {
+            let typography = crate::control_typography(cx);
+            panel_style.metrics.panel_width = style.metrics.panel_width.max(fitted_width(
+                &entries,
+                style.metrics,
+                &typography,
+                window,
+            ));
+        }
         let closed_reservation = state.update(cx, |state, cx| {
             let should_close = state.open && !enabled;
             state.synchronize(
                 entries,
-                style,
+                panel_style,
                 self.placement,
                 enabled,
                 self.kind,
@@ -4136,6 +4156,80 @@ fn panel_leading_columns(entries: &[InternalEntry]) -> LeadingColumns {
     LeadingColumns::new(state, icon)
 }
 
+/// The panel width that shows every row of `entries` and of their submenus in full.
+fn fitted_width(
+    entries: &[InternalEntry],
+    metrics: MenuMetrics,
+    typography: &crate::ControlTypography,
+    window: &Window,
+) -> Pixels {
+    let measure = |text: &SharedString, font: &Font, size: Pixels| {
+        let run = TextRun {
+            len: text.len(),
+            font: font.clone(),
+            color: window.text_style().color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(text.clone(), size, &[run], None)
+            .width
+    };
+    let regular = typography.regular();
+    let columns =
+        panel_leading_columns(entries).label_offset(metrics.leading_column_metrics(), metrics.gap);
+    let fixed =
+        (metrics.panel_padding + metrics.horizontal_padding + metrics.border_width) * 2.0 + columns;
+    let trailing = |text: &Option<SharedString>, font: &Font, size: Pixels| {
+        text.as_ref()
+            .map_or(px(0.0), |text| metrics.gap + measure(text, font, size))
+    };
+    entries
+        .iter()
+        .map(|entry| match &entry.kind {
+            InternalEntryKind::Item {
+                label,
+                shortcut,
+                extra,
+                ..
+            } => {
+                fixed
+                    + measure(label, regular, metrics.font_size)
+                    + trailing(&extra.detail, regular, metrics.font_size)
+                    + trailing(
+                        shortcut,
+                        menu_shortcut_font(typography),
+                        metrics.shortcut_font_size,
+                    )
+            }
+            InternalEntryKind::Submenu {
+                label,
+                shortcut,
+                extra,
+                entries,
+                ..
+            } => (fixed
+                + measure(label, regular, metrics.font_size)
+                + trailing(&extra.detail, regular, metrics.font_size)
+                + trailing(
+                    shortcut,
+                    menu_shortcut_font(typography),
+                    metrics.shortcut_font_size,
+                )
+                + metrics.gap
+                + metrics.icon_size)
+                .max(fitted_width(entries, metrics, typography, window)),
+            InternalEntryKind::Heading(label) => {
+                fixed + measure(label, typography.section_font(), metrics.section_font_size)
+            }
+            InternalEntryKind::Separator => px(0.0),
+        })
+        .fold(px(0.0), Pixels::max)
+        .ceil()
+}
+
 fn panel_size(entries: &[InternalEntry], metrics: MenuMetrics) -> gpui::Size<Pixels> {
     let content_height = entries.iter().fold(px(0.0), |height, entry| {
         height
@@ -5463,6 +5557,82 @@ pub(crate) mod tests {
             .resolve(MenuSize::Regular, test_shell())
             .metrics;
         (metrics, cx)
+    }
+
+    struct FitRoot {
+        fit: bool,
+        entries: Vec<MenuEntry<&'static str>>,
+    }
+
+    impl Render for FitRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Menu::new("fit-menu", "Actions", self.entries.clone())
+                .debug_selector("fit-menu")
+                .when(self.fit, Menu::fit_rows)
+                .on_activate(|_, _, _| {})
+        }
+    }
+
+    /// The laid-out widths of a row's label and detail, and the widths their text needs.
+    fn row_widths(fit: bool, cx: &mut TestAppContext) -> [(Pixels, Pixels); 2] {
+        const LABEL: &str = "This Computer at the end of a long name";
+        const DETAIL: &str = "Closes 3 sessions \u{b7} Restart\u{2026}";
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let entries = vec![
+            MenuEntry::action(LABEL, "restart")
+                .detail(DETAIL)
+                .debug_selector("fit-row"),
+        ];
+        let (_, cx) = cx.add_window_view(move |_, _| FitRoot { fit, entries });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("fit-menu").expect("menu trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+        let label = cx.debug_bounds("fit-row-label").expect("label").size.width;
+        let detail = cx
+            .debug_bounds("fit-row-detail")
+            .expect("detail")
+            .size
+            .width;
+        let metrics = test_theme()
+            .resolve(MenuSize::Regular, test_shell())
+            .metrics;
+        let [label_text, detail_text] = cx.update(|window, cx| {
+            let font = crate::control_typography(cx).regular().clone();
+            [LABEL, DETAIL].map(|text| {
+                let run = TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: window.text_style().color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                window
+                    .text_system()
+                    .shape_line(text.into(), metrics.font_size, &[run], None)
+                    .width
+            })
+        });
+        [(label, label_text), (detail, detail_text)]
+    }
+
+    #[gpui::test]
+    fn fitted_rows_show_their_label_and_detail_in_full(cx: &mut TestAppContext) {
+        let [(label, label_text), (detail, detail_text)] = row_widths(true, cx);
+        assert!(label >= label_text, "label {label:?} < {label_text:?}");
+        assert!(detail >= detail_text, "detail {detail:?} < {detail_text:?}");
+    }
+
+    #[gpui::test]
+    fn an_unfitted_panel_truncates_a_row_wider_than_its_size(cx: &mut TestAppContext) {
+        let [(label, label_text), _] = row_widths(false, cx);
+        assert!(
+            label < label_text,
+            "the fixture must overflow the regular width"
+        );
     }
 
     fn label_inset(cx: &mut VisualTestContext, row: &'static str) -> Pixels {

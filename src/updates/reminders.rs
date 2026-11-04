@@ -11,9 +11,22 @@ use std::time::Duration;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 
 use super::UpdateService;
+use super::machines::MachineId;
 use super::machines::store::MachineUpdates;
 use super::policy::DAY;
 use super::presentation::{self, ItemKey, Reminder};
+use spaceterm_core::update::facts::Version;
+
+/// The Pending Version `machine` waits with now.
+fn pending_version(machine: MachineId, cx: &App) -> Option<Version> {
+    let store = MachineUpdates::global(cx)?;
+    let store = store.read(cx);
+    let update = store
+        .machines()
+        .iter()
+        .find(|update| update.machine == machine)?;
+    Some(update.facts.as_ref()?.pending.as_ref()?.version.clone())
+}
 
 /// How often the schedule is read again when nothing else changes.
 const RECHECK: Duration = Duration::from_secs(60 * 60);
@@ -33,8 +46,8 @@ pub(crate) struct ReminderActivated(pub(crate) ItemKey);
 
 pub(crate) struct UpdateReminders {
     adapter: Rc<dyn UpdateReminderAdapter>,
-    /// When each Machine's overdue restart was last named.
-    named: HashMap<ItemKey, u64>,
+    /// When each Machine's overdue restart was last named, and the Pending Version it named.
+    named: HashMap<MachineId, (Version, u64)>,
     _subscriptions: Vec<Subscription>,
     _recheck: Task<()>,
 }
@@ -124,15 +137,14 @@ impl UpdateReminders {
         let desktop_due = cx
             .try_global::<UpdateService>()
             .is_some_and(|service| service.0.read(cx).reminder().is_some());
-        self.named
-            .retain(|key, _| reminders.iter().any(|reminder| reminder.key == *key));
+        self.forget_resolved(cx);
         for reminder in reminders {
             let due = match reminder.key {
                 ItemKey::Desktop => desktop_due,
-                ItemKey::Machine(_) => self
+                ItemKey::Machine(machine) => self
                     .named
-                    .get(&reminder.key)
-                    .is_none_or(|last| now.saturating_sub(*last) >= DAY),
+                    .get(&machine)
+                    .is_none_or(|(_, last)| now.saturating_sub(*last) >= DAY),
             };
             if !due {
                 continue;
@@ -149,11 +161,37 @@ impl UpdateReminders {
                         });
                     }
                 }
-                ItemKey::Machine(_) => {
-                    self.named.insert(reminder.key, now);
+                ItemKey::Machine(machine) => {
+                    if let Some(pending) = pending_version(machine, cx) {
+                        self.named.insert(machine, (pending, now));
+                    }
                 }
             }
         }
+    }
+
+    /// Forgets a Machine's last reminder once it is gone or its Pending Version resolved or
+    /// changed. A temporary state, such as Offline, Checking or Restarting, keeps it, so a
+    /// Machine that comes back overdue is named again only a day after the last time.
+    fn forget_resolved(&mut self, cx: &App) {
+        let Some(store) = MachineUpdates::global(cx) else {
+            self.named.clear();
+            return;
+        };
+        let machines = store.read(cx).machines();
+        self.named.retain(|machine, (named, _)| {
+            let Some(update) = machines.iter().find(|update| update.machine == *machine) else {
+                return false;
+            };
+            match &update.facts {
+                // No facts while unreachable: nothing says the update resolved.
+                None => true,
+                Some(facts) => facts
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.version == *named),
+            }
+        });
     }
 
     fn show(&self, reminder: &Reminder) {
@@ -258,6 +296,62 @@ mod tests {
         assert_eq!(
             shown[0].2,
             "SpaceTerm Core 0.9.0 has waited 1 day. Restarting closes 3 running sessions."
+        );
+    }
+
+    #[gpui::test]
+    fn a_temporary_state_keeps_the_daily_interval_and_a_new_version_names_again(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let machines = Rc::new(ScriptedMachines::default());
+        let reminders = Rc::new(RecordingReminders::default());
+        cx.update(|cx| {
+            MachineUpdates::install(machines.clone(), cx);
+            UpdateReminders::install(reminders.clone(), cx);
+        });
+        let changed = |update: MachineUpdate| {
+            machines.emit(MachineUpdatesEvent::Changed(Box::new(update)));
+        };
+        machines.emit(MachineUpdatesEvent::Machines(vec![overdue_penguin(3)]));
+        cx.run_until_parked();
+
+        let mut offline = overdue_penguin(3);
+        offline.link = MachineLink::Offline {
+            since: crate::updates::now(),
+        };
+        offline.facts = None;
+        changed(offline);
+        cx.run_until_parked();
+        changed(overdue_penguin(3));
+        cx.run_until_parked();
+        let mut checking = overdue_penguin(3);
+        checking.facts.as_mut().unwrap().operation =
+            Some(spaceterm_core::update::facts::Operation::Checking);
+        changed(checking);
+        cx.run_until_parked();
+        changed(overdue_penguin(3));
+        cx.run_until_parked();
+        assert_eq!(
+            reminders.shown.borrow().len(),
+            1,
+            "Offline and Checking keep today's reminder"
+        );
+
+        let mut newer = overdue_penguin(3);
+        newer
+            .facts
+            .as_mut()
+            .unwrap()
+            .pending
+            .as_mut()
+            .unwrap()
+            .version = Version::parse("0.9.1").unwrap();
+        changed(newer);
+        cx.run_until_parked();
+        assert_eq!(
+            reminders.shown.borrow().len(),
+            2,
+            "a replaced Pending Version starts its own reminders"
         );
     }
 }

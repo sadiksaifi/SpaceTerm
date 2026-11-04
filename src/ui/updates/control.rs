@@ -265,6 +265,7 @@ impl Render for UpdateControl {
                         .debug_selector("update-control-menu-tooltip"),
                 )
                 .size(MenuSize::Wide)
+                .fit_rows()
                 .placement(MenuPlacementConfig::new(
                     MenuPlacement::Bottom,
                     MenuAlignment::End,
