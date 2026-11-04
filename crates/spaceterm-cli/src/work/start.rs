@@ -150,13 +150,10 @@ fn selected(cli: &Cli, credentials: &CliCredentials<'_>) -> Output {
     output
 }
 
-/// Whether the command ends with the notice about a version that waits for a restart: the work
-/// commands on Workspaces, Tabs and Panes. `worktree` and `show` print none.
+/// Whether the command ends with the notice about a version that waits for a restart: every
+/// work command but `show`, which acts on the desktop rather than SpaceTerm Core.
 fn reports_pending_restart(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::List(_) | Command::Workspace(_) | Command::Tab(_) | Command::Pane(_)
-    )
+    !matches!(command, Command::Show(_))
 }
 
 /// Each pass owns its writer until it returns. Human input happens between passes, and the
@@ -432,6 +429,24 @@ mod tests {
                 assert_eq!(sent.borrow().len(), 1);
             }
             std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_work_command_ends_with_the_pending_restart_notice_but_show() {
+        for (argv, reports) in [
+            (&["list"][..], true),
+            (&["workspace", "create", "Notes"][..], true),
+            (&["tab", "create"][..], true),
+            (&["pane", "split"][..], true),
+            (&["worktree", "create", "feature"][..], true),
+            (&["worktree", "remove", "--worktree", "feature"][..], true),
+            (&["show"][..], false),
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("spaceterm").chain(argv.iter().copied()))
+                .unwrap();
+            assert!(execute::handles(&cli.command), "{argv:?}");
+            assert_eq!(reports_pending_restart(&cli.command), reports, "{argv:?}");
         }
     }
 }
