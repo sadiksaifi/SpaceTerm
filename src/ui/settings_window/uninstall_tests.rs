@@ -297,6 +297,46 @@ fn an_installed_tree_is_removed_with_its_launcher_icon_and_desktop_entry() {
     assert!(other_entry.exists(), "other desktop entries stay");
 }
 
+/// Preflight installs beside Release under its own names.
+#[test]
+fn a_preflight_tree_is_removed_with_its_own_launcher_and_leaves_release_alone() {
+    let scratch = Scratch::new();
+    let home = scratch.0.join("home");
+    let data_home = home.join(".local/share");
+    let lib = home.join(".local/lib");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["spaceterm", "spaceterm-preflight"] {
+        touch(&lib.join(name).join("bin/spaceterm-desktop"));
+        std::os::unix::fs::symlink(
+            lib.join(name).join("bin/spaceterm-desktop"),
+            bin.join(format!("{name}-desktop")),
+        )
+        .unwrap();
+    }
+    let entry = data_home.join("applications/io.github.sadiksaifi.spaceterm-preflight.desktop");
+    touch(&entry);
+
+    InstalledApp::Tree {
+        root: lib.join("spaceterm-preflight"),
+        home: home.clone(),
+        data_home,
+        application_id: "io.github.sadiksaifi.spaceterm-preflight",
+    }
+    .remove()
+    .unwrap();
+
+    assert!(!lib.join("spaceterm-preflight").exists());
+    assert!(std::fs::symlink_metadata(bin.join("spaceterm-preflight-desktop")).is_err());
+    assert!(!entry.exists());
+    assert!(lib.join("spaceterm/bin/spaceterm-desktop").exists());
+    assert_eq!(
+        std::fs::read_link(bin.join("spaceterm-desktop")).unwrap(),
+        lib.join("spaceterm/bin/spaceterm-desktop"),
+        "Release's launcher stays"
+    );
+}
+
 #[test]
 fn a_launcher_that_points_elsewhere_stays() {
     let scratch = Scratch::new();

@@ -469,8 +469,9 @@ fn in_window(
 enum InstalledApp {
     /// `<bundle>.app/Contents/MacOS/<executable>`.
     Bundle(PathBuf),
-    /// `<root>/bin/spaceterm-desktop` beside `<root>/share/spaceterm`, with the launcher, icon and
-    /// desktop entry `install.sh` added for `application_id`.
+    /// `<root>/bin/spaceterm-desktop` beside `<root>/share/spaceterm`, with the launcher
+    /// `~/.local/bin/<root name>-desktop`, and the icon and desktop entry `install.sh` added for
+    /// `application_id`.
     Tree {
         root: PathBuf,
         home: PathBuf,
@@ -525,11 +526,17 @@ impl InstalledApp {
                 data_home,
                 application_id,
             } => {
-                let launcher = home.join(".local").join("bin").join("spaceterm-desktop");
-                if std::fs::read_link(&launcher)
-                    .is_ok_and(|target| target == root.join("bin").join("spaceterm-desktop"))
-                {
-                    std::fs::remove_file(&launcher)?;
+                // install.sh names the tree and its launcher after the build identity, such as
+                // `spaceterm-preflight` and `spaceterm-preflight-desktop`.
+                if let Some(name) = root.file_name() {
+                    let mut launcher = name.to_owned();
+                    launcher.push("-desktop");
+                    let launcher = home.join(".local").join("bin").join(launcher);
+                    if std::fs::read_link(&launcher)
+                        .is_ok_and(|target| target == root.join("bin").join("spaceterm-desktop"))
+                    {
+                        std::fs::remove_file(&launcher)?;
+                    }
                 }
                 let icon = data_home
                     .join("icons/hicolor/scalable/apps")
