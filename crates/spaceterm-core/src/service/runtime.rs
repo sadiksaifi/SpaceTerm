@@ -491,6 +491,7 @@ fn digest(bytes: &[u8]) -> String {
         .map(|v| format!("{v:02x}"))
         .collect()
 }
+/// The nonproduction key that Preflight and Development archives verify under.
 fn public_key(identity: &str) -> Result<Vec<u8>, CoreError> {
     #[cfg(test)]
     if test_support::active() {
@@ -501,16 +502,6 @@ fn public_key(identity: &str) -> Result<Vec<u8>, CoreError> {
         });
     }
     let key = match identity {
-        "spaceterm" => {
-            let template = include_str!("../../../../packaging/macos/spaceterm/Info.plist");
-            template
-                .split_once("<key>SUPublicEDKey</key>")
-                .and_then(|(_, tail)| tail.trim_start().strip_prefix("<string>"))
-                .and_then(|tail| tail.split_once("</string>"))
-                .ok_or(CoreError::RuntimeUnavailable)?
-                .0
-                .to_owned()
-        }
         "spaceterm-preflight" | "spaceterm-development" => {
             #[derive(Deserialize)]
             struct NonproductionTrust {
@@ -529,11 +520,24 @@ fn public_key(identity: &str) -> Result<Vec<u8>, CoreError> {
         .decode(key.trim())
         .map_err(|_| CoreError::RuntimeUnavailable)
 }
+/// Verifies an archive's raw signature for `identity`. A Release archive verifies under the
+/// current or the backup key of `packaging/update-trust.json`, and under nothing else.
+/// Preflight and Development archives verify under the nonproduction key.
 pub(super) fn authenticate(
     bytes: &[u8],
     signature: &[u8],
     identity: &str,
 ) -> Result<(), CoreError> {
+    #[cfg(test)]
+    let release = identity == "spaceterm" && !test_support::active();
+    #[cfg(not(test))]
+    let release = identity == "spaceterm";
+    if release {
+        return crate::update::trust::UpdateTrust::release()
+            .map_err(|_| CoreError::RuntimeUnavailable)?
+            .verify(bytes, signature)
+            .map_err(|_| CoreError::RuntimeUnavailable);
+    }
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key(identity)?)
         .verify(bytes, signature)
         .map_err(|_| CoreError::RuntimeUnavailable)
