@@ -591,45 +591,31 @@ pub(super) fn installed(service: &Service) -> Option<Arc<dyn SpaceTermRemoval>> 
 
 impl SpaceTermRemoval for InstalledSpaceTerm {
     fn observe(&self) -> Result<Observed, RemovalFailure> {
-        // A stopped Core uninstalls without a preview, so only a running one is asked.
-        let status = self.service.status().map_err(RemovalFailure::of_core)?;
-        if !status.running {
-            return Ok(Observed::default());
-        }
-        match self
+        // A preview removes nothing, even while SpaceTerm Core is stopped.
+        let preview = self
             .service
-            .uninstall_cli(None, Data::Keep)
-            .map_err(RemovalFailure::of_core)?
-        {
-            CliUninstall::Preview { sessions, .. } => Ok(Observed::new(sessions)),
-            // The Core stopped between the two reads and is already removed.
-            CliUninstall::Completed => Ok(Observed::default()),
-        }
+            .preview_uninstall(Data::Keep)
+            .map_err(RemovalFailure::of_core)?;
+        Ok(Observed::new(preview.sessions))
     }
 
     fn remove_core(&self, observed: &Observed, data: Data) -> Result<(), RemovalFailure> {
-        // The approval binds the data choice, so the uninstall previews again with it.
+        // The approval binds the data choice the person just made, so it is previewed again
+        // with that choice. SpaceTerm Core refuses the token if anything moved since.
+        let preview = self
+            .service
+            .preview_uninstall(data)
+            .map_err(RemovalFailure::of_core)?;
+        if Observed::new(preview.sessions) != *observed {
+            return Err(RemovalFailure::Changed);
+        }
         match self
             .service
-            .uninstall_cli(None, data)
+            .uninstall_cli(Some(&preview.token), data)
             .map_err(RemovalFailure::of_core)?
         {
             CliUninstall::Completed => Ok(()),
-            CliUninstall::Preview {
-                token, sessions, ..
-            } => {
-                if Observed::new(sessions) != *observed {
-                    return Err(RemovalFailure::Changed);
-                }
-                match self
-                    .service
-                    .uninstall_cli(Some(&token), data)
-                    .map_err(RemovalFailure::of_core)?
-                {
-                    CliUninstall::Completed => Ok(()),
-                    CliUninstall::Preview { .. } => Err(RemovalFailure::Changed),
-                }
-            }
+            CliUninstall::Preview { .. } => Err(RemovalFailure::Changed),
         }
     }
 
