@@ -79,8 +79,8 @@ fn prepend_path(
     Some(value)
 }
 
-/// `root` first on the `separator`-delimited `prior` list, which keeps its order without empty
-/// entries or another copy of `root`.
+/// `root` first on the `separator`-delimited `prior` list. Every other entry keeps its order,
+/// including empty entries, which name the current directory. Only other copies of `root` go.
 pub(super) fn prepend_path_once(
     root: &std::ffi::OsStr,
     prior: &std::ffi::OsStr,
@@ -89,22 +89,21 @@ pub(super) fn prepend_path_once(
     if !separator.is_ascii() || separator.is_ascii_control() {
         return None;
     }
-    let mut rest = OsString::new();
+    if root.as_encoded_bytes().contains(&(separator as u8)) {
+        return None;
+    }
+    let mut value = root.to_owned();
     for entry in prior
         .as_encoded_bytes()
         .split(|byte| *byte == separator as u8)
+        .filter(|entry| *entry != root.as_encoded_bytes())
     {
-        if entry.is_empty() || entry == root.as_encoded_bytes() {
-            continue;
-        }
-        if !rest.is_empty() {
-            rest.push(separator.to_string());
-        }
+        value.push(separator.to_string());
         // SAFETY: `entry` is a run of `prior`'s encoded bytes split only at an ASCII byte, which
         // `OsStr::from_encoded_bytes_unchecked` accepts.
-        rest.push(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(entry) });
+        value.push(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(entry) });
     }
-    prepend_path(root, &rest, separator)
+    Some(value)
 }
 
 pub fn plan_shell_integration(

@@ -238,11 +238,12 @@ impl PreparedShellLaunch {
     }
 
     /// The inherited PATH with `cli`'s directory first and nowhere else, so `spaceterm` names
-    /// this Session's own server even when shell integration is off.
+    /// this Session's own server even when shell integration is off. An absent PATH stays
+    /// absent, so the shell keeps its own default search path.
     fn session_path(&self, cli: &Path) -> Option<OsString> {
         super::shell_integration::prepend_path_once(
             cli.parent()?.as_os_str(),
-            self.inherited_path.as_deref().unwrap_or_default(),
+            self.inherited_path.as_deref()?,
             self.path_list_separator,
         )
     }
@@ -555,7 +556,9 @@ mod tests {
     }
 
     /// Every Session finds `spaceterm` before any other on PATH, with or without shell
-    /// integration, and the rest of the inherited PATH keeps its order without a second copy.
+    /// integration. The rest of the inherited PATH keeps every entry in its order, including the
+    /// empty entries that name the current directory, without a second copy of the CLI's
+    /// directory. An absent PATH stays absent for the shell to fill in.
     #[test]
     fn a_machine_session_puts_its_cli_first_on_path() {
         let resources = crate::terminal::testing::ShellResourcesFixture::new();
@@ -570,21 +573,40 @@ mod tests {
             ShellIntegrationMode::Automatic,
             ShellIntegrationMode::Disabled,
         ] {
-            let launch = ShellLaunchPlanner::for_test("/bin/sh".into(), resources.path().into())
-                .with_environment(
-                    mode,
-                    ShellEnvironment {
-                        path: Some("/usr/bin:/opt/space term/bin:/bin".into()),
-                        ..ShellEnvironment::default()
-                    },
-                )
-                .local(&std::env::temp_dir())
-                .unwrap()
-                .with_session_environment(&session);
-            assert_eq!(
-                env_value(&launch, "PATH"),
-                Some(OsStr::new("/opt/space term/bin:/usr/bin:/bin"))
-            );
+            for (inherited, expected) in [
+                (
+                    Some("/usr/bin:/opt/space term/bin:/bin"),
+                    Some("/opt/space term/bin:/usr/bin:/bin"),
+                ),
+                (
+                    Some(":/usr/bin:/opt/space term/bin:/opt/space term/bin:/bin:"),
+                    Some("/opt/space term/bin::/usr/bin:/bin:"),
+                ),
+                (
+                    Some("/usr/bin::/bin"),
+                    Some("/opt/space term/bin:/usr/bin::/bin"),
+                ),
+                (Some(""), Some("/opt/space term/bin:")),
+                (None, None),
+            ] {
+                let launch =
+                    ShellLaunchPlanner::for_test("/bin/sh".into(), resources.path().into())
+                        .with_environment(
+                            mode,
+                            ShellEnvironment {
+                                path: inherited.map(OsString::from),
+                                ..ShellEnvironment::default()
+                            },
+                        )
+                        .local(&std::env::temp_dir())
+                        .unwrap()
+                        .with_session_environment(&session);
+                assert_eq!(
+                    env_value(&launch, "PATH"),
+                    expected.map(OsStr::new),
+                    "inherited {inherited:?}"
+                );
+            }
         }
     }
 
