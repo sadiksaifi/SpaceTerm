@@ -481,3 +481,76 @@ fn install_tree_elsewhere(scratch: &Scratch, account: &Account) -> PathBuf {
     .unwrap();
     foreign
 }
+
+/// Runs a copy of `sleep` as `executable` until the returned child is killed.
+fn run_as(executable: &Path) -> std::process::Child {
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_file(executable);
+    std::fs::copy("/bin/sleep", executable).unwrap();
+    // Another test's fork can briefly hold the fresh copy open for writing.
+    for _ in 0..50 {
+        match std::process::Command::new(executable).arg("30").spawn() {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result.unwrap(),
+        }
+    }
+    panic!("the copy of sleep stayed busy");
+}
+
+fn stop(mut child: std::process::Child) {
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_tree_runs_while_its_executable_or_a_staged_copy_does() {
+    let scratch = Scratch::new();
+    let account = scratch.account();
+    let root = install_tree(&scratch.0.join("lib"), &account);
+    let app = tree(&root, &account);
+    assert!(!app.is_running());
+
+    let child = run_as(&root.join("bin/spaceterm-desktop"));
+    assert!(app.is_running());
+    stop(child);
+    assert!(!app.is_running());
+
+    let staged = run_as(
+        &scratch
+            .0
+            .join("lib/.spaceterm.update/next/bin/spaceterm-desktop"),
+    );
+    assert!(app.is_running());
+    stop(staged);
+
+    let elsewhere = run_as(&scratch.0.join("other/spaceterm/bin/spaceterm-desktop"));
+    assert!(!app.is_running());
+    stop(elsewhere);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_bundle_runs_while_its_executable_does() {
+    let scratch = Scratch::new();
+    let account = scratch.account();
+    let bundle = scratch.0.join("Applications/SpaceTerm.app");
+    write_plist(&bundle, ID);
+    let app = InstalledApp::new(Location::Bundle(bundle.clone()), &release(), &account);
+    assert!(!app.is_running());
+
+    let child = run_as(&bundle.join("Contents/MacOS/SpaceTerm"));
+    assert!(app.is_running());
+    stop(child);
+    assert!(!app.is_running());
+
+    let elsewhere = run_as(
+        &scratch
+            .0
+            .join("Other/SpaceTerm.app/Contents/MacOS/SpaceTerm"),
+    );
+    assert!(!app.is_running());
+    stop(elsewhere);
+}

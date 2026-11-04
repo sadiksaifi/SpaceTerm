@@ -154,6 +154,27 @@ impl InstalledApp {
         }
     }
 
+    /// Whether another process of this account runs this app, read afresh. That is the check
+    /// `install.sh` makes before it replaces or removes the app: on macOS an executable in the
+    /// bundle's `Contents/MacOS`, on Linux the tree's `bin/spaceterm-desktop` or a copy the
+    /// updater staged beside the tree but has not relaunched. A process list this account
+    /// cannot read counts as no running app.
+    pub fn is_running(&self) -> bool {
+        running_executables()
+            .iter()
+            .any(|executable| self.runs(executable))
+    }
+
+    fn runs(&self, executable: &Path) -> bool {
+        match &self.location {
+            Location::Bundle(bundle) => executable.parent() == Some(&bundle.join("Contents/MacOS")),
+            Location::Tree(root) => {
+                executable == root.join("bin").join(EXECUTABLE)
+                    || staging(root).is_some_and(|staging| executable.starts_with(staging))
+            }
+        }
+    }
+
     /// Removes what the installer installed for this app and nothing else. The layout is checked
     /// again first, so a directory that changed since it was found stays.
     pub fn remove(&self) -> io::Result<()> {
@@ -363,13 +384,84 @@ fn remove_tree(root: &Path, identity: &AppIdentity, account: &Account) -> io::Re
     if entry_program(&entry).is_some_and(|program| program == executable) {
         remove_file(&entry)?;
     }
-    if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
-        let mut staging = OsString::from(".");
-        staging.push(name);
-        staging.push(".update");
-        remove_directory(&parent.join(staging))?;
+    if let Some(staging) = staging(root) {
+        remove_directory(&staging)?;
     }
     remove_directory(root)
+}
+
+/// `<parent>/.<name>.update`, where the updater stages a new tree before it swaps it in.
+fn staging(root: &Path) -> Option<PathBuf> {
+    let mut staging = OsString::from(".");
+    staging.push(root.file_name()?);
+    staging.push(".update");
+    Some(root.parent()?.join(staging))
+}
+
+/// The executable of every other process this account can inspect. A process replaced since
+/// it started reports its executable as `<path> (deleted)` on Linux; that path still counts.
+#[cfg(target_os = "linux")]
+fn running_executables() -> Vec<PathBuf> {
+    let this = std::process::id().to_string();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .filter(|name| {
+            name.to_str().is_some_and(|name| {
+                name != this && !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+        .filter_map(|name| std::fs::read_link(Path::new("/proc").join(name).join("exe")).ok())
+        .map(|executable| {
+            use std::os::unix::ffi::OsStrExt;
+            let bytes = executable.as_os_str().as_bytes();
+            match bytes.strip_suffix(b" (deleted)") {
+                Some(path) => PathBuf::from(std::ffi::OsStr::from_bytes(path)),
+                None => executable,
+            }
+        })
+        .collect()
+}
+
+/// The executable of every other process this account can inspect.
+#[cfg(target_os = "macos")]
+fn running_executables() -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: a null buffer asks only for the number of processes.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let Ok(count) = usize::try_from(count) else {
+        return Vec::new();
+    };
+    // Room for processes that start between the two calls.
+    let mut processes = vec![0_i32; count + 64];
+    let Ok(size) = i32::try_from(processes.len() * std::mem::size_of::<i32>()) else {
+        return Vec::new();
+    };
+    // SAFETY: the buffer holds `size` bytes of process IDs.
+    let listed = unsafe { libc::proc_listallpids(processes.as_mut_ptr().cast(), size) };
+    let Ok(listed) = usize::try_from(listed) else {
+        return Vec::new();
+    };
+    processes.truncate(listed.min(processes.len()));
+    let this = i32::try_from(std::process::id()).unwrap_or(0);
+    let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    processes
+        .into_iter()
+        .filter(|process| *process > 0 && *process != this)
+        .filter_map(|process| {
+            // SAFETY: the buffer holds PROC_PIDPATHINFO_MAXSIZE bytes.
+            let length = unsafe {
+                libc::proc_pidpath(process, buffer.as_mut_ptr().cast(), buffer.len() as u32)
+            };
+            let length = usize::try_from(length).ok().filter(|length| *length > 0)?;
+            Some(PathBuf::from(std::ffi::OsStr::from_bytes(
+                &buffer[..length],
+            )))
+        })
+        .collect()
 }
 
 fn remove_file(path: &Path) -> io::Result<()> {

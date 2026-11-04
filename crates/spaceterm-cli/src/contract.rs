@@ -829,6 +829,7 @@ codes! {
     CommandFailed = "command_failed", Failed, false, "The command exited with a nonzero status.";
     OutputFailed = "output_failed", Failed, false, "SpaceTerm couldn\u{2019}t write the output.";
     OperationFailed = "operation_failed", Failed, false, "SpaceTerm Core did not perform the operation.";
+    AppRunning = "app_running", ActionRequired, false, "SpaceTerm is running. Quit SpaceTerm, then run this again.";
     AppNotRemoved = "app_not_removed", Failed, false, "SpaceTerm Core is uninstalled, but SpaceTerm couldn\u{2019}t remove the SpaceTerm app.";
     PermissionFailed = "permission_failed", Failed, false, "The system didn\u{2019}t complete the permission operation.";
     Interrupted = "interrupted", Interrupted, false, "Interrupted.";
