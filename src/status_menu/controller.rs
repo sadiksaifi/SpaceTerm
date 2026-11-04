@@ -170,7 +170,8 @@ impl StatusMenu {
                 }
             }
             // The Core starts nothing that is off in Login Items, so Start opens that list,
-            // where the person turns it on. Turning it on there starts it.
+            // where the person turns it on. Nothing starts by itself: once the item is on, the
+            // menu still offers Start, and the person chooses it.
             Err(ActionFailure::LoginItemOff) => self.host.open_login_items(),
             Err(failure) => {
                 if let Some((title, message)) = presentation::action_failure(

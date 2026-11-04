@@ -204,6 +204,7 @@ fn sessions_that_changed_since_asking_stop_the_uninstall_before_anything_is_remo
     );
 }
 
+/// The remedy is the desktop's own wording, whatever it calls this computer.
 #[gpui::test]
 fn an_app_that_cannot_remove_itself_says_how_to_finish(cx: &mut TestAppContext) {
     let removal = ScriptedRemoval::new(0);
@@ -214,8 +215,8 @@ fn an_app_that_cannot_remove_itself_says_how_to_finish(cx: &mut TestAppContext) 
     click_modal(CONFIRM_SELECTOR, cx);
 
     assert!(shows(
-        "SpaceTerm Core was removed, but SpaceTerm couldn’t remove itself, so run install.sh \
-         --uninstall.",
+        "SpaceTerm Core was removed, but SpaceTerm couldn’t remove itself, so remove SpaceTerm \
+         the way you installed it.",
         cx
     ));
     assert!(
@@ -303,8 +304,8 @@ fn the_data_goes_even_when_the_app_cannot_remove_itself(cx: &mut TestAppContext)
         ]
     );
     assert!(shows(
-        "SpaceTerm Core was removed, but SpaceTerm couldn’t remove itself, so run install.sh \
-         --uninstall.",
+        "SpaceTerm Core was removed, but SpaceTerm couldn’t remove itself, so remove SpaceTerm \
+         the way you installed it.",
         cx
     ));
     assert!(alert_open(QUIT_SELECTOR, cx));
@@ -322,8 +323,8 @@ fn an_app_that_cannot_remove_itself_also_names_data_that_stays(cx: &mut TestAppC
     click_modal(CONFIRM_SELECTOR, cx);
 
     assert!(shows(
-        "SpaceTerm Core was removed, but SpaceTerm couldn’t remove itself, so run install.sh \
-         --uninstall. Some of its Workspaces, paired devices and settings also remain.",
+        "SpaceTerm Core was removed, but SpaceTerm couldn’t remove itself, so remove SpaceTerm \
+         the way you installed it. Some of its Workspaces, paired devices and settings also remain.",
         cx
     ));
 }

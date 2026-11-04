@@ -182,14 +182,10 @@ pub(super) fn failure_message(failure: RemovalFailure, here: &str) -> String {
     }
 }
 
-/// The last alert's title and message once SpaceTerm Core is gone.
-pub(super) fn ended_message(ended: Ended, here: &str, mac: bool) -> (&'static str, String) {
+/// The last alert's title and message once SpaceTerm Core is gone. `app_remedy` is how the
+/// person removes SpaceTerm themselves, in this desktop's wording.
+pub(super) fn ended_message(ended: Ended, here: &str, app_remedy: &str) -> (&'static str, String) {
     const PARTLY: &str = "Couldn\u{2019}t Uninstall SpaceTerm";
-    let app_remedy = if mac {
-        "move SpaceTerm to the Trash"
-    } else {
-        "run install.sh --uninstall"
-    };
     match ended {
         Ended {
             app_kept: false,
@@ -240,10 +236,6 @@ pub(super) fn ended_message(ended: Ended, here: &str, mac: bool) -> (&'static st
 impl SettingsWindow {
     fn here(&self) -> String {
         self.this_computer_phrase.to_owned()
-    }
-
-    fn on_mac(&self) -> bool {
-        self.this_computer == "This Mac"
     }
 
     /// The Advanced row's description.
@@ -489,7 +481,7 @@ impl SettingsWindow {
     /// left to run, so it quits.
     fn uninstalled(&mut self, ended: Ended, window: &mut Window, cx: &mut Context<Self>) {
         self.close_uninstall_progress(window, cx);
-        let (title, message) = ended_message(ended, &self.here(), self.on_mac());
+        let (title, message) = ended_message(ended, &self.here(), self.uninstall_app_remedy);
         self.present_uninstall_end(title, message, true, window, cx);
     }
 

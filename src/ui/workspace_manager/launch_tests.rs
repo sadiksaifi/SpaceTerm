@@ -507,10 +507,19 @@ fn a_core_turned_off_in_login_items_while_open_says_so_until_turned_on(cx: &mut 
 }
 
 /// The person stopped SpaceTerm Core, then turned it off in Login Items. The service refuses the
-/// Start chosen after that, and the window says the item is off and offers that list.
+/// Start chosen after that, and the window says the item is off and offers that list. Once the
+/// person turns it on and comes back, the window reads launch again and offers Start. The refused
+/// Start never runs by itself, so the Stop stays until the person chooses Start.
 #[gpui::test]
-fn start_after_turning_off_in_login_items_offers_login_items(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped)], cx);
+fn a_start_refused_for_login_items_never_runs_by_itself(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(
+        vec![
+            Ok(LaunchOutcome::Stopped),
+            Ok(LaunchOutcome::Stopped),
+            ready(),
+        ],
+        cx,
+    );
     cx.run_until_parked();
     harness.launch.refuse_start(CoreError::LoginItemOff);
 
@@ -520,6 +529,26 @@ fn start_after_turning_off_in_login_items_offers_login_items(cx: &mut TestAppCon
     assert_eq!(harness.launch_title(cx), Some(launch::LOGIN_ITEM_OFF_TITLE));
     harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
     assert_eq!(harness.launch.steps(), ["run", "start", "open_login_items"]);
+
+    // The person turns SpaceTerm Core on in System Settings and comes back.
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "start", "open_login_items", "run"],
+        "launch reads again and starts nothing"
+    );
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+    assert!(cx.debug_bounds(LAUNCH_START_SELECTOR).is_some());
+
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    sync(&harness, cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "start", "open_login_items", "run", "start", "run"]
+    );
+    assert_eq!(harness.rows(cx), 1);
 }
 
 /// An item macOS blocked when launch installed it and an item the person turned off read the

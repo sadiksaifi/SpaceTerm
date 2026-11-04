@@ -124,6 +124,9 @@ pub(crate) enum UnavailableKind {
     /// Another program on the machine holds the UDP port Network Access asked for. Nothing
     /// changed there.
     PortInUse,
+    /// SpaceTerm Core is off in Login Items on that Mac, so its service started nothing. The
+    /// person turns it on there.
+    LoginItemOff,
     CredentialUnavailable,
     Storage,
 }
@@ -1086,11 +1089,11 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             CapturedEffectError::NotAdmitted(error) => self.process_failure(error),
             CapturedEffectError::Unconfirmed => SetupFailure::Unconfirmed(operation),
         })?;
-        if output.exit.code() == Some(i32::from(spaceterm_core::provisioning::PORT_IN_USE)) {
-            return Err(SetupFailure::Unavailable(UnavailableKind::PortInUse));
-        }
         if !output.exit.is_success() {
-            return Err(SetupFailure::Unconfirmed(operation));
+            return Err(step_failure(
+                output.exit.code(),
+                SetupFailure::Unconfirmed(operation),
+            ));
         }
         self.completed_effect.set(Some(operation));
         Ok(output)
@@ -1117,10 +1120,24 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         )
         .map_err(|_| SetupFailure::Unconfirmed(SetupOperation::Install))?;
         if !output.exit.is_success() {
-            return Err(SetupFailure::Refused(RefusalKind::InstallRefused));
+            return Err(step_failure(
+                output.exit.code(),
+                SetupFailure::Refused(RefusalKind::InstallRefused),
+            ));
         }
         self.completed_effect.set(Some(SetupOperation::Install));
         Ok(())
+    }
+}
+
+/// What a setup step's nonzero exit `code` says. A status the CLI reserves names its one cause;
+/// any other status is `otherwise`.
+fn step_failure(code: Option<i32>, otherwise: SetupFailure) -> SetupFailure {
+    use spaceterm_core::provisioning::{LOGIN_ITEM_OFF, PORT_IN_USE};
+    match code.and_then(|code| u8::try_from(code).ok()) {
+        Some(PORT_IN_USE) => SetupFailure::Unavailable(UnavailableKind::PortInUse),
+        Some(LOGIN_ITEM_OFF) => SetupFailure::Unavailable(UnavailableKind::LoginItemOff),
+        _ => otherwise,
     }
 }
 
@@ -1646,6 +1663,30 @@ mod admission_tests {
                 },
                 confirmed: Some(false),
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod login_item_tests {
+    use super::*;
+
+    /// SSH setup's install or start on a Mac whose SpaceTerm Core is off in Login Items says so
+    /// and what the person turns on, instead of an unconfirmed start or a refused installation.
+    #[test]
+    fn a_core_off_in_login_items_says_so_for_install_and_start() {
+        let off = Some(i32::from(spaceterm_core::provisioning::LOGIN_ITEM_OFF));
+        let start = step_failure(off, SetupFailure::Unconfirmed(SetupOperation::Start));
+        let install = step_failure(off, SetupFailure::Refused(RefusalKind::InstallRefused));
+        assert_eq!(start, install);
+        assert_eq!(
+            crate::ui::ssh_setup::problem(&start, "penguin").explanation,
+            "SpaceTerm Core is off in Login Items on penguin. Turn it on there, then try again."
+        );
+        assert_eq!(
+            step_failure(Some(1), SetupFailure::Unconfirmed(SetupOperation::Start)),
+            SetupFailure::Unconfirmed(SetupOperation::Start),
+            "any other status keeps its meaning"
         );
     }
 }

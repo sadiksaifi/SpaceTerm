@@ -496,6 +496,8 @@ pub(crate) struct SettingsWindow {
     this_computer_phrase: &'static str,
     /// The Uninstall SpaceTerm row's description, in this desktop's wording.
     uninstall_description: &'static str,
+    /// How the person removes SpaceTerm when Uninstall couldn't, in this desktop's wording.
+    uninstall_app_remedy: &'static str,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -773,6 +775,7 @@ impl SettingsWindow {
         let this_computer = wording.this_computer;
         let this_computer_phrase = wording.this_computer_phrase;
         let uninstall_description = wording.uninstall_description;
+        let uninstall_app_remedy = wording.uninstall_app_remedy;
         let available_sections = SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -896,6 +899,7 @@ impl SettingsWindow {
             this_computer,
             this_computer_phrase,
             uninstall_description,
+            uninstall_app_remedy,
         };
         // Servers and Git present the retained selection, which loads after the window opens.
         cx.observe_global::<machine_selection::MachineSelection>(|settings, cx| {

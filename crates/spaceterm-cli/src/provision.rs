@@ -21,13 +21,14 @@ impl From<CoreError> for Error {
     }
 }
 
-/// An enrollment step reports a held Network Access port by exit status, so SSH setup can say
-/// so in one sentence.
-fn enrollment_error(error: CoreError) -> Error {
+/// A setup step reports a held Network Access port, or a SpaceTerm Core off in Login Items, by
+/// exit status, so SSH setup can say so in one sentence.
+fn setup_error(error: CoreError) -> Error {
     match error {
         CoreError::Direct(spaceterm_core::direct::DirectError::PortInUse) => {
             Error::Exit(spaceterm_core::provisioning::PORT_IN_USE)
         }
+        CoreError::LoginItemOff => Error::Exit(spaceterm_core::provisioning::LOGIN_ITEM_OFF),
         error => error.into(),
     }
 }
@@ -112,7 +113,7 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
             .map_err(CoreError::from)?;
             write_setup(
                 &spaceterm_core::provisioning::setup_direct(IDENTITY, policy, request)
-                    .map_err(enrollment_error)?,
+                    .map_err(setup_error)?,
             )?;
         }
         InternalCommand::SshDirectPrepare { address } => {
@@ -124,7 +125,7 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
             )
             .map_err(CoreError::from)?;
             spaceterm_core::provisioning::prepare_direct(IDENTITY, policy, request)
-                .map_err(enrollment_error)?;
+                .map_err(setup_error)?;
             write_setup(&serde_json::json!({"prepared":true}))?;
         }
         InternalCommand::SshDirectCancel => {
@@ -137,7 +138,11 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
         InternalCommand::SshStart => {
             setup_pipe()?;
             let approved = read_setup::<spaceterm_core::service::SetupStartObservation>()?;
-            write_setup(&Service::for_identity(IDENTITY)?.start_for_setup(&approved)?)?;
+            write_setup(
+                &Service::for_identity(IDENTITY)?
+                    .start_for_setup(&approved)
+                    .map_err(setup_error)?,
+            )?;
         }
         InternalCommand::SshInstall {
             archive,
@@ -151,7 +156,7 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
                 sha256,
                 spaceterm_core::protocol::MAJOR,
             )?;
-            service.install(&candidate.directory)?;
+            service.install(&candidate.directory).map_err(setup_error)?;
         }
         InternalCommand::Helper {
             operation,
@@ -197,12 +202,22 @@ mod tests {
     #[test]
     fn a_held_network_access_port_exits_with_its_reserved_status_and_others_keep_their_code() {
         assert!(matches!(
-            enrollment_error(DirectError::PortInUse.into()),
+            setup_error(DirectError::PortInUse.into()),
             Error::Exit(spaceterm_core::provisioning::PORT_IN_USE)
         ));
         assert!(matches!(
-            enrollment_error(DirectError::AddressUnavailable.into()),
+            setup_error(DirectError::AddressUnavailable.into()),
             Error::Failure(failure) if failure.code == Code::AddressUnavailable
+        ));
+    }
+
+    /// SSH setup's install or start on a Mac whose SpaceTerm Core is off in Login Items exits
+    /// with the reserved status, so the desktop can say what the person turns on.
+    #[test]
+    fn a_core_off_in_login_items_exits_with_its_reserved_status() {
+        assert!(matches!(
+            setup_error(CoreError::LoginItemOff),
+            Error::Exit(spaceterm_core::provisioning::LOGIN_ITEM_OFF)
         ));
     }
 }

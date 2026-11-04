@@ -26,6 +26,9 @@ pub(crate) struct DesktopWording {
     pub(crate) read_only_update: (&'static str, &'static str),
     /// What Settings > Uninstall SpaceTerm removes from this computer, as its row's description.
     pub(crate) uninstall_description: &'static str,
+    /// What the person does to remove SpaceTerm after Uninstall removed SpaceTerm Core but not
+    /// the app, inside a sentence, such as "move SpaceTerm to the Trash".
+    pub(crate) uninstall_app_remedy: &'static str,
 }
 
 pub(crate) trait ShortcutFormatter {
@@ -431,6 +434,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             reveal_file: "Show in Folder",
             read_only_update: ("Move SpaceTerm", "Move SpaceTerm before updating it."),
             uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this computer.",
+            uninstall_app_remedy: "remove SpaceTerm the way you installed it",
         },
         Rc::new(TestingShortcutFormatter),
         ShortcutSelection::NativeMenu,
