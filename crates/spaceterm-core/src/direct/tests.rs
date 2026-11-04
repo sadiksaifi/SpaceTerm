@@ -1668,6 +1668,137 @@ fn reserve(fixture: &Fixture, request: &Management) {
     ));
 }
 
+fn direct_status(fixture: &Fixture) -> DirectStatus {
+    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
+        panic!()
+    };
+    status
+}
+
+/// Sets up a device that turns Network Access on at a new loopback listener, as Add Machine does
+/// on a computer whose Network Access is off or elsewhere. Returns the setup's pin and
+/// operation, and how to put Network Access back as it was.
+fn set_up_elsewhere(
+    fixture: &Fixture,
+    operation: OperationId,
+) -> (MachinePin, OperationId, NetworkRestore) {
+    let before = direct_status(fixture);
+    let installed =
+        host::tests::reserve_policy(&fixture.state, std::net::Ipv4Addr::LOCALHOST.into());
+    let mut operation = operation;
+    operation[..8].copy_from_slice(&before.setup_generation.to_be_bytes());
+    let request = Management::Setup {
+        generation: before.setup_generation,
+        pin: before.pin.clone(),
+        expected_policy: before.policy.clone(),
+        expected_enabled: before.enabled,
+        endpoint: format!("quic://{}", installed.bind),
+        policy: installed.clone(),
+        operation,
+        public_key: DeviceCredential::generate().unwrap().public_key().unwrap(),
+        name: "Setup device".into(),
+    };
+    reserve(fixture, &request);
+    assert!(matches!(
+        fixture.management(request),
+        Ok(ManagementReply::Setup(_))
+    ));
+    let after = direct_status(fixture);
+    assert_eq!(
+        (after.policy, after.enabled),
+        (Some(installed.clone()), true)
+    );
+    (
+        before.pin.clone(),
+        operation,
+        NetworkRestore::new(installed, &before),
+    )
+}
+
+fn cancel_and_restore(
+    fixture: &Fixture,
+    pin: &MachinePin,
+    operation: OperationId,
+    restore: &NetworkRestore,
+) -> Option<RestoredAccess> {
+    let Ok(ManagementReply::SetupCancelled { restored, .. }) =
+        fixture.management(Management::CancelSetup {
+            pin: pin.clone(),
+            operation,
+            restore: Some(restore.clone()),
+        })
+    else {
+        panic!("the cancellation was refused")
+    };
+    restored
+}
+
+/// A cancellation that restores Network Access turns it back off when setup turned it on, and a
+/// repeated cancellation, as after a lost reply, agrees.
+#[test]
+fn a_setup_cancellation_puts_network_access_back_off() {
+    let fixture = Fixture::new();
+    let (pin, operation, restore) = set_up_elsewhere(&fixture, [96; 32]);
+    for _ in 0..2 {
+        assert_eq!(
+            cancel_and_restore(&fixture, &pin, operation, &restore),
+            Some(RestoredAccess::Off)
+        );
+        assert!(!direct_status(&fixture).enabled);
+    }
+}
+
+/// Network Access that someone changed while setup waited stays as they set it, and the
+/// cancellation says it kept that choice. The setup's pairing is revoked all the same.
+#[test]
+fn a_setup_cancellation_keeps_network_access_changed_meanwhile() {
+    let fixture = Fixture::new();
+    let (pin, operation, restore) = set_up_elsewhere(&fixture, [97; 32]);
+    let newer = host::tests::reserve_policy(&fixture.state, std::net::Ipv4Addr::LOCALHOST.into());
+    fixture
+        .management(Management::SetPolicy {
+            policy: Some(newer.clone()),
+            enabled: true,
+        })
+        .unwrap();
+    assert_eq!(
+        cancel_and_restore(&fixture, &pin, operation, &restore),
+        Some(RestoredAccess::Kept)
+    );
+    let status = direct_status(&fixture);
+    assert_eq!((status.policy, status.enabled), (Some(newer), true));
+    assert!(matches!(
+        fixture.management(Management::Devices),
+        Ok(ManagementReply::Devices(devices)) if devices.is_empty()
+    ));
+}
+
+/// A restore SpaceTerm Core can't apply says so, and Network Access stays on as setup turned it
+/// on. Here another app took the earlier address's port while setup waited.
+#[test]
+fn a_setup_cancellation_that_cannot_restore_says_it_failed() {
+    let fixture = Fixture::new();
+    let earlier = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+    let (pin, operation, restore) = set_up_elsewhere(&fixture, [98; 32]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let _taken = loop {
+        match UdpSocket::bind(earlier) {
+            Ok(socket) => break socket,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => panic!("the earlier port stayed held: {error}"),
+        }
+    };
+    assert_eq!(
+        cancel_and_restore(&fixture, &pin, operation, &restore),
+        Some(RestoredAccess::Failed)
+    );
+    let status = direct_status(&fixture);
+    assert_eq!(
+        (status.policy, status.enabled),
+        (Some(restore.installed.clone()), true)
+    );
+}
+
 #[test]
 fn prepared_setup_can_be_cancelled_over_quic_before_admission_and_after_restart() {
     let fixture = Fixture::new();
@@ -1710,6 +1841,7 @@ fn account_setup_cancellation_checks_the_original_pin_and_fences_admission_with_
         fixture.management(Management::CancelSetup {
             pin: changed,
             operation,
+            restore: None,
         }),
         Err(DirectError::PinMismatch)
     ));
@@ -1720,10 +1852,12 @@ fn account_setup_cancellation_checks_the_original_pin_and_fences_admission_with_
             fixture.management(Management::CancelSetup {
                 pin: pin.clone(),
                 operation,
+                restore: None,
             }),
             Ok(ManagementReply::SetupCancelled {
                 pin: confirmed,
                 operation: confirmed_operation,
+                restored: None,
             }) if confirmed == *pin && confirmed_operation == operation
         ));
     }
@@ -1978,7 +2112,11 @@ fn paired_quic_authority_cannot_prepare_enroll_or_cancel_account_setup() {
             name,
         },
         request.clone(),
-        Management::CancelSetup { pin, operation },
+        Management::CancelSetup {
+            pin,
+            operation,
+            restore: None,
+        },
     ] {
         assert!(matches!(
             manage(&connection, action),
@@ -2006,7 +2144,11 @@ fn completed_cancellations_retire_capacity_and_reject_delayed_prepare_and_admiss
             panic!()
         };
         assert!(matches!(
-            fixture.management(Management::CancelSetup { pin, operation }),
+            fixture.management(Management::CancelSetup {
+                pin,
+                operation,
+                restore: None,
+            }),
             Ok(ManagementReply::SetupCancelled { .. })
         ));
     }
@@ -2087,14 +2229,16 @@ fn unknown_current_generation_requires_account_cancellation_to_fence_delayed_pre
     assert!(matches!(
         fixture.management(Management::CancelSetup {
             pin: pin.clone(),
-            operation: future
+            operation: future,
+            restore: None,
         }),
         Err(DirectError::Expired)
     ));
     assert!(matches!(
         fixture.management(Management::CancelSetup {
             pin: pin.clone(),
-            operation
+            operation,
+            restore: None,
         }),
         Ok(ManagementReply::SetupCancelled { .. })
     ));
@@ -2270,6 +2414,7 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
     let cancel = Management::CancelSetup {
         pin: pin.clone(),
         operation: *operation,
+        restore: None,
     };
     let core = fixture.serve_next();
     let connection = connect(&fixture.endpoint(), &paired, &credential);

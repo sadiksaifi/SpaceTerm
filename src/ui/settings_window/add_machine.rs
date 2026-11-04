@@ -44,10 +44,10 @@ use crate::direct_connections::{DirectConnections, DirectRouteId, JoinId, JoinSt
 use crate::domain::SshDestination;
 use crate::machine_connection::direct::{DirectError, Endpoint, Invitation, default_port};
 use crate::machine_connection::pane::control::ClientName;
-use spaceterm_core::provisioning::{RestoredAccess, SetupRefusal};
+use spaceterm_core::provisioning::RestoredAccess;
 
 use crate::ssh::provisioning::{
-    SetupAddress, SetupFailure, SetupOffer, SetupPhase, SetupProgress, SetupRequest,
+    NetworkAfter, SetupAddress, SetupFailure, SetupOffer, SetupPhase, SetupProgress, SetupRequest,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
@@ -279,12 +279,14 @@ enum Stage {
     /// Choosing SSH or Invitation and filling in its value.
     Form,
     /// SSH setup underway. `phase` is the last step it reported. `offer` is a step setup waits on
-    /// until the person answers it. `cancelling` holds the sheet until setup has closed every SSH
+    /// until the person answers it. `network_allowed` is whether the person allowed Network
+    /// Access in this attempt. `cancelling` holds the sheet until setup has closed every SSH
     /// resource it opened.
     SettingUp {
         setup: Setup,
         phase: Option<SetupPhase>,
         offer: Option<PendingApproval>,
+        network_allowed: bool,
         cancel: CancellationToken,
         cancelling: bool,
     },
@@ -1149,11 +1151,13 @@ impl AddMachineSheet {
             SheetAction::Install | SheetAction::Start | SheetAction::AllowNetwork => {
                 if let Stage::SettingUp {
                     offer: offer @ Some(_),
+                    network_allowed,
                     cancelling: false,
                     ..
                 } = &mut self.stage
                     && let Some(pending) = offer.take()
                 {
+                    *network_allowed |= matches!(pending.offer, SetupOffer::Network { .. });
                     pending.answer(true);
                 }
                 self.show(window, cx);
@@ -1304,6 +1308,7 @@ impl AddMachineSheet {
             setup,
             phase: None,
             offer: None,
+            network_allowed: false,
             cancel: cancel.clone(),
             cancelling: false,
         };
@@ -1457,10 +1462,10 @@ impl AddMachineSheet {
             // Only a Network Access SpaceTerm Core confirmed off is turned back on.
             restoring_network: matches!(
                 outcome,
-                SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
-                    access: RestoredAccess::Off,
+                SetupFailure::Unreachable {
+                    network: NetworkAfter::Restored(RestoredAccess::Off),
                     ..
-                })
+                }
             ),
             ..setup
         };
@@ -2214,6 +2219,7 @@ impl AddMachineSheet {
             Stage::SettingUp {
                 setup,
                 phase,
+                network_allowed,
                 cancelling,
                 ..
             } => {
@@ -2225,13 +2231,12 @@ impl AddMachineSheet {
                 } else {
                     (
                         format!("Setting up {}\u{2026}", setup.destination.as_str()).into(),
-                        // Until pairing begins, Try Again after a blocked UDP port is turning
-                        // Network Access back on.
+                        // Try Again after a blocked UDP port turns Network Access back on from
+                        // the moment the person allows it until pairing ends. Signing in,
+                        // checking, installing and starting read as themselves.
                         if setup.restoring_network
-                            && !matches!(
-                                phase,
-                                Some(SetupPhase::Enrolling | SetupPhase::Connecting)
-                            )
+                            && *network_allowed
+                            && !matches!(phase, Some(SetupPhase::Connecting))
                         {
                             crate::ui::ssh_setup::restoring_network(setup.destination.as_str())
                         } else {

@@ -140,9 +140,12 @@ pub enum Management {
         public_key: [u8; 32],
         name: ClientName,
     },
+    /// Revokes the setup's pairing. With `restore`, it then puts Network Access back in the
+    /// same step, only while Network Access is still what this setup installed.
     CancelSetup {
         pin: MachinePin,
         operation: OperationId,
+        restore: Option<super::NetworkRestore>,
     },
     SetPolicy {
         policy: Option<NetworkPolicy>,
@@ -173,6 +176,8 @@ pub enum ManagementReply {
     SetupCancelled {
         pin: MachinePin,
         operation: OperationId,
+        /// What happened to Network Access, when the cancellation asked to restore it.
+        restored: Option<super::RestoredAccess>,
     },
     Invitation(String),
     Claims(Vec<PairingClaim>),

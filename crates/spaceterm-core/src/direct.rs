@@ -134,6 +134,41 @@ pub struct DirectStatus {
     pub network_addresses: Result<NetworkAddresses, DirectError>,
 }
 
+/// How to put Network Access back after an SSH setup changed it: `installed` is the policy that
+/// setup turned on, and `policy` and `enabled` are Network Access as it was before. A setup
+/// cancellation puts it back only while Network Access is still what this setup installed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkRestore {
+    pub installed: NetworkPolicy,
+    pub policy: Option<NetworkPolicy>,
+    pub enabled: bool,
+}
+impl NetworkRestore {
+    /// Puts Network Access back to `before`, read before setup turned on `installed`.
+    pub fn new(installed: NetworkPolicy, before: &DirectStatus) -> Self {
+        Self {
+            installed,
+            policy: before.policy.clone(),
+            enabled: before.enabled,
+        }
+    }
+}
+
+/// What a setup cancellation did with the Network Access that the setup changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoredAccess {
+    /// Put back. Network Access is off.
+    Off,
+    /// Put back. Network Access is on at the address it had before setup.
+    On,
+    /// Network Access changed after setup changed it, so the newer choice stays.
+    Kept,
+    /// Putting it back failed. Network Access stays on as setup turned it on.
+    Failed,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkAddresses {
