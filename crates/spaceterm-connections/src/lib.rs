@@ -656,6 +656,80 @@ impl DirectConnections {
         }
     }
 
+    /// Removes every saved route, unpair request and pending enrollment here, with this
+    /// device's key for each, and asks no Core. Uninstalling SpaceTerm with its data deleted
+    /// does this before it deletes the records. Records that startup hasn't read are read now.
+    /// Every key is tried, and any key that stays fails with
+    /// [`DirectError::CredentialUnavailable`]. Records that can't be read fail with
+    /// [`DirectError::StorageUnavailable`], since the keys they name can't be found.
+    pub fn forget_every_machine(&self) -> Result<(), DirectError> {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut result = Ok(());
+        if !state.inventory_loaded {
+            match self.0.records.load() {
+                Ok(document) => {
+                    state.document = document;
+                    state.inventory_loaded = true;
+                }
+                Err(_) => result = Err(DirectError::StorageUnavailable),
+            }
+        }
+        let loaded = state.inventory_loaded;
+        let mut keys = Vec::new();
+        for key in state.document.routes.iter().map(|r| r.credential).chain(
+            state
+                .document
+                .pending
+                .iter()
+                .filter_map(PendingRecord::credential_key),
+        ) {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        let routes: Vec<DirectRouteId> = state.document.routes.iter().map(|r| r.route.id).collect();
+        state.document.routes.clear();
+        state.document.pending.clear();
+        state.pending.clear();
+        let cores: Vec<MachineConnection> = std::mem::take(&mut state.routes)
+            .into_values()
+            .filter_map(|route| {
+                route
+                    .gate
+                    .store(false, std::sync::atomic::Ordering::Release);
+                route.core
+            })
+            .collect();
+        // The caller deletes the record file next, so a save that fails here leaves nothing
+        // the person sees. The keys below are what the records can't take with them. Records
+        // that couldn't be read stay as they are.
+        if loaded {
+            let _ = self.0.save(&mut state);
+        }
+        drop(state);
+        for core in cores {
+            core.disconnect();
+        }
+        let cleanup = self
+            .0
+            .route_removed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(cleanup) = cleanup {
+            for route in &routes {
+                cleanup(route);
+            }
+        }
+        for key in &keys {
+            if credentials::remove_asked(self.0.credentials.as_ref(), key).is_err() {
+                result = Err(DirectError::CredentialUnavailable);
+            }
+        }
+        self.0.notify();
+        result
+    }
+
     pub fn unpair(&self, id: &DirectRouteId, target: PairingId) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         let core = state.routes.get(id).and_then(|route| route.core.clone());
