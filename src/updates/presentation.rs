@@ -143,6 +143,34 @@ impl Approval {
         }
     }
 
+    /// Whether the person's approval still covers a new `preview` of its work. A restart the
+    /// alert described into a Pending Version is not covered once the Core previews none: that
+    /// update already ran or went away.
+    pub(crate) fn still_approves(&self, preview: &MachinePreview) -> bool {
+        !(preview.action == MachineAction::Restart
+            && preview.target.is_none()
+            && self
+                .target(preview.machine)
+                .is_some_and(|target| target.is_some()))
+    }
+
+    /// Whether a new `preview` restarts into another Pending Version than the alert described.
+    pub(crate) fn retargets(&self, preview: &MachinePreview) -> bool {
+        preview.action == MachineAction::Restart
+            && preview.target.is_some()
+            && self
+                .target(preview.machine)
+                .is_some_and(|target| target != preview.target.as_ref())
+    }
+
+    /// The Pending Version described for `machine`, when the alert described it.
+    fn target(&self, machine: MachineId) -> Option<Option<&Version>> {
+        self.machines
+            .iter()
+            .find(|described| described.machine == machine)
+            .map(|described| described.target.as_ref())
+    }
+
     /// Whether `machines` still show the work the alert described: the same sessions, running
     /// Core and Pending Version on every affected Machine. Other changes keep the approval.
     pub(crate) fn holds(&self, machines: &[MachineUpdate]) -> bool {

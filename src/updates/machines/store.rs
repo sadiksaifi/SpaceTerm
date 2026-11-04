@@ -14,7 +14,7 @@ use super::{
     ActionFailure, MachineAction, MachineId, MachinePreview, MachineUpdate, MachineUpdatesAdapter,
     MachineUpdatesEvent,
 };
-use crate::updates::presentation::{self, Confirmation, Dismissed};
+use crate::updates::presentation::{self, Approval, Confirmation, Dismissed};
 
 /// Where the person asked for an action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +42,8 @@ enum Prepared {
     Run(Vec<MachinePreview>),
     /// Ask with this confirmation first; approving it executes these previews.
     Ask(Confirmation, Vec<MachinePreview>),
-    /// A preview failed, and its surface heard why.
+    /// Nothing is left to run: every preview failed, and its surface heard why, or the
+    /// approved work is gone.
     Nothing,
 }
 
@@ -51,10 +52,12 @@ pub(crate) type Ask = Rc<dyn Fn(Confirmation, Box<dyn FnOnce(bool, &mut App)>, &
 
 /// Restarts or stops `actions`' Machines only on their Cores' own previews: each Core previews
 /// first, the person confirms the sessions that Core reports through `ask`, and exactly those
-/// previews execute. A Machine whose Core reports no facts is previewed like any other.
+/// previews execute. A Machine whose Core reports no facts is previewed like any other. A
+/// preview that fails reports to `surface` for its Machine alone; the others still ask and run.
 /// `always` asks even when no session closes, as after a Core refused a preview: a refused
 /// action never runs again without a fresh confirmation. An approval that no longer holds
-/// against the facts previews again.
+/// against the facts previews again, and keeps only the work the person approved: a restart
+/// into a Pending Version that is gone now is dropped, and one into another version asks.
 pub(crate) fn request(
     actions: Vec<(MachineId, MachineAction)>,
     always: bool,
@@ -62,10 +65,23 @@ pub(crate) fn request(
     ask: Ask,
     cx: &mut App,
 ) {
+    request_approved(actions, always, None, surface, ask, cx);
+}
+
+fn request_approved(
+    actions: Vec<(MachineId, MachineAction)>,
+    always: bool,
+    stale: Option<Approval>,
+    surface: Surface,
+    ask: Ask,
+    cx: &mut App,
+) {
     let Some(store) = MachineUpdates::global(cx) else {
         return;
     };
-    let prepared = store.update(cx, |store, cx| store.prepare(&actions, always, surface, cx));
+    let prepared = store.update(cx, |store, cx| {
+        store.prepare(&actions, always, stale, surface, cx)
+    });
     cx.spawn(async move |cx| {
         let prepared = prepared.await;
         cx.update(|cx| match prepared {
@@ -83,7 +99,7 @@ pub(crate) fn request(
                     if holds {
                         execute_all(previews, surface, cx);
                     } else {
-                        request(actions, false, surface, again, cx);
+                        request_approved(actions, false, Some(approval), surface, again, cx);
                     }
                 });
                 ask(confirmation, answered, cx);
@@ -175,35 +191,53 @@ impl MachineUpdates {
         self.adapter.perform(machine, action);
     }
 
-    /// Asks each affected Core to preview its Restart or Stop. A preview that fails reports
-    /// that failure to `surface` as the action's outcome and prepares nothing.
+    /// Asks each affected Core to preview its Restart or Stop, all at once. Each preview that
+    /// fails reports that failure to `surface` as its own action's outcome, as soon as it
+    /// fails; the rest are prepared together. After a `stale` approval, a restart whose Pending
+    /// Version is gone is dropped and one into another version asks.
     fn prepare(
         &self,
         actions: &[(MachineId, MachineAction)],
         always: bool,
+        stale: Option<Approval>,
         surface: Surface,
         cx: &mut Context<Self>,
     ) -> Task<Prepared> {
-        let answers: Vec<_> = actions
-            .iter()
-            .map(|(machine, action)| {
-                let answer = self.adapter.preview(*machine, action.clone());
-                (*machine, action.clone(), answer)
-            })
-            .collect();
+        let (answered, answers) = async_channel::unbounded();
+        for (index, (machine, action)) in actions.iter().enumerate() {
+            let answer = self.adapter.preview(*machine, action.clone());
+            let answered = answered.clone();
+            let (machine, action) = (*machine, action.clone());
+            cx.background_executor()
+                .spawn(async move {
+                    let outcome = answer.recv().await.unwrap_or(Err(ActionFailure::Failed));
+                    let _ = answered.send((index, machine, action, outcome)).await;
+                })
+                .detach();
+        }
+        drop(answered);
         cx.spawn(async move |this, cx| {
             let mut previews = Vec::new();
-            for (machine, action, answer) in answers {
-                match answer.recv().await {
-                    Ok(Ok(preview)) => previews.push(preview),
-                    Ok(Err(failure)) => {
+            while let Ok((index, machine, action, outcome)) = answers.recv().await {
+                match outcome {
+                    Ok(preview) => previews.push((index, preview)),
+                    Err(failure) => {
                         let _ = this.update(cx, |this, cx| {
                             this.notify_outcome(machine, action, surface, Err(failure), cx);
                         });
-                        return Prepared::Nothing;
                     }
-                    Err(_) => return Prepared::Nothing,
                 }
+            }
+            previews.sort_by_key(|(index, _)| *index);
+            let mut previews: Vec<MachinePreview> =
+                previews.into_iter().map(|(_, preview)| preview).collect();
+            let mut always = always;
+            if let Some(stale) = stale {
+                previews.retain(|preview| stale.still_approves(preview));
+                always |= previews.iter().any(|preview| stale.retargets(preview));
+            }
+            if previews.is_empty() {
+                return Prepared::Nothing;
             }
             cx.update(
                 |cx| match presentation::current(cx).previewed(&previews, always) {

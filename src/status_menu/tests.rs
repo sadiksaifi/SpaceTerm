@@ -817,3 +817,96 @@ fn sessions_the_core_previews_ask_even_when_the_menu_showed_none(cx: &mut TestAp
     );
     assert_eq!(fixture.machines.asked().len(), 1);
 }
+
+/// One Machine's preview failing in Restart All reports that Machine alone, at once. The others
+/// still ask, with their own sessions, and run.
+#[gpui::test]
+fn a_failed_preview_in_restart_all_leaves_the_other_machines_to_restart(cx: &mut TestAppContext) {
+    use crate::updates::machines::testing::preview;
+
+    let fixture = start(
+        vec![
+            waiting(machine(LOCAL, "This Mac", 3)),
+            waiting(machine(PENGUIN, "penguin", 4)),
+            waiting(machine(BUILD_BOX, "build-box", 1)),
+        ],
+        cx,
+    );
+    fixture.machines.hold_previews();
+    let restart_all = action_command(&fixture.host.menu(), "Restart All\u{2026}");
+    cx.update(|cx| fixture.menu.perform(restart_all, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.asked().len(),
+        3,
+        "every Core previews at once"
+    );
+
+    // build-box answers first, with a failure, while the others still preview.
+    fixture.host.answers.borrow_mut().push(true);
+    fixture
+        .machines
+        .answer_preview_of(BUILD_BOX, |_| Err(ActionFailure::Unreachable));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.host.alerts.borrow().as_slice(),
+        [Alert {
+            title: "Couldn't restart SpaceTerm Core on build-box".to_owned(),
+            message: "SpaceTerm can't reach build-box. Try again when it is connected.".to_owned(),
+            confirm: None,
+        }],
+        "the failure reports at once, for build-box alone"
+    );
+
+    for (id, sessions) in [(LOCAL, 3), (PENGUIN, 4)] {
+        fixture
+            .machines
+            .answer_preview_of(id, |action| Ok(preview(id, action, sessions)));
+    }
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.host.alerts.borrow().last().cloned(),
+        Some(Alert {
+            title: "Restart SpaceTerm Core on 2 machines?".to_owned(),
+            message: "This will close 7 running sessions.".to_owned(),
+            confirm: Some("Restart".to_owned()),
+        })
+    );
+    assert!(fixture.machines.executed().is_empty());
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.executed_actions(),
+        [
+            (LOCAL, MachineAction::Restart),
+            (PENGUIN, MachineAction::Restart)
+        ]
+    );
+}
+
+/// The Core updated by itself while its alert was open, because its sessions closed. Approving
+/// the stale alert restarts nothing more: the update it asked for already ran.
+#[gpui::test]
+fn an_update_that_ran_while_the_alert_was_open_restarts_nothing_more(cx: &mut TestAppContext) {
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    cx.update(|cx| fixture.menu.perform(restart, cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.host.alerts.borrow().len(), 1);
+
+    let mut updated = machine(PENGUIN, "penguin", 0);
+    updated.facts.as_mut().unwrap().running = Version::parse("0.9.0").unwrap();
+    changed(&fixture, updated, cx);
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.asked().len(),
+        2,
+        "the stale approval previews again"
+    );
+    assert!(
+        fixture.machines.executed().is_empty(),
+        "a plain restart nobody asked for never runs"
+    );
+    assert_eq!(fixture.host.alerts.borrow().len(), 1, "and nothing asks");
+}
