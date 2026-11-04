@@ -1526,7 +1526,9 @@ impl<H: HostCommands> Served<H> {
             Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
             // Scrollback pages reply from the terminal worker. Direct-network administration never
             // reaches the service.
-            Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
+            Operation::ScrollbackPage { .. }
+            | Operation::Direct(_)
+            | Operation::Sessions { .. } => Err(Refusal::Unsupported),
             Operation::Observe {
                 channel,
                 pane,

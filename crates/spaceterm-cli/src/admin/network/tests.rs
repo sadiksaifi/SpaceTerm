@@ -165,7 +165,10 @@ fn the_access_argument_round_trips_into_the_confirmation_hint() {
     }
     assert_eq!(
         argument(access(&parsed("192.0.2.4"))),
-        format!("192.0.2.4:{}", spaceterm_core::direct::DEFAULT_PORT)
+        format!(
+            "192.0.2.4:{}",
+            spaceterm_core::direct::default_port(env!("SPACETERM_CLI_IDENTITY"))
+        )
     );
 }
 

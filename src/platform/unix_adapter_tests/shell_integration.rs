@@ -404,12 +404,13 @@ fn installed_shell_path(name: &str) -> Option<std::path::PathBuf> {
     found
 }
 
-/// Shell integration puts the Session's CLI first on PATH once, after the startup files ran,
-/// and leaves PATH alone when it is disabled.
+/// Each shell's startup files put the Session's CLI first on PATH once, after the user's startup
+/// files ran, with or without the rest of shell integration.
 #[test]
-fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
+fn each_shell_puts_the_session_cli_first_on_path_with_or_without_integration() {
     let integration = resource_root().join("shell-integration");
     let first = "/fixture cli/bin:/usr/bin:/bin";
+    let home = DirectoryFixture::new();
     let bash = |enabled| {
         let mut command = session_free_command("/bin/bash");
         command
@@ -424,7 +425,7 @@ fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
         session_path(command, enabled)
     };
     assert_eq!(bash(true), first);
-    assert_eq!(bash(false), FIXTURE_PATH);
+    assert_eq!(bash(false), first);
     let zsh = |enabled| {
         let mut command = session_free_command("/bin/zsh");
         command
@@ -434,31 +435,36 @@ fn each_shell_puts_the_session_cli_first_on_path_only_with_integration() {
                 r#"builtin source -- "$1"; (( $+functions[_spaceterm_cli_path] )) && _spaceterm_cli_path; builtin print -r -- "PATH=$PATH""#,
                 "spaceterm",
             ])
-            .arg(integration.join("zsh/spaceterm-integration"));
+            .arg(integration.join("zsh/.zshenv"))
+            .env("HOME", home.path());
         session_path(command, enabled)
     };
     assert_eq!(zsh(true), first);
-    assert_eq!(zsh(false), FIXTURE_PATH);
+    assert_eq!(zsh(false), first);
     if let Some(fish) = installed_shell_path("fish") {
-        let mut command = session_free_command(fish);
-        command
-            .args([
-                "--no-config",
-                "-ic",
-                r#"source "$argv[1]"; functions -q _spaceterm_cli_path; and _spaceterm_cli_path; printf 'PATH=%s\n' "$PATH""#,
-            ])
-            .arg(integration.join("fish/vendor_conf.d/spaceterm-shell-integration.fish"));
-        assert_eq!(session_path(command, true), first);
+        for enabled in [true, false] {
+            let mut command = session_free_command(&fish);
+            command
+                .args([
+                    "--no-config",
+                    "-ic",
+                    r#"source "$argv[1]"; functions -q _spaceterm_cli_path; and _spaceterm_cli_path; printf 'PATH=%s\n' "$PATH""#,
+                ])
+                .arg(integration.join("fish/vendor_conf.d/spaceterm-shell-integration.fish"));
+            assert_eq!(session_path(command, enabled), first, "fish {enabled}");
+        }
     }
     if let Some(nu) = installed_shell_path("nu") {
-        let mut command = session_free_command(nu);
-        command.args(["--no-config-file", "-c"]).arg(format!(
-            "source '{}'; use spaceterm install; install; print $\"PATH=($env.PATH | str join (char esep))\"",
-            integration
-                .join("nushell/vendor/autoload/spaceterm.nu")
-                .display()
-        ));
-        assert_eq!(session_path(command, true), first);
+        for enabled in [true, false] {
+            let mut command = session_free_command(&nu);
+            command.args(["--no-config-file", "-c"]).arg(format!(
+                "source '{}'; use spaceterm install; install; print $\"PATH=($env.PATH | str join (char esep))\"",
+                integration
+                    .join("nushell/vendor/autoload/spaceterm.nu")
+                    .display()
+            ));
+            assert_eq!(session_path(command, enabled), first, "nu {enabled}");
+        }
     }
     if let Some(elvish) = installed_shell_path("elvish") {
         use crate::platform::shell_integration::{ShellEnvironment, ShellIntegrationMode};
@@ -517,11 +523,95 @@ set edit:before-readline = (conj $edit:before-readline { user-path; exit })
                 }
                 assert_eq!(
                     session_path(command, enabled),
-                    if enabled { first } else { FIXTURE_PATH },
+                    first,
                     "Elvish integration={enabled}, config={config:?}",
                 );
             }
         }
+    }
+}
+
+/// A login shell whose profile replaces PATH still finds the Session's own `spaceterm`, for Bash
+/// with shell integration on or off and for `/bin/sh`, which has no integration. On macOS,
+/// `/bin/bash` is Bash 3.2, which runs SpaceTerm's file as its login profile and keeps the
+/// person's HOME.
+#[test]
+fn a_login_shell_whose_profile_replaces_path_still_finds_the_session_cli() {
+    use crate::platform::launch_host::shell_launch_planner_with;
+    use crate::platform::shell_launch::SessionEnvironment;
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = DirectoryFixture::new();
+    let home = fixture.path().join("home");
+    let cli = fixture.path().join("core bin/spaceterm");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    std::fs::write(&cli, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for profile in [".bash_profile", ".profile"] {
+        std::fs::write(home.join(profile), "PATH=/usr/bin:/bin\nexport PATH\n").unwrap();
+    }
+    let session = SessionEnvironment {
+        identity: "spaceterm".into(),
+        core: [0; 32],
+        pane: [1; 32],
+        session: [2; 32],
+        cli: cli.clone(),
+    };
+    for (shell, integration) in [
+        ("/bin/bash", None),
+        ("/bin/bash", Some("0")),
+        ("/bin/sh", None),
+    ] {
+        let launch = shell_launch_planner_with(shell.into(), resource_root(), |key| match key {
+            "PATH" => Some("/usr/bin:/bin".into()),
+            "HOME" => Some(home.clone().into_os_string()),
+            "SPACETERM_SHELL_INTEGRATION" => integration.map(Into::into),
+            _ => None,
+        })
+        .local(&home)
+        .unwrap()
+        .with_session_environment(&session);
+        let mut argv = vec![launch.executable()];
+        argv.extend(launch.arguments().iter().map(std::ffi::OsString::as_os_str));
+        argv.extend(
+            [
+                "-i",
+                "-c",
+                r#"printf 'HOME=%s\nFOUND=%s\n' "$HOME" "$(command -v spaceterm)""#,
+            ]
+            .map(std::ffi::OsStr::new),
+        );
+        let mut command = controlling_terminal_command(&argv);
+        for name in launch.environment_removals() {
+            command.env_remove(name);
+        }
+        command
+            .current_dir(&home)
+            .env("HOME", &home)
+            .envs(launch.environment().iter().cloned());
+        let output = bounded_shell_output(&mut command, &fixture, shell, integration);
+        assert!(
+            output.status.success(),
+            "{shell} {integration:?}: {output:?}"
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let start = stdout
+            .rfind("FOUND=")
+            .expect("the shell reports its lookup")
+            + "FOUND=".len();
+        let found = stdout[start..].split(['\r', '\n']).next().unwrap();
+        assert_eq!(
+            found,
+            cli.to_str().unwrap(),
+            "{shell} with SPACETERM_SHELL_INTEGRATION={integration:?}"
+        );
+        let start = stdout.rfind("HOME=").expect("the shell reports its HOME") + "HOME=".len();
+        assert_eq!(
+            stdout[start..].split(['\r', '\n']).next().unwrap(),
+            home.to_str().unwrap(),
+            "{shell} with SPACETERM_SHELL_INTEGRATION={integration:?} keeps the person's HOME"
+        );
     }
 }
 

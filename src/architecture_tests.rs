@@ -531,6 +531,9 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
         // Remote server facts and their display names select no client adapter.
         .replace("Platform::MacosArm64", "ExplicitUpdatePlatform")
         .replace("Platform::LinuxX86_64", "ExplicitUpdatePlatform")
+        .replace("SetupRefusal::ArmLinux", "ExplicitSetupRefusal")
+        .replace("SetupRefusal::MacosTooOld", "ExplicitSetupRefusal")
+        .replace("runs Linux on ARM", "runs a Remote Operating System on ARM")
         .replace("\"Linux\"", "\"Remote Operating System\"");
     let compact: String = source
         .chars()
@@ -628,6 +631,9 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         "let platform = Platform::LinuxX86_64;",
         r#"let facts = json!({"operating_system": "Linux"});"#,
         r#"match remote_os { "linux" => "Linux", _ => "Unknown" }"#,
+        "let refusal = SetupRefusal::ArmLinux;",
+        "let refusal = SetupRefusal::MacosTooOld { found: None };",
+        r#"let sentence = format!("{n} runs Linux on ARM.");"#,
     ] {
         assert!(
             native_verification_dependency(&portable_verification_source(wiring)).is_none(),
@@ -664,6 +670,19 @@ fn every_native_suite_mount_requires_test_target_and_feature_gates() {
             );
         }
     }
+}
+
+/// `source` without the top-level function that `signature` starts, through its closing brace.
+fn without_function(source: &str, signature: &str) -> String {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("{signature} is missing"));
+    let end = start
+        + source[start..]
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("{signature} has no closing brace"))
+        + 3;
+    format!("{}{}", &source[..start], &source[end..])
 }
 
 fn workspace_presentation_violation(source: &str) -> Option<&'static str> {
@@ -710,11 +729,14 @@ fn workspace_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() 
         }
         let source = std::fs::read_to_string(&path).unwrap();
         let production = source.split(TEST_MODULE).next().unwrap();
-        // Server cards name the remote operating system independently of the client's host.
+        // Server cards and Add Machine's refusals name the remote operating system
+        // independently of the client's host.
         let production = if path == root.join("ui/settings_window/machine_card.rs") {
             production
                 .replace("\"macOS\"", "\"\"")
                 .replace("\"Linux\"", "\"\"")
+        } else if path == root.join("ui/ssh_setup.rs") {
+            without_function(production, "fn refusal_sentence(")
         } else {
             production.to_owned()
         };

@@ -31,6 +31,7 @@ mod sidebar;
 mod theme_gallery;
 mod theme_store;
 mod themes;
+mod uninstall;
 mod updates;
 
 #[cfg(test)]
@@ -456,6 +457,8 @@ pub(crate) struct SettingsWindow {
     command_line_tool: Option<command_line_tool::CommandLineToolRow>,
     /// The desktop's direct network connections. `None` omits their rows.
     direct_routes: Option<direct_routes::DirectRouteRows>,
+    /// Uninstall SpaceTerm. `None` omits its row.
+    uninstall: Option<uninstall::UninstallRow>,
     /// The server the person selected in the Servers list. A server no longer listed gives way
     /// to the local server or the first saved one.
     selected_machine: Option<machine_list::MachineChoice>,
@@ -489,6 +492,10 @@ pub(crate) struct SettingsWindow {
     remote_admin: remote_admin::RemoteAdministration,
     /// How Servers names the server for this account on this computer.
     this_computer: &'static str,
+    /// This computer inside a sentence, such as "this computer".
+    this_computer_phrase: &'static str,
+    /// The Uninstall SpaceTerm row's description, in this desktop's wording.
+    uninstall_description: &'static str,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -712,6 +719,14 @@ impl SettingsWindow {
             if window.is_window_active() {
                 settings.refresh_capture_access(cx);
                 settings.refresh_permission_access(cx);
+                // The person may have turned SpaceTerm Core on in Login Items meanwhile.
+                if settings
+                    .core_service
+                    .as_ref()
+                    .is_some_and(|row| row.state.background_item_off)
+                {
+                    settings.check_core_service(cx);
+                }
             } else {
                 settings.shortcuts.end_search_capture(cx);
             }
@@ -754,7 +769,10 @@ impl SettingsWindow {
         let direct_routes = crate::ui::direct_machines::installed(cx)
             .map(|connections| direct_routes::DirectRouteRows::new(connections, cx));
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let this_computer = presentation.wording().this_computer;
+        let wording = presentation.wording();
+        let this_computer = wording.this_computer;
+        let this_computer_phrase = wording.this_computer_phrase;
+        let uninstall_description = wording.uninstall_description;
         let available_sections = SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -780,6 +798,11 @@ impl SettingsWindow {
                         && local_core
                             .as_ref()
                             .is_none_or(|offered| offered.command_line_tool.is_none()))
+                    // Only an installed app can remove itself.
+                    || (*row == SettingsRowId::UninstallSpaceTerm
+                        && local_core
+                            .as_ref()
+                            .is_none_or(|offered| offered.removal.is_none()))
             })
             .collect();
         let local_operations = local_operations::LocalCoreOperations::get(cx);
@@ -851,6 +874,10 @@ impl SettingsWindow {
                 .as_ref()
                 .and_then(|offered| offered.command_line_tool.clone())
                 .map(command_line_tool::CommandLineToolRow::new),
+            uninstall: local_core
+                .as_ref()
+                .and_then(|offered| offered.removal.clone())
+                .map(uninstall::UninstallRow::new),
             local_core: local_core
                 .map(|offered| machines::LocalMachineRow::new(offered.connection)),
             direct_routes,
@@ -867,6 +894,8 @@ impl SettingsWindow {
             retained_status: std::collections::BTreeMap::new(),
             remote_admin: remote_admin::RemoteAdministration::default(),
             this_computer,
+            this_computer_phrase,
+            uninstall_description,
         };
         // Servers and Git present the retained selection, which loads after the window opens.
         cx.observe_global::<machine_selection::MachineSelection>(|settings, cx| {
@@ -1718,6 +1747,7 @@ impl SettingsWindow {
                 )
                 .into_any_element()
             }
+            SettingsRowId::UninstallSpaceTerm => self.render_uninstall(cx),
             SettingsRowId::ResetAllSettings => {
                 let owner = cx.weak_entity();
                 action_button(
@@ -2647,6 +2677,7 @@ impl SettingsWindow {
             SettingsRowId::ImportSettings => Some(
                 "Replace every setting, keyboard shortcut, and installed theme with an exported file.",
             ),
+            SettingsRowId::UninstallSpaceTerm => Some(self.uninstall_description()),
             SettingsRowId::ResetAllSettings => Some(
                 "Return every setting and keyboard shortcut to its default and remove installed themes.",
             ),

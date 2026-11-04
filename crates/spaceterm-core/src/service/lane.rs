@@ -11,7 +11,7 @@
 //! Core's own feed names, and `StageUpload` with `UploadChunk` installs a pushed archive. Both
 //! answer `Installed`; [`crate::update::sources`] describes the sources.
 //!
-//! Stop, Restart, Update and Network Access changes run in two steps. `Preview` observes the service, the live
+//! Stop, Restart, Uninstall and Network Access changes run in two steps. `Preview` observes the service, the live
 //! Session set and the candidate, and returns a token bound to that observation. `Execute`
 //! recomputes the observation under the hierarchy lock, sets the membership fence so no new
 //! Session starts, admits the operation in the ledger and launches the helper that performs it.
@@ -31,6 +31,7 @@ use crate::permissions::{
     SystemPermissions,
 };
 use crate::protocol::Preamble;
+use crate::protocol::capability::{Capabilities, Capability, Unavailable};
 use crate::storage::Directory;
 use crate::update::facts::{UpdateFacts, Version};
 use crate::update::source::FactsSource;
@@ -149,9 +150,19 @@ impl LaneRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum LaneAction {
+    /// Only the Core's own machine stops it. A paired caller gets `local_only`, because a
+    /// stopped Core can't be started remotely.
     Stop,
     Restart,
-    Network { access: NetworkAccess },
+    Network {
+        access: NetworkAccess,
+    },
+    /// Remove Machine: stops SpaceTerm Core, revokes every pairing and removes the service,
+    /// the launcher and every installed version. Workspace data stays. Gated by
+    /// [`Capability::Uninstall`], as Restart is by [`Capability::Restart`]. Once the helper
+    /// starts, the Core answers no further request, so the caller treats `Accepted` as the
+    /// outcome.
+    Uninstall,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,12 +370,34 @@ pub struct LaneCore {
     connections: AtomicU64,
     launch: Box<Launcher>,
     permissions: Arc<dyn SystemPermissions>,
+    /// What this Core's service lane can do. Tests withhold capabilities.
+    capabilities: Capabilities,
     /// The Permission Setups whose preparations run, and their cancellations.
     setups: Mutex<setups::Setups>,
     /// Held for each whole `Execute`, and while the fence watcher releases the fence.
     executing: Mutex<()>,
     /// A fence watcher runs. The watcher clears it only under `executing`.
     watching: AtomicBool,
+}
+
+/// The capability a previewed or executed action needs, when it is not part of every service
+/// lane.
+const fn required(action: &LaneAction) -> Option<Capability> {
+    match action {
+        LaneAction::Restart => Some(Capability::Restart),
+        LaneAction::Uninstall => Some(Capability::Uninstall),
+        LaneAction::Stop | LaneAction::Network { .. } => None,
+    }
+}
+
+/// Whether `request` previews or executes an action newer than the connection's `selected`
+/// service lane version.
+fn newer_than(request: &LaneRequest, selected: crate::protocol::version::ProtocolVersion) -> bool {
+    matches!(
+        request,
+        LaneRequest::Preview { action } | LaneRequest::Execute { action, .. }
+            if required(action).is_some_and(|capability| capability.since().1 > selected)
+    )
 }
 
 /// The part of an observation that does not depend on the Session set, and the effects it
@@ -424,6 +457,10 @@ impl LaneCore {
             connections: AtomicU64::new(0),
             launch,
             permissions,
+            capabilities: Capabilities::new(
+                Err(Unavailable::NotConnected),
+                Ok(crate::protocol::version::SERVICE),
+            ),
             setups: Mutex::default(),
             executing: Mutex::new(()),
             watching: AtomicBool::new(false),
@@ -480,7 +517,9 @@ impl LaneCore {
             authorized()?;
             let caller = NetworkCaller::of(&actor, route);
             let (reply, launch) = match serde_json::from_slice::<LaneRequest>(&bytes) {
-                Ok(request) if request.since() > selected => (error(&CoreError::Unsupported), None),
+                Ok(request) if request.since() > selected || newer_than(&request, selected) => {
+                    (error(&CoreError::Unsupported), None)
+                }
                 Ok(request) => self.respond(request, &actor, caller, connection),
                 Err(_) => (error(&CoreError::Protocol), None),
             };
@@ -515,6 +554,14 @@ impl LaneCore {
         caller: Option<NetworkCaller>,
         connection: u64,
     ) -> (LaneReply, Option<Dispatch>) {
+        // An action this Core's service lane does not have is refused before its preview or
+        // admission, from the same table clients read.
+        if let LaneRequest::Preview { action } | LaneRequest::Execute { action, .. } = &request
+            && let Some(capability) = required(action)
+            && self.capabilities.check(capability).is_err()
+        {
+            return (error(&CoreError::Unsupported), None);
+        }
         // Stop runs only on the Machine itself: nothing could start SpaceTerm Core again from a
         // paired device.
         if actor.pairing.is_some()
@@ -890,18 +937,22 @@ impl LaneCore {
             }
         }
         let result = result.map(drop);
-        // Once the change started, `AddressUnavailable` means the host could not ready the new
-        // listener and changed nothing. Any other failure is a commit it could not confirm.
+        // Once the change started, `AddressUnavailable` and `PortInUse` mean the host could not
+        // ready the new listener and changed nothing. Any other failure is a commit it could not
+        // confirm.
         let state = match result {
             Ok(()) if refused => State::Failed {
                 code: super::lane_codes::DISCONNECTS_EVERY_DEVICE.to_owned(),
             },
             Ok(()) => State::Done,
-            Err(failure @ CoreError::Direct(crate::direct::DirectError::AddressUnavailable)) => {
-                State::Failed {
-                    code: super::lane_codes::code(&failure).to_owned(),
-                }
-            }
+            Err(
+                failure @ CoreError::Direct(
+                    crate::direct::DirectError::AddressUnavailable
+                    | crate::direct::DirectError::PortInUse,
+                ),
+            ) => State::Failed {
+                code: super::lane_codes::code(&failure).to_owned(),
+            },
             Err(_) if started => State::Unresolved,
             Err(failure) => State::Failed {
                 code: super::lane_codes::code(&failure).to_owned(),
@@ -996,6 +1047,7 @@ impl LaneCore {
                 LaneAction::Stop => Action::Stop,
                 LaneAction::Restart if prepared.candidate.is_some() => Action::Update,
                 LaneAction::Restart => Action::Restart,
+                LaneAction::Uninstall => Action::Uninstall,
                 LaneAction::Network { .. } => return Err(CoreError::Protocol),
             },
             observation_digest: expected,
@@ -1129,6 +1181,7 @@ impl LaneCore {
                 Action::Stop => LaneAction::Stop,
                 // A restart into the Pending Version is the Restart its client confirmed.
                 Action::Restart | Action::Update => LaneAction::Restart,
+                Action::Uninstall => LaneAction::Uninstall,
                 Action::Network(access) => LaneAction::Network { access },
             },
             state,
@@ -1274,11 +1327,12 @@ impl Admin<'_> {
                 effects.to_major = protocol_major(approval.candidate());
                 (approval.running(), Some(digest_bytes(&installation)?))
             }
-            (LaneAction::Stop, _) | (LaneAction::Restart, None) => {
-                let control = if *action == LaneAction::Stop {
-                    super::control::Action::Stop
-                } else {
+            // Uninstall begins with a Stop, so it observes what a Stop observes.
+            (LaneAction::Stop | LaneAction::Uninstall, _) | (LaneAction::Restart, None) => {
+                let control = if *action == LaneAction::Restart {
                     super::control::Action::Restart
+                } else {
+                    super::control::Action::Stop
                 };
                 let confirmation =
                     super::control::Controller::new(self.service.clone()).prepare(control)?;

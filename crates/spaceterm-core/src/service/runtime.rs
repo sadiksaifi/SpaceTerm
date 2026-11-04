@@ -8,7 +8,7 @@ use std::{
 };
 
 mod files;
-mod launcher;
+pub(super) mod launcher;
 mod layout;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -108,27 +108,6 @@ pub(super) enum Repoint {
     Failed(CoreError),
 }
 
-/// An installer preview carries only bounded service effects and a nonsecret approval token.
-#[cfg(feature = "client")]
-#[derive(Debug)]
-pub enum CliUninstall {
-    Preview {
-        token: String,
-        expires_at: u64,
-        sessions: Vec<crate::hierarchy::Id>,
-    },
-    Completed,
-}
-
-#[cfg(feature = "client")]
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UninstallConfirmation {
-    token: String,
-    expires_at: u64,
-    observation: String,
-}
-
 impl Service {
     /// Retain an installer-selected signed package and select its CLI under the service lock.
     /// The unpacked installation must carry its original artifact.tar.gz and artifact.sig.
@@ -219,7 +198,7 @@ impl Service {
         )
     }
 
-    fn cli_home(&self) -> Result<&Path, CoreError> {
+    pub(super) fn cli_home(&self) -> Result<&Path, CoreError> {
         let suffix = Path::new(".local/share").join(&self.identity).join("core");
         if !self.paths.data.ends_with(suffix) {
             return Err(CoreError::UnsafeStorage);
@@ -255,97 +234,6 @@ impl Service {
             Ok(CliLink::Blocked) => Repoint::Blocked,
             Err(error) => Repoint::Failed(error),
         }
-    }
-
-    /// Preview an uninstall or confirm its exact service and live Session observation.
-    /// A preview is retained for ten minutes. Neither preview nor retention starts a server.
-    #[cfg(feature = "client")]
-    pub fn uninstall_cli(&self, confirmation: Option<&str>) -> Result<CliUninstall, CoreError> {
-        // Admission waits for the service lock, so establish this passive link first.
-        let initial = self.passive_status()?;
-        let link = if initial.running {
-            Some(
-                crate::MachineConnection::for_cli(&self.identity, crate::CliRoute::Local, None)?
-                    .link()?,
-            )
-        } else {
-            None
-        };
-        let data = Directory::open(&self.paths.data, true)?;
-        let _operation = data.lock("service.lock", false)?;
-        data.verify_path(&self.paths.data)?;
-        let state = Self::state(&data)?;
-        let status = self.passive_status()?;
-        if status.running != initial.running {
-            return Err(CoreError::Changed);
-        }
-        let sessions = if let Some(link) = link {
-            if !matches!(link.health(), crate::connection::link::Health::Live) {
-                return Err(CoreError::Changed);
-            }
-            let (_, revision) = link.next_inventory(0).map_err(|_| CoreError::Protocol)?;
-            let close = revision
-                .inventory
-                .close
-                .as_ref()
-                .ok_or(CoreError::Protocol)?;
-            close
-                .sessions
-                .iter()
-                .filter_map(|pane| pane.session)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let observation =
-            activation::confirmation_token(&(&self.identity, &state, &status, &sessions))?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| CoreError::StorageUnavailable)?
-            .as_secs();
-        if let Some(token) = confirmation {
-            let preview = data
-                .read_json::<UninstallConfirmation>("cli-uninstall.json")?
-                .ok_or(CoreError::Changed)?;
-            if preview.token != token
-                || preview.observation != observation
-                || now > preview.expires_at
-            {
-                return Err(CoreError::Changed);
-            }
-            data.remove(c"cli-uninstall.json")?;
-        } else if status.running {
-            let token = format!(
-                "c1-{}",
-                crate::protocol::random()?
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            );
-            let expires_at = now + 600;
-            data.write_json(
-                c"cli-uninstall.json",
-                &UninstallConfirmation {
-                    token: token.clone(),
-                    expires_at,
-                    observation,
-                },
-            )?;
-            return Ok(CliUninstall::Preview {
-                token,
-                expires_at,
-                sessions,
-            });
-        }
-        if state.is_some() {
-            self.apply_control_locked(&data, control::Action::Uninstall, Some(status.running))?;
-        }
-        launcher::remove(
-            self.cli_home()?,
-            &self.identity,
-            &self.paths.data.join("installations"),
-        )?;
-        Ok(CliUninstall::Completed)
     }
 
     /// Authenticate an update for this native target without comparing protocol majors.

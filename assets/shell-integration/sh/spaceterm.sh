@@ -7,8 +7,24 @@ else
     unset ENV
 fi
 
-case $- in
-    *i*)
+# The login profile and ENV already set PATH, so the server's own CLI goes first now. Every
+# other entry keeps its place, empty entries included.
+if [ -n "${SPACETERM_CLI:-}" ] && [ "${PATH+set}" = set ]; then
+    _spaceterm_cli_dir=${SPACETERM_CLI%/*}
+    _spaceterm_path=$PATH:
+    _spaceterm_rest=
+    while [ -n "$_spaceterm_path" ]; do
+        _spaceterm_entry=${_spaceterm_path%%:*}
+        _spaceterm_path=${_spaceterm_path#*:}
+        [ "$_spaceterm_entry" = "$_spaceterm_cli_dir" ] || _spaceterm_rest=$_spaceterm_rest:$_spaceterm_entry
+    done
+    PATH=$_spaceterm_cli_dir$_spaceterm_rest
+    export PATH
+    unset _spaceterm_cli_dir _spaceterm_path _spaceterm_rest _spaceterm_entry
+fi
+
+case $-:${SPACETERM_SHELL_INTEGRATION_VERSION:-} in
+    *i*:1)
         # Encode protocol fields bytewise so delimiters and UTF-8 survive OSC parsing.
         _spaceterm_encode() (
             LC_ALL=C

@@ -203,6 +203,7 @@ lucide_sources! {
     Package => "package",
     Palette => "palette",
     Pause => "pause",
+    Play => "play",
     Pencil => "pencil",
     Pin => "pin",
     PinOff => "pin-off",

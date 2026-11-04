@@ -1,4 +1,4 @@
-//! Status, Restart and Update of a paired Machine from its Machines card.
+//! Status, Restart, Update and Remove Machine of a paired Machine from its Machines card.
 //!
 //! The card takes the CLI's steps over the server's service lane:
 //! [`spaceterm_core::service::lane::admin`] settles what this desktop left pending, previews
@@ -29,6 +29,7 @@ use crate::machine_connection::{CoreError, MachineConnection};
 use crate::ui::sidebar_window::form::CaptionTone;
 
 pub(super) const RESTART_SELECTOR: &str = "settings-remote-server-restart";
+pub(super) const REMOVE_SELECTOR: &str = "settings-remote-machine-remove";
 pub(super) const UPDATE_SELECTOR: &str = "settings-remote-server-update";
 pub(super) const CONFIRM_SELECTOR: &str = "settings-remote-server-confirm";
 pub(super) const CANCEL_SELECTOR: &str = "settings-remote-server-cancel";
@@ -41,6 +42,9 @@ pub(crate) enum Change {
     /// Installs the server's newest signed release beside its running version, then restarts
     /// into it after confirmation.
     Update,
+    /// Uninstalls SpaceTerm Core on the machine, which revokes every pairing, then removes it
+    /// here.
+    Remove,
 }
 
 impl Change {
@@ -48,6 +52,7 @@ impl Change {
         match self {
             Self::Restart => "Restart SpaceTerm Core\u{2026}",
             Self::Update => "Update\u{2026}",
+            Self::Remove => "Remove Machine\u{2026}",
         }
     }
 
@@ -55,6 +60,7 @@ impl Change {
         match self {
             Self::Restart => RESTART_SELECTOR,
             Self::Update => UPDATE_SELECTOR,
+            Self::Remove => REMOVE_SELECTOR,
         }
     }
 }
@@ -105,6 +111,8 @@ pub(crate) enum RemoteFailure {
     Refused,
     /// The server answered in a way this SpaceTerm doesn't read.
     Protocol,
+    /// The machine's SpaceTerm Core is too old for the change.
+    Unsupported,
     /// Any other refusal or failure.
     Failed,
 }
@@ -128,6 +136,7 @@ impl RemoteFailure {
             | "credential_unavailable"
             | "credential_interaction_required" => Self::Refused,
             "protocol_error" | "incompatible_protocol" => Self::Protocol,
+            "unsupported" => Self::Unsupported,
             _ => Self::Failed,
         }
     }
@@ -175,6 +184,7 @@ impl RemoteFailure {
             Self::Protocol => {
                 format!("{name} answered in a way SpaceTerm doesn\u{2019}t understand.")
             }
+            Self::Unsupported => uninstall_unsupported(name),
             Self::Failed => format!("{name} couldn\u{2019}t finish the change."),
         }
     }
@@ -246,6 +256,7 @@ impl RemoteMachineControl for LaneControl {
                 }
                 admin::preview(&mut session, LaneAction::Restart)
             }
+            Change::Remove => admin::preview(&mut session, LaneAction::Uninstall),
         }
         .map_err(RemoteFailure::of_lane)?;
         Ok(Prepared { preview, settled })
@@ -253,7 +264,12 @@ impl RemoteMachineControl for LaneControl {
 
     fn perform(&self, preview: Preview) -> Result<Performed, RemoteFailure> {
         let (lane, pending, session, settled) = self.open()?;
-        let wait = admin::wait(&preview.action);
+        // The Core ends the lane once its uninstall begins, as it does for a Stop.
+        let wait = if preview.action == LaneAction::Uninstall {
+            admin::STOP_WAIT
+        } else {
+            admin::wait(&preview.action)
+        };
         let outcome = admin::execute(
             &lane,
             session,
@@ -279,7 +295,7 @@ struct InstalledSource(ControlSource);
 impl Global for InstalledSource {}
 
 /// Makes `source` the desktop's way to reach a paired server's service lane. Without it, paired
-/// server cards offer no Stop, Restart or Update.
+/// server cards offer no Restart or Update.
 pub(crate) fn install(source: ControlSource, cx: &mut App) {
     cx.set_global(InstalledSource(source));
 }
@@ -303,6 +319,8 @@ pub(super) enum Act {
     /// A Network Access change. Only the CLI makes one, so the card names it only as an earlier
     /// operation a connection settled.
     NetworkAccess,
+    /// Remove Machine's uninstall.
+    Uninstall,
 }
 
 impl Act {
@@ -314,6 +332,7 @@ impl Act {
             LaneAction::Restart if to.is_some() => Self::Update(to),
             LaneAction::Restart => Self::Restart,
             LaneAction::Network { .. } => Self::NetworkAccess,
+            LaneAction::Uninstall => Self::Uninstall,
         }
     }
 
@@ -324,6 +343,7 @@ impl Act {
             Self::Restart => "restart",
             Self::Update(_) => "update",
             Self::NetworkAccess => "Network Access change",
+            Self::Uninstall => "uninstall",
         }
     }
 
@@ -334,6 +354,7 @@ impl Act {
             Self::Restart => "restart",
             Self::Update(_) => "update",
             Self::NetworkAccess => "change its Network Access",
+            Self::Uninstall => "uninstall SpaceTerm Core",
         }
     }
 }
@@ -395,9 +416,6 @@ struct RouteAdmin {
     ended: Option<Ended>,
     /// The last earlier operation a connection settled, until the person asks something else.
     earlier: Option<(Act, Settlement)>,
-    /// SpaceTerm's connection to a server it stopped has ended, so connecting again means
-    /// someone started it on its own computer.
-    left: bool,
     _task: Option<Task<()>>,
 }
 
@@ -415,6 +433,29 @@ pub(super) struct RemoteConfirmation {
     pub(super) message: String,
     pub(super) detail: String,
     pub(super) confirm: String,
+}
+
+/// The ⋯ menu's note above a Remove Machine that the machine's Core is too old for.
+pub(super) const REMOVAL_NEEDS_UPDATE: &str = "Needs a newer SpaceTerm Core";
+
+/// Why Remove Machine can't uninstall SpaceTerm Core on the machine named `name`.
+fn uninstall_unsupported(name: &str) -> String {
+    format!("Remove Machine needs a newer SpaceTerm Core on {name}. Update it first.")
+}
+
+/// Whether a Core whose service lane speaks `lane_major` uninstalls itself over the lane.
+fn uninstalls(lane_major: u16) -> bool {
+    use spaceterm_core::protocol::capability::{Capabilities, Capability, Unavailable};
+    use spaceterm_core::protocol::version::ProtocolVersion;
+    Capabilities::new(
+        Err(Unavailable::NotConnected),
+        Ok(ProtocolVersion {
+            major: lane_major,
+            minor: 0,
+        }),
+    )
+    .check(Capability::Uninstall)
+    .is_ok()
 }
 
 /// What ends for every client: the exact count the server's preview named.
@@ -439,38 +480,45 @@ fn build(version: &LaneVersion) -> BuildName<'_> {
 pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation {
     let effects = &preview.effects;
     let ends = sessions_end(effects.ends_sessions);
-    // A server stopped or restarted from here starts again on its own computer, so the shared
-    // wording's startup clause never shows.
+    // A restart keeps the machine's own startup, so the shared wording's startup clause never
+    // shows.
     let startup = spaceterm_core::service::ServiceStartup::AtLogin;
     match &preview.action {
-        LaneAction::Stop | LaneAction::Restart
-            if preview.action == LaneAction::Stop || effects.to.is_none() =>
-        {
-            let (action, detail) = if preview.action == LaneAction::Stop {
-                (
-                    control::Action::Stop,
-                    format!(
-                        "{ends} Every client connected to it loses access, and Workspaces are \
-                         kept. It stays stopped until someone starts it on its own computer."
-                    ),
-                )
-            } else {
-                (
-                    control::Action::Restart,
-                    format!(
-                        "{ends} Every client connected to it disconnects until it starts again, \
-                         and Workspaces are kept."
-                    ),
-                )
-            };
-            let wording = Wording::for_machine(name, action, true, startup);
+        LaneAction::Restart if effects.to.is_none() => {
+            let wording = Wording::for_machine(name, control::Action::Restart, true, startup);
             RemoteConfirmation {
                 title: wording.title(),
                 message: wording.message(),
-                detail,
+                detail: format!(
+                    "{ends} Every client connected to it disconnects until it starts again, and \
+                     Workspaces are kept."
+                ),
                 confirm: wording.confirm_label().to_owned(),
             }
         }
+        // Only the machine itself stops its Core.
+        LaneAction::Stop => RemoteConfirmation {
+            title: "Stop SpaceTerm Core",
+            message: format!("Stop SpaceTerm Core on {name}?"),
+            detail: ends,
+            confirm: "Stop".to_owned(),
+        },
+        LaneAction::Uninstall => RemoteConfirmation {
+            title: "Remove Machine",
+            message: format!("Remove {name}?"),
+            detail: match effects.ends_sessions {
+                0 => format!("This will uninstall SpaceTerm Core on {name} and unpair it."),
+                1 => format!(
+                    "This will uninstall SpaceTerm Core on {name}, close your 1 running session \
+                     there, and unpair it."
+                ),
+                count => format!(
+                    "This will uninstall SpaceTerm Core on {name}, close your {count} running \
+                     sessions there, and unpair it."
+                ),
+            },
+            confirm: "Remove".to_owned(),
+        },
         // The card offers no Network Access change, and a Network preview arrives as its own
         // reply, so this names the change plainly should one ever reach it.
         LaneAction::Network { .. } => RemoteConfirmation {
@@ -480,7 +528,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
             confirm: "Change".to_owned(),
         },
         // A Restart into the Pending Version reads as the update it completes.
-        LaneAction::Stop | LaneAction::Restart => {
+        LaneAction::Restart => {
             let unnamed = LaneVersion {
                 version: String::new(),
                 commit: String::new(),
@@ -518,20 +566,16 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
 pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) {
     match ended {
         Ended::Refused(failure) => (failure.explanation(name), CaptionTone::Error),
-        Ended::Changed(Act::Stop, Settlement::Done) => (
+        Ended::Changed(Act::Stop, Settlement::Done) => {
+            (format!("{name} stopped."), CaptionTone::Guidance)
+        }
+        // The machine closed the lane before it confirmed the change, so only the machine itself
+        // can read the outcome.
+        Ended::Changed(act, Settlement::Shutdown) => (
             format!(
-                "{name} stopped, and its Terminal Sessions ended for every client. Start it again \
-                 on its own computer."
-            ),
-            CaptionTone::Guidance,
-        ),
-        // The server closes the lane as it stops, so its own record of the stop is readable
-        // only on its computer. A Stop that ran out of time with the lane open reads as any
-        // other uncertain change.
-        Ended::Changed(_, Settlement::Shutdown) => (
-            format!(
-                "{name} closed its connection while stopping, so SpaceTerm can\u{2019}t confirm \
-                 the stop finished. Check on its own computer with \u{201C}spaceterm status\u{201D}, and start it again there."
+                "{name} closed its connection before it confirmed its {}, so SpaceTerm can\u{2019}t \
+                 confirm it finished.",
+                act.noun()
             ),
             CaptionTone::Warning,
         ),
@@ -543,6 +587,11 @@ pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) 
                 || format!("{name} updated."),
                 |to| format!("{name} updated to {to}."),
             ),
+            CaptionTone::Guidance,
+        ),
+        // A removed machine leaves the list, so this reads only should its removal here fail.
+        Ended::Changed(Act::Uninstall, Settlement::Done) => (
+            format!("SpaceTerm Core was uninstalled on {name}."),
             CaptionTone::Guidance,
         ),
         Ended::Changed(Act::NetworkAccess, Settlement::Done) => (
@@ -607,6 +656,20 @@ fn earlier(settled: &[LaneReceipt]) -> Option<(Act, Settlement)> {
     ))
 }
 
+/// Whether `outcome` proves Remove Machine's uninstall started. Once its helper starts, the Core
+/// answers nothing more, so the evidence is a receipt that its helper launched followed by the
+/// closed lane, or a receipt that it finished. Admission alone proves nothing: a helper that
+/// failed to launch leaves the Core installed and paired.
+fn uninstall_started(outcome: &Outcome) -> bool {
+    match outcome {
+        Outcome::Settled { .. } => settlement(outcome) == Settlement::Done,
+        // The lane ends an uninstall this way only after its helper launched.
+        Outcome::Shutdown { boot, .. } => !boot.is_empty(),
+        // An admitted uninstall whose helper may never have launched leaves the Core paired.
+        Outcome::Unconfirmed { .. } => false,
+    }
+}
+
 /// What a finished flow established about `act`.
 fn settlement(outcome: &Outcome) -> Settlement {
     Settlement::of(admin::verdict(outcome))
@@ -637,6 +700,13 @@ impl SettingsWindow {
     /// connected, or that the server refused only for want of a protocol in common, which the
     /// lane still speaks.
     pub(super) fn remote_ready(&self, route: &DirectRouteId, cx: &App) -> bool {
+        self.remote_reachable(route, cx)
+            && self.remote(route).is_none_or(|admin| admin.work.is_none())
+    }
+
+    /// Whether SpaceTerm reaches `route`'s service lane over a connection it holds, whatever
+    /// the card is doing.
+    pub(super) fn remote_reachable(&self, route: &DirectRouteId, cx: &App) -> bool {
         let status = self
             .saved_direct_machines()
             .into_iter()
@@ -650,7 +720,6 @@ impl SettingsWindow {
             )
         );
         reachable
-            && self.remote(route).is_none_or(|admin| admin.work.is_none())
             && installed(cx).is_some()
             && self
                 .direct_routes
@@ -686,26 +755,29 @@ impl SettingsWindow {
         Some(pending.version.to_string().into())
     }
 
-    /// Whether the last change SpaceTerm made to `route` stopped it, or closed the lane while
-    /// stopping. A Stop whose outcome is merely unknown doesn't count.
-    pub(super) fn remote_stopped(&self, route: &DirectRouteId) -> bool {
-        matches!(
+    /// Why Remove Machine can't uninstall SpaceTerm Core on `route` over its lane, once a reading
+    /// or a refusal has shown its Core lacks the capability, as the ⋯ menu notes it above the
+    /// entry. The card's footnote says the full sentence after a refusal.
+    pub(super) fn remote_removal_blocked(&self, route: &DirectRouteId) -> Option<SharedString> {
+        let read_too_old = self
+            .current_reading(route)
+            .and_then(|admin| admin.status.as_ref())
+            .is_some_and(|status| !uninstalls(status.lane_major));
+        let refused = matches!(
             self.remote(route).and_then(|admin| admin.ended.as_ref()),
-            Some(Ended::Changed(
-                Act::Stop,
-                Settlement::Done | Settlement::Shutdown
-            ))
-        )
+            Some(Ended::Refused(RemoteFailure::Unsupported))
+        );
+        (read_too_old || refused).then(|| REMOVAL_NEEDS_UPDATE.into())
     }
 
     /// The verb of a change underway on `route`, which the Server row names under its label.
     pub(super) fn remote_operation(&self, route: &DirectRouteId) -> Option<&'static str> {
         match self.remote_work(route)? {
-            Work::Performing(Act::Stop) => Some("Stopping\u{2026}"),
             Work::Performing(Act::Restart) => Some("Restarting\u{2026}"),
             Work::Performing(Act::Update(_)) => Some("Updating\u{2026}"),
-            // The card never performs a Network Access change.
-            Work::Performing(Act::NetworkAccess) => None,
+            // The card never performs a Stop or a Network Access change.
+            Work::Performing(Act::Stop | Act::NetworkAccess) => None,
+            Work::Performing(Act::Uninstall) => Some("Removing\u{2026}"),
             Work::Preparing(Change::Update) => Some("Preparing\u{2026}"),
             Work::Reading | Work::Preparing(_) | Work::Confirming => None,
         }
@@ -729,12 +801,12 @@ impl SettingsWindow {
             )
         };
         let text = match self.remote_work(route)? {
-            Work::Performing(Act::Stop) => "Stopping SpaceTerm Core\u{2026}".to_owned(),
             Work::Performing(Act::Restart) => "Restarting SpaceTerm Core\u{2026}".to_owned(),
             Work::Performing(Act::Update(to)) => {
                 named(to, "Updating to", "Updating SpaceTerm Core\u{2026}")
             }
-            Work::Performing(Act::NetworkAccess) => return None,
+            Work::Performing(Act::Stop | Act::NetworkAccess) => return None,
+            Work::Performing(Act::Uninstall) => "Uninstalling SpaceTerm Core\u{2026}".to_owned(),
             Work::Preparing(Change::Update) => named(
                 &self.remote_available(route),
                 "Preparing the update to",
@@ -756,39 +828,14 @@ impl SettingsWindow {
             let (text, tone) = ended_message(name, ended);
             return Some((text.into(), tone));
         }
-        let (act, settlement) = admin.earlier.as_ref()?;
-        let (text, tone) = earlier_message(name, act, settlement);
-        Some((text.into(), tone))
-    }
-
-    /// Follows the registry's connection states. A server SpaceTerm stopped that connects again
-    /// was started on its own computer, so the stop no longer needs explaining.
-    pub(super) fn follow_remote_routes(&mut self) {
-        let statuses: HashMap<DirectRouteId, DirectRouteStatus> = self
-            .saved_direct_machines()
-            .into_iter()
-            .map(|(route, status, _)| (route, status))
-            .collect();
-        for (route, admin) in &mut self.remote_admin.routes {
-            let stopped = matches!(
-                admin.ended,
-                Some(Ended::Changed(
-                    Act::Stop,
-                    Settlement::Done | Settlement::Shutdown
-                ))
-            );
-            if !stopped {
-                continue;
-            }
-            match statuses.get(route) {
-                Some(DirectRouteStatus::Connected) if admin.left => {
-                    admin.ended = None;
-                    admin.left = false;
-                }
-                Some(DirectRouteStatus::Connected) => {}
-                _ => admin.left = true,
-            }
+        if let Some((act, settlement)) = admin.earlier.as_ref() {
+            let (text, tone) = earlier_message(name, act, settlement);
+            return Some((text.into(), tone));
         }
+        // A reading that shows a Core too old to uninstall itself says why Remove Machine is
+        // unavailable.
+        self.remote_removal_blocked(route)
+            .map(|_| (uninstall_unsupported(name).into(), CaptionTone::Guidance))
     }
 
     /// Reads `route`'s Status and update check over its lane, as Check Now asks.
@@ -958,20 +1005,30 @@ impl SettingsWindow {
                 .background_spawn(async move { control.perform(preview) })
                 .await;
             let _ = settings.update(cx, |settings, cx| {
+                let removed = matches!(
+                    &performed,
+                    Ok(performed) if act == Act::Uninstall && uninstall_started(&performed.outcome)
+                );
+                if removed {
+                    // The Core's uninstall started, which revokes every pairing, so the machine
+                    // leaves this computer too. Anything less keeps the route, its key and the
+                    // pending operation, so a later check can settle it.
+                    settings.remote_admin.routes.remove(&route);
+                    settings.forget_machine(route, cx);
+                    return;
+                }
                 let admin = settings.remote_mut(route);
                 admin.work = None;
                 match performed {
                     Ok(performed) => {
                         admin.earlier = earlier(&performed.settled);
                         admin.ended = Some(Ended::Changed(act, settlement(&performed.outcome)));
-                        admin.left = false;
                         // The server changed, so what the last read said no longer holds.
                         admin.status = None;
                         admin.read_over = None;
                     }
                     Err(failure) => admin.ended = Some(Ended::Refused(failure)),
                 }
-                settings.follow_remote_routes();
                 cx.notify();
             });
         });

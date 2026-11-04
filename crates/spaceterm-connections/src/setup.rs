@@ -91,7 +91,8 @@ impl DirectConnections {
         Ok(prepared)
     }
 
-    /// The caller closes every SSH resource before entering this QUIC admission step.
+    /// The caller closes every SSH resource before entering this QUIC admission step, except
+    /// the one it needs to restore Network Access that setup changed, should no packet arrive.
     pub fn complete_setup(
         &self,
         prepared: &SetupEnrollment,

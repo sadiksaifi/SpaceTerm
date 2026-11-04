@@ -292,6 +292,8 @@ struct HostService {
     stop: Arc<Stop>,
     /// The membership fence: set while an admitted service operation is unsettled.
     fence: Arc<AtomicBool>,
+    /// The connection that fenced Session starts for a local uninstall, until it closes.
+    uninstalling: Option<[u8; 32]>,
 }
 impl PaneService for HostService {
     fn restore(&mut self, store: crate::organization::OrganizationStore) -> Result<(), CoreError> {
@@ -315,7 +317,17 @@ impl PaneService for HostService {
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
         // The fence and its check share this service's lock, so no Session starts between an
         // admitted operation's observation and its outcome.
-        if self.fence.load(Ordering::Acquire) && matches!(operation, Operation::Claim(_)) {
+        if let Operation::Sessions { fence } = operation {
+            if fence {
+                self.uninstalling = Some(peer.connection);
+            }
+            return Dispatch::reply(Ok(crate::protocol::ReplyBody::Sessions(
+                self.inner.sessions(),
+            )));
+        }
+        if (self.fence.load(Ordering::Acquire) || self.uninstalling.is_some())
+            && matches!(operation, Operation::Claim(_))
+        {
             return Dispatch::reply(Err(Refusal::ServiceBusy));
         }
         let shutdown = matches!(operation, Operation::Shutdown);
@@ -356,6 +368,9 @@ impl PaneService for HostService {
         self.inner.tick(now)
     }
     fn disconnected(&mut self, peer: &Peer) {
+        if self.uninstalling == Some(peer.connection) {
+            self.uninstalling = None;
+        }
         self.inner.disconnected(peer)
     }
     fn shutdown(&mut self) -> Result<(), CoreError> {
@@ -608,6 +623,7 @@ fn serve_runtime_ready(
         paths: paths.clone(),
         stop: Arc::clone(&stop),
         fence: Arc::clone(&fence),
+        uninstalling: None,
     });
     {
         // A Git write can outlive a crashed server through its inherited lock. Restore only
@@ -1691,6 +1707,97 @@ mod tests {
         );
     }
 
+    /// A local uninstall reads the live Sessions and fences later Session starts in one step, and
+    /// the fence holds for every connection until the uninstalling connection closes.
+    #[test]
+    fn an_uninstall_fence_refuses_every_session_start_until_its_connection_closes() {
+        use crate::protocol::ReplyBody;
+        struct Running;
+        impl PaneService for Running {
+            fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {}
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                Dispatch::reply(Ok(ReplyBody::Done))
+            }
+            fn sessions(&self) -> Vec<[u8; 32]> {
+                vec![[3; 32]]
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {}
+            fn shutdown(&mut self) -> Result<(), CoreError> {
+                Ok(())
+            }
+        }
+        fn peer(connection: u8) -> Peer {
+            Peer {
+                client: [connection; 32],
+                connection: [connection; 32],
+                pairing: None,
+            }
+        }
+        fn claim(host: &mut HostService, peer: &Peer) -> Result<ReplyBody, Refusal> {
+            let operation = Operation::Claim(crate::protocol::Claim {
+                channel: crate::protocol::Channel(1),
+                attachment: crate::attachments::Attachment {
+                    workspace: [1; 32],
+                    generation: 1,
+                },
+                pane: [2; 32],
+                claim: crate::pane::AttachmentClaim::Select { explicit: true },
+                size: None,
+                style: None,
+            });
+            match host.request(peer, RequestId(1), operation) {
+                Dispatch::Reply(reply) => *reply,
+                _ => panic!("expected a reply"),
+            }
+        }
+        let mut host = HostService {
+            fence: Arc::default(),
+            uninstalling: None,
+            inner: Box::new(Running),
+            paths: Paths {
+                identity: "spaceterm-development".into(),
+                data: "/nonexistent/d".into(),
+                runtime: "/nonexistent/r".into(),
+            },
+            stop: Arc::new(Stop {
+                stopping: AtomicBool::new(false),
+                wake: Arc::new(|| {}),
+            }),
+        };
+        let (uninstaller, other) = (peer(1), peer(2));
+        assert!(claim(&mut host, &other).is_ok(), "no fence yet");
+        let Dispatch::Reply(reply) = host.request(
+            &uninstaller,
+            RequestId(1),
+            Operation::Sessions { fence: true },
+        ) else {
+            panic!("expected a reply");
+        };
+        assert!(matches!(*reply, Ok(ReplyBody::Sessions(ref ids)) if ids == &vec![[3; 32]]));
+        assert!(matches!(
+            claim(&mut host, &other),
+            Err(Refusal::ServiceBusy)
+        ));
+        assert!(matches!(
+            claim(&mut host, &uninstaller),
+            Err(Refusal::ServiceBusy)
+        ));
+        host.disconnected(&other);
+        assert!(matches!(
+            claim(&mut host, &other),
+            Err(Refusal::ServiceBusy)
+        ));
+        host.disconnected(&uninstaller);
+        assert!(
+            claim(&mut host, &other).is_ok(),
+            "the fence ends with its connection"
+        );
+    }
+
     #[test]
     fn the_host_restores_its_service_from_retained_organization() {
         struct Restoring(Arc<AtomicBool>);
@@ -1722,6 +1829,7 @@ mod tests {
         let restored = Arc::new(AtomicBool::new(false));
         let mut host: Box<dyn PaneService> = Box::new(HostService {
             fence: Arc::default(),
+            uninstalling: None,
             inner: Box::new(Restoring(Arc::clone(&restored))),
             paths: Paths {
                 identity: "spaceterm-development".into(),

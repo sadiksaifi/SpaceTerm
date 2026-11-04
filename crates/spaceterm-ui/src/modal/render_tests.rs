@@ -1505,6 +1505,35 @@ fn compact_warning_keeps_content_and_safe_actions_visible_together(cx: &mut Test
     );
 }
 
+/// An Alert's title sits 8 pt above its message, so the two read as one block.
+#[gpui::test]
+fn alert_title_sits_eight_points_above_its_message(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    cx.set_global(test_modal_theme(ModalMetrics::new(
+        px(360.0),
+        px(480.0),
+        px(640.0),
+    )));
+    let window = cx.update(|cx| {
+        cx.open_window(WindowOptions::default(), |_, cx| {
+            cx.new(|_| CompactWarningFixture { presentation: None })
+        })
+        .unwrap_or_else(|error| panic!("compact warning window failed: {error}"))
+    });
+    let root = window.root(cx).expect("compact warning root should exist");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+    cx.run_until_parked();
+
+    let title = cx
+        .debug_bounds("modal-header-title")
+        .expect("the title should render");
+    let message = cx
+        .debug_bounds("modal-alert-message")
+        .expect("the message should render");
+    assert_eq!(message.top() - title.bottom(), px(8.0));
+}
+
 /// Visible Alert detail is part of what a person reads before deciding, so assistive technology
 /// reads it too, after the message and inside the Alert.
 #[gpui::test]
@@ -8798,7 +8827,7 @@ fn alert_intents_render_bounded_semantic_treatments_without_accessories(cx: &mut
             .expect("body viewport");
         assert_eq!(
             treatment.top() - viewport.top(),
-            px(16.0),
+            px(8.0),
             "{name} must not reserve an accessory row"
         );
         assert!(

@@ -257,7 +257,8 @@ impl State {
         match self.bind(policy.bind) {
             Ok(listener) => Ok(Prepared::Fresh(listener)),
             Err(Bind::InUse) if self.holds(policy.bind) => Ok(Prepared::Deferred),
-            Err(_) => Err(DirectError::AddressUnavailable),
+            Err(Bind::InUse) => Err(DirectError::PortInUse),
+            Err(Bind::Other) => Err(DirectError::AddressUnavailable),
         }
     }
     /// Whether one of this server's own listeners on every interface holds `address`'s port.
@@ -947,7 +948,7 @@ impl State {
                     return Err(DirectError::Disabled);
                 };
                 let endpoint = if let Some(authority) = advertise {
-                    super::Endpoint::parse(&authority)?.url()
+                    super::Endpoint::parse(&authority, super::default_port(&self.pin.build))?.url()
                 } else {
                     let address = if addr.ip().is_unspecified() {
                         network::snapshot(self.network.as_ref())?

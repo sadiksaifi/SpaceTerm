@@ -116,6 +116,12 @@ pub fn cli_state_root(identity: &str) -> Result<std::path::PathBuf, CoreError> {
         .join("clients/cli"))
 }
 
+/// SpaceTerm Core's data root of `identity` on this account, under the account's own home
+/// directory whatever HOME says.
+pub fn core_data_root(identity: &str) -> Result<std::path::PathBuf, CoreError> {
+    Ok(host::Paths::for_identity(identity)?.data)
+}
+
 /// The nonsecret ID of the server `identity` on this account, read without contacting or
 /// starting it.
 pub fn local_machine_id(identity: &str) -> Result<[u8; 32], CoreError> {

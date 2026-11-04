@@ -242,7 +242,13 @@ pub(crate) mod macos_services;
 pub(crate) mod core_permission_access;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
-mod macos_system_settings;
+pub(crate) mod macos_app_location;
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
+pub(crate) mod macos_login_items;
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
+pub(crate) mod macos_system_settings;
 
 #[cfg(all(target_os = "macos", not(test)))]
 #[cfg(feature = "desktop")]

@@ -222,6 +222,7 @@ actions!(
         ShowAboutApplication,
         OpenApplicationHelp,
         QuitApplication,
+        QuitUninstalledApplication,
         CloseAllWindows,
         DismissApplication,
         HideApplication,
@@ -298,6 +299,13 @@ pub(crate) fn init(
         // Window action dispatch temporarily owns its Window, so the choice reads every window
         // after it returns.
         cx.defer(move |cx| coordinator.dismiss(cx));
+    });
+    let uninstalled = Rc::clone(&application_quit);
+    // Uninstall SpaceTerm removed SpaceTerm Core and the app, so no Terminal Session remains
+    // for the quit warning to protect and the client exits at once.
+    cx.on_action(move |_: &QuitUninstalledApplication, cx| {
+        let application_quit = Rc::clone(&uninstalled);
+        cx.defer(move |cx| application_quit.confirm_quit(cx));
     });
     cx.on_action(move |_: &QuitApplication, cx| {
         let application_quit = Rc::clone(&application_quit);
@@ -1470,6 +1478,10 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
         restore_default_window(cx, &reopened_host);
     });
     application.run(move |cx| {
+        if crate::local_startup::leave_disk_image() {
+            cx.quit();
+            return;
+        }
         if let Err(error) = initialize_application(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();
@@ -2222,6 +2234,23 @@ mod tests {
         cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
         assert_eq!(quit.confirmations(), 0);
+    }
+
+    /// Once Uninstall SpaceTerm removed SpaceTerm Core, no Terminal Session remains to warn
+    /// about, so its Quit exits at once.
+    #[gpui::test]
+    fn quitting_after_uninstall_exits_without_asking(cx: &mut TestAppContext) {
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
+
+        cx.update(|cx| cx.dispatch_action(&QuitUninstalledApplication));
+        cx.run_until_parked();
+
+        assert!(!cx.has_pending_prompt(), "Quit asks nothing again");
+        assert_eq!(quit.confirmations(), 1);
     }
 
     #[gpui::test]

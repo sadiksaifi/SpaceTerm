@@ -1,4 +1,4 @@
-//! Paired server Status, Stop, Restart and Update from the Servers card.
+//! Paired machine Status, Restart and Update from the Machines card.
 use gpui::{TestAppContext, VisualTestContext};
 use spaceterm_core::service::lane::{
     LaneActivation, LaneEffects, LaneNetwork, LaneOperationState, LaneReceipt,
@@ -111,19 +111,34 @@ fn status(runtime: LaneVersion) -> LaneStatus {
     }
 }
 
+/// Remove Machine's confirmation follows the mockup: it names the machine, the sessions that
+/// close there, and that it unpairs.
 #[test]
-fn a_stop_confirmation_says_every_client_loses_access_and_where_start_happens() {
-    let confirmation = confirmation("penguin", &preview(LaneAction::Stop, effects(2)));
-
-    assert_eq!(confirmation.title, "Stop SpaceTerm Core");
-    assert_eq!(confirmation.message, "Stop SpaceTerm Core on penguin?");
+fn a_remove_confirmation_names_the_machine_and_the_sessions_that_close() {
+    let detail = |sessions| {
+        confirmation(
+            "build-box",
+            &preview(LaneAction::Uninstall, effects(sessions)),
+        )
+        .detail
+    };
+    let removal = confirmation("build-box", &preview(LaneAction::Uninstall, effects(1)));
+    assert_eq!(removal.message, "Remove build-box?");
+    assert_eq!(removal.confirm, "Remove");
     assert_eq!(
-        confirmation.detail,
-        "Its 2 Terminal Sessions end for every client. Every client connected to it loses \
-         access, and Workspaces are kept. It stays stopped until someone starts it on its own \
-         computer."
+        detail(1),
+        "This will uninstall SpaceTerm Core on build-box, close your 1 running session there, \
+         and unpair it."
     );
-    assert_eq!(confirmation.confirm, "Stop SpaceTerm Core");
+    assert_eq!(
+        detail(3),
+        "This will uninstall SpaceTerm Core on build-box, close your 3 running sessions there, \
+         and unpair it."
+    );
+    assert_eq!(
+        detail(0),
+        "This will uninstall SpaceTerm Core on build-box and unpair it."
+    );
 }
 
 #[test]
@@ -179,22 +194,14 @@ fn confirmation_detail(to_major: Option<u16>) -> String {
 
 #[test]
 fn an_outcome_the_client_cannot_confirm_says_so() {
-    let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Shutdown));
-    assert_eq!(
-        stop,
-        "penguin closed its connection while stopping, so SpaceTerm can\u{2019}t confirm the \
-         stop finished. Check on its own computer with \u{201C}spaceterm status\u{201D}, \
-         and start it again there."
+    let (closed, tone) = ended_message(
+        "penguin",
+        &Ended::Changed(Act::Restart, Settlement::Shutdown),
     );
-    assert_eq!(tone, CaptionTone::Warning);
-
-    // A Stop that ran out of time with the lane open proves no shutdown, so it reads as any
-    // other uncertain change.
-    let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Uncertain));
     assert_eq!(
-        stop,
-        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its stop. Check Now asks \
-         penguin again."
+        closed,
+        "penguin closed its connection before it confirmed its restart, so SpaceTerm \
+         can\u{2019}t confirm it finished."
     );
     assert_eq!(tone, CaptionTone::Warning);
 
@@ -213,11 +220,6 @@ fn an_outcome_the_client_cannot_confirm_says_so() {
 #[test]
 fn each_settled_change_reads_its_own_way() {
     let message = |ended| ended_message("penguin", &ended).0;
-    assert_eq!(
-        message(Ended::Changed(Act::Stop, Settlement::Done)),
-        "penguin stopped, and its Terminal Sessions ended for every client. Start it again on \
-         its own computer."
-    );
     assert_eq!(
         message(Ended::Changed(Act::Restart, Settlement::Done)),
         "penguin restarted."
@@ -619,4 +621,203 @@ fn an_earlier_network_access_change_reads_as_an_earlier_change() {
         ended_message("penguin", &Ended::Changed(act, Settlement::Done)).0,
         "penguin changed its Network Access."
     );
+}
+
+/// Remove Machine previews the uninstall, names the machine and the sessions that close, and
+/// once the Core admits it, the machine leaves this computer with nothing left to unpair.
+#[gpui::test]
+fn remove_machine_uninstalls_core_there_and_unpairs_in_one_step(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    *remote.prepare.lock().unwrap() = Ok(Prepared {
+        preview: preview(LaneAction::Uninstall, effects(1)),
+        settled: Vec::new(),
+    });
+    // The Core answers nothing once its uninstall helper launched, so the lane closes.
+    *remote.perform.lock().unwrap() = Ok(Performed {
+        outcome: Outcome::Shutdown {
+            operation: "0123456789abcdef0123456789abcdef".into(),
+            boot: "a".into(),
+        },
+        settled: Vec::new(),
+    });
+    let machines = open_penguin(&remote, cx);
+    let route = machines.routes[0];
+
+    click(REMOVE_SELECTOR, machines.cx);
+    assert_eq!(*remote.prepared.lock().unwrap(), vec![Change::Remove]);
+    let tree = A11yTree::read(machines.cx);
+    assert!(tree.find_text("Remove penguin?").is_some());
+    assert!(
+        tree.find_text(
+            "This will uninstall SpaceTerm Core on penguin, close your 1 running session there, \
+             and unpair it."
+        )
+        .is_some()
+    );
+    assert!(
+        remote.performed.lock().unwrap().is_empty(),
+        "Remove asks first"
+    );
+
+    answer(CONFIRM_SELECTOR, machines.cx);
+    let direct = machines.direct.clone();
+    settle(machines.cx, |_| direct.route(&route).is_none());
+
+    assert_eq!(remote.performed.lock().unwrap().len(), 1);
+    assert!(
+        machines.direct.pending_unpairs().is_empty(),
+        "the uninstalled Core already revoked every pairing"
+    );
+    let selected = machines
+        .window
+        .read_with(machines.cx, |settings, _| settings.selected_machine());
+    assert_ne!(
+        selected,
+        Some(super::super::machine_list::MachineChoice::Direct(route)),
+        "the selection leaves the removed machine"
+    );
+}
+
+/// Confirms Remove Machine with the lane answering `performed`, and checks that the Machine, its
+/// key and its pairing stay, so a later check can settle what happened.
+fn removal_keeps_the_machine(
+    performed: Result<Performed, RemoteFailure>,
+    says: &str,
+    cx: &mut TestAppContext,
+) {
+    let remote = ScriptedRemote::new();
+    *remote.prepare.lock().unwrap() = Ok(Prepared {
+        preview: preview(LaneAction::Uninstall, effects(0)),
+        settled: Vec::new(),
+    });
+    *remote.perform.lock().unwrap() = performed;
+    let machines = open_penguin(&remote, cx);
+    let route = machines.routes[0];
+
+    click(REMOVE_SELECTOR, machines.cx);
+    answer(CONFIRM_SELECTOR, machines.cx);
+    let window = machines.window.clone();
+    settle(machines.cx, |cx| {
+        window.read_with(cx, |settings, cx| {
+            settings
+                .machine_card_footnote(cx)
+                .is_some_and(|footnote| footnote.contains(says))
+        })
+    });
+
+    assert_eq!(remote.performed.lock().unwrap().len(), 1);
+    assert!(
+        machines.direct.route(&route).is_some(),
+        "the Machine stays until its Core's uninstall started"
+    );
+    assert!(
+        machines.direct.pending_unpairs().is_empty(),
+        "nothing was unpaired"
+    );
+}
+
+/// No Core run accepted the request, which may never have arrived.
+#[gpui::test]
+fn an_uninstall_no_core_admitted_keeps_the_machine_and_its_pairing(cx: &mut TestAppContext) {
+    removal_keeps_the_machine(
+        Ok(Performed {
+            outcome: Outcome::Unconfirmed {
+                operation: "0123456789abcdef0123456789abcdef".into(),
+                boot: String::new(),
+                last: None,
+            },
+            settled: Vec::new(),
+        }),
+        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its uninstall.",
+        cx,
+    );
+}
+
+/// A Core admitted the uninstall, but no receipt showed its helper launched, so the Core may
+/// still be installed and paired.
+#[gpui::test]
+fn an_admitted_uninstall_with_no_launched_helper_keeps_the_machine(cx: &mut TestAppContext) {
+    removal_keeps_the_machine(
+        Ok(Performed {
+            outcome: Outcome::Unconfirmed {
+                operation: "0123456789abcdef0123456789abcdef".into(),
+                boot: "a".into(),
+                last: None,
+            },
+            settled: Vec::new(),
+        }),
+        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its uninstall.",
+        cx,
+    );
+}
+
+#[gpui::test]
+fn an_uninstall_that_failed_keeps_the_machine_and_its_pairing(cx: &mut TestAppContext) {
+    removal_keeps_the_machine(
+        Err(RemoteFailure::Unreachable),
+        &RemoteFailure::Unreachable.explanation("penguin"),
+        cx,
+    );
+}
+
+/// A Core too old to uninstall itself refuses, and Remove Machine then says why it's unavailable.
+#[gpui::test]
+fn remove_machine_says_why_a_core_too_old_to_uninstall_cant_be_removed(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    *remote.prepare.lock().unwrap() = Err(RemoteFailure::of_code("unsupported"));
+    let machines = open_penguin(&remote, cx);
+
+    click(REMOVE_SELECTOR, machines.cx);
+    assert!(!alert_open(machines.cx));
+    let reason = "Remove Machine needs a newer SpaceTerm Core on penguin. Update it first.";
+    assert!(
+        footnote(&machines).contains(reason),
+        "got {:?}",
+        footnote(&machines)
+    );
+
+    click(super::super::machine_card::MENU_SELECTOR, machines.cx);
+    let tree = A11yTree::read(machines.cx);
+    assert_eq!(
+        tree.node("Remove Machine\u{2026}")["aria"]["disabled"],
+        true
+    );
+    assert!(
+        machines.direct.route(&machines.routes[0]).is_some(),
+        "nothing was removed"
+    );
+}
+
+/// A reading that shows a Core whose service lane predates uninstall makes Remove Machine
+/// unavailable and says why before the person asks.
+#[gpui::test]
+fn a_reading_of_a_core_too_old_to_uninstall_disables_remove_machine(cx: &mut TestAppContext) {
+    let remote = ScriptedRemote::new();
+    let mut old = status(version("0.9.0", "aaaaaaaaaa"));
+    old.lane_major = 0;
+    *remote.read.lock().unwrap() = Ok(Reading {
+        status: old,
+        settled: Vec::new(),
+    });
+    let machines = open_penguin(&remote, cx);
+
+    click(
+        super::super::machine_card::VERSION_CHECK_SELECTOR,
+        machines.cx,
+    );
+    machines.cx.run_until_parked();
+
+    assert!(
+        footnote(&machines)
+            .contains("Remove Machine needs a newer SpaceTerm Core on penguin. Update it first."),
+        "got {:?}",
+        footnote(&machines)
+    );
+    click(super::super::machine_card::MENU_SELECTOR, machines.cx);
+    let tree = A11yTree::read(machines.cx);
+    assert_eq!(
+        tree.node("Remove Machine\u{2026}")["aria"]["disabled"],
+        true
+    );
+    assert!(remote.prepared.lock().unwrap().is_empty());
 }

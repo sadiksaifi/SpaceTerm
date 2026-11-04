@@ -510,9 +510,10 @@ pub fn settle(action: ServiceAction, outcome: Outcome) -> Settled {
 
 fn unconfirmed(receipt: &LaneReceipt) -> Failure {
     match receipt.action {
-        LaneAction::Stop | LaneAction::Restart | LaneAction::Network { .. } => {
-            Failure::new(Code::OutcomeUnconfirmed)
-        }
+        LaneAction::Stop
+        | LaneAction::Restart
+        | LaneAction::Network { .. }
+        | LaneAction::Uninstall => Failure::new(Code::OutcomeUnconfirmed),
     }
 }
 
@@ -523,6 +524,7 @@ pub fn receipt_of(receipt: &LaneReceipt) -> Receipt {
             LaneAction::Stop => ServiceAction::Stop,
             LaneAction::Restart => ServiceAction::Restart,
             LaneAction::Network { .. } => ServiceAction::Network,
+            LaneAction::Uninstall => ServiceAction::Uninstall,
         },
         state: match receipt.state {
             LaneOperationState::Admitted => ReceiptState::Admitted,

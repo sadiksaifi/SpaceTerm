@@ -184,7 +184,6 @@ impl Directory {
         self.0.sync_all().map_err(|_| CoreError::StorageUnavailable)
     }
     /// Removes one private record. A record that is already absent is removed.
-    #[cfg(feature = "client")]
     pub fn remove(&self, name: &std::ffi::CStr) -> Result<(), CoreError> {
         self.remove_record(name)
     }

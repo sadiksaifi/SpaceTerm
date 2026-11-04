@@ -19,6 +19,11 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
         DirectError::InvalidInvitation => "Invalid or used invitation. Ask for a new one.",
         DirectError::Expired => "Invitation expired. Ask for a new one.",
         DirectError::WrongMachine => "This invitation is for a different SpaceTerm app.",
+        // A Release desktop never pairs with a Preflight Core, and the reverse.
+        DirectError::IdentityMismatch => {
+            "This invitation comes from another edition of SpaceTerm, so open it in the matching \
+             edition."
+        }
         DirectError::IncompatibleProtocol => "SpaceTerm and this SpaceTerm Core are incompatible.",
         DirectError::AuthenticationRefused
         | DirectError::PinMismatch
@@ -37,6 +42,7 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
         | DirectError::InvalidRequest
         | DirectError::InvalidAddress
         | DirectError::AddressUnavailable
+        | DirectError::PortInUse
         | DirectError::PolicyChanged
         | DirectError::AlreadyDecided => "The machine refused pairing.",
     }

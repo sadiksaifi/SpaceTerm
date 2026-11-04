@@ -115,6 +115,7 @@ pub(in crate::ui::settings_window) fn open_with<'a>(
         service: None,
         update: None,
         command_line_tool: None,
+        removal: None,
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
@@ -630,7 +631,7 @@ fn remove_machine_asks_before_removing_the_named_machine(cx: &mut TestAppContext
 
     let tree = A11yTree::read(machines.cx);
     assert!(
-        tree.find_text("Remove \u{201C}penguin\u{201D}?").is_some(),
+        tree.find_text("Remove penguin?").is_some(),
         "the alert names the machine"
     );
     assert!(

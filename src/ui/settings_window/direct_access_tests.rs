@@ -18,8 +18,8 @@ use super::super::direct_routes::{UNPAIR_SELF_CONFIRM_SELECTOR, UNSAVED_CHANGES}
 use super::super::machine_card::MENU_SELECTOR;
 use super::super::machine_list::LIST_SELECTOR;
 use super::super::machine_selection;
-use super::super::machines::testing::connected;
-use super::super::machines::{ConnectedCore, LocalCoreControl, OfferedMachine};
+use super::super::machines::testing::{Prompt, ScriptedService, ServiceCall, connected, running};
+use super::super::machines::{ConnectedCore, CoreServiceControl, LocalCoreControl, OfferedMachine};
 use super::super::notices::NOTICE_SELECTOR;
 use super::{
     ACCESS_SELECTOR, ADDRESS_SELECTOR, DEVICE_SELECTOR, INVITE_SELECTOR, REMOVE_CANCEL_SELECTOR,
@@ -61,6 +61,7 @@ struct ScriptedAccess {
     devices: Mutex<Vec<Device>>,
     /// Why the server can't list its devices, when it can't.
     devices_failure: Mutex<Option<AccessFailure>>,
+    invitations: Mutex<usize>,
 }
 
 impl ScriptedAccess {
@@ -87,6 +88,7 @@ impl ScriptedAccess {
             claims: Mutex::default(),
             devices: Mutex::default(),
             devices_failure: Mutex::default(),
+            invitations: Mutex::default(),
         })
     }
 
@@ -189,6 +191,7 @@ impl DirectAccessControl for ScriptedAccess {
     }
 
     fn invite(&self, _: Option<IpAddr>) -> Result<OpenInvitation, AccessFailure> {
+        *self.invitations.lock().expect("invitations") += 1;
         Ok(OpenInvitation {
             id: INVITATION_ID,
             text: Zeroizing::new(INVITATION.to_owned()),
@@ -334,6 +337,15 @@ fn open_machines_with<'a>(
     direct: Option<DirectConnections>,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
+    open_machines_with_service(access, direct, None, cx)
+}
+
+fn open_machines_with_service<'a>(
+    access: &Arc<ScriptedAccess>,
+    direct: Option<DirectConnections>,
+    service: Option<Arc<dyn CoreServiceControl>>,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SettingsWindow>, &'a mut VisualTestContext) {
     let settings =
         crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
@@ -348,9 +360,10 @@ fn open_machines_with<'a>(
     });
     let local = Some(OfferedMachine {
         connection: Ok(Arc::new(ScriptedLocal(Arc::clone(access))) as Arc<dyn LocalCoreControl>),
-        service: None,
+        service: service.map(Ok),
         update: None,
         command_line_tool: None,
+        removal: None,
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
@@ -450,15 +463,148 @@ fn select_paired_machine(cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn network_access_requires_linger_before_listening(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
+    let service = ScriptedService::with_boot_startup(Ok(running()));
+    let (window, cx) = open_machines_with_service(&access, None, Some(service.clone()), cx);
+
+    click(ACCESS_SELECTOR, cx);
+
+    assert!(access.requests().is_empty());
+    assert!(!access_on(&window, cx));
+    assert!(reads(
+        "Paired devices need SpaceTerm Core to keep running after you log out.",
+        cx
+    ));
+    assert!(!service.calls().contains(&ServiceCall::AuthorizeStartup));
+
+    click(&modal_action("settings-pairing-linger-cancel"), cx);
+    assert!(access.requests().is_empty());
+}
+
+#[gpui::test]
+fn changing_a_listening_address_requires_linger(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let service = ScriptedService::with_boot_startup(Ok(running()));
+    let (_, cx) = open_machines_with_service(&access, None, Some(service), cx);
+
+    click(ADDRESS_SELECTOR, cx);
+    click("All Interfaces", cx);
+
+    assert!(access.requests().is_empty());
+    assert!(reads(
+        "Paired devices need SpaceTerm Core to keep running after you log out.",
+        cx
+    ));
+}
+
+#[gpui::test]
+fn invite_device_requires_linger_before_creating_a_link(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let service = ScriptedService::with_boot_startup(Ok(running()));
+    let (_, cx) = open_machines_with_service(&access, None, Some(service.clone()), cx);
+
+    click(INVITE_SELECTOR, cx);
+
+    assert_eq!(*access.invitations.lock().unwrap(), 0);
+    assert!(reads(
+        "Paired devices need SpaceTerm Core to keep running after you log out.",
+        cx
+    ));
+    assert!(!service.calls().contains(&ServiceCall::AuthorizeStartup));
+
+    click(&modal_action("settings-pairing-linger-cancel"), cx);
+    assert_eq!(*access.invitations.lock().unwrap(), 0);
+}
+
+#[gpui::test]
+fn enabling_linger_continues_the_requested_network_access_change(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
+    let service = ScriptedService::with_boot_startup(Ok(running()));
+    let (window, cx) = open_machines_with_service(&access, None, Some(service.clone()), cx);
+    click(ACCESS_SELECTOR, cx);
+
+    click(&modal_action("settings-pairing-linger-enable"), cx);
+
+    assert!(access_on(&window, cx));
+    assert_eq!(access.requests().len(), 1);
+    assert!(service.calls().contains(&ServiceCall::AuthorizeStartup));
+    assert!(
+        !service
+            .calls()
+            .iter()
+            .any(|call| matches!(call, ServiceCall::SetAutomaticStart(_)))
+    );
+}
+
+#[gpui::test]
+fn enabling_linger_continues_the_requested_invitation(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let service = ScriptedService::with_boot_startup(Ok(running()));
+    let (_, cx) = open_machines_with_service(&access, None, Some(service.clone()), cx);
+    click(INVITE_SELECTOR, cx);
+
+    click(&modal_action("settings-pairing-linger-enable"), cx);
+
+    assert_eq!(*access.invitations.lock().unwrap(), 1);
+    assert!(open(crate::ui::direct_pairing::COPY_SELECTOR, cx));
+    assert!(service.calls().contains(&ServiceCall::AuthorizeStartup));
+}
+
+#[gpui::test]
+fn cancelling_linger_authorization_never_invites_a_device(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let service = ScriptedService::with_boot_startup(Ok(running()));
+    service.answer_prompt(Prompt::Cancel);
+    let (_, cx) = open_machines_with_service(&access, None, Some(service.clone()), cx);
+    click(INVITE_SELECTOR, cx);
+
+    click(&modal_action("settings-pairing-linger-enable"), cx);
+
+    assert_eq!(*access.invitations.lock().unwrap(), 0);
+    assert!(!open(crate::ui::direct_pairing::COPY_SELECTOR, cx));
+    assert!(reads(
+        "Paired devices need SpaceTerm Core to keep running after you log out.",
+        cx
+    ));
+}
+
+#[gpui::test]
+fn enabled_linger_allows_network_access_and_inviting_without_another_prompt(
+    cx: &mut TestAppContext,
+) {
+    let access = ScriptedAccess::off();
+    let service = ScriptedService::with_boot_startup(Ok(running()));
+    service.authorize_startup().unwrap();
+    let (window, cx) = open_machines_with_service(&access, None, Some(service.clone()), cx);
+
+    click(ACCESS_SELECTOR, cx);
+    assert!(access_on(&window, cx));
+    click(INVITE_SELECTOR, cx);
+
+    assert_eq!(*access.invitations.lock().unwrap(), 1);
+    assert!(open(crate::ui::direct_pairing::COPY_SELECTOR, cx));
+    assert_eq!(
+        service
+            .calls()
+            .iter()
+            .filter(|call| **call == ServiceCall::AuthorizeStartup)
+            .count(),
+        1
+    );
+}
+
+#[gpui::test]
 fn turning_on_listens_at_the_address_the_core_suggests_on_spaceterms_port(cx: &mut TestAppContext) {
     let access = ScriptedAccess::off();
     let (window, cx) = open_machines(&access, cx);
 
     click(ACCESS_SELECTOR, cx);
 
-    assert_eq!(access.policies(), vec![policy("192.168.1.21:9231")]);
+    let suggested = format!("192.168.1.21:{}", crate::ssh::provisioning::own_port());
+    assert_eq!(access.policies(), vec![policy(&suggested)]);
     assert!(access_on(&window, cx));
-    assert!(reads("Listening on 192.168.1.21:9231.", cx));
+    assert!(reads(&format!("Listening on {suggested}."), cx));
 }
 
 #[gpui::test]
@@ -475,6 +621,24 @@ fn a_change_the_core_couldnt_save_leaves_access_off_and_says_why(cx: &mut TestAp
     );
     assert!(reads(
         "\u{201C}studio\u{201D} couldn\u{2019}t save the change. Try again.",
+        cx
+    ));
+}
+
+/// Each build identity has its own port, so a port in use is most often another app's.
+#[gpui::test]
+fn a_port_another_app_uses_leaves_access_off_and_says_so(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
+    *access.refusal.lock().expect("refusal") = Some(AccessFailure::from(
+        crate::machine_connection::direct::DirectError::PortInUse,
+    ));
+    let (window, cx) = open_machines(&access, cx);
+
+    click(ACCESS_SELECTOR, cx);
+
+    assert!(!access_on(&window, cx));
+    assert!(reads(
+        "Another app on \u{201C}studio\u{201D} is using that UDP port, so choose another port.",
         cx
     ));
 }

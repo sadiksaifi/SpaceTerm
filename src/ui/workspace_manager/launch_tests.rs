@@ -10,8 +10,8 @@ use spaceterm_core::hierarchy::{Inventory, Pane, Side, Tab, Workspace};
 use super::*;
 use crate::machine_connection::CoreError;
 use crate::ui::workspace_manager::launch::{
-    LAUNCH_AUTHORIZE_SELECTOR, LAUNCH_RETRY_SELECTOR, LAUNCH_SELECTOR, LAUNCH_START_SELECTOR,
-    LaunchOutcome, WorkspaceCoreConnector, WorkspaceMachineConnection,
+    LAUNCH_AUTHORIZE_SELECTOR, LAUNCH_LOGIN_ITEMS_SELECTOR, LAUNCH_RETRY_SELECTOR, LAUNCH_SELECTOR,
+    LAUNCH_START_SELECTOR, LaunchOutcome, WorkspaceCoreConnector, WorkspaceMachineConnection,
 };
 use crate::ui::workspace_manager::launch_testing::ScriptedLaunch;
 use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
@@ -174,12 +174,39 @@ fn launch_harness_restoring(
     remembered: Option<crate::ui::remembered_view::WindowView>,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let launch = Arc::new(ScriptedLaunch::default());
+    let launch = ScriptedLaunch::default();
     for answer in answers {
         launch.answer(answer);
     }
+    scripted_harness(launch, edits, selections, remembered, cx)
+}
+
+/// A launch harness whose background item reads answer `off` in order before launch begins.
+fn launch_harness_reading_background_item(
+    answers: Vec<Result<LaunchOutcome, CoreError>>,
+    off: impl IntoIterator<Item = bool>,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    let launch = ScriptedLaunch::default();
+    for answer in answers {
+        launch.answer(answer);
+    }
+    launch.background_item(off);
+    scripted_harness(launch, ScriptedEdits::new(Some(inventory())), [], None, cx)
+}
+
+fn scripted_harness(
+    launch: ScriptedLaunch,
+    edits: ScriptedEdits,
+    selections: impl IntoIterator<
+        Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
+    >,
+    remembered: Option<crate::ui::remembered_view::WindowView>,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let launch = Arc::new(launch);
     let session_factory = WorkspaceTerminalSessionFactory::new_core(Rc::new(
         TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()),
     ));
@@ -398,6 +425,132 @@ fn a_stopped_core_stays_stopped_until_start_core(cx: &mut TestAppContext) {
     sync(&harness, cx);
     assert_eq!(harness.rows(cx), 1);
     assert_eq!(harness.launch_title(cx), None);
+}
+
+/// The person turned SpaceTerm Core off in Login Items. The window says so and opens that list,
+/// and never starts it: once the person turns it on and comes back, launch runs again.
+#[gpui::test]
+fn a_core_turned_off_in_login_items_opens_that_list_and_never_turns_it_on(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness_reading_background_item(vec![ready()], [true], cx);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("SpaceTerm Core is turned off in Login Items")
+    );
+    assert!(cx.debug_bounds(LAUNCH_START_SELECTOR).is_none());
+    assert_eq!(
+        harness.launch.steps(),
+        Vec::<&str>::new(),
+        "launch neither prepares nor starts a service macOS keeps off"
+    );
+
+    harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["open_login_items"]);
+
+    // The person turns SpaceTerm Core on in System Settings and comes back.
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert_eq!(harness.launch.steps(), ["open_login_items", "run"]);
+    assert_eq!(harness.rows(cx), 1);
+}
+
+/// The person turns SpaceTerm Core off in Login Items while its Workspaces are open. macOS stops
+/// it, so the stage says what launch says and offers that list in place of the Tabs, instead of
+/// reconnecting to a server that can't answer. Once the person turns it on and comes back, launch
+/// runs again and the Tabs and their Panes return without being asked.
+#[gpui::test]
+fn a_core_turned_off_in_login_items_while_open_says_so_until_turned_on(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    const TITLE: &str = "SpaceTerm Core is turned off in Login Items";
+
+    // Launch reads the item on, the connection loss reads it off, and the return reads it on.
+    let (harness, cx) =
+        launch_harness_reading_background_item(vec![ready(), ready()], [false, true, false], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert!(cx.debug_bounds("tab-bar").is_some());
+
+    harness.edits.fail_attempt(CoreError::NotRunning);
+    sync(&harness, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(cx);
+    let stage = tree.node(TITLE).clone();
+    assert_eq!(
+        stage["aria"]["description"],
+        "Workspaces on This Computer open when you turn it on."
+    );
+    assert!(cx.debug_bounds("tab-bar").is_none(), "no Tab reconnects");
+    assert!(cx.debug_bounds(super::empty::RECONNECT_SELECTOR).is_none());
+    assert!(
+        cx.debug_bounds(LAUNCH_START_SELECTOR).is_none(),
+        "Start can't run a service macOS keeps off"
+    );
+    assert!(
+        cx.debug_bounds("server-launch-alert-ok").is_none(),
+        "the stage says it, so no alert repeats it"
+    );
+    assert_eq!(harness.launch.steps(), ["run"], "the read changes nothing");
+
+    harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items"]);
+
+    // The person turns SpaceTerm Core on in System Settings and comes back.
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items", "run"]);
+    harness.edits.reconnect();
+    sync(&harness, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(A11yTree::read(cx).find(TITLE).is_none());
+    assert!(cx.debug_bounds("tab-bar").is_some(), "the Tabs return");
+}
+
+/// The person stopped SpaceTerm Core, then turned it off in Login Items. Start, chosen after
+/// that, starts nothing and says the item is off instead.
+#[gpui::test]
+fn start_after_turning_off_in_login_items_starts_nothing(cx: &mut TestAppContext) {
+    let (harness, cx) =
+        launch_harness_reading_background_item(vec![Ok(LaunchOutcome::Stopped)], [false, true], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch.steps(), ["run"]);
+
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("SpaceTerm Core is turned off in Login Items")
+    );
+    assert_eq!(
+        harness.launch.steps(),
+        ["run"],
+        "Start never turns on a service macOS keeps off"
+    );
+}
+
+/// macOS blocked the background item SpaceTerm Core installs, so the window asks for approval in
+/// Login Items rather than reporting a failure.
+#[gpui::test]
+fn a_blocked_background_item_asks_for_approval_in_login_items(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness_reading_background_item(
+        vec![Err(CoreError::StartupFailed)],
+        [false, true],
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("SpaceTerm Core needs your approval")
+    );
+
+    harness.click(LAUNCH_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "open_login_items"]);
 }
 
 /// A paired server presented while the local server is stopped makes this window the presenting
@@ -1064,6 +1217,97 @@ fn workspace_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContex
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     cx.debug_bounds(selector).is_some()
+}
+
+/// The status line 2 of the window's only Workspace row shows in place of its directory.
+fn workspace_row_status(
+    harness: &LaunchHarness,
+    cx: &mut VisualTestContext,
+) -> Option<&'static str> {
+    harness.manager.read_with(cx, |manager, _| {
+        let id = manager
+            .workspaces
+            .iter()
+            .next()
+            .expect("one Workspace row")
+            .id();
+        manager
+            .workspace_row_facts(id)
+            .and_then(|facts| facts.row.status)
+            .map(|status| status.text)
+    })
+}
+
+/// Stopping This Mac's SpaceTerm Core while one of its Workspaces is active follows the No-Tabs
+/// rule. Its row says Stopped in the quiet color, and the stage is one empty Pane offering Start
+/// SpaceTerm Core, with no Tab and no New Tab. No update control shows, so the Pane rises to the
+/// window's top.
+#[gpui::test]
+fn a_core_stopped_in_session_leaves_an_empty_pane_that_offers_start(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![ready(), ready()], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert!(cx.debug_bounds("create-tab-button").is_some());
+
+    harness.edits.set_connected(false);
+    harness.edits.set_error(CoreError::Stopped);
+    sync(&harness, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    assert_eq!(workspace_row_status(&harness, cx), Some("Stopped"));
+    assert!(cx.debug_bounds("tab-bar").is_none());
+    assert!(cx.debug_bounds("create-tab-button").is_none());
+    let stage = cx
+        .debug_bounds("empty-workspace-stage")
+        .expect("the stage renders");
+    let pane = cx
+        .debug_bounds("empty-workspace-pane")
+        .expect("the stage draws an empty Pane");
+    let inset = cx.update(|_, cx| {
+        crate::ui::workspace_frame::WorkspaceFrame::for_appearance(
+            crate::ui::appearance::chrome(cx),
+            cx,
+        )
+        .window_edge_inset()
+    });
+    assert_eq!(pane.top() - stage.top(), inset);
+
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+}
+
+/// A stopped Workspace's row menu offers Start SpaceTerm Core, as its empty Pane does.
+#[gpui::test]
+fn a_stopped_workspace_row_offers_start_core(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![ready(), ready()], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    let id = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .iter()
+            .next()
+            .expect("one Workspace row")
+            .id()
+    });
+    let row: &'static str =
+        Box::leak(format!("workspace-row-{}-active", id.get()).into_boxed_str());
+    right_click(row, cx);
+    assert!(
+        cx.debug_bounds("workspace-menu-row-start-core").is_none(),
+        "a running server needs no Start"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    harness.edits.set_connected(false);
+    harness.edits.set_error(CoreError::Stopped);
+    sync(&harness, cx);
+    right_click(row, cx);
+    click("workspace-menu-row-start-core", cx);
+
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
 }
 
 #[gpui::test]

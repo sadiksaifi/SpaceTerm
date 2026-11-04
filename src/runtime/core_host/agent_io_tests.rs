@@ -101,7 +101,7 @@ fn integrated_host(shell: &std::path::Path, home: &Home) -> CorePaneHost {
             ShellIntegrationMode::Automatic,
             ShellEnvironment::default(),
             ShellIntegrationPolicy {
-                supported: true,
+                legacy_bash: false,
                 path_list_separator: ':',
                 fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
             },

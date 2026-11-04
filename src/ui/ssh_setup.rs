@@ -17,6 +17,8 @@ use gpui::{App, AppContext, Entity, EventEmitter, Global, SharedString, Window, 
 use crate::cancellation::CancellationToken;
 use crate::domain::SshDestination;
 use crate::ssh::askpass::AskPassAttemptFactory;
+use spaceterm_core::provisioning::{MINIMUM_GLIBC, MINIMUM_MACOS, RestoredAccess, SetupRefusal};
+
 use crate::ssh::provisioning::{
     IncompatibilityKind, RefusalKind, SetupApprovalHandler, SetupFailure, SetupOffer,
     SetupOperation, SetupPhase, SshSetupBackend, UnavailableKind,
@@ -163,146 +165,237 @@ pub(crate) fn installed(cx: &App) -> Option<Rc<dyn SshSetupFactory>> {
         .map(|installed| Rc::clone(&installed.0))
 }
 
-/// What the sheet says while `phase` runs.
-pub(crate) const fn phase_detail(phase: SetupPhase) -> &'static str {
+/// What the sheet says while `phase` runs on the machine named `name`.
+pub(crate) fn phase_detail(phase: SetupPhase, name: &str) -> SharedString {
     match phase {
-        SetupPhase::Authenticating => "Signing in\u{2026}",
-        SetupPhase::Discovering => "Looking for SpaceTerm Core\u{2026}",
-        SetupPhase::Installing => "Installing SpaceTerm Core\u{2026}",
-        SetupPhase::Starting => "Starting SpaceTerm Core\u{2026}",
-        SetupPhase::Enrolling => "Pairing this device\u{2026}",
-        SetupPhase::Connecting => "Connecting over the network\u{2026}",
+        SetupPhase::Authenticating => "Signing in\u{2026}".into(),
+        SetupPhase::Discovering => format!("Checking {name}\u{2026}").into(),
+        SetupPhase::Installing => "Installing SpaceTerm Core\u{2026}".into(),
+        SetupPhase::Starting => "Starting SpaceTerm Core\u{2026}".into(),
+        SetupPhase::Enrolling => "Pairing this device\u{2026}".into(),
+        SetupPhase::Connecting => "Connecting over the network\u{2026}".into(),
     }
 }
 
-/// How a failed attempt reads: its short state and what the person can do.
+/// What the sheet says while Try Again turns Network Access on `name` back on, until pairing
+/// begins.
+/// What a blocked UDP port left Network Access as, as SpaceTerm Core reported it.
+fn restored_access(access: RestoredAccess, n: &str) -> String {
+    match access {
+        RestoredAccess::Off => format!("Network Access on {n} is off again."),
+        RestoredAccess::On => format!("Network Access on {n} is on again at its earlier address."),
+        RestoredAccess::Unknown => {
+            format!("SpaceTerm couldn\u{2019}t read whether Network Access on {n} is on.")
+        }
+    }
+}
+
+pub(crate) fn restoring_network(name: &str) -> SharedString {
+    format!("Turning Network Access on {name} back on\u{2026}").into()
+}
+
+/// How a failed attempt reads: one sentence, an optional footnote, and whether trying again
+/// with the same values can help.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SetupProblem {
-    pub(crate) state: &'static str,
     pub(crate) explanation: SharedString,
-    /// Whether trying again with the same values can help.
+    pub(crate) footnote: Option<SharedString>,
     pub(crate) retry: bool,
 }
 
-/// The presentation of a failure other than a cancellation, which the sheet handles itself.
-pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
-    let fixed = |state, text: &'static str, retry| SetupProblem {
-        state,
-        explanation: SharedString::new_static(text),
-        retry,
-    };
+impl SetupProblem {
+    fn new(explanation: String, retry: bool) -> Self {
+        Self {
+            explanation: explanation.into(),
+            footnote: None,
+            retry,
+        }
+    }
+}
+
+/// The presentation of a failure to add the machine named `name`. The sheet handles a
+/// cancellation itself; these words only cover a stray one.
+pub(crate) fn problem(failure: &SetupFailure, name: &str) -> SetupProblem {
+    let n = name;
     match failure {
-        // The kept build is changed only on that computer, after which trying again can help.
-        SetupFailure::Incompatible(IncompatibilityKind::Installation) => fixed(
-            "Different build",
-            incompatibility_detail(IncompatibilityKind::Installation),
+        SetupFailure::Unsupported(refusal) => SetupProblem {
+            explanation: refusal_sentence(*refusal, n).into(),
+            footnote: match refusal {
+                SetupRefusal::UdpBlocked { access, .. } => Some(restored_access(*access, n).into()),
+                _ => None,
+            },
+            retry: retry_refusal(*refusal),
+        },
+        SetupFailure::Unreachable { address } => SetupProblem::new(
+            format!(
+                "SpaceTerm can\u{2019}t reach {n} at {}, so check the address and try again.",
+                address.authority()
+            ),
             true,
         ),
-        SetupFailure::Incompatible(kind) => fixed("Incompatible", incompatibility_detail(*kind), false),
-        SetupFailure::Refused(RefusalKind::MissingArtifact) => {
-            fixed("Not included", refusal_detail(RefusalKind::MissingArtifact), false)
-        }
-        SetupFailure::Refused(RefusalKind::InvalidEndpoint) => {
-            fixed("Address not accepted", refusal_detail(RefusalKind::InvalidEndpoint), false)
-        }
-        SetupFailure::Refused(kind) => fixed("Refused", refusal_detail(*kind), true),
-        SetupFailure::Unreachable { address } => SetupProblem {
-            state: "Not reachable",
-            explanation: format!(
-                "SpaceTerm Core is running, but this computer couldn\u{2019}t reach it at {}. Check the address and that any firewall allows UDP, or enter the address this computer uses to reach it.",
-                address.authority()
-            )
-            .into(),
-            retry: true,
-        },
-        SetupFailure::Unavailable(kind) => fixed("Unavailable", unavailable_detail(*kind), true),
-        SetupFailure::Unconfirmed(operation) => {
-            // A save SpaceTerm couldn't confirm may already be listed, so trying again could pair twice.
-            fixed(
-                "Unconfirmed",
-                unconfirmed_detail(*operation),
-                *operation != SetupOperation::Save,
-            )
-        }
-        // The sheet ends or returns to its form on a cancellation; these words only cover a
-        // stray one.
-        SetupFailure::Cancelled => {
-            fixed("Not added", "Setup stopped before the machine was added.", true)
-        }
-    }
-}
-
-/// How a setup that this computer couldn't start reads. It reached no other computer.
-pub(crate) fn start_failure() -> SetupProblem {
-    SetupProblem {
-        state: "Couldn\u{2019}t Start",
-        explanation: SharedString::new_static(
-            "SpaceTerm couldn\u{2019}t start setup on this computer. Nothing was changed on the other computer. Try again.",
+        // The kept build is changed only on that machine, after which trying again can help.
+        SetupFailure::Incompatible(IncompatibilityKind::Installation) => SetupProblem::new(
+            format!(
+                "{n} keeps a SpaceTerm Core build that differs from the one this SpaceTerm includes, so set up with the matching SpaceTerm or manage SpaceTerm Core on {n}, then try again."
+            ),
+            true,
         ),
-        retry: true,
+        SetupFailure::Incompatible(_) => SetupProblem::new(
+            format!("SpaceTerm Core on {n} is incompatible with this SpaceTerm."),
+            false,
+        ),
+        SetupFailure::Refused(kind) => SetupProblem::new(
+            refusal_detail(*kind, n),
+            !matches!(
+                kind,
+                RefusalKind::MissingArtifact | RefusalKind::InvalidEndpoint
+            ),
+        ),
+        SetupFailure::Unavailable(kind) => SetupProblem::new(unavailable_detail(*kind, n), true),
+        // A save SpaceTerm couldn't confirm may already be listed, so trying again could pair
+        // twice.
+        SetupFailure::Unconfirmed(operation) => SetupProblem::new(
+            unconfirmed_detail(*operation, n),
+            *operation != SetupOperation::Save,
+        ),
+        SetupFailure::Cancelled => {
+            SetupProblem::new(format!("Setup stopped before {n} was added."), true)
+        }
     }
 }
 
-const fn incompatibility_detail(kind: IncompatibilityKind) -> &'static str {
-    match kind {
-        IncompatibilityKind::Protocol => "SpaceTerm and this SpaceTerm Core are incompatible.",
-        IncompatibilityKind::Platform => {
-            "SpaceTerm Core is unavailable for this computer\u{2019}s operating system or processor."
+/// How a setup that this computer couldn't start reads. It reached no other machine.
+pub(crate) fn start_failure(name: &str) -> SetupProblem {
+    SetupProblem::new(
+        format!("SpaceTerm couldn\u{2019}t start setup, so nothing changed on {name}. Try again."),
+        true,
+    )
+}
+
+/// Whether trying again can help: a login session, linger and a firewall can each change while
+/// the sheet stays open.
+const fn retry_refusal(refusal: SetupRefusal) -> bool {
+    matches!(
+        refusal,
+        SetupRefusal::NobodyLoggedIn { .. }
+            | SetupRefusal::LingerDeclined
+            | SetupRefusal::UdpBlocked { .. }
+    )
+}
+
+/// A macOS or glibc release as people write it: "26" or "15.6", "2.31".
+fn release((major, minor): (u16, u16), drop_zero: bool) -> String {
+    if drop_zero && minor == 0 {
+        major.to_string()
+    } else {
+        format!("{major}.{minor}")
+    }
+}
+
+/// The one sentence that says why Add Machine refused the machine named `n`.
+fn refusal_sentence(refusal: SetupRefusal, n: &str) -> String {
+    let macos = release(MINIMUM_MACOS, true);
+    let glibc = release(MINIMUM_GLIBC, false);
+    match refusal {
+        SetupRefusal::IntelMac => {
+            format!("{n} is an Intel Mac, and SpaceTerm Core supports only Apple silicon.")
         }
-        IncompatibilityKind::Installation => {
-            "That computer keeps a SpaceTerm Core build that differs from the one this SpaceTerm includes, so nothing was installed. Set up with the matching version of SpaceTerm, or manage SpaceTerm Core on that computer, then try again."
+        SetupRefusal::ArmLinux => {
+            format!("{n} runs Linux on ARM, which SpaceTerm Core doesn\u{2019}t support.")
+        }
+        SetupRefusal::OtherSystem => {
+            format!("{n} runs an operating system that SpaceTerm Core doesn\u{2019}t support.")
+        }
+        SetupRefusal::MacosTooOld { found: Some(found) } => format!(
+            "{n} runs macOS {}, and SpaceTerm Core needs macOS {macos} or later.",
+            release(found, true)
+        ),
+        SetupRefusal::MacosTooOld { found: None } => {
+            format!("SpaceTerm Core needs macOS {macos} or later on {n}.")
+        }
+        SetupRefusal::GlibcTooOld { found: Some(found) } => format!(
+            "{n} has glibc {}, and SpaceTerm Core needs glibc {glibc} or later.",
+            release(found, false)
+        ),
+        SetupRefusal::GlibcTooOld { found: None } => {
+            format!("{n} has no glibc, and SpaceTerm Core needs glibc {glibc} or later.")
+        }
+        SetupRefusal::RootAccount => format!(
+            "SpaceTerm Core can\u{2019}t run as root, so sign in to {n} with a regular account."
+        ),
+        SetupRefusal::NoUserManager => {
+            format!("{n} has no systemd user manager, which SpaceTerm Core needs.")
+        }
+        // Automatic login is unavailable while FileVault is on.
+        SetupRefusal::NobodyLoggedIn { filevault: false } => {
+            format!("{n} has nobody logged in, so turn on automatic login on {n} and try again.")
+        }
+        SetupRefusal::NobodyLoggedIn { filevault: true } => {
+            format!("{n} needs someone logged in before SpaceTerm Core can run there.")
+        }
+        SetupRefusal::LingerDeclined => format!(
+            "Setup stopped because {n} must let SpaceTerm Core keep running after you log out."
+        ),
+        SetupRefusal::UdpBlocked { port, .. } => format!(
+            "SpaceTerm can\u{2019}t reach {n} on UDP port {port}, so allow that port in {n}\u{2019}s firewall and try again."
+        ),
+    }
+}
+
+fn refusal_detail(kind: RefusalKind, n: &str) -> String {
+    match kind {
+        RefusalKind::InstallRefused => format!("{n} refused the installation."),
+        RefusalKind::MissingArtifact => format!(
+            "This SpaceTerm doesn\u{2019}t include SpaceTerm Core for {n}, so reinstall SpaceTerm and try again."
+        ),
+        RefusalKind::InvalidArtifact => {
+            format!("The SpaceTerm Core package for {n} failed verification.")
+        }
+        RefusalKind::MachineChanged => format!(
+            "SpaceTerm Core on {n} changed during setup, so try again to set up the one running there now."
+        ),
+        RefusalKind::InvalidEndpoint => {
+            format!("SpaceTerm Core on {n} didn\u{2019}t accept that network address.")
         }
     }
 }
 
-const fn refusal_detail(kind: RefusalKind) -> &'static str {
+fn unavailable_detail(kind: UnavailableKind, n: &str) -> String {
     match kind {
-        RefusalKind::AuthorizationRefused => {
-            "This computer didn\u{2019}t allow SpaceTerm Core to run after logout."
+        UnavailableKind::SshFailed => format!(
+            "SpaceTerm couldn\u{2019}t sign in to {n} over SSH, so check your SSH configuration and try again."
+        ),
+        UnavailableKind::HostUnreachable => format!(
+            "SpaceTerm couldn\u{2019}t reach {n} over SSH, so check that it\u{2019}s online and try again."
+        ),
+        UnavailableKind::ServiceUnavailable => {
+            format!("SpaceTerm Core on {n} didn\u{2019}t answer, so try again.")
         }
-        RefusalKind::InstallRefused => "The remote computer refused the installation.",
-        RefusalKind::MissingArtifact => {
-            "This SpaceTerm installation doesn\u{2019}t include a SpaceTerm Core package for this computer. Reinstall SpaceTerm, then try again."
-        }
-        RefusalKind::InvalidArtifact => "The SpaceTerm Core package failed verification.",
-        RefusalKind::MachineChanged => {
-            "SpaceTerm Core changed during setup. Try again to set up the SpaceTerm Core now running there."
-        }
-        RefusalKind::InvalidEndpoint => "SpaceTerm Core didn\u{2019}t accept that network address.",
-    }
-}
-
-const fn unavailable_detail(kind: UnavailableKind) -> &'static str {
-    match kind {
-        UnavailableKind::SshFailed => "Check your SSH configuration, then try again.",
-        UnavailableKind::HostUnreachable => {
-            "Check that this computer is reachable over SSH, then try again."
-        }
-        UnavailableKind::ServiceUnavailable => "SpaceTerm Core did not answer. Try again.",
         UnavailableKind::EndpointUnreachable => {
-            "This computer couldn\u{2019}t reach the machine at that address."
+            format!("SpaceTerm couldn\u{2019}t reach {n} at that address.")
         }
-        UnavailableKind::CredentialUnavailable => {
-            "SpaceTerm couldn\u{2019}t store this device\u{2019}s key. Unlock your keychain or keyring, then try again."
-        }
-        UnavailableKind::Storage => "SpaceTerm couldn\u{2019}t save the machine on this computer.",
+        UnavailableKind::CredentialUnavailable => "SpaceTerm couldn\u{2019}t store this device\u{2019}s key, so unlock your keychain or keyring and try again.".to_owned(),
+        UnavailableKind::Storage => format!("SpaceTerm couldn\u{2019}t save {n} in Machines."),
+        UnavailableKind::PortInUse => format!(
+            "Another app on {n} is using that UDP port, so choose another port and try again."
+        ),
     }
 }
 
-const fn unconfirmed_detail(operation: SetupOperation) -> &'static str {
+fn unconfirmed_detail(operation: SetupOperation, n: &str) -> String {
     match operation {
-        SetupOperation::Install => {
-            "SpaceTerm couldn\u{2019}t confirm the installation. Try again to check whether it finished."
-        }
-        SetupOperation::Start => {
-            "SpaceTerm couldn\u{2019}t confirm that SpaceTerm Core started. Try again to check."
-        }
-        SetupOperation::Enrollment => {
-            "SpaceTerm couldn\u{2019}t confirm that the machine paired this device. Try again to check."
-        }
-        SetupOperation::Save => {
-            "The machine paired this device, but SpaceTerm couldn\u{2019}t confirm it saved the connection. Check Machines for it before trying again."
-        }
+        SetupOperation::Install => format!(
+            "SpaceTerm couldn\u{2019}t confirm the installation on {n}, so try again to check whether it finished."
+        ),
+        SetupOperation::Start => format!(
+            "SpaceTerm couldn\u{2019}t confirm that SpaceTerm Core started on {n}, so try again to check."
+        ),
+        SetupOperation::Enrollment => format!(
+            "SpaceTerm couldn\u{2019}t confirm that {n} paired this device, so try again to check."
+        ),
+        SetupOperation::Save => format!(
+            "{n} paired this device, but SpaceTerm couldn\u{2019}t confirm it saved the connection, so check Machines before trying again."
+        ),
     }
 }
 

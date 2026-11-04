@@ -193,8 +193,9 @@ pub fn within<T: Send + 'static>(
 /// the flow never learned which run of the server admitted the operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Stop was admitted, or may have been, and the server closed the lane. Completion is
-    /// confirmed on the machine that runs the server, after its next start.
+    /// The server closed the lane after a Stop that was admitted, or may have been, or after a
+    /// receipt showed an uninstall's helper launched. `boot` names the admitting run when the flow
+    /// learned it. Completion is confirmed on the machine that runs the server.
     Shutdown { operation: String, boot: String },
     /// The operation settled. `boot` is the run of the server that admitted it.
     Settled { receipt: LaneReceipt, boot: String },
@@ -231,7 +232,10 @@ pub(crate) fn perform(
     let id = OperationId::random()?;
     admitted(&id)?;
     let operation = id.to_string();
-    let stop = action == LaneAction::Stop;
+    // Stop and Uninstall end the Core that answers the lane, so the flow does not reconnect once
+    // the Core admitted them.
+    let stop = matches!(action, LaneAction::Stop | LaneAction::Uninstall);
+    let uninstall = action == LaneAction::Uninstall;
     let execute = LaneRequest::Execute {
         action,
         token,
@@ -256,12 +260,7 @@ pub(crate) fn perform(
         }
         match current.as_mut() {
             // Without the lane, a Stop that may have been admitted is reported as in progress.
-            None if stop => {
-                return Ok(Outcome::Shutdown {
-                    operation,
-                    boot: boot.unwrap_or_default(),
-                });
-            }
+            None if stop => return Ok(closed(uninstall, operation, boot, last)),
             None => {}
             // The first reply was lost. A repeated Execute returns the existing admission, or
             // admits the operation now if the first never arrived. An interrupted caller only
@@ -306,12 +305,7 @@ pub(crate) fn perform(
                     Ok(LaneReply::Error { code }) => return Err(LaneError::Code(code)),
                     Ok(_) => return Err(LaneError::Core(CoreError::Protocol)),
                     // The server closed the lane: it is stopping, or it already stopped.
-                    Err(_) if stop => {
-                        return Ok(Outcome::Shutdown {
-                            operation,
-                            boot: boot.unwrap_or_default(),
-                        });
-                    }
+                    Err(_) if stop => return Ok(closed(uninstall, operation, boot, last)),
                     Err(_) => current = None,
                 }
             }
@@ -324,6 +318,30 @@ pub(crate) fn perform(
             });
         }
         std::thread::sleep(POLL);
+    }
+}
+
+/// How a Stop or an uninstall ends once its lane closed. A Core whose uninstall helper failed to
+/// launch keeps running and records that, so a closed lane ends an uninstall only after a receipt
+/// showed its helper launched. Before that, the operation stays to settle later.
+fn closed(
+    uninstall: bool,
+    operation: String,
+    boot: Option<String>,
+    last: Option<LaneReceipt>,
+) -> Outcome {
+    let launched = last
+        .as_ref()
+        .is_some_and(|receipt| receipt.state != super::LaneOperationState::Admitted);
+    let boot = boot.unwrap_or_default();
+    if uninstall && !launched {
+        Outcome::Unconfirmed {
+            operation,
+            boot,
+            last,
+        }
+    } else {
+        Outcome::Shutdown { operation, boot }
     }
 }
 

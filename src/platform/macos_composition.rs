@@ -82,6 +82,7 @@ fn desktop_profile(
                     "Move SpaceTerm to Applications",
                     "Install SpaceTerm in Applications to update.",
                 ),
+                uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this Mac.",
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::NativeMenu,
@@ -323,7 +324,7 @@ mod tests {
                 "ENV",
                 Some("/captured/env"),
                 "SPACETERM_BASH_ENV",
-                None,
+                Some("/captured/env"),
                 false,
             ),
             (
@@ -384,7 +385,9 @@ mod tests {
                     "SPACETERM_SHELL_INTEGRATION",
                     "XDG_DATA_DIRS",
                     "ZDOTDIR",
-                    "ENV"
+                    "ENV",
+                    "PATH",
+                    "HOME"
                 ]
             );
             // Planning repeatedly uses the captured values after the reader has been dropped.
@@ -414,7 +417,9 @@ mod tests {
                     }
                 });
                 assert_eq!(lookup(expected_key), expected.as_deref(), "{shell}");
-                if !integrated {
+                // macOS's Bash 3.2 cannot run SpaceTerm's startup files, so it starts as is.
+                // Disabled integration still runs them for PATH.
+                if shell == "/bin/bash" {
                     assert_eq!(launch.arguments(), [OsStr::new("-l")]);
                 }
             }

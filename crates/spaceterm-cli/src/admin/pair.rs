@@ -211,15 +211,28 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         return Reply::failure(COMMAND, None, Failure::new(Code::InteractionRequired));
     }
     if let Some(address) = address
-        && spaceterm_core::direct::Endpoint::parse(address).is_err()
+        && spaceterm_core::direct::Endpoint::parse(
+            address,
+            spaceterm_core::direct::default_port(context.identity),
+        )
+        .is_err()
     {
         return Reply::failure(COMMAND, None, Failure::new(Code::InvalidAddress));
     }
     let core = super::local_ref(context.identity).ok();
+    if let Err(failure) = require_linger(context.identity) {
+        return Reply::failure(COMMAND, core, failure);
+    }
     let connection = match context.local_connection() {
         Ok(connection) => connection,
         Err(failure) => return Reply::failure(COMMAND, core, failure),
     };
+    // Network Access is a confirmed change of its own, so pairing never turns it on.
+    match connection.direct_status() {
+        Ok(status) if status.enabled => {}
+        Ok(_) => return Reply::failure(COMMAND, core, Failure::new(Code::NetworkOff)),
+        Err(error) => return Reply::failure(COMMAND, core, contract::from_direct_error(error)),
+    }
     // Ctrl-C withdraws the invitation, so while pairing runs it is only recorded.
     let _cooperation = match crate::interrupt::cooperate() {
         Ok(cooperation) => cooperation,
@@ -234,6 +247,18 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         context.timeout(LIFETIME),
     );
     reply(core, paired, &mut std::io::stderr().lock())
+}
+
+/// Paired devices need SpaceTerm Core to keep running after logout, which Linux allows only
+/// with linger. Other systems have no such setting.
+pub(super) fn require_linger(identity: &str) -> Result<(), Failure> {
+    let linger = spaceterm_core::service::Service::for_identity(identity)
+        .and_then(|service| service.linger())
+        .map_err(contract::from_core_error)?;
+    if linger == Some(false) {
+        return Err(Failure::new(Code::LingerRequired));
+    }
+    Ok(())
 }
 
 fn reply(

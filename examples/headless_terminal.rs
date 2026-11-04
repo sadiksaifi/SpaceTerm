@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ShellIntegrationMode::Disabled,
             ShellEnvironment::default(),
             ShellIntegrationPolicy {
-                supported: true,
+                legacy_bash: false,
                 path_list_separator: ':',
                 fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
             },

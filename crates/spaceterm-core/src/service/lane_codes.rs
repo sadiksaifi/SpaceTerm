@@ -58,6 +58,8 @@ fn direct_code(error: &DirectError) -> &'static str {
         DirectError::InvalidRequest => "protocol_error",
         DirectError::InvalidAddress => "invalid_address",
         DirectError::AddressUnavailable => "address_unavailable",
+        DirectError::PortInUse => "port_in_use",
+        DirectError::IdentityMismatch => "identity_mismatch",
         DirectError::AlreadyDecided => "claim_decided",
         DirectError::Substituted => "comparison_mismatch",
         DirectError::WrongMachine => "wrong_machine",

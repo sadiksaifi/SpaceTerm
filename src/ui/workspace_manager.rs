@@ -390,7 +390,8 @@ impl WorkspaceManager {
             },
         )
         .detach();
-        cx.observe_window_activation(window, |_, window, cx| {
+        cx.observe_window_activation(window, |manager, window, cx| {
+            manager.launch_window_activation(window.is_window_active(), window, cx);
             if window.is_window_active()
                 && let Some(store) =
                     crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
@@ -440,7 +441,12 @@ impl WorkspaceManager {
             direct_routes: direct_machines::DirectRoutes::default(),
             empty_focus: cx.focus_handle(),
             empty_band: std::cell::RefCell::default(),
-            launch: launch::LocalLaunchState::new(local_core),
+            launch: launch::LocalLaunchState::new(
+                local_core,
+                crate::desktop_profile::DesktopPresentation::get(cx)
+                    .wording()
+                    .this_computer,
+            ),
             display_order: display_order::DisplayOrder::default(),
             restoration: crate::ui::remembered_view::Restoration::none(),
             person_keys: None,
@@ -555,6 +561,20 @@ impl WorkspaceManager {
             manager.set_parent_focus_blocker(None, cx);
             manager.focus(window, cx);
         });
+    }
+
+    /// Whether the person stopped the server that owns the Active Workspace, or turned this
+    /// computer's off in Login Items.
+    fn active_core_stopped(&self) -> bool {
+        self.local_core_turned_off_presented()
+            || self
+                .workspaces
+                .active_workspace_id()
+                .and_then(|workspace_id| self.binding.owner(workspace_id))
+                .and_then(|key| self.binding.get(key))
+                .is_some_and(|binding| {
+                    binding.connection_error() == Some(spaceterm_core::CoreError::Stopped)
+                })
     }
 
     /// The Active Workspace's Tab manager, absent while this window presents no Workspace.
@@ -1871,6 +1891,9 @@ impl WorkspaceManager {
             WorkspaceMenuCommand::NewWorktree => {
                 self.new_worktree(workspace_id, window, cx);
             }
+            WorkspaceMenuCommand::StartCore => {
+                self.run_launch_action(launch::LaunchAction::Start, window, cx);
+            }
             // A Workspace of another computer's server reconnects by connecting to that server.
             // The person asked, so the system may ask for this device's key.
             WorkspaceMenuCommand::Reconnect => {
@@ -2865,6 +2888,7 @@ impl WorkspaceManager {
         self.save_arrangements(cx);
         self.report_client_view_error(window, cx);
         self.read_refusal_offer(cx);
+        self.read_background_item(window, cx);
         // Membership, connection, and Git facts all decide what each view presents, including
         // Workspaces nobody is looking at.
         if poll.changed {
@@ -4457,6 +4481,8 @@ impl WorkspaceManager {
                         .map(|inventory| inventory.main_root.as_path()),
                 ),
                 detaches: binding.attachments_changeable(),
+                stopped: key == MachineKey::LOCAL
+                    && binding.connection_error() == Some(spaceterm_core::CoreError::Stopped),
             },
             directory: directory.to_owned(),
             pinned: facts.pinned(),
@@ -4781,7 +4807,12 @@ impl WorkspaceManager {
     fn render_chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_terminal_focus_blocker(window, cx);
         let manager = cx.entity().downgrade();
-        let active_tab_manager = self.active_tab_manager();
+        // A Workspace whose server the person stopped or turned off in Login Items has no running
+        // Tab to show, so the stage presents the empty Pane that says how to run it again, with
+        // no Tab and no New Tab.
+        let active_tab_manager = self
+            .active_tab_manager()
+            .filter(|_| !self.active_core_stopped());
         let sidebar_layout = self.sidebar.read(cx).layout();
         let sidebar_frame = self.sidebar.update(cx, |sidebar, cx| sidebar.present(cx));
         if sidebar_frame.moving {

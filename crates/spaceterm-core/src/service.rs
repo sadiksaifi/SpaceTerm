@@ -13,13 +13,15 @@ pub mod operations;
 mod registration;
 mod runtime;
 pub mod tokens;
-#[cfg(feature = "client")]
-pub use runtime::CliUninstall;
 pub use runtime::updates;
+mod uninstall;
 pub use runtime::{
     CandidateMetadata, CliLauncher, CliLink, Layout, bundle_identifier, bundle_name,
     verify_candidate_bytes,
 };
+pub use uninstall::Data;
+#[cfg(feature = "client")]
+pub use uninstall::{CliUninstall, UninstallPreview};
 
 use crate::{
     CoreError,
@@ -51,10 +53,6 @@ use std::{
 pub enum LingerAuthorization {
     Terminal,
     Desktop,
-    /// SSH prerequisite check that must never request a password or open authorization UI.
-    RemoteNoninteractive,
-    /// Explicit remote authorization whose password arrives only on inherited standard input.
-    RemoteStdin,
 }
 
 /// When the owning account's service manager can automatically start this server.
@@ -203,6 +201,14 @@ impl Service {
             supervisor,
         }
     }
+    /// The LaunchAgent file macOS lists under Login Items & Extensions as this server's
+    /// background item, whether or not it exists. Reading the path reaches no service.
+    #[cfg(target_os = "macos")]
+    pub fn login_item(&self) -> Result<PathBuf, CoreError> {
+        Ok(macos::LaunchAgent::new(&self.paths, &self.identity)?
+            .registration()
+            .path())
+    }
     /// Where this account's signed installations are retained.
     pub fn installations_directory(&self) -> PathBuf {
         self.paths.data.join("installations")
@@ -222,7 +228,7 @@ impl Service {
     }
     /// Change only automatic startup using owning-account host authority.
     /// A deliberate Stop remains in force until explicit Start, regardless of this preference.
-    /// Linux requires confirmed linger before automatic startup can be enabled.
+    /// A service manager that needs authorization before a start refuses it here first.
     pub fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, CoreError> {
         let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
@@ -726,7 +732,8 @@ impl Service {
         });
         self.resume_activation(data)?;
         let mut state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
-        if recovering {
+        // Recovery settles an interrupted activation. An uninstall still removes the service.
+        if recovering && action != control::Action::Uninstall {
             return self.snapshot(&state);
         }
         if action == control::Action::Uninstall && !state.installed && !state.removing {
@@ -2006,7 +2013,7 @@ mod tests {
         }
 
         #[test]
-        fn automatic_start_and_explicit_start_preserve_registration_and_require_linger() {
+        fn automatic_start_and_explicit_start_preserve_registration_and_require_authorization() {
             let fixture = Fixture::new();
             fresh(&fixture);
             let supervisor = AccountSupervisor::new(fixture.paths.clone());
@@ -2342,7 +2349,192 @@ mod tests {
         }
 
         #[test]
-        fn linux_first_setup_resumes_only_after_explicit_linger_authorization() {
+        fn uninstall_removes_service_launcher_and_versions_and_keeps_data_unless_asked() {
+            for choice in [Data::Keep, Data::Delete] {
+                let fixture = Fixture::new();
+                fresh(&fixture);
+                let supervisor = AccountSupervisor::new(fixture.paths.clone());
+                let service = supervisor.service();
+                runtime::test_support::with_artifact(
+                    &fixture.root.join("artifact"),
+                    &fixture.paths.identity,
+                    |archive, signature| {
+                        let startup = LocalStartup::with_service(service.clone()).unwrap();
+                        ready(
+                            startup
+                                .run(|| provision(&service, archive, signature), || false)
+                                .unwrap(),
+                        );
+                        service.stop().unwrap();
+                        let Ok(CliUninstall::Preview { token, .. }) =
+                            service.uninstall_cli(None, choice)
+                        else {
+                            panic!("an uninstall previews first");
+                        };
+                        assert!(matches!(
+                            service.uninstall_cli(Some(&token), choice),
+                            Ok(CliUninstall::Completed)
+                        ));
+                        assert!(supervisor.registered.lock().unwrap().is_none());
+                        let data = &fixture.paths.data;
+                        assert!(!data.join("installations").exists());
+                        assert!(!data.join("service.json").exists());
+                        assert_eq!(data.join("identity.json").exists(), choice == Data::Keep);
+                        assert_eq!(data.exists(), choice == Data::Keep);
+                    },
+                );
+            }
+        }
+
+        /// `spaceterm uninstall` without `--confirm` only previews, also while the Core is
+        /// stopped, and its token confirms only the previewed data choice.
+        #[test]
+        fn uninstalling_a_stopped_core_previews_and_removes_nothing_until_confirmed() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    service.stop().unwrap();
+                    let data = &fixture.paths.data;
+                    for _ in 0..2 {
+                        let Ok(CliUninstall::Preview { sessions, .. }) =
+                            service.uninstall_cli(None, Data::Keep)
+                        else {
+                            panic!("a stopped Core previews its uninstall");
+                        };
+                        assert!(sessions.is_empty());
+                        assert!(data.join("installations").exists());
+                        assert!(supervisor.registered.lock().unwrap().is_some());
+                    }
+                    let Ok(CliUninstall::Preview { token, .. }) =
+                        service.uninstall_cli(None, Data::Keep)
+                    else {
+                        panic!("a stopped Core previews its uninstall");
+                    };
+                    assert_eq!(
+                        service.uninstall_cli(Some(&token), Data::Delete).err(),
+                        Some(CoreError::Changed)
+                    );
+                    assert!(data.join("installations").exists());
+                    let Ok(CliUninstall::Preview { token, .. }) =
+                        service.uninstall_cli(None, Data::Keep)
+                    else {
+                        panic!("a stopped Core previews its uninstall");
+                    };
+                    assert!(matches!(
+                        service.uninstall_cli(Some(&token), Data::Keep),
+                        Ok(CliUninstall::Completed)
+                    ));
+                    assert!(supervisor.registered.lock().unwrap().is_none());
+                    assert!(!data.join("installations").exists());
+                },
+            );
+        }
+
+        /// With nothing set up, an uninstall still previews, and only a token of the form a
+        /// preview issues confirms it.
+        #[test]
+        fn uninstalling_with_nothing_set_up_previews_first() {
+            let fixture = Fixture::new();
+            std::fs::remove_dir_all(&fixture.paths.data).unwrap();
+            let service = AccountSupervisor::new(fixture.paths.clone()).service();
+            let Ok(CliUninstall::Preview { token, .. }) = service.uninstall_cli(None, Data::Keep)
+            else {
+                panic!("an uninstall with nothing set up previews first");
+            };
+            assert_eq!(
+                service.uninstall_cli(Some("c1-typed"), Data::Keep).err(),
+                Some(CoreError::Changed)
+            );
+            assert!(matches!(
+                service.uninstall_cli(Some(&token), Data::Keep),
+                Ok(CliUninstall::Completed)
+            ));
+        }
+
+        #[test]
+        fn a_preview_of_a_stopped_core_removes_nothing_until_its_choice_is_confirmed() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    service.stop().unwrap();
+                    let preview = service.preview_uninstall(Data::Keep).unwrap();
+                    assert!(preview.sessions.is_empty());
+                    let data = &fixture.paths.data;
+                    assert!(data.join("installations").exists());
+                    assert!(supervisor.registered.lock().unwrap().is_some());
+                    // The token binds the data choice.
+                    assert_eq!(
+                        service
+                            .uninstall_cli(Some(&preview.token), Data::Delete)
+                            .err(),
+                        Some(CoreError::Changed)
+                    );
+                    assert!(data.join("installations").exists());
+                    let preview = service.preview_uninstall(Data::Keep).unwrap();
+                    assert!(matches!(
+                        service.uninstall_cli(Some(&preview.token), Data::Keep),
+                        Ok(CliUninstall::Completed)
+                    ));
+                    assert!(supervisor.registered.lock().unwrap().is_none());
+                    assert!(!data.join("installations").exists());
+                    assert!(data.join("identity.json").exists());
+                },
+            );
+        }
+
+        #[test]
+        fn remove_machine_revokes_every_pairing_and_uninstalls_but_keeps_data() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    service.stop().unwrap();
+                    let data = &fixture.paths.data;
+                    std::fs::write(data.join("direct.json"), b"{}").unwrap();
+                    service.remove_machine().unwrap();
+                    assert!(!data.join("direct.json").exists());
+                    assert!(supervisor.registered.lock().unwrap().is_none());
+                    assert!(!data.join("installations").exists());
+                    assert!(!data.join("service.json").exists());
+                    assert!(data.join("identity.json").exists());
+                },
+            );
+        }
+
+        #[test]
+        fn first_setup_resumes_only_after_a_required_authorization() {
             let fixture = Fixture::new();
             fresh(&fixture);
             let supervisor = AccountSupervisor::new(fixture.paths.clone());

@@ -34,8 +34,10 @@ use spaceterm_core::{
     direct::{DirectError, DirectStatus, MachinePin, NetworkPolicy},
     pane::control::ClientName,
     provisioning::{
-        AccountDiscovery, SetupCancellation, SetupCancellationReply,
-        SetupReply as EnrollmentResponse, SetupRequest as EnrollmentRequest,
+        AccountDiscovery, NetworkRestore, RestoredAccess, SetupCancellation,
+        SetupCancellationReply, SetupRefusal, SetupReply as EnrollmentResponse,
+        SetupRequest as EnrollmentRequest,
+        preflight::{self, Preflight},
     },
     service::{SetupStartObservation, verify_candidate_bytes},
 };
@@ -107,7 +109,6 @@ pub(crate) enum IncompatibilityKind {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RefusalKind {
-    AuthorizationRefused,
     InstallRefused,
     MissingArtifact,
     InvalidArtifact,
@@ -120,13 +121,20 @@ pub(crate) enum UnavailableKind {
     HostUnreachable,
     ServiceUnavailable,
     EndpointUnreachable,
+    /// Another program on the machine holds the UDP port Network Access asked for. Nothing
+    /// changed there.
+    PortInUse,
     CredentialUnavailable,
     Storage,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SetupFailure {
     Cancelled,
-    Unreachable { address: SetupAddress },
+    /// Add Machine refuses this computer. Each refusal reads as one sentence.
+    Unsupported(spaceterm_core::provisioning::SetupRefusal),
+    Unreachable {
+        address: SetupAddress,
+    },
     Incompatible(IncompatibilityKind),
     Refused(RefusalKind),
     Unavailable(UnavailableKind),
@@ -316,6 +324,15 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             completed_effect: std::cell::Cell::new(None),
         };
         progress.report(SetupPhase::Discovering);
+        // Every refusal but a blocked UDP port comes before anything is uploaded or changed.
+        let preflight = session.preflight(&ssh_cancellation)?;
+        if let Some(refusal) = preflight.refusal() {
+            return Err(SetupFailure::Unsupported(refusal));
+        }
+        // A machine that needs linger keeps SpaceTerm Core running after logout only with it.
+        if preflight.needs_linger() {
+            session.authorize_linger(&ssh_cancellation)?;
+        }
         let mut discovered = session.discover(&ssh_cancellation)?;
         let discovery = loop {
             match discovered {
@@ -532,7 +549,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             Ok(())
         });
         if let Err(error) = prepared_reply {
-            let confirmed = session.cancel_enrollment(prepared.operation(), &status.pin);
+            let confirmed = session.cancel_enrollment(prepared.operation(), &status.pin, None);
             drop(session);
             if confirmed {
                 let _ = self.direct.confirm_setup_cancelled(&prepared);
@@ -561,9 +578,12 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             });
         let cancelled = cancellation.is_cancelled();
         let cleanup_confirmed = (enrolled.is_err() || cancelled)
-            && session.cancel_enrollment(prepared.operation(), &status.pin);
-        // Every command is reaped synchronously. The broker/socket also closes before QUIC.
-        drop(session);
+            && session.cancel_enrollment(prepared.operation(), &status.pin, None);
+        // When setup changed Network Access, SSH stays open through the QUIC check, so a blocked
+        // UDP port can put Network Access back. Otherwise the broker and socket close first.
+        let changed_network =
+            !status.enabled || status.policy.as_ref().map(|policy| policy.bind) != Some(bind);
+        let session = (changed_network && enrolled.is_ok() && !cancelled).then_some(session);
         let enrolled = match enrolled {
             Ok(enrolled) => enrolled,
             Err(error) => {
@@ -584,27 +604,40 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             return Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
         }
         progress.report(SetupPhase::Connecting);
-        self.direct
-            .complete_setup(
-                &prepared,
-                enrolled.paired,
-                enrolled.machine_name,
-                cancellation,
+        let completed = self.direct.complete_setup(
+            &prepared,
+            enrolled.paired,
+            enrolled.machine_name,
+            cancellation,
+        );
+        let failure = match completed {
+            Ok(route) => return Ok(route),
+            Err(_) if cancellation.is_cancelled() => {
+                return Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
+            }
+            Err(error) => map_direct_error(error),
+        };
+        if failure != SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable) {
+            return Err(failure);
+        }
+        // No QUIC packet reached SpaceTerm Core. Setup revokes its pairing and puts Network
+        // Access back as it was, which Try Again changes again.
+        let Some(session) = session.filter(|session| {
+            session.cancel_enrollment(
+                prepared.operation(),
+                &status.pin,
+                Some(NetworkRestore::before(&status)),
             )
-            .map_err(|error| {
-                if cancellation.is_cancelled() {
-                    SetupFailure::Unconfirmed(SetupOperation::Enrollment)
-                } else {
-                    match map_direct_error(error) {
-                        SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable) => {
-                            SetupFailure::Unreachable {
-                                address: address.clone(),
-                            }
-                        }
-                        failure => failure,
-                    }
-                }
-            })
+        }) else {
+            return Err(SetupFailure::Unreachable { address });
+        };
+        let _ = self.direct.confirm_setup_cancelled(&prepared);
+        // The refusal says what is on now, as SpaceTerm Core reports it after the restore.
+        let restored = session.direct_status(&CancellationToken::default()).ok();
+        Err(SetupFailure::Unsupported(SetupRefusal::UdpBlocked {
+            port: bind.port(),
+            access: RestoredAccess::read(restored.as_ref()),
+        }))
     }
 }
 
@@ -704,7 +737,14 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         }
         Ok(output)
     }
-    fn cancel_enrollment(&self, operation: [u8; 32], pin: &MachinePin) -> bool {
+    /// Revokes this setup's pairing, and restores Network Access when `restore` says how it
+    /// was. True once SpaceTerm Core confirmed both.
+    fn cancel_enrollment(
+        &self,
+        operation: [u8; 32],
+        pin: &MachinePin,
+        restore: Option<NetworkRestore>,
+    ) -> bool {
         let Ok(command) = ValidatedRemoteShellCommand::core_script(&self.config.bootstrap.locator(
             identity(),
             "setup-direct-cancel",
@@ -724,6 +764,7 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         let Ok(input) = serde_json::to_vec(&SetupCancellation {
             operation,
             pin: pin.clone(),
+            restore,
         }) else {
             return false;
         };
@@ -748,6 +789,83 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
     fn discover(&self, cancellation: &CancellationToken) -> Result<Discovery, SetupFailure> {
         parse_discovery(&self.read("ssh-discover", cancellation)?.stdout)
     }
+    /// Reads what the computer is, changing nothing.
+    fn preflight(&self, cancellation: &CancellationToken) -> Result<Preflight, SetupFailure> {
+        let command = self.command(preflight::SCRIPT)?;
+        let output = run_captured_process(
+            &self.config.adapter,
+            &command,
+            &self.environment,
+            Vec::new(),
+            preflight::MAX_REPLY,
+            cancellation,
+            Instant::now() + OBSERVATION,
+        )
+        .map_err(|error| self.process_failure(error))?;
+        if !output.exit.is_success() {
+            return Err(SetupFailure::Unavailable(UnavailableKind::SshFailed));
+        }
+        std::str::from_utf8(&output.stdout)
+            .ok()
+            .and_then(|text| Preflight::parse(text).ok())
+            .ok_or(SetupFailure::Unavailable(UnavailableKind::SshFailed))
+    }
+    /// Enables linger before anything is uploaded: first without a password, then with one the
+    /// remote authorization prompt asks for. Declining refuses setup.
+    fn authorize_linger(&self, cancellation: &CancellationToken) -> Result<(), SetupFailure> {
+        let declined = SetupFailure::Unsupported(SetupRefusal::LingerDeclined);
+        let run = |script: &str, input: Vec<u8>| -> Result<bool, SetupFailure> {
+            let output = run_captured_transfer(
+                &self.config.adapter,
+                &self.command(script)?,
+                &self.environment,
+                input,
+                4096,
+                cancellation,
+            )
+            .map_err(|error| self.process_failure(error))?;
+            match output.exit.code() {
+                Some(0) => Ok(true),
+                Some(preflight::LINGER_REFUSED) => Ok(false),
+                _ => Err(SetupFailure::Unavailable(UnavailableKind::SshFailed)),
+            }
+        };
+        self.check_cancelled(cancellation)?;
+        if run(preflight::LINGER, Vec::new())? {
+            return Ok(());
+        }
+        let prompt = self
+            .environment
+            .remote_authorization_command()
+            .map_err(|_| declined.clone())?;
+        let answer = run_captured_transfer(
+            &self.config.adapter,
+            &prompt,
+            &self.environment,
+            Vec::new(),
+            4096,
+            cancellation,
+        )
+        .map_err(|error| self.process_failure(error))?;
+        let mut secret = zeroize::Zeroizing::new(answer.stdout);
+        if !answer.exit.is_success() {
+            return Err(declined);
+        }
+        if secret.last() == Some(&b'\n') {
+            secret.pop();
+        }
+        if secret.iter().any(|byte| matches!(byte, b'\n' | b'\r' | 0)) {
+            return Err(declined);
+        }
+        let mut input = zeroize::Zeroizing::new(Vec::with_capacity(secret.len() + 1));
+        input.extend_from_slice(&secret);
+        input.push(b'\n');
+        if run(preflight::LINGER_WITH_PASSWORD, std::mem::take(&mut *input))? {
+            Ok(())
+        } else {
+            Err(declined)
+        }
+    }
     fn effect(
         &self,
         action: &str,
@@ -769,6 +887,9 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             CapturedEffectError::NotAdmitted(error) => self.process_failure(error),
             CapturedEffectError::Unconfirmed => SetupFailure::Unconfirmed(operation),
         })?;
+        if output.exit.code() == Some(i32::from(spaceterm_core::provisioning::PORT_IN_USE)) {
+            return Err(SetupFailure::Unavailable(UnavailableKind::PortInUse));
+        }
         if !output.exit.is_success() {
             return Err(SetupFailure::Unconfirmed(operation));
         }
@@ -780,61 +901,22 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         artifact: &VerifiedArtifact,
         cancellation: &CancellationToken,
     ) -> Result<(), SetupFailure> {
-        let transfer = |password, input, cancellation: &CancellationToken| {
-            let command = self.command(&self.config.bootstrap.install(
-                identity(),
-                artifact.bytes.len(),
-                &artifact.signature,
-                &artifact.digest,
-                password,
-            ))?;
-            run_captured_transfer(
-                &self.config.adapter,
-                &command,
-                &self.environment,
-                input,
-                MAX_DISCOVERY,
-                cancellation,
-            )
-            .map_err(|_| SetupFailure::Unconfirmed(SetupOperation::Install))
-        };
+        let command = self.command(&self.config.bootstrap.install(
+            identity(),
+            artifact.bytes.len(),
+            &artifact.signature,
+            &artifact.digest,
+        ))?;
         self.check_cancelled(cancellation)?;
-        let mut output = transfer(false, artifact.bytes.clone(), cancellation)?;
-        if output.exit.code() == Some(77) {
-            let prompt = self
-                .environment
-                .remote_authorization_command()
-                .map_err(|_| SetupFailure::Refused(RefusalKind::AuthorizationRefused))?;
-            let answer = run_captured_transfer(
-                &self.config.adapter,
-                &prompt,
-                &self.environment,
-                Vec::new(),
-                4096,
-                cancellation,
-            )
-            .map_err(|error| self.process_failure(error))?;
-            let mut secret = zeroize::Zeroizing::new(answer.stdout);
-            if !answer.exit.is_success() {
-                return Err(SetupFailure::Refused(RefusalKind::AuthorizationRefused));
-            }
-            if secret.last() == Some(&b'\n') {
-                secret.pop();
-            }
-            if secret.iter().any(|byte| matches!(byte, b'\n' | b'\r' | 0)) {
-                return Err(SetupFailure::Refused(RefusalKind::AuthorizationRefused));
-            }
-            let mut input = zeroize::Zeroizing::new(Vec::with_capacity(
-                secret.len() + artifact.bytes.len() + 1,
-            ));
-            input.extend_from_slice(&secret);
-            input.push(b'\n');
-            input.extend_from_slice(&artifact.bytes);
-            output = transfer(true, std::mem::take(&mut *input), cancellation)?;
-            if output.exit.code() == Some(77) {
-                return Err(SetupFailure::Refused(RefusalKind::AuthorizationRefused));
-            }
-        }
+        let output = run_captured_transfer(
+            &self.config.adapter,
+            &command,
+            &self.environment,
+            artifact.bytes.clone(),
+            MAX_DISCOVERY,
+            cancellation,
+        )
+        .map_err(|_| SetupFailure::Unconfirmed(SetupOperation::Install))?;
         if !output.exit.is_success() {
             return Err(SetupFailure::Refused(RefusalKind::InstallRefused));
         }
@@ -883,8 +965,16 @@ fn resolved_setup_address(output: &CapturedProcessOutput) -> Result<SetupAddress
     if port.is_none() {
         return Err(SetupFailure::Refused(RefusalKind::InvalidEndpoint));
     }
-    SetupAddress::parse(hostname.ok_or(SetupFailure::Refused(RefusalKind::InvalidEndpoint))?)
-        .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))
+    SetupAddress::parse(
+        hostname.ok_or(SetupFailure::Refused(RefusalKind::InvalidEndpoint))?,
+        own_port(),
+    )
+    .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))
+}
+
+/// The UDP port this desktop's build identity uses unless an address names one.
+pub(crate) fn own_port() -> u16 {
+    spaceterm_core::direct::default_port(ApplicationIdentity::current().directory_name())
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<(), SetupFailure> {
@@ -906,6 +996,7 @@ fn map_direct_error(error: DirectError) -> SetupFailure {
             SetupFailure::Unavailable(UnavailableKind::CredentialUnavailable)
         }
         DirectError::StorageUnavailable => SetupFailure::Unconfirmed(SetupOperation::Save),
+        DirectError::PortInUse => SetupFailure::Unavailable(UnavailableKind::PortInUse),
         DirectError::PolicyChanged => SetupFailure::Unconfirmed(SetupOperation::Enrollment),
         DirectError::IncompatibleProtocol => {
             SetupFailure::Incompatible(IncompatibilityKind::Protocol)
@@ -923,9 +1014,7 @@ fn map_core_error(error: CoreError) -> SetupFailure {
         CoreError::IncompatibleProtocol(_) => {
             SetupFailure::Incompatible(IncompatibilityKind::Protocol)
         }
-        CoreError::AuthorizationRequired => {
-            SetupFailure::Refused(RefusalKind::AuthorizationRefused)
-        }
+        CoreError::AuthorizationRequired => SetupFailure::Unsupported(SetupRefusal::LingerDeclined),
         _ => SetupFailure::Refused(RefusalKind::InvalidArtifact),
     }
 }
@@ -938,7 +1027,6 @@ pub(crate) trait SshCoreBootstrap: Send + Sync {
         archive_length: usize,
         signature: &[u8],
         digest: &str,
-        password: bool,
     ) -> String;
 }
 

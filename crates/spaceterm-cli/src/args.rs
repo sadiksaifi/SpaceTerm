@@ -43,7 +43,7 @@ SpaceTerm Core on this machine. [--machine] marks commands that also reach a pai
   unpair            Revoke another Paired Device
   permissions       Show the System Permissions of this machine's Terminal Sessions, or set one up
   end-all-sessions  End every Terminal Session on this machine, keeping Workspaces
-  uninstall         Uninstall SpaceTerm Core from this machine, keeping its data
+  uninstall         Uninstall SpaceTerm and SpaceTerm Core, keeping their data unless asked
 
 Machines this CLI reaches. These commands reject --machine.
   machine           Add, list, rename and remove machines
@@ -201,11 +201,19 @@ pub enum CoreCommand {
     },
     /// End every Terminal Session on this machine, keeping Workspaces.
     EndAllSessions(Confirm),
-    /// Uninstall SpaceTerm Core from this machine, keeping its data.
+    /// Uninstall SpaceTerm and SpaceTerm Core, keeping their data unless asked.
     ///
-    /// Removes the account service and the CLI launcher. Workspaces, settings, pairings and
-    /// installed versions remain.
-    Uninstall(Confirm),
+    /// Removes the account service, the CLI launcher, every installed version and the SpaceTerm
+    /// app. Workspaces, Machine Settings, pairings and saved machines remain unless
+    /// --delete-data is given.
+    Uninstall {
+        /// Also delete SpaceTerm Core's data on this machine, this CLI's saved machines and
+        /// their credentials.
+        #[arg(long)]
+        delete_data: bool,
+        #[arg(long, value_name = "TOKEN")]
+        confirm: Option<String>,
+    },
 }
 
 /// Setting up one System Permission on this machine.
@@ -304,11 +312,6 @@ pub enum InternalCommand {
         signature: PathBuf,
         sha256: String,
     },
-    SshEnableLinger {
-        /// Read the sudo password from stdin.
-        #[arg(long)]
-        password_stdin: bool,
-    },
     BuildInfo,
     Check,
     /// Report this process's own System Permissions, as SpaceTerm Core's probe child.
@@ -333,7 +336,6 @@ impl InternalCommand {
             Self::SshDirectCancel => "internal.ssh-direct-cancel",
             Self::SshStart => "internal.ssh-start",
             Self::SshInstall { .. } => "internal.ssh-install",
-            Self::SshEnableLinger { .. } => "internal.ssh-enable-linger",
             Self::BuildInfo => "internal.build-info",
             Self::Check => "internal.check",
             Self::PermissionReport => "internal.permission-report",
@@ -738,7 +740,7 @@ impl CoreCommand {
                 Some(PermissionsCommand::Settings { .. }) => "permissions.settings",
             },
             Self::EndAllSessions(_) => "end-all-sessions",
-            Self::Uninstall(_) => "uninstall",
+            Self::Uninstall { .. } => "uninstall",
         }
     }
 }
@@ -787,9 +789,12 @@ fn network(text: &str) -> Result<Network, String> {
     match text {
         "all" => Ok(Network::All),
         "off" => Ok(Network::Off),
-        address => spaceterm_core::direct::NetworkPolicy::parse(address)
-            .map(Network::Address)
-            .map_err(|_| String::new()),
+        address => spaceterm_core::direct::NetworkPolicy::parse(
+            address,
+            spaceterm_core::direct::default_port(env!("SPACETERM_CLI_IDENTITY")),
+        )
+        .map(Network::Address)
+        .map_err(|_| String::new()),
     }
 }
 
@@ -925,6 +930,7 @@ mod tests {
             &["permissions", "request", "microphone"],
             &["end-all-sessions"],
             &["uninstall", "--confirm", "c1-00"],
+            &["uninstall", "--delete-data", "--confirm", "c1-00"],
             &["machine", "add", "penguin", "--trust"],
             &["machine", "list"],
             &["machine", "rename", "penguin", "lab"],
@@ -1022,10 +1028,6 @@ mod tests {
             (
                 &["internal", "ssh-install", "a", "s", "00"],
                 "internal.ssh-install",
-            ),
-            (
-                &["internal", "ssh-enable-linger", "--password-stdin"],
-                "internal.ssh-enable-linger",
             ),
         ] {
             let cli = parse(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));

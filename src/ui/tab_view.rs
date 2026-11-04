@@ -3572,7 +3572,7 @@ impl TabView {
             self.focus(window, cx);
         }
     }
-    /// Reconnects each Pane the person's stop interrupted, once they started the server.
+    /// Reconnects each Pane a stop or Login Items interrupted, once its server runs again.
     pub(crate) fn core_started(&mut self, cx: &mut Context<Self>) {
         let binding = &mut self.binding;
         for pane_id in binding.pane_ids() {

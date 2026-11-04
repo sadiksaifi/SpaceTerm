@@ -14,12 +14,12 @@ use super::{
     AUTHORIZE_CANCEL_SELECTOR, AUTHORIZE_CONFIRM_SELECTOR, AUTHORIZE_INSTALL_SELECTOR,
     AUTHORIZE_START_SELECTOR, AuthorizationPrompt, AuthorizedRequest, CoreServiceControl,
     INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice, LocalCoreControl,
-    LocalCorePresentation, LocalCoreStatus, OfferedLocalMachine, OfferedMachine,
-    RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR, SERVICE_CHECK_SELECTOR,
-    START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR, STOP_SELECTOR,
-    ServiceAction, ServiceConfirmation, ServicePresentation, ServiceStartup, ServiceState,
-    UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR, UNINSTALL_SELECTOR, present,
-    present_service,
+    LocalCorePresentation, LocalCoreStatus, OPEN_LOGIN_ITEMS_SELECTOR, OfferedLocalMachine,
+    OfferedMachine, RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR,
+    SERVICE_CHECK_SELECTOR, START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR,
+    STOP_SELECTOR, ServiceAction, ServiceConfirmation, ServicePresentation, ServiceStartup,
+    ServiceState, UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR, UNINSTALL_SELECTOR,
+    present, present_service,
 };
 use crate::appearance::Appearance;
 use crate::machine_connection::CoreError;
@@ -101,12 +101,13 @@ core_error_cases! {
 }
 
 /// A server on a platform without a service layer, which shows only the connection row.
-fn offered(core: &Arc<ScriptedCore>) -> OfferedLocalMachine {
+pub(in crate::ui::settings_window) fn offered(core: &Arc<ScriptedCore>) -> OfferedLocalMachine {
     Some(OfferedMachine {
         connection: Ok(Arc::clone(core) as Arc<dyn LocalCoreControl>),
         service: None,
         update: None,
         command_line_tool: None,
+        removal: None,
     })
 }
 
@@ -119,10 +120,11 @@ fn offered_with_service(
         service: Some(Ok(Arc::clone(service) as Arc<dyn CoreServiceControl>)),
         update: None,
         command_line_tool: None,
+        removal: None,
     })
 }
 
-fn open_settings(
+pub(in crate::ui::settings_window) fn open_settings(
     local_core: OfferedLocalMachine,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
@@ -243,7 +245,7 @@ fn modal_action(selector: &str) -> &'static str {
     Box::leak(format!("modal-action-{selector}").into_boxed_str())
 }
 
-fn click_modal(selector: &str, cx: &mut VisualTestContext) {
+pub(in crate::ui::settings_window) fn click_modal(selector: &str, cx: &mut VisualTestContext) {
     let selector = modal_action(selector);
     let position = cx
         .debug_bounds(selector)
@@ -254,7 +256,10 @@ fn click_modal(selector: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn alert_open(selector: &str, cx: &mut VisualTestContext) -> bool {
+pub(in crate::ui::settings_window) fn alert_open(
+    selector: &str,
+    cx: &mut VisualTestContext,
+) -> bool {
     cx.debug_bounds(modal_action(selector)).is_some()
 }
 
@@ -292,6 +297,7 @@ fn open_machines_with_update(
         service: Some(Ok(Arc::clone(&service) as Arc<dyn CoreServiceControl>)),
         update: Some(Arc::clone(&update) as Arc<dyn CoreUpdateControl>),
         command_line_tool: None,
+        removal: None,
     });
     let (window, cx) = open_settings(offered, cx);
     click(NAVIGATION_SELECTOR, cx);
@@ -424,6 +430,7 @@ fn a_development_run_core_is_described_as_ending_with_the_run(cx: &mut TestAppCo
             service: None,
             update: None,
             command_line_tool: None,
+            removal: None,
         }),
         cx,
     );
@@ -616,6 +623,7 @@ fn an_unresolved_core_explains_itself_and_offers_nothing(cx: &mut TestAppContext
             service: None,
             update: None,
             command_line_tool: None,
+            removal: None,
         }),
         cx,
     );
@@ -1195,6 +1203,60 @@ fn start_restores_a_stopped_core_without_asking(cx: &mut TestAppContext) {
     assert_eq!(status(&window, cx), "Running");
 }
 
+/// The person turned SpaceTerm Core off in Login Items while Settings was open. Start, chosen
+/// after that, reaches no service: the row says the item is off and offers Login Items. Once the
+/// person turns it on there and comes back, the row offers Start again.
+#[gpui::test]
+fn start_after_turning_off_in_login_items_offers_login_items_instead(cx: &mut TestAppContext) {
+    let (window, _core, service, cx) = open_machines_with_service(Ok(not_running()), cx);
+    assert!(rendered(START_SERVICE_SELECTOR, cx));
+
+    service.turn_off_in_login_items(true);
+    click(START_SERVICE_SELECTOR, cx);
+
+    assert!(
+        service.changes().is_empty(),
+        "Start never turns on a service macOS keeps off"
+    );
+    assert_eq!(status(&window, cx), "Off in Login Items");
+    let presented = service_presentation(&window, cx);
+    assert_eq!(presented.state, "Off in Login Items");
+    assert_eq!(
+        presented.actions,
+        vec![ServiceAction::OpenLoginItems, ServiceAction::Uninstall]
+    );
+    assert!(!rendered(START_SERVICE_SELECTOR, cx));
+
+    click(OPEN_LOGIN_ITEMS_SELECTOR, cx);
+    assert_eq!(service.calls().last(), Some(&ServiceCall::OpenLoginItems));
+    assert!(service.changes().is_empty());
+
+    // The person turns SpaceTerm Core on in System Settings and comes back.
+    service.turn_off_in_login_items(false);
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Not running");
+    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    click(START_SERVICE_SELECTOR, cx);
+    assert_eq!(service.changes(), vec![ServiceCall::Start]);
+}
+
+/// A read that finds a stopped SpaceTerm Core also off in Login Items presents Login Items, not
+/// Start, and changes nothing.
+#[gpui::test]
+fn a_stopped_core_off_in_login_items_offers_login_items(cx: &mut TestAppContext) {
+    let (window, _core, service, cx) = open_machines_with_service(Ok(stopped()), cx);
+    service.turn_off_in_login_items(true);
+    window.update(cx, |settings, cx| settings.check_core_service(cx));
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Off in Login Items");
+    assert!(rendered(OPEN_LOGIN_ITEMS_SELECTOR, cx));
+    assert!(service.changes().is_empty());
+}
+
 #[gpui::test]
 fn restart_asks_first_then_restarts(cx: &mut TestAppContext) {
     let (window, _core, service, cx) = open_machines_with_service(Ok(running()), cx);
@@ -1339,6 +1401,7 @@ fn an_unresolved_service_explains_itself_and_offers_nothing(cx: &mut TestAppCont
             service: Some(Err(CoreError::StorageUnavailable)),
             update: None,
             command_line_tool: None,
+            removal: None,
         }),
         cx,
     );

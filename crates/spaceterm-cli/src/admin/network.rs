@@ -47,6 +47,14 @@ pub fn run(context: &Context<'_>, network: Option<&Network>, token: Option<&str>
             return Reply::failure(COMMAND, Some(routed.machine), failure);
         }
     };
+    // Paired devices need SpaceTerm Core after logout, so Linux turns Network Access on only
+    // with linger. A paired machine had linger before it paired.
+    if routed.local
+        && access.is_some_and(|access| access != NetworkAccess::Off)
+        && let Err(failure) = super::pair::require_linger(context.identity)
+    {
+        return Reply::failure(COMMAND, Some(routed.machine), failure);
+    }
     match (access, token) {
         (None, _) => show(routed, opened),
         (Some(access), Some(token)) => {

@@ -27,6 +27,7 @@ pub(super) const LAUNCH_AUTHORIZE_SELECTOR: &str = "server-launch-authorize";
 pub(super) const LAUNCH_RETRY_SELECTOR: &str = "server-launch-retry";
 pub(super) const LAUNCH_SETTINGS_SELECTOR: &str = "server-launch-settings";
 pub(super) const LAUNCH_UPDATE_SELECTOR: &str = "server-launch-update";
+pub(super) const LAUNCH_LOGIN_ITEMS_SELECTOR: &str = "server-launch-login-items";
 const LAUNCH_QUIET_SELECTOR: &str = "server-launch-quiet";
 
 /// How long a window's first launch may wait for the server before it says so. Opening an
@@ -51,9 +52,16 @@ pub(crate) enum LaunchOutcome {
 
 /// The blocking steps of local launch. Each runs on a background thread.
 pub(crate) trait LocalLaunch: Send + Sync {
-    /// Prepares or reuses the account's service and connects. Never reverses Stop and never
-    /// asks for authorization.
+    /// Prepares or reuses the account's service and connects. Never reverses Stop and never asks
+    /// for authorization. It may install, enable and start the service, so launch runs it, and
+    /// [`Self::start`], only while [`Self::background_item_off`] is false.
     fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError>;
+    /// Whether macOS keeps SpaceTerm Core's background item off, because the person turned it
+    /// off in Login Items or has not approved it yet. Reads only: it changes nothing.
+    fn background_item_off(&self) -> bool;
+    /// Opens System Settings at Login Items, where the person turns SpaceTerm Core on. It must
+    /// run on the event thread, so macOS brings System Settings forward.
+    fn open_login_items(&self);
     /// The person's explicit Start Server, which reverses their Stop.
     fn start(&self) -> Result<(), CoreError>;
     /// The person's explicit startup authorization. Cancelling the system prompt changes nothing.
@@ -130,6 +138,14 @@ impl LocalLaunch for AccountLaunch {
         })
     }
 
+    fn background_item_off(&self) -> bool {
+        crate::local_startup::background_item_off()
+    }
+
+    fn open_login_items(&self) {
+        crate::local_startup::open_login_items();
+    }
+
     fn wait_for_service(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<(), CoreError> {
         spaceterm_core::LocalStartup::for_identity(
             crate::application_identity::ApplicationIdentity::current().directory_name(),
@@ -203,6 +219,10 @@ pub(super) enum LaunchState {
         declined: bool,
     },
     Failed(CoreError),
+    /// The person turned SpaceTerm Core off in Login Items.
+    LoginItemOff,
+    /// macOS blocked SpaceTerm Core's background item until the person approves it.
+    BackgroundItemBlocked,
     /// This client refused the server, which keeps running with its Terminal Sessions.
     /// `update` is whether this SpaceTerm includes a verified server build to update it to.
     Incompatible {
@@ -221,6 +241,8 @@ pub(super) enum LaunchAction {
     Settings,
     /// Opens Settings on Servers and starts the Update Server journey there.
     Update,
+    /// Opens System Settings at Login Items & Extensions.
+    OpenLoginItems,
 }
 
 impl LaunchAction {
@@ -231,6 +253,7 @@ impl LaunchAction {
             Self::Retry => "Try Again",
             Self::Settings => "Machine Settings\u{2026}",
             Self::Update => "Update SpaceTerm Core\u{2026}",
+            Self::OpenLoginItems => "Open Login Items",
         }
     }
 
@@ -241,6 +264,7 @@ impl LaunchAction {
             Self::Retry => LAUNCH_RETRY_SELECTOR,
             Self::Settings => LAUNCH_SETTINGS_SELECTOR,
             Self::Update => LAUNCH_UPDATE_SELECTOR,
+            Self::OpenLoginItems => LAUNCH_LOGIN_ITEMS_SELECTOR,
         }
     }
 }
@@ -252,6 +276,8 @@ pub(super) enum LaunchIcon {
     Stopped,
     /// Launch waits for the person's authorization.
     Authorization,
+    /// Launch waits for the person to approve SpaceTerm Core in Login Items.
+    Approval,
     /// Launch could not finish.
     Failure,
 }
@@ -262,6 +288,7 @@ impl LaunchIcon {
         match self {
             Self::Stopped => (IconName::Pause, EmptyStateTone::Quiet),
             Self::Authorization => (IconName::Lock, EmptyStateTone::Warning),
+            Self::Approval => (IconName::Shield, EmptyStateTone::Warning),
             Self::Failure => (IconName::CircleAlert, EmptyStateTone::Error),
         }
     }
@@ -287,8 +314,13 @@ pub(super) struct LaunchPresentation {
 pub(super) const OPENING_TITLE: &str = "Opening Workspaces";
 // Launch reuses a running server or starts it, so the detail claims neither.
 const OPENING_DETAIL: &str = "SpaceTerm is waiting for SpaceTerm Core.";
-pub(super) const STOPPED_TITLE: &str = "SpaceTerm Core Stopped";
-const STOPPED_DETAIL: &str = "Start SpaceTerm Core to open your Workspaces.";
+pub(super) const STOPPED_TITLE: &str = "SpaceTerm Core is stopped";
+
+/// Why this computer's Workspaces are closed while its server is stopped. `place` is the host's
+/// name for this computer, such as "This Mac".
+pub(super) fn stopped_detail(place: &str) -> SharedString {
+    format!("Workspaces on {place} open when it starts.").into()
+}
 pub(super) const AUTHORIZATION_TITLE: &str = "Run SpaceTerm Core at Startup";
 const AUTHORIZATION_DECLINED: &str = "Authorization didn\u{2019}t finish.";
 const AUTHORIZING_DETAIL: &str =
@@ -362,8 +394,9 @@ const fn failed(error: CoreError, update: bool) -> LaunchState {
     }
 }
 
-pub(super) fn present(state: LaunchState) -> LaunchPresentation {
-    use LaunchAction::{Authorize, Retry, Settings, Start, Update};
+/// `place` is the host's name for this computer, such as "This Mac".
+pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
+    use LaunchAction::{Authorize, OpenLoginItems, Retry, Settings, Start, Update};
     let failure = Some(LaunchIcon::Failure);
     let fixed = SharedString::new_static;
     match state {
@@ -377,7 +410,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         },
         LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
             title: STOPPED_TITLE,
-            detail: fixed(STOPPED_DETAIL),
+            detail: stopped_detail(place),
             progress: Some("Starting SpaceTerm Core\u{2026}"),
             actions: &[],
             icon: None,
@@ -402,10 +435,29 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         },
         LaunchState::Stopped => LaunchPresentation {
             title: STOPPED_TITLE,
-            detail: fixed(STOPPED_DETAIL),
+            detail: stopped_detail(place),
             progress: None,
-            actions: &[Start, Settings],
+            actions: &[Start],
             icon: Some(LaunchIcon::Stopped),
+            waiting: false,
+        },
+        // Turning SpaceTerm Core off was the person's choice, so nothing warns.
+        LaunchState::LoginItemOff => LaunchPresentation {
+            title: "SpaceTerm Core is turned off in Login Items",
+            detail: format!("Workspaces on {place} open when you turn it on.").into(),
+            progress: None,
+            actions: &[OpenLoginItems],
+            icon: Some(LaunchIcon::Stopped),
+            waiting: false,
+        },
+        LaunchState::BackgroundItemBlocked => LaunchPresentation {
+            title: "SpaceTerm Core needs your approval",
+            detail: fixed(
+                "Turn on SpaceTerm Core in System Settings > General > Login Items & Extensions.",
+            ),
+            progress: None,
+            actions: &[OpenLoginItems],
+            icon: Some(LaunchIcon::Approval),
             waiting: false,
         },
         LaunchState::AuthorizationRequired { declined } => LaunchPresentation {
@@ -466,6 +518,18 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
 pub(super) struct LocalLaunchState {
     adapters: LocalCoreAdapters,
     pub(super) state: LaunchState,
+    /// The host's name for this computer, such as "This Mac".
+    place: &'static str,
+    /// The window went inactive while it said SpaceTerm Core is off in Login Items.
+    away: bool,
+    /// The last launch or connection loss found this computer's SpaceTerm Core turned off in
+    /// Login Items. It holds while a launch rechecks, so the presented Workspaces keep saying so
+    /// instead of reconnecting.
+    turned_off: bool,
+    /// The failed connection attempts counted when this computer's connection loss last read
+    /// the background item, so each failed attempt reads it once.
+    background_item_read: Option<u64>,
+    _background_item: Option<Task<()>>,
     cancelled: Arc<AtomicBool>,
     _task: Option<Task<()>>,
     /// The server was started elsewhere while this launch was answering. A launch that then
@@ -495,10 +559,16 @@ pub(super) struct LocalLaunchState {
 }
 
 impl LocalLaunchState {
-    pub(super) fn new(adapters: LocalCoreAdapters) -> Self {
+    /// `place` is the host's name for this computer, such as "This Mac".
+    pub(super) fn new(adapters: LocalCoreAdapters, place: &'static str) -> Self {
         Self {
             adapters,
             state: LaunchState::Launching,
+            place,
+            away: false,
+            turned_off: false,
+            background_item_read: None,
+            _background_item: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             _task: None,
             resume: false,
@@ -546,6 +616,12 @@ impl Drop for LocalLaunchState {
 /// What one background run reports back to the window.
 enum StepResult {
     Outcome(LaunchOutcome),
+    /// The person turned SpaceTerm Core off in Login Items, so macOS doesn't let it run. Launch
+    /// never turns it back on.
+    LoginItemOff,
+    /// macOS blocked the background item SpaceTerm Core installed, and waits for the person to
+    /// approve it in Login Items.
+    BackgroundItemBlocked,
     Failed(CoreError),
     /// The client refused the server. `update` is whether a verified build can update it.
     Incompatible(CoreError, bool),
@@ -580,6 +656,8 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
                 LaunchState::Stopped
                     | LaunchState::AuthorizationRequired { .. }
                     | LaunchState::Failed(_)
+                    | LaunchState::LoginItemOff
+                    | LaunchState::BackgroundItemBlocked
                     | LaunchState::Incompatible { .. }
             ) && manager.launch._task.is_none()
             {
@@ -649,6 +727,11 @@ impl WorkspaceManager {
         let adapter = Arc::clone(&launch.adapters.launch);
         let cancelled = Arc::clone(&launch.cancelled);
         let work = cx.background_spawn(async move {
+            // What the person turned off in Login Items stays off: neither their Start nor
+            // launch reaches a service macOS keeps off.
+            if adapter.background_item_off() {
+                return StepResult::LoginItemOff;
+            }
             let refused = match step {
                 Some(LaunchStep::Start) => adapter.start().err().map(StepResult::Failed),
                 // Only a cancelled or refused prompt leaves startup unchanged. Any other failure
@@ -669,6 +752,8 @@ impl WorkspaceManager {
             let observed = move || cancelled.load(Ordering::Acquire);
             match adapter.run(&observed) {
                 Ok(outcome) => StepResult::Outcome(outcome),
+                // macOS blocked the background item this launch installed, so it could not start.
+                Err(_) if adapter.background_item_off() => StepResult::BackgroundItemBlocked,
                 Err(error) if incompatible(error) => {
                     StepResult::Incompatible(error, adapter.update_offered())
                 }
@@ -693,6 +778,8 @@ impl WorkspaceManager {
         let state = match result {
             StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_core(window, cx),
             StepResult::Outcome(LaunchOutcome::Stopped) => LaunchState::Stopped,
+            StepResult::LoginItemOff => LaunchState::LoginItemOff,
+            StepResult::BackgroundItemBlocked => LaunchState::BackgroundItemBlocked,
             // The operation decides what launch finds next, so launch runs again once it ends.
             StepResult::Outcome(LaunchOutcome::ServiceBusy) => {
                 self.run_local_launch(Some(LaunchStep::WaitForService), window, cx);
@@ -711,12 +798,18 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        let was_turned_off = std::mem::replace(
+            &mut self.launch.turned_off,
+            state == LaunchState::LoginItemOff,
+        );
         if std::mem::take(&mut self.launch.resume)
             && matches!(
                 state,
                 LaunchState::Stopped
                     | LaunchState::AuthorizationRequired { .. }
                     | LaunchState::Failed(_)
+                    | LaunchState::LoginItemOff
+                    | LaunchState::BackgroundItemBlocked
                     | LaunchState::Incompatible { .. }
             )
         {
@@ -732,9 +825,14 @@ impl WorkspaceManager {
             }
         }
         // While Workspaces are presented the launch screen is hidden, so a step that could not
-        // finish explains itself in an alert instead.
+        // finish explains itself in an alert instead. A Login Items state the window already
+        // said, or says in place of the Active Workspace's Tabs, needs no alert.
+        let said = state == LaunchState::LoginItemOff
+            && (was_turned_off || self.local_core_turned_off_presented());
         if self.launch_presentation().is_none()
-            && let Some(presentation) = (state != LaunchState::Ready).then(|| present(state))
+            && !said
+            && let Some(presentation) =
+                (state != LaunchState::Ready).then(|| present(state, self.launch.place))
         {
             Self::present_launch_alert(presentation, window, cx);
         }
@@ -748,7 +846,7 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    /// Reconnects each Pane the person's stop interrupted, once this computer's server runs
+    /// Reconnects each Pane a stop or Login Items interrupted, once this computer's server runs
     /// again. Another computer's Panes follow their own server.
     fn core_started(&self, cx: &mut App) {
         for workspace in self.workspaces.iter() {
@@ -837,23 +935,28 @@ impl WorkspaceManager {
                     LaunchState::Launching | LaunchState::Ready
                 ) =>
             {
-                Some(present(self.launch.state))
+                Some(present(self.launch.state, self.launch.place))
             }
-            Some(binding) => Some(present(match binding.connection_error() {
-                Some(CoreError::Stopped) => LaunchState::Stopped,
-                // The connection waits for the operation again by itself.
-                Some(CoreError::ServiceBusy) => LaunchState::Working(LaunchStep::WaitForService),
-                // An open connection's refusal offers what the Server version row offers.
-                Some(error) if ends_opening(error) => failed(
-                    error,
-                    self.launch
-                        .refusal_offer
-                        .is_some_and(|(refused, update)| refused == error && update),
-                ),
-                // The connection retries an interruption by itself, so opening goes on.
-                _ => LaunchState::Launching,
-            })),
-            None => Some(present(self.launch.state)),
+            Some(binding) => Some(present(
+                match binding.connection_error() {
+                    Some(CoreError::Stopped) => LaunchState::Stopped,
+                    // The connection waits for the operation again by itself.
+                    Some(CoreError::ServiceBusy) => {
+                        LaunchState::Working(LaunchStep::WaitForService)
+                    }
+                    // An open connection's refusal offers what the Server version row offers.
+                    Some(error) if ends_opening(error) => failed(
+                        error,
+                        self.launch
+                            .refusal_offer
+                            .is_some_and(|(refused, update)| refused == error && update),
+                    ),
+                    // The connection retries an interruption by itself, so opening goes on.
+                    _ => LaunchState::Launching,
+                },
+                self.launch.place,
+            )),
+            None => Some(present(self.launch.state, self.launch.place)),
         }
     }
 
@@ -1040,6 +1143,121 @@ impl WorkspaceManager {
             .child(state)
     }
 
+    /// Follows the window's activation while it says SpaceTerm Core is off in Login Items. The
+    /// person may turn it on there while the window is inactive, so launch runs again when they
+    /// come back.
+    pub(super) fn launch_window_activation(
+        &mut self,
+        active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self.launch.turned_off
+            || matches!(
+                self.launch.state,
+                LaunchState::LoginItemOff | LaunchState::BackgroundItemBlocked
+            );
+        if !active {
+            self.launch.away = waiting;
+        } else if std::mem::take(&mut self.launch.away) && waiting {
+            if self.launch._task.is_none() {
+                self.run_local_launch(None, window, cx);
+            } else {
+                // The running launch may have read the item before the person turned it on.
+                self.launch.resume = true;
+            }
+        }
+    }
+
+    /// Whether the stage says this computer's SpaceTerm Core is turned off in Login Items in
+    /// place of the Active Workspace's Tabs.
+    pub(super) fn local_core_turned_off_presented(&self) -> bool {
+        self.launch.turned_off
+            && self
+                .workspaces
+                .active_workspace_id()
+                .and_then(|workspace_id| self.binding.owner(workspace_id))
+                == Some(super::MachineKey::LOCAL)
+    }
+
+    /// Whether this computer's SpaceTerm Core is turned off in Login Items, as the last launch
+    /// or connection loss read.
+    pub(super) const fn local_core_turned_off(&self) -> bool {
+        self.launch.turned_off
+    }
+
+    /// Reads, off the event thread, the background item launch reads, once for each failed
+    /// attempt of this computer's open connection. macOS stops SpaceTerm Core when the person
+    /// turns it off in Login Items, and reconnecting can't reach it until they turn it on, so
+    /// the window then says what launch says. Once the item is on again, launch runs again and
+    /// the Panes reconnect. The read changes nothing.
+    pub(super) fn read_background_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(binding) = self.binding.local() else {
+            return;
+        };
+        let attempts = binding.failed_attempts();
+        if binding.connection_error().is_none() {
+            self.launch.background_item_read = None;
+            self.launch._background_item = None;
+            // The server answered again, so its Panes reconnect now rather than on their delay.
+            if binding.connected() && std::mem::take(&mut self.launch.turned_off) {
+                if self.launch.state == LaunchState::LoginItemOff {
+                    self.launch.state = LaunchState::Ready;
+                }
+                self.core_started(cx);
+                cx.notify();
+            }
+            return;
+        }
+        // A launch reads the item itself, and a launch screen's own state stays until it reruns.
+        if self.launch._task.is_some()
+            || !matches!(
+                self.launch.state,
+                LaunchState::Ready | LaunchState::LoginItemOff
+            )
+            || self.launch.background_item_read == Some(attempts)
+        {
+            return;
+        }
+        self.launch.background_item_read = Some(attempts);
+        let adapter = Arc::clone(&self.launch.adapters.launch);
+        let read = cx.background_spawn(async move { adapter.background_item_off() });
+        self.launch._background_item = Some(cx.spawn_in(window, async move |manager, cx| {
+            let off = read.await;
+            let _ = manager.update_in(cx, |manager, window, cx| {
+                manager.finish_background_item_read(off, window, cx);
+            });
+        }));
+    }
+
+    fn finish_background_item_read(
+        &mut self,
+        off: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let launch = &mut self.launch;
+        // A launch that began meanwhile answers for itself.
+        if launch._task.is_some()
+            || !matches!(launch.state, LaunchState::Ready | LaunchState::LoginItemOff)
+        {
+            return;
+        }
+        if off {
+            if !launch.turned_off {
+                launch.state = LaunchState::LoginItemOff;
+                launch.turned_off = true;
+                // The person turns it on in System Settings, so coming back runs launch again.
+                launch.away = true;
+                cx.notify();
+            }
+        } else if launch.turned_off {
+            // The person turned it on again. Launch reuses or starts the service, and its Ready
+            // reconnects the Panes.
+            self.run_local_launch(None, window, cx);
+        }
+    }
+
     pub(super) fn run_launch_action(
         &mut self,
         action: LaunchAction,
@@ -1055,6 +1273,8 @@ impl WorkspaceManager {
             // The journey reads the server again and asks before it changes anything. A
             // finished update runs launch again in every waiting window.
             LaunchAction::Update => crate::ui::settings_window::open_core_update(cx),
+            // Launch runs again when the person comes back to this window.
+            LaunchAction::OpenLoginItems => self.launch.adapters.launch.open_login_items(),
             LaunchAction::Start if ready => {
                 self.run_local_launch(Some(LaunchStep::Start), window, cx);
             }
@@ -1174,6 +1394,8 @@ pub(crate) mod testing {
         authorize: Mutex<Option<CoreError>>,
         /// Whether a verified build can update a refused server.
         update: Mutex<bool>,
+        /// Each background item read in order. It is on once the queue is empty.
+        background_item_off: Mutex<VecDeque<bool>>,
     }
 
     impl ScriptedLaunch {
@@ -1184,6 +1406,10 @@ pub(crate) mod testing {
         pub(crate) fn answer(&self, result: Result<LaunchOutcome, CoreError>) {
             self.runs.lock().unwrap().push_back(result);
         }
+        /// Answers the next background item reads with `off`, in order.
+        pub(crate) fn background_item(&self, off: impl IntoIterator<Item = bool>) {
+            self.background_item_off.lock().unwrap().extend(off);
+        }
         pub(crate) fn refuse_start(&self, error: CoreError) {
             *self.start.lock().unwrap() = Some(error);
         }
@@ -1192,8 +1418,8 @@ pub(crate) mod testing {
         pub(crate) fn refuse_authorization(&self, error: CoreError) {
             *self.authorize.lock().unwrap() = Some(error);
         }
-        /// Every step in order: `run`, `start`, `authorize`, `wait_for_service`, and
-        /// `update_offered`.
+        /// Every step in order: `run`, `start`, `authorize`, `wait_for_service`,
+        /// `update_offered`, and `open_login_items`.
         pub(crate) fn steps(&self) -> Vec<&'static str> {
             self.steps.lock().unwrap().clone()
         }
@@ -1227,6 +1453,16 @@ pub(crate) mod testing {
         fn update_offered(&self) -> bool {
             self.steps.lock().unwrap().push("update_offered");
             *self.update.lock().unwrap()
+        }
+        fn background_item_off(&self) -> bool {
+            self.background_item_off
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(false)
+        }
+        fn open_login_items(&self) {
+            self.steps.lock().unwrap().push("open_login_items");
         }
     }
 }

@@ -281,17 +281,30 @@ impl WorkspaceManager {
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let reachable = self.local_core_reachable();
+        let reachable = self.local_core_reachable() && !self.local_core_turned_off();
         let place = presentation.wording().this_computer_phrase;
         let local = self.binding.local();
         let stopped = local.and_then(|binding| binding.connection_error())
             == Some(spaceterm_core::CoreError::Stopped);
-        let (title, detail): (&'static str, SharedString) = if reachable {
+        // macOS keeps SpaceTerm Core off until the person turns it on in Login Items, so the
+        // stage says what launch says and offers that list, never a reconnect that can't reach it.
+        let turned_off = self.local_core_turned_off().then(|| {
+            super::launch::present(
+                super::launch::LaunchState::LoginItemOff,
+                presentation.wording().this_computer,
+            )
+        });
+        let (title, detail): (&'static str, SharedString) = if let Some(turned_off) = &turned_off {
+            (turned_off.title, turned_off.detail.clone())
+        } else if reachable {
             // A reachable server ends any reconnect the person asked for.
             self.launch.reconnect_from.set(None);
             (EMPTY_TITLE, EMPTY_DETAIL.into())
         } else if stopped {
-            (OFFLINE_TITLE, stopped_detail(place))
+            (
+                super::launch::STOPPED_TITLE,
+                super::launch::stopped_detail(presentation.wording().this_computer),
+            )
         } else {
             (OFFLINE_TITLE, offline_detail(place))
         };
@@ -336,27 +349,44 @@ impl WorkspaceManager {
                         });
                     })
             };
-            // A stopped server answers no reconnect: only Start reverses Stop.
-            let primary = if stopped {
-                action(LaunchAction::Start)
+            if let Some(turned_off) = turned_off {
+                // Turning SpaceTerm Core off was the person's choice, so nothing warns.
+                let mut state = crate::ui::empty_state::empty_state(title, cx)
+                    .icon(IconName::Pause)
+                    .tone(EmptyStateTone::Quiet);
+                for (index, &launch_action) in turned_off.actions.iter().enumerate() {
+                    state = if index == 0 {
+                        state.primary(action(launch_action))
+                    } else {
+                        state.link(action(launch_action))
+                    };
+                }
+                state
+            } else if stopped {
+                // A stopped server answers no reconnect: only Start reverses Stop. Stopping was the
+                // person's choice, so nothing warns.
+                crate::ui::empty_state::empty_state(title, cx)
+                    .icon(IconName::Pause)
+                    .tone(EmptyStateTone::Quiet)
+                    .primary(action(LaunchAction::Start))
             } else {
                 let owner = manager.clone();
-                Button::new(RECONNECT_SELECTOR, LaunchAction::Retry.label())
+                let reconnect_button = Button::new(RECONNECT_SELECTOR, LaunchAction::Retry.label())
                     .tab_stop(true)
                     .disabled(matches!(reconnect, Some(Reconnect::Trying)))
                     .debug_selector(RECONNECT_SELECTOR)
                     .on_activate(move |_, _, cx| {
                         let _ = owner.update(cx, |manager, cx| manager.reconnect_local(cx));
-                    })
-            };
-            let state = crate::ui::empty_state::empty_state(title, cx)
-                .icon(IconName::TriangleAlert)
-                .tone(EmptyStateTone::Warning)
-                .primary(primary)
-                .link(action(LaunchAction::Settings));
-            match reconnect.filter(|_| !stopped) {
-                Some(status) => state.footer(status.render(cx)),
-                None => state,
+                    });
+                let state = crate::ui::empty_state::empty_state(title, cx)
+                    .icon(IconName::TriangleAlert)
+                    .tone(EmptyStateTone::Warning)
+                    .primary(reconnect_button)
+                    .link(action(LaunchAction::Settings));
+                match reconnect {
+                    Some(status) => state.footer(status.render(cx)),
+                    None => state,
+                }
             }
         };
         div()
@@ -459,12 +489,6 @@ impl Reconnect {
             .child(content)
             .into_any_element()
     }
-}
-
-/// Why the window shows no Workspace while this computer's server is stopped. `place` is the
-/// host's phrase for this computer.
-pub(super) fn stopped_detail(place: &str) -> SharedString {
-    format!("You stopped SpaceTerm Core on {place}. Start it to use its Workspaces.").into()
 }
 
 /// `place` is the host's phrase for this computer, such as "this Mac".

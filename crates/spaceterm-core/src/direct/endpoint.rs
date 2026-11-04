@@ -1,4 +1,4 @@
-use super::{DEFAULT_PORT, DirectError};
+use super::DirectError;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{OnceLock, mpsc};
 use std::time::Instant;
@@ -18,9 +18,10 @@ impl std::fmt::Debug for Endpoint {
 }
 
 impl Endpoint {
-    /// Parse DNS or IP with an optional port, without resolving DNS.
-    pub fn parse(authority: &str) -> Result<Self, DirectError> {
-        let endpoint = Self::authority_value(authority)?;
+    /// Parse DNS or IP with an optional port, without resolving DNS. `default_port` applies
+    /// when no port is given: [`super::default_port`] of the build identity.
+    pub fn parse(authority: &str, default_port: u16) -> Result<Self, DirectError> {
+        let endpoint = Self::authority_value(authority, Some(default_port))?;
         if endpoint
             .host
             .parse::<IpAddr>()
@@ -31,15 +32,18 @@ impl Endpoint {
         Ok(endpoint)
     }
 
-    /// Validate an existing QUIC endpoint, including local loopback connections.
+    /// Validate an existing QUIC endpoint, including local loopback connections. [`Self::url`]
+    /// always writes the port, so a URL without one is refused.
     pub fn from_url(url: &str) -> Result<Self, DirectError> {
         let authority = url
             .strip_prefix("quic://")
             .ok_or(DirectError::InvalidAddress)?;
-        Self::authority_value(authority)
+        Self::authority_value(authority, None)
     }
 
-    fn authority_value(authority: &str) -> Result<Self, DirectError> {
+    /// `default_port` is `None` when the port is required.
+    fn authority_value(authority: &str, default_port: Option<u16>) -> Result<Self, DirectError> {
+        let default_port = || default_port.ok_or(DirectError::InvalidAddress);
         if authority.is_empty()
             || authority.len() > 320
             || authority.bytes().any(|byte| byte.is_ascii_whitespace())
@@ -47,7 +51,7 @@ impl Endpoint {
             return Err(DirectError::InvalidAddress);
         }
         let (host, port) = if let Ok(address) = authority.parse::<IpAddr>() {
-            (address.to_string(), DEFAULT_PORT)
+            (address.to_string(), default_port()?)
         } else if let Some(bracketed) = authority.strip_prefix('[') {
             let (host, rest) = bracketed
                 .split_once(']')
@@ -56,7 +60,7 @@ impl Endpoint {
                 .parse::<std::net::Ipv6Addr>()
                 .map_err(|_| DirectError::InvalidAddress)?;
             let port = if rest.is_empty() {
-                DEFAULT_PORT
+                default_port()?
             } else {
                 rest.strip_prefix(':')
                     .ok_or(DirectError::InvalidAddress)?
@@ -71,7 +75,7 @@ impl Endpoint {
                     port.parse::<u16>()
                         .map_err(|_| DirectError::InvalidAddress)?,
                 ),
-                None => (authority, DEFAULT_PORT),
+                None => (authority, default_port()?),
             };
             let host = host.strip_suffix('.').unwrap_or(host);
             if host.is_empty()
@@ -207,7 +211,7 @@ mod tests {
             ("192.0.2.8", "192.0.2.8:9231"),
             ("[2001:db8::8]:9443", "[2001:db8::8]:9443"),
         ] {
-            let endpoint = Endpoint::parse(input).unwrap();
+            let endpoint = Endpoint::parse(input, 9231).unwrap();
             assert_eq!(endpoint.authority(), expected);
             assert_eq!(Endpoint::from_url(&endpoint.url()).unwrap(), endpoint);
         }
@@ -225,7 +229,27 @@ mod tests {
             "host:22:9231",
             "quic://host",
         ] {
-            assert!(Endpoint::parse(input).is_err());
+            assert!(Endpoint::parse(input, 9231).is_err());
         }
+    }
+
+    #[test]
+    fn the_default_port_is_the_build_identitys_and_a_url_names_its_port() {
+        assert_eq!(super::super::default_port("spaceterm"), 9231);
+        assert_eq!(super::super::default_port("spaceterm-preflight"), 9232);
+        assert_eq!(super::super::default_port("spaceterm-development"), 9233);
+        let preflight = super::super::default_port("spaceterm-preflight");
+        assert_eq!(
+            Endpoint::parse("penguin", preflight).unwrap().authority(),
+            "penguin:9232"
+        );
+        assert_eq!(
+            Endpoint::from_url("quic://penguin"),
+            Err(DirectError::InvalidAddress)
+        );
+        assert_eq!(
+            Endpoint::from_url("quic://[2001:db8::8]"),
+            Err(DirectError::InvalidAddress)
+        );
     }
 }

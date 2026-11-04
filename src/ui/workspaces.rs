@@ -2250,7 +2250,8 @@ mod core_workspaces {
         /// What `workspace`'s sidebar row says in place of its directory, if anything.
         ///
         /// Ordinary name and pin edits project their values immediately. Worktree operations
-        /// retain their progress, and "Not connected" waits for an established connection loss.
+        /// retain their progress, "Stopped" follows the person's Stop, and "Not connected" waits
+        /// for an established connection loss.
         pub(crate) fn row_status(
             &self,
             workspace: Id,
@@ -2260,6 +2261,12 @@ mod core_workspaces {
                 return Some(WorkspaceRowStatus::progress(text));
             }
             match self.edits.editability() {
+                // The person stopped the server, so its rows say so quietly: nothing failed.
+                WorkspaceEditability::Offline
+                    if self.connection_error == Some(spaceterm_core::CoreError::Stopped) =>
+                {
+                    Some(WorkspaceRowStatus::progress("Stopped"))
+                }
                 WorkspaceEditability::Offline
                     if self.connection_error.is_some() || self.standing_in =>
                 {
@@ -3937,6 +3944,14 @@ mod core_workspaces {
 
             pub(crate) fn set_error(&self, error: spaceterm_core::CoreError) {
                 self.publish(|snapshot| snapshot.error = Some(error));
+            }
+
+            /// A connection attempt reached the server again.
+            pub(crate) fn reconnect(&self) {
+                self.publish(|snapshot| {
+                    snapshot.connected = true;
+                    snapshot.error = None;
+                });
             }
 
             /// Answers the last submitted edit with `outcome`.

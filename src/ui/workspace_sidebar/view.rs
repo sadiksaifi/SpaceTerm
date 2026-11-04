@@ -2293,6 +2293,16 @@ fn workspace_menu_entries(
             .debug_selector("workspace-menu-row-reconnect"),
         );
     }
+    if binding.is_some_and(|binding| binding.stopped) {
+        entries.push(
+            MenuEntry::action(
+                "Start SpaceTerm Core",
+                RowMenuCommand::Workspace(WorkspaceMenuCommand::StartCore),
+            )
+            .icon(|foreground, size| Icon::new(IconName::Play, size, foreground).into_any_element())
+            .debug_selector("workspace-menu-row-start-core"),
+        );
+    }
     // Detach Workspace stops presenting the Workspace here and releases this client's control
     // of its Panes. The Workspace and its Terminal Sessions keep running on the server, so it
     // sits apart from Kill Workspace, which ends them for every client. It needs no server, so

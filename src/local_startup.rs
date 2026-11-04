@@ -26,6 +26,49 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
     )
 }
 
+/// Whether macOS keeps this account's SpaceTerm Core from running because its background item is
+/// turned off in Login Items. Reading it changes nothing, so launch never turns the item back on.
+pub fn background_item_off() -> bool {
+    let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+    Service::for_identity(identity).is_ok_and(|service| service_background_item_off(&service))
+}
+
+/// The policy [`background_item_off`] applies, for a service already resolved. Launch and
+/// Settings both read it before any step that would install or start the service, so neither
+/// turns on an item the person turned off.
+pub fn service_background_item_off(service: &Service) -> bool {
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    {
+        service
+            .login_item()
+            .is_ok_and(|plist| crate::platform::macos_login_items::turned_off(&plist))
+    }
+    #[cfg(not(all(target_os = "macos", feature = "desktop")))]
+    {
+        let _ = service;
+        false
+    }
+}
+
+/// Opens System Settings at Login Items & Extensions, where the person turns SpaceTerm Core on.
+/// Call it on the event thread, so macOS brings System Settings forward.
+pub fn open_login_items() {
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    crate::platform::macos_system_settings::open(crate::platform::macos_login_items::LOGIN_ITEMS);
+}
+
+/// Offers to move a packaged SpaceTerm out of the disk image it was opened from, before any
+/// window opens, since only an installed SpaceTerm installs SpaceTerm Core. Returns whether
+/// SpaceTerm must quit now. Call it on the event thread.
+pub fn leave_disk_image() -> bool {
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    {
+        cfg!(spaceterm_packaged) && crate::platform::macos_app_location::leave_disk_image()
+    }
+    #[cfg(not(all(target_os = "macos", feature = "desktop")))]
+    false
+}
+
 /// Only source Development launch may bypass the retained service lifecycle.
 pub(crate) fn owned_foreground() -> bool {
     !cfg!(spaceterm_packaged)

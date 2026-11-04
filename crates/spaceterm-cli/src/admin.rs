@@ -174,7 +174,10 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
         CoreCommand::Unpair { device, confirm } => {
             unpair::run(&context, device, confirm.as_deref())
         }
-        CoreCommand::Uninstall(confirm) => uninstall::run(&context, confirm.confirm.as_deref()),
+        CoreCommand::Uninstall {
+            delete_data,
+            confirm,
+        } => uninstall::run(&context, *delete_data, confirm.as_deref()),
     };
     context.credentials.report(&mut reply.envelope);
     reply.notice = notice(&context, command, &reply);

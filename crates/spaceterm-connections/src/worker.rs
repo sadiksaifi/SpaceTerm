@@ -156,7 +156,7 @@ impl DirectConnections {
     ) -> Result<JoinId, DirectError> {
         let mut invitation = direct::Invitation::parse(&text)?;
         if invitation.machine_pin().build != self.0.identity {
-            return Err(DirectError::WrongMachine);
+            return Err(DirectError::IdentityMismatch);
         }
         if let Some(endpoint) = endpoint {
             invitation = invitation.with_address(&endpoint.authority())?;
@@ -1225,7 +1225,7 @@ pub(super) mod enrollment_tests {
             .unwrap()
             .as_secs()
             + 60;
-        let endpoint = direct::Endpoint::parse("Public.EXAMPLE:9443").unwrap();
+        let endpoint = direct::Endpoint::parse("Public.EXAMPLE:9443", 9231).unwrap();
         let fixture =
             Unjoined::new("Server 1", EnrollmentStage::Claim, expires).join(Some(endpoint));
 

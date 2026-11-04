@@ -116,6 +116,9 @@ mod local_path;
 #[cfg(feature = "desktop")]
 pub mod local_startup;
 
+/// The installed SpaceTerm desktop app and its removal, shared by Settings and `spaceterm uninstall`.
+pub mod installed_app;
+
 /// Terminal runtime contracts shared by graphical and headless hosts.
 pub mod runtime;
 

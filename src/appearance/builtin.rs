@@ -210,7 +210,7 @@ pub(super) fn chrome_definition(appearance: Appearance) -> ChromeDefinition {
             on_emphasis: 0xffffff,
             info: 0x1a66c8,
             success: 0x22713f,
-            warning: 0x8a5b12,
+            warning: 0x704a0d,
             error: 0xb8352f,
             shadow: 0x0000002b,
         },

@@ -2644,6 +2644,7 @@ mod draft {
                 edits: true,
                 edits_reason: "",
                 status: None,
+                stopped: false,
             }),
         }
     }

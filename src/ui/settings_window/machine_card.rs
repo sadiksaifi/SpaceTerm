@@ -113,6 +113,7 @@ pub(super) const fn service_verb(action: ServiceAction) -> &'static str {
         ServiceAction::Restart => "Restarting\u{2026}",
         ServiceAction::Uninstall => "Uninstalling\u{2026}",
         ServiceAction::AuthorizeInstall | ServiceAction::AuthorizeStart => "Authorizing\u{2026}",
+        ServiceAction::OpenLoginItems => "Opening\u{2026}",
     }
 }
 
@@ -165,6 +166,10 @@ fn local_observed(
         }
         Some((Some(ServicePhase::NotRunning), _, _)) => {
             CoreState::new("Not running", "Not running", Tone::Attention)
+        }
+        // Turning SpaceTerm Core off was the person's choice, so nothing warns.
+        Some((Some(ServicePhase::TurnedOff), _, _)) => {
+            CoreState::new("Off in Login Items", "Off in Login Items", Tone::Idle)
         }
         Some((Some(ServicePhase::Running), _, _)) | None if connected => {
             CoreState::new("Running", "Running \u{b7} this account", Tone::Live).live()
@@ -259,6 +264,8 @@ struct MenuItem {
     enabled: bool,
     destructive: bool,
     separator_before: bool,
+    /// Why the entry is unavailable, shown once above it.
+    note: Option<SharedString>,
 }
 
 impl MenuItem {
@@ -270,7 +277,13 @@ impl MenuItem {
             enabled,
             destructive: false,
             separator_before: false,
+            note: None,
         }
+    }
+
+    fn note(mut self, note: Option<SharedString>) -> Self {
+        self.note = note;
+        self
     }
 
     fn destructive(mut self) -> Self {
@@ -296,7 +309,7 @@ impl SettingsWindow {
                 let service = self.core_service.as_ref().map(|row| {
                     let presentation = row.presentation();
                     (
-                        row.state.status.map(ServicePhase::of),
+                        row.state.phase(),
                         presentation.working,
                         presentation.authorization.is_some(),
                     )
@@ -333,11 +346,6 @@ impl SettingsWindow {
                     Some((_, status, _)) => direct_state(status),
                     None => CoreState::new("Not connected", "Not connected", Tone::Idle),
                 };
-                // A server SpaceTerm stopped reads as stopped rather than as a connection that
-                // keeps retrying, until someone starts it on its own computer.
-                if !state.live && self.remote_stopped(route) {
-                    state = CoreState::new("Stopped", "Stopped", Tone::Idle);
-                }
                 state.operation = self.remote_operation(route);
                 state.checking |= self.remote_reading(route);
                 state
@@ -421,12 +429,6 @@ impl SettingsWindow {
             return None;
         }
         let name = self.machine_name(choice);
-        // The stop SpaceTerm made explains itself, including where to start the server again.
-        if let MachineChoice::Direct(route) = choice
-            && self.remote_stopped(route)
-        {
-            return None;
-        }
         if self.core_unreachable(choice) {
             let observed = machine_selection::facts(&choice.key(), cx)
                 .map(|facts| facts.observed_at)
@@ -461,11 +463,7 @@ impl SettingsWindow {
     /// Whether this computer has no installed server service, so only Install, not Start,
     /// brings its settings back.
     fn local_core_not_installed(&self) -> bool {
-        let service = self
-            .core_service
-            .as_ref()
-            .and_then(|row| row.state.status)
-            .map(ServicePhase::of);
+        let service = self.core_service.as_ref().and_then(|row| row.state.phase());
         let connection = self.local_core.as_ref().map(|row| row.current_status());
         service == Some(ServicePhase::NotInstalled)
             || matches!(
@@ -483,11 +481,7 @@ impl SettingsWindow {
                     .local_core
                     .as_ref()
                     .map_or(LocalCoreStatus::NotChecked, |row| row.current_status());
-                let phase = self
-                    .core_service
-                    .as_ref()
-                    .and_then(|row| row.state.status)
-                    .map(ServicePhase::of);
+                let phase = self.core_service.as_ref().and_then(|row| row.state.phase());
                 let LocalCoreStatus::Failed(error) = connection else {
                     return false;
                 };
@@ -597,6 +591,7 @@ impl SettingsWindow {
         let idle = presentation.working.is_none();
         let mut buttons = Vec::new();
         for action in [
+            ServiceAction::OpenLoginItems,
             ServiceAction::AuthorizeStart,
             ServiceAction::AuthorizeInstall,
             ServiceAction::Start,
@@ -688,11 +683,20 @@ impl SettingsWindow {
         } else {
             reconnect.after_separator()
         });
-        menu.push(
-            MenuItem::new("Remove Machine\u{2026}", StatusStep::UnpairThisDevice, true)
-                .destructive()
-                .after_separator(),
-        );
+        // Remove Machine uninstalls SpaceTerm Core over the lane and unpairs in one step. A
+        // machine SpaceTerm doesn't reach is only removed here.
+        let remove = if self.remote_reachable(&route, cx) {
+            let blocked = self.remote_removal_blocked(&route);
+            MenuItem::new(
+                Change::Remove.label(),
+                StatusStep::Remote(Change::Remove),
+                ready && blocked.is_none(),
+            )
+            .note(blocked)
+        } else {
+            MenuItem::new(Change::Remove.label(), StatusStep::UnpairThisDevice, true)
+        };
+        menu.push(remove.destructive().after_separator());
         (buttons, menu)
     }
 
@@ -1409,12 +1413,14 @@ impl SettingsWindow {
                 if item.separator_before {
                     entries.push(MenuEntry::separator());
                 }
-                entries.push(
-                    MenuEntry::action(item.label, item.step)
-                        .disabled(!item.enabled)
-                        .destructive(item.destructive)
-                        .debug_selector(item.selector.to_string()),
-                );
+                let entry = MenuEntry::action(item.label, item.step)
+                    .disabled(!item.enabled)
+                    .destructive(item.destructive)
+                    .debug_selector(item.selector.to_string());
+                entries.push(match item.note {
+                    Some(note) => MenuEntry::section(note, vec![entry]),
+                    None => entry,
+                });
             }
             let owner = cx.weak_entity();
             let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
@@ -1609,7 +1615,7 @@ fn button_rank(step: &StatusStep) -> Option<u8> {
     match step {
         StatusStep::Version(VersionStep::Local(UpdateAction::Update))
         | StatusStep::Remote(Change::Update) => Some(1),
-        StatusStep::Local(ServiceAction::Start) => Some(2),
+        StatusStep::Local(ServiceAction::Start | ServiceAction::OpenLoginItems) => Some(2),
         _ => None,
     }
 }
@@ -1694,6 +1700,7 @@ const fn service_progress(action: ServiceAction) -> &'static str {
         ServiceAction::AuthorizeInstall | ServiceAction::AuthorizeStart => {
             "Waiting for authorization\u{2026}"
         }
+        ServiceAction::OpenLoginItems => "Opening Login Items\u{2026}",
     }
 }
 

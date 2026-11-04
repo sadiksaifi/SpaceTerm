@@ -7,7 +7,75 @@ use crate::{CoreError, host, protocol, storage::Directory};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// One exact enrollment authorized by the owning account during Add Server.
+pub mod preflight;
+
+/// Why Add Machine refuses a computer. Each is one sentence in the desktop. Every refusal but
+/// `UdpBlocked` comes before anything is uploaded. SSH preflight reports the first that applies,
+/// in declaration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "refusal", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SetupRefusal {
+    /// A Mac with an Intel processor. SpaceTerm Core runs on Apple silicon only.
+    IntelMac,
+    /// Linux on an ARM processor. SpaceTerm Core runs on x86_64 Linux only.
+    ArmLinux,
+    /// Neither macOS nor Linux.
+    OtherSystem,
+    /// macOS older than [`MINIMUM_MACOS`]. `found` is its (major, minor), `None` when unknown.
+    MacosTooOld { found: Option<(u16, u16)> },
+    /// glibc older than [`MINIMUM_GLIBC`]. `found` is its (major, minor), `None` when the
+    /// computer has no glibc.
+    GlibcTooOld { found: Option<(u16, u16)> },
+    /// The SSH account is root. SpaceTerm Core runs under an ordinary account.
+    RootAccount,
+    /// Linux with no systemd user manager for the account.
+    NoUserManager,
+    /// A Mac with nobody logged in, so there is no Aqua session to start SpaceTerm Core in.
+    /// `filevault` is true when FileVault is on. Automatic login is then unavailable, so the
+    /// desktop suggests it only when this is false.
+    NobodyLoggedIn { filevault: bool },
+    /// The user declined to let SpaceTerm Core keep running after logout on a remote Linux
+    /// machine. Remote Linux requires linger.
+    LingerDeclined,
+    /// Setup changed Network Access, but no QUIC packet reached SpaceTerm Core at `port`. Setup
+    /// put Network Access back as it was, and `access` is what SpaceTerm Core then reported.
+    /// Try Again changes it again.
+    UdpBlocked { port: u16, access: RestoredAccess },
+}
+
+/// Network Access after setup put it back, as SpaceTerm Core reported it then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoredAccess {
+    /// Network Access is off.
+    Off,
+    /// Network Access is on, at the address it had before setup.
+    On,
+    /// SpaceTerm Core didn't report Network Access after it put it back.
+    Unknown,
+}
+
+impl RestoredAccess {
+    /// What `status`, read after the restore, says. `None` is a read that failed.
+    pub fn read(status: Option<&DirectStatus>) -> Self {
+        match status {
+            Some(status) if status.enabled => Self::On,
+            Some(_) => Self::Off,
+            None => Self::Unknown,
+        }
+    }
+}
+
+/// The exit status of an SSH setup enrollment step when another program holds the Network
+/// Access port. Nothing changed on the machine.
+pub const PORT_IN_USE: u8 = 78;
+
+/// The oldest macOS release SpaceTerm Core runs on, as (major, minor).
+pub const MINIMUM_MACOS: (u16, u16) = (26, 0);
+/// The oldest glibc SpaceTerm Core runs on, as (major, minor).
+pub const MINIMUM_GLIBC: (u16, u16) = (2, 35);
+
+/// One exact enrollment authorized by the owning account during Add Machine.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetupRequest {
@@ -27,6 +95,27 @@ pub struct SetupRequest {
 pub struct SetupCancellation {
     pub pin: MachinePin,
     pub operation: [u8; 32],
+    /// The Network Access to restore after the cancellation, when setup changed it. Add Machine
+    /// restores it when the enrolled device could not reach SpaceTerm Core over UDP.
+    pub restore: Option<NetworkRestore>,
+}
+
+/// Network Access as it was before setup changed it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkRestore {
+    pub policy: Option<NetworkPolicy>,
+    pub enabled: bool,
+}
+
+impl NetworkRestore {
+    /// Network Access as `status`, read before setup changed it, reports it.
+    pub fn before(status: &DirectStatus) -> Self {
+        Self {
+            policy: status.policy.clone(),
+            enabled: status.enabled,
+        }
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -118,10 +207,34 @@ pub fn setup_direct(
     })
 }
 
-/// Revoke only the pairing allocated by this setup operation, including after a lost reply.
+/// Revoke only the pairing allocated by this setup operation, including after a lost reply, then
+/// restore Network Access when the request names how it was.
 pub fn cancel_direct(
     identity: &str,
     request: SetupCancellation,
+) -> Result<SetupCancellationReply, CoreError> {
+    let reply = cancel_setup(identity, &request)?;
+    if let Some(restore) = request.restore {
+        // An earlier policy is kept as the configured one even while access is off.
+        match manage(
+            identity,
+            SETUP,
+            Management::SetPolicy {
+                policy: restore.policy,
+                enabled: restore.enabled,
+            },
+        )? {
+            ManagementReply::Status(status) if status.pin == request.pin => {}
+            ManagementReply::Status(_) => return Err(DirectError::PinMismatch.into()),
+            _ => return Err(CoreError::Protocol),
+        }
+    }
+    Ok(reply)
+}
+
+fn cancel_setup(
+    identity: &str,
+    request: &SetupCancellation,
 ) -> Result<SetupCancellationReply, CoreError> {
     match manage(
         identity,
@@ -237,6 +350,56 @@ fn ssh_local_address(connection: &str) -> Option<std::net::IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn direct_status(enabled: bool, bind: Option<&str>) -> DirectStatus {
+        DirectStatus {
+            setup_generation: 0,
+            pin: MachinePin {
+                build: "spaceterm".into(),
+                core: [1; 32],
+                public_key: [2; 32],
+                certificate: [3; 32],
+            },
+            policy: bind.map(|bind| NetworkPolicy::new(bind.parse().unwrap()).unwrap()),
+            enabled,
+            machine_name: "penguin".into(),
+            listener: crate::direct::ListenerState::Off,
+            network_addresses: Err(DirectError::Transport),
+        }
+    }
+
+    /// A blocked UDP port puts Network Access back exactly as it was: off when setup turned it
+    /// on, and on at its earlier address when setup only moved it.
+    #[test]
+    fn a_restore_puts_network_access_back_as_it_was_before_setup() {
+        for (enabled, bind) in [
+            (false, None),
+            (false, Some("192.0.2.8:9231")),
+            (true, Some("127.0.0.1:9231")),
+        ] {
+            let before = direct_status(enabled, bind);
+            assert_eq!(
+                NetworkRestore::before(&before),
+                NetworkRestore {
+                    policy: before.policy.clone(),
+                    enabled,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn restored_access_reads_what_the_core_reported_after_the_restore() {
+        assert_eq!(
+            RestoredAccess::read(Some(&direct_status(false, Some("192.0.2.8:9231")))),
+            RestoredAccess::Off
+        );
+        assert_eq!(
+            RestoredAccess::read(Some(&direct_status(true, Some("127.0.0.1:9231")))),
+            RestoredAccess::On
+        );
+        assert_eq!(RestoredAccess::read(None), RestoredAccess::Unknown);
+    }
     #[test]
     fn ssh_socket_metadata_accepts_only_the_complete_connection_tuple() {
         assert_eq!(

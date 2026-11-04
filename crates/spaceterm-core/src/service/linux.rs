@@ -263,33 +263,17 @@ fn linger_command(uid: u32, authorization: LingerAuthorization) -> Command {
     } else {
         "/usr/bin/sudo"
     });
-    match authorization {
-        LingerAuthorization::RemoteNoninteractive => {
-            process.args(["-n", "--"]);
-        }
-        LingerAuthorization::RemoteStdin => {
-            process.args(["-S", "-p", "", "--"]);
-        }
-        LingerAuthorization::Terminal | LingerAuthorization::Desktop => {}
-    }
     process.args(["/usr/bin/loginctl", "enable-linger", &uid.to_string()]);
     linger_stdio(&mut process, authorization);
     process
 }
 
 fn linger_stdio(process: &mut Command, authorization: LingerAuthorization) {
-    match authorization {
-        LingerAuthorization::Terminal => {}
-        LingerAuthorization::Desktop
-        | LingerAuthorization::RemoteNoninteractive
-        | LingerAuthorization::RemoteStdin => {
-            process.stdin(if authorization == LingerAuthorization::RemoteStdin {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
-            });
-            process.stdout(Stdio::null()).stderr(Stdio::null());
-        }
+    if authorization == LingerAuthorization::Desktop {
+        process
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
     }
 }
 
@@ -342,8 +326,13 @@ impl Supervisor for UserService {
         self.systemctl(&["daemon-reload"])?;
         self.check(candidate, false)
     }
+    /// At boot with linger, otherwise from login to logout.
     fn startup(&self) -> ServiceStartup {
-        ServiceStartup::AtBoot
+        if self.linger().is_ok() {
+            ServiceStartup::AtBoot
+        } else {
+            ServiceStartup::AtLogin
+        }
     }
     fn check(&self, runtime: &Path, removing: bool) -> Result<(), CoreError> {
         self.registration()
@@ -409,8 +398,11 @@ impl Supervisor for UserService {
         self.systemctl(&["daemon-reload"])?;
         self.check(runtime, false)
     }
+    /// Starting needs no linger. Without it the account's user manager, and SpaceTerm Core with
+    /// it, runs while the user is logged in and stops at logout. Remote setup and pairing
+    /// require linger themselves.
     fn prepare_start(&self) -> Result<(), CoreError> {
-        self.linger()
+        Ok(())
     }
     fn linger_authorized(&self) -> Result<Option<bool>, CoreError> {
         match self.linger() {
@@ -441,6 +433,8 @@ impl Supervisor for UserService {
         Duration::from_secs(90)
     }
     fn uninstall(&self, runtime: &Path) -> Result<(), CoreError> {
+        // The startup link goes first, so systemd never keeps a link to a removed unit.
+        self.startup(false)?;
         self.registration().remove(&self.contents(runtime)?)?;
         self.systemctl(&["daemon-reload"])?;
         Ok(())
@@ -625,85 +619,6 @@ mod tests {
         manager.observation = Ok(b"LoadState=not-found\n".to_vec());
         assert_eq!(manager.run(), Ok(()));
         assert_eq!(manager.commands(), ["show", "start"]);
-    }
-
-    #[test]
-    fn remote_linger_authorization_limits_sudo_to_the_requested_account_and_prompt_mode() {
-        for (authorization, expected) in [
-            (
-                LingerAuthorization::RemoteNoninteractive,
-                vec!["-n", "--", "/usr/bin/loginctl", "enable-linger", "501"],
-            ),
-            (
-                LingerAuthorization::RemoteStdin,
-                vec![
-                    "-S",
-                    "-p",
-                    "",
-                    "--",
-                    "/usr/bin/loginctl",
-                    "enable-linger",
-                    "501",
-                ],
-            ),
-        ] {
-            let command = linger_command(501, authorization);
-            assert_eq!(command.get_program(), "/usr/bin/sudo");
-            assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
-        }
-    }
-
-    #[test]
-    fn only_explicit_remote_password_authorization_inherits_standard_input() {
-        for authorization in ["noninteractive", "password"] {
-            let mut child = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "service::linux::tests::remote_linger_input_child",
-                ])
-                .env("SPACETERM_TEST_LINGER_INPUT", authorization)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(b"authorized-fixture\n")
-                .unwrap();
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "runs only inside the isolated remote stdin policy test"]
-    fn remote_linger_input_child() {
-        let authorization = match std::env::var("SPACETERM_TEST_LINGER_INPUT")
-            .unwrap()
-            .as_str()
-        {
-            "noninteractive" => LingerAuthorization::RemoteNoninteractive,
-            "password" => LingerAuthorization::RemoteStdin,
-            _ => panic!("invalid fixture mode"),
-        };
-        let mut process = Command::new("/bin/sh");
-        process.args([
-            "-c",
-            "IFS= read -r value && test \"$value\" = authorized-fixture",
-        ]);
-        linger_stdio(&mut process, authorization);
-        assert_eq!(
-            process.status().unwrap().success(),
-            authorization == LingerAuthorization::RemoteStdin
-        );
     }
 
     #[test]

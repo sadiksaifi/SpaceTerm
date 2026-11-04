@@ -66,7 +66,7 @@ pub(super) fn service_status(status: ServiceStatus) -> ObservedCoreStatus {
         ServicePhase::Running => ObservedCoreStatus::Running,
         ServicePhase::Stopped => ObservedCoreStatus::Stopped,
         ServicePhase::NotInstalled => ObservedCoreStatus::NotInstalled,
-        ServicePhase::NotRunning => ObservedCoreStatus::Unavailable,
+        ServicePhase::NotRunning | ServicePhase::TurnedOff => ObservedCoreStatus::Unavailable,
     }
 }
 
@@ -109,6 +109,11 @@ pub(super) fn merged(
 ) -> LastKnownFacts {
     let previous = previous.unwrap_or_default();
     let core = observed.core;
+    // Stop ends every Terminal Session, so a Core observed stopped or uninstalled runs none.
+    let running_sessions = match observed.status {
+        Some(ObservedCoreStatus::Stopped | ObservedCoreStatus::NotInstalled) => Some(0),
+        _ => observed.running_sessions.or(previous.running_sessions),
+    };
     LastKnownFacts {
         observed_at: now,
         status: observed.status.unwrap_or(previous.status),
@@ -128,7 +133,7 @@ pub(super) fn merged(
         starts_automatically: observed
             .starts_automatically
             .or(previous.starts_automatically),
-        running_sessions: observed.running_sessions.or(previous.running_sessions),
+        running_sessions,
         ..previous
     }
 }
@@ -383,6 +388,32 @@ mod tests {
         assert_eq!(next.machine.as_deref(), Some("penguin"));
         assert_eq!(next.version.as_deref(), Some("2.1.0"));
         assert_eq!(next.observed_at, 20);
+    }
+
+    /// Stop ends every Terminal Session, so a Core observed stopped or uninstalled runs none,
+    /// whatever count it reported while it ran.
+    #[test]
+    fn a_core_observed_stopped_runs_no_sessions() {
+        for status in [
+            ObservedCoreStatus::Stopped,
+            ObservedCoreStatus::NotInstalled,
+        ] {
+            let previous = LastKnownFacts {
+                observed_at: 10,
+                status: ObservedCoreStatus::Running,
+                running_sessions: Some(1),
+                ..LastKnownFacts::default()
+            };
+            let next = merged(
+                Some(previous),
+                20,
+                Observation {
+                    status: Some(status),
+                    ..Observation::default()
+                },
+            );
+            assert_eq!(next.running_sessions, Some(0), "{status:?}");
+        }
     }
 
     /// A Stop read from the service while SpaceTerm isn't connected is still what was observed

@@ -417,6 +417,7 @@ fn open_settings_with_capabilities(
                         &std::sync::Arc::default(),
                     ),
                 )),
+                removal: None,
             }),
             window,
             cx,
@@ -1277,6 +1278,7 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             | SettingsRowId::SettingsFile
             | SettingsRowId::ExportSettings
             | SettingsRowId::ImportSettings
+            | SettingsRowId::UninstallSpaceTerm
             | SettingsRowId::ResetAllSettings => continue,
         };
         let slots = if row == SettingsRowId::TerminalTheme {
@@ -2804,6 +2806,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::SettingsFile => "settings-file-frame",
             SettingsRowId::ExportSettings => "settings-document-export",
             SettingsRowId::ImportSettings => "settings-import",
+            SettingsRowId::UninstallSpaceTerm => "settings-uninstall-spaceterm",
             SettingsRowId::ResetAllSettings => "settings-reset-all",
             SettingsRowId::Shortcut(_) => {
                 return Some(format!("{}-control", row.descriptor().selector));
