@@ -80,7 +80,8 @@ pub(crate) struct UpdateHistory {
     last_reminder: Option<u64>,
     reminder_stage: UpdateStage,
     pub(crate) last_check: Option<u64>,
-    /// The version whose release notes the person has read. A first install has read its own.
+    /// The newest version whose release notes the person has read. A first install has read its
+    /// own.
     notes_read: Option<String>,
 }
 impl UpdateHistory {
@@ -202,15 +203,31 @@ impl UpdateHistory {
         self.notes_read.get_or_insert_with(|| installed.to_owned());
     }
 
-    /// Whether `installed` came by an update whose notes the person has not opened.
+    /// Whether `installed` is newer than every version whose notes the person has opened.
     pub(crate) fn notes_unread(&self, installed: &str) -> bool {
         self.notes_read
             .as_deref()
-            .is_some_and(|read| read != installed)
+            .is_some_and(|read| newer(installed, read))
     }
 
+    /// Records that the person opened the notes of `installed`. Older notes read later leave the
+    /// newer record in place.
     pub(crate) fn read_notes(&mut self, installed: &str) {
-        self.notes_read = Some(installed.to_owned());
+        if self
+            .notes_read
+            .as_deref()
+            .is_none_or(|read| newer(installed, read))
+        {
+            self.notes_read = Some(installed.to_owned());
+        }
+    }
+}
+
+/// Whether `version` follows `than`. Development versions have no order, so any other one is newer.
+fn newer(version: &str, than: &str) -> bool {
+    match (stable_version(version), stable_version(than)) {
+        (Some(version), Some(than)) => version > than,
+        _ => version != than,
     }
 }
 
@@ -240,6 +257,27 @@ mod tests {
         updated.read_notes("0.9.0");
         updated.launched("0.9.0");
         assert!(!updated.notes_unread("0.9.0"));
+    }
+
+    #[test]
+    fn going_back_to_an_older_version_revives_no_notes() {
+        let mut history = UpdateHistory::default();
+        history.launched("0.8.0");
+        history.launched("0.9.0");
+        history.read_notes("0.9.0");
+        history.launched("0.8.0");
+        assert!(
+            !history.notes_unread("0.8.0"),
+            "0.8.0 is older than the notes read"
+        );
+        history.read_notes("0.8.0");
+        history.launched("0.9.0");
+        assert!(
+            !history.notes_unread("0.9.0"),
+            "opening older notes keeps newer ones read"
+        );
+        history.launched("0.10.0");
+        assert!(history.notes_unread("0.10.0"));
     }
 
     #[test]
