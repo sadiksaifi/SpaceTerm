@@ -1,8 +1,6 @@
 use super::*;
 use crate::service::runtime::test_support::{COMMIT, VERSION, target, with_artifact};
 use crate::service::{ServiceStartup, Supervisor};
-use crate::update::feed::FeedTarget;
-use crate::update::fetch::{FeedSource, FetchError, Signed};
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 
@@ -111,41 +109,6 @@ pub(crate) fn serving_with(paths: &crate::host::Paths, host: Arc<dyn LaneHost>) 
         Arc::new(crate::permissions::Unsupported),
     )
     .unwrap()
-}
-
-/// [`serving_with`] whose Release feed comes from `feed`.
-pub(crate) fn serving_with_feed(
-    paths: &crate::host::Paths,
-    host: Arc<dyn LaneHost>,
-    feed: Arc<dyn FeedSource>,
-) -> Arc<LaneCore> {
-    LaneCore::new(
-        Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running)),
-        host,
-        Some(FeedCheck::fixture(paths.data.clone(), None, feed)),
-        Box::new(|_| Ok(())),
-        Arc::new(crate::permissions::Unsupported),
-    )
-    .unwrap()
-}
-
-/// A release host that takes `0` to answer and then cannot be reached, as a slow download holds
-/// the lane connection that asked for it.
-pub(crate) struct SlowFeed(pub Duration);
-impl FeedSource for SlowFeed {
-    fn feed(&self, _: FeedTarget) -> Result<Signed, FetchError> {
-        std::thread::sleep(self.0);
-        Err(FetchError::Network)
-    }
-    fn archive(
-        &self,
-        _: FeedTarget,
-        _: &crate::update::facts::Version,
-        _: u64,
-        _: &mut dyn std::io::Write,
-    ) -> Result<(), FetchError> {
-        panic!("no feed to download from")
-    }
 }
 
 const ACTOR: Actor = Actor {
@@ -924,6 +887,86 @@ fn a_core_without_a_feed_refuses_to_check_or_install_from_one() {
         assert_eq!(
             code(lane.lane.answer(LaneRequest::StageFetch, &ACTOR)),
             "no_update_feed"
+        );
+    });
+}
+
+/// A release host that cannot be reached.
+struct Unreachable;
+impl crate::update::fetch::FeedSource for Unreachable {
+    fn feed(
+        &self,
+        _: crate::update::feed::FeedTarget,
+    ) -> Result<crate::update::fetch::Signed, crate::update::fetch::FetchError> {
+        Err(crate::update::fetch::FetchError::Network)
+    }
+    fn archive(
+        &self,
+        _: crate::update::feed::FeedTarget,
+        _: &crate::update::facts::Version,
+        _: u64,
+        _: &mut dyn std::io::Write,
+    ) -> Result<(), crate::update::fetch::FetchError> {
+        panic!("no feed to download from")
+    }
+}
+
+#[test]
+fn a_feed_check_that_fails_answers_its_code_and_ends_its_operation() {
+    use crate::update::facts::UpdateCheck;
+    with_lane(|lane| {
+        let served = LaneCore::new(
+            lane.service.clone(),
+            lane.host.clone(),
+            Some(FeedCheck::fixture(
+                lane.service.paths.data.clone(),
+                None,
+                Arc::new(Unreachable),
+            )),
+            Box::new(|_| Ok(())),
+            Arc::new(crate::permissions::Unsupported),
+        )
+        .unwrap();
+        assert_eq!(
+            code(served.answer(LaneRequest::Check, &ACTOR)),
+            "feed_unreachable"
+        );
+        assert_eq!(
+            code(served.answer(LaneRequest::StageFetch, &ACTOR)),
+            "feed_unreachable"
+        );
+        let LaneReply::Facts { boot, facts } = served.answer(LaneRequest::Facts {}, &ACTOR) else {
+            panic!("expected facts");
+        };
+        assert_eq!(boot, hex(&served.boot));
+        // The fixture is a Development Core, whose facts always report its check as off.
+        assert_eq!(facts.check, UpdateCheck::Disabled);
+        assert_eq!(facts.operation, None, "the check ended");
+        let LaneReply::Status(status) = served.answer(LaneRequest::Status, &ACTOR) else {
+            panic!("expected a status");
+        };
+        assert_eq!(
+            status.update.map(|facts| facts.running),
+            Some(facts.running)
+        );
+    });
+}
+
+#[test]
+fn a_push_of_the_running_version_is_refused_before_any_byte() {
+    with_lane(|lane| {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(
+            code(lane.lane.answer(
+                LaneRequest::StageUpload {
+                    version: VERSION.into(),
+                    length: 10,
+                    sha256: "ab".repeat(32),
+                    signature: encode(&[3; 64]),
+                },
+                &ACTOR,
+            )),
+            "not_newer"
         );
     });
 }

@@ -409,11 +409,7 @@ impl Updates {
     ///
     /// # Errors
     /// Returns what [`Self::admits`] returns.
-    pub fn begin_install(
-        &self,
-        version: Version,
-        total: u64,
-    ) -> Result<Installing, InstallError> {
+    pub fn begin_install(&self, version: Version, total: u64) -> Result<Installing, InstallError> {
         {
             let mut live = self.shared.lock();
             self.shared.admits(&live, &version)?;

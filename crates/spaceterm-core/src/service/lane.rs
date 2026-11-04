@@ -350,7 +350,8 @@ pub struct LaneCore {
     boot: Id,
     host: Arc<dyn LaneHost>,
     tokens: Tokens,
-    updates: Updates,
+    /// The update engine, or why it could not open, such as a Core with no installed runtime.
+    updates: Result<Updates, CoreError>,
     /// A Release Core's own feed. None for Preflight and Development.
     feed: Option<Arc<FeedCheck>>,
     pushes: Pushes,
@@ -391,10 +392,10 @@ impl LaneCore {
             Box::new(move |op| super::helper::launch(&owned, op)),
             crate::permissions::native(&paths.identity),
         )?;
-        if let Some(feed) = &lane.feed {
+        if let (Some(feed), Ok(updates)) = (&lane.feed, &lane.updates) {
             let host = lane.host.clone();
             feed.clone()
-                .spawn(lane.updates.clone(), Arc::new(move || host.stopping()));
+                .spawn(updates.clone(), Arc::new(move || host.stopping()));
         }
         Ok(lane)
     }
@@ -408,7 +409,7 @@ impl LaneCore {
     ) -> Result<Arc<Self>, CoreError> {
         let core = service.passive_machine_id()?.ok_or(CoreError::NotSetUp)?;
         let lane = Self {
-            updates: Updates::open(service.clone())?,
+            updates: Updates::open(service.clone()),
             pushes: Pushes::new(service.paths.data.clone()),
             service,
             core,
@@ -550,39 +551,32 @@ impl LaneCore {
             } => self.preview_network(access, actor, caller),
             LaneRequest::Status => self
                 .admin()
-                .status(Some((self.host.as_ref(), self.facts())))
+                .status(Some((self.host.as_ref(), self.facts().ok())))
                 .map(LaneReply::Status),
-            LaneRequest::Facts {} => Ok(self.facts_reply(self.facts())),
-            LaneRequest::WaitFacts { boot, revision } => Ok(if boot == hex(&self.boot) {
-                self.facts_reply(self.updates.wait(revision, WAIT_FACTS_LIMIT))
-            } else {
-                self.facts_reply(self.facts())
+            LaneRequest::Facts {} => self.facts().map(|facts| self.facts_reply(facts)),
+            LaneRequest::WaitFacts { boot, revision } => self.updates().map(|updates| {
+                self.facts_reply(if boot == hex(&self.boot) {
+                    updates.wait(revision, WAIT_FACTS_LIMIT)
+                } else {
+                    updates.facts()
+                })
             }),
-            LaneRequest::Check => {
-                return (
-                    self.check()
-                        .map(|()| self.facts_reply(self.facts()))
-                        .unwrap_or_else(|failure| source_error(&failure)),
-                    None,
-                );
-            }
-            LaneRequest::StageFetch => return (self.stage_fetch(), None),
+            LaneRequest::Check => return (sourced(self.check()), None),
+            LaneRequest::StageFetch => return (sourced(self.stage_fetch()), None),
             LaneRequest::StageUpload {
                 version,
                 length,
                 sha256,
                 signature,
             } => {
-                return (
-                    self.stage_upload(connection, &version, length, &sha256, &signature),
-                    None,
-                );
+                let reply = self.stage_upload(connection, &version, length, &sha256, &signature);
+                return (sourced(reply), None);
             }
             LaneRequest::UploadChunk {
                 upload,
                 offset,
                 data,
-            } => return (self.upload_chunk(&upload, offset, &data), None),
+            } => return (sourced(self.upload_chunk(&upload, offset, &data)), None),
             LaneRequest::Preview { action } => self.preview(&action, actor),
             LaneRequest::Resolve { operation } => self.resolve(&operation),
             LaneRequest::Acknowledge { operation } => self.acknowledge(&operation, actor),
@@ -654,9 +648,13 @@ impl LaneCore {
         })
     }
 
+    fn updates(&self) -> Result<&Updates, CoreError> {
+        self.updates.as_ref().map_err(|error| *error)
+    }
+
     /// The Core's update facts now.
-    fn facts(&self) -> UpdateFacts {
-        self.updates.facts()
+    fn facts(&self) -> Result<UpdateFacts, CoreError> {
+        self.updates().map(FactsSource::facts)
     }
 
     fn facts_reply(&self, facts: UpdateFacts) -> LaneReply {
@@ -666,23 +664,21 @@ impl LaneCore {
         }
     }
 
-    /// Checks the feed now. A finished check that found nothing newer succeeds.
-    fn check(&self) -> Result<(), SourceError> {
+    /// Checks the feed now, and answers the facts after. A check that found nothing newer
+    /// succeeds.
+    fn check(&self) -> Result<LaneReply, SourceError> {
         let feed = self.feed.as_ref().ok_or(SourceError::NoFeed)?;
-        feed.run(&self.updates).map(drop)
+        feed.run(self.updates()?)?;
+        Ok(self.facts_reply(self.facts()?))
     }
 
-    fn stage_fetch(&self) -> LaneReply {
-        let Some(feed) = self.feed.as_ref() else {
-            return source_error(&SourceError::NoFeed);
-        };
-        match feed.run(&self.updates) {
-            Ok(outcome) => LaneReply::Installed {
-                installed: matches!(outcome, crate::update::sources::Outcome::Installed(_)),
-                facts: Box::new(self.facts()),
-            },
-            Err(failure) => source_error(&failure),
-        }
+    fn stage_fetch(&self) -> Result<LaneReply, SourceError> {
+        let feed = self.feed.as_ref().ok_or(SourceError::NoFeed)?;
+        let outcome = feed.run(self.updates()?)?;
+        Ok(LaneReply::Installed {
+            installed: matches!(outcome, crate::update::sources::Outcome::Installed(_)),
+            facts: Box::new(self.facts()?),
+        })
     }
 
     fn stage_upload(
@@ -692,47 +688,44 @@ impl LaneCore {
         length: u64,
         sha256: &str,
         signature: &str,
-    ) -> LaneReply {
+    ) -> Result<LaneReply, SourceError> {
         let (Ok(version), Ok(signature)) = (
             Version::parse(version),
             base64::engine::general_purpose::STANDARD.decode(signature),
         ) else {
-            return error(&CoreError::Protocol);
+            return Err(SourceError::Protocol);
         };
-        match self.pushes.begin(
-            &self.updates,
+        let upload = self.pushes.begin(
+            self.updates()?,
             connection,
             version,
             length,
             sha256,
             &signature,
-        ) {
-            Ok(upload) => LaneReply::UploadProgress {
-                upload,
-                next_offset: 0,
-            },
-            Err(failure) => source_error(&failure),
-        }
+        )?;
+        Ok(LaneReply::UploadProgress {
+            upload,
+            next_offset: 0,
+        })
     }
 
-    fn upload_chunk(&self, id: &str, offset: u64, data: &str) -> LaneReply {
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-            return error(&CoreError::Protocol);
-        };
+    fn upload_chunk(&self, id: &str, offset: u64, data: &str) -> Result<LaneReply, SourceError> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| SourceError::Protocol)?;
         if bytes.len() > MAX_CHUNK {
-            return error(&CoreError::Protocol);
+            return Err(SourceError::Protocol);
         }
-        match self.pushes.chunk(id, offset, &bytes) {
-            Ok(Received::Next(next_offset)) => LaneReply::UploadProgress {
+        Ok(match self.pushes.chunk(id, offset, &bytes)? {
+            Received::Next(next_offset) => LaneReply::UploadProgress {
                 upload: id.to_owned(),
                 next_offset,
             },
-            Ok(Received::Installed(_)) => LaneReply::Installed {
+            Received::Installed(_) => LaneReply::Installed {
                 installed: true,
-                facts: Box::new(self.facts()),
+                facts: Box::new(self.facts()?),
             },
-            Err(failure) => source_error(&failure),
-        }
+        })
     }
 
     /// Plans a Network Access change without applying it. A paired caller's change that keeps
@@ -1164,11 +1157,11 @@ impl Admin<'_> {
     /// and its update facts. A stopped server reports its persisted update facts.
     pub fn status(
         &self,
-        live: Option<(&dyn LaneHost, UpdateFacts)>,
+        live: Option<(&dyn LaneHost, Option<UpdateFacts>)>,
     ) -> Result<LaneStatus, CoreError> {
         let (live, facts) = match live {
-            Some((host, facts)) => (Some(host), Some(facts)),
-            None => (None, None),
+            Some((host, facts)) => (Some(host), facts),
+            None => (None, Updates::stored(self.service).ok()),
         };
         let Some((_, state)) = self.service.read()? else {
             // Set up but never installed: nothing runs, and no runtime is approved.
@@ -1204,10 +1197,7 @@ impl Admin<'_> {
             automatic_start: snapshot.enabled,
             linger: self.service.linger()?,
             runtime: self.approved(&state)?,
-            update: match facts {
-                Some(facts) => Some(facts),
-                None => Updates::stored(self.service).ok(),
-            },
+            update: facts,
             activation: if unresolved {
                 LaneActivation::Unresolved
             } else {
@@ -1595,6 +1585,10 @@ fn refusal() -> LaneReply {
     LaneReply::Error {
         code: super::lane_codes::DISCONNECTS_EVERY_DEVICE.to_owned(),
     }
+}
+
+fn sourced(reply: Result<LaneReply, SourceError>) -> LaneReply {
+    reply.unwrap_or_else(|failure| source_error(&failure))
 }
 
 fn source_error(failure: &SourceError) -> LaneReply {

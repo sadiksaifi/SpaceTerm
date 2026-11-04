@@ -385,7 +385,8 @@ fn hex(bytes: &[u8]) -> String {
 
 /// The pushes a running Core receives over its service lane: a desktop's embedded build, or a
 /// local archive the CLI sends. One push at a time; a new one replaces an unfinished one, and a
-/// push whose connection closes ends with it. Neither records a failure.
+/// push whose connection closes ends with it. A push that breaks off tells its sender alone; the
+/// Core records a failure only for a completed push that fails verification.
 pub struct Pushes {
     data: PathBuf,
     slot: Mutex<Option<Push>>,
@@ -501,11 +502,11 @@ impl Pushes {
             return Err(SourceError::Protocol);
         }
         if let Err(error) = push.file.write_all(data) {
-            let failure = install_failure(super::fetch::storage(&error));
-            if let Some(push) = slot.take() {
-                push.installing.fail(failure);
-            }
-            return Err(InstallError::Failed(failure).into());
+            // A push that breaks off tells its sender alone, and records nothing.
+            *slot = None;
+            return Err(
+                InstallError::Failed(install_failure(super::fetch::storage(&error))).into(),
+            );
         }
         push.digest.update(data);
         push.next += data.len() as u64;
@@ -528,7 +529,7 @@ impl Pushes {
             ..
         } = push;
         if file.sync_all().is_err() {
-            installing.fail(InstallFailure::DiskFull);
+            drop(installing);
             return Err(InstallError::Failed(InstallFailure::DiskFull).into());
         }
         drop(file);
