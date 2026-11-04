@@ -1787,3 +1787,51 @@ mod flow {
         });
     }
 }
+
+#[test]
+fn facts_messages_keep_their_json_shape() {
+    use crate::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+    assert_eq!(
+        serde_json::from_str::<LaneRequest>(r#"{"request":"facts"}"#).unwrap(),
+        LaneRequest::Facts
+    );
+    assert_eq!(
+        serde_json::from_str::<LaneRequest>(r#"{"request":"wait_facts","boot":"b1","revision":4}"#)
+            .unwrap(),
+        LaneRequest::WaitFacts {
+            boot: "b1".into(),
+            revision: 4
+        }
+    );
+    let reply = LaneReply::Facts {
+        boot: "b1".into(),
+        facts: Box::new(UpdateFacts {
+            revision: 4,
+            platform: Platform::MacosArm64,
+            running: Version::parse("0.9.0").unwrap(),
+            pending: None,
+            sessions: 2,
+            operation: None,
+            check: UpdateCheck::Succeeded { at: 10 },
+            skipped: None,
+            last_failure: None,
+        }),
+    };
+    let json = serde_json::json!({
+        "reply": "facts",
+        "boot": "b1",
+        "facts": {
+            "revision": 4,
+            "platform": "macos-arm64",
+            "running": "0.9.0",
+            "pending": null,
+            "sessions": 2,
+            "operation": null,
+            "check": { "succeeded": { "at": 10 } },
+            "skipped": null,
+            "last_failure": null,
+        },
+    });
+    assert_eq!(serde_json::to_value(&reply).unwrap(), json);
+    assert_eq!(serde_json::from_value::<LaneReply>(json).unwrap(), reply);
+}

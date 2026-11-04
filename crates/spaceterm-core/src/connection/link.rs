@@ -458,6 +458,8 @@ impl CoreLink {
                 let _ = self.send(&ClientMessage::Pong(Pong { nonce }), true);
             }
             CoreMessage::Pong(_) => {}
+            // #797's client slice exposes the latest facts per connection.
+            CoreMessage::UpdateFacts(_) => {}
             CoreMessage::Goodbye(fatal) => {
                 self.fail(LinkError::Goodbye(fatal));
                 return Err(LinkError::Goodbye(fatal));

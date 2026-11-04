@@ -55,6 +55,8 @@ pub const MAX_FRAME: usize = 128 * 1024;
 pub const MAX_CHUNK: usize = 64 * 1024;
 /// How long the lane waits for the next request before it closes the connection.
 const REQUEST_LIMIT: Duration = Duration::from_secs(30);
+/// How long `WaitFacts` waits for a change before it answers with the unchanged facts.
+pub const WAIT_FACTS_LIMIT: Duration = Duration::from_secs(20);
 /// How often an admitted operation's fence is rechecked against the ledger.
 const FENCE_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -62,6 +64,15 @@ const FENCE_INTERVAL: Duration = Duration::from_millis(500);
 #[serde(tag = "request", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaneRequest {
     Status,
+    /// Reads the Core's update facts.
+    Facts,
+    /// Answers with the facts once the Core's `boot` or facts `revision` differs from these, or
+    /// after [`WAIT_FACTS_LIMIT`] with the unchanged facts. A client that shares no work major
+    /// with the Core follows facts this way.
+    WaitFacts {
+        boot: String,
+        revision: u64,
+    },
     Check,
     StageFetch,
     StageUpload {
@@ -128,6 +139,11 @@ pub enum LaneAction {
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum LaneReply {
     Status(LaneStatus),
+    /// The update facts of the Core run `boot`.
+    Facts {
+        boot: String,
+        facts: Box<crate::update::facts::UpdateFacts>,
+    },
     Check(LaneCheck),
     Staged {
         installation: String,
@@ -531,6 +547,8 @@ impl LaneCore {
                 .status(Some(self.host.as_ref()))
                 .map(LaneReply::Status),
             LaneRequest::Check => self.admin().check().map(LaneReply::Check),
+            // #797's update engine answers these.
+            LaneRequest::Facts | LaneRequest::WaitFacts { .. } => Err(CoreError::Unsupported),
             LaneRequest::StageFetch => self
                 .admin()
                 .stage_fetch()

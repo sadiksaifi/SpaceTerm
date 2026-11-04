@@ -49,6 +49,11 @@ pub const MAX_PATH_BYTES: usize = 4096;
 /// Workspaces, Tabs, repository facts and encoding overhead.
 pub const MAX_INVENTORY_BYTES: usize =
     2 * crate::hierarchy::MAX_PANES * (MAX_PANE_METADATA_BYTES + 4 * MAX_PATH_BYTES);
+/// Largest `UpdateFacts` message: every stranded Paired Device at its name limit with its
+/// pairing and length prefix, plus 4 KiB for the versions and the other fields.
+pub const MAX_UPDATE_FACTS_BYTES: usize = crate::update::facts::MAX_STRANDED
+    * (32 + 2 + crate::update::facts::MAX_DEVICE_NAME_BYTES)
+    + 4096;
 
 /// Requests one client keeps in flight on one connection.
 pub const MAX_REQUESTS_IN_FLIGHT: usize = 64;

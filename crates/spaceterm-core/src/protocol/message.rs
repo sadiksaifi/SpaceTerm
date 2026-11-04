@@ -48,6 +48,9 @@ pub enum CoreMessage {
     Pane(PaneMessage),
     /// The latest Workspace inventory. A newer revision replaces one not yet written.
     Inventory(Box<InventoryRevision>),
+    /// The Core's update facts: the first message after admission, then again after every
+    /// change. A newer value replaces one not yet written.
+    UpdateFacts(Box<crate::update::facts::UpdateFacts>),
     Ping(Ping),
     Pong(Pong),
     /// The server closes the connection after this message.
@@ -350,6 +353,7 @@ impl CoreMessage {
                 }
                 Ok(())
             }
+            Self::UpdateFacts(facts) => check(facts.validate().is_ok()),
             Self::Pane(_) | Self::Ping(_) | Self::Pong(_) | Self::Goodbye(_) => Ok(()),
         }
     }
