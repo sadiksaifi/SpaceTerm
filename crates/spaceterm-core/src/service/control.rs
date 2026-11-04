@@ -52,23 +52,28 @@ impl Confirmation {
 
 /// Shared destructive-action copy, without service access or an authority grant.
 pub struct Wording {
-    core: String,
+    /// The Machine the copy names: This Mac, This Computer, or the selected machine's name.
+    machine: String,
     action: Action,
     running: bool,
     startup: ServiceStartup,
 }
 
 impl Wording {
-    /// Names the server from the compiled application identity.
-    pub fn new(identity: &str, action: Action, running: bool, startup: ServiceStartup) -> Self {
-        Self::for_core(display_name(identity), action, running, startup)
+    /// Names this computer: This Mac on macOS, This Computer elsewhere.
+    pub fn local(action: Action, running: bool, startup: ServiceStartup) -> Self {
+        Self::for_machine(this_computer(), action, running, startup)
     }
 
-    /// Names the server from a supplied name, so a remote confirmation names the machine the
-    /// person selected rather than the application identity this process was built as.
-    pub fn for_core(core: &str, action: Action, running: bool, startup: ServiceStartup) -> Self {
+    /// Names the Machine the person selected.
+    pub fn for_machine(
+        machine: &str,
+        action: Action,
+        running: bool,
+        startup: ServiceStartup,
+    ) -> Self {
         Self {
-            core: core.into(),
+            machine: machine.into(),
             action,
             running,
             startup,
@@ -91,11 +96,11 @@ impl Wording {
     }
 
     pub fn message(&self) -> String {
-        let core = &self.core;
+        let machine = &self.machine;
         match self.action {
-            Action::Stop => format!("Stop SpaceTerm Core on {core}?"),
-            Action::Restart => format!("Restart SpaceTerm Core on {core}?"),
-            Action::Uninstall => format!("Uninstall SpaceTerm Core on {core}?"),
+            Action::Stop => format!("Stop SpaceTerm Core on {machine}?"),
+            Action::Restart => format!("Restart SpaceTerm Core on {machine}?"),
+            Action::Uninstall => format!("Uninstall SpaceTerm Core on {machine}?"),
         }
     }
 
@@ -136,7 +141,8 @@ pub enum UpdateChange {
 /// authority grant. Each build is named by version and abbreviated commit, so two builds of one
 /// version read apart.
 pub struct UpdateWording {
-    core: String,
+    /// The Machine the copy names: This Mac, This Computer, or the selected machine's name.
+    machine: String,
     change: UpdateChange,
     previous: String,
     candidate: String,
@@ -147,16 +153,15 @@ pub struct UpdateWording {
 impl UpdateWording {
     /// `previous` is the approved build and `candidate` the verified build it changes to.
     /// `running` and `stopped` are the observation the confirmation binds.
-    pub fn new(
-        identity: &str,
+    pub fn local(
         change: UpdateChange,
         previous: &RetainedInstallation,
         candidate: &RetainedInstallation,
         running: bool,
         stopped: bool,
     ) -> Self {
-        Self::for_core(
-            display_name(identity),
+        Self::for_machine(
+            this_computer(),
             change,
             BuildName::of(previous),
             BuildName::of(candidate),
@@ -168,8 +173,8 @@ impl UpdateWording {
     /// Names the server from a supplied name and each build from supplied nonsecret values, so a
     /// remote confirmation names the machine the person selected and the builds a remote service
     /// reported, without a local installation directory.
-    pub fn for_core(
-        core: &str,
+    pub fn for_machine(
+        machine: &str,
         change: UpdateChange,
         previous: BuildName<'_>,
         candidate: BuildName<'_>,
@@ -178,7 +183,7 @@ impl UpdateWording {
     ) -> Self {
         let (previous, candidate) = build_labels(previous, candidate);
         Self {
-            core: core.into(),
+            machine: machine.into(),
             change,
             previous,
             candidate,
@@ -203,17 +208,17 @@ impl UpdateWording {
 
     pub fn message(&self) -> String {
         let Self {
-            core,
+            machine,
             previous,
             candidate,
             ..
         } = self;
         match self.change {
             UpdateChange::Update if self.stopped && !self.running => {
-                format!("Update the stopped SpaceTerm Core on {core} to {candidate}?")
+                format!("Update the stopped SpaceTerm Core on {machine} to {candidate}?")
             }
-            UpdateChange::Update => format!("Update SpaceTerm Core on {core} to {candidate}?"),
-            UpdateChange::Return => format!("Return SpaceTerm Core on {core} to {previous}?"),
+            UpdateChange::Update => format!("Update SpaceTerm Core on {machine} to {candidate}?"),
+            UpdateChange::Return => format!("Return SpaceTerm Core on {machine} to {previous}?"),
         }
     }
 
@@ -281,6 +286,15 @@ pub fn build_labels(first: BuildName<'_>, second: BuildName<'_>) -> (String, Str
         _ => format!("{})", name(build)),
     };
     (label(first), label(second))
+}
+
+/// How confirmations name the computer this process runs on.
+pub fn this_computer() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "This Mac"
+    } else {
+        "This Computer"
+    }
 }
 
 /// The application display name for a compiled service identity.
@@ -370,7 +384,7 @@ impl Controller {
             service: self.service.clone(),
             action,
             running,
-            wording: Wording::new(&self.service.identity, action, running, self.startup()),
+            wording: Wording::local(action, running, self.startup()),
         })
     }
 
@@ -393,16 +407,16 @@ mod tests {
 
     #[test]
     fn a_remote_confirmation_names_the_selected_machine_with_the_same_copy() {
-        let local = Wording::new(
-            "spaceterm-development",
-            Action::Stop,
-            true,
-            ServiceStartup::AtLogin,
-        );
-        let remote = Wording::for_core("penguin", Action::Stop, true, ServiceStartup::AtLogin);
+        let local = Wording::local(Action::Stop, true, ServiceStartup::AtLogin);
+        let remote = Wording::for_machine("penguin", Action::Stop, true, ServiceStartup::AtLogin);
+        let computer = if cfg!(target_os = "macos") {
+            "This Mac"
+        } else {
+            "This Computer"
+        };
         assert_eq!(
             local.message(),
-            "Stop SpaceTerm Core on SpaceTerm Development?"
+            format!("Stop SpaceTerm Core on {computer}?")
         );
         assert_eq!(remote.message(), "Stop SpaceTerm Core on penguin?");
         assert_eq!(local.title(), remote.title());
@@ -417,7 +431,7 @@ mod tests {
     #[test]
     fn an_uninstall_confirmation_says_what_is_kept_whether_or_not_the_core_runs() {
         let uninstall = |running, startup| {
-            Wording::for_core("penguin", Action::Uninstall, running, startup).detail()
+            Wording::for_machine("penguin", Action::Uninstall, running, startup).detail()
         };
         assert_eq!(
             uninstall(true, ServiceStartup::AtLogin),
@@ -443,7 +457,7 @@ mod tests {
             commit: "0123456789abcdef0123456789abcdef01234567",
             package: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
         };
-        let wording = UpdateWording::for_core(
+        let wording = UpdateWording::for_machine(
             "penguin",
             UpdateChange::Update,
             build("0.6.8"),
@@ -461,7 +475,7 @@ mod tests {
              Sessions on it end for every client, and Workspaces are kept."
         );
         let observed = |running, stopped| {
-            UpdateWording::for_core(
+            UpdateWording::for_machine(
                 "penguin",
                 UpdateChange::Update,
                 build("0.6.8"),
@@ -481,7 +495,7 @@ mod tests {
             "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). It isn\u{2019}t \
              running, so no Terminal Sessions end."
         );
-        let returning = UpdateWording::for_core(
+        let returning = UpdateWording::for_machine(
             "penguin",
             UpdateChange::Return,
             build("0.6.8"),

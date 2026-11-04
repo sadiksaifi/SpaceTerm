@@ -749,12 +749,7 @@ impl ServiceConfirmation {
             | ServiceAction::AuthorizeInstall
             | ServiceAction::AuthorizeStart => return None,
         };
-        let wording = control::Wording::new(
-            ApplicationIdentity::current().directory_name(),
-            control,
-            running,
-            startup,
-        );
+        let wording = control::Wording::local(control, running, startup);
         Some(Self {
             id,
             title: wording.title(),
@@ -1173,7 +1168,7 @@ pub(super) struct MachineServiceRow {
     /// Whether the service started the server on its own as of the last read that could tell,
     /// kept while a later read fails.
     last_confirmed_automatic_start: Option<bool>,
-    /// Start Server was chosen while a read ran. It follows once the reads finish, if they still
+    /// Start SpaceTerm Core was chosen while a read ran. It follows once the reads finish, if they still
     /// offer it.
     start_requested: bool,
     /// The service changed outside Settings while a read ran. That read may have observed the
@@ -1543,7 +1538,7 @@ impl SettingsWindow {
         service_reads && update_reads
     }
 
-    /// Starts the server once the reads that held Start Server back finish, if the service still
+    /// Starts the server once the reads that held Start SpaceTerm Core back finish, if the service still
     /// offers it. A read that found it running or couldn't read the service drops the request.
     pub(super) fn continue_requested_start(&mut self, cx: &mut Context<Self>) {
         let requested = self

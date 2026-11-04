@@ -23,7 +23,7 @@ const UPDATE_NEEDS_ATTENTION: &str = "Update needs attention";
 pub(crate) struct LocalUpdateFacts {
     /// The server's identity, when its service reports one. Rows for one server merge by it.
     pub(crate) core: Option<[u8; 32]>,
-    /// The update status as the Updates menu says it, and whether Update Server is offered, or
+    /// The update status as the Updates menu says it, and whether Update SpaceTerm Core is offered, or
     /// why the read failed.
     pub(crate) update: Result<(SharedString, bool), CoreError>,
 }
@@ -137,7 +137,7 @@ impl CoreUpdates {
         let mut inventory = Self {
             sources,
             rows: vec![MachineUpdateRow {
-                label: "This computer".into(),
+                label: crate::machine_connection::service::control::this_computer().into(),
                 detail: "Reading Update Status…".into(),
                 action: Some(CoreUpdateAction::Settings(MachineTarget::Local)),
             }],
@@ -252,7 +252,7 @@ fn local_row(passive: Result<(SharedString, bool), CoreError>) -> MachineUpdateR
         ),
     };
     MachineUpdateRow {
-        label: "This computer".into(),
+        label: crate::machine_connection::service::control::this_computer().into(),
         detail,
         action: Some(action),
     }
@@ -306,7 +306,7 @@ pub(crate) mod testing {
         }
     }
 
-    /// Installs a local server that reports `status`, offering Update Server when `offered`.
+    /// Installs a local server that reports `status`, offering Update SpaceTerm Core when `offered`.
     pub(crate) fn install(status: &'static str, offered: bool, cx: &mut App) {
         let scripted = ScriptedLocalUpdates(LocalUpdateFacts {
             core: None,

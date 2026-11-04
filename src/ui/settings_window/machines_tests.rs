@@ -833,7 +833,7 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     for action in [ServiceAction::Stop, ServiceAction::Restart] {
         let confirmation =
             ServiceConfirmation::for_action(action, true, login).expect("confirmation");
-        let core = crate::application_identity::ApplicationIdentity::current().display_name();
+        let core = crate::machine_connection::service::control::this_computer();
         let question = match action {
             ServiceAction::Stop => format!("Stop SpaceTerm Core on {core}?"),
             ServiceAction::Restart => format!("Restart SpaceTerm Core on {core}?"),

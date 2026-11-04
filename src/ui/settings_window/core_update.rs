@@ -1,6 +1,6 @@
-//! The local server's version and its one "Update Server..." journey. Reading stages nothing:
+//! The local server's version and its one "Update SpaceTerm Core..." journey. Reading stages nothing:
 //! the server package this SpaceTerm includes is verified and retained only after the person
-//! chooses Update Server, and only the change they then confirm replaces the approved runtime.
+//! chooses Update SpaceTerm Core, and only the change they then confirm replaces the approved runtime.
 
 use std::sync::Arc;
 
@@ -13,7 +13,6 @@ use spaceterm_ui::{
 
 use super::SettingsWindow;
 use super::local_operations::UpdateCompletion;
-use crate::application_identity::ApplicationIdentity;
 use crate::local_startup::CandidateError;
 use crate::machine_connection::CoreError;
 use crate::machine_connection::service::activation::{
@@ -181,7 +180,7 @@ fn read_facts(
     })
 }
 
-/// Whether the Server row offers Update Server for `service`, for a surface that opens
+/// Whether the Server row offers Update SpaceTerm Core for `service`, for a surface that opens
 /// the journey from elsewhere. Reads only, so it stages, installs, and starts nothing. Blocking.
 pub(crate) fn update_offered(service: &Service) -> bool {
     CoreUpdateControl::read(service).is_ok_and(|facts| {
@@ -570,9 +569,7 @@ pub(super) struct UpdateConfirmation {
 impl UpdateConfirmation {
     /// Uses the shared confirmation for this application's server.
     pub(super) fn of(prepared: &PreparedChange) -> Self {
-        let identity = ApplicationIdentity::current();
-        let wording = UpdateWording::new(
-            identity.directory_name(),
+        let wording = UpdateWording::local(
             prepared.change,
             &prepared.previous,
             &prepared.candidate,

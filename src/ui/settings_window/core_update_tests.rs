@@ -246,7 +246,7 @@ fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
     };
     let live = super::UpdateConfirmation::of(&prepared(true, false));
     assert_eq!(live.title, "Update SpaceTerm Core");
-    let core = crate::application_identity::ApplicationIdentity::current().display_name();
+    let core = crate::machine_connection::service::control::this_computer();
     assert_eq!(
         live.message.as_ref(),
         format!("Update SpaceTerm Core on {core} to 1.5.0 (commit bbbbbbb)?")
