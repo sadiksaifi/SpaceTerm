@@ -350,7 +350,7 @@ impl StatusItem {
             Command::Stop => "stop",
             _ => "restart",
         };
-        let message = format!("The {} server couldn\u{2019}t {operation}.", self.name);
+        let message = format!("The {} Core couldn\u{2019}t {operation}.", self.name);
         let alert = core_alert(&message, &error.to_string(), None, self.mtm);
         present(alert, self.activation, cx.windows().is_empty(), |_| {});
     }
@@ -548,8 +548,8 @@ pub(in crate::platform) mod tests {
 
     const ANSWER_CASES: [AnswerCase; 3] = [
         (
-            Some("Stop Server"),
-            &[("Cancel", "\r"), ("Stop Server", "")],
+            Some("Stop SpaceTerm Core"),
+            &[("Cancel", "\r"), ("Stop SpaceTerm Core", "")],
             0,
             &[
                 (Answering::Click(0), Some(false)),
@@ -561,8 +561,8 @@ pub(in crate::platform) mod tests {
             ],
         ),
         (
-            Some("Restart Server"),
-            &[("Cancel", "\r"), ("Restart Server", "")],
+            Some("Restart SpaceTerm Core"),
+            &[("Cancel", "\r"), ("Restart SpaceTerm Core", "")],
             0,
             &[
                 (Answering::Click(0), Some(false)),
@@ -596,7 +596,7 @@ pub(in crate::platform) mod tests {
         for (destructive, keys, focused, answers) in ANSWER_CASES {
             for &(answering, expected) in answers {
                 let alert = core_alert(
-                    "Stop the server?",
+                    "Stop SpaceTerm Core?",
                     "Stopping ends every Terminal Session.",
                     destructive,
                     mtm,

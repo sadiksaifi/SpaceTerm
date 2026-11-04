@@ -81,7 +81,7 @@ fn core_attention_counts_preserve_existing_warning_precedence() {
     assert_eq!(
         pill(None, None, &[attention.clone(), other_attention.clone()]).unwrap(),
         (
-            "Review 2 Servers".into(),
+            "Review 2 Machines".into(),
             PillTone::Neutral,
             None,
             PillCommand::Menu
@@ -90,7 +90,7 @@ fn core_attention_counts_preserve_existing_warning_precedence() {
     assert_eq!(
         pill(None, None, &[other_attention.clone(), offer.clone()]).unwrap(),
         (
-            "Review 2 Servers".into(),
+            "Review 2 Machines".into(),
             PillTone::Primary,
             None,
             PillCommand::Menu
@@ -113,7 +113,7 @@ fn core_attention_counts_preserve_existing_warning_precedence() {
     assert_eq!(
         pill(None, None, &[core("machine", CoreUpdateAction::Local)]),
         Some((
-            "Update Server".into(),
+            "Update SpaceTerm Core".into(),
             PillTone::Primary,
             None,
             PillCommand::Core(CoreUpdateAction::Local)
@@ -126,7 +126,7 @@ fn core_attention_counts_preserve_existing_warning_precedence() {
             &[core("local", CoreUpdateAction::Local), paired_attention()]
         ),
         Some((
-            "Review 2 Servers".into(),
+            "Review 2 Machines".into(),
             PillTone::Primary,
             None,
             PillCommand::Menu

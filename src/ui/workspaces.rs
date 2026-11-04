@@ -796,7 +796,7 @@ mod core_workspaces {
             match self {
                 Self::Missing => "Item Already Removed",
                 Self::Invalid => "Change Not Accepted",
-                Self::Limit => "Server Limit Reached",
+                Self::Limit => "Machine Limit Reached",
                 Self::Disconnected => "Changes Not Sent",
             }
         }

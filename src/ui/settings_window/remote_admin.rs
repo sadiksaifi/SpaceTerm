@@ -49,8 +49,8 @@ pub(crate) enum Change {
 impl Change {
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Stop => "Stop Server",
-            Self::Restart => "Restart Server",
+            Self::Stop => "Stop SpaceTerm Core",
+            Self::Restart => "Restart SpaceTerm Core",
             Self::Update => "Update\u{2026}",
         }
     }
@@ -171,7 +171,7 @@ impl RemoteFailure {
                 format!("{name} couldn\u{2019}t verify the update, so nothing changed.")
             }
             Self::ActivationUnresolved => format!(
-                "An earlier update of {name} hasn\u{2019}t finished. Finish it on its own computer with \u{201C}spaceterm server update\u{201D}."
+                "An earlier update of {name} hasn\u{2019}t finished. Finish it on its own computer with \u{201C}spaceterm update\u{201D}."
             ),
             Self::StartupFailed => format!("{name} didn\u{2019}t start after the change."),
             Self::Refused => {
@@ -519,7 +519,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
             };
             let (previous, candidate) = control::build_labels(build(from), build(to));
             let mut detail = format!(
-                "It changes from {previous} to {candidate}, replacing the running server. {ends} \
+                "It changes from {previous} to {candidate}, replacing the running SpaceTerm Core. {ends} \
                  Every client connected to it disconnects until it starts again, and Workspaces \
                  are kept."
             );
@@ -559,8 +559,7 @@ pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) 
         Ended::Changed(_, Settlement::Shutdown) => (
             format!(
                 "{name} closed its connection while stopping, so SpaceTerm can\u{2019}t confirm \
-                 the stop finished. Check on its own computer with \u{201C}spaceterm server \
-                 status\u{201D}, and start it again there."
+                 the stop finished. Check on its own computer with \u{201C}spaceterm status\u{201D}, and start it again there."
             ),
             CaptionTone::Warning,
         ),
@@ -766,10 +765,10 @@ impl SettingsWindow {
             )
         };
         let text = match self.remote_work(route)? {
-            Work::Performing(Act::Stop) => "Stopping the server\u{2026}".to_owned(),
-            Work::Performing(Act::Restart) => "Restarting the server\u{2026}".to_owned(),
+            Work::Performing(Act::Stop) => "Stopping SpaceTerm Core\u{2026}".to_owned(),
+            Work::Performing(Act::Restart) => "Restarting SpaceTerm Core\u{2026}".to_owned(),
             Work::Performing(Act::Update(to)) => {
-                named(to, "Updating to", "Updating the server\u{2026}")
+                named(to, "Updating to", "Updating SpaceTerm Core\u{2026}")
             }
             Work::Performing(Act::Return(to)) => {
                 named(to, "Restoring", "Restoring the previous version\u{2026}")

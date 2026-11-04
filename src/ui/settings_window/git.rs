@@ -34,7 +34,7 @@ pub(super) fn worktree_location_problem(problem: WorktreePathTemplateError) -> &
             "Include {branch} for separate Worktree directories."
         }
         WorktreePathTemplateError::InvalidCharacter => "Remove control characters.",
-        WorktreePathTemplateError::NotWritable => "The server can\u{2019}t write here.",
+        WorktreePathTemplateError::NotWritable => "SpaceTerm Core can\u{2019}t write here.",
     }
 }
 

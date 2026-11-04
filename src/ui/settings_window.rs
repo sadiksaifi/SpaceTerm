@@ -2293,7 +2293,7 @@ impl SettingsWindow {
     }
 
     fn reset_all_detail(&self) -> String {
-        "This can\u{2019}t be undone. Server connections and system permissions are kept."
+        "This can\u{2019}t be undone. Machine connections and system permissions are kept."
             .to_owned()
     }
 
@@ -2544,7 +2544,7 @@ impl SettingsWindow {
             ),
             SettingsRowId::PairedDevices => (
                 SharedString::new_static(
-                    "A paired device can do anything this computer can on this server.",
+                    "A paired device can do anything this computer can on this machine.",
                 ),
                 self.no_paired_devices_note()
                     .map(|text| (text, CaptionTone::Guidance)),

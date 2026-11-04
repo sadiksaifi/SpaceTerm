@@ -658,7 +658,7 @@ fn a_machine_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestA
     );
     assert!(!access_on(&window, cx));
     assert!(reads("Unknown", cx));
-    assert!(reads("Can\u{2019}t reach the server.", cx));
+    assert!(reads("Can\u{2019}t reach SpaceTerm Core.", cx));
     assert!(
         !reads(
             "SpaceTerm can\u{2019}t reach This Computer. Last known Network Access settings:",
@@ -747,10 +747,10 @@ fn an_incompatible_account_local_protocol_explains_the_version_mismatch(cx: &mut
     let (_, cx) = open_machines(&access, cx);
 
     assert!(reads(
-        "This SpaceTerm Client and the SpaceTerm Server on \"This Computer\" use incompatible SpaceTerm Protocol versions.",
+        "This SpaceTerm Client and SpaceTerm Core on \u{201C}This Computer\u{201D} use incompatible SpaceTerm Protocol versions.",
         cx,
     ));
-    assert!(!reads("Can\u{2019}t reach the server.", cx));
+    assert!(!reads("Can\u{2019}t reach SpaceTerm Core.", cx));
     assert!(!open(ACCESS_SELECTOR, cx));
     assert!(access.policies().is_empty());
 }
@@ -1131,7 +1131,7 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
     );
     assert!(
         !open(&format!("{LIST_SELECTOR}-1"), cx),
-        "All Servers no longer offers the unpaired server"
+        "All Machines no longer offers the unpaired server"
     );
     // The offline server's first revocation attempt fails, which leaves the unpair unconfirmed
     // until the person retries it.

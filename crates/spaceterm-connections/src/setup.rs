@@ -65,7 +65,7 @@ impl DirectConnections {
         }
         state.document.pending.push(PendingRecord::enrollment(
             operation,
-            "Server setup".into(),
+            "Machine setup".into(),
             endpoint.clone(),
             pin.clone(),
             operation,
@@ -641,7 +641,7 @@ mod tests {
             .complete_setup(
                 &prepared,
                 paired.clone(),
-                "Remote server".into(),
+                "Remote machine".into(),
                 &CancellationToken::default(),
             )
             .unwrap();
@@ -672,7 +672,7 @@ mod tests {
                 owner.complete_setup(
                     &prepared,
                     paired,
-                    "Remote server".into(),
+                    "Remote machine".into(),
                     &CancellationToken::default(),
                 ),
                 Err(DirectError::StorageUnavailable)
@@ -702,7 +702,7 @@ mod tests {
             .complete_setup(
                 &prepared,
                 paired.clone(),
-                "Remote server".into(),
+                "Remote machine".into(),
                 &CancellationToken::default(),
             )
             .unwrap();
@@ -727,7 +727,7 @@ mod tests {
             owner.complete_setup(
                 &prepared,
                 paired,
-                "Remote server".into(),
+                "Remote machine".into(),
                 &CancellationToken::default(),
             ),
             Err(DirectError::Transport)
@@ -748,7 +748,7 @@ mod tests {
             owner.complete_setup(
                 &prepared,
                 paired,
-                "Remote server".into(),
+                "Remote machine".into(),
                 &network.cancellation,
             ),
             Err(DirectError::Rejected)

@@ -179,7 +179,7 @@ fn a_confirmed_update_replaces_the_running_core_once(cx: &mut TestAppContext) {
     assert!(
         presentation
             .explanation
-            .contains("includes server version 1.5.0 (commit bbbbbbb)"),
+            .contains("includes SpaceTerm Core version 1.5.0 (commit bbbbbbb)"),
         "{}",
         presentation.explanation
     );
@@ -245,23 +245,23 @@ fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
         commit: Box::new(|| Err(CoreError::Changed)),
     };
     let live = super::UpdateConfirmation::of(&prepared(true, false));
-    assert_eq!(live.title, "Update Server");
+    assert_eq!(live.title, "Update SpaceTerm Core");
     let core = crate::application_identity::ApplicationIdentity::current().display_name();
     assert_eq!(
         live.message.as_ref(),
-        format!("Update the {core} server to 1.5.0 (commit bbbbbbb)?")
+        format!("Update SpaceTerm Core on {core} to 1.5.0 (commit bbbbbbb)?")
     );
     assert_eq!(
         live.detail.as_ref(),
         "It changes from 1.4.0 (commit aaaaaaa) to 1.5.0 (commit bbbbbbb). All Terminal Sessions \
          on it end for every client, and Workspaces are kept."
     );
-    assert_eq!(live.confirm, "Update Server");
+    assert_eq!(live.confirm, "Update SpaceTerm Core");
 
     let parked = super::UpdateConfirmation::of(&prepared(false, true));
     assert_eq!(
         parked.message.as_ref(),
-        format!("Update the stopped {core} server to 1.5.0 (commit bbbbbbb)?")
+        format!("Update the stopped SpaceTerm Core on {core} to 1.5.0 (commit bbbbbbb)?")
     );
     assert_eq!(
         parked.detail.as_ref(),
@@ -304,7 +304,7 @@ fn updating_a_stopped_core_keeps_it_stopped(cx: &mut TestAppContext) {
         harness
             .presentation()
             .explanation
-            .contains("Updating keeps the server stopped")
+            .contains("Updating keeps SpaceTerm Core stopped")
     );
 
     click(UPDATE_SELECTOR, harness.cx);
@@ -315,7 +315,7 @@ fn updating_a_stopped_core_keeps_it_stopped(cx: &mut TestAppContext) {
         harness
             .presentation()
             .explanation
-            .contains("you stopped the server")
+            .contains("you stopped SpaceTerm Core")
     );
     // Nothing started the server, and the update reached no Workspace Window.
     assert!(harness.service.changes().is_empty());
@@ -333,7 +333,7 @@ fn a_changed_machine_needs_a_fresh_confirmation(cx: &mut TestAppContext) {
     assert!(
         presentation
             .explanation
-            .contains("The server changed. Review the update again."),
+            .contains("SpaceTerm Core changed. Review the update again."),
         "{}",
         presentation.explanation
     );
@@ -471,7 +471,7 @@ fn an_approved_or_unavailable_build_offers_no_update() {
         if error == CandidateError::ClientRestartRequired {
             assert_eq!(
                 presentation.explanation.as_ref(),
-                "Quit and reopen SpaceTerm to update the server."
+                "Quit and reopen SpaceTerm to update SpaceTerm Core."
             );
         } else {
             assert!(

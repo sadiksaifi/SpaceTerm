@@ -215,7 +215,7 @@ pub(super) fn confirmation(core: &str, live: usize) -> (String, String, String) 
     (
         format!("End All Sessions on {core}?"),
         message,
-        "The server keeps running, and Workspaces, Tabs and Panes stay.".to_owned(),
+        "SpaceTerm Core keeps running, and Workspaces, Tabs and Panes stay.".to_owned(),
     )
 }
 

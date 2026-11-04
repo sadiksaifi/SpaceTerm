@@ -29,13 +29,13 @@ use std::time::Instant;
 pub enum LinkError {
     #[error("the connection closed")]
     Closed,
-    #[error("the server stopped responding")]
+    #[error("SpaceTerm Core stopped responding")]
     Unresponsive,
     #[error("the connection stopped making progress")]
     Stalled,
-    #[error("the server closed the connection")]
+    #[error("SpaceTerm Core closed the connection")]
     Goodbye(Fatal),
-    #[error("the server broke the protocol")]
+    #[error("SpaceTerm Core broke the protocol")]
     Violation,
     /// The link stays usable. The caller exceeded the requests in flight, the open channels, or
     /// the queued input.
@@ -51,7 +51,7 @@ pub enum LinkError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RequestError {
-    #[error("the server refused the request")]
+    #[error("SpaceTerm Core refused the request")]
     Refused(Refusal),
     #[error("{0}")]
     Link(LinkError),

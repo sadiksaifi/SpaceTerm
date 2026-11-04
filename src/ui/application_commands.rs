@@ -183,8 +183,8 @@ fn entries(cx: &App) -> Vec<CommandPaletteItem<PaletteEntry>> {
 }
 
 fn add_machine_entry() -> CommandPaletteItem<PaletteEntry> {
-    CommandPaletteItem::new(PaletteEntry::AddMachine, "Add Server\u{2026}")
-        .section("Servers")
+    CommandPaletteItem::new(PaletteEntry::AddMachine, "Add Machine\u{2026}")
+        .section("Machines")
         .keywords([
             "ssh",
             "remote",

@@ -40,7 +40,7 @@ pub(crate) use spaceterm_core::worktree::{
 pub(crate) enum WorktreeCreateError {
     #[error("the operation was not submitted")]
     NotSubmitted(&'static str),
-    #[error("the server could not complete the Worktree operation")]
+    #[error("SpaceTerm Core could not complete the Worktree operation")]
     Core(spaceterm_core::worktree::Error),
     #[error("git refuses the branch name")]
     InvalidName,

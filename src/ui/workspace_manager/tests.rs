@@ -10138,7 +10138,7 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
     let landing = A11yTree::read(cx)
         .focused()
         .map(|node| node["aria"]["label"].clone());
-    assert_eq!(landing, Some(serde_json::json!("Server Restarted")));
+    assert_eq!(landing, Some(serde_json::json!("SpaceTerm Core Restarted")));
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     let focused = A11yTree::read(cx)
@@ -10401,7 +10401,7 @@ fn try_again_on_the_offline_empty_view_should_reconnect_now_and_say_when_it_fail
         .fail_attempt(spaceterm_core::CoreError::NotRunning);
     harness.sync(cx);
     let failed = A11yTree::read(cx)
-        .find_text("Still not connected. The server is not running.")
+        .find_text("Still not connected. SpaceTerm Core is not running.")
         .is_some();
 
     assert_eq!(retries, 1, "Try Again asks the connection to reconnect now");
@@ -10420,7 +10420,7 @@ fn a_stopped_core_offers_start_core_on_the_empty_view(cx: &mut TestAppContext) {
 
     assert!(
         cx.debug_bounds("server-launch-start").is_some(),
-        "Start Server"
+        "Start SpaceTerm Core"
     );
     assert!(
         cx.debug_bounds(super::empty::RECONNECT_SELECTOR).is_none(),

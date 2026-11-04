@@ -81,17 +81,17 @@ pub(super) const DEFERRED_SELECTOR: &str = "add-server-deferred";
 
 /// What the host field's description says. It is also the field's accessibility hint.
 const HOST_DESCRIPTION: &str =
-    "Sign in with your SSH account to install, start and pair a SpaceTerm Server.";
+    "Sign in with your SSH account to install, start and pair SpaceTerm Core.";
 /// What the disclosure says while the address is hidden. It is also its accessibility hint.
 const ADDRESS_DISCLOSURE_DESCRIPTION: &str =
-    "Optional. Use when this computer reaches the server at a different name or address than SSH.";
+    "Optional. Use when this computer reaches the machine at a different name or address than SSH.";
 const HOST_INVALID: &str = "Enter an SSH host or alias without spaces or command options.";
 const ADDRESS_INVALID: &str =
     "Enter a host name or IP address, optionally followed by a port, such as studio.local:9231.";
 const LINK_DESCRIPTION: &str = "Paste the invitation link from the other computer.";
 /// What the invitation's disclosure says while the address is hidden. It is also its
 /// accessibility hint.
-const ENDPOINT_DISCLOSURE_DESCRIPTION: &str = "Optional. Use when this computer reaches the server at a different name or address than the invitation.";
+const ENDPOINT_DISCLOSURE_DESCRIPTION: &str = "Optional. Use when this computer reaches the machine at a different name or address than the invitation.";
 /// What a shown disclosure's accessibility hint says.
 const DISCLOSURE_HIDE: &str = "Hide the network address";
 /// How long the host, address and link fields are, so a long value scrolls inside the field.
@@ -100,7 +100,7 @@ const FIELD_WIDTH: f32 = 260.0;
 /// What the address field's description says, naming the port SpaceTerm uses unless one is given.
 fn address_description() -> SharedString {
     format!(
-        "The name or IP address this computer uses to reach the server. Leave it empty to use the one SSH reaches. Port {DEFAULT_PORT} unless you add one."
+        "The name or IP address this computer uses to reach the machine. Leave it empty to use the one SSH reaches. Port {DEFAULT_PORT} unless you add one."
     )
     .into()
 }
@@ -108,7 +108,7 @@ fn address_description() -> SharedString {
 /// What the invitation's address field says, naming the port SpaceTerm uses unless one is given.
 fn endpoint_description() -> SharedString {
     format!(
-        "The name or IP address this computer uses to reach the server. Leave it empty to use the one in the invitation. Port {DEFAULT_PORT} unless you add one."
+        "The name or IP address this computer uses to reach the machine. Leave it empty to use the one in the invitation. Port {DEFAULT_PORT} unless you add one."
     )
     .into()
 }
@@ -142,7 +142,7 @@ impl SheetAction {
             Self::SetUp => "Set Up",
             Self::Join => "Join",
             Self::Install => "Install",
-            Self::Start => "Start Server",
+            Self::Start => "Start SpaceTerm Core",
             Self::AllowNetwork => "Allow",
             Self::TryAgain => "Try Again",
             Self::Back => "Back",
@@ -734,7 +734,7 @@ impl AddMachineSheet {
     /// The title and actions the current stage presents, or `None` while nothing should be on
     /// screen, such as while an SSH sign-in prompt is open.
     fn shape(&self, cx: &App) -> Option<Shape> {
-        let add = || SharedString::new_static("Add Server");
+        let add = || SharedString::new_static("Add Machine");
         let join_title = |core: &str| SharedString::from(format!("Join {core}"));
         let failure_title = |core: &str, error: DirectError| {
             if matches!(
@@ -786,14 +786,11 @@ impl AddMachineSheet {
                 }
                 let (title, action) = match &pending.offer {
                     SetupOffer::Installation { .. } => (
-                        format!(
-                            "Install SpaceTerm Server on {}?",
-                            quoted(&setup.destination)
-                        ),
+                        format!("Install SpaceTerm Core on {}?", quoted(&setup.destination)),
                         SheetAction::Install,
                     ),
                     SetupOffer::Startup => (
-                        format!("Start SpaceTerm Server on {}?", quoted(&setup.destination)),
+                        format!("Start SpaceTerm Core on {}?", quoted(&setup.destination)),
                         SheetAction::Start,
                     ),
                     SetupOffer::Network { .. } => (
@@ -1055,7 +1052,7 @@ impl AddMachineSheet {
             dialog.present_with_lifecycle(window, cx, on_action, on_result, on_lifecycle)
         };
         if presented.is_err() {
-            eprintln!("failed to present Add Server");
+            eprintln!("failed to present Add Machine");
         }
         presented.ok()
     }
@@ -2125,7 +2122,7 @@ impl AddMachineSheet {
                         .flex_col()
                         .w_full()
                         .gap(appearance.spacing(8.0))
-                        .child(fact("server", "Server", &preview.core))
+                        .child(fact("server", "Machine", &preview.core))
                         .child(fact("address", "Address", &preview.address)),
                 )
             }
@@ -2198,7 +2195,7 @@ impl AddMachineSheet {
                 let (label, detail): (SharedString, SharedString) = if *cancelling {
                     (
                         "Cancelling\u{2026}".into(),
-                        "SpaceTerm is closing the SSH connection. A step the server already accepted can still finish.".into(),
+                        "SpaceTerm is closing the SSH connection. A step the machine already accepted can still finish.".into(),
                     )
                 } else {
                     (
@@ -2342,7 +2339,7 @@ fn offer_lines(offer: &SetupOffer) -> Vec<SharedString> {
     match offer {
         SetupOffer::Installation { version, platform } => {
             let mut lines = vec![SharedString::from(format!(
-                "SpaceTerm installs its signed SpaceTerm Server {version} for {} and starts it.",
+                "SpaceTerm installs its signed SpaceTerm Core {version} for {} and starts it.",
                 crate::ui::ssh_setup::platform_name(&platform.0, &platform.1)
             ))];
             if platform.0.eq_ignore_ascii_case("linux") {
@@ -2351,7 +2348,7 @@ fn offer_lines(offer: &SetupOffer) -> Vec<SharedString> {
             lines
         }
         SetupOffer::Startup => vec![
-            "SpaceTerm Server is installed but stopped. Starting it lets paired devices reach its Workspaces."
+            "SpaceTerm Core is installed but stopped. Starting it lets paired devices reach its Workspaces."
                 .into(),
         ],
         SetupOffer::Network {
@@ -2361,7 +2358,7 @@ fn offer_lines(offer: &SetupOffer) -> Vec<SharedString> {
             enabled,
         } => {
             let mut lines = vec![SharedString::from(format!(
-                "SpaceTerm Server will accept connections from paired devices at {bind}, and this computer will reach it at {}. Devices must still be approved before they can connect.",
+                "SpaceTerm Core will accept connections from paired devices at {bind}, and this computer will reach it at {}. Devices must still be approved before they can connect.",
                 address.authority()
             ))];
             match current.filter(|current| current != bind) {
@@ -2370,7 +2367,7 @@ fn offer_lines(offer: &SetupOffer) -> Vec<SharedString> {
                         .into(),
                 ),
                 _ if !*enabled => {
-                    lines.push("Network access is off on that server. Allowing turns it on.".into());
+                    lines.push("Network access is off on that machine. Allowing turns it on.".into());
                 }
                 _ => {}
             }

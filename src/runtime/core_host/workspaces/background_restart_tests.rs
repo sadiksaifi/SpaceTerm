@@ -175,7 +175,7 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
         let copy = DormantCopy::of(ended);
         assert_eq!(
             (copy.title, copy.label),
-            ("Server Restarted", "Start Session")
+            ("SpaceTerm Core Restarted", "Start Session")
         );
     }
     assert_eq!(

@@ -42,52 +42,52 @@ pub struct AuthenticatedStatus {
 pub enum CoreError {
     #[error("{0}")]
     Direct(crate::direct::DirectError),
-    #[error("The server is not set up.")]
+    #[error("SpaceTerm Core is not set up.")]
     NotSetUp,
-    #[error("Server service unavailable. Sign in and try again.")]
+    #[error("SpaceTerm Core service unavailable. Sign in and try again.")]
     ServiceUnavailable,
     /// Another service operation, such as Update, Restart, Stop or Start, holds the service.
     /// Launch reports this while it runs. Launch and admission also report it when the
     /// operation outlasts their wait.
-    #[error("Another server operation is running. Try again when it finishes.")]
+    #[error("Another SpaceTerm Core operation is running. Try again when it finishes.")]
     ServiceBusy,
-    #[error("Install the server service first.")]
+    #[error("Install the SpaceTerm Core service first.")]
     NotInstalled,
-    #[error("The local server was stopped. Use Start Server to start it again.")]
+    #[error("The local SpaceTerm Core was stopped. Use Start SpaceTerm Core to start it again.")]
     Stopped,
-    #[error("The server changed. Review and confirm again.")]
+    #[error("SpaceTerm Core changed. Review and confirm again.")]
     Changed,
     #[error(
-        "SpaceTerm couldn\u{2019}t confirm whether the server update finished. Check the update in Server Settings."
+        "SpaceTerm couldn\u{2019}t confirm whether the SpaceTerm Core update finished. Check the update in Machine Settings."
     )]
     ActivationUnresolved,
-    #[error("SpaceTerm can\u{2019}t safely restore the previous server version.")]
+    #[error("SpaceTerm can\u{2019}t safely restore the previous SpaceTerm Core version.")]
     ReturnUnavailable,
-    #[error("Couldn\u{2019}t verify this server package.")]
+    #[error("Couldn\u{2019}t verify this SpaceTerm Core package.")]
     RuntimeUnavailable,
     /// This build includes no server package to verify. Distinct from a package that failed
     /// verification.
-    #[error("This SpaceTerm build doesn\u{2019}t include a server package.")]
+    #[error("This SpaceTerm build doesn\u{2019}t include a SpaceTerm Core package.")]
     CandidateMissing,
     #[error("Administrator authorization required.")]
     AuthorizationRequired,
-    #[error("The server is not running.")]
+    #[error("SpaceTerm Core is not running.")]
     NotRunning,
-    #[error("Server storage is unavailable.")]
+    #[error("SpaceTerm Core storage is unavailable.")]
     StorageUnavailable,
-    #[error("This server\u{2019}s saved state is from an incompatible SpaceTerm.")]
+    #[error("This SpaceTerm Core\u{2019}s saved state is from an incompatible SpaceTerm.")]
     IncompatibleState,
-    #[error("Server storage has unsafe permissions.")]
+    #[error("SpaceTerm Core storage has unsafe permissions.")]
     UnsafeStorage,
-    #[error("SpaceTerm couldn\u{2019}t verify the server or account for this connection.")]
+    #[error("SpaceTerm couldn\u{2019}t verify the machine or account for this connection.")]
     AuthenticationRefused,
-    #[error("SpaceTerm and this server are incompatible.")]
+    #[error("SpaceTerm and this SpaceTerm Core are incompatible.")]
     IncompatibleProtocol,
     #[error(
         "SpaceTerm was updated or moved after it opened. Quit and reopen SpaceTerm to continue."
     )]
     CandidateChanged,
-    #[error("The server connection did not complete.")]
+    #[error("The connection to SpaceTerm Core did not complete.")]
     Protocol,
     #[error("Reinstall SpaceTerm and try again.")]
     StartupFailed,

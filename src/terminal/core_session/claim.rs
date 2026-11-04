@@ -599,7 +599,7 @@ mod tests {
                             let copy = DormantCopy::of(ended);
                             assert_eq!(
                                 (copy.title, copy.label),
-                                ("Server Restarted", "Start Session")
+                                ("SpaceTerm Core Restarted", "Start Session")
                             );
                             // Teardown only after the live claim chose observation over Start.
                             alive.store(false, Ordering::Release);

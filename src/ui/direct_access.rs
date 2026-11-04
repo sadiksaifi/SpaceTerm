@@ -306,7 +306,7 @@ impl AccessFailure {
                 format!("SpaceTerm can\u{2019}t reach \u{201C}{core}\u{201D}. Try again.")
             }
             Self::IncompatibleProtocol => format!(
-                "This SpaceTerm Client and the SpaceTerm Server on \"{core}\" use incompatible SpaceTerm Protocol versions."
+                "This SpaceTerm Client and SpaceTerm Core on \u{201C}{core}\u{201D} use incompatible SpaceTerm Protocol versions."
             ),
             Self::InvalidAddress => {
                 format!(

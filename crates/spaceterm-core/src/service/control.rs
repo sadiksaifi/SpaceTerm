@@ -77,9 +77,9 @@ impl Wording {
 
     pub fn title(&self) -> &'static str {
         match self.action {
-            Action::Stop => "Stop Server",
-            Action::Restart => "Restart Server",
-            Action::Uninstall => "Uninstall Server",
+            Action::Stop => "Stop SpaceTerm Core",
+            Action::Restart => "Restart SpaceTerm Core",
+            Action::Uninstall => "Uninstall SpaceTerm Core",
         }
     }
 
@@ -93,9 +93,9 @@ impl Wording {
     pub fn message(&self) -> String {
         let core = &self.core;
         match self.action {
-            Action::Stop => format!("Stop the {core} server?"),
-            Action::Restart => format!("Restart the {core} server?"),
-            Action::Uninstall => format!("Uninstall the {core} server?"),
+            Action::Stop => format!("Stop SpaceTerm Core on {core}?"),
+            Action::Restart => format!("Restart SpaceTerm Core on {core}?"),
+            Action::Uninstall => format!("Uninstall SpaceTerm Core on {core}?"),
         }
     }
 
@@ -104,7 +104,7 @@ impl Wording {
         const ENDS: &str = "All Terminal Sessions on it end for every client.";
         match self.action {
             Action::Stop => format!(
-                "{ENDS} Workspaces are kept, and the server stays stopped until you start it again."
+                "{ENDS} Workspaces are kept, and SpaceTerm Core stays stopped until you start it again."
             ),
             Action::Restart => format!(
                 "{ENDS} Workspaces are kept, and each Pane starts a new shell when you use it."
@@ -189,7 +189,7 @@ impl UpdateWording {
 
     pub fn title(&self) -> &'static str {
         match self.change {
-            UpdateChange::Update => "Update Server",
+            UpdateChange::Update => "Update SpaceTerm Core",
             UpdateChange::Return => "Return to Previous Version",
         }
     }
@@ -210,10 +210,10 @@ impl UpdateWording {
         } = self;
         match self.change {
             UpdateChange::Update if self.stopped && !self.running => {
-                format!("Update the stopped {core} server to {candidate}?")
+                format!("Update the stopped SpaceTerm Core on {core} to {candidate}?")
             }
-            UpdateChange::Update => format!("Update the {core} server to {candidate}?"),
-            UpdateChange::Return => format!("Return the {core} server to {previous}?"),
+            UpdateChange::Update => format!("Update SpaceTerm Core on {core} to {candidate}?"),
+            UpdateChange::Return => format!("Return SpaceTerm Core on {core} to {previous}?"),
         }
     }
 
@@ -239,7 +239,7 @@ impl UpdateWording {
             ),
             UpdateChange::Return => format!(
                 "Version {candidate} never started. Version {previous} and your Workspaces are \
-                 unchanged, and the server stays stopped until you start it."
+                 unchanged, and SpaceTerm Core stays stopped until you start it."
             ),
         }
     }
@@ -400,14 +400,17 @@ mod tests {
             ServiceStartup::AtLogin,
         );
         let remote = Wording::for_core("penguin", Action::Stop, true, ServiceStartup::AtLogin);
-        assert_eq!(local.message(), "Stop the SpaceTerm Development server?");
-        assert_eq!(remote.message(), "Stop the penguin server?");
+        assert_eq!(
+            local.message(),
+            "Stop SpaceTerm Core on SpaceTerm Development?"
+        );
+        assert_eq!(remote.message(), "Stop SpaceTerm Core on penguin?");
         assert_eq!(local.title(), remote.title());
         assert_eq!(local.detail(), remote.detail());
         assert_eq!(
             local.detail(),
-            "All Terminal Sessions on it end for every client. Workspaces are kept, and the \
-             server stays stopped until you start it again."
+            "All Terminal Sessions on it end for every client. Workspaces are kept, and SpaceTerm \
+             Core stays stopped until you start it again."
         );
     }
 
@@ -450,7 +453,7 @@ mod tests {
         );
         assert_eq!(
             wording.message(),
-            "Update the penguin server to 0.7.0 (commit 0123456)?"
+            "Update SpaceTerm Core on penguin to 0.7.0 (commit 0123456)?"
         );
         assert_eq!(
             wording.detail(),
@@ -489,7 +492,7 @@ mod tests {
         assert_eq!(
             returning.detail(),
             "Version 0.7.0 (commit 0123456) never started. Version 0.6.8 (commit 0123456) and \
-             your Workspaces are unchanged, and the server stays stopped until you start it."
+             your Workspaces are unchanged, and SpaceTerm Core stays stopped until you start it."
         );
     }
 }

@@ -2044,7 +2044,7 @@ impl ApplicationMenuCommand {
     const fn label(self) -> &'static str {
         match self {
             Self::CommandPalette => "Command Palette\u{2026}",
-            Self::AddMachine => "Add Server\u{2026}",
+            Self::AddMachine => "Add Machine\u{2026}",
             Self::KeyboardShortcuts => crate::keybindings::Command::KeyboardShortcuts.label(),
             Self::About => crate::keybindings::Command::About.label(),
         }
@@ -2162,7 +2162,7 @@ fn remote_submenu(
         entries.push(MenuEntry::separator());
     }
     entries.push(
-        MenuEntry::action("Add Server\u{2026}", NewWorkspaceItem::AddMachine)
+        MenuEntry::action("Add Machine\u{2026}", NewWorkspaceItem::AddMachine)
             .debug_selector(format!("new-workspace-menu-{selector}-add-server")),
     );
     entries

@@ -187,7 +187,7 @@ pub(super) struct WorkspaceRowViewModel {
 }
 
 /// Names a Workspace's origin wherever the sidebar and the Tab strip describe it.
-pub(super) const CORE_WORKSPACE_BADGE: &str = "Server";
+pub(super) const CORE_WORKSPACE_BADGE: &str = "SpaceTerm Core";
 
 /// Introduces the directory of a Worktree's last-used Pane once that Pane has left the Worktree.
 pub(super) const OUTSIDE_PANE_LABEL: &str = "Pane outside this Worktree";

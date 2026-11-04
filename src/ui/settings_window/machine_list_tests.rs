@@ -221,7 +221,7 @@ fn listed(cx: &mut VisualTestContext) -> Vec<(String, bool)> {
         .with_role("ListBox")
         .into_iter()
         .find(|node| node["aria"]["label"] == super::MACHINE_LIST_NAME)
-        .expect("All Servers lists the servers");
+        .expect("All Machines lists the servers");
     tree.children(list)
         .into_iter()
         .filter(|node| node["aria"]["role"] == "ListBoxOption")
@@ -314,7 +314,7 @@ fn the_picker_and_all_machines_share_one_selection_that_connects_nothing(cx: &mu
     let picker = tree.node(super::PICKER_NAME);
     assert_eq!(picker["aria"]["role"], "ComboBox");
     assert_eq!(picker["aria"]["value"], "penguin");
-    assert_eq!(picker["aria"]["description"], "Choose or add a server");
+    assert_eq!(picker["aria"]["description"], "Choose or add a machine");
     assert_eq!(
         selected(machines.cx),
         MachineChoice::Direct(machines.routes[0]).key(),
@@ -719,11 +719,11 @@ fn searching_for_a_machine_by_name_reveals_and_selects_it(cx: &mut TestAppContex
 /// server. "servers" names All Servers, so the list shows which server the search presents.
 #[gpui::test]
 fn a_query_inside_a_machine_name_keeps_the_local_machine(cx: &mut TestAppContext) {
-    let mut machines = open_machines(true, &["build.servers"], cx);
-    search_for("servers", &mut machines);
+    let mut machines = open_machines(true, &["build.machines"], cx);
+    search_for("machines", &mut machines);
 
     assert_eq!(listed(machines.cx)[0], (local_name().to_owned(), true));
-    assert_eq!(listed(machines.cx)[1], ("build.servers".to_owned(), false));
+    assert_eq!(listed(machines.cx)[1], ("build.machines".to_owned(), false));
 }
 
 /// A Setting the query names by its own words comes before a server that happens to share it.
@@ -946,7 +946,7 @@ fn reset_all_and_import_leave_machine_connections_and_machine_settings_alone(
         .read_with(machines.cx, |settings, _| settings.reset_all_detail());
     assert_eq!(
         detail,
-        "This can\u{2019}t be undone. Server connections and system permissions are kept."
+        "This can\u{2019}t be undone. Machine connections and system permissions are kept."
     );
 
     click("settings-reset-all", machines.cx);

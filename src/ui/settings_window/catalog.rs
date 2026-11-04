@@ -53,7 +53,7 @@ impl SettingsSectionId {
             Self::Keybindings => "Keybindings",
             Self::Privacy => "Privacy",
             Self::Git => "Git",
-            Self::Machines => "Servers",
+            Self::Machines => "Machines",
             Self::Updates => "Updates",
             Self::Advanced => "Advanced",
         }
@@ -77,7 +77,7 @@ impl SettingsSectionId {
             }
             Self::Privacy => "Clipboard access.",
             Self::Git => "Repository Status, Pull Requests, and Worktrees.",
-            Self::Machines => "Servers run Workspaces and Terminal Sessions.",
+            Self::Machines => "Machines run Workspaces and Terminal Sessions.",
             Self::Updates => "SpaceTerm updates in the background.",
             Self::Advanced => {
                 "Every setting at once: edit them as JSON, export or import them, or start over."
@@ -662,15 +662,15 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::CoreStatus,
         section: SettingsSectionId::Machines,
         group: super::machine_list::CORE_GROUP,
-        label: "Server",
+        label: "Machine",
         keywords: &[
-            "server",
-            "spaceterm server",
+            "core",
+            "spaceterm core",
             "status",
             "version",
             "update",
-            "update server",
-            "server update",
+            "update core",
+            "core update",
             "upgrade",
             "check now",
             "needs update",
@@ -679,10 +679,10 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "return to previous version",
             "finish update",
             "running",
-            "start server",
-            "stop server",
-            "restart server",
-            "uninstall server",
+            "start core",
+            "stop core",
+            "restart core",
+            "uninstall core",
             "install",
             "connect",
             "disconnect",
@@ -779,10 +779,10 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::AllMachines,
         section: SettingsSectionId::Machines,
         group: super::machine_list::ALL_MACHINES_GROUP,
-        label: "All Servers",
+        label: "All Machines",
         keywords: &[
-            "servers",
-            "server list",
+            "machines",
+            "machine list",
             "computer",
             "machine",
             "select",
@@ -795,11 +795,11 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::AddMachine,
         section: SettingsSectionId::Machines,
         group: super::machine_list::ALL_MACHINES_GROUP,
-        label: "Add Server\u{2026}",
+        label: "Add Machine\u{2026}",
         keywords: &[
-            "add server",
+            "add machine",
             "add",
-            "new server",
+            "new machine",
             "ssh",
             "openssh",
             "set up",
@@ -847,7 +847,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "not found",
             "xcode",
             "command line tools",
-            "server",
+            "core",
         ],
         selector: "settings-row-git-tool",
     },
@@ -857,8 +857,8 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         group: super::machine_list::GIT_CORE_GROUP,
         label: "New Worktree Location",
         keywords: &[
-            "server",
-            "server settings",
+            "core",
+            "machine settings",
             "worktree",
             "worktrees",
             "path",
@@ -1511,9 +1511,9 @@ mod tests {
     #[test]
     fn a_machine_query_reaches_the_machine_rows() {
         for (query, row) in [
-            ("stop server", SettingsRowId::CoreStatus),
-            ("uninstall server", SettingsRowId::CoreStatus),
-            ("update server", SettingsRowId::CoreStatus),
+            ("stop core", SettingsRowId::CoreStatus),
+            ("uninstall core", SettingsRowId::CoreStatus),
+            ("update core", SettingsRowId::CoreStatus),
             ("start at login", SettingsRowId::CoreAutoStart),
             ("end all", SettingsRowId::EndAllSessions),
             ("invite device", SettingsRowId::PairedDevices),
@@ -1531,11 +1531,11 @@ mod tests {
     /// server picker.
     #[test]
     fn an_add_machine_query_reaches_add_machine_first() {
-        for query in ["add server", "join"] {
+        for query in ["add machine", "join"] {
             assert_eq!(
                 matching_rows(query).first(),
                 Some(&SettingsRowId::AddMachine),
-                "{query:?} should rank Add Server first"
+                "{query:?} should rank Add Machine first"
             );
         }
     }

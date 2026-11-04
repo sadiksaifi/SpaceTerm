@@ -75,7 +75,7 @@ pub enum OutboxError {
     #[error("the message could not be encoded")]
     Encode(EncodeError),
     /// The server misused the outbox, such as replying to an id it does not owe.
-    #[error("the server misused the connection")]
+    #[error("SpaceTerm Core misused the connection")]
     Misuse,
 }
 

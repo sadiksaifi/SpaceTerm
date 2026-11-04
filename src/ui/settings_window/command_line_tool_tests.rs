@@ -177,7 +177,7 @@ fn a_refused_install_says_why_and_keeps_offering_install(cx: &mut TestAppContext
             "Not installed",
             Some((ToolAction::Install, "Install")),
             Some((
-                "This SpaceTerm build doesn\u{2019}t include a server package.".to_owned(),
+                "This SpaceTerm build doesn\u{2019}t include a SpaceTerm Core package.".to_owned(),
                 CaptionTone::Error
             ))
         )

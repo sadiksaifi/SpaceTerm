@@ -248,8 +248,8 @@ fn an_incompatible_machine_is_named_without_claiming_which_side_is_older() {
     assert_eq!(
         notice(&view),
         Some((
-            "Incompatible Server".to_owned(),
-            "SpaceTerm and this server are incompatible.".to_owned()
+            "Incompatible SpaceTerm Core".to_owned(),
+            "SpaceTerm and this SpaceTerm Core are incompatible.".to_owned()
         ))
     );
 }

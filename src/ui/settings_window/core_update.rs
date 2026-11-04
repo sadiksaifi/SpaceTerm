@@ -210,7 +210,7 @@ impl UpdateAction {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Check => "Check Now",
-            Self::Update => "Update Server\u{2026}",
+            Self::Update => "Update SpaceTerm Core\u{2026}",
             Self::Finish => "Finish Update",
             Self::Return => "Return to Previous Version\u{2026}",
         }
@@ -237,7 +237,7 @@ impl UpdateAction {
     pub(super) const fn consequence(self) -> Option<&'static str> {
         match self {
             Self::Update => Some(
-                "Update the server after confirmation. This ends its Terminal Sessions for every client.",
+                "Update SpaceTerm Core after confirmation. This ends its Terminal Sessions for every client.",
             ),
             Self::Finish => Some("Completes the confirmed update."),
             Self::Return => Some("SpaceTerm asks first."),
@@ -264,20 +264,20 @@ pub(super) enum UpdateStep {
 impl UpdateStep {
     const fn progress(self) -> (&'static str, &'static str) {
         match self {
-            Self::Check => ("Checking", "Reading the server version\u{2026}"),
+            Self::Check => ("Checking", "Reading the SpaceTerm Core version\u{2026}"),
             Self::Prepare => (
                 "Verifying",
-                "Verifying the server version included with SpaceTerm\u{2026}",
+                "Verifying the SpaceTerm Core version included with SpaceTerm\u{2026}",
             ),
             Self::Update { running: true } => (
                 "Updating",
-                "Updating the server. Its Terminal Sessions end\u{2026}",
+                "Updating SpaceTerm Core. Its Terminal Sessions end\u{2026}",
             ),
-            Self::Update { running: false } => ("Updating", "Updating the server\u{2026}"),
+            Self::Update { running: false } => ("Updating", "Updating SpaceTerm Core\u{2026}"),
             Self::PrepareReturn => ("Checking", "Checking the previous version\u{2026}"),
             Self::Return => (
                 "Returning",
-                "Returning the server to its previous version\u{2026}",
+                "Returning SpaceTerm Core to its previous version\u{2026}",
             ),
             Self::Finish => ("Finishing", "Finishing the update you confirmed\u{2026}"),
         }
@@ -325,7 +325,7 @@ pub(super) fn present_update(state: &UpdateState) -> UpdatePresentation {
             None => (
                 "Not checked",
                 "settings-server-update-state-not-checked",
-                "SpaceTerm reads the server version when you open this section.".into(),
+                "SpaceTerm reads the SpaceTerm Core version when you open this section.".into(),
                 CaptionTone::Guidance,
                 vec![UpdateAction::Check],
             ),
@@ -374,12 +374,12 @@ pub(super) fn present_update(state: &UpdateState) -> UpdatePresentation {
 fn failure_caption(error: CoreError) -> String {
     match error {
         CoreError::CandidateChanged => RESTART_CLIENT.to_owned(),
-        CoreError::Changed => "The server changed. Review the update again.".to_owned(),
+        CoreError::Changed => "SpaceTerm Core changed. Review the update again.".to_owned(),
         error => error.to_string(),
     }
 }
 
-const RESTART_CLIENT: &str = "Quit and reopen SpaceTerm to update the server.";
+const RESTART_CLIENT: &str = "Quit and reopen SpaceTerm to update SpaceTerm Core.";
 
 type Facts = (
     &'static str,
@@ -414,7 +414,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         return (
             "Not installed",
             "settings-server-update-state-not-installed",
-            "Install the background service above to see the server version.".into(),
+            "Install the background service above to see the SpaceTerm Core version.".into(),
             CaptionTone::Guidance,
             Vec::new(),
         );
@@ -423,7 +423,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         return (
             "Unknown",
             "settings-server-update-state-unknown",
-            "Couldn\u{2019}t read installed server version.".into(),
+            "Couldn\u{2019}t read the installed SpaceTerm Core version.".into(),
             CaptionTone::Error,
             vec![UpdateAction::Check],
         );
@@ -441,7 +441,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
     let now = if status.running {
         format!("Version {approved} is running.")
     } else if status.stopped {
-        format!("Version {approved} is installed, and you stopped the server.")
+        format!("Version {approved} is installed, and you stopped SpaceTerm Core.")
     } else {
         format!("Version {approved} is installed but not running.")
     };
@@ -457,7 +457,9 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         Ok(included) if included.approved => (
             "Up to date",
             "settings-server-update-state-current",
-            format!("{now}{returned} It\u{2019}s the server version included with SpaceTerm."),
+            format!(
+                "{now}{returned} It\u{2019}s the SpaceTerm Core version included with SpaceTerm."
+            ),
             CaptionTone::Guidance,
             Vec::new(),
         ),
@@ -465,8 +467,8 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
             "No update",
             "settings-server-update-state-earlier",
             format!(
-                "{now}{returned} SpaceTerm includes server version {included_label}, an earlier \
-                 release, so it offers no server update."
+                "{now}{returned} SpaceTerm includes SpaceTerm Core version {included_label}, an \
+                 earlier release, so it offers no SpaceTerm Core update."
             ),
             CaptionTone::Guidance,
             Vec::new(),
@@ -474,17 +476,19 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         Ok(_) => {
             let included = included_label;
             let effect = if status.running {
-                "Updating ends the server\u{2019}s Terminal Sessions for every client, so \
+                "Updating ends SpaceTerm Core\u{2019}s Terminal Sessions for every client, so \
                  SpaceTerm asks first."
             } else if status.stopped {
-                "Updating keeps the server stopped until you start it."
+                "Updating keeps SpaceTerm Core stopped until you start it."
             } else {
-                "The server isn\u{2019}t running, so updating ends no Terminal Sessions."
+                "SpaceTerm Core isn\u{2019}t running, so updating ends no Terminal Sessions."
             };
             (
                 "Update available",
                 "settings-server-update-state-available",
-                format!("{now}{returned} SpaceTerm includes server version {included}. {effect}"),
+                format!(
+                    "{now}{returned} SpaceTerm includes SpaceTerm Core version {included}. {effect}"
+                ),
                 CaptionTone::Guidance,
                 vec![UpdateAction::Update],
             )
@@ -493,8 +497,8 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
             "No update",
             "settings-server-update-state-unavailable",
             format!(
-                "{now}{returned} This SpaceTerm doesn\u{2019}t include a server package, so it \
-                 offers no server update."
+                "{now}{returned} This SpaceTerm doesn\u{2019}t include a SpaceTerm Core package, so \
+                 it offers no SpaceTerm Core update."
             ),
             CaptionTone::Guidance,
             Vec::new(),
@@ -509,7 +513,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         Err(CandidateError::Verification(error)) => (
             "Not verified",
             "settings-server-update-state-not-verified",
-            format!("Couldn\u{2019}t verify the server package. {error}"),
+            format!("Couldn\u{2019}t verify the SpaceTerm Core package. {error}"),
             CaptionTone::Error,
             vec![UpdateAction::Check],
         ),

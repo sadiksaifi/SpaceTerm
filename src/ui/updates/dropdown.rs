@@ -179,8 +179,8 @@ fn client_section(
 fn core_sections(rows: Vec<MachineUpdateRow>) -> Vec<MenuEntry<UpdatesMenuAction>> {
     if rows.is_empty() {
         return vec![MenuEntry::section(
-            "Servers",
-            vec![status_row("No Servers").debug_selector("update-server-none")],
+            "Machines",
+            vec![status_row("No Machines").debug_selector("update-server-none")],
         )];
     }
     rows.into_iter()

@@ -23,7 +23,7 @@ use crate::settings::storage::testing::MemoryStorage;
 
 /// What Reset All Settings says it can't give back and what it keeps.
 const RESET_ALL_DETAIL: &str =
-    "This can\u{2019}t be undone. Server connections and system permissions are kept.";
+    "This can\u{2019}t be undone. Machine connections and system permissions are kept.";
 
 pub(super) struct Harness {
     storage: Arc<MemoryStorage>,

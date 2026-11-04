@@ -414,7 +414,7 @@ impl SshCommandSpec {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum RemoteShellCommandError {
-    #[error("the remote server command is too long or contains NUL")]
+    #[error("the remote SpaceTerm Core command is too long or contains NUL")]
     CommandTooLong,
     #[error("the temporary SSH configuration path is unsafe")]
     UnsafeConfiguration,

@@ -29,10 +29,10 @@ pub(super) const PICKER_SELECTOR: &str = "settings-server-picker";
 pub(super) const LIST_SELECTOR: &str = "settings-all-servers";
 pub(super) const ADD_MACHINE_SELECTOR: &str = "settings-add-server";
 /// The picker's name for assistive technology.
-pub(super) const PICKER_NAME: &str = "Server";
-const PICKER_HINT: &str = "Choose or add a server";
+pub(super) const PICKER_NAME: &str = "Machine";
+const PICKER_HINT: &str = "Choose or add a machine";
 /// The list's name for assistive technology.
-pub(super) const MACHINE_LIST_NAME: &str = "All Servers";
+pub(super) const MACHINE_LIST_NAME: &str = "All Machines";
 /// The fewest characters of a server's name that search treats as naming it.
 const NAME_QUERY_MINIMUM: usize = 3;
 
@@ -41,11 +41,11 @@ pub(super) const CORE_GROUP: &str = "";
 /// The card of rows about other devices reaching the selected server over the network.
 pub(super) const NETWORK_GROUP: &str = "Network Access";
 /// The card listing every server.
-pub(super) const ALL_MACHINES_GROUP: &str = "All Servers";
+pub(super) const ALL_MACHINES_GROUP: &str = "All Machines";
 /// The card of this computer's command, which ignores the picker.
 pub(super) const COMMAND_LINE_GROUP: &str = "Command Line";
 /// The card of the selected server's Git and its Server Settings on the Git page.
-pub(super) const GIT_CORE_GROUP: &str = "Git on server";
+pub(super) const GIT_CORE_GROUP: &str = "Git on machine";
 
 /// The server a Servers or Git row acts on.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -240,7 +240,7 @@ impl SettingsWindow {
                 .into_iter()
                 .find(|(saved, _, _)| saved == route)
                 .map_or_else(
-                    || SharedString::new_static("Paired server"),
+                    || SharedString::new_static("Paired machine"),
                     |(_, _, label)| label.into(),
                 ),
         }
@@ -481,7 +481,7 @@ impl SettingsWindow {
                 let query = query.trim();
                 let lowered = query.to_lowercase();
                 let mut commands = vec![
-                    ComboBoxCommand::new(PickerCommand::AddMachine, "Add Server\u{2026}")
+                    ComboBoxCommand::new(PickerCommand::AddMachine, "Add Machine\u{2026}")
                         .debug_selector(format!("{PICKER_SELECTOR}-add-server")),
                 ];
                 if looks_like_host(query) && !names.iter().any(|name| name.contains(&lowered)) {
@@ -503,8 +503,8 @@ impl SettingsWindow {
         // This computer is always listed and Add Server always remains, so the picker never
         // shows an empty state. A search that finds no server says so above Add Server.
         .copy(
-            ComboBoxCopy::new("Search servers", "Search")
-                .no_match("No servers match")
+            ComboBoxCopy::new("Search machines", "Search")
+                .no_match("No machines match")
                 .commands_heading("Add"),
         )
         .debug_selector(PICKER_SELECTOR)

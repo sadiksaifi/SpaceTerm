@@ -310,7 +310,10 @@ fn a_launch_that_opens_within_its_quiet_period_never_shows_the_launch_screen(
 fn a_retry_within_the_quiet_period_keeps_saying_what_it_does(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Err(CoreError::NotInstalled)], cx);
     cx.run_until_parked();
-    assert_eq!(harness.launch_title(cx), Some("Server Not Installed"));
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("SpaceTerm Core Not Installed")
+    );
 
     // Try Again runs launch, and no answer arrives yet.
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
@@ -349,7 +352,7 @@ fn a_launch_during_a_core_operation_says_so_without_asking_the_person_to_act(
     assert_eq!(presentation.title, launch::BUSY_TITLE);
     assert_eq!(
         presentation.detail.as_ref(),
-        "Another server operation is running. Your Workspaces open when it finishes."
+        "Another SpaceTerm Core operation is running. Your Workspaces open when it finishes."
     );
     assert!(presentation.progress.is_some());
     assert!(
@@ -375,7 +378,7 @@ fn a_launch_during_a_core_operation_opens_the_workspaces_once_it_ends(cx: &mut T
 fn an_operation_that_outlasts_the_wait_offers_try_again(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Err(CoreError::ServiceBusy), ready()], cx);
     cx.run_until_parked();
-    assert_eq!(harness.launch_title(cx), Some("Server Busy"));
+    assert_eq!(harness.launch_title(cx), Some("SpaceTerm Core Busy"));
 
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     sync(&harness, cx);
@@ -483,7 +486,7 @@ fn startup_without_usable_core_state_presents_recovery_across_the_window(cx: &mu
     cx.run_until_parked();
     assert_eq!(
         harness.launch_title(cx),
-        Some("Couldn\u{2019}t Verify Server")
+        Some("Couldn\u{2019}t Verify SpaceTerm Core")
     );
     assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
     assert!(!creation_available(cx), "New Workspace has nowhere to go");
@@ -531,7 +534,7 @@ fn a_missing_core_package_and_a_failed_verification_explain_themselves_different
             .expect("the failure is presented")
     };
     let unverified = presentation(cx);
-    assert_eq!(unverified.title, "Couldn\u{2019}t Verify Server");
+    assert_eq!(unverified.title, "Couldn\u{2019}t Verify SpaceTerm Core");
     assert_eq!(unverified.detail, "Reinstall SpaceTerm, then try again.");
     assert!(
         !unverified.detail.contains("include"),
@@ -542,10 +545,10 @@ fn a_missing_core_package_and_a_failed_verification_explain_themselves_different
 
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     let missing = presentation(cx);
-    assert_eq!(missing.title, "Server Not Included");
+    assert_eq!(missing.title, "SpaceTerm Core Not Included");
     assert_eq!(
         missing.detail,
-        "This SpaceTerm build doesn\u{2019}t include a server. Reinstall SpaceTerm, then try again."
+        "This SpaceTerm build doesn\u{2019}t include SpaceTerm Core. Reinstall SpaceTerm, then try again."
     );
     assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_none());
     assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
@@ -598,7 +601,7 @@ fn another_machines_inventory_without_attached_workspaces_keeps_workspace_contro
     assert!(creation_available(cx));
     assert_eq!(
         harness.launch_title(cx),
-        Some("Server Not Included"),
+        Some("SpaceTerm Core Not Included"),
         "the stage still explains this computer's server"
     );
 }
@@ -610,7 +613,10 @@ fn a_refused_start_explains_itself_and_retries_launch_only_when_asked(cx: &mut T
     harness.launch.refuse_start(CoreError::NotInstalled);
     harness.click(LAUNCH_START_SELECTOR, cx);
     assert_eq!(harness.launch.steps(), ["run", "start"]);
-    assert_eq!(harness.launch_title(cx), Some("Server Not Installed"));
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("SpaceTerm Core Not Installed")
+    );
 
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
@@ -630,8 +636,8 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
             .expect("the authorization step is presented")
             .detail,
         "Enter an administrator password so your account\u{2019}s services keep running after you \
-         log out. This applies to every service your account runs and stays on if you uninstall the \
-         server.",
+         log out. This applies to every service your account runs and stays on if you uninstall SpaceTerm \
+         Core.",
         "launch explains authorization as Settings does"
     );
     assert_eq!(harness.launch.steps(), ["run"]);
@@ -700,7 +706,7 @@ fn an_authorization_whose_result_is_unconfirmed_reports_its_failure(cx: &mut Tes
 fn an_authorization_that_fails_before_its_prompt_is_not_a_cancellation(cx: &mut TestAppContext) {
     assert_authorization_failure_explains_itself(
         CoreError::StorageUnavailable,
-        "Server Storage Unavailable",
+        "SpaceTerm Core Storage Unavailable",
         cx,
     );
 }
@@ -724,10 +730,16 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
     for (error, title) in [
-        (CoreError::IncompatibleProtocol, "Incompatible Server"),
-        (CoreError::IncompatibleState, "Incompatible Server"),
-        (CoreError::StorageUnavailable, "Server Storage Unavailable"),
-        (CoreError::UnsafeStorage, "Unsafe Server Storage"),
+        (
+            CoreError::IncompatibleProtocol,
+            "Incompatible SpaceTerm Core",
+        ),
+        (CoreError::IncompatibleState, "Incompatible SpaceTerm Core"),
+        (
+            CoreError::StorageUnavailable,
+            "SpaceTerm Core Storage Unavailable",
+        ),
+        (CoreError::UnsafeStorage, "Unsafe SpaceTerm Core Storage"),
     ] {
         harness.edits.set_error(error);
         sync(&harness, cx);
@@ -768,7 +780,7 @@ fn a_refused_core_offers_an_update_only_from_a_verified_build(cx: &mut TestAppCo
     assert!(
         presentation
             .detail
-            .contains("SpaceTerm and this server are incompatible.")
+            .contains("SpaceTerm and this SpaceTerm Core are incompatible.")
     );
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_none());
 
@@ -778,10 +790,10 @@ fn a_refused_core_offers_an_update_only_from_a_verified_build(cx: &mut TestAppCo
         .manager
         .read_with(cx, |manager, _| manager.launch_presentation())
         .expect("the refusal is presented");
-    assert_eq!(presentation.title, "Incompatible Server");
+    assert_eq!(presentation.title, "Incompatible SpaceTerm Core");
     assert_eq!(
         presentation.detail,
-        "Updating the server ends its Terminal Sessions for every client."
+        "Updating SpaceTerm Core ends its Terminal Sessions for every client."
     );
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
     assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_some());
@@ -806,7 +818,10 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
 
     harness.edits.set_error(CoreError::IncompatibleProtocol);
     sync(&harness, cx);
-    assert_eq!(harness.launch_title(cx), Some("Incompatible Server"));
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("Incompatible SpaceTerm Core")
+    );
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
     sync(&harness, cx);
     assert_eq!(

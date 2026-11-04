@@ -3386,7 +3386,7 @@ impl TabView {
         let notice = pane.notice().map(|(title, detail, intent)| {
             let detail = match &remote {
                 Some(name) if pane.core_stopped() => gpui::SharedString::from(format!(
-                    "Start the server on \u{201C}{name}\u{201D} to use this Pane again."
+                    "Start SpaceTerm Core on \u{201C}{name}\u{201D} to use this Pane again."
                 )),
                 _ => detail,
             };

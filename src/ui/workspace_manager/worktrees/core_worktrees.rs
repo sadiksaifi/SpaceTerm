@@ -582,7 +582,7 @@ impl WorkspaceManager {
             ("Check Worktree Removal", "Remove Worktree")
         };
         let message = format!(
-            "The server stopped before SpaceTerm could confirm the result. Check \u{201C}{name}\u{201D} in the sidebar before choosing {action} again."
+            "SpaceTerm Core stopped before SpaceTerm could confirm the result. Check \u{201C}{name}\u{201D} in the sidebar before choosing {action} again."
         );
         Alert::new(
             ModalId::new("server-worktree-interrupted"),
@@ -765,7 +765,7 @@ impl WorkspaceManager {
             Error::Pinned => "Unpin the directory before removing it.",
             Error::Missing => "Another client or Git removed it.",
             Error::Interrupted => {
-                "The server stopped before SpaceTerm could confirm the result. Review the sidebar before trying again."
+                "SpaceTerm Core stopped before SpaceTerm could confirm the result. Review the sidebar before trying again."
             }
             Error::Location => "Choose a new or empty directory.",
             Error::Template(

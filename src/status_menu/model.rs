@@ -80,7 +80,7 @@ impl Presentation {
             label: label.to_owned(),
             enabled: offered(command),
         };
-        let core = format!("{name} Server");
+        let core = format!("{name} Core");
         Self {
             summary: format!("{core}: {label}"),
             core,
@@ -93,13 +93,13 @@ impl Presentation {
                 enabled: true,
             },
             controls: [
-                control(Command::Start, "Start Server"),
-                control(Command::Stop, "Stop Server\u{2026}"),
-                control(Command::Restart, "Restart Server\u{2026}"),
+                control(Command::Start, "Start SpaceTerm Core"),
+                control(Command::Stop, "Stop SpaceTerm Core\u{2026}"),
+                control(Command::Restart, "Restart SpaceTerm Core\u{2026}"),
             ],
             update: state.update.then(|| Item {
                 command: Command::Update,
-                label: "Update Server\u{2026}".to_owned(),
+                label: "Update SpaceTerm Core\u{2026}".to_owned(),
                 enabled: idle && phase.offers(Command::Update),
             }),
             quit: Item {
@@ -153,24 +153,24 @@ impl Phase {
             Self::Running => ("Running", None),
             Self::Stopped => (
                 "Stopped",
-                Some("The server stays stopped until you start it.".to_owned()),
+                Some("SpaceTerm Core stays stopped until you start it.".to_owned()),
             ),
             Self::NotRunning => ("Not running", Some("Installed but not running.".to_owned())),
             Self::NotInstalled => (
                 "Not installed",
-                Some(format!("Open {name} to set up the server.")),
+                Some(format!("Open {name} to set up SpaceTerm Core.")),
             ),
             Self::Unavailable(CoreError::CleanupUnresolved) => (
                 badge(CoreError::CleanupUnresolved),
                 Some(
-                    "SpaceTerm couldn\u{2019}t confirm that the server\u{2019}s Terminal Sessions ended. \
-                     Choose Stop Server to try again."
+                    "SpaceTerm couldn\u{2019}t confirm that SpaceTerm Core\u{2019}s Terminal Sessions ended. \
+                     Choose Stop SpaceTerm Core to try again."
                         .to_owned(),
                 ),
             ),
             Self::Unavailable(CoreError::Stopped) => (
                 badge(CoreError::Stopped),
-                Some("Choose Start Server.".to_owned()),
+                Some("Choose Start SpaceTerm Core.".to_owned()),
             ),
             Self::Unavailable(error) => (badge(error), Some(error.to_string())),
         }
@@ -267,7 +267,7 @@ mod tests {
         };
         for state in [status(true, true, false), status(true, false, true)] {
             let item = update(offered(state)).expect("the row is shown");
-            assert_eq!(item.label, "Update Server\u{2026}");
+            assert_eq!(item.label, "Update SpaceTerm Core\u{2026}");
             assert!(item.enabled);
         }
         // Another operation, or a control window asking, holds it back.

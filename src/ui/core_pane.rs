@@ -55,14 +55,14 @@ pub(crate) fn takeover_copy(controller: Option<&Controller>) -> (SharedString, &
 }
 /// The notice a Pane of a server this client is not connected to shows. Only connecting the
 /// server's Saved Connection reaches the Pane again.
-pub(crate) const OFFLINE_TITLE: &str = "Server Not Connected";
-pub(crate) const OFFLINE_DETAIL: &str = "Connect to this server in Settings to use this Pane.";
+pub(crate) const OFFLINE_TITLE: &str = "Machine Not Connected";
+pub(crate) const OFFLINE_DETAIL: &str = "Connect to this machine in Settings to use this Pane.";
 pub(crate) const SESSION_ENDED_TITLE: &str = "Session Ended";
 pub(crate) const SESSION_ENDED_DETAIL: &str = "This Terminal Session is no longer available.";
 pub(crate) const TAKING_OVER: &str = "Taking Over…";
 pub(crate) const CLOSE_PANE: &str = "Close Pane";
 pub(crate) const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
-pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
+pub(crate) const RESTORED_TITLE: &str = "SpaceTerm Core Restarted";
 /// End All Sessions ended this Pane's shell and cleared its output. The Pane, its Tab, and its
 /// control stay, so only an explicit start brings a shell back.
 pub(crate) const ENDED_DETAIL: &str =
@@ -148,10 +148,10 @@ pub(crate) const START_UNKNOWN_DETAIL: &str = "Check whether the shell started."
 /// What restarting ends, wherever the server restarts: from Server Settings on this computer or
 /// on the server's own computer.
 pub(crate) const START_UNKNOWN_RESTART: &str =
-    "Restarting the server ends every Terminal Session on it.";
+    "Restarting SpaceTerm Core ends every Terminal Session on it.";
 const CHECK_START_DESCRIPTION: &str = "Check whether this Pane\u{2019}s shell started.";
-const MACHINE_SETTINGS: &str = "Server Settings\u{2026}";
-const MACHINE_SETTINGS_DESCRIPTION: &str = "Open Server Settings.";
+const MACHINE_SETTINGS: &str = "Machine Settings\u{2026}";
+const MACHINE_SETTINGS_DESCRIPTION: &str = "Open Machine Settings.";
 pub(crate) const CHECKING_START: &str = "Checking\u{2026}";
 pub(crate) const START_STILL_UNKNOWN: &str =
     "SpaceTerm still can\u{2019}t tell whether the shell started.";
@@ -165,8 +165,8 @@ fn failure_copy(error: CoreError) -> (&'static str, SharedString) {
             SharedString::new_static("SpaceTerm stopped reconnecting."),
         ),
         CoreError::IncompatibleProtocol => (
-            "Incompatible Server",
-            SharedString::new_static("SpaceTerm and this server are incompatible."),
+            "Incompatible SpaceTerm Core",
+            SharedString::new_static("SpaceTerm and this SpaceTerm Core are incompatible."),
         ),
         error => (OFFLINE_TITLE, SharedString::from(error.to_string())),
     }
@@ -762,7 +762,7 @@ pub(crate) fn start_core_button(
     on_activate: impl Fn(&mut gpui::Window, &mut App) + 'static,
 ) -> Button {
     let debug_selector = selector.clone();
-    Button::new(selector, "Start Server")
+    Button::new(selector, "Start SpaceTerm Core")
         .variant(ButtonVariant::Link)
         .size(ButtonSize::Compact)
         .tab_stop(true)
@@ -1373,7 +1373,7 @@ mod connection {
                 }
                 CorePaneStatus::Failed(CoreError::Stopped)
                 | CorePaneStatus::TakeoverFailed(CoreError::Stopped) => Some((
-                    SharedString::new_static("Server Stopped"),
+                    SharedString::new_static("SpaceTerm Core Stopped"),
                     SharedString::new_static("The programs in this Pane ended."),
                     super::StatusIntent::Warning,
                 )),

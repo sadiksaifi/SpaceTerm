@@ -468,7 +468,7 @@ impl SettingsWindow {
         // couldn't read says why under its row, so the card adds nothing.
         if stopped {
             return Some(
-                format!("Start the server on {name} to change its network access.").into(),
+                format!("Start SpaceTerm Core on {name} to change its network access.").into(),
             );
         }
         if matches!(
@@ -487,7 +487,7 @@ impl SettingsWindow {
                 });
             return Some(
                 observed
-                    .unwrap_or_else(|| "Can\u{2019}t reach the server.".to_owned())
+                    .unwrap_or_else(|| "Can\u{2019}t reach SpaceTerm Core.".to_owned())
                     .into(),
             );
         }

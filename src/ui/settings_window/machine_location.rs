@@ -526,7 +526,7 @@ impl SettingsWindow {
         Some(
             match self.selected_machine() {
                 Some(MachineChoice::Local) | None => format!(
-                    "Start the server on {} to change its Git settings.",
+                    "Start SpaceTerm Core on {} to change its Git settings.",
                     self.selected_machine_name()
                 ),
                 Some(_) => format!(

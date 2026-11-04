@@ -284,7 +284,7 @@ impl WindowMovement {
         let movement = self.clone();
         let label = match self.window_name {
             "About" => "Move About window".to_owned(),
-            "Server Control" => "Move Server Control window".to_owned(),
+            "SpaceTerm Core Control" => "Move SpaceTerm Core Control window".to_owned(),
             "Developer Workbench" => format!(
                 "Move Operating-System Window from {} chrome",
                 self.window_name

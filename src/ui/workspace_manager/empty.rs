@@ -31,7 +31,7 @@ pub(super) const EMPTY_ACTION: &str = "Choose Workspace\u{2026}";
 pub(super) const EMPTY_CREATE: &str = "New Local Workspace";
 /// The title while this computer's server is unreachable, so the switcher lists none of its
 /// Workspaces.
-pub(super) const OFFLINE_TITLE: &str = "Server Not Connected";
+pub(super) const OFFLINE_TITLE: &str = "Machine Not Connected";
 
 /// Where the sidebar stands while the empty view lays out beside it.
 pub(super) struct EmptySidebar {
@@ -464,13 +464,13 @@ impl Reconnect {
 /// Why the window shows no Workspace while this computer's server is stopped. `place` is the
 /// host's phrase for this computer.
 pub(super) fn stopped_detail(place: &str) -> SharedString {
-    format!("You stopped the server on {place}. Start it to use its Workspaces.").into()
+    format!("You stopped SpaceTerm Core on {place}. Start it to use its Workspaces.").into()
 }
 
 /// `place` is the host's phrase for this computer, such as "this Mac".
 pub(super) fn offline_detail(place: &str) -> SharedString {
     format!(
-        "SpaceTerm can\u{2019}t reach the server on {place}, so its Workspaces aren\u{2019}t \
+        "SpaceTerm can\u{2019}t reach SpaceTerm Core on {place}, so its Workspaces aren\u{2019}t \
          available."
     )
     .into()

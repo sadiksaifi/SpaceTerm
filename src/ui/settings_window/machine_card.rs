@@ -433,7 +433,7 @@ impl SettingsWindow {
                 .filter(|at| *at > 0)
                 .map(|at| observed_time(at, cx));
             let reach = observed.map_or_else(
-                || "SpaceTerm can\u{2019}t reach the server right now.".to_owned(),
+                || "SpaceTerm can\u{2019}t reach SpaceTerm Core right now.".to_owned(),
                 |at| format!("SpaceTerm can\u{2019}t reach {name}. Last known settings: {at}."),
             );
             // A stopped server accepts no connection, so only its own computer starts it.
@@ -447,10 +447,10 @@ impl SettingsWindow {
         Some(
             match choice {
                 MachineChoice::Local if self.local_core_not_installed() => {
-                    format!("Install the server on {name} to change these settings.")
+                    format!("Install SpaceTerm Core on {name} to change these settings.")
                 }
                 MachineChoice::Local => {
-                    format!("Start the server on {name} to change these settings.")
+                    format!("Start SpaceTerm Core on {name} to change these settings.")
                 }
                 _ => format!("Connect to {name} to change these settings."),
             }
@@ -618,17 +618,17 @@ impl SettingsWindow {
         let menu = if installed {
             vec![
                 MenuItem::new(
-                    "Restart Server",
+                    "Restart SpaceTerm Core",
                     StatusStep::Local(ServiceAction::Restart),
                     idle && offered(ServiceAction::Restart),
                 ),
                 MenuItem::new(
-                    "Stop Server",
+                    "Stop SpaceTerm Core",
                     StatusStep::Local(ServiceAction::Stop),
                     idle && offered(ServiceAction::Stop),
                 ),
                 MenuItem::new(
-                    "Uninstall Server\u{2026}",
+                    "Uninstall SpaceTerm Core\u{2026}",
                     StatusStep::Local(ServiceAction::Uninstall),
                     idle && offered(ServiceAction::Uninstall),
                 )
@@ -766,8 +766,8 @@ impl SettingsWindow {
         let message = "It keeps running after you quit SpaceTerm.";
         let result = spaceterm_ui::Alert::new(
             spaceterm_ui::ModalId::new("settings-server-install"),
-            "Install SpaceTerm Server?",
-            "Install SpaceTerm Server?",
+            "Install SpaceTerm Core?",
+            "Install SpaceTerm Core?",
             message,
             vec![
                 spaceterm_ui::ModalAction::new(
@@ -995,7 +995,7 @@ impl SettingsWindow {
         let Some(row) = self.core_update.as_ref() else {
             return VersionView {
                 subtitle: SharedString::new_static(
-                    "This run builds its own server, so it has no update.",
+                    "This run builds its own SpaceTerm Core, so it has no update.",
                 ),
                 actions: vec![VersionStep::Observe],
                 restore: None,
@@ -1052,7 +1052,10 @@ impl SettingsWindow {
                 vec![UpdateAction::Update],
             )
         } else if presentation.state_selector == "settings-server-update-state-not-installed" {
-            ("Install to see the server version.".to_owned(), Vec::new())
+            (
+                "Install to see the SpaceTerm Core version.".to_owned(),
+                Vec::new(),
+            )
         } else {
             (version, vec![UpdateAction::Check])
         };
@@ -1512,7 +1515,7 @@ impl SettingsWindow {
         if self.this_computer == "This Mac" {
             SharedString::new_static("Start at login.")
         } else {
-            SharedString::new_static("Start the server when this computer starts.")
+            SharedString::new_static("Start SpaceTerm Core when this computer starts.")
         }
     }
 
@@ -1717,7 +1720,9 @@ fn update_progress(step: UpdateStep, state: &UpdateState) -> Option<String> {
             "Preparing the update to",
             "Preparing the update\u{2026}",
         ),
-        UpdateStep::Update { .. } => named(included, "Updating to", "Updating the server\u{2026}"),
+        UpdateStep::Update { .. } => {
+            named(included, "Updating to", "Updating SpaceTerm Core\u{2026}")
+        }
         UpdateStep::PrepareReturn => named(
             previous,
             "Preparing to restore",
@@ -1739,12 +1744,12 @@ fn update_progress(step: UpdateStep, state: &UpdateState) -> Option<String> {
 /// A local service step underway, as the Server row names it.
 const fn service_progress(action: ServiceAction) -> &'static str {
     match action {
-        ServiceAction::Check => "Checking the server\u{2026}",
-        ServiceAction::Install => "Installing the server\u{2026}",
-        ServiceAction::Start => "Starting the server\u{2026}",
-        ServiceAction::Stop => "Stopping the server\u{2026}",
-        ServiceAction::Restart => "Restarting the server\u{2026}",
-        ServiceAction::Uninstall => "Uninstalling the server\u{2026}",
+        ServiceAction::Check => "Checking SpaceTerm Core\u{2026}",
+        ServiceAction::Install => "Installing SpaceTerm Core\u{2026}",
+        ServiceAction::Start => "Starting SpaceTerm Core\u{2026}",
+        ServiceAction::Stop => "Stopping SpaceTerm Core\u{2026}",
+        ServiceAction::Restart => "Restarting SpaceTerm Core\u{2026}",
+        ServiceAction::Uninstall => "Uninstalling SpaceTerm Core\u{2026}",
         ServiceAction::AuthorizeInstall | ServiceAction::AuthorizeStart => {
             "Waiting for authorization\u{2026}"
         }

@@ -72,9 +72,9 @@ impl LocalCoreControl for DevelopmentRunCore {
 }
 
 /// The Servers section's description while a Development run owns the local server.
-pub(super) const DEVELOPMENT_RUN_DESCRIPTION: &str = "Servers run your Workspaces and their \
+pub(super) const DEVELOPMENT_RUN_DESCRIPTION: &str = "Machines run your Workspaces and their \
                                                        Terminal Sessions. This Development \
-                                                       run\u{2019}s server ends when the run ends.";
+                                                       run\u{2019}s SpaceTerm Core ends when the run ends.";
 
 impl LocalCoreControl for MachineConnection {
     fn worktree_core(&self) -> Option<MachineConnection> {
@@ -305,7 +305,7 @@ impl LocalMachineRow {
             (self.lifetime(), status)
         {
             presentation.explanation = format!(
-                "Connected to the server this Development run owns. It ends with its Terminal \
+                "Connected to the SpaceTerm Core this Development run owns. It ends with its Terminal \
                  Sessions when the run ends. Protocol version {}.",
                 connection.protocol_major
             )
@@ -328,14 +328,14 @@ pub(super) fn present(status: LocalCoreStatus) -> LocalCorePresentation {
         LocalCoreStatus::NotChecked => (
             "Not checked",
             "settings-local-server-state-not-checked",
-            guidance("SpaceTerm checks the server when you open this section."),
+            guidance("SpaceTerm checks SpaceTerm Core when you open this section."),
             true,
             false,
         ),
         LocalCoreStatus::Checking => (
             "Checking",
             "settings-local-server-state-working",
-            guidance("Connecting to the server…"),
+            guidance("Connecting to SpaceTerm Core…"),
             true,
             true,
         ),
@@ -344,7 +344,7 @@ pub(super) fn present(status: LocalCoreStatus) -> LocalCorePresentation {
             "settings-local-server-state-connected",
             (
                 SharedString::from(format!(
-                    "Connected to the server for your account. Protocol version {}.",
+                    "Connected to SpaceTerm Core for your account. Protocol version {}.",
                     connection.protocol_major
                 )),
                 CaptionTone::Guidance,
@@ -356,11 +356,11 @@ pub(super) fn present(status: LocalCoreStatus) -> LocalCorePresentation {
             let (state, state_selector, check) = failure(error);
             let explanation = match error {
                 CoreError::NotSetUp => guidance(
-                    "SpaceTerm sets up the server for your account when its window opens. Only \
+                    "SpaceTerm sets up SpaceTerm Core for your account when its window opens. Only \
                      programs running as your account can connect to it.",
                 ),
                 CoreError::NotRunning => guidance(
-                    "The server is set up but not running. Start it below, or open a SpaceTerm \
+                    "SpaceTerm Core is set up but not running. Start it below, or open a SpaceTerm \
                      window, to connect.",
                 ),
                 CoreError::AuthenticationRefused | CoreError::IncompatibleState => {
@@ -372,21 +372,21 @@ pub(super) fn present(status: LocalCoreStatus) -> LocalCorePresentation {
                     SharedString::new_static(INCOMPATIBLE_PROTOCOL),
                     CaptionTone::Error,
                 ),
-                CoreError::ActivationUnresolved => {
-                    guidance("Choose Finish Update to complete the server update and reconnect.")
-                }
+                CoreError::ActivationUnresolved => guidance(
+                    "Choose Finish Update to complete the SpaceTerm Core update and reconnect.",
+                ),
                 // Another service operation is still running. It is not a fault.
                 CoreError::ServiceBusy => guidance(
-                    "Another server operation is running. Choose Check Now when it finishes.",
+                    "Another SpaceTerm Core operation is running. Choose Check Now when it finishes.",
                 ),
                 // A deliberate Stop is a state the person chose, not a fault.
                 CoreError::Stopped => guidance(STOPPED_GUIDANCE),
                 CoreError::NotInstalled => {
-                    guidance("Install the server\u{2019}s service below to start it.")
+                    guidance("Install the SpaceTerm Core service below to start it.")
                 }
                 // Only the service's explicit Start can ask for this authorization.
                 CoreError::AuthorizationRequired => guidance(
-                    "Choose Start Server. Your computer asks for an administrator password.",
+                    "Choose Start SpaceTerm Core. Your computer asks for an administrator password.",
                 ),
                 _ => (SharedString::from(error.to_string()), CaptionTone::Error),
             };
@@ -530,11 +530,12 @@ fn failure(error: CoreError) -> (&'static str, &'static str, bool) {
 
 /// Why this client refused a server with no protocol major in common. Neither side's release
 /// number says which one is older, so the wording names no side.
-pub(crate) const INCOMPATIBLE_PROTOCOL: &str = "SpaceTerm and this server are incompatible.";
+pub(crate) const INCOMPATIBLE_PROTOCOL: &str =
+    "SpaceTerm and this SpaceTerm Core are incompatible.";
 
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
 /// stopped through account login and computer startup alike.
-const STOPPED_GUIDANCE: &str = "You stopped the server. It stays stopped, even after you \
+const STOPPED_GUIDANCE: &str = "You stopped SpaceTerm Core. It stays stopped, even after you \
                                 restart the computer, until you start it.";
 
 pub(super) const SERVICE_CHECK_SELECTOR: &str = "settings-server-service-check";
@@ -581,9 +582,9 @@ impl ServiceAction {
         match self {
             Self::Check => "Check Now",
             Self::Install => "Install",
-            Self::Start => "Start Server",
-            Self::Stop => "Stop Server",
-            Self::Restart => "Restart Server",
+            Self::Start => "Start SpaceTerm Core",
+            Self::Stop => "Stop SpaceTerm Core",
+            Self::Restart => "Restart SpaceTerm Core",
             Self::Uninstall => "Uninstall",
             Self::AuthorizeInstall => "Authorize and Install\u{2026}",
             Self::AuthorizeStart => "Authorize and Start\u{2026}",
@@ -623,13 +624,15 @@ impl ServiceAction {
     /// where the row renders it.
     pub(super) const fn consequence(self) -> Option<&'static str> {
         match self {
-            Self::Stop => Some("Ends the server\u{2019}s Terminal Sessions."),
-            Self::Restart => Some("Ends the server\u{2019}s Terminal Sessions."),
+            Self::Stop => Some("Ends SpaceTerm Core\u{2019}s Terminal Sessions."),
+            Self::Restart => Some("Ends SpaceTerm Core\u{2019}s Terminal Sessions."),
             Self::Uninstall => Some("Removes the service."),
             Self::AuthorizeInstall => {
-                Some("Requires an administrator password to install and start the server.")
+                Some("Requires an administrator password to install and start SpaceTerm Core.")
             }
-            Self::AuthorizeStart => Some("Requires an administrator password to start the server."),
+            Self::AuthorizeStart => {
+                Some("Requires an administrator password to start SpaceTerm Core.")
+            }
             Self::Check | Self::Install | Self::Start => None,
         }
     }
@@ -646,17 +649,20 @@ impl ServiceAction {
             Self::Check => ("Checking", "Reading the service\u{2026}"),
             Self::Install if stopped => (
                 "Installing",
-                "Installing the server without starting it\u{2026}",
+                "Installing SpaceTerm Core without starting it\u{2026}",
             ),
-            Self::Install => ("Installing", "Installing and starting the server\u{2026}"),
-            Self::Start => ("Starting", "Starting the server\u{2026}"),
+            Self::Install => (
+                "Installing",
+                "Installing and starting SpaceTerm Core\u{2026}",
+            ),
+            Self::Start => ("Starting", "Starting SpaceTerm Core\u{2026}"),
             Self::Stop => (
                 "Stopping",
-                "Stopping the server and ending its Terminal Sessions\u{2026}",
+                "Stopping SpaceTerm Core and ending its Terminal Sessions\u{2026}",
             ),
             Self::Restart => (
                 "Restarting",
-                "Restarting the server. Its Terminal Sessions end\u{2026}",
+                "Restarting SpaceTerm Core. Its Terminal Sessions end\u{2026}",
             ),
             Self::Uninstall => ("Uninstalling", "Stopping and removing the service\u{2026}"),
             Self::AuthorizeInstall | Self::AuthorizeStart => (
@@ -780,9 +786,9 @@ impl AuthorizationPrompt {
             AuthorizedRequest::Start => "Authorize and Start",
         };
         Self {
-            title: "Run the Server at Startup?",
+            title: "Run SpaceTerm Core at Startup?",
             message: "Enter an administrator password so your account\u{2019}s services keep running after you log out.",
-            detail: "This applies to every service your account runs and stays on if you uninstall the server.",
+            detail: "This applies to every service your account runs and stays on if you uninstall SpaceTerm Core.",
             confirm,
         }
     }
@@ -958,7 +964,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
             "settings-server-service-state-cleanup-unresolved",
             (
                 SharedString::new_static(
-                    "Terminal Session end unconfirmed. Choose Stop Server to try again.",
+                    "Terminal Session end unconfirmed. Choose Stop SpaceTerm Core to try again.",
                 ),
                 CaptionTone::Warning,
             ),
@@ -980,15 +986,15 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                     "settings-server-service-state-not-installed",
                     match install_choices.as_slice() {
                         [] => guidance(
-                            "No verified server package is available. Use the server installer \
-                             command to keep a signed package for this account, then choose \
+                            "No verified SpaceTerm Core package is available. Use the SpaceTerm \
+                             Core installer command to keep a signed package for this account, then choose \
                              Check Now.",
                         ),
                         // Installing a stopped server starts nothing, so it needs no
                         // authorization on either platform.
                         [only] if stopped => (
                             SharedString::from(format!(
-                                "{} is verified and ready to install. You stopped the server. \
+                                "{} is verified and ready to install. You stopped SpaceTerm Core. \
                                  Installing keeps it stopped until you start it. No \
                                  administrator password is needed.",
                                 only.description_label
@@ -997,7 +1003,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                         ),
                         [only] if at_boot => (
                             SharedString::from(format!(
-                                "{} is verified and ready to install. The server then starts for \
+                                "{} is verified and ready to install. SpaceTerm Core then starts for \
                                  your account when the computer starts and keeps running after \
                                  you log out or quit SpaceTerm. If your computer needs an administrator \
                                  password to allow that, SpaceTerm asks you first.",
@@ -1007,7 +1013,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                         ),
                         [only] => (
                             SharedString::from(format!(
-                                "{} is verified and ready to install. The server then runs for \
+                                "{} is verified and ready to install. SpaceTerm Core then runs for \
                                  your account whenever you\u{2019}re logged in, even after \
                                  SpaceTerm quits. No administrator password is needed.",
                                 only.description_label
@@ -1015,18 +1021,18 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                             CaptionTone::Guidance,
                         ),
                         _ if stopped => guidance(
-                            "Choose a verified server version from Install. You stopped the \
-                             server. Installing keeps it stopped until you start it. No \
+                            "Choose a verified SpaceTerm Core version from Install. You stopped SpaceTerm \
+                             Core. Installing keeps it stopped until you start it. No \
                              administrator password is needed.",
                         ),
                         _ if at_boot => guidance(
-                            "Choose a verified server version from Install. It starts for your \
+                            "Choose a verified SpaceTerm Core version from Install. It starts for your \
                              account when the computer starts and keeps running after you log \
                              out or quit SpaceTerm. If your computer needs an administrator password to \
                              allow that, SpaceTerm asks you first.",
                         ),
                         _ => guidance(
-                            "Choose a verified server version from Install. It runs for your \
+                            "Choose a verified SpaceTerm Core version from Install. It runs for your \
                              account whenever you\u{2019}re logged in, even after SpaceTerm \
                              quits. No administrator password is needed.",
                         ),
@@ -1038,11 +1044,11 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                     // The status does not report lingering, which can be turned off outside
                     // SpaceTerm, so only surviving SpaceTerm's quit is promised outright.
                     guidance(if at_boot {
-                        "The server keeps running after SpaceTerm quits. While lingering stays \
+                        "SpaceTerm Core keeps running after SpaceTerm quits. While lingering stays \
                          on for your account, it also starts when the computer starts and keeps \
                          running after you log out."
                     } else {
-                        "The server starts when you log in and keeps running after SpaceTerm \
+                        "SpaceTerm Core starts when you log in and keeps running after SpaceTerm \
                          quits."
                     }),
                 ),
@@ -1050,10 +1056,10 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                     "Stopped",
                     "settings-server-service-state-stopped",
                     guidance(if at_boot {
-                        "You stopped the server. It stays stopped, even after the computer \
+                        "You stopped SpaceTerm Core. It stays stopped, even after the computer \
                          restarts or you open SpaceTerm, until you start it."
                     } else {
-                        "You stopped the server. It stays stopped, even after you log in again \
+                        "You stopped SpaceTerm Core. It stays stopped, even after you log in again \
                          or open SpaceTerm, until you start it."
                     }),
                 ),
@@ -1062,7 +1068,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                     "settings-server-service-state-not-running",
                     (
                         SharedString::new_static(
-                            "The server is installed but not running. Start it to connect.",
+                            "SpaceTerm Core is installed but not running. Start it to connect.",
                         ),
                         CaptionTone::Warning,
                     ),
@@ -1138,7 +1144,7 @@ fn authorization_caption(
             format!("Choose {step} to try again.")
         }
         (false, ServicePhase::NotInstalled | ServicePhase::Stopped) => {
-            format!("Choose {step} to run the server at startup.")
+            format!("Choose {step} to run SpaceTerm Core at startup.")
         }
         (false, ServicePhase::NotRunning | ServicePhase::Running) => {
             format!("Choose {step} to continue.")
@@ -1706,8 +1712,8 @@ impl SettingsWindow {
                 let _ = presenting.update(cx, |_, cx| {
                     let result = Alert::new(
                         ModalId::new("settings-server-auto-start-authorize"),
-                        "Start the Server at Boot?",
-                        "Start the Server at Boot?",
+                        "Start SpaceTerm Core at Boot?",
+                        "Start SpaceTerm Core at Boot?",
                         "Enter an administrator password so your account\u{2019}s services start at boot.",
                         vec![
                             ModalAction::new(

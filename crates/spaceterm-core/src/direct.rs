@@ -232,19 +232,19 @@ pub enum DirectError {
     InvalidInvitation,
     #[error("This invitation or claim has expired.")]
     Expired,
-    #[error("The server owner rejected this claim.")]
+    #[error("The machine\u{2019}s owner rejected this claim.")]
     Rejected,
     #[error("The claim changed. Review it before approving.")]
     ChangedClaim,
     #[error("Network access changed. Review it before continuing setup.")]
     PolicyChanged,
-    #[error("The server or device did not match this connection.")]
+    #[error("The machine or device did not match this connection.")]
     AuthenticationRefused,
-    #[error("The server no longer matches this connection.")]
+    #[error("The machine no longer matches this connection.")]
     PinMismatch,
     #[error("This device has been unpaired.")]
     Revoked,
-    #[error("The client and server have no compatible protocol version.")]
+    #[error("SpaceTerm and SpaceTerm Core have no compatible protocol version.")]
     IncompatibleProtocol,
     #[error("Direct connections have reached capacity.")]
     Capacity,
@@ -256,13 +256,13 @@ pub enum DirectError {
     InvalidAddress,
     /// The server couldn't listen at the address and port, for example because another app
     /// holds them. Nothing changed.
-    #[error("The server couldn\u{2019}t listen at this address and port.")]
+    #[error("SpaceTerm Core couldn\u{2019}t listen at this address and port.")]
     AddressUnavailable,
     #[error("This claim has already been decided.")]
     AlreadyDecided,
     #[error("This proof belongs to a different claim.")]
     Substituted,
-    #[error("This claim or connection names another server.")]
+    #[error("This claim or connection names another machine.")]
     WrongMachine,
 }
 

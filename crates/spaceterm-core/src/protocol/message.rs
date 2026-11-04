@@ -257,7 +257,7 @@ pub enum Fatal {
     Stalled,
     #[error("This device's access was revoked.")]
     Revoked,
-    #[error("The server is stopping.")]
+    #[error("SpaceTerm Core is stopping.")]
     Stopping,
     #[error("The peers have no compatible protocol.")]
     Incompatible,

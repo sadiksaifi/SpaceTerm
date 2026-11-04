@@ -184,10 +184,10 @@ pub(crate) fn present(status: DirectRouteStatus, core: &str) -> DirectMachinePre
                     &[],
                 ),
                 RefusalReason::PinMismatch => (
-                    "Different server",
+                    "Different machine",
                     "settings-direct-server-state-pin",
                     format!(
-                        "SpaceTerm refused to connect because \u{201C}{core}\u{201D} now reaches a different server."
+                        "SpaceTerm refused to connect because \u{201C}{core}\u{201D} now reaches a different machine."
                     ),
                     &[Connect],
                 ),

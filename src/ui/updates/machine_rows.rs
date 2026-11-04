@@ -70,7 +70,7 @@ pub(crate) enum CoreNeed {
 impl CoreUpdateAction {
     pub(crate) fn label(&self) -> &'static str {
         match self {
-            Self::Local => "Update Server…",
+            Self::Local => "Update SpaceTerm Core…",
             Self::Review(_) | Self::Settings(_) => "Settings…",
         }
     }

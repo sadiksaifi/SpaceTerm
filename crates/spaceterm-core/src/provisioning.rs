@@ -145,7 +145,7 @@ pub fn cancel_direct(
 }
 
 /// The client name setup connects under.
-const SETUP: &str = "Server setup";
+const SETUP: &str = "Machine setup";
 
 fn manage(identity: &str, name: &str, request: Management) -> Result<ManagementReply, CoreError> {
     let paths = host::Paths::for_identity(identity)?;

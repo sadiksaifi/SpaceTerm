@@ -19,18 +19,18 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
         DirectError::InvalidInvitation => "Invalid or used invitation. Ask for a new one.",
         DirectError::Expired => "Invitation expired. Ask for a new one.",
         DirectError::WrongMachine => "This invitation is for a different SpaceTerm app.",
-        DirectError::IncompatibleProtocol => "SpaceTerm and this server are incompatible.",
+        DirectError::IncompatibleProtocol => "SpaceTerm and this SpaceTerm Core are incompatible.",
         DirectError::AuthenticationRefused
         | DirectError::PinMismatch
         | DirectError::ChangedClaim
-        | DirectError::Substituted => "SpaceTerm couldn\u{2019}t verify this server.",
+        | DirectError::Substituted => "SpaceTerm couldn\u{2019}t verify this machine.",
         DirectError::CredentialUnavailable | DirectError::InteractionRequired => {
             "SpaceTerm couldn\u{2019}t save this device\u{2019}s key."
         }
         DirectError::StorageUnavailable => "SpaceTerm couldn\u{2019}t save the connection.",
         DirectError::Capacity => "SpaceTerm is finishing other pairings. Try again shortly.",
         DirectError::Transport => {
-            "SpaceTerm couldn\u{2019}t reach the server. Check your network connection."
+            "SpaceTerm couldn\u{2019}t reach the machine. Check your network connection."
         }
         DirectError::Disabled
         | DirectError::Revoked
@@ -38,7 +38,7 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
         | DirectError::InvalidAddress
         | DirectError::AddressUnavailable
         | DirectError::PolicyChanged
-        | DirectError::AlreadyDecided => "The server refused pairing.",
+        | DirectError::AlreadyDecided => "The machine refused pairing.",
     }
 }
 
@@ -48,14 +48,14 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
 pub(super) fn join_paused(stage: EnrollmentStage) -> String {
     match stage {
         EnrollmentStage::Claim => {
-            "SpaceTerm couldn\u{2019}t reach the server. Check your network, then try again."
+            "SpaceTerm couldn\u{2019}t reach the machine. Check your network, then try again."
         }
         EnrollmentStage::Approval => {
-            "SpaceTerm lost contact with the server. Check your network, then try again."
+            "SpaceTerm lost contact with the machine. Check your network, then try again."
         }
     }
     .to_owned()
 }
 
 /// What a request the server's owner declined says.
-const DECLINED: &str = "The server\u{2019}s owner declined pairing.";
+const DECLINED: &str = "The machine\u{2019}s owner declined pairing.";

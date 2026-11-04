@@ -226,11 +226,11 @@ pub(super) enum LaunchAction {
 impl LaunchAction {
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Start => "Start Server",
+            Self::Start => "Start SpaceTerm Core",
             Self::Authorize => "Authorize\u{2026}",
             Self::Retry => "Try Again",
-            Self::Settings => "Server Settings\u{2026}",
-            Self::Update => "Update Server\u{2026}",
+            Self::Settings => "Machine Settings\u{2026}",
+            Self::Update => "Update SpaceTerm Core\u{2026}",
         }
     }
 
@@ -286,32 +286,34 @@ pub(super) struct LaunchPresentation {
 
 pub(super) const OPENING_TITLE: &str = "Opening Workspaces";
 // Launch reuses a running server or starts it, so the detail claims neither.
-const OPENING_DETAIL: &str = "SpaceTerm is waiting for the server.";
-pub(super) const STOPPED_TITLE: &str = "Server Stopped";
-const STOPPED_DETAIL: &str = "Start the server to open your Workspaces.";
-pub(super) const AUTHORIZATION_TITLE: &str = "Run the Server at Startup";
+const OPENING_DETAIL: &str = "SpaceTerm is waiting for SpaceTerm Core.";
+pub(super) const STOPPED_TITLE: &str = "SpaceTerm Core Stopped";
+const STOPPED_DETAIL: &str = "Start SpaceTerm Core to open your Workspaces.";
+pub(super) const AUTHORIZATION_TITLE: &str = "Run SpaceTerm Core at Startup";
 const AUTHORIZATION_DECLINED: &str = "Authorization didn\u{2019}t finish.";
 const AUTHORIZING_DETAIL: &str =
     "Enter an administrator password in the system prompt to continue.";
-pub(super) const BUSY_TITLE: &str = "Waiting for the Server";
+pub(super) const BUSY_TITLE: &str = "Waiting for SpaceTerm Core";
 const BUSY_DETAIL: &str =
-    "Another server operation is running. Your Workspaces open when it finishes.";
+    "Another SpaceTerm Core operation is running. Your Workspaces open when it finishes.";
 
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: CoreError) -> &'static str {
     match error {
-        CoreError::IncompatibleState | CoreError::IncompatibleProtocol => "Incompatible Server",
+        CoreError::IncompatibleState | CoreError::IncompatibleProtocol => {
+            "Incompatible SpaceTerm Core"
+        }
         CoreError::ActivationUnresolved | CoreError::ReturnUnavailable => {
-            "Server Update Unfinished"
+            "SpaceTerm Core Update Unfinished"
         }
         CoreError::CandidateChanged => "Restart SpaceTerm",
-        CoreError::CandidateMissing => "Server Not Included",
-        CoreError::RuntimeUnavailable => "Couldn\u{2019}t Verify Server",
-        CoreError::UnsafeStorage => "Unsafe Server Storage",
-        CoreError::StorageUnavailable => "Server Storage Unavailable",
-        CoreError::NotInstalled => "Server Not Installed",
+        CoreError::CandidateMissing => "SpaceTerm Core Not Included",
+        CoreError::RuntimeUnavailable => "Couldn\u{2019}t Verify SpaceTerm Core",
+        CoreError::UnsafeStorage => "Unsafe SpaceTerm Core Storage",
+        CoreError::StorageUnavailable => "SpaceTerm Core Storage Unavailable",
+        CoreError::NotInstalled => "SpaceTerm Core Not Installed",
         CoreError::AuthenticationRefused => "Connection Refused",
-        CoreError::ServiceBusy => "Server Busy",
+        CoreError::ServiceBusy => "SpaceTerm Core Busy",
         _ => "Couldn\u{2019}t Open Workspaces",
     }
 }
@@ -321,7 +323,7 @@ const fn failure_title(error: CoreError) -> &'static str {
 fn failure_detail(error: CoreError) -> SharedString {
     match error {
         CoreError::CandidateMissing => {
-            "This SpaceTerm build doesn\u{2019}t include a server. Reinstall SpaceTerm, then try \
+            "This SpaceTerm build doesn\u{2019}t include SpaceTerm Core. Reinstall SpaceTerm, then try \
              again."
                 .into()
         }
@@ -370,7 +372,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         LaunchState::Launching | LaunchState::Ready => LaunchPresentation {
             title: OPENING_TITLE,
             detail: fixed(OPENING_DETAIL),
-            progress: Some("Waiting for the server\u{2026}"),
+            progress: Some("Waiting for SpaceTerm Core\u{2026}"),
             actions: &[],
             icon: None,
             waiting: true,
@@ -378,7 +380,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
             title: STOPPED_TITLE,
             detail: fixed(STOPPED_DETAIL),
-            progress: Some("Starting the server\u{2026}"),
+            progress: Some("Starting SpaceTerm Core\u{2026}"),
             actions: &[],
             icon: None,
             waiting: false,
@@ -395,7 +397,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         LaunchState::Working(LaunchStep::WaitForService) => LaunchPresentation {
             title: BUSY_TITLE,
             detail: fixed(BUSY_DETAIL),
-            progress: Some("Waiting for the server\u{2026}"),
+            progress: Some("Waiting for SpaceTerm Core\u{2026}"),
             actions: &[],
             icon: None,
             waiting: false,
@@ -428,9 +430,9 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         },
         LaunchState::Incompatible { reason, update } => {
             let detail = if update {
-                "Updating the server ends its Terminal Sessions for every client."
+                "Updating SpaceTerm Core ends its Terminal Sessions for every client."
             } else {
-                "SpaceTerm and this server are incompatible."
+                "SpaceTerm and this SpaceTerm Core are incompatible."
             };
             LaunchPresentation {
                 title: failure_title(reason),

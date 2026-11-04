@@ -92,46 +92,46 @@ fn status(runtime: LaneVersion) -> LaneStatus {
 fn a_stop_confirmation_says_every_client_loses_access_and_where_start_happens() {
     let confirmation = confirmation("penguin", &preview(LaneAction::Stop, effects(2)));
 
-    assert_eq!(confirmation.title, "Stop Server");
-    assert_eq!(confirmation.message, "Stop the penguin server?");
+    assert_eq!(confirmation.title, "Stop SpaceTerm Core");
+    assert_eq!(confirmation.message, "Stop SpaceTerm Core on penguin?");
     assert_eq!(
         confirmation.detail,
         "Its 2 Terminal Sessions end for every client. Every client connected to it loses \
          access, and Workspaces are kept. It stays stopped until someone starts it on its own \
          computer."
     );
-    assert_eq!(confirmation.confirm, "Stop Server");
+    assert_eq!(confirmation.confirm, "Stop SpaceTerm Core");
 }
 
 #[test]
 fn a_restart_confirmation_names_the_exact_sessions_that_end() {
     let confirmation = confirmation("penguin", &preview(LaneAction::Restart, effects(1)));
 
-    assert_eq!(confirmation.message, "Restart the penguin server?");
+    assert_eq!(confirmation.message, "Restart SpaceTerm Core on penguin?");
     assert_eq!(
         confirmation.detail,
         "Its 1 Terminal Session ends for every client. Every client connected to it disconnects \
          until it starts again, and Workspaces are kept."
     );
-    assert_eq!(confirmation.confirm, "Restart Server");
+    assert_eq!(confirmation.confirm, "Restart SpaceTerm Core");
 }
 
 #[test]
 fn an_update_confirmation_says_it_replaces_the_running_core() {
     let confirmation = confirmation("penguin", &update_preview(None));
 
-    assert_eq!(confirmation.title, "Update Server");
+    assert_eq!(confirmation.title, "Update SpaceTerm Core");
     assert_eq!(
         confirmation.message,
-        "Update the penguin server to 1.3.0 (commit bbbbbbb)?"
+        "Update SpaceTerm Core on penguin to 1.3.0 (commit bbbbbbb)?"
     );
     assert_eq!(
         confirmation.detail,
         "It changes from 1.2.0 (commit aaaaaaa) to 1.3.0 (commit bbbbbbb), replacing the running \
-         server. Its 2 Terminal Sessions end for every client. Every client connected to it \
+         SpaceTerm Core. Its 2 Terminal Sessions end for every client. Every client connected to it \
          disconnects until it starts again, and Workspaces are kept."
     );
-    assert_eq!(confirmation.confirm, "Update Server");
+    assert_eq!(confirmation.confirm, "Update SpaceTerm Core");
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn a_return_confirmation_names_the_version_it_returns_to() {
     assert_eq!(confirmation.title, "Return to Previous Version");
     assert_eq!(
         confirmation.message,
-        "Return the penguin server to 1.2.0 (commit aaaaaaa)?"
+        "Return SpaceTerm Core on penguin to 1.2.0 (commit aaaaaaa)?"
     );
     assert_eq!(confirmation.confirm, "Return to 1.2.0 (commit aaaaaaa)");
     assert!(
@@ -189,7 +189,7 @@ fn an_outcome_the_client_cannot_confirm_says_so() {
     assert_eq!(
         stop,
         "penguin closed its connection while stopping, so SpaceTerm can\u{2019}t confirm the \
-         stop finished. Check on its own computer with \u{201C}spaceterm server status\u{201D}, \
+         stop finished. Check on its own computer with \u{201C}spaceterm status\u{201D}, \
          and start it again there."
     );
     assert_eq!(tone, CaptionTone::Warning);
@@ -386,7 +386,7 @@ fn stop_confirms_the_machines_preview_and_reports_an_unconfirmed_stop(cx: &mut T
     assert_eq!(*remote.prepared.lock().unwrap(), vec![Change::Stop]);
     assert!(alert_open(machines.cx), "Stop asks first");
     let tree = A11yTree::read(machines.cx);
-    assert!(tree.find_text("Stop the penguin server?").is_some());
+    assert!(tree.find_text("Stop SpaceTerm Core on penguin?").is_some());
     assert!(remote.performed.lock().unwrap().is_empty());
 
     answer(CONFIRM_SELECTOR, machines.cx);
@@ -508,7 +508,7 @@ fn check_now_offers_the_machines_update_and_update_follows_it_to_the_end(cx: &mu
     assert_eq!(*remote.prepared.lock().unwrap(), vec![Change::Update]);
     let tree = A11yTree::read(machines.cx);
     let message = tree
-        .find_text("Update the penguin server to 1.3.0 (commit bbbbbbb)?")
+        .find_text("Update SpaceTerm Core on penguin to 1.3.0 (commit bbbbbbb)?")
         .is_some();
     assert!(message, "the alert names the server and the version");
     answer(CONFIRM_SELECTOR, machines.cx);

@@ -948,10 +948,10 @@ impl UpdatePill {
         match self {
             Self::Client { step, .. } => step.pill.clone(),
             Self::Core { action, .. } => match action.need() {
-                Some(CoreNeed::Attention) => "Server Needs Attention".into(),
-                _ => "Update Server".into(),
+                Some(CoreNeed::Attention) => "SpaceTerm Core Needs Attention".into(),
+                _ => "Update SpaceTerm Core".into(),
             },
-            Self::Machines { count, .. } => format!("Review {count} Servers").into(),
+            Self::Machines { count, .. } => format!("Review {count} Machines").into(),
         }
     }
 
@@ -962,12 +962,12 @@ impl UpdatePill {
                 let step = step.status.clone().unwrap_or_else(|| step.label.clone());
                 match machines {
                     0 => step,
-                    1 => format!("{step}. A server needs action in Updates.").into(),
-                    count => format!("{step}. {count} servers need action in Updates.").into(),
+                    1 => format!("{step}. A machine needs action in Updates.").into(),
+                    count => format!("{step}. {count} machines need action in Updates.").into(),
                 }
             }
             Self::Core { name, detail, .. } => format!("{name}: {detail}").into(),
-            Self::Machines { count, .. } => format!("{count} servers need action").into(),
+            Self::Machines { count, .. } => format!("{count} machines need action").into(),
         }
     }
 
@@ -1330,7 +1330,7 @@ mod tests {
         assert_eq!(
             pill(None, None, &with(&update)),
             Some((
-                "Update Server".to_owned(),
+                "Update SpaceTerm Core".to_owned(),
                 PillTone::Primary,
                 None,
                 PillCommand::Core(CoreUpdateAction::Local)
@@ -1339,7 +1339,7 @@ mod tests {
         assert_eq!(
             pill(None, None, &with(&attention)),
             Some((
-                "Server Needs Attention".to_owned(),
+                "SpaceTerm Core Needs Attention".to_owned(),
                 PillTone::Warning,
                 Some(ControlGlyph::Warning),
                 PillCommand::Core(CoreUpdateAction::Review(MachineTarget::Direct([3; 32])))
@@ -1350,7 +1350,7 @@ mod tests {
         assert_eq!(
             pill(None, None, &both),
             Some((
-                "Review 2 Servers".to_owned(),
+                "Review 2 Machines".to_owned(),
                 PillTone::Primary,
                 None,
                 PillCommand::Menu

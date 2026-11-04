@@ -2631,7 +2631,7 @@ mod draft {
             name: name.to_owned().into(),
             path: "~/work".into(),
             machine: None,
-            tooltip: "Server: /server/work".into(),
+            tooltip: "SpaceTerm Core: /server/work".into(),
             pinned: false,
             remote_connection_phase: None,
             repository: None,

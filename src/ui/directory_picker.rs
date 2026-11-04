@@ -53,7 +53,7 @@ const NO_SUBDIRECTORIES_NOTE: &str = "No subdirectories.";
 const TRUNCATED_LISTING_NOTE: &str = "Showing the first 1024. Type a path to open others.";
 pub(super) const MAXIMUM_DIRECTORY_ROWS: usize = 1024;
 const CONNECTION_LOST_NOTICE: EmptyNotice =
-    EmptyNotice::new(IconName::TriangleAlert, "Server Not Connected")
+    EmptyNotice::new(IconName::TriangleAlert, "Machine Not Connected")
         .description("Choose again once SpaceTerm reconnects.");
 
 /// The content-unavailable view the list area presents in place of child directories.
@@ -1225,7 +1225,7 @@ impl DirectoryPicker {
                         .description("Choose an existing directory.");
                 }
                 DirectoryPickerStatus::ConnectionLost => {
-                    return EmptyNotice::new(IconName::TriangleAlert, "Server Not Connected")
+                    return EmptyNotice::new(IconName::TriangleAlert, "Machine Not Connected")
                         .description("Edit the path once SpaceTerm reconnects.");
                 }
                 _ => {}

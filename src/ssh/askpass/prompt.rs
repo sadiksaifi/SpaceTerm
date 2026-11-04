@@ -2,7 +2,7 @@ use std::path::Path;
 
 use zeroize::Zeroizing;
 
-pub(crate) const REMOTE_LINGER_PROMPT: &str = "SpaceTerm: sudo password on the remote computer to keep its SpaceTerm server running after logout:";
+pub(crate) const REMOTE_LINGER_PROMPT: &str = "SpaceTerm: sudo password on the remote computer to keep its SpaceTerm Core running after logout:";
 
 const MAX_ASKPASS_PROMPT_BYTES: usize = 4 * 1024;
 const MAX_ASKPASS_SECRET_BYTES: usize = 16 * 1024;
@@ -270,9 +270,9 @@ impl AskPassPresentation {
     fn remote_administrator(this_computer: &str) -> Self {
         Self {
             kind: AskPassPresentationKind::RemoteAdministrator,
-            title: "Allow the Server to Keep Running".into(),
+            title: "Allow SpaceTerm Core to Keep Running".into(),
             detail: format!(
-                "Enter your sudo password for the remote computer, not for {this_computer}, so its SpaceTerm Server keeps running after you log out."
+                "Enter your sudo password for the remote computer, not for {this_computer}, so its SpaceTerm Core keeps running after you log out."
             ),
             note: Some("SpaceTerm sends it once and doesn\u{2019}t store it."),
             affirmative: "Allow",
@@ -652,7 +652,7 @@ mod tests {
         assert_eq!(presentation.field_label(), "Remote sudo password");
         assert_eq!(
             presentation.detail(),
-            "Enter your sudo password for the remote computer, not for this Mac, so its SpaceTerm Server keeps running after you log out."
+            "Enter your sudo password for the remote computer, not for this Mac, so its SpaceTerm Core keeps running after you log out."
         );
         assert_eq!(
             presentation.note(),

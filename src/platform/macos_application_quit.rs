@@ -501,8 +501,8 @@ pub(in crate::platform) mod tests {
             title: "Quit SpaceTerm?".to_owned(),
             detail: match buttons {
                 QuitButtons::Quit => "SpaceTerm leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it.",
-                QuitButtons::DestructiveQuit => "This development build runs its own server. Quitting ends its 3 Terminal Sessions and stops their running commands.",
-                QuitButtons::CancelOnly => "Reconnect to the development server, then try again.",
+                QuitButtons::DestructiveQuit => "This development build runs its own SpaceTerm Core. Quitting ends its 3 Terminal Sessions and stops their running commands.",
+                QuitButtons::CancelOnly => "Reconnect to the development SpaceTerm Core, then try again.",
             }
             .to_owned(),
             buttons,

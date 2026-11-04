@@ -64,7 +64,10 @@ fn an_unwritable_folder_appears_only_for_the_text_the_core_checked() {
     );
     assert_eq!(
         model.message(),
-        Some(("The server can\u{2019}t write here.", CaptionTone::Error))
+        Some((
+            "SpaceTerm Core can\u{2019}t write here.",
+            CaptionTone::Error
+        ))
     );
     assert_eq!(model.commit(), None);
 }
@@ -264,7 +267,7 @@ mod presented {
         type_location("/Volumes/Locked/{branch}", machines.cx);
         wait(Duration::from_millis(400), machines.cx);
 
-        assert!(says("The server can\u{2019}t write here.", machines.cx));
+        assert!(says("SpaceTerm Core can\u{2019}t write here.", machines.cx));
         machines.cx.simulate_keystrokes("enter");
         machines.cx.run_until_parked();
         assert!(edits.submitted().is_empty());

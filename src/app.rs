@@ -35,7 +35,7 @@ impl crate::ui::updates::LocalUpdateObservation for NativeLocalUpdates {
             .ok()
             .and_then(|service| service.passive_machine_id().ok().flatten());
         let update = if crate::local_startup::owned_foreground() {
-            Ok(("Development Server".into(), false))
+            Ok(("Development SpaceTerm Core".into(), false))
         } else {
             service
                 .as_ref()
@@ -655,7 +655,7 @@ impl ApplicationQuitCoordinator {
         };
         let notice = QuitPrompt {
             title: "Couldn\u{2019}t check Terminal Sessions".to_owned(),
-            detail: "Reconnect to the development server, then try again.".to_owned(),
+            detail: "Reconnect to the development SpaceTerm Core, then try again.".to_owned(),
             buttons: QuitButtons::CancelOnly,
         };
         let Some((answer, place)) = present_quit_prompt(adapter.as_ref(), &notice, cx) else {
@@ -954,11 +954,11 @@ fn quit_prompt(
             "{name} leaves the {place}. Your Terminal Sessions keep running, so everything is where you left it."
         ),
         (Some(_), 0) => format!(
-            "{name} leaves the {place} and stops its development server. No Terminal Sessions are running."
+            "{name} leaves the {place} and stops its development SpaceTerm Core. No Terminal Sessions are running."
         ),
-        (Some(_), 1) => "This development build runs its own server. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
+        (Some(_), 1) => "This development build runs its own SpaceTerm Core. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
         (Some(_), count) => format!(
-            "This development build runs its own server. Quitting ends its {count} Terminal Sessions and stops their running commands."
+            "This development build runs its own SpaceTerm Core. Quitting ends its {count} Terminal Sessions and stops their running commands."
         ),
     };
     QuitPrompt {
@@ -1718,7 +1718,7 @@ mod tests {
         assert_eq!(
             idle.detail,
             format!(
-                "{name} leaves the menu bar and stops its development server. No Terminal Sessions are running."
+                "{name} leaves the menu bar and stops its development SpaceTerm Core. No Terminal Sessions are running."
             )
         );
         assert_eq!(
@@ -1731,13 +1731,13 @@ mod tests {
         assert_eq!(
             status_area_idle.detail,
             format!(
-                "{name} leaves the status area and stops its development server. No Terminal Sessions are running."
+                "{name} leaves the status area and stops its development SpaceTerm Core. No Terminal Sessions are running."
             )
         );
         let one = quit_prompt(StatusAreaName::MenuBar, Some(&quit_sessions(1, &[Some(1)])));
         assert_eq!(
             one.detail,
-            "This development build runs its own server. Quitting ends its 1 Terminal Session and stops its running commands."
+            "This development build runs its own SpaceTerm Core. Quitting ends its 1 Terminal Session and stops its running commands."
         );
         assert_eq!(one.buttons, QuitButtons::DestructiveQuit);
     }
@@ -1980,7 +1980,7 @@ mod tests {
             .expect("server-owned work confirms without windows");
         assert_eq!(
             detail,
-            "This development build runs its own server. Quitting ends its 3 Terminal Sessions and stops their running commands."
+            "This development build runs its own SpaceTerm Core. Quitting ends its 3 Terminal Sessions and stops their running commands."
         );
         cx.simulate_prompt_answer("Quit");
         cx.run_until_parked();

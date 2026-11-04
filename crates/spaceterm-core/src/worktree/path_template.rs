@@ -28,7 +28,7 @@ pub enum WorktreePathTemplateError {
     MissingBranch,
     #[error("the template contains a control character")]
     InvalidCharacter,
-    #[error("the server cannot write to this folder")]
+    #[error("SpaceTerm Core cannot write to this folder")]
     NotWritable,
 }
 

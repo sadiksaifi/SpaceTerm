@@ -398,7 +398,7 @@ fn a_connection_names_only_its_protocol_version() {
     assert_eq!(presented.state, "Connected");
     assert_eq!(
         presented.explanation.as_ref(),
-        "Connected to the server for your account. Protocol version 3."
+        "Connected to SpaceTerm Core for your account. Protocol version 3."
     );
     assert!(presented.check);
 
@@ -431,7 +431,7 @@ fn a_development_run_core_is_described_as_ending_with_the_run(cx: &mut TestAppCo
         )
     });
     assert!(
-        description.contains("server ends when the run ends"),
+        description.contains("SpaceTerm Core ends when the run ends"),
         "got {description:?}"
     );
     assert!(!description.contains("keep running after SpaceTerm quits"));
@@ -439,7 +439,7 @@ fn a_development_run_core_is_described_as_ending_with_the_run(cx: &mut TestAppCo
     assert_eq!(presentation.state, "Connected");
     assert_eq!(
         presentation.explanation.as_ref(),
-        "Connected to the server this Development run owns. It ends with its Terminal Sessions \
+        "Connected to the SpaceTerm Core this Development run owns. It ends with its Terminal Sessions \
          when the run ends. Protocol version 2."
     );
     assert!(!rendered(SERVICE_ROW_SELECTOR, cx), "no service runs it");
@@ -449,7 +449,7 @@ fn a_development_run_core_is_described_as_ending_with_the_run(cx: &mut TestAppCo
     assert_eq!(
         window.read_with(cx, |settings, cx| settings
             .section_description(SettingsSectionId::Machines, cx)),
-        "Servers run Workspaces and Terminal Sessions."
+        "Machines run Workspaces and Terminal Sessions."
     );
 }
 
@@ -592,7 +592,7 @@ fn settings_search_reveals_the_local_machine_and_checks_it_once(cx: &mut TestApp
     let core = ScriptedCore::new(Ok(connected(2)));
     let (window, cx) = open_settings(offered(&core), cx);
 
-    for query in ["s", "se", "ser", "serv", "serve", "server"] {
+    for query in ["m", "ma", "mac", "mach", "machi", "machine"] {
         search(&window, query, cx);
     }
 
@@ -710,7 +710,7 @@ fn installing_promises_to_start_the_core_only_when_the_person_has_not_stopped_it
     // A first installation starts the server and keeps it running while the person is logged in.
     assert_eq!(
         presented(not_installed(), one(), None).explanation.as_ref(),
-        "Version 1.4.0 (commit aaaaaaa) is verified and ready to install. The server then runs \
+        "Version 1.4.0 (commit aaaaaaa) is verified and ready to install. SpaceTerm Core then runs \
          for your account whenever you\u{2019}re logged in, even after SpaceTerm quits. No \
          administrator password is needed."
     );
@@ -718,7 +718,7 @@ fn installing_promises_to_start_the_core_only_when_the_person_has_not_stopped_it
         presented(not_installed(), several(), None)
             .explanation
             .as_ref(),
-        "Choose a verified server version from Install. It runs for your account whenever \
+        "Choose a verified SpaceTerm Core version from Install. It runs for your account whenever \
          you\u{2019}re logged in, even after SpaceTerm quits. No administrator password is \
          needed."
     );
@@ -726,20 +726,20 @@ fn installing_promises_to_start_the_core_only_when_the_person_has_not_stopped_it
     assert_eq!(installing.state, "Installing");
     assert_eq!(
         installing.explanation.as_ref(),
-        "Installing and starting the server\u{2026}"
+        "Installing and starting SpaceTerm Core\u{2026}"
     );
 
     // A Stop the person chose outlasts Uninstall, and installing again keeps it.
     for (installations, explanation) in [
         (
             one(),
-            "Version 1.4.0 (commit aaaaaaa) is verified and ready to install. You stopped the \
-             server. Installing keeps it stopped until you start it. No administrator password \
+            "Version 1.4.0 (commit aaaaaaa) is verified and ready to install. You stopped SpaceTerm \
+             Core. Installing keeps it stopped until you start it. No administrator password \
              is needed.",
         ),
         (
             several(),
-            "Choose a verified server version from Install. You stopped the server. Installing \
+            "Choose a verified SpaceTerm Core version from Install. You stopped SpaceTerm Core. Installing \
              keeps it stopped until you start it. No administrator password is needed.",
         ),
     ] {
@@ -753,7 +753,7 @@ fn installing_promises_to_start_the_core_only_when_the_person_has_not_stopped_it
     assert_eq!(installing.state, "Installing");
     assert_eq!(
         installing.explanation.as_ref(),
-        "Installing the server without starting it\u{2026}"
+        "Installing SpaceTerm Core without starting it\u{2026}"
     );
 }
 
@@ -835,14 +835,14 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
             ServiceConfirmation::for_action(action, true, login).expect("confirmation");
         let core = crate::application_identity::ApplicationIdentity::current().display_name();
         let question = match action {
-            ServiceAction::Stop => format!("Stop the {core} server?"),
-            ServiceAction::Restart => format!("Restart the {core} server?"),
+            ServiceAction::Stop => format!("Stop SpaceTerm Core on {core}?"),
+            ServiceAction::Restart => format!("Restart SpaceTerm Core on {core}?"),
             _ => unreachable!(),
         };
         assert_eq!(confirmation.message.as_ref(), question);
         let kept = match action {
             ServiceAction::Stop => {
-                "Workspaces are kept, and the server stays stopped until you start it again."
+                "Workspaces are kept, and SpaceTerm Core stays stopped until you start it again."
             }
             ServiceAction::Restart => {
                 "Workspaces are kept, and each Pane starts a new shell when you use it."
@@ -950,7 +950,7 @@ fn without_a_verified_build_the_row_explains_how_to_keep_one_and_offers_another_
     assert!(
         presentation
             .explanation
-            .contains("Use the server installer command to keep a signed package")
+            .contains("Use the SpaceTerm Core installer command to keep a signed package")
     );
 }
 
@@ -994,7 +994,7 @@ fn several_verified_builds_are_chosen_from_installs_menu(cx: &mut TestAppContext
     assert!(
         service_presentation(&window, cx)
             .explanation
-            .starts_with("Choose a verified server version from Install.")
+            .starts_with("Choose a verified SpaceTerm Core version from Install.")
     );
 
     click(MENU_SELECTOR, cx);
@@ -1232,7 +1232,7 @@ fn uninstall_asks_first_then_offers_install_again(cx: &mut TestAppContext) {
     });
     assert_eq!(
         service_presentation(&window, cx).explanation.as_ref(),
-        "Installing the server without starting it\u{2026}"
+        "Installing SpaceTerm Core without starting it\u{2026}"
     );
     cx.run_until_parked();
 
@@ -1392,7 +1392,7 @@ fn assistive_technology_hears_the_core_state_and_stop_asks_first(cx: &mut TestAp
     // Cancel focused, so Escape keeps the server running.
     click(MENU_SELECTOR, cx);
     let tree = A11yTree::read(cx);
-    perform(cx, tree.node("Stop Server"), Action::Click);
+    perform(cx, tree.node("Stop SpaceTerm Core"), Action::Click);
     cx.run_until_parked();
     assert!(alert_open(STOP_CONFIRM_SELECTOR, cx));
     let tree = A11yTree::read(cx);
@@ -1428,10 +1428,13 @@ fn the_status_menu_offers_stopping_only_a_running_machine(cx: &mut TestAppContex
     click(MENU_SELECTOR, cx);
     let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
 
-    assert_eq!(tree.node("Stop Server")["aria"]["disabled"], true);
-    assert_eq!(tree.node("Restart Server")["aria"]["disabled"], true);
+    assert_eq!(tree.node("Stop SpaceTerm Core")["aria"]["disabled"], true);
+    assert_eq!(
+        tree.node("Restart SpaceTerm Core")["aria"]["disabled"],
+        true
+    );
     assert_ne!(
-        tree.node("Uninstall Server\u{2026}")["aria"]["disabled"],
+        tree.node("Uninstall SpaceTerm Core\u{2026}")["aria"]["disabled"],
         true
     );
 }
@@ -1468,7 +1471,7 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
     // SpaceTerm's quit does not depend on it.
     assert_eq!(
         presented(ServiceStartup::AtBoot, running()).as_ref(),
-        "The server keeps running after SpaceTerm quits. While lingering stays on for your \
+        "SpaceTerm Core keeps running after SpaceTerm quits. While lingering stays on for your \
          account, it also starts when the computer starts and keeps running after you log out."
     );
     // Installing may need authorization for boot startup, and SpaceTerm says it asks first.
@@ -1486,7 +1489,7 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
     let stop = ServiceConfirmation::for_action(ServiceAction::Stop, true, boot).expect("stop");
     assert_eq!(
         stop.detail.as_ref(),
-        "All Terminal Sessions on it end for every client. Workspaces are kept, and the server \
+        "All Terminal Sessions on it end for every client. Workspaces are kept, and SpaceTerm Core \
          stays stopped until you start it again."
     );
     let uninstall =
@@ -1511,7 +1514,7 @@ fn the_authorization_prompt_names_the_required_permission_and_matching_action() 
     );
     assert_eq!(
         install.detail,
-        "This applies to every service your account runs and stays on if you uninstall the server."
+        "This applies to every service your account runs and stays on if you uninstall SpaceTerm Core."
     );
     let start = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
     assert_eq!(start.confirm, "Authorize and Start");
@@ -1539,7 +1542,7 @@ fn a_boot_installation_waits_for_explained_authorization_then_installs_its_build
     assert_eq!(presented.tone, CaptionTone::Warning);
     assert_eq!(
         presented.explanation.as_ref(),
-        "Choose Authorize and Install to run the server at startup."
+        "Choose Authorize and Install to run SpaceTerm Core at startup."
     );
     assert_eq!(presented.actions, vec![ServiceAction::AuthorizeInstall]);
 
@@ -1677,7 +1680,7 @@ fn a_boot_service_restart_refused_after_stopping_offers_to_authorize_and_start(
     let presented = service_presentation(&window, cx);
     assert_eq!(
         presented.explanation.as_ref(),
-        "Choose Authorize and Start to run the server at startup."
+        "Choose Authorize and Start to run SpaceTerm Core at startup."
     );
     assert_eq!(
         presented.actions,
@@ -1731,7 +1734,7 @@ fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unaske
     cx.run_until_parked();
     assert!(alert_open(AUTHORIZE_CANCEL_SELECTOR, cx));
     let tree = A11yTree::read(cx);
-    let prompt = tree.node("Run the Server at Startup?");
+    let prompt = tree.node("Run SpaceTerm Core at Startup?");
     assert_eq!(prompt["aria"]["role"], "AlertDialog");
     assert_eq!(
         prompt["aria"]["description"],

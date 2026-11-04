@@ -700,7 +700,7 @@ fn an_address_that_names_no_host_is_refused_before_setup_runs(cx: &mut TestAppCo
     sheet.choose(SheetAction::SetUp.selector());
 
     assert!(sheet.says("Enter a host name or IP address"));
-    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.title(), "Add Machine");
     assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_some());
     assert!(
         sheet.computers.asked().is_empty(),
@@ -803,7 +803,7 @@ fn an_installation_offer_waits_for_install_and_setup_goes_on(cx: &mut TestAppCon
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Install SpaceTerm Server on \u{201C}penguin\u{201D}?");
+    sheet.settle(|sheet| sheet.title() == "Install SpaceTerm Core on \u{201C}penguin\u{201D}?");
 
     assert!(sheet.says("SpaceTerm may ask for your sudo password on that computer."));
     assert!(
@@ -833,7 +833,7 @@ fn a_stopped_core_starts_only_after_the_person_chooses_start_core(cx: &mut TestA
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Server on \u{201C}penguin\u{201D}?");
+    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Core on \u{201C}penguin\u{201D}?");
 
     sheet.choose(SheetAction::Start.selector());
     sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(MachineChoice::Direct(route)));
@@ -891,7 +891,7 @@ fn cancelling_an_offer_declines_it_and_adds_no_core(cx: &mut TestAppContext) {
     sheet.begin(AddMachineRequest::Ssh(None));
     sheet.fill("penguin");
     sheet.choose(SheetAction::SetUp.selector());
-    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Server on \u{201C}penguin\u{201D}?");
+    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Core on \u{201C}penguin\u{201D}?");
 
     sheet.choose(SheetAction::Cancel.selector());
     sheet.settle(|sheet| !sheet.open());
@@ -950,7 +950,7 @@ fn an_unreachable_address_says_where_and_back_offers_it_for_editing(cx: &mut Tes
     assert!(sheet.says("couldn\u{2019}t reach it at 10.1.2.3:9231"));
 
     sheet.choose(SheetAction::Back.selector());
-    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.title(), "Add Machine");
     assert_eq!(
         sheet.typed(),
         ("penguin".to_owned(), "10.1.2.3:9231".to_owned()),
@@ -1008,7 +1008,7 @@ fn escape_closes_a_filled_in_sheet_without_setting_up(cx: &mut TestAppContext) {
 fn typing_the_first_host_character_makes_set_up_available_in_place(cx: &mut TestAppContext) {
     let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
     sheet.begin(AddMachineRequest::Ssh(None));
-    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.title(), "Add Machine");
     assert!(sheet.cx.debug_bounds(ADDRESS_SELECTOR).is_none());
     let (before, _) = sheet.presented();
     let set_up = sheet.node("Set Up");
@@ -1036,7 +1036,7 @@ fn an_unavailable_set_up_sets_up_nothing(cx: &mut TestAppContext) {
     sheet.cx.run_until_parked();
 
     assert!(sheet.open());
-    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.title(), "Add Machine");
     assert!(sheet.computers.asked().is_empty());
 }
 
@@ -1077,7 +1077,7 @@ fn declining_a_sign_in_before_any_change_returns_to_the_form(cx: &mut TestAppCon
         .block_test(completion);
     sheet.cx.run_until_parked();
     assert!(sheet.open());
-    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.title(), "Add Machine");
     assert_eq!(sheet.node("Set Up")["aria"]["role"], "Button");
 
     assert!(
@@ -1095,7 +1095,7 @@ fn declining_a_sign_in_after_a_start_reports_the_unconfirmed_start(cx: &mut Test
     for (operation, expected) in [
         (
             SetupOperation::Start,
-            "couldn\u{2019}t confirm that the server started",
+            "couldn\u{2019}t confirm that SpaceTerm Core started",
         ),
         (
             SetupOperation::Install,
@@ -1135,7 +1135,7 @@ fn add_machine_stays_usable_while_ssh_hosts_are_read(cx: &mut TestAppContext) {
     sheet.begin(AddMachineRequest::Ssh(None));
 
     hosts.wait_until_started(sheet.cx);
-    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.title(), "Add Machine");
     assert!(
         sheet.cx.debug_bounds(HOSTS_MENU_SELECTOR).is_none(),
         "no hosts are listed before the read answers"
@@ -1262,7 +1262,7 @@ fn a_delivered_invitation_names_its_machine_and_address_and_waits_for_join(
     assert!(!sheet.disabled("Join"), "the person can join it");
     assert_eq!(
         sheet.title(),
-        "Add Server",
+        "Add Machine",
         "a delivered link joins nothing until the person chooses Join"
     );
 }
@@ -1285,7 +1285,7 @@ fn an_invitation_address_that_names_no_host_is_refused_before_join(cx: &mut Test
     sheet.choose(SheetAction::Join.selector());
 
     assert!(sheet.says("Enter a host name or IP address"));
-    assert_eq!(sheet.title(), "Add Server", "nothing was joined");
+    assert_eq!(sheet.title(), "Add Machine", "nothing was joined");
     assert!(!sheet.disabled("Join"), "the link stays for another try");
     let focused = sheet.cx.update(|window, cx| {
         let sheet = open_sheet(window, cx).expect("the sheet is open");
@@ -1412,8 +1412,9 @@ fn an_entered_invitation_address_replaces_only_where_join_connects(cx: &mut Test
 
     sheet.choose(SheetAction::Join.selector());
     sheet.settle(|sheet| {
-        sheet
-            .says("SpaceTerm couldn\u{2019}t reach the server. Check your network, then try again.")
+        sheet.says(
+            "SpaceTerm couldn\u{2019}t reach the machine. Check your network, then try again.",
+        )
     });
     assert_eq!(sheet.title(), "Pairing Paused");
 
@@ -1484,8 +1485,9 @@ fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAp
 
     sheet.adopt(join, "studio");
     sheet.settle(|sheet| {
-        sheet
-            .says("SpaceTerm couldn\u{2019}t reach the server. Check your network, then try again.")
+        sheet.says(
+            "SpaceTerm couldn\u{2019}t reach the machine. Check your network, then try again.",
+        )
     });
 
     assert_eq!(sheet.title(), "Pairing Paused");
@@ -1633,6 +1635,6 @@ fn a_link_delivered_during_a_join_waits_for_it_to_end(cx: &mut TestAppContext) {
     assert!(sheet.says("Another invitation is next."));
 
     sheet.cx.simulate_keystrokes("escape");
-    sheet.settle(|sheet| sheet.open() && sheet.title() == "Add Server" && sheet.says("annex"));
+    sheet.settle(|sheet| sheet.open() && sheet.title() == "Add Machine" && sheet.says("annex"));
     assert!(!sheet.disabled("Join"), "the delivered link waits for Join");
 }

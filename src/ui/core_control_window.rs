@@ -204,7 +204,7 @@ impl Content {
             Step::Authorize => {
                 let prompt = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
                 Self {
-                    title: format!("{name} Server").into(),
+                    title: format!("{name} Core").into(),
                     heading: prompt.title.into(),
                     body: Some(format!("{} {}", prompt.message, prompt.detail).into()),
                     buttons: vec![
@@ -219,10 +219,10 @@ impl Content {
                 }
             }
             Step::Working(operation) => Self {
-                title: format!("{name} Server").into(),
+                title: format!("{name} Core").into(),
                 heading: match operation {
-                    Operation::Stop => "Stopping the server…",
-                    Operation::Restart => "Restarting the server…",
+                    Operation::Stop => "Stopping SpaceTerm Core…",
+                    Operation::Restart => "Restarting SpaceTerm Core…",
                     Operation::Start => operation.service_action().progress(false).1,
                 }
                 .into(),
@@ -230,8 +230,8 @@ impl Content {
                 buttons: Vec::new(),
             },
             Step::Failed(error) => Self {
-                title: format!("{name} Server").into(),
-                heading: format!("The {name} server couldn\u{2019}t {}.", operation.verb()).into(),
+                title: format!("{name} Core").into(),
+                heading: format!("The {name} Core couldn\u{2019}t {}.", operation.verb()).into(),
                 body: Some(error.to_string().into()),
                 buttons: vec![Choice {
                     label: "OK".into(),
@@ -354,7 +354,8 @@ impl CoreControlWindow {
         });
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let window_movement = WindowMovement::new(drag, focus_handle.clone(), "Server Control");
+        let window_movement =
+            WindowMovement::new(drag, focus_handle.clone(), "SpaceTerm Core Control");
         Self {
             controller,
             name,

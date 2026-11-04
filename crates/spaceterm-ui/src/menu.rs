@@ -4129,7 +4129,7 @@ pub(crate) mod tests {
                     .child(
                         Menu::new(
                             "whole",
-                            "Update 2 Servers",
+                            "Update 2 Machines",
                             vec![MenuEntry::action("Open", ())],
                         )
                         .button_trigger(

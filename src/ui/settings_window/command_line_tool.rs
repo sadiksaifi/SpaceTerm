@@ -136,15 +136,15 @@ pub(super) fn present(
                     "Broken",
                     "settings-command-line-tool-state-stale",
                     format!(
-                        "\u{201C}{name}\u{201D} names a server build that is no longer installed."
+                        "\u{201C}{name}\u{201D} names a SpaceTerm Core build that is no longer installed."
                     ),
                 ),
                 Launcher::Outdated => (
                     "Out of date",
                     "settings-command-line-tool-state-outdated",
                     format!(
-                        "\u{201C}{name}\u{201D} runs a different server build than this \
-                         computer\u{2019}s server."
+                        "\u{201C}{name}\u{201D} runs a different SpaceTerm Core build than \
+                         this computer\u{2019}s SpaceTerm Core."
                     ),
                 ),
                 Launcher::Blocked => (
@@ -222,20 +222,20 @@ pub(super) fn present(
 fn failure_text(failure: ToolFailure, name: &str) -> SharedString {
     match failure {
         ToolFailure::Busy => SharedString::new_static(
-            "Another server operation is running. Try again when it finishes.",
+            "Another SpaceTerm Core operation is running. Try again when it finishes.",
         ),
         ToolFailure::NoCorePackage => SharedString::new_static(
-            "This SpaceTerm build doesn\u{2019}t include a server package.",
+            "This SpaceTerm build doesn\u{2019}t include a SpaceTerm Core package.",
         ),
         ToolFailure::RestartRequired => SharedString::new_static(
             "SpaceTerm was updated or moved after it opened. Quit and reopen SpaceTerm to \
              continue.",
         ),
         ToolFailure::Unverified => {
-            SharedString::new_static("Couldn\u{2019}t verify this server package.")
+            SharedString::new_static("Couldn\u{2019}t verify this SpaceTerm Core package.")
         }
         ToolFailure::UnsafeStorage => SharedString::from(format!(
-            "{DIRECTORY} or server storage has permissions SpaceTerm doesn\u{2019}t accept."
+            "{DIRECTORY} or SpaceTerm Core storage has permissions SpaceTerm doesn\u{2019}t accept."
         )),
         ToolFailure::StorageUnavailable => SharedString::from(format!(
             "SpaceTerm couldn\u{2019}t read or write {DIRECTORY}."
@@ -520,7 +520,7 @@ mod tests {
             refused.caption,
             Some((
                 SharedString::new_static(
-                    "This SpaceTerm build doesn\u{2019}t include a server package."
+                    "This SpaceTerm build doesn\u{2019}t include a SpaceTerm Core package."
                 ),
                 CaptionTone::Error
             ))
