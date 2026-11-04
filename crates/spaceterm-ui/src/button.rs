@@ -1063,6 +1063,16 @@ impl Button {
         self
     }
 
+    /// Presents the button as a status: it keeps its enabled paints and keyboard focus, publishes
+    /// the Status role with its description, and performs nothing. Use it for work in progress
+    /// that occupies a button's place, never for an unavailable action.
+    pub fn status(mut self) -> Self {
+        self.core.status = true;
+        self.core.on_activate = None;
+        self.core.tab_stop = true;
+        self
+    }
+
     /// Controls whether keyboard traversal may stop on this button.
     ///
     /// This defaults to `false` so compact terminal chrome does not capture Tab. A containing form
@@ -1377,6 +1387,8 @@ struct ButtonCore {
     role: ButtonRole,
     disabled: bool,
     tab_stop: bool,
+    /// Presents the button's shape as a status that reports work and performs nothing.
+    status: bool,
     debug_selector: Option<String>,
     tooltip: Option<Tooltip>,
     on_activate: Option<ActivationHandler>,
@@ -1413,6 +1425,7 @@ impl ButtonCore {
             role: ButtonRole::Normal,
             disabled: false,
             tab_stop: false,
+            status: false,
             debug_selector: None,
             tooltip: None,
             on_activate: None,
@@ -1469,7 +1482,8 @@ impl ButtonCore {
         cx: &mut App,
     ) -> impl IntoElement {
         let font = crate::control_typography(cx).regular().clone();
-        let enabled = !self.disabled && self.on_activate.is_some();
+        let status = self.status;
+        let enabled = !self.disabled && (self.on_activate.is_some() || status);
         let injected_focus_handle = self.injected_focus_handle.clone();
         let state = window.use_keyed_state(self.id.clone(), cx, move |window, cx| {
             ButtonState::new(injected_focus_handle, window, cx)
@@ -1511,7 +1525,12 @@ impl ButtonCore {
                 (state.pressed(), hover_level, state.focused())
             })
             .unwrap_or((pressed, hover_level, focused));
-        let paint = resolve_paint(style, enabled, pressed, hover_level);
+        // A status has no press or hover to show.
+        let paint = if status {
+            resolve_paint(style, enabled, false, 0.0)
+        } else {
+            resolve_paint(style, enabled, pressed, hover_level)
+        };
         let focus_ring = (focused && !self.parent_draws_focus_ring).then_some(style.focus_border);
         let border_color = if self.modal_borderless {
             paint.background
@@ -1629,7 +1648,11 @@ impl ButtonCore {
         let on_accessibility_activate = self.on_activate.clone().filter(|_| enabled);
         let button = div()
             .id(self.id)
-            .role(accesskit::Role::Button)
+            .role(if status {
+                accesskit::Role::Status
+            } else {
+                accesskit::Role::Button
+            })
             .aria_label(self.accessibility_name.clone())
             .when_some(self.accessibility_description, |button, description| {
                 button.aria_description(description)

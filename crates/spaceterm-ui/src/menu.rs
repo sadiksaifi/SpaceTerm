@@ -652,6 +652,19 @@ struct MenuItem<A> {
     icon: Option<RowIconBuilder>,
     mark: EntryMark,
     debug_selector: Option<String>,
+    extra: RowExtra,
+}
+
+/// What a row says beyond its label.
+#[derive(Clone, Debug, Default)]
+struct RowExtra {
+    /// Trailing secondary text, such as a status. Unlike a shortcut it names no keystroke.
+    detail: Option<SharedString>,
+    /// The full sentence, published as the row's accessibility description and shown as its
+    /// tooltip.
+    description: Option<SharedString>,
+    /// The row can be reached and read but never activates.
+    informational: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -686,6 +699,7 @@ impl<A> MenuEntry<A> {
                 icon: None,
                 mark,
                 debug_selector: None,
+                extra: RowExtra::default(),
             }),
         }
     }
@@ -729,6 +743,7 @@ impl<A> MenuEntry<A> {
                     icon: None,
                     mark: EntryMark::None,
                     debug_selector: None,
+                    extra: RowExtra::default(),
                 },
                 entries,
             },
@@ -787,6 +802,33 @@ impl<A> MenuEntry<A> {
         }
         self
     }
+
+    fn extra(mut self, change: impl FnOnce(&mut RowExtra)) -> Self {
+        match &mut self.kind {
+            MenuEntryKind::Item(item) => change(&mut item.extra),
+            MenuEntryKind::Submenu { item, .. } => change(&mut item.extra),
+            MenuEntryKind::Separator | MenuEntryKind::Section { .. } => {}
+        }
+        self
+    }
+
+    /// Adds trailing secondary text, such as a status or the consequence of choosing the row.
+    /// Unlike [`Self::shortcut`], it names no keystroke.
+    pub fn detail(self, detail: impl Into<SharedString>) -> Self {
+        self.extra(|extra| extra.detail = Some(detail.into()))
+    }
+
+    /// Adds the row's full sentence: its accessibility description and its tooltip.
+    pub fn description(self, description: impl Into<SharedString>) -> Self {
+        self.extra(|extra| extra.description = Some(description.into()))
+    }
+
+    /// Shows an action entry as readable information: keyboard and assistive technology reach
+    /// it, its text keeps a readable color, and choosing it does nothing. It keeps its menu and
+    /// submenu available, unlike a disabled entry.
+    pub fn informational(self) -> Self {
+        self.extra(|extra| extra.informational = true)
+    }
 }
 
 /// A button-triggered action menu.
@@ -798,6 +840,7 @@ pub struct Menu<A: Clone + 'static> {
     icon_trigger: bool,
     button: Option<(ButtonVariant, ButtonSize, ButtonShape)>,
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
+    tooltip: Option<crate::Tooltip>,
 }
 
 impl<A: Clone + 'static> Menu<A> {
@@ -815,6 +858,7 @@ impl<A: Clone + 'static> Menu<A> {
             icon_trigger: false,
             button: None,
             contextual_style: None,
+            tooltip: None,
         }
     }
 
@@ -839,6 +883,17 @@ impl<A: Clone + 'static> Menu<A> {
     /// a warning. See [`crate::Button::contextual_style`].
     pub fn contextual_style(mut self, style: ButtonVariantStyle, focus_border: Rgba) -> Self {
         self.contextual_style = Some((style, focus_border));
+        self
+    }
+
+    /// Supplies guidance or status separately from the trigger's name.
+    pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.core.accessibility_description = Some(description.into());
+        self
+    }
+
+    pub fn tooltip(mut self, tooltip: crate::Tooltip) -> Self {
+        self.tooltip = Some(tooltip);
         self
     }
 
@@ -913,7 +968,16 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
                 )
             })
             .into_any_element();
-        self.core.render(content, window, cx)
+        let enabled = self.core.is_enabled();
+        let tooltip = self.tooltip;
+        let trigger = self.core.render(content, window, cx);
+        match tooltip {
+            Some(tooltip) => tooltip
+                .attach(trigger, crate::TooltipTargetVisibility::Visible)
+                .disabled(!enabled)
+                .into_any_element(),
+            None => trigger.into_any_element(),
+        }
     }
 }
 
@@ -1667,6 +1731,8 @@ struct MenuControl<A> {
     context_target: Option<ContextMenuTarget>,
     /// The value a Picker trigger publishes to assistive technology.
     accessibility_value: Option<SharedString>,
+    /// Guidance or status a trigger publishes separately from its name.
+    accessibility_description: Option<SharedString>,
 }
 
 impl<A> MenuControl<A> {
@@ -1696,6 +1762,7 @@ impl<A> MenuControl<A> {
             context_focus: None,
             context_target: None,
             accessibility_value: None,
+            accessibility_description: None,
         }
     }
 
@@ -1907,6 +1974,9 @@ impl<A: Clone + 'static> MenuControl<A> {
                     .when_some(self.accessibility_value, |trigger, value| {
                         trigger.aria_value(value)
                     })
+                    .when_some(self.accessibility_description, |trigger, description| {
+                        trigger.aria_description(description)
+                    })
                     .aria_expanded(open)
                     .aria_disabled(!enabled)
                     .when(enabled, |trigger| {
@@ -2116,6 +2186,7 @@ enum InternalEntryKind {
         mark: EntryMark,
         debug_selector: Option<String>,
         activate: InternalActivation,
+        extra: RowExtra,
     },
     Separator,
     Heading(SharedString),
@@ -2127,6 +2198,7 @@ enum InternalEntryKind {
         icon: Option<RowIconBuilder>,
         debug_selector: Option<String>,
         entries: Vec<InternalEntry>,
+        extra: RowExtra,
     },
 }
 
@@ -2177,6 +2249,7 @@ fn convert_entries<A: Clone + 'static>(
                     mark: item.mark,
                     debug_selector: item.debug_selector,
                     activate: make_activation(item.action, item.mark),
+                    extra: item.extra,
                 },
             }),
             MenuEntryKind::Separator => converted.push(InternalEntry {
@@ -2201,6 +2274,7 @@ fn convert_entries<A: Clone + 'static>(
                         icon: item.icon,
                         debug_selector: item.debug_selector,
                         entries: convert_entries(entries, make_activation),
+                        extra: item.extra,
                     },
                 });
             }
@@ -2980,8 +3054,9 @@ impl MenuState {
             InternalEntryKind::Item {
                 disabled: false,
                 activate,
+                extra,
                 ..
-            } => Some(activate.clone()),
+            } if !extra.informational => Some(activate.clone()),
             _ => None,
         }
     }
@@ -3615,7 +3690,9 @@ fn render_panel(
                 mark,
                 debug_selector,
                 activate,
+                extra,
             } => {
+                let activation = (!extra.informational).then_some(activate);
                 content = content.child(render_row(
                     state.clone(),
                     depth,
@@ -3624,12 +3701,13 @@ fn render_panel(
                     disabled,
                     destructive,
                     shortcut,
+                    extra,
                     icon,
                     mark,
                     columns,
                     debug_selector,
                     false,
-                    Some(activate),
+                    activation,
                     highlighted == Some(index),
                     hovered == Some(index),
                     style,
@@ -3646,6 +3724,7 @@ fn render_panel(
                 shortcut,
                 icon,
                 debug_selector,
+                extra,
                 ..
             } => {
                 content = content.child(render_row(
@@ -3656,6 +3735,7 @@ fn render_panel(
                     disabled,
                     destructive,
                     shortcut,
+                    extra,
                     icon,
                     EntryMark::None,
                     columns,
@@ -3688,6 +3768,7 @@ fn render_row(
     disabled: bool,
     destructive: bool,
     shortcut: Option<SharedString>,
+    extra: RowExtra,
     icon: Option<RowIconBuilder>,
     mark: EntryMark,
     columns: LeadingColumns,
@@ -3725,7 +3806,9 @@ fn render_row(
     let press_state = state.clone();
     let pointer_state = state;
     let row_selector = debug_selector.unwrap_or_else(|| label.to_string());
+    let informational = extra.informational;
     let (role, toggled) = match mark {
+        EntryMark::None if informational => (accesskit::Role::Label, None),
         EntryMark::None => (accesskit::Role::MenuItem, None),
         EntryMark::Checkbox(checked) => (accesskit::Role::MenuItemCheckBox, Some(checked)),
         EntryMark::Radio { selected, .. } => (accesskit::Role::MenuItemRadio, Some(selected)),
@@ -3735,11 +3818,16 @@ fn render_row(
     let mark_selector = format!("{row_selector}-mark");
     let icon_selector = format!("{row_selector}-icon");
     let shortcut_selector = format!("{row_selector}-shortcut");
+    let detail_selector = format!("{row_selector}-detail");
+    let tooltip_id: SharedString = format!("{row_selector}-tooltip").into();
     let mut row = div()
         .id(index)
         .role(role)
         .aria_label(label.clone())
         .aria_disabled(disabled)
+        .when_some(extra.description.clone(), |row, description| {
+            row.aria_description(description)
+        })
         .when_some(toggled, |row, toggled| {
             row.aria_toggled(accesskit::Toggled::from(toggled))
         })
@@ -3751,24 +3839,27 @@ fn render_row(
         .when(highlighted && collection_focused && deepest, |row| {
             row.aria_active_descendant()
         })
-        .when(!disabled, |row| {
-            row.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
-                if let Some(activation) = &press_activation {
-                    activate_menu(
-                        &press_state,
-                        activation,
-                        MenuActivationSource::Accessibility,
-                        window,
-                        cx,
-                    );
-                } else if submenu {
-                    let _ = press_state.update(cx, |state, cx| {
-                        state.invalidate_submenu_task();
-                        state.open_submenu_at(depth, index, cx);
-                    });
-                }
-            })
-        })
+        .when(
+            !disabled && (press_activation.is_some() || submenu),
+            |row| {
+                row.on_a11y_action(accesskit::Action::Click, move |_, window, cx| {
+                    if let Some(activation) = &press_activation {
+                        activate_menu(
+                            &press_state,
+                            activation,
+                            MenuActivationSource::Accessibility,
+                            window,
+                            cx,
+                        );
+                    } else if submenu {
+                        let _ = press_state.update(cx, |state, cx| {
+                            state.invalidate_submenu_task();
+                            state.open_submenu_at(depth, index, cx);
+                        });
+                    }
+                })
+            },
+        )
         .debug_selector(move || row_selector)
         .relative()
         .h(style.metrics.row_height)
@@ -3824,8 +3915,20 @@ fn render_row(
                 .min_w_0()
                 .flex_grow(1.0)
                 .truncate()
+                .when(informational, |label| {
+                    label.text_color(secondary_foreground)
+                })
                 .child(label),
         )
+        .when_some(extra.detail, |row, detail| {
+            row.child(
+                div()
+                    .debug_selector(move || detail_selector)
+                    .flex_none()
+                    .text_color(secondary_foreground)
+                    .child(detail),
+            )
+        })
         .when_some(shortcut, |row, shortcut| {
             row.child(
                 div()
@@ -3928,7 +4031,13 @@ fn render_row(
         .inset_0();
         row = row.child(pointer_tracker);
     }
-    row.into_any_element()
+    match extra.description {
+        Some(description) => crate::Tooltip::new(tooltip_id, description)
+            .attach(row, crate::TooltipTargetVisibility::Visible)
+            .disabled(disabled)
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
 }
 
 fn resolve_row_paint(
@@ -4509,8 +4618,30 @@ pub(crate) mod tests {
                 mark: EntryMark::None,
                 debug_selector: None,
                 activate: Rc::new(|_, _, _| {}),
+                extra: RowExtra::default(),
             },
         }
+    }
+
+    #[test]
+    fn informational_entries_keep_their_menu_open_but_never_activate() {
+        let info = || MenuEntry::action("penguin installed 0.9", ()).informational();
+        assert!(
+            has_selectable(&[info()]),
+            "information is reachable content"
+        );
+        let converted = convert_entries(
+            vec![MenuEntry::submenu("Recent", vec![info()])],
+            &|_: (), _| -> InternalActivation { Rc::new(|_, _: &mut Window, _: &mut App| {}) },
+        );
+        let Some(children) = converted[0].submenu() else {
+            panic!("a submenu holding only information still opens");
+        };
+        assert!(children[0].selectable(), "keyboard reaches the information");
+        let InternalEntryKind::Item { extra, .. } = &children[0].kind else {
+            panic!("the information stays a row");
+        };
+        assert!(extra.informational);
     }
 
     #[test]
@@ -6250,6 +6381,7 @@ pub(crate) mod tests {
                     icon: None,
                     debug_selector: None,
                     entries: vec![inert("Child", false)],
+                    extra: RowExtra::default(),
                 },
             },
             inert("Other", false),
