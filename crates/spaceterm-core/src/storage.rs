@@ -186,6 +186,37 @@ impl Directory {
     /// Removes one private record. A record that is already absent is removed.
     #[cfg(feature = "client")]
     pub fn remove(&self, name: &std::ffi::CStr) -> Result<(), CoreError> {
+        self.remove_record(name)
+    }
+    /// Replaces the private record `to` with the bytes of `from`, or removes `to` when `from`
+    /// is absent. Returns whether `from` was present.
+    pub(crate) fn copy_record(
+        &self,
+        from: &std::ffi::CStr,
+        to: &std::ffi::CStr,
+    ) -> Result<bool, CoreError> {
+        let name = from.to_str().map_err(|_| CoreError::UnsafeStorage)?;
+        let file = match self.file(name, false) {
+            Ok(file) => file,
+            Err(CoreError::NotSetUp) => {
+                self.remove_record(to)?;
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes = zeroize::Zeroizing::new(Vec::new());
+        (&file)
+            .take((MAX_RECORD + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| CoreError::StorageUnavailable)?;
+        if bytes.len() > MAX_RECORD {
+            return Err(CoreError::UnsafeStorage);
+        }
+        self.write_bytes(to, &bytes)?;
+        Ok(true)
+    }
+    /// Removes one private record. A record that is already absent is removed.
+    pub(crate) fn remove_record(&self, name: &std::ffi::CStr) -> Result<(), CoreError> {
         // SAFETY: descriptor and terminated single-component name remain live for this call.
         if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0
             && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound

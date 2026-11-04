@@ -618,6 +618,17 @@ fn executable_build(path: &Path, identity: &str) -> Result<Vec<u8>, CoreError> {
     Ok(bytes)
 }
 
+/// The verified build document of the installation at `path`.
+pub(super) fn build(path: &Path, identity: &str) -> Result<CandidateMetadata, CoreError> {
+    verify(path, identity)?;
+    let directory = owned_directory(path)?;
+    Build::parse(
+        &read_file(&directory, Path::new("build.json"), 4096)?,
+        identity,
+    )
+    .map(Into::into)
+}
+
 pub(super) fn describe(path: &Path, identity: &str) -> Result<(String, String), CoreError> {
     verify(path, identity)?;
     let directory = owned_directory(path)?;
