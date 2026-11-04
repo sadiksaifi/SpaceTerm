@@ -182,7 +182,11 @@ fn before_rename(_temporary: &Path) {
 
 /// Remove only a link into this identity's retained installations, under the service lock.
 #[cfg(any(feature = "client", test))]
-pub(super) fn remove(home: &Path, identity: &str, installations: &Path) -> Result<(), CoreError> {
+pub(in crate::service) fn remove(
+    home: &Path,
+    identity: &str,
+    installations: &Path,
+) -> Result<(), CoreError> {
     let parent = home.join(".local/bin");
     if !parent.exists() {
         return Ok(());

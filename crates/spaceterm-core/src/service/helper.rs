@@ -122,6 +122,11 @@ fn perform(identity: &str, record: &Record) -> Result<State, CoreError> {
             };
             service.activate(approval)?.phase
         }
+        Action::Uninstall => {
+            controller.confirm(controller.prepare(ControlAction::Stop)?)?;
+            service.remove_machine()?;
+            return Ok(State::Done);
+        }
         // The lane applies Network Access changes itself and never launches a helper for one.
         Action::Network(_) => return Err(CoreError::Unsupported),
     };

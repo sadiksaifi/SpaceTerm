@@ -7,7 +7,47 @@ use crate::{CoreError, host, protocol, storage::Directory};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// One exact enrollment authorized by the owning account during Add Server.
+pub mod preflight;
+
+/// Why Add Machine refuses a computer. Each is one sentence in the desktop. Every refusal but
+/// `UdpBlocked` comes before anything is uploaded. SSH preflight reports the first that applies,
+/// in declaration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "refusal", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SetupRefusal {
+    /// A Mac with an Intel processor. SpaceTerm Core runs on Apple silicon only.
+    IntelMac,
+    /// Linux on an ARM processor. SpaceTerm Core runs on x86_64 Linux only.
+    ArmLinux,
+    /// Neither macOS nor Linux.
+    OtherSystem,
+    /// macOS older than [`MINIMUM_MACOS`]. `found` is its (major, minor), `None` when unknown.
+    MacosTooOld { found: Option<(u16, u16)> },
+    /// glibc older than [`MINIMUM_GLIBC`]. `found` is its (major, minor), `None` when the
+    /// computer has no glibc.
+    GlibcTooOld { found: Option<(u16, u16)> },
+    /// The SSH account is root. SpaceTerm Core runs under an ordinary account.
+    RootAccount,
+    /// Linux with no systemd user manager for the account.
+    NoUserManager,
+    /// A Mac with nobody logged in, so there is no Aqua session to start SpaceTerm Core in.
+    /// `filevault` is true when FileVault is on. Automatic login is then unavailable, so the
+    /// desktop suggests it only when this is false.
+    NobodyLoggedIn { filevault: bool },
+    /// The user declined to let SpaceTerm Core keep running after logout on a remote Linux
+    /// machine. Remote Linux requires linger.
+    LingerDeclined,
+    /// Network Access was enabled but no QUIC packet reached SpaceTerm Core at `port`. Setup
+    /// turned Network Access off again. Try Again turns it on.
+    UdpBlocked { port: u16 },
+}
+
+/// The oldest macOS release SpaceTerm Core runs on, as (major, minor).
+pub const MINIMUM_MACOS: (u16, u16) = (26, 0);
+/// The oldest glibc SpaceTerm Core runs on, as (major, minor).
+pub const MINIMUM_GLIBC: (u16, u16) = (2, 35);
+
+/// One exact enrollment authorized by the owning account during Add Machine.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetupRequest {

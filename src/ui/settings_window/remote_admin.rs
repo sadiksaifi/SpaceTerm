@@ -303,6 +303,8 @@ pub(super) enum Act {
     /// A Network Access change. Only the CLI makes one, so the card names it only as an earlier
     /// operation a connection settled.
     NetworkAccess,
+    /// Remove Machine's uninstall.
+    Uninstall,
 }
 
 impl Act {
@@ -314,6 +316,7 @@ impl Act {
             LaneAction::Restart if to.is_some() => Self::Update(to),
             LaneAction::Restart => Self::Restart,
             LaneAction::Network { .. } => Self::NetworkAccess,
+            LaneAction::Uninstall => Self::Uninstall,
         }
     }
 
@@ -324,6 +327,7 @@ impl Act {
             Self::Restart => "restart",
             Self::Update(_) => "update",
             Self::NetworkAccess => "Network Access change",
+            Self::Uninstall => "uninstall",
         }
     }
 
@@ -334,6 +338,7 @@ impl Act {
             Self::Restart => "restart",
             Self::Update(_) => "update",
             Self::NetworkAccess => "change its Network Access",
+            Self::Uninstall => "uninstall SpaceTerm Core",
         }
     }
 }
@@ -473,6 +478,15 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
         }
         // The card offers no Network Access change, and a Network preview arrives as its own
         // reply, so this names the change plainly should one ever reach it.
+        LaneAction::Uninstall => RemoteConfirmation {
+            title: "Remove Machine",
+            message: format!("Remove {name}?"),
+            detail: format!(
+                "{ends} SpaceTerm Core is uninstalled from {name} and every device is unpaired from \
+                 it. Workspaces stay on {name}."
+            ),
+            confirm: "Remove".to_owned(),
+        },
         LaneAction::Network { .. } => RemoteConfirmation {
             title: "Change Network Access",
             message: format!("Change Network Access on {name}?"),
@@ -547,6 +561,10 @@ pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) 
         ),
         Ended::Changed(Act::NetworkAccess, Settlement::Done) => (
             format!("{name} changed its Network Access."),
+            CaptionTone::Guidance,
+        ),
+        Ended::Changed(Act::Uninstall, Settlement::Done) => (
+            format!("SpaceTerm Core was uninstalled from {name}."),
             CaptionTone::Guidance,
         ),
         Ended::Changed(act, Settlement::Uncertain) => (
@@ -706,6 +724,7 @@ impl SettingsWindow {
             Work::Performing(Act::Update(_)) => Some("Updating\u{2026}"),
             // The card never performs a Network Access change.
             Work::Performing(Act::NetworkAccess) => None,
+            Work::Performing(Act::Uninstall) => Some("Removing\u{2026}"),
             Work::Preparing(Change::Update) => Some("Preparing\u{2026}"),
             Work::Reading | Work::Preparing(_) | Work::Confirming => None,
         }
@@ -735,6 +754,7 @@ impl SettingsWindow {
                 named(to, "Updating to", "Updating SpaceTerm Core\u{2026}")
             }
             Work::Performing(Act::NetworkAccess) => return None,
+            Work::Performing(Act::Uninstall) => "Uninstalling SpaceTerm Core\u{2026}".to_owned(),
             Work::Preparing(Change::Update) => named(
                 &self.remote_available(route),
                 "Preparing the update to",

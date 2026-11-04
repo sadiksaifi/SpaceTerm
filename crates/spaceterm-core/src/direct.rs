@@ -14,7 +14,7 @@ pub(crate) mod host;
 mod network;
 mod quic;
 mod storage;
-pub(crate) use storage::observe;
+pub(crate) use storage::{forget, observe};
 #[cfg(test)]
 pub(crate) mod tests;
 mod wire;
@@ -258,6 +258,14 @@ pub enum DirectError {
     /// holds them. Nothing changed.
     #[error("SpaceTerm Core couldn\u{2019}t listen at this address and port.")]
     AddressUnavailable,
+    /// Another socket holds the UDP port, often another build identity's SpaceTerm Core or
+    /// another app. Nothing changed.
+    #[error("Another app is using this UDP port.")]
+    PortInUse,
+    /// The invitation or Machine belongs to another build identity, such as a Preflight Core
+    /// for a Release desktop. Nothing was claimed.
+    #[error("This invitation is for another edition of SpaceTerm.")]
+    IdentityMismatch,
     #[error("This claim has already been decided.")]
     AlreadyDecided,
     #[error("This proof belongs to a different claim.")]

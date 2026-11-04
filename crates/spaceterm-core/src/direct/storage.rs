@@ -257,3 +257,10 @@ pub(crate) fn observe(
         .collect();
     Ok((record.policy.clone(), record.enabled, devices))
 }
+
+/// Revokes every pairing at once by forgetting the direct record: its key, certificate, Network
+/// Access policy and devices. The next start creates a new record with Network Access off, so no
+/// earlier device can connect. The service lock must be held while the Core is stopped.
+pub(crate) fn forget(data: &Directory) -> Result<(), CoreError> {
+    data.remove(c"direct.json")
+}

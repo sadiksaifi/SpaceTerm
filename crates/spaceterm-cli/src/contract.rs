@@ -851,6 +851,7 @@ codes! {
     DiskFull = "disk_full", Failed, true, "SpaceTerm Core couldn\u{2019}t install the update because the disk is full. Nothing changed.";
     DownloadFailed = "download_failed", Failed, true, "SpaceTerm Core couldn\u{2019}t download the update. Nothing changed.";
     AuthorizationRequired = "authorization_required", ActionRequired, false, "Administrator authorization is required.";
+    LingerRequired = "linger_required", ActionRequired, false, "Paired devices need SpaceTerm Core to keep running after you log out. Authorize it with: spaceterm setup";
     NotRunning = "not_running", Unavailable, true, "SpaceTerm Core is not running.";
     StorageUnavailable = "storage_unavailable", Unavailable, false, "Storage is unavailable.";
     IncompatibleState = "incompatible_state", Unavailable, false, "The saved state is from an incompatible SpaceTerm.";
@@ -876,6 +877,8 @@ codes! {
     NetworkOff = "network_off", Unavailable, false, "Network Access is off on that machine.";
     InvalidAddress = "invalid_address", Target, false, "Enter a DNS name or IP address and an optional nonzero port.";
     AddressUnavailable = "address_unavailable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t listen at this address and port. Nothing changed.";
+    PortInUse = "port_in_use", Unavailable, true, "Another app is using this UDP port. Nothing changed. Choose another port with: spaceterm network ADDRESS:PORT.";
+    IdentityMismatch = "identity_mismatch", Target, false, "This invitation is for another edition of SpaceTerm. Pair with a SpaceTerm Core of the same edition.";
     ClaimDecided = "claim_decided", Target, false, "This pairing claim was already decided.";
     ComparisonMismatch = "comparison_mismatch", Failed, false, "The Comparison Code did not match.";
     WrongMachine = "wrong_machine", Target, false, "This invitation or connection names another machine.";
@@ -994,6 +997,8 @@ pub fn from_direct_error(error: DirectError) -> Failure {
         DirectError::InvalidRequest => Code::ProtocolError,
         DirectError::InvalidAddress => Code::InvalidAddress,
         DirectError::AddressUnavailable => Code::AddressUnavailable,
+        DirectError::PortInUse => Code::PortInUse,
+        DirectError::IdentityMismatch => Code::IdentityMismatch,
         DirectError::AlreadyDecided => Code::ClaimDecided,
         DirectError::Substituted => Code::ComparisonMismatch,
         DirectError::WrongMachine => Code::WrongMachine,
@@ -1629,6 +1634,7 @@ pub enum ServiceAction {
     Stop,
     Restart,
     Network,
+    Uninstall,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -2344,6 +2350,8 @@ mod tests {
             (E::AlreadyDecided, "claim_decided", 4),
             (E::Substituted, "comparison_mismatch", 1),
             (E::WrongMachine, "wrong_machine", 4),
+            (E::PortInUse, "port_in_use", 5),
+            (E::IdentityMismatch, "identity_mismatch", 4),
         ] {
             let failure = from_direct_error(error);
             assert_eq!((failure.code.as_str(), failure.code.exit()), (code, exit));

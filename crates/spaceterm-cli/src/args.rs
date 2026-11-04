@@ -43,7 +43,7 @@ SpaceTerm Core on this machine. [--machine] marks commands that also reach a pai
   unpair            Revoke another Paired Device
   permissions       Show the System Permissions of this machine's Terminal Sessions, or set one up
   end-all-sessions  End every Terminal Session on this machine, keeping Workspaces
-  uninstall         Uninstall SpaceTerm Core from this machine, keeping its data
+  uninstall         Uninstall SpaceTerm Core from this machine, keeping its data unless asked
 
 Machines this CLI reaches. These commands reject --machine.
   machine           Add, list, rename and remove machines
@@ -201,11 +201,18 @@ pub enum CoreCommand {
     },
     /// End every Terminal Session on this machine, keeping Workspaces.
     EndAllSessions(Confirm),
-    /// Uninstall SpaceTerm Core from this machine, keeping its data.
+    /// Uninstall SpaceTerm Core from this machine, keeping its data unless asked.
     ///
-    /// Removes the account service and the CLI launcher. Workspaces, settings, pairings and
-    /// installed versions remain.
-    Uninstall(Confirm),
+    /// Removes the account service, the CLI launcher and every installed version. Workspaces,
+    /// Machine Settings, pairings and saved machines remain unless --delete-data is given.
+    Uninstall {
+        /// Also delete SpaceTerm Core's data on this machine, this CLI's saved machines and
+        /// their credentials.
+        #[arg(long)]
+        delete_data: bool,
+        #[arg(long, value_name = "TOKEN")]
+        confirm: Option<String>,
+    },
 }
 
 /// Setting up one System Permission on this machine.
@@ -738,7 +745,7 @@ impl CoreCommand {
                 Some(PermissionsCommand::Settings { .. }) => "permissions.settings",
             },
             Self::EndAllSessions(_) => "end-all-sessions",
-            Self::Uninstall(_) => "uninstall",
+            Self::Uninstall { .. } => "uninstall",
         }
     }
 }
@@ -925,6 +932,7 @@ mod tests {
             &["permissions", "request", "microphone"],
             &["end-all-sessions"],
             &["uninstall", "--confirm", "c1-00"],
+            &["uninstall", "--delete-data", "--confirm", "c1-00"],
             &["machine", "add", "penguin", "--trust"],
             &["machine", "list"],
             &["machine", "rename", "penguin", "lab"],

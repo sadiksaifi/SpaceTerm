@@ -262,7 +262,9 @@ fn classify(error: impl Into<DirectError>) -> AccessFailure {
         | DirectError::Revoked => AccessFailure::Unreachable,
         DirectError::IncompatibleProtocol => AccessFailure::IncompatibleProtocol,
         DirectError::InvalidAddress => AccessFailure::InvalidAddress,
-        DirectError::AddressUnavailable => AccessFailure::AddressUnavailable,
+        DirectError::AddressUnavailable | DirectError::PortInUse => {
+            AccessFailure::AddressUnavailable
+        }
         DirectError::Disabled => AccessFailure::Disabled,
         DirectError::Capacity => AccessFailure::Capacity,
         DirectError::StorageUnavailable => AccessFailure::Storage,
@@ -270,9 +272,10 @@ fn classify(error: impl Into<DirectError>) -> AccessFailure {
         DirectError::Expired => AccessFailure::ClaimExpired,
         // A claim another client declined is one already answered.
         DirectError::AlreadyDecided | DirectError::Rejected => AccessFailure::ClaimDecided,
-        DirectError::ChangedClaim | DirectError::Substituted | DirectError::WrongMachine => {
-            AccessFailure::ClaimChanged
-        }
+        DirectError::ChangedClaim
+        | DirectError::Substituted
+        | DirectError::WrongMachine
+        | DirectError::IdentityMismatch => AccessFailure::ClaimChanged,
         DirectError::AuthenticationRefused
         | DirectError::PinMismatch
         | DirectError::PolicyChanged

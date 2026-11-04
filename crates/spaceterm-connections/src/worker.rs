@@ -156,7 +156,7 @@ impl DirectConnections {
     ) -> Result<JoinId, DirectError> {
         let mut invitation = direct::Invitation::parse(&text)?;
         if invitation.machine_pin().build != self.0.identity {
-            return Err(DirectError::WrongMachine);
+            return Err(DirectError::IdentityMismatch);
         }
         if let Some(endpoint) = endpoint {
             invitation = invitation.with_address(&endpoint.authority())?;

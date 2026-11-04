@@ -11,7 +11,7 @@
 //! Core's own feed names, and `StageUpload` with `UploadChunk` installs a pushed archive. Both
 //! answer `Installed`; [`crate::update::sources`] describes the sources.
 //!
-//! Stop, Restart, Update and Network Access changes run in two steps. `Preview` observes the service, the live
+//! Stop, Restart, Uninstall and Network Access changes run in two steps. `Preview` observes the service, the live
 //! Session set and the candidate, and returns a token bound to that observation. `Execute`
 //! recomputes the observation under the hierarchy lock, sets the membership fence so no new
 //! Session starts, admits the operation in the ledger and launches the helper that performs it.
@@ -149,9 +149,16 @@ impl LaneRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum LaneAction {
+    /// Only the Core's own machine stops it. A paired caller gets `local_only`, because a
+    /// stopped Core can't be started remotely.
     Stop,
     Restart,
     Network { access: NetworkAccess },
+    /// Remove Machine: stops SpaceTerm Core, revokes every pairing and removes the service,
+    /// the launcher and every installed version. Workspace data stays. Gated by
+    /// [`crate::protocol::capability::Capability::Uninstall`]. Once the helper starts, the Core
+    /// answers no further request, so the caller treats `Accepted` as the outcome.
+    Uninstall,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,18 +897,22 @@ impl LaneCore {
             }
         }
         let result = result.map(drop);
-        // Once the change started, `AddressUnavailable` means the host could not ready the new
-        // listener and changed nothing. Any other failure is a commit it could not confirm.
+        // Once the change started, `AddressUnavailable` and `PortInUse` mean the host could not
+        // ready the new listener and changed nothing. Any other failure is a commit it could not
+        // confirm.
         let state = match result {
             Ok(()) if refused => State::Failed {
                 code: super::lane_codes::DISCONNECTS_EVERY_DEVICE.to_owned(),
             },
             Ok(()) => State::Done,
-            Err(failure @ CoreError::Direct(crate::direct::DirectError::AddressUnavailable)) => {
-                State::Failed {
-                    code: super::lane_codes::code(&failure).to_owned(),
-                }
-            }
+            Err(
+                failure @ CoreError::Direct(
+                    crate::direct::DirectError::AddressUnavailable
+                    | crate::direct::DirectError::PortInUse,
+                ),
+            ) => State::Failed {
+                code: super::lane_codes::code(&failure).to_owned(),
+            },
             Err(_) if started => State::Unresolved,
             Err(failure) => State::Failed {
                 code: super::lane_codes::code(&failure).to_owned(),
@@ -947,6 +958,9 @@ impl LaneCore {
     }
 
     fn preview(&self, action: &LaneAction, actor: &Actor) -> Result<LaneReply, CoreError> {
+        if let Some(refused) = local_only(action, actor) {
+            return Ok(refused);
+        }
         let prepared = self.admin().prepare(action, &self.core, &self.boot)?;
         let sessions = self.host.sessions();
         let observation = observation(&prepared, &sessions);
@@ -968,6 +982,9 @@ impl LaneCore {
         actor: &Actor,
     ) -> Result<(LaneReply, Option<OperationId>), CoreError> {
         let id = OperationId::parse(operation).ok_or(CoreError::Protocol)?;
+        if let Some(refused) = local_only(action, actor) {
+            return Ok((refused, None));
+        }
         // One Execute at a time, so a repeated Execute on another connection waits for the
         // first and finds its record instead of a spent token.
         let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
@@ -996,6 +1013,7 @@ impl LaneCore {
                 LaneAction::Stop => Action::Stop,
                 LaneAction::Restart if prepared.candidate.is_some() => Action::Update,
                 LaneAction::Restart => Action::Restart,
+                LaneAction::Uninstall => Action::Uninstall,
                 LaneAction::Network { .. } => return Err(CoreError::Protocol),
             },
             observation_digest: expected,
@@ -1129,6 +1147,7 @@ impl LaneCore {
                 Action::Stop => LaneAction::Stop,
                 // A restart into the Pending Version is the Restart its client confirmed.
                 Action::Restart | Action::Update => LaneAction::Restart,
+                Action::Uninstall => LaneAction::Uninstall,
                 Action::Network(access) => LaneAction::Network { access },
             },
             state,
@@ -1274,11 +1293,12 @@ impl Admin<'_> {
                 effects.to_major = protocol_major(approval.candidate());
                 (approval.running(), Some(digest_bytes(&installation)?))
             }
-            (LaneAction::Stop, _) | (LaneAction::Restart, None) => {
-                let control = if *action == LaneAction::Stop {
-                    super::control::Action::Stop
-                } else {
+            // Uninstall begins with a Stop, so it observes what a Stop observes.
+            (LaneAction::Stop | LaneAction::Uninstall, _) | (LaneAction::Restart, None) => {
+                let control = if *action == LaneAction::Restart {
                     super::control::Action::Restart
+                } else {
+                    super::control::Action::Stop
                 };
                 let confirmation =
                     super::control::Controller::new(self.service.clone()).prepare(control)?;
@@ -1530,6 +1550,13 @@ fn effects(prepared: &Prepared, sessions: &[Id]) -> LaneEffects {
         effects.sessions = sorted;
     }
     effects
+}
+
+/// Stop answers only the Core's own machine.
+fn local_only(action: &LaneAction, actor: &Actor) -> Option<LaneReply> {
+    (*action == LaneAction::Stop && actor.pairing.is_some()).then(|| LaneReply::Error {
+        code: LOCAL_ONLY.to_owned(),
+    })
 }
 
 fn action_key(action: &LaneAction) -> Result<Vec<u8>, CoreError> {

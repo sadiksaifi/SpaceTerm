@@ -6,6 +6,7 @@
 //! closes its SSH resources. The attempt succeeds only once this device is admitted over paired
 //! QUIC, so every later operation uses that connection.
 
+use spaceterm_core::provisioning::SetupRefusal;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -199,6 +200,12 @@ pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
             true,
         ),
         SetupFailure::Incompatible(kind) => fixed("Incompatible", incompatibility_detail(*kind), false),
+        // Settings renders one sentence per refusal that names the machine.
+        SetupFailure::Unsupported(refusal) => fixed(
+            "Not supported",
+            "SpaceTerm Core can\u{2019}t run on this computer.",
+            matches!(refusal, SetupRefusal::UdpBlocked { .. } | SetupRefusal::LingerDeclined),
+        ),
         SetupFailure::Refused(RefusalKind::MissingArtifact) => {
             fixed("Not included", refusal_detail(RefusalKind::MissingArtifact), false)
         }

@@ -257,7 +257,8 @@ impl State {
         match self.bind(policy.bind) {
             Ok(listener) => Ok(Prepared::Fresh(listener)),
             Err(Bind::InUse) if self.holds(policy.bind) => Ok(Prepared::Deferred),
-            Err(_) => Err(DirectError::AddressUnavailable),
+            Err(Bind::InUse) => Err(DirectError::PortInUse),
+            Err(Bind::Other) => Err(DirectError::AddressUnavailable),
         }
     }
     /// Whether one of this server's own listeners on every interface holds `address`'s port.

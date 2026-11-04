@@ -71,6 +71,8 @@ pub enum Action {
     Stop,
     Restart,
     Update,
+    /// Remove Machine. The helper stops the Core, revokes every pairing and uninstalls it.
+    Uninstall,
     /// The lane applies it in-process. No helper claims it.
     Network(super::lane::network::NetworkAccess),
 }
@@ -345,7 +347,7 @@ impl Ledger {
                             Err(error) => return Err(error),
                         },
                         Action::Restart if earlier => State::Done,
-                        Action::Restart | Action::Stop => State::Unresolved,
+                        Action::Restart | Action::Stop | Action::Uninstall => State::Unresolved,
                         // The server that applied it ended before it recorded the outcome.
                         Action::Network(_) if earlier => State::Unresolved,
                         // The lane is applying it now.

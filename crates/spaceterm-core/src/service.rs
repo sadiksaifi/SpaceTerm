@@ -13,13 +13,15 @@ pub mod operations;
 mod registration;
 mod runtime;
 pub mod tokens;
-#[cfg(feature = "client")]
-pub use runtime::CliUninstall;
 pub use runtime::updates;
+mod uninstall;
 pub use runtime::{
     CandidateMetadata, CliLauncher, CliLink, Layout, bundle_identifier, bundle_name,
     verify_candidate_bytes,
 };
+#[cfg(feature = "client")]
+pub use uninstall::CliUninstall;
+pub use uninstall::Data;
 
 use crate::{
     CoreError,

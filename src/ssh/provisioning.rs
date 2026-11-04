@@ -126,6 +126,8 @@ pub(crate) enum UnavailableKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SetupFailure {
     Cancelled,
+    /// Add Machine refuses this computer. Each refusal reads as one sentence.
+    Unsupported(spaceterm_core::provisioning::SetupRefusal),
     Unreachable { address: SetupAddress },
     Incompatible(IncompatibilityKind),
     Refused(RefusalKind),
