@@ -10,6 +10,7 @@ mod tests;
 pub(crate) use controller::{Alert, StatusHost, StatusMenu};
 
 use gpui::{App, Global};
+use spaceterm_core::service::ServiceStatus;
 use std::rc::Rc;
 
 /// What the client's window lifecycle needs from its status item.
@@ -65,4 +66,12 @@ pub(crate) fn show_in_dock(cx: &mut App, visible: bool) {
     {
         dock(visible);
     }
+}
+
+/// A status-surface operation succeeded. A server it left running reaches every Workspace Window
+/// still waiting on it, as a Start from Settings does. Nothing here opens a window.
+pub(crate) fn operation_succeeded(cx: &mut App, status: ServiceStatus) {
+    crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
+        cx, status,
+    );
 }

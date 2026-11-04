@@ -721,13 +721,11 @@ impl SettingsWindow {
             if window.is_window_active() {
                 settings.refresh_capture_access(cx);
                 settings.refresh_permission_access(cx);
-                // The person may have turned SpaceTerm Core on in Login Items meanwhile, and a
-                // Start refused from any surface runs once they have.
+                // The person may have turned SpaceTerm Core on in Login Items meanwhile.
                 if settings
                     .core_service
                     .as_ref()
                     .is_some_and(|row| row.state.background_item_off)
-                    || local_operations::LocalCoreOperations::start_waits(cx)
                 {
                     settings.check_core_service(cx);
                 }

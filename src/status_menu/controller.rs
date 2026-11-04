@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{App, Task};
+use spaceterm_core::service::ServiceStatus;
 
 use super::model::{Command, Menu};
-use crate::ui::settings_window::local_operations::LocalCoreOperations;
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
 use crate::updates::presentation::{self, DesktopAction};
@@ -64,8 +64,7 @@ pub(crate) struct StatusMenu {
     /// The menu as last rendered.
     menu: RefCell<Option<Menu>>,
     /// Waits for the person to turn SpaceTerm Core on in Login Items after the service refused
-    /// this menu's Start, then runs that Start. It reads for a few minutes only; opening the menu
-    /// reads again after that.
+    /// this menu's Start, then runs that Start.
     refused_start: RefCell<Option<Task<()>>>,
 }
 
@@ -179,16 +178,16 @@ impl StatusMenu {
                 }
             }
             // The Core starts nothing that is off in Login Items, so Start opens that list,
-            // where the person turns it on. The refused Start runs once the item is on, so the
-            // person need not choose Start again.
+            // where the person turns it on. The menu remembers the Start and runs it once the
+            // item is on, so the person need not choose Start again.
             Err(ActionFailure::LoginItemOff) => {
                 self.host.open_login_items();
                 if notice.action == MachineAction::Start {
-                    LocalCoreOperations::start_refused(cx);
-                    let wait = LocalCoreOperations::start_when_login_item_on(
+                    let machine = notice.machine;
+                    let wait = crate::local_startup::when_login_item_on(
                         self.host.login_item(),
-                        Surface::StatusMenu,
                         cx,
+                        move |cx| act(machine, MachineAction::Start, cx),
                     );
                     *self.refused_start.borrow_mut() = Some(wait);
                 }
@@ -214,19 +213,23 @@ impl StatusMenu {
     /// A Start, Stop or Restart of this computer's Core reaches every Workspace Window still
     /// waiting on it, as the same change made in Settings does.
     fn succeeded(&self, local: bool, action: &MachineAction, cx: &mut App) {
+        let running = match action {
+            MachineAction::Start | MachineAction::Restart => true,
+            MachineAction::Stop => false,
+            _ => return,
+        };
         if local {
-            LocalCoreOperations::machine_action_succeeded(action, cx);
+            super::operation_succeeded(
+                cx,
+                // Settings reads the service again; only `running` and `stopped` matter here.
+                ServiceStatus {
+                    installed: true,
+                    enabled: true,
+                    running,
+                    stopped: !running,
+                },
+            );
         }
-    }
-
-    /// The person opened the menu. A Start refused while SpaceTerm Core was off in Login Items
-    /// runs now if the item is on, after the menu's own wait ended.
-    pub(crate) fn opened(&self, cx: &mut App) {
-        LocalCoreOperations::start_if_login_item_on(
-            self.host.login_item(),
-            Surface::StatusMenu,
-            cx,
-        );
     }
 
     fn render(&self, cx: &App) {

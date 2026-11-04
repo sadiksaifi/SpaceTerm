@@ -58,30 +58,27 @@ impl LoginItems {
 
 /// How often a surface waiting on the person to turn SpaceTerm Core on reads its item again.
 const LOGIN_ITEM_READ_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-/// How long that surface keeps reading. Opening the menu bar extra or a window reads it later.
-pub(crate) const LOGIN_ITEM_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Waits until `off` reads SpaceTerm Core on in Login Items, then runs `then` once on the event
 /// thread. macOS tells SpaceTerm nothing when the person turns the item on in System Settings, so
-/// the wait reads the item every two seconds, off the event thread, for at most
-/// [`LOGIN_ITEM_WAIT`]. Reading changes nothing. Dropping the task ends the wait.
+/// the wait reads the item every two seconds, off the event thread. Reading changes nothing.
+/// Dropping the task ends the wait.
 pub(crate) fn when_login_item_on(
     off: LoginItemRead,
     cx: &gpui::App,
     then: impl FnOnce(&mut gpui::App) + 'static,
 ) -> gpui::Task<()> {
-    let reads = LOGIN_ITEM_WAIT.as_secs() / LOGIN_ITEM_READ_INTERVAL.as_secs();
     cx.spawn(async move |cx| {
-        for _ in 0..reads {
+        loop {
             cx.background_executor()
                 .timer(LOGIN_ITEM_READ_INTERVAL)
                 .await;
             let off = std::sync::Arc::clone(&off);
             if !cx.background_executor().spawn(async move { off() }).await {
-                cx.update(then);
-                return;
+                break;
             }
         }
+        cx.update(then);
     })
 }
 

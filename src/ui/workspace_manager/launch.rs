@@ -524,6 +524,9 @@ pub(super) struct LocalLaunchState {
     /// Login Items. It holds while a launch rechecks, so the presented Workspaces keep saying so
     /// instead of reconnecting.
     turned_off: bool,
+    /// The service refused the person's Start because SpaceTerm Core was off in Login Items, and
+    /// no launch has found it on since. Launch runs that Start once the person comes back.
+    start_refused: bool,
     /// The failed connection attempts counted when this computer's connection loss last read
     /// the background item, so each failed attempt reads it once.
     background_item_read: Option<u64>,
@@ -565,6 +568,7 @@ impl LocalLaunchState {
             place,
             away: false,
             turned_off: false,
+            start_refused: false,
             background_item_read: None,
             _background_item: None,
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -766,19 +770,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A Start refused here waits with those refused from every other surface, and a
-        // running server needs none of them.
-        match result {
-            StepResult::StartRefused => {
-                crate::ui::settings_window::local_operations::LocalCoreOperations::start_refused(
-                    cx,
-                );
-            }
-            StepResult::Outcome(LaunchOutcome::Ready) => {
-                crate::ui::settings_window::local_operations::LocalCoreOperations::core_running(cx);
-            }
-            _ => {}
-        }
+        let refused = matches!(result, StepResult::StartRefused);
         let state = match result {
             StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_core(window, cx),
             StepResult::Outcome(LaunchOutcome::Stopped) => LaunchState::Stopped,
@@ -803,6 +795,9 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        // A launch that finds the item still off keeps the refused Start for the next one.
+        self.launch.start_refused =
+            refused || (self.launch.start_refused && state == LaunchState::LoginItemOff);
         let was_turned_off = std::mem::replace(
             &mut self.launch.turned_off,
             state == LaunchState::LoginItemOff,
@@ -1201,9 +1196,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let waiting = self.launch.turned_off
-            || matches!(self.launch.state, LaunchState::LoginItemOff)
-            || crate::ui::settings_window::local_operations::LocalCoreOperations::start_waits(cx);
+        let waiting =
+            self.launch.turned_off || matches!(self.launch.state, LaunchState::LoginItemOff);
         if !active {
             self.launch.away = waiting;
         } else if std::mem::take(&mut self.launch.away) && waiting {
@@ -1306,15 +1300,12 @@ impl WorkspaceManager {
     }
 
     /// Runs launch again after the person may have turned SpaceTerm Core on in Login Items. A
-    /// Start the service refused while it was off, from any surface, runs first, once, so the
-    /// person need not choose Start again. If the item is still off, the service refuses it
-    /// again and changes nothing.
+    /// Start the service refused while it was off runs first, once, so the person need not
+    /// choose Start again. If the item is still off, the service refuses it again and changes
+    /// nothing.
     fn run_launch_after_login_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let refused =
-            crate::ui::settings_window::local_operations::LocalCoreOperations::take_refused_start(
-                cx,
-            );
-        self.run_local_launch(refused.then_some(LaunchStep::Start), window, cx);
+        let step = self.launch.start_refused.then_some(LaunchStep::Start);
+        self.run_local_launch(step, window, cx);
     }
 
     pub(super) fn run_launch_action(

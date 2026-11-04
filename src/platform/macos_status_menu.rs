@@ -21,8 +21,8 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSColor,
     NSEvent, NSEventMask, NSEventModifierFlags, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSMutableAttributedString, NSRange, NSString, ns_string};
 use std::{
@@ -31,15 +31,7 @@ use std::{
     rc::Rc,
 };
 
-/// What the native menu reports to the application.
-enum MenuEvent {
-    /// The person chose a row.
-    Chose(Command),
-    /// The person opened the menu.
-    Opened,
-}
-
-type Sender = async_channel::Sender<MenuEvent>;
+type Sender = async_channel::Sender<Command>;
 
 /// The section label over the Machine rows, as Bluetooth labels "Devices".
 const MACHINES_TITLE: &str = "Machines";
@@ -74,11 +66,8 @@ pub(crate) fn install(
     let item = Rc::new(StatusItem::new(mtm, sender));
     let menu = StatusMenu::install(item, cx);
     cx.spawn(async move |cx| {
-        while let Ok(event) = messages.recv().await {
-            cx.update(|cx| match event {
-                MenuEvent::Chose(command) => menu.perform(command, cx),
-                MenuEvent::Opened => menu.opened(cx),
-            });
+        while let Ok(command) = messages.recv().await {
+            cx.update(|cx| menu.perform(command, cx));
         }
     })
     .detach();
@@ -98,7 +87,6 @@ impl StatusItem {
         let menu = NSMenu::new(mtm);
         // Each row's availability follows the presentation, not AppKit's responder chain.
         menu.setAutoenablesItems(false);
-        menu.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*target)));
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
         item.setMenu(Some(&menu));
         Self {
@@ -480,13 +468,6 @@ define_class!(
     }
 
     unsafe impl NSObjectProtocol for MenuTarget {}
-
-    unsafe impl NSMenuDelegate for MenuTarget {
-        #[unsafe(method(menuWillOpen:))]
-        fn menu_will_open(&self, _menu: &NSMenu) {
-            let _ = self.ivars().sender.try_send(MenuEvent::Opened);
-        }
-    }
 );
 
 impl MenuTarget {
@@ -502,7 +483,7 @@ impl MenuTarget {
     /// Menu actions reach the application after the menu closes, so an alert never opens
     /// inside menu tracking.
     fn send(&self, command: Command) {
-        let _ = self.ivars().sender.try_send(MenuEvent::Chose(command));
+        let _ = self.ivars().sender.try_send(command);
     }
 }
 
