@@ -529,6 +529,8 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
         )
         .replace("TextInputKeybindingProfile::Linux", "ExplicitTextProfile")
         // Remote server facts and their display names select no client adapter.
+        .replace("Platform::MacosArm64", "ExplicitUpdatePlatform")
+        .replace("Platform::LinuxX86_64", "ExplicitUpdatePlatform")
         .replace("\"Linux\"", "\"Remote Operating System\"");
     let compact: String = source
         .chars()
@@ -622,6 +624,8 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         "#[cfg_attr(\n    not(target_os = \"macos\"),\n    allow(dead_code, reason = \"only a native Adapter consumes it\")\n)]\nstruct Endpoint;",
         "#![cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"only a native Adapter consumes it\"))]",
         "let profile = TextInputKeybindingProfile::Linux;",
+        "let platform = Platform::MacosArm64;",
+        "let platform = Platform::LinuxX86_64;",
         r#"let facts = json!({"operating_system": "Linux"});"#,
         r#"match remote_os { "linux" => "Linux", _ => "Unknown" }"#,
     ] {
