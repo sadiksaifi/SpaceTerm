@@ -84,7 +84,7 @@ _Avoid_: shim, alias, CLI install
 
 **Restart Core**: The explicit action that stops and starts SpaceTerm Core, ending its Terminal Sessions and retaining its Workspace organization.
 
-**Uninstall Core**: The explicit action that removes SpaceTerm Core's service registration and Command Line Tool, ending its Terminal Sessions. It retains the Machine's Workspace organization, Machine Settings and pairings unless the person also chooses to delete that data.
+**Uninstall Core**: The explicit action that removes SpaceTerm Core's service registration, Command Line Tool and installed versions, ending its Terminal Sessions. It retains the Machine's Workspace organization, Machine Settings and pairings unless the person also chooses to delete that data.
 
 **End All Sessions**: The action that ends every live Terminal Session on one Machine while SpaceTerm Core keeps running and retains its Workspace organization.
 
@@ -110,7 +110,7 @@ _Avoid_: shim, alias, CLI install
 
 **Add Machine**: The Settings-owned journey that enrolls a remote Machine through SSH Setup or an Invitation Link.
 
-**Remove Machine**: The action that removes a paired Machine's Saved Connection from a desktop SpaceTerm Client and requests Unpair Device for that client.
+**Remove Machine**: The action that uninstalls SpaceTerm Core from a paired Machine, revoking every pairing, and removes that Machine's Saved Connection from a desktop SpaceTerm Client. The Machine keeps its Workspace organization and Machine Settings.
 
 **Network Access**: A Machine's deliberate QUIC exposure: off, or on at one address of its computer or every interface, at one port.
 

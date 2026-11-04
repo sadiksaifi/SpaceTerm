@@ -30,7 +30,7 @@ Packaging prepares the signed SpaceTerm Core package before compiling the deskto
 
 When startup has no usable SpaceTerm Core state, recovery fills the window beneath its window controls. The Machine Settings action remains available there. A missing SpaceTerm Core package and a package that fails verification have separate explanations. Usable Workspaces from another connected Machine keep the normal Workspace presentation.
 
-Linux first setup can return an authorization requirement before service registration. The caller must obtain explicit scoped linger authorization through the existing service control, then retry startup. Cancellation before service mutation preserves the previous policy; admitted service registration or Start is observed to completion without claiming rollback.
+On Linux without linger, SpaceTerm Core runs while you are logged in and stops at logout. `spaceterm pair` and SSH Setup require linger under [ADR 0030](adr/0030-start-servers-at-boot-independently-of-clients.md). Setup cancellation before service mutation preserves the previous policy; admitted service registration or Start is observed to completion without claiming rollback.
 
 To end the Terminal Sessions of This Mac or This Computer while SpaceTerm Core keeps running, preview the action and copy its exact token:
 
@@ -47,7 +47,7 @@ Use Settings > Machines > Add Machine… with SSH Setup or an Invitation Link. [
 
 Setup rejects SSH executable or runtime configuration paths containing whitespace or shell metacharacters before starting SSH, because OpenSSH leaves them unquoted in generated hop commands. System SSH `Include` paths must be absolute because `-F` treats included files as user configuration and resolves relative system includes under `~/.ssh`; platform defaults already use absolute paths. User configuration includes retain normal OpenSSH behavior.
 
-Enter an SSH destination to begin setup. The evaluated OpenSSH HostName supplies the QUIC address with UDP port 9231. The optional Network Address disclosure accepts a DNS name or IP address and an optional UDP port. SSH aliases and ProxyJump can reach a computer without making its QUIC endpoint reachable; use the override when the client needs a different address. Turning on Network Access requires approval of the reachable address and SpaceTerm Core's listener. Installation and startup do not complete setup until credentials and the connection are saved, SSH resources close and QUIC admission succeeds. If setup fails, review its reported service and pairing effects before retrying.
+Enter an SSH destination to begin setup. The evaluated OpenSSH HostName supplies the QUIC address with the build identity's UDP port under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). The optional Network Address disclosure accepts a DNS name or IP address and an optional UDP port. SSH aliases and ProxyJump can reach a computer without making its QUIC endpoint reachable; use the override when the client needs a different address. Turning on Network Access requires approval of the reachable address and SpaceTerm Core's listener. Installation and startup do not complete setup until credentials and the connection are saved, SSH resources close and QUIC admission succeeds. If setup fails, review its reported service and pairing effects before retrying.
 
 Once added, select that Machine in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Try Again and pairing cleanup use QUIC under [ADR 0052](adr/0052-carry-paired-connections-over-quic.md). The CLI can Restart and Update a running paired Machine and change its Network Access through [the service lane](adr/0057-administer-servers-over-the-service-lane.md). Stop, Start, setup, invitations, unpairing other devices, End All Sessions and a Network Access change that leaves no connected device a route stay on the Machine itself. Saved addresses are read-only; add the Machine again to use a different address. [ADR 0056](adr/0056-install-and-pair-servers-from-their-own-command-line.md) describes CLI enrollment and its address override.
 
@@ -81,7 +81,7 @@ The installer installs the Release build of SpaceTerm Core beside any version al
 spaceterm uninstall
 ```
 
-Uninstall previews any Terminal Sessions it would end. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. `install.sh --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
+Uninstall previews any Terminal Sessions it would end. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk unless you add `--delete-data`. A noninteractive uninstall returns the preview token for `--confirm TOKEN`. `install.sh --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
 
 
 ## Cross-target artifact catalogs
