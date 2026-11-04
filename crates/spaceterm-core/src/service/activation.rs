@@ -485,7 +485,7 @@ impl Service {
                 }
                 Step::StopDispatched => {
                     self.supervisor.check(&self.runtime(&state), false)?;
-                    self.wait_quiescent(data, &operation, operation.original_run.as_ref())?;
+                    self.wait_quiescent(data, &operation, operation.original_run.as_ref(), false)?;
                     let _intent = data.lock("service-intent.lock", false)?;
                     state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
                     let _writes = data
@@ -587,7 +587,7 @@ impl Service {
                     }
                 }
                 Step::ReturnStopDispatched => {
-                    self.wait_quiescent(data, &operation, operation.candidate_run.as_ref())?;
+                    self.wait_quiescent(data, &operation, operation.candidate_run.as_ref(), true)?;
                     let failure = self.classify();
                     let _intent = data.lock("service-intent.lock", false)?;
                     state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
@@ -676,11 +676,17 @@ impl Service {
         }
     }
     /// Waits for the stopped server's cleanup, refusing a run other than `expected`.
+    ///
+    /// A candidate that never became ready published no endpoint and admitted no client, so it
+    /// started no Terminal Session. With `unready_candidate`, its own run counts as ended once
+    /// the service manager stopped it and its instance lock and endpoint prove it gone, even
+    /// when it failed or crashed during startup without recording its end.
     fn wait_quiescent(
         &self,
         data: &Directory,
         operation: &Operation,
         expected: Option<&Run>,
+        unready_candidate: bool,
     ) -> Result<(), CoreError> {
         if self.supervisor.running()? {
             return Err(CoreError::ActivationUnresolved);
@@ -691,7 +697,12 @@ impl Service {
             if state.run.as_ref().is_some_and(|run| Some(run) != expected) {
                 return Err(CoreError::ActivationUnresolved);
             }
-            match check_cleanup(&state).and_then(|()| self.prove_quiescent()) {
+            let ended = unready_candidate
+                && !operation.ready
+                && expected.is_some()
+                && state.run.as_ref() == expected;
+            let cleanup = if ended { Ok(()) } else { check_cleanup(&state) };
+            match cleanup.and_then(|()| self.prove_quiescent()) {
                 Ok(()) => return Ok(()),
                 Err(CoreError::CleanupUnresolved)
                     if Instant::now() < deadline && !operation.failed =>

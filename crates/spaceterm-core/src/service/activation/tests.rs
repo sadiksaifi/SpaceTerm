@@ -1278,3 +1278,74 @@ fn a_startup_policy_failure_after_readiness_leaves_the_update_completed() {
         );
     });
 }
+
+#[test]
+fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::StartDispatched,
+            false,
+        );
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        let run = Run {
+            boot: boot().unwrap(),
+            token: crate::protocol::random().unwrap(),
+        };
+        admit_run(&mut state, &run).unwrap();
+        state.run = Some(run);
+        state.activation.as_mut().unwrap().started_at = Some(0);
+        data.write_json(c"service.json", &state).unwrap();
+        // The candidate's run stays recorded, as a run that fails or crashes during startup
+        // leaves it, and its process is gone.
+        supervisor.running.store(false, Ordering::SeqCst);
+        *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(previous.directory.clone());
+        let status = service.recover_activation().unwrap().unwrap();
+        assert_eq!(
+            status.phase,
+            ActivationPhase::Returned {
+                failure: StartFailure::NotReady,
+                running: true
+            }
+        );
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+    });
+}
+
+#[test]
+fn existing_pairings_survive_a_candidate_that_rewrote_them() {
+    with_service(|service, previous, candidate, supervisor| {
+        drop(crate::direct::host::State::open(&service.paths).unwrap());
+        let pairings = std::fs::read(service.paths.data.join("direct.json")).unwrap();
+        supervisor
+            .hangs
+            .lock()
+            .unwrap()
+            .push(candidate.directory.clone());
+        *supervisor.meddles.lock().unwrap() = Some(Box::new(|data: &Directory| {
+            let mut direct: serde_json::Value = data.read_json("direct.json").unwrap().unwrap();
+            direct["enabled"] = (!direct["enabled"].as_bool().unwrap()).into();
+            direct["devices"] = serde_json::json!([]);
+            data.write_json(c"direct.json", &direct).unwrap();
+        }));
+        let status = update_running(&service, &previous, &candidate, &supervisor).unwrap();
+        assert!(matches!(status.phase, ActivationPhase::Returned { .. }));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(service.paths.data.join("direct.json")).unwrap()
+            )
+            .unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&pairings).unwrap()
+        );
+        crate::direct::host::State::open(&service.paths).unwrap();
+    });
+}

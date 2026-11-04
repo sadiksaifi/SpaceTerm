@@ -976,10 +976,11 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
     state.run = Some(run.clone());
     data.write_json(c"service.json", &state)?;
     drop(intent);
-    match crate::host::serve_runtime(&service.paths, Some(panes), true) {
-        Ok(()) | Err(CoreError::Stopped) => {}
-        Err(error) => return Err(error),
-    }
+    // A startup that fails has returned from its cleanup too, so its run ends either way.
+    let served = match crate::host::serve_runtime(&service.paths, Some(panes), true) {
+        Ok(()) | Err(CoreError::Stopped) => Ok(()),
+        Err(error) => Err(error),
+    };
     let _intent = data.lock("service-intent.lock", false)?;
     let mut state = Service::state(&data)?.ok_or(CoreError::StorageUnavailable)?;
     if state
@@ -990,7 +991,8 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
         return Err(CoreError::CleanupUnresolved);
     }
     state.run = None;
-    data.write_json(c"service.json", &state)
+    data.write_json(c"service.json", &state)?;
+    served
 }
 fn check_cleanup(state: &State) -> Result<(), CoreError> {
     if let Some(run) = &state.run
