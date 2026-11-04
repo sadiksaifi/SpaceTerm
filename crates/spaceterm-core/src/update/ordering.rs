@@ -97,15 +97,23 @@ mod tests {
     fn development_versions_refuse_only_an_installed_one() {
         let running = version("dev.0123456789ab");
         assert_eq!(
-            admit(&version("dev.ba9876543210"), &[running.clone()], None),
+            admit(
+                &version("dev.ba9876543210"),
+                std::slice::from_ref(&running),
+                None
+            ),
             Ok(())
         );
         assert_eq!(
-            admit(&version("dev.0123456789ab.dirty"), &[running.clone()], None),
+            admit(
+                &version("dev.0123456789ab.dirty"),
+                std::slice::from_ref(&running),
+                None
+            ),
             Ok(())
         );
         assert_eq!(
-            admit(&running, &[running.clone()], None),
+            admit(&running, std::slice::from_ref(&running), None),
             Err(Refusal::NotNewer)
         );
         assert_eq!(

@@ -256,7 +256,7 @@ pub struct LaneStatus {
     pub linger: Option<bool>,
     pub runtime: LaneVersion,
     /// The Core's update facts. None while no runtime is installed.
-    pub update: Option<UpdateFacts>,
+    pub update: Option<Box<UpdateFacts>>,
     pub activation: LaneActivation,
     pub sessions: u32,
     pub network: LaneNetwork,
@@ -1197,7 +1197,7 @@ impl Admin<'_> {
             automatic_start: snapshot.enabled,
             linger: self.service.linger()?,
             runtime: self.approved(&state)?,
-            update: facts,
+            update: facts.map(Box::new),
             activation: if unresolved {
                 LaneActivation::Unresolved
             } else {

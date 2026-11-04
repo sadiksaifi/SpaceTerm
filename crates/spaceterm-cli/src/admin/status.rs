@@ -228,8 +228,8 @@ pub(crate) fn envelope(
         automatic_start: status.automatic_start,
         linger: status.linger,
         runtime: version(&status.runtime),
-        pending: status.update.as_ref().and_then(pending),
-        update_check: update_check(status.update.as_ref()),
+        pending: status.update.as_deref().and_then(pending),
+        update_check: update_check(status.update.as_deref()),
         activation: match status.activation {
             LaneActivation::Settled => Activation::Settled,
             LaneActivation::Unresolved => Activation::Unresolved,

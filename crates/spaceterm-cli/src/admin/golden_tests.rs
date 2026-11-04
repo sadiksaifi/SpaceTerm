@@ -77,14 +77,14 @@ fn status_reports_service_network_devices_and_held_outcomes() {
         automatic_start: true,
         linger: Some(true),
         runtime: lane_version("0.7.0", 'a'),
-        update: Some(facts(
+        update: Some(Box::new(facts(
             Some(pending(true, true)),
             UpdateCheck::Failing {
                 since: FAILING,
                 last_success: Some(SUCCEEDED),
                 reason: CheckFailure::Proxy,
             },
-        )),
+        ))),
         activation: LaneActivation::Settled,
         sessions: 2,
         network: LaneNetwork {
