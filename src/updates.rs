@@ -5,6 +5,7 @@ pub(crate) mod preview;
 
 pub(crate) mod machines;
 pub(crate) mod policy;
+pub(crate) mod push;
 pub(crate) mod release_feed;
 
 use policy::{UpdateHistory, UpdatePreferences, UpdateStage};
