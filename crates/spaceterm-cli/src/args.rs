@@ -277,10 +277,11 @@ pub enum InternalCommand {
         #[arg(long)]
         identity: Option<String>,
     },
-    /// Run one transient service operation for SpaceTerm Core.
+    /// Run one transient service operation for SpaceTerm Core. Without an operation, finish an
+    /// activation a reboot interrupted.
     Helper {
         #[arg(long)]
-        operation: String,
+        operation: Option<String>,
         #[arg(long)]
         identity: String,
     },
@@ -965,6 +966,10 @@ mod tests {
                     "--identity",
                     "spaceterm",
                 ],
+                "internal.helper",
+            ),
+            (
+                &["internal", "helper", "--identity", "spaceterm"][..],
                 "internal.helper",
             ),
             (

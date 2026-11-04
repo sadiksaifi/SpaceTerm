@@ -1,5 +1,7 @@
 //! The transient service helper. It runs one admitted service operation outside the server it
-//! stops or replaces: `spaceterm internal helper --operation ID --identity X`.
+//! stops or replaces: `spaceterm internal helper --operation ID --identity X`. Without an
+//! operation it finishes an activation a reboot interrupted: `spaceterm internal helper
+//! --identity X`.
 //!
 //! The helper must outlive the service manager's Stop of the server that launched it. On Linux
 //! it therefore runs in its own transient user unit, outside the server unit's control group. On
@@ -36,6 +38,34 @@ pub fn launch(identity: &str, op: &OperationId) -> Result<(), CoreError> {
     let mut argv = vec![program.into_os_string()];
     argv.extend(arguments(identity, op));
     spawn_detached(&format!("{identity}-service-{}", op.short()), &argv)
+}
+
+/// Starts the helper that finishes an activation a reboot interrupted, detached from the server
+/// that found it. That server refuses to run until the activation settles.
+pub(crate) fn launch_recovery(identity: &str) -> Result<(), CoreError> {
+    let program = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
+    let argv = [
+        program.into_os_string(),
+        "internal".into(),
+        "helper".into(),
+        "--identity".into(),
+        identity.into(),
+    ];
+    spawn_detached(&format!("{identity}-service-recovery"), &argv)
+}
+
+/// The recovery helper's own work: finishes the interrupted activation under the helper lock.
+/// The activation either starts the Pending Version or returns to the previous one. Another
+/// helper that holds the lock is finishing it already.
+pub fn recover(identity: &str) -> Result<(), CoreError> {
+    let paths = crate::host::Paths::for_identity(identity)?;
+    let data = Directory::open(&paths.data, false)?;
+    let Some(_helper) = data.try_lock(HELPER_LOCK)? else {
+        return Ok(());
+    };
+    Service::for_identity(identity)?
+        .recover_activation()
+        .map(drop)
 }
 
 /// The helper's own work: takes the helper lock, claims its record, runs the same control a local

@@ -942,12 +942,20 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
     if state.stopped || !state.installed {
         return Ok(());
     }
+    // An activation that refuses this run and whose earlier run ended, as a reboot proves,
+    // has no helper left to finish it. A recovery helper finishes it outside this unit.
+    let refuse = |state: &State| {
+        if check_cleanup(state).is_ok() {
+            let _ = helper::launch_recovery(identity);
+        }
+        CoreError::ActivationUnresolved
+    };
     if state
         .activation
         .as_ref()
         .is_some_and(|o| !o.permits_start())
     {
-        return Err(CoreError::ActivationUnresolved);
+        return Err(refuse(&state));
     }
     check_cleanup(&state)?;
     let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
@@ -961,7 +969,11 @@ pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), CoreError> {
         boot: boot()?,
         token: crate::protocol::random()?,
     };
-    activation::admit_run(&mut state, &run)?;
+    if activation::admit_run(&mut state, &run).is_err() {
+        return Err(refuse(
+            &Service::state(&data)?.ok_or(CoreError::NotInstalled)?,
+        ));
+    }
     state.run = Some(run.clone());
     data.write_json(c"service.json", &state)?;
     drop(intent);

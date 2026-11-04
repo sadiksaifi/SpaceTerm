@@ -149,12 +149,17 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
             if identity != IDENTITY {
                 return Err(Error::Failure(Failure::new(Code::InvalidArguments)));
             }
-            let bytes = decode_id(operation)
-                .ok_or_else(|| Error::Failure(Failure::new(Code::InvalidArguments)))?;
-            spaceterm_core::service::helper::run(
-                IDENTITY,
-                &spaceterm_core::service::operations::OperationId(bytes),
-            )?;
+            match operation {
+                Some(operation) => {
+                    let bytes = decode_id(operation)
+                        .ok_or_else(|| Error::Failure(Failure::new(Code::InvalidArguments)))?;
+                    spaceterm_core::service::helper::run(
+                        IDENTITY,
+                        &spaceterm_core::service::operations::OperationId(bytes),
+                    )?;
+                }
+                None => spaceterm_core::service::helper::recover(IDENTITY)?,
+            }
         }
         // Serving and retention run in main.rs.
         InternalCommand::Serve { .. } | InternalCommand::Retain { .. } => unreachable!(),
