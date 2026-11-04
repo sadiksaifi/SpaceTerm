@@ -781,3 +781,86 @@ fn a_first_version_read_begun_before_a_status_item_uninstall_offers_no_stale_upd
         "a removed server offers no update"
     );
 }
+
+/// The row records a confirmed restart into the Pending Version by how its lane operation ended.
+#[test]
+fn a_confirmed_restart_is_recorded_by_how_its_lane_operation_ended() {
+    use crate::machine_connection::service::RetainedInstallation;
+    use crate::machine_connection::service::lane::client::Outcome as LaneOutcome;
+    use crate::machine_connection::service::lane::{LaneAction, LaneOperationState, LaneReceipt};
+    use crate::machine_connection::update::facts::StartFailure;
+    let installation = |version: &str| RetainedInstallation {
+        directory: std::path::PathBuf::from(format!("/installations/{version}")),
+        version: version.into(),
+        commit: "c".repeat(40),
+    };
+    let settled = |state| LaneOutcome::Settled {
+        receipt: LaneReceipt {
+            operation: "0a".repeat(16),
+            action: LaneAction::Restart,
+            state,
+            code: None,
+            boot: "b".repeat(64),
+        },
+        boot: "a".repeat(64),
+    };
+    let phase = |outcome: &LaneOutcome| {
+        super::restarted(outcome, installation("1.0.0"), installation("1.1.0"))
+            .map(|status| status.phase)
+    };
+    assert_eq!(
+        phase(&settled(LaneOperationState::Done)),
+        Ok(ActivationPhase::Completed { running: true })
+    );
+    assert_eq!(
+        phase(&settled(LaneOperationState::Failed)),
+        Ok(ActivationPhase::Returned {
+            failure: StartFailure::NotReady,
+            running: true
+        })
+    );
+    assert_eq!(
+        phase(&settled(LaneOperationState::NotPerformed)),
+        Err(CoreError::Changed)
+    );
+    assert_eq!(
+        phase(&LaneOutcome::Unconfirmed {
+            operation: "0a".repeat(16),
+            boot: "a".repeat(64),
+            last: None,
+        }),
+        Ok(ActivationPhase::Uncertain)
+    );
+    let status = super::restarted(
+        &settled(LaneOperationState::Done),
+        installation("1.0.0"),
+        installation("1.1.0"),
+    )
+    .unwrap();
+    assert_eq!(status.operation[..16], [0x0a; 16]);
+    assert_eq!(status.candidate.version, "1.1.0");
+    assert_eq!(status.previous.version, "1.0.0");
+}
+
+#[test]
+fn lane_failures_keep_the_rows_classifications() {
+    use crate::machine_connection::service::lane::client::LaneError;
+    for (code, error) in [
+        ("service_busy", CoreError::ServiceBusy),
+        ("changed", CoreError::Changed),
+        ("not_running", CoreError::NotRunning),
+        ("version_skipped", CoreError::CandidateMissing),
+        ("candidate_unverified", CoreError::RuntimeUnavailable),
+        ("disk_full", CoreError::StorageUnavailable),
+    ] {
+        assert_eq!(
+            super::lane_error(LaneError::Code(code.into())),
+            error,
+            "{code}"
+        );
+    }
+    assert_eq!(
+        super::lane_error(LaneError::Core(CoreError::Protocol)),
+        CoreError::Protocol
+    );
+}

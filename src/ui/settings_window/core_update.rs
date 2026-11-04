@@ -1,6 +1,7 @@
-//! The local server's version and its one "Update SpaceTerm Core..." journey. Reading stages nothing:
-//! the server package this SpaceTerm includes is verified and retained only after the person
-//! chooses Update SpaceTerm Core, and only the change they then confirm replaces the approved runtime.
+//! The local server's version and its one "Update SpaceTerm Core..." journey. Reading stages nothing.
+//! Choosing Update SpaceTerm Core installs the server package this SpaceTerm includes through the
+//! running Core's update engine, which ends nothing, and previews the restart into it. Only the
+//! restart the person then confirms replaces the approved runtime.
 
 use std::sync::Arc;
 
@@ -19,7 +20,12 @@ use crate::machine_connection::service::activation::{
     ActivationPhase, ActivationStatus, is_released_downgrade,
 };
 use crate::machine_connection::service::control::{BuildName, UpdateWording, build_labels};
+use crate::machine_connection::service::lane::admin;
+use crate::machine_connection::service::lane::client::{LaneError, Outcome};
+use crate::machine_connection::service::lane::{LaneAction, LaneOperationState, LaneVersion};
+use crate::machine_connection::service::updates::{Archive, InstallError, Source, Updates};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
+use crate::machine_connection::update::facts::{InstallFailure, StartFailure, Version};
 use crate::ui::sidebar_window::form::CaptionTone;
 
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
@@ -85,23 +91,175 @@ impl CoreUpdateControl for Service {
 
     fn prepare_update(&self) -> Result<Option<PreparedChange>, CoreError> {
         let candidate = crate::local_startup::discover_candidate().map_err(CoreError::from)?;
-        let installation = candidate.stage()?;
-        let Some(approval) = self.prepare_activation(&installation)? else {
+        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+        let core = crate::machine_connection::MachineConnection::for_identity(identity)?;
+        let opened = core.service_lane().and_then(|lane| {
+            let pending = core.service_operations()?;
+            let (session, _) = admin::open(&lane, &pending).map_err(lane_error)?;
+            Ok((lane, pending, session))
+        });
+        let Ok((lane, pending, mut session)) = opened else {
+            // A stopped Core installs through its own engine here, and starts into the Pending
+            // Version on its next start. Nothing waits for confirmation.
+            install_stopped(self, &candidate)?;
             return Ok(None);
         };
-        let service = self.clone();
+        let version =
+            Version::parse(candidate.version()).map_err(|_| CoreError::RuntimeUnavailable)?;
+        let signature =
+            std::fs::read(candidate.signature()).map_err(|_| CoreError::CandidateMissing)?;
+        let length = std::fs::metadata(candidate.archive())
+            .map_err(|_| CoreError::CandidateMissing)?
+            .len();
+        let mut archive =
+            std::fs::File::open(candidate.archive()).map_err(|_| CoreError::CandidateMissing)?;
+        let pushed = admin::push(
+            &mut session,
+            &admin::PushArchive {
+                version: &version,
+                length,
+                sha256: candidate.digest(),
+                signature: &signature,
+            },
+            &mut archive,
+            &mut |_| {},
+        );
+        let facts = match pushed {
+            Ok(facts) => facts,
+            // The Core already has it, as its Pending Version or the running one.
+            Err(LaneError::Code(code)) if code == "not_newer" => {
+                admin::facts(&mut session).map_err(lane_error)?.1
+            }
+            Err(error) => return Err(lane_error(error)),
+        };
+        if facts.pending.map(|pending| pending.version) != Some(version) {
+            return Ok(None);
+        }
+        let preview = admin::preview(&mut session, LaneAction::Restart).map_err(lane_error)?;
+        let (Some(from), Some(to)) = (&preview.effects.from, &preview.effects.to) else {
+            return Err(CoreError::Changed);
+        };
+        if to.version != candidate.version() {
+            return Err(CoreError::Changed);
+        }
+        let installations = self.installations_directory();
+        let retained = |version: &LaneVersion| RetainedInstallation {
+            directory: installations.join(&version.sha256),
+            version: version.version.clone(),
+            commit: version.commit.clone(),
+        };
+        let (previous, candidate) = (retained(from), retained(to));
         Ok(Some(PreparedChange {
-            previous: approval.previous().clone(),
-            candidate: approval.candidate().clone(),
-            running: approval.running(),
-            stopped: approval.stopped(),
-            commit: Box::new(move || service.activate(approval)),
+            previous: previous.clone(),
+            candidate: candidate.clone(),
+            running: true,
+            stopped: false,
+            commit: Box::new(move || {
+                let outcome = admin::execute(
+                    &lane,
+                    session,
+                    preview.action,
+                    preview.token,
+                    admin::wait(&LaneAction::Restart),
+                    &pending,
+                    &mut || Ok(()),
+                    &|| None,
+                )
+                .map_err(lane_error)?;
+                restarted(&outcome, previous, candidate)
+            }),
         }))
     }
 
     fn finish(&self) -> Result<Option<ActivationStatus>, CoreError> {
         self.recover_activation()
     }
+}
+
+/// Installs the included build into a stopped Core through its update engine.
+fn install_stopped(
+    service: &Service,
+    candidate: &crate::local_startup::Candidate,
+) -> Result<(), CoreError> {
+    let updates = Updates::open(service.clone())?;
+    match updates.install(Archive {
+        archive: candidate.archive(),
+        signature: candidate.signature(),
+        sha256: candidate.digest(),
+        source: Source::Local,
+    }) {
+        Ok(_) | Err(InstallError::NotNewer) => Ok(()),
+        Err(error) => Err(install_error(error)),
+    }
+}
+
+fn install_error(error: InstallError) -> CoreError {
+    match error {
+        InstallError::NotNewer | InstallError::Skipped => CoreError::CandidateMissing,
+        InstallError::Busy => CoreError::ServiceBusy,
+        InstallError::Failed(InstallFailure::Verification) => CoreError::RuntimeUnavailable,
+        InstallError::Failed(_) => CoreError::StorageUnavailable,
+        InstallError::Core(error) => error,
+    }
+}
+
+/// The classification of a lane failure the row reports.
+pub(super) fn lane_error(error: LaneError) -> CoreError {
+    match error {
+        LaneError::Core(error) => error,
+        LaneError::Interrupted => CoreError::Changed,
+        LaneError::Code(code) => match code.as_str() {
+            "changed" | "candidate_changed" => CoreError::Changed,
+            "service_busy" => CoreError::ServiceBusy,
+            "not_running" | "stopped" | "unreachable" => CoreError::NotRunning,
+            "not_newer" | "version_skipped" | "no_candidate" => CoreError::CandidateMissing,
+            "candidate_unverified" => CoreError::RuntimeUnavailable,
+            "disk_full" | "storage_unavailable" => CoreError::StorageUnavailable,
+            "activation_unresolved" => CoreError::ActivationUnresolved,
+            _ => CoreError::StartupFailed,
+        },
+    }
+}
+
+/// The row's record of a confirmed restart into the Pending Version, from how its lane
+/// operation ended.
+pub(super) fn restarted(
+    outcome: &Outcome,
+    previous: RetainedInstallation,
+    candidate: RetainedInstallation,
+) -> Result<ActivationStatus, CoreError> {
+    let (operation, phase) = match outcome {
+        Outcome::Settled { receipt, .. } => {
+            let phase = match receipt.state {
+                LaneOperationState::Done => ActivationPhase::Completed { running: true },
+                // The Core returned to the version it ran on its own.
+                LaneOperationState::Failed => ActivationPhase::Returned {
+                    failure: StartFailure::NotReady,
+                    running: true,
+                },
+                LaneOperationState::NotPerformed => return Err(CoreError::Changed),
+                _ => ActivationPhase::Uncertain,
+            };
+            (receipt.operation.as_str(), phase)
+        }
+        Outcome::Shutdown { operation, .. } | Outcome::Unconfirmed { operation, .. } => {
+            (operation.as_str(), ActivationPhase::Uncertain)
+        }
+    };
+    let mut id = [0; 32];
+    for (slot, pair) in id.iter_mut().zip(operation.as_bytes().chunks(2)) {
+        *slot = std::str::from_utf8(pair)
+            .ok()
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .unwrap_or(0);
+    }
+    Ok(ActivationStatus {
+        operation: id,
+        previous,
+        candidate,
+        stopped: false,
+        phase,
+    })
 }
 
 /// The dropdown observes the same facts and policy as Settings without resuming an activation.

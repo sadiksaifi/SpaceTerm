@@ -71,6 +71,14 @@ impl Candidate {
     pub fn digest(&self) -> &str {
         &self.digest
     }
+    /// The signed archive, verified when this candidate was discovered.
+    pub fn archive(&self) -> &Path {
+        &self.paths.archive
+    }
+    /// The archive's raw signature.
+    pub fn signature(&self) -> &Path {
+        &self.paths.signature
+    }
     pub fn is_approved(
         &self,
         installation: &spaceterm_core::service::RetainedInstallation,
