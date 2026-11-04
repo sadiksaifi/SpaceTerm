@@ -171,6 +171,8 @@ pub(super) enum SettingsRowId {
     ExportSettings,
     /// Replaces the Settings Document with one read from a file the person chooses.
     ImportSettings,
+    /// Removes SpaceTerm Core and the SpaceTerm app from this computer.
+    UninstallSpaceTerm,
     /// Returns every Setting to its default and removes the installed Terminal Themes.
     ResetAllSettings,
 }
@@ -232,6 +234,7 @@ impl SettingsRowId {
             | Self::SettingsFile
             | Self::ExportSettings
             | Self::ImportSettings
+            | Self::UninstallSpaceTerm
             | Self::ResetAllSettings => {
                 return None;
             }
@@ -943,6 +946,14 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-import-settings",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::UninstallSpaceTerm,
+        section: SettingsSectionId::Advanced,
+        group: "Uninstall",
+        label: "Uninstall SpaceTerm",
+        keywords: &["uninstall", "remove", "delete", "trash", "core", "app"],
+        selector: "settings-row-uninstall-spaceterm",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::ResetAllSettings,
         section: SettingsSectionId::Advanced,
         group: "Reset",
@@ -1162,6 +1173,7 @@ mod tests {
         SettingsFile,
         ExportSettings,
         ImportSettings,
+        UninstallSpaceTerm,
         ResetAllSettings,
     }
 
@@ -1459,6 +1471,7 @@ mod tests {
             ("restore", SettingsRowId::ImportSettings),
             ("reset all", SettingsRowId::ResetAllSettings),
             ("factory", SettingsRowId::ResetAllSettings),
+            ("uninstall", SettingsRowId::UninstallSpaceTerm),
         ] {
             assert!(
                 matching_rows(query).contains(&row),

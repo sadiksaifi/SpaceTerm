@@ -351,6 +351,7 @@ fn open_machines_with<'a>(
         service: None,
         update: None,
         command_line_tool: None,
+        removal: None,
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(

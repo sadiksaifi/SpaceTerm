@@ -62,6 +62,7 @@ fn open_with_viewer(
                 service: None,
                 update: None,
                 command_line_tool,
+                removal: None,
             }),
             window,
             cx,

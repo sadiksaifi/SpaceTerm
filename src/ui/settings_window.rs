@@ -31,6 +31,7 @@ mod sidebar;
 mod theme_gallery;
 mod theme_store;
 mod themes;
+mod uninstall;
 mod updates;
 
 #[cfg(test)]
@@ -456,6 +457,8 @@ pub(crate) struct SettingsWindow {
     command_line_tool: Option<command_line_tool::CommandLineToolRow>,
     /// The desktop's direct network connections. `None` omits their rows.
     direct_routes: Option<direct_routes::DirectRouteRows>,
+    /// Uninstall SpaceTerm. `None` omits its row.
+    uninstall: Option<uninstall::UninstallRow>,
     /// The server the person selected in the Servers list. A server no longer listed gives way
     /// to the local server or the first saved one.
     selected_machine: Option<machine_list::MachineChoice>,
@@ -780,6 +783,11 @@ impl SettingsWindow {
                         && local_core
                             .as_ref()
                             .is_none_or(|offered| offered.command_line_tool.is_none()))
+                    // Only an installed app can remove itself.
+                    || (*row == SettingsRowId::UninstallSpaceTerm
+                        && local_core
+                            .as_ref()
+                            .is_none_or(|offered| offered.removal.is_none()))
             })
             .collect();
         let local_operations = local_operations::LocalCoreOperations::get(cx);
@@ -851,6 +859,10 @@ impl SettingsWindow {
                 .as_ref()
                 .and_then(|offered| offered.command_line_tool.clone())
                 .map(command_line_tool::CommandLineToolRow::new),
+            uninstall: local_core
+                .as_ref()
+                .and_then(|offered| offered.removal.clone())
+                .map(uninstall::UninstallRow::new),
             local_core: local_core
                 .map(|offered| machines::LocalMachineRow::new(offered.connection)),
             direct_routes,
@@ -1718,6 +1730,7 @@ impl SettingsWindow {
                 )
                 .into_any_element()
             }
+            SettingsRowId::UninstallSpaceTerm => self.render_uninstall(cx),
             SettingsRowId::ResetAllSettings => {
                 let owner = cx.weak_entity();
                 action_button(
@@ -2647,6 +2660,7 @@ impl SettingsWindow {
             SettingsRowId::ImportSettings => Some(
                 "Replace every setting, keyboard shortcut, and installed theme with an exported file.",
             ),
+            SettingsRowId::UninstallSpaceTerm => Some(self.uninstall_description()),
             SettingsRowId::ResetAllSettings => Some(
                 "Return every setting and keyboard shortcut to its default and remove installed themes.",
             ),

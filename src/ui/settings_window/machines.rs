@@ -184,6 +184,8 @@ pub(super) struct OfferedMachine {
     pub(super) update: Option<Arc<dyn CoreUpdateControl>>,
     /// This computer's command for the server's identity. `None` omits its row.
     pub(super) command_line_tool: Option<Arc<crate::command_line_tool::CommandLineTool>>,
+    /// Uninstall SpaceTerm, offered only by an installed app. `None` omits its row.
+    pub(super) removal: Option<Arc<dyn super::uninstall::SpaceTermRemoval>>,
 }
 
 /// The local server a Settings window presents. Every build offers one. `None` hides the Servers
@@ -204,9 +206,11 @@ pub(super) fn offered_local_machine(
             service: None,
             update: None,
             command_line_tool,
+            removal: None,
         });
     }
     let resolved = Service::for_identity(identity);
+    let removal = resolved.as_ref().ok().and_then(super::uninstall::installed);
     // Only a resolved service can report or replace its approved build.
     let update = resolved
         .as_ref()
@@ -223,6 +227,7 @@ pub(super) fn offered_local_machine(
         service,
         update,
         command_line_tool,
+        removal,
     })
 }
 
@@ -2401,4 +2406,4 @@ pub(super) mod testing {
 
 #[cfg(test)]
 #[path = "machines_tests.rs"]
-mod tests;
+pub(super) mod tests;

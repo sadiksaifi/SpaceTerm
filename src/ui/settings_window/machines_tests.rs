@@ -101,12 +101,13 @@ core_error_cases! {
 }
 
 /// A server on a platform without a service layer, which shows only the connection row.
-fn offered(core: &Arc<ScriptedCore>) -> OfferedLocalMachine {
+pub(in crate::ui::settings_window) fn offered(core: &Arc<ScriptedCore>) -> OfferedLocalMachine {
     Some(OfferedMachine {
         connection: Ok(Arc::clone(core) as Arc<dyn LocalCoreControl>),
         service: None,
         update: None,
         command_line_tool: None,
+        removal: None,
     })
 }
 
@@ -119,10 +120,11 @@ fn offered_with_service(
         service: Some(Ok(Arc::clone(service) as Arc<dyn CoreServiceControl>)),
         update: None,
         command_line_tool: None,
+        removal: None,
     })
 }
 
-fn open_settings(
+pub(in crate::ui::settings_window) fn open_settings(
     local_core: OfferedLocalMachine,
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, &mut VisualTestContext) {
@@ -243,7 +245,7 @@ fn modal_action(selector: &str) -> &'static str {
     Box::leak(format!("modal-action-{selector}").into_boxed_str())
 }
 
-fn click_modal(selector: &str, cx: &mut VisualTestContext) {
+pub(in crate::ui::settings_window) fn click_modal(selector: &str, cx: &mut VisualTestContext) {
     let selector = modal_action(selector);
     let position = cx
         .debug_bounds(selector)
@@ -254,7 +256,10 @@ fn click_modal(selector: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn alert_open(selector: &str, cx: &mut VisualTestContext) -> bool {
+pub(in crate::ui::settings_window) fn alert_open(
+    selector: &str,
+    cx: &mut VisualTestContext,
+) -> bool {
     cx.debug_bounds(modal_action(selector)).is_some()
 }
 
@@ -292,6 +297,7 @@ fn open_machines_with_update(
         service: Some(Ok(Arc::clone(&service) as Arc<dyn CoreServiceControl>)),
         update: Some(Arc::clone(&update) as Arc<dyn CoreUpdateControl>),
         command_line_tool: None,
+        removal: None,
     });
     let (window, cx) = open_settings(offered, cx);
     click(NAVIGATION_SELECTOR, cx);
@@ -424,6 +430,7 @@ fn a_development_run_core_is_described_as_ending_with_the_run(cx: &mut TestAppCo
             service: None,
             update: None,
             command_line_tool: None,
+            removal: None,
         }),
         cx,
     );
@@ -616,6 +623,7 @@ fn an_unresolved_core_explains_itself_and_offers_nothing(cx: &mut TestAppContext
             service: None,
             update: None,
             command_line_tool: None,
+            removal: None,
         }),
         cx,
     );
@@ -1339,6 +1347,7 @@ fn an_unresolved_service_explains_itself_and_offers_nothing(cx: &mut TestAppCont
             service: Some(Err(CoreError::StorageUnavailable)),
             update: None,
             command_line_tool: None,
+            removal: None,
         }),
         cx,
     );

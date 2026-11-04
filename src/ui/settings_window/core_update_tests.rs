@@ -65,6 +65,7 @@ fn open_unread(facts: UpdateFacts, cx: &mut TestAppContext) -> Harness<'_> {
         service: Some(Ok(Arc::clone(&service) as Arc<dyn CoreServiceControl>)),
         update: Some(Arc::clone(&update) as Arc<dyn CoreUpdateControl>),
         command_line_tool: None,
+        removal: None,
     };
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
@@ -576,6 +577,7 @@ fn confirmed_update_after_reopening(
         service: Some(Ok(service as Arc<dyn CoreServiceControl>)),
         update: Some(Arc::clone(&update) as Arc<dyn CoreUpdateControl>),
         command_line_tool: None,
+        removal: None,
     };
     let (settings, visual) = cx.add_window_view(|window, cx| {
         let mut settings = SettingsWindow::new_with_capabilities(
