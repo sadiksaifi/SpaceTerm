@@ -313,9 +313,9 @@ struct Live {
 
 /// An install in progress. It reports `Installing` progress until it ends. Dropping it without
 /// [`Installing::install`] or [`Installing::fail`] records no failure, as a desktop push that
-/// breaks off does.
-pub struct Installing<'a> {
-    updates: &'a Updates,
+/// breaks off does. It owns its engine handle, so a push can span several lane requests.
+pub struct Installing {
+    updates: Updates,
     version: Version,
     total: u64,
 }
@@ -413,7 +413,7 @@ impl Updates {
         &self,
         version: Version,
         total: u64,
-    ) -> Result<Installing<'_>, InstallError> {
+    ) -> Result<Installing, InstallError> {
         {
             let mut live = self.shared.lock();
             self.shared.admits(&live, &version)?;
@@ -425,7 +425,7 @@ impl Updates {
         }
         self.refresh();
         Ok(Installing {
-            updates: self,
+            updates: self.clone(),
             version,
             total,
         })
@@ -730,7 +730,7 @@ impl Shared {
     }
 }
 
-impl Installing<'_> {
+impl Installing {
     /// `received` of the archive's bytes arrived.
     pub fn progress(&self, received: u64) {
         {
@@ -774,7 +774,7 @@ impl Installing<'_> {
     }
 }
 
-impl Drop for Installing<'_> {
+impl Drop for Installing {
     fn drop(&mut self) {
         self.updates.end_operation();
     }
