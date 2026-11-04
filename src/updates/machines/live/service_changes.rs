@@ -3,6 +3,7 @@
 //! server's process. Machine updates read the service after each such change, and never on a
 //! timer, so This Mac's or This Computer's row stays current in a menu-only client, while its
 //! Core is stopped, and beside a Core that refuses admission.
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 
 /// What woke a [`Watch`].
@@ -21,22 +22,49 @@ pub(crate) trait Watch {
 }
 
 /// Starts a platform watch over `directories` and, when given, the exit of `process`. A process
-/// that already exited is not watched.
-pub(crate) type StartWatch = fn(&[PathBuf], Option<u32>) -> Option<Box<dyn Watch>>;
+/// that already exited is not watched. The watch also ends, returning `None` from
+/// [`Watch::wait`], once `stop` becomes readable or reaches end of file.
+pub(crate) type StartWatch = fn(&[PathBuf], Option<u32>, BorrowedFd<'_>) -> Option<Box<dyn Watch>>;
+
+/// Ends a [`follow`] thread when dropped, at once and without a change to the service: dropping
+/// closes the write end of the pipe whose read end every watch waits on.
+pub(crate) struct Following {
+    _stop: OwnedFd,
+}
 
 /// Calls `changed` after each change to the service at `directories` or to its server's process,
 /// on a thread that blocks in the platform watch between changes. `process` reads the running
-/// server's process. The thread ends when `changed` returns `false` or watching fails.
+/// server's process. The thread ends when `changed` returns `false`, watching fails, or the
+/// returned [`Following`] is dropped.
 pub(crate) fn follow(
     start: StartWatch,
     directories: Vec<PathBuf>,
     process: impl Fn() -> Option<u32> + Send + 'static,
     changed: impl Fn() -> bool + Send + 'static,
-) -> std::io::Result<()> {
+) -> std::io::Result<Following> {
+    let (read, write) = pipe()?;
     std::thread::Builder::new()
         .name("server-service-changes".into())
-        .spawn(move || run(start, &directories, &process, &changed))
-        .map(drop)
+        .spawn(move || run(start, &directories, &process, &changed, read.as_fd()))?;
+    Ok(Following { _stop: write })
+}
+
+/// A pipe whose ends close on exec.
+fn pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut ends = [0; 2];
+    // SAFETY: writes two new descriptors into the local array on success.
+    if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: both are new descriptors this function now owns.
+    let ends = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+    for end in [&ends.0, &ends.1] {
+        // SAFETY: sets a descriptor flag on a live descriptor.
+        if unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(ends)
 }
 
 fn run(
@@ -44,6 +72,7 @@ fn run(
     directories: &[PathBuf],
     process: &dyn Fn() -> Option<u32>,
     changed: &dyn Fn() -> bool,
+    stop: BorrowedFd<'_>,
 ) {
     let mut first = true;
     // A process the watch saw exit is not watched again while the service manager still names it.
@@ -56,7 +85,7 @@ fn run(
             .collect();
         let paths: Vec<PathBuf> = watched.iter().map(|watched| watched.path()).collect();
         let core = process().filter(|core| Some(*core) != exited);
-        let Some(mut watch) = start(&paths, core) else {
+        let Some(mut watch) = start(&paths, core, stop) else {
             return;
         };
         if !first && !changed() {
@@ -127,6 +156,7 @@ mod tests {
         runtime: PathBuf,
         core: Arc<Mutex<Option<u32>>>,
         reports: mpsc::Receiver<()>,
+        following: Option<Following>,
     }
 
     fn fixture() -> Fixture {
@@ -154,7 +184,7 @@ mod tests {
             let core = Arc::clone(&core);
             move || *core.lock().unwrap()
         };
-        follow(
+        let following = follow(
             crate::platform::service_watch,
             vec![data.clone(), runtime.clone()],
             process,
@@ -168,6 +198,7 @@ mod tests {
             runtime,
             core,
             reports,
+            following: Some(following),
         }
     }
 
@@ -261,5 +292,18 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         fixture.reported("the server's process ending");
+    }
+
+    /// Dropping the follow handle ends its thread while nothing about the service changes.
+    #[test]
+    fn dropping_the_handle_ends_an_idle_watch() {
+        let mut fixture = fixture();
+        fixture.quiet("an idle service");
+        drop(fixture.following.take());
+        assert_eq!(
+            fixture.reports.recv_timeout(PROMPT),
+            Err(mpsc::RecvTimeoutError::Disconnected),
+            "the watch thread ended and dropped its report sender"
+        );
     }
 }

@@ -2,7 +2,7 @@
 //! process. The watch thread sleeps in `poll` between changes.
 use crate::updates::machines::live::service_changes::{Fired, Watch};
 use std::ffi::CString;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
@@ -11,6 +11,10 @@ struct InotifyWatch {
     /// Each watch descriptor with the index of its directory.
     directories: Vec<(i32, usize)>,
     process: Option<OwnedFd>,
+    /// The read end of the stop pipe. It stays open as long as the [`follow`] thread runs.
+    ///
+    /// [`follow`]: crate::updates::machines::live::service_changes::follow
+    stop: RawFd,
     /// A directory that went away before its watch was registered, reported at once.
     missing: Option<usize>,
 }
@@ -23,7 +27,11 @@ const CHANGES: u32 = libc::IN_CREATE
     | libc::IN_MOVE_SELF
     | libc::IN_ONLYDIR;
 
-pub(crate) fn start(directories: &[PathBuf], process: Option<u32>) -> Option<Box<dyn Watch>> {
+pub(crate) fn start(
+    directories: &[PathBuf],
+    process: Option<u32>,
+    stop: BorrowedFd<'_>,
+) -> Option<Box<dyn Watch>> {
     // SAFETY: plain syscall with constant flags; a valid result is a new descriptor.
     let inotify = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
     if inotify < 0 {
@@ -35,6 +43,7 @@ pub(crate) fn start(directories: &[PathBuf], process: Option<u32>) -> Option<Box
         inotify,
         directories: Vec::new(),
         process: None,
+        stop: stop.as_raw_fd(),
         missing: None,
     };
     for (index, directory) in directories.iter().enumerate() {
@@ -126,13 +135,21 @@ impl Watch for InotifyWatch {
                     events: libc::POLLIN,
                     revents: 0,
                 },
+                libc::pollfd {
+                    fd: self.stop,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
             // SAFETY: polls the live local descriptors with no timeout; a negative one is ignored.
-            let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) };
+            let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), 3, -1) };
             if ready < 0 {
                 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
+                return None;
+            }
+            if descriptors[2].revents != 0 {
                 return None;
             }
             if descriptors[1].revents != 0 {

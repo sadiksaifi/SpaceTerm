@@ -118,10 +118,38 @@ pub(crate) fn composed(
     ))
 }
 
+/// A Restart or Stop the Machine's SpaceTerm Core previewed, which the person confirms before
+/// [`MachineUpdatesAdapter::execute`] runs exactly it. The Core binds its preview to the
+/// Terminal Sessions and Pending Version it observed and refuses a later change with
+/// [`ActionFailure::Changed`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MachinePreview {
+    pub(crate) machine: MachineId,
+    pub(crate) action: MachineAction,
+    /// The Terminal Sessions it ends.
+    pub(crate) sessions: u32,
+    /// The version a Restart starts, when the Core names one.
+    pub(crate) target: Option<Version>,
+    /// The adapter's own name for the retained preview.
+    pub(crate) id: u64,
+}
+
+/// The answer to [`MachineUpdatesAdapter::preview`], sent once.
+pub(crate) type PreviewAnswer = async_channel::Receiver<Result<MachinePreview, ActionFailure>>;
+
 pub(crate) trait MachineUpdatesAdapter {
     fn start(
         &self,
         events: async_channel::Sender<MachineUpdatesEvent>,
     ) -> Result<(), MachineUpdatesError>;
+    /// Performs an action that needs no confirmation: Install, Check Again, Dismiss Failure or
+    /// Start. A Restart or Stop given here runs only when the Core's own preview matches the
+    /// facts this adapter last reported; otherwise it finishes with
+    /// [`ActionFailure::Changed`] and nothing runs. Unknown facts never restart silently.
     fn perform(&self, machine: MachineId, action: MachineAction);
+    /// Asks the Machine's Core to preview a Restart or Stop.
+    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer;
+    /// Executes exactly `preview`. It ends with one [`MachineUpdatesEvent::Finished`] for
+    /// `preview.action`.
+    fn execute(&self, preview: MachinePreview);
 }

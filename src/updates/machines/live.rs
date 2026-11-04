@@ -2,50 +2,58 @@
 //! lane, and each paired Machine over its own service lane.
 //!
 //! One follower thread per Machine reads `Facts` and then long-polls `WaitFacts`, which answers
-//! on every change and at least every [`spaceterm_core::service::lane::WAIT_FACTS_LIMIT`]. A
-//! follower whose Core it can't reach waits for its [`Sources`] to report a change: the local
-//! service's directories or Core process, or a paired route's connection state. It never reads
-//! on a timer, except while a restart it expects has not come back.
+//! on every change and at least every [`spaceterm_core::service::lane::WAIT_FACTS_LIMIT`]. Each
+//! change its [`Sources`] report, such as a route connecting or disconnecting or the local
+//! service changing, abandons the long poll and reads the Machine's reach again. A follower whose
+//! Core it can't reach waits for the next such change. It never reads on a timer, except while a
+//! restart it expects has not come back.
 //!
 //! A local Core that is deliberately stopped reads as [`MachineLink::Stopped`] from the service
 //! manager, which needs no connection. A Core that answers `Facts` with `unsupported` predates
 //! update facts and reads as [`MachineLink::Unreported`].
 //!
-//! Each action runs on its own thread and ends with one [`MachineUpdatesEvent::Finished`]:
-//! Install pushes the offered embedded Core build, or asks the Core to fetch its newest release
-//! (`StageFetch`) when none is offered. Check Again asks it to check (`Check`), Restart and Stop
-//! preview and execute the change over the lane, and Start runs
-//! through the local service manager, because a stopped Core accepts no connection.
+//! Restart and Stop run only on a preview the Core issued: [`MachineUpdatesAdapter::preview`]
+//! retains the Core's own token and [`MachineUpdatesAdapter::execute`] executes exactly it. The
+//! Core refuses the token when its sessions or Pending Version changed since. Install pushes the
+//! offered embedded Core build, or asks the Core to fetch its newest release when none is
+//! offered. Check Again asks it to check (`Check`), and Start runs through the local service
+//! manager, because a stopped Core accepts no connection.
+//!
+//! Dropping the adapter retires every thread it started and ends its sources' watches.
 
 pub(crate) mod desktop;
 pub(crate) mod service_changes;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::SharedString;
 use spaceterm_core::protocol::capability::{Capabilities, Unavailable};
 use spaceterm_core::protocol::version::{self as protocol, Incompatible};
+use spaceterm_core::service::lane::admin;
 use spaceterm_core::update::facts::{Operation, UpdateFacts, Version};
 
 use crate::updates::push::{EmbeddedCore, EmbeddedCores};
 
 use super::{
-    ActionFailure, MachineAction, MachineId, MachineLink, MachineUpdate, MachineUpdatesAdapter,
-    MachineUpdatesError, MachineUpdatesEvent,
+    ActionFailure, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
+    MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
 };
 
 /// How long a restart may take before the Machine reads "Can't confirm". It matches how long the
 /// lane follows a Core that replaces itself.
-pub(crate) const RESTART_LIMIT: Duration = spaceterm_core::service::lane::admin::RETURN_WAIT;
+pub(crate) const RESTART_LIMIT: Duration = admin::RETURN_WAIT;
 /// How often a follower retries a Core that is restarting, until [`RESTART_LIMIT`].
 const RESTART_RETRY: Duration = Duration::from_secs(2);
-/// The pause before a follower reads again after its long poll ended, so a lane that answers
-/// `Facts` but fails `WaitFacts` at once can't spin.
+/// The pause before a follower reads again after its long poll ended by itself, so a lane that
+/// answers `Facts` but fails `WaitFacts` at once can't spin.
 const REPOLL: Duration = Duration::from_secs(1);
+/// The most previews kept for execution. An older one is forgotten, and executing it asks
+/// again.
+const RETAINED_PREVIEWS: usize = 16;
 
 /// What one `Facts` or `WaitFacts` answer carried.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,16 +76,21 @@ pub(crate) trait MachineLane: Send + Sync {
     /// `Unavailable(Unavailable::CoreTooOld)`.
     fn facts(&self) -> Result<Observed, ActionFailure>;
     /// `WaitFacts`: answers once the Core's `boot` or `revision` differs, or after the lane's
-    /// wait limit with unchanged facts.
-    fn wait_facts(&self, boot: &str, revision: u64) -> Result<Observed, ActionFailure>;
+    /// wait limit with unchanged facts. It gives up as soon as `stale()` is true.
+    fn wait_facts(
+        &self,
+        boot: &str,
+        revision: u64,
+        stale: &dyn Fn() -> bool,
+    ) -> Result<Observed, ActionFailure>;
     /// `Check`.
     fn check(&self) -> Result<(), ActionFailure>;
     /// Pushes `build` when supplied, otherwise fetches from the Core's feed.
     fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure>;
-    /// Previews `change`, executes it and follows it until it settles. `sessions` is the
-    /// session count the person confirmed; a preview that ends a different number fails with
-    /// `Changed` and executes nothing.
-    fn change(&self, change: LaneChange, sessions: Option<u32>) -> Result<(), ActionFailure>;
+    /// `Preview` of `change`: the Core's token and what it affects.
+    fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure>;
+    /// `Execute` of exactly `preview`, followed until it settles.
+    fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure>;
 }
 
 /// How a Machine can be reached now.
@@ -102,7 +115,7 @@ pub(crate) trait Machine: Send + Sync {
     fn start(&self) -> Result<(), ActionFailure>;
 }
 
-/// A Machine its source knows.
+/// A Machine its source knows, with every route it has.
 #[derive(Clone)]
 pub(crate) struct Known {
     pub(crate) id: MachineId,
@@ -116,22 +129,27 @@ pub(crate) struct Known {
 /// nobody follows the changes.
 pub(crate) type Changed = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// Ends a source's watch when dropped, without waiting for its next change.
+pub(crate) type Watching = Box<dyn Send>;
+
 /// Where the Machines come from.
 pub(crate) trait Sources: Send + Sync {
-    /// Every Machine now: This Mac or This Computer first, when its Core is installed, then each
-    /// paired Machine.
+    /// Every Machine now, one per Machine ID: This Mac or This Computer first, when its Core is
+    /// installed, then each paired Machine.
     fn known(&self) -> Vec<Known>;
-    /// Starts calling `changed` after each change, until it returns false.
-    fn watch(&self, changed: Changed) -> Result<(), MachineUpdatesError>;
+    /// Starts calling `changed` after each change, until it returns false or the returned
+    /// [`Watching`] is dropped.
+    fn watch(&self, changed: Changed) -> Result<Watching, MachineUpdatesError>;
 }
 
 /// The production [`MachineUpdatesAdapter`]. Construction has no effects; `start` starts the
-/// followers.
+/// followers, and dropping it ends them.
 pub(crate) struct LiveMachines {
     sources: Arc<dyn Sources>,
     embedded: Arc<EmbeddedCores>,
     restart_limit: Duration,
     shared: OnceLock<Arc<Shared>>,
+    watching: Mutex<Option<Watching>>,
 }
 
 impl LiveMachines {
@@ -149,7 +167,53 @@ impl LiveMachines {
             embedded,
             restart_limit,
             shared: OnceLock::new(),
+            watching: Mutex::new(None),
         }
+    }
+
+    /// Runs `work` on its own thread, which ends with `finish(outcome)`. A thread that can't
+    /// start finishes with `Failed` at once.
+    fn spawn_action(
+        &self,
+        shared: &Arc<Shared>,
+        machine: MachineId,
+        action: MachineAction,
+        work: impl FnOnce(&Shared) -> Result<(), ActionFailure> + Send + 'static,
+    ) {
+        let thread_shared = Arc::clone(shared);
+        let finished = action.clone();
+        let spawned = std::thread::Builder::new()
+            .name("spaceterm-machine-action".into())
+            .spawn(move || {
+                let outcome = work(&thread_shared);
+                thread_shared.poke(machine);
+                thread_shared.emit(MachineUpdatesEvent::Finished {
+                    machine,
+                    action: finished,
+                    outcome,
+                });
+            });
+        if spawned.is_err() {
+            shared.emit(MachineUpdatesEvent::Finished {
+                machine,
+                action,
+                outcome: Err(ActionFailure::Failed),
+            });
+        }
+    }
+}
+
+impl Drop for LiveMachines {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.get() {
+            shared.close();
+        }
+        drop(
+            self.watching
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
+        );
     }
 }
 
@@ -177,64 +241,151 @@ impl MachineUpdatesAdapter for LiveMachines {
                 .map_err(|_| MachineUpdatesError::Unavailable)?;
         }
         let wake = Arc::clone(&shared.coordinator);
-        let watched = self.sources.watch(Arc::new(move || {
+        match self.sources.watch(Arc::new(move || {
             wake.poke();
             !wake.retired()
-        }));
-        if watched.is_err() {
-            shared.close();
+        })) {
+            Ok(watching) => {
+                *self.watching.lock().unwrap_or_else(|e| e.into_inner()) = Some(watching);
+                Ok(())
+            }
+            Err(error) => {
+                shared.close();
+                Err(error)
+            }
         }
-        watched
     }
 
     fn perform(&self, machine: MachineId, action: MachineAction) {
         let Some(shared) = self.shared.get() else {
             return;
         };
-        let shared = Arc::clone(shared);
-        let finished = {
-            let shared = Arc::clone(&shared);
-            let action = action.clone();
-            move |outcome| {
-                shared.emit(MachineUpdatesEvent::Finished {
-                    machine,
-                    action,
-                    outcome,
-                });
-            }
-        };
         let Some(target) = shared.target(machine) else {
-            finished(Err(ActionFailure::Unreachable));
+            shared.emit(MachineUpdatesEvent::Finished {
+                machine,
+                action,
+                outcome: Err(ActionFailure::Unreachable),
+            });
             return;
         };
         let performed = action.clone();
+        self.spawn_action(shared, machine, action, move |shared| {
+            act(shared, machine, &target, &performed)
+        });
+    }
+
+    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
+        let (answer, answered) = async_channel::bounded(1);
+        let Some(shared) = self.shared.get() else {
+            let _ = answer.try_send(Err(ActionFailure::Unreachable));
+            return answered;
+        };
+        let Some(target) = shared.target(machine) else {
+            let _ = answer.try_send(Err(ActionFailure::Unreachable));
+            return answered;
+        };
+        let shared = Arc::clone(shared);
         let spawned = std::thread::Builder::new()
-            .name("spaceterm-machine-action".into())
-            .spawn(move || {
-                let outcome = act(&shared, machine, &target, &performed);
-                target.wake.poke();
-                finished(outcome);
+            .name("spaceterm-machine-preview".into())
+            .spawn({
+                let answer = answer.clone();
+                move || {
+                    let previewed = preview(&shared, machine, &target, &action);
+                    let _ = answer.try_send(previewed);
+                }
             });
         if spawned.is_err() {
-            // The report went with the closure the failed spawn dropped.
-            if let Some(shared) = self.shared.get() {
-                shared.emit(MachineUpdatesEvent::Finished {
-                    machine,
-                    action,
-                    outcome: Err(ActionFailure::Failed),
-                });
-            }
+            let _ = answer.try_send(Err(ActionFailure::Failed));
         }
+        answered
+    }
+
+    fn execute(&self, preview: MachinePreview) {
+        let Some(shared) = self.shared.get() else {
+            return;
+        };
+        let machine = preview.machine;
+        let retained = shared.take_preview(&preview);
+        let target = shared.target(machine);
+        let action = preview.action.clone();
+        self.spawn_action(shared, machine, action, move |shared| {
+            // A forgotten preview, or one of a removed Machine, is confirmed by nobody now.
+            let (Some(lane_preview), Some(target)) = (retained, target) else {
+                return Err(ActionFailure::Changed);
+            };
+            let Reach::Lane { lane, .. } = target.known.machine.reach() else {
+                return Err(ActionFailure::Unreachable);
+            };
+            run_previewed(shared, machine, lane.as_ref(), &preview, lane_preview)
+        });
     }
 }
 
 /// What an action needs of its Machine, read once when the person asked.
 struct Target {
     known: Known,
-    wake: Arc<Wake>,
-    /// The sessions the facts the person saw reported.
-    sessions: Option<u32>,
+    /// The facts this adapter reported last, which the person saw.
+    facts: Option<UpdateFacts>,
+    /// The embedded Core build Install pushes, when one is offered.
     push: Option<Arc<EmbeddedCore>>,
+}
+
+fn change_of(local: bool, action: &MachineAction) -> Result<LaneChange, ActionFailure> {
+    match action {
+        MachineAction::Restart => Ok(LaneChange::Restart),
+        MachineAction::Stop if local => Ok(LaneChange::Stop),
+        // Stop is This Mac's or This Computer's alone; nothing else is previewed.
+        _ => Err(ActionFailure::Failed),
+    }
+}
+
+/// The version a preview names for its Restart, when it names one.
+fn previewed_target(preview: &admin::Preview) -> Option<Version> {
+    preview
+        .effects
+        .to
+        .as_ref()
+        .and_then(|to| Version::parse(&to.version).ok())
+}
+
+fn preview(
+    shared: &Shared,
+    machine: MachineId,
+    target: &Target,
+    action: &MachineAction,
+) -> Result<MachinePreview, ActionFailure> {
+    let change = change_of(target.known.local, action)?;
+    let Reach::Lane { lane, .. } = target.known.machine.reach() else {
+        return Err(ActionFailure::Unreachable);
+    };
+    let lane_preview = lane.preview(change)?;
+    let previewed = MachinePreview {
+        machine,
+        action: action.clone(),
+        sessions: lane_preview.effects.ends_sessions,
+        target: previewed_target(&lane_preview),
+        id: 0,
+    };
+    Ok(shared.retain_preview(previewed, lane_preview))
+}
+
+/// Executes `lane_preview`, which `preview` describes, and expects a Restart's return.
+fn run_previewed(
+    shared: &Shared,
+    machine: MachineId,
+    lane: &dyn MachineLane,
+    preview: &MachinePreview,
+    lane_preview: admin::Preview,
+) -> Result<(), ActionFailure> {
+    let restart = preview.action == MachineAction::Restart;
+    if restart {
+        shared.expect_restart(machine, preview.target.clone());
+    }
+    let outcome = lane.execute(lane_preview);
+    if restart && outcome.is_err() {
+        shared.forget_restart(machine);
+    }
+    outcome
 }
 
 fn act(
@@ -258,15 +409,37 @@ fn act(
     match action {
         MachineAction::Install => lane.install(target.push.as_deref()),
         MachineAction::CheckAgain => lane.check(),
-        MachineAction::Restart => {
-            shared.expect_restart(id);
-            let outcome = lane.change(LaneChange::Restart, target.sessions);
-            if outcome.is_err() {
-                shared.forget_restart(id);
+        MachineAction::Restart | MachineAction::Stop => {
+            let change = change_of(target.known.local, action)?;
+            // Without its own preview, only facts this adapter reported can stand for what the
+            // person confirmed, and only when the Core previews exactly those. Unknown facts
+            // never restart silently.
+            let Some(facts) = &target.facts else {
+                return Err(ActionFailure::Changed);
+            };
+            let lane_preview = lane.preview(change)?;
+            let previewed = MachinePreview {
+                machine: id,
+                action: action.clone(),
+                sessions: lane_preview.effects.ends_sessions,
+                target: previewed_target(&lane_preview),
+                id: 0,
+            };
+            let pending = facts.pending.as_ref().map(|pending| &pending.version);
+            let target_changed = change == LaneChange::Restart
+                && previewed
+                    .target
+                    .as_ref()
+                    .is_some_and(|to| Some(to) != pending);
+            if previewed.sessions != facts.sessions || target_changed {
+                return Err(ActionFailure::Changed);
             }
-            outcome
+            let previewed = MachinePreview {
+                target: previewed.target.or_else(|| pending.cloned()),
+                ..previewed
+            };
+            run_previewed(shared, id, lane.as_ref(), &previewed, lane_preview)
         }
-        MachineAction::Stop => lane.change(LaneChange::Stop, target.sessions),
         MachineAction::Start | MachineAction::DismissFailure(_) => Ok(()),
     }
 }
@@ -346,8 +519,12 @@ struct Shared {
 struct State {
     /// Whether the first `Machines` event went out.
     listed: bool,
+    closed: bool,
     order: Vec<MachineId>,
     entries: HashMap<MachineId, Entry>,
+    /// Previews the Core issued that nobody executed yet, oldest first.
+    previews: VecDeque<(MachinePreview, admin::Preview)>,
+    next_preview: u64,
 }
 
 struct Entry {
@@ -361,7 +538,7 @@ struct Entry {
 }
 
 struct Awaited {
-    /// The Pending Version, when the facts named one.
+    /// The Pending Version, when the facts or the preview named one.
     expected: Option<Version>,
     /// The run that restarts. Facts from another run end the wait.
     boot: Option<String>,
@@ -380,10 +557,21 @@ impl Shared {
         }
     }
 
+    /// Retires the coordinator and every follower, which wakes each wait and abandons each
+    /// long poll.
     fn close(&self) {
         self.coordinator.retire();
-        for entry in self.lock().entries.values() {
+        let mut state = self.lock();
+        state.closed = true;
+        for entry in state.entries.values() {
             entry.wake.retire();
+        }
+        state.previews.clear();
+    }
+
+    fn poke(&self, id: MachineId) {
+        if let Some(entry) = self.lock().entries.get(&id) {
+            entry.wake.poke();
         }
     }
 
@@ -392,13 +580,41 @@ impl Shared {
         let entry = state.entries.get(&id)?;
         Some(Target {
             known: entry.known.clone(),
-            wake: Arc::clone(&entry.wake),
-            sessions: entry.update.facts.as_ref().map(|facts| facts.sessions),
+            facts: entry.update.facts.clone(),
             push: entry.update.facts.as_ref().and_then(|facts| {
                 entry.update.push.as_ref()?;
                 self.embedded.build(facts.platform)
             }),
         })
+    }
+
+    /// The Machine's current source, which a follower reads before each reach.
+    fn machine(&self, id: MachineId) -> Option<Arc<dyn Machine>> {
+        Some(Arc::clone(&self.lock().entries.get(&id)?.known.machine))
+    }
+
+    fn retain_preview(&self, preview: MachinePreview, lane: admin::Preview) -> MachinePreview {
+        let mut state = self.lock();
+        state.next_preview += 1;
+        let preview = MachinePreview {
+            id: state.next_preview,
+            ..preview
+        };
+        if state.previews.len() == RETAINED_PREVIEWS {
+            state.previews.pop_front();
+        }
+        state.previews.push_back((preview.clone(), lane));
+        preview
+    }
+
+    /// The Core's preview `preview` names, once.
+    fn take_preview(&self, preview: &MachinePreview) -> Option<admin::Preview> {
+        let mut state = self.lock();
+        let index = state
+            .previews
+            .iter()
+            .position(|(retained, _)| retained == preview)?;
+        state.previews.remove(index).map(|(_, lane)| lane)
     }
 
     /// Applies `change` to `id`'s entry and reports the Machine when its update changed.
@@ -417,13 +633,25 @@ impl Shared {
         Some(result)
     }
 
-    /// Brings the Machines in line with `known`: starts a follower for each new one, retires
-    /// each removed one, and wakes every follower to read its reach again.
+    /// Brings the Machines in line with `known`: starts a follower for each new Machine ID,
+    /// retires each removed one, hands each kept one its current routes, and wakes each kept
+    /// follower to read its reach again.
     fn reconcile(self: &Arc<Self>, known: Vec<Known>) {
         let mut renamed = Vec::new();
         let listing = {
             let mut state = self.lock();
-            let order: Vec<MachineId> = known.iter().map(|known| known.id).collect();
+            if state.closed {
+                return;
+            }
+            let mut order: Vec<MachineId> = Vec::new();
+            let mut unique = Vec::new();
+            for machine in known {
+                // One Machine per Machine ID; the first source of an ID wins.
+                if !order.contains(&machine.id) {
+                    order.push(machine.id);
+                    unique.push(machine);
+                }
+            }
             let removed: Vec<MachineId> = state
                 .order
                 .iter()
@@ -435,7 +663,8 @@ impl Shared {
                     entry.wake.retire();
                 }
             }
-            for machine in known {
+            let mut started = Vec::new();
+            for machine in unique {
                 if let Some(entry) = state.entries.get_mut(&machine.id) {
                     if entry.update.name != machine.name {
                         entry.update.name = machine.name.clone();
@@ -464,9 +693,10 @@ impl Shared {
                 let id = machine.id;
                 let followed = std::thread::Builder::new()
                     .name("spaceterm-machine".into())
-                    .spawn(move || follow(&shared, id, machine.machine.as_ref(), &wake));
+                    .spawn(move || follow(&shared, id, &wake));
                 if followed.is_ok() {
                     state.entries.insert(id, entry);
+                    started.push(id);
                 }
             }
             let order: Vec<MachineId> = order
@@ -482,8 +712,11 @@ impl Shared {
             });
             state.listed = true;
             state.order = order;
-            for entry in state.entries.values() {
-                entry.wake.poke();
+            // A follower just started reads its reach anyway.
+            for (id, entry) in &state.entries {
+                if !started.contains(id) {
+                    entry.wake.poke();
+                }
             }
             listing
         };
@@ -590,18 +823,20 @@ impl Shared {
         .flatten()
     }
 
-    /// This desktop asked `id` to restart: until the Core answers from a new run, an
-    /// unreachable lane reads as restarting, not offline.
-    fn expect_restart(&self, id: MachineId) {
+    /// This desktop asked `id` to restart into `expected`: until the Core answers from a new
+    /// run, an unreachable lane reads as restarting, not offline.
+    fn expect_restart(&self, id: MachineId, expected: Option<Version>) {
         let limit = self.restart_limit;
         self.publish(id, |entry| {
             entry.restart = Some(Awaited {
-                expected: entry
-                    .update
-                    .facts
-                    .as_ref()
-                    .and_then(|facts| facts.pending.as_ref())
-                    .map(|pending| pending.version.clone()),
+                expected: expected.or_else(|| {
+                    entry
+                        .update
+                        .facts
+                        .as_ref()
+                        .and_then(|facts| facts.pending.as_ref())
+                        .map(|pending| pending.version.clone())
+                }),
                 boot: entry.boot.clone(),
                 deadline: Instant::now() + limit,
             });
@@ -613,7 +848,7 @@ impl Shared {
     }
 }
 
-/// Keeps the Machines in line with `sources` until nobody receives the events.
+/// Keeps the Machines in line with `sources` until the adapter closes.
 fn coordinate(shared: &Arc<Shared>, sources: &dyn Sources) {
     while let Some(seen) = shared.coordinator.generation() {
         shared.reconcile(sources.known());
@@ -624,9 +859,13 @@ fn coordinate(shared: &Arc<Shared>, sources: &dyn Sources) {
     shared.close();
 }
 
-/// Follows one Machine until it is removed or nobody receives the events.
-fn follow(shared: &Shared, id: MachineId, machine: &dyn Machine, wake: &Wake) {
+/// Follows one Machine until it is removed or the adapter closes. Each iteration reads the
+/// Machine's current source, so a route that comes or goes takes effect at the next change.
+fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
     while let Some(seen) = wake.generation() {
+        let Some(machine) = shared.machine(id) else {
+            return;
+        };
         let limit = match machine.reach() {
             Reach::Stopped => {
                 shared.stopped(id);
@@ -636,23 +875,30 @@ fn follow(shared: &Shared, id: MachineId, machine: &dyn Machine, wake: &Wake) {
             Reach::Lane { lane, work } => match lane.facts() {
                 Ok(observed) => {
                     shared.observed(id, &observed, work);
+                    let stale = || wake.generation() != Some(seen);
                     let mut current = observed;
-                    while wake.generation().is_some() {
-                        match lane.wait_facts(&current.boot, current.facts.revision) {
+                    let ended_by_itself = loop {
+                        if stale() {
+                            break false;
+                        }
+                        match lane.wait_facts(&current.boot, current.facts.revision, &stale) {
                             Ok(next) => {
                                 shared.observed(id, &next, work);
                                 current = next;
                             }
-                            Err(_) => break,
+                            Err(_) => break !stale(),
                         }
-                    }
-                    // The lane ended, as it does when the Core stops or restarts. Read again
-                    // after a pause, or as soon as the sources report a change.
-                    let Some(seen) = wake.generation() else {
-                        return;
                     };
-                    if !wake.wait(seen, Some(REPOLL)) {
-                        return;
+                    // A change the sources reported reads the reach again at once. A lane that
+                    // ended by itself, as when the Core stops or restarts, is read after a pause
+                    // or the next change.
+                    if ended_by_itself {
+                        let Some(now) = wake.generation() else {
+                            return;
+                        };
+                        if !wake.wait(now, Some(REPOLL)) {
+                            return;
+                        }
                     }
                     continue;
                 }

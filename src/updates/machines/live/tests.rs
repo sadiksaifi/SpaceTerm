@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
+use spaceterm_core::service::lane::{LaneAction, LaneEffects};
 use spaceterm_core::update::facts::{PendingVersion, Platform, Protocols, UpdateCheck};
 
 use super::*;
@@ -10,6 +12,8 @@ const LOCAL: MachineId = [1; 32];
 const PENGUIN: MachineId = [2; 32];
 /// Long enough for a follower thread to answer; a missing event fails within it.
 const PROMPT: Duration = Duration::from_secs(5);
+/// How long a test waits to show that something did not happen.
+const QUIET: Duration = Duration::from_millis(300);
 
 fn version(text: &str) -> Version {
     Version::parse(text).unwrap()
@@ -40,11 +44,13 @@ fn facts(revision: u64, sessions: u32, pending: Option<&str>) -> Observed {
 }
 
 /// A service lane the test scripts: `Facts` answers from a queue, `WaitFacts` blocks until the
-/// test sends its answer, and every request is recorded.
+/// test answers it or the follower abandons it, `Preview` ends `previewed` sessions, and every
+/// request is recorded.
 struct ScriptedLane {
     facts: Mutex<VecDeque<Result<Observed, ActionFailure>>>,
     waits: Mutex<mpsc::Receiver<Result<Observed, ActionFailure>>>,
     answer: Mutex<mpsc::Sender<Result<Observed, ActionFailure>>>,
+    previewed: Mutex<u32>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -55,6 +61,7 @@ impl ScriptedLane {
             facts: Mutex::new(facts.into_iter().collect()),
             waits: Mutex::new(waits),
             answer: Mutex::new(answer),
+            previewed: Mutex::new(0),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -64,8 +71,27 @@ impl ScriptedLane {
         self.answer.lock().unwrap().send(reply).unwrap();
     }
 
+    fn preview_ends(&self, sessions: u32) {
+        *self.previewed.lock().unwrap() = sessions;
+    }
+
     fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
+    }
+
+    fn count(&self, prefix: &str) -> usize {
+        self.requests()
+            .iter()
+            .filter(|request| request.starts_with(prefix))
+            .count()
+    }
+
+    /// The requests other than reads.
+    fn actions(&self) -> Vec<String> {
+        self.requests()
+            .into_iter()
+            .filter(|request| request != "facts" && !request.starts_with("wait"))
+            .collect()
     }
 
     fn record(&self, request: String) {
@@ -83,13 +109,21 @@ impl MachineLane for ScriptedLane {
             .unwrap_or(Err(ActionFailure::Unreachable))
     }
 
-    fn wait_facts(&self, boot: &str, revision: u64) -> Result<Observed, ActionFailure> {
+    fn wait_facts(
+        &self,
+        boot: &str,
+        revision: u64,
+        stale: &dyn Fn() -> bool,
+    ) -> Result<Observed, ActionFailure> {
         self.record(format!("wait {boot} {revision}"));
-        self.waits
-            .lock()
-            .unwrap()
-            .recv_timeout(PROMPT)
-            .unwrap_or(Err(ActionFailure::Unreachable))
+        let deadline = Instant::now() + PROMPT;
+        let waits = self.waits.lock().unwrap();
+        while Instant::now() < deadline && !stale() {
+            if let Ok(reply) = waits.recv_timeout(Duration::from_millis(10)) {
+                return reply;
+            }
+        }
+        Err(ActionFailure::Unreachable)
     }
 
     fn check(&self) -> Result<(), ActionFailure> {
@@ -105,8 +139,29 @@ impl MachineLane for ScriptedLane {
         Ok(())
     }
 
-    fn change(&self, change: LaneChange, sessions: Option<u32>) -> Result<(), ActionFailure> {
-        self.record(format!("{change:?} {sessions:?}"));
+    fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure> {
+        self.record(format!("preview {change:?}"));
+        let ends = *self.previewed.lock().unwrap();
+        Ok(admin::Preview {
+            action: match change {
+                LaneChange::Restart => LaneAction::Restart,
+                LaneChange::Stop => LaneAction::Stop,
+            },
+            token: format!("token-{change:?}-{ends}"),
+            expires_at: String::new(),
+            effects: LaneEffects {
+                ends_sessions: ends,
+                sessions: Vec::new(),
+                start_requires_machine: false,
+                from: None,
+                to: None,
+                to_major: None,
+            },
+        })
+    }
+
+    fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure> {
+        self.record(format!("execute {}", preview.token));
         Ok(())
     }
 }
@@ -165,14 +220,21 @@ impl Machine for ScriptedMachine {
 struct ScriptedSources {
     known: Mutex<Vec<Known>>,
     changed: Mutex<Option<Changed>>,
+    /// Set when the adapter drops its watch.
+    unwatched: Arc<AtomicBool>,
 }
 
 impl ScriptedSources {
     fn with(known: Vec<Known>) -> Arc<Self> {
         Arc::new(Self {
             known: Mutex::new(known),
-            changed: Mutex::default(),
+            ..Self::default()
         })
+    }
+
+    fn set(&self, known: Vec<Known>) {
+        *self.known.lock().unwrap() = known;
+        self.change();
     }
 
     /// Reports a change, as the service watch or the route registry does.
@@ -182,14 +244,22 @@ impl ScriptedSources {
     }
 }
 
+struct Unwatch(Arc<AtomicBool>);
+
+impl Drop for Unwatch {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 impl Sources for ScriptedSources {
     fn known(&self) -> Vec<Known> {
         self.known.lock().unwrap().clone()
     }
 
-    fn watch(&self, changed: Changed) -> Result<(), MachineUpdatesError> {
+    fn watch(&self, changed: Changed) -> Result<Watching, MachineUpdatesError> {
         *self.changed.lock().unwrap() = Some(changed);
-        Ok(())
+        Ok(Box::new(Unwatch(Arc::clone(&self.unwatched))))
     }
 }
 
@@ -202,10 +272,9 @@ fn known(id: MachineId, name: &str, local: bool, machine: &Arc<ScriptedMachine>)
     }
 }
 
-fn started(
-    sources: &Arc<ScriptedSources>,
-    restart_limit: Duration,
-) -> (LiveMachines, async_channel::Receiver<MachineUpdatesEvent>) {
+type Events = async_channel::Receiver<MachineUpdatesEvent>;
+
+fn started(sources: &Arc<ScriptedSources>, restart_limit: Duration) -> (LiveMachines, Events) {
     let adapter = LiveMachines::with_restart_limit(
         Arc::clone(sources) as Arc<dyn Sources>,
         Arc::new(EmbeddedCores::new(None, "spaceterm-development")),
@@ -216,9 +285,18 @@ fn started(
     (adapter, received)
 }
 
+/// Waits until `condition` holds.
+fn eventually(what: &str, condition: impl Fn() -> bool) {
+    let deadline = Instant::now() + PROMPT;
+    while !condition() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// The first event `matches` accepts, skipping the others.
 fn until<T>(
-    events: &async_channel::Receiver<MachineUpdatesEvent>,
+    events: &Events,
     what: &str,
     mut matches: impl FnMut(&MachineUpdatesEvent) -> Option<T>,
 ) -> T {
@@ -236,25 +314,40 @@ fn until<T>(
     }
 }
 
-fn changed(
-    events: &async_channel::Receiver<MachineUpdatesEvent>,
-    what: &str,
-    accept: impl Fn(&MachineUpdate) -> bool,
-) -> MachineUpdate {
+fn changed(events: &Events, what: &str, accept: impl Fn(&MachineUpdate) -> bool) -> MachineUpdate {
     until(events, what, |event| match event {
         MachineUpdatesEvent::Changed(update) if accept(update) => Some((**update).clone()),
         _ => None,
     })
 }
 
-fn finished(
-    events: &async_channel::Receiver<MachineUpdatesEvent>,
-    expected: &MachineAction,
-) -> Result<(), ActionFailure> {
+/// Waits until every Machine in `ids` reported facts, in whatever order they arrive.
+fn all_reported(events: &Events, ids: &[MachineId]) {
+    let mut waiting: Vec<MachineId> = ids.to_vec();
+    until(events, "every Machine's facts", |event| {
+        if let MachineUpdatesEvent::Changed(update) = event
+            && update.facts.is_some()
+        {
+            waiting.retain(|id| *id != update.machine);
+        }
+        waiting.is_empty().then_some(())
+    });
+}
+
+fn finished(events: &Events, expected: &MachineAction) -> Result<(), ActionFailure> {
     until(events, "the action finishing", |event| match event {
         MachineUpdatesEvent::Finished {
             action, outcome, ..
         } if action == expected => Some(*outcome),
+        _ => None,
+    })
+}
+
+fn listing(events: &Events) -> Vec<MachineId> {
+    until(events, "the Machines", |event| match event {
+        MachineUpdatesEvent::Machines(machines) => {
+            Some(machines.iter().map(|m| m.machine).collect())
+        }
         _ => None,
     })
 }
@@ -268,16 +361,12 @@ fn a_local_core_reports_its_facts_and_follows_each_change() {
     let sources = ScriptedSources::with(vec![known(LOCAL, "This Mac", true, &machine)]);
     let (_adapter, events) = started(&sources, RESTART_LIMIT);
 
-    let listed = until(&events, "the Machines", |event| match event {
-        MachineUpdatesEvent::Machines(machines) => Some(machines.clone()),
-        _ => None,
-    });
-    assert_eq!(listed.len(), 1);
-    assert!(listed[0].local);
+    assert_eq!(listing(&events), [LOCAL]);
     let first = changed(&events, "the first facts", |update| update.facts.is_some());
     assert_eq!(first.link, MachineLink::Connected);
     assert_eq!(first.facts.as_ref().unwrap().sessions, 3);
 
+    eventually("the long poll", || lane.count("wait") == 1);
     lane.answer(Ok(facts(2, 3, Some("0.9.0"))));
     let next = changed(&events, "the changed facts", |update| {
         update
@@ -289,9 +378,7 @@ fn a_local_core_reports_its_facts_and_follows_each_change() {
         next.facts.unwrap().pending.unwrap().version,
         version("0.9.0")
     );
-    let requests = lane.requests();
-    assert_eq!(requests[0], "facts");
-    assert_eq!(requests[1], "wait boot-1 1");
+    assert_eq!(lane.requests()[..2], ["facts", "wait boot-1 1"]);
 }
 
 /// A Core that answers `Facts` with `unsupported` reads as "Can't check", not as a missing
@@ -314,6 +401,26 @@ fn a_core_that_predates_update_facts_reads_cant_check() {
             push: None,
         }
     );
+}
+
+/// A Core that does not answer is read again only after a change its sources report, never in
+/// a loop.
+#[test]
+fn an_unreachable_core_is_read_again_only_after_a_change() {
+    let lane = ScriptedLane::new([]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (_adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the offline Machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    std::thread::sleep(QUIET);
+    assert_eq!(lane.count("facts"), 1, "no retry without a change");
+
+    sources.change();
+    eventually("a read after the change", || lane.count("facts") == 2);
+    std::thread::sleep(QUIET);
+    assert_eq!(lane.count("facts"), 2);
 }
 
 /// A deliberately stopped local Core reads as Stopped from the service manager alone. Start
@@ -342,29 +449,23 @@ fn a_stopped_local_core_reads_stopped_and_starts_through_the_service_manager() {
     assert_eq!(running.facts.unwrap().sessions, 0);
 }
 
-/// Install, Check Again, Restart and Stop each become their lane request. Restart carries the
-/// session count the person saw, and Stop is refused on a paired Machine without dialing it.
+/// Install and Check Again become their lane requests. A Restart performed without a preview
+/// executes only the Core's preview of the sessions the person saw. Stop is refused on a paired
+/// Machine without dialing it.
 #[test]
 fn actions_become_lane_requests_and_stop_stays_local() {
     let remote_lane = ScriptedLane::new([Ok(facts(1, 3, Some("0.9.0")))]);
+    remote_lane.preview_ends(3);
     let remote = ScriptedMachine::new(Script::Lane, Arc::clone(&remote_lane));
     let local_lane = ScriptedLane::new([Ok(facts(1, 2, None))]);
+    local_lane.preview_ends(2);
     let local = ScriptedMachine::new(Script::Lane, Arc::clone(&local_lane));
     let sources = ScriptedSources::with(vec![
         known(LOCAL, "This Mac", true, &local),
         known(PENGUIN, "penguin", false, &remote),
     ]);
     let (adapter, events) = started(&sources, RESTART_LIMIT);
-    let mut observed = Vec::new();
-    until(&events, "both Machines' facts", |event| {
-        if let MachineUpdatesEvent::Changed(update) = event
-            && update.facts.is_some()
-            && !observed.contains(&update.machine)
-        {
-            observed.push(update.machine);
-        }
-        (observed.len() == 2).then_some(())
-    });
+    all_reported(&events, &[LOCAL, PENGUIN]);
 
     for action in [
         MachineAction::Install,
@@ -382,13 +483,110 @@ fn actions_become_lane_requests_and_stop_stays_local() {
     adapter.perform(LOCAL, MachineAction::Stop);
     assert_eq!(finished(&events, &MachineAction::Stop), Ok(()));
 
-    let remote_actions: Vec<String> = remote_lane
-        .requests()
-        .into_iter()
-        .filter(|request| request != "facts" && !request.starts_with("wait"))
-        .collect();
-    assert_eq!(remote_actions, ["install", "check", "Restart Some(3)"]);
-    assert!(local_lane.requests().contains(&"Stop Some(2)".to_owned()));
+    assert_eq!(
+        remote_lane.actions(),
+        [
+            "install",
+            "check",
+            "preview Restart",
+            "execute token-Restart-3"
+        ]
+    );
+    assert_eq!(
+        local_lane.actions(),
+        ["preview Stop", "execute token-Stop-2"]
+    );
+}
+
+/// A Restart whose Core previews more sessions than the facts the person saw, or of a Core
+/// whose facts are unknown, executes nothing and asks again.
+#[test]
+fn a_restart_runs_only_on_the_sessions_the_person_saw() {
+    let lane = ScriptedLane::new([Ok(facts(1, 3, Some("0.9.0")))]);
+    lane.preview_ends(6);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let unreported_lane =
+        ScriptedLane::new([Err(ActionFailure::Unavailable(Unavailable::CoreTooOld))]);
+    let unreported = ScriptedMachine::new(Script::Lane, Arc::clone(&unreported_lane));
+    let sources = ScriptedSources::with(vec![
+        known(LOCAL, "This Mac", true, &unreported),
+        known(PENGUIN, "penguin", false, &machine),
+    ]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    let (mut facts_seen, mut unreported_seen) = (false, false);
+    until(&events, "both Machines", |event| {
+        if let MachineUpdatesEvent::Changed(update) = event {
+            facts_seen |= update.machine == PENGUIN && update.facts.is_some();
+            unreported_seen |= update.machine == LOCAL && update.link == MachineLink::Unreported;
+        }
+        (facts_seen && unreported_seen).then_some(())
+    });
+
+    adapter.perform(PENGUIN, MachineAction::Restart);
+    assert_eq!(
+        finished(&events, &MachineAction::Restart),
+        Err(ActionFailure::Changed)
+    );
+    assert_eq!(lane.actions(), ["preview Restart"], "nothing executes");
+
+    adapter.perform(LOCAL, MachineAction::Restart);
+    assert_eq!(
+        finished(&events, &MachineAction::Restart),
+        Err(ActionFailure::Changed)
+    );
+    assert!(
+        unreported_lane.actions().is_empty(),
+        "unknown facts never restart silently"
+    );
+}
+
+/// A preview reports what the Core itself will end, and executing it runs exactly that
+/// preview's token. A preview the adapter did not issue, or one already executed, asks again.
+#[test]
+fn an_executed_preview_runs_the_cores_own_token() {
+    let lane = ScriptedLane::new([Err(ActionFailure::Unavailable(Unavailable::CoreTooOld))]);
+    lane.preview_ends(4);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the unreported Core", |update| {
+        update.link == MachineLink::Unreported
+    });
+
+    let preview = adapter
+        .preview(PENGUIN, MachineAction::Restart)
+        .recv_blocking()
+        .unwrap()
+        .unwrap();
+    assert_eq!(preview.sessions, 4, "the Core's own count, with no facts");
+    assert_eq!(preview.action, MachineAction::Restart);
+
+    let forged = MachinePreview {
+        id: preview.id + 1,
+        ..preview.clone()
+    };
+    adapter.execute(forged);
+    assert_eq!(
+        finished(&events, &MachineAction::Restart),
+        Err(ActionFailure::Changed)
+    );
+    adapter.execute(preview.clone());
+    assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
+    adapter.execute(preview);
+    assert_eq!(
+        finished(&events, &MachineAction::Restart),
+        Err(ActionFailure::Changed)
+    );
+    assert_eq!(
+        lane.actions(),
+        ["preview Restart", "execute token-Restart-4"]
+    );
+
+    let refused = adapter
+        .preview(PENGUIN, MachineAction::Stop)
+        .recv_blocking()
+        .unwrap();
+    assert_eq!(refused, Err(ActionFailure::Failed), "Stop stays local");
 }
 
 /// A restart whose Core does not answer again before the limit reads "Can't confirm" for the
@@ -404,7 +602,6 @@ fn a_restart_that_does_not_come_back_reads_cant_confirm() {
     adapter.perform(PENGUIN, MachineAction::Restart);
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     // The Core closes its lane to restart and does not come back.
-    lane.answer(Err(ActionFailure::Unreachable));
     let unconfirmed = changed(&events, "the unconfirmed restart", |update| {
         matches!(update.link, MachineLink::Unconfirmed { .. })
     });
@@ -414,6 +611,53 @@ fn a_restart_that_does_not_come_back_reads_cant_confirm() {
     ));
 }
 
+/// A route change while a long poll waits abandons it and reads the Machine's reach again,
+/// so a disconnected Machine stops reading as connected.
+#[test]
+fn a_disconnect_abandons_the_long_poll_and_reads_the_reach_again() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, None))]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (_adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the facts", |update| update.facts.is_some());
+    eventually("the long poll", || lane.count("wait") == 1);
+
+    machine.set(Script::Offline);
+    sources.change();
+    changed(&events, "the disconnected Machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    std::thread::sleep(QUIET);
+    assert_eq!(lane.count("wait"), 1, "no further long poll");
+}
+
+/// One Machine is listed once however many sources name it, and a Machine whose source is
+/// replaced, as when its only connected route changes, is followed through the new source.
+#[test]
+fn one_machine_id_is_one_row_followed_through_its_current_source() {
+    let old_lane = ScriptedLane::new([]);
+    let old = ScriptedMachine::new(Script::Offline, Arc::clone(&old_lane));
+    let new_lane = ScriptedLane::new([Ok(facts(1, 1, None))]);
+    let new = ScriptedMachine::new(Script::Lane, Arc::clone(&new_lane));
+    let sources = ScriptedSources::with(vec![
+        known(PENGUIN, "penguin", false, &old),
+        known(PENGUIN, "penguin (LAN)", false, &new),
+    ]);
+    let (_adapter, events) = started(&sources, RESTART_LIMIT);
+    assert_eq!(listing(&events), [PENGUIN]);
+    changed(&events, "the offline Machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    assert_eq!(new_lane.count("facts"), 0);
+
+    sources.set(vec![known(PENGUIN, "penguin", false, &new)]);
+    let connected = changed(&events, "facts over the new route", |update| {
+        update.facts.is_some()
+    });
+    assert_eq!(connected.machine, PENGUIN);
+    assert_eq!(new_lane.count("facts"), 1);
+}
+
 /// A Machine paired while the adapter runs, or removed, lists every Machine again.
 #[test]
 fn added_and_removed_machines_are_listed_again() {
@@ -421,31 +665,41 @@ fn added_and_removed_machines_are_listed_again() {
     let remote = ScriptedMachine::new(Script::Offline, ScriptedLane::new([]));
     let sources = ScriptedSources::with(vec![known(LOCAL, "This Mac", true, &local)]);
     let (_adapter, events) = started(&sources, RESTART_LIMIT);
-    let listing = |events: &async_channel::Receiver<MachineUpdatesEvent>| {
-        until(events, "the Machines", |event| match event {
-            MachineUpdatesEvent::Machines(machines) => {
-                Some(machines.iter().map(|m| m.machine).collect::<Vec<_>>())
-            }
-            _ => None,
-        })
-    };
     assert_eq!(listing(&events), [LOCAL]);
 
-    sources
-        .known
-        .lock()
-        .unwrap()
-        .push(known(PENGUIN, "penguin", false, &remote));
-    sources.change();
+    sources.set(vec![
+        known(LOCAL, "This Mac", true, &local),
+        known(PENGUIN, "penguin", false, &remote),
+    ]);
     assert_eq!(listing(&events), [LOCAL, PENGUIN]);
-    let offline = changed(&events, "the offline Machine", |update| {
-        update.machine == PENGUIN
-    });
-    assert!(matches!(offline.link, MachineLink::Offline { .. }));
 
-    sources.known.lock().unwrap().truncate(1);
-    sources.change();
+    sources.set(vec![known(LOCAL, "This Mac", true, &local)]);
     assert_eq!(listing(&events), [LOCAL]);
+}
+
+/// Dropping the adapter while every Machine is idle ends its watch, its coordinator and its
+/// followers, with no event or change to wake them.
+#[test]
+fn dropping_the_adapter_ends_every_thread_while_idle() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, None))]);
+    let polled = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let stopped = ScriptedMachine::new(Script::Stopped, ScriptedLane::new([]));
+    let sources = ScriptedSources::with(vec![
+        known(LOCAL, "This Mac", true, &stopped),
+        known(PENGUIN, "penguin", false, &polled),
+    ]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the stopped Core", |update| {
+        update.link == MachineLink::Stopped
+    });
+    eventually("the long poll", || lane.count("wait") == 1);
+
+    drop(adapter);
+    assert!(sources.unwatched.load(Ordering::SeqCst), "the watch ended");
+    eventually("every thread let go of its Machine", || {
+        Arc::strong_count(&stopped) == 2 && Arc::strong_count(&polled) == 2
+    });
+    eventually("the events channel closed", || events.is_closed());
 }
 
 #[test]

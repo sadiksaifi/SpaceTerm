@@ -183,6 +183,7 @@ impl DirectConnections {
             RouteState {
                 status: DirectRouteStatus::Connected,
                 core: Some(core),
+                service: None,
                 gate,
                 retry: Retry {
                     due: Instant::now() + std::time::Duration::from_secs(5),

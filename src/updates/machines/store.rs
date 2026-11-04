@@ -11,8 +11,8 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString,
 use spaceterm_core::update::facts::Version;
 
 use super::{
-    ActionFailure, MachineAction, MachineId, MachineUpdate, MachineUpdatesAdapter,
-    MachineUpdatesEvent,
+    ActionFailure, MachineAction, MachineId, MachinePreview, MachineUpdate, MachineUpdatesAdapter,
+    MachineUpdatesEvent, PreviewAnswer,
 };
 use crate::updates::presentation::{Confirmation, Dismissed};
 
@@ -129,6 +129,19 @@ impl MachineUpdates {
             self.perform(machine, action, surface, cx);
         }
         Ok(())
+    }
+
+    /// Asks the Machine's Core to preview a Restart or Stop, so a confirmation describes what
+    /// the Core itself will end. Execute the answer with [`Self::execute`].
+    pub(crate) fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
+        self.adapter.preview(machine, action)
+    }
+
+    /// Executes exactly `preview`, which the person confirmed on `surface`.
+    pub(crate) fn execute(&mut self, preview: MachinePreview, surface: Surface) {
+        self.performed
+            .push((preview.machine, preview.action.clone(), surface));
+        self.adapter.execute(preview);
     }
 
     fn receive(&mut self, event: MachineUpdatesEvent, cx: &mut Context<Self>) {

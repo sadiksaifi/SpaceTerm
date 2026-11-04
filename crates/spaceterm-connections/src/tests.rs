@@ -476,6 +476,7 @@ fn connected_fixture(
             RouteState {
                 status: DirectRouteStatus::Connected,
                 core: Some(core),
+                service: None,
                 gate,
                 retry: Retry::new(Interaction::Quiet),
                 health: None,
@@ -1097,4 +1098,70 @@ impl records::RecordFile for RecordingFile {
         files.bytes = Some(bytes.to_vec());
         Ok(files.commit_outcome.unwrap_or(Durability::Synchronized))
     }
+}
+
+/// A Core that refuses this desktop's work protocol keeps a service-lane handle, so its update
+/// facts and administration still reach it. Disconnecting the route lets the handle go.
+#[cfg(test)]
+#[test]
+fn an_incompatible_route_keeps_a_service_lane_handle() {
+    struct IncompatibleNetwork;
+    impl DirectNetwork for IncompatibleNetwork {
+        fn connect(
+            &self,
+            _: &str,
+            _: &DirectRoute,
+            _: DeviceCredential,
+            _: Arc<AtomicBool>,
+        ) -> Result<MachineConnection, DirectError> {
+            Err(DirectError::IncompatibleProtocol)
+        }
+        fn service(
+            &self,
+            identity: &str,
+            route: &DirectRoute,
+            _: DeviceCredential,
+            _: Arc<AtomicBool>,
+        ) -> Option<MachineConnection> {
+            MachineConnection::direct(
+                identity,
+                route.id,
+                route.paired.clone(),
+                Arc::new(NoConnection),
+            )
+            .ok()
+        }
+        fn revoke(
+            &self,
+            _: &str,
+            _: &PairedDevice,
+            _: &DeviceCredential,
+            _: UnpairKey,
+            _: PairingId,
+        ) -> Result<direct::RevocationReceipt, DirectError> {
+            Err(DirectError::Transport)
+        }
+        fn cancel_enrollment(
+            &self,
+            _: &str,
+            _: &direct::MachinePin,
+            _: [u8; 32],
+            _: &DeviceCredential,
+        ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
+            Err(DirectError::Transport)
+        }
+    }
+    let (connections, ids, _lock, _records) = retained_fixture_routes(
+        &[("studio", None)],
+        true,
+        None,
+        Arc::new(IncompatibleNetwork),
+    );
+    await_condition(|| {
+        connections.status(&ids[0]) == Some(DirectRouteStatus::Refused(RefusalReason::Incompatible))
+    });
+    assert!(connections.core(&ids[0]).is_none());
+    assert!(connections.service(&ids[0]).is_some());
+    connections.disconnect(&ids[0]);
+    assert!(connections.service(&ids[0]).is_none());
 }

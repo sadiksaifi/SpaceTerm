@@ -609,11 +609,12 @@ mod macos_service_watch;
 pub(crate) fn service_watch(
     directories: &[std::path::PathBuf],
     process: Option<u32>,
+    stop: std::os::fd::BorrowedFd<'_>,
 ) -> Option<Box<dyn crate::updates::machines::live::service_changes::Watch>> {
     #[cfg(target_os = "macos")]
-    return macos_service_watch::start(directories, process);
+    return macos_service_watch::start(directories, process, stop);
     #[cfg(target_os = "linux")]
-    linux_service_watch::start(directories, process)
+    linux_service_watch::start(directories, process, stop)
 }
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]

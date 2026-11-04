@@ -18,8 +18,8 @@ use spaceterm_core::update::facts::{
 };
 
 use super::{
-    ActionFailure, MachineAction, MachineId, MachineLink, MachineUpdate, MachineUpdatesAdapter,
-    MachineUpdatesError, MachineUpdatesEvent,
+    ActionFailure, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
+    MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
 };
 
 const THIS_MACHINE: MachineId = [1; 32];
@@ -263,6 +263,36 @@ impl MachineUpdatesAdapter for PreviewMachines {
             Some(Err(failure)) => self.finish_now(machine, Some(action), Err(failure)),
             None => self.finish_now(machine, Some(action), Err(ActionFailure::Unreachable)),
         }
+    }
+
+    /// Previews from the scenario's facts. Executing runs the action's transitions.
+    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
+        let (answer, answered) = async_channel::bounded(1);
+        let previewed = self.shared.lock().ok().and_then(|shared| {
+            let update = shared.machines.iter().find(|m| m.machine == machine)?;
+            let facts = update.facts.as_ref()?;
+            Some(plan(update, &action).map(|_| {
+                MachinePreview {
+                    machine,
+                    action: action.clone(),
+                    sessions: facts.sessions,
+                    target: match action {
+                        MachineAction::Restart => facts
+                            .pending
+                            .as_ref()
+                            .map(|pending| pending.version.clone()),
+                        _ => None,
+                    },
+                    id: 0,
+                }
+            }))
+        });
+        let _ = answer.try_send(previewed.unwrap_or(Err(ActionFailure::Unreachable)));
+        answered
+    }
+
+    fn execute(&self, preview: MachinePreview) {
+        self.perform(preview.machine, preview.action);
     }
 }
 
