@@ -440,30 +440,35 @@ mod tests {
     }
 
     #[test]
-    fn a_feed_over_4096_bytes_is_refused_even_when_signed() {
+    fn a_signed_feed_of_at_most_4096_bytes_is_read() {
         let signer = Signer::new();
-        let mut bytes = serde_json::to_vec(&example()).unwrap();
-        bytes.resize(MAX_FEED + 1, b' ');
-        let signature = signer.key.sign(&bytes);
-        assert_eq!(
+        let padded = |length: usize| {
+            let mut bytes = serde_json::to_vec(&example()).unwrap();
+            bytes.resize(length, b' ');
+            let signature = signer.key.sign(&bytes);
             read(
                 FeedTarget::CORE_LINUX,
                 &bytes,
                 &signature,
                 &signer.trust,
-                NOW
-            ),
-            Err(FeedError::TooLarge)
-        );
+                NOW,
+            )
+        };
+        assert!(padded(MAX_FEED).is_ok());
+        assert_eq!(padded(MAX_FEED + 1), Err(FeedError::TooLarge));
     }
 
     #[test]
     fn every_field_rule_refuses_its_breach() {
         let signer = Signer::new();
         type Breach = (fn(&mut Value), FeedError);
-        let refused: [Breach; 17] = [
+        let refused: [Breach; 18] = [
             (|f| f["channel"] = "stable".into(), FeedError::Malformed),
             (|f| f["archive"]["url"] = "x".into(), FeedError::Malformed),
+            (
+                |f| f["protocols"]["future"] = 0.into(),
+                FeedError::Malformed,
+            ),
             (
                 |f| f["protocols"]["work"]["patch"] = 0.into(),
                 FeedError::Malformed,

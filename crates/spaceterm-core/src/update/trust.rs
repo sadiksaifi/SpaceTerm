@@ -134,15 +134,33 @@ mod tests {
     }
 
     #[test]
+    fn each_key_binds_its_signature_to_the_exact_bytes() {
+        let (current, backup) = (TestKey::generate(), TestKey::generate());
+        let trust = trust(&current, &backup);
+        let message = b"feed";
+        for key in [&current, &backup] {
+            let signature = key.sign(message);
+            assert_eq!(trust.verify(message, &signature), Ok(()));
+            assert_eq!(trust.verify(b"fees", &signature), Err(BadSignature));
+            assert_eq!(trust.verify(b"feed\n", &signature), Err(BadSignature));
+        }
+    }
+
+    #[test]
     fn signatures_are_exactly_64_raw_bytes() {
         let (current, backup) = (TestKey::generate(), TestKey::generate());
         let trust = trust(&current, &backup);
         let message = b"feed";
-        let mut signature = current.sign(message);
-        signature.push(b'\n');
-        assert_eq!(trust.verify(message, &signature), Err(BadSignature));
-        let encoded = base64::engine::general_purpose::STANDARD.encode(current.sign(message));
-        assert_eq!(trust.verify(message, encoded.as_bytes()), Err(BadSignature));
+        for key in [&current, &backup] {
+            let signature = key.sign(message);
+            let truncated = &signature[..63];
+            let newline = [signature.as_slice(), b"\n"].concat();
+            let extended = [signature.as_slice(), &[0]].concat();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&signature);
+            for refused in [truncated, &newline, &extended, encoded.as_bytes()] {
+                assert_eq!(trust.verify(message, refused), Err(BadSignature));
+            }
+        }
     }
 
     #[test]
