@@ -407,7 +407,7 @@ mod tests {
                 public_key: [4; 32],
                 certificate: [5; 32],
             },
-            policy: NetworkPolicy::parse("192.168.1.20").ok(),
+            policy: NetworkPolicy::parse("192.168.1.20", 9231).ok(),
             enabled: true,
             machine_name: "studio".to_owned(),
             listener,

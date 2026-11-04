@@ -342,7 +342,11 @@ impl Connections<'_> {
             return Err(reserved_name());
         }
         if let Some(address) = address {
-            spaceterm_core::direct::Endpoint::parse(address).map_err(|_| usage("--address"))?;
+            spaceterm_core::direct::Endpoint::parse(
+                address,
+                spaceterm_core::direct::default_port(self.identity),
+            )
+            .map_err(|_| usage("--address"))?;
         }
         if !trust && !self.allows_input() {
             return Err(Code::InteractionRequired.into());

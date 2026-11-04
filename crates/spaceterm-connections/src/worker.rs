@@ -1225,7 +1225,7 @@ pub(super) mod enrollment_tests {
             .unwrap()
             .as_secs()
             + 60;
-        let endpoint = direct::Endpoint::parse("Public.EXAMPLE:9443").unwrap();
+        let endpoint = direct::Endpoint::parse("Public.EXAMPLE:9443", 9231).unwrap();
         let fixture =
             Unjoined::new("Server 1", EnrollmentStage::Claim, expires).join(Some(endpoint));
 

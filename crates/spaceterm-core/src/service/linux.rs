@@ -342,8 +342,13 @@ impl Supervisor for UserService {
         self.systemctl(&["daemon-reload"])?;
         self.check(candidate, false)
     }
+    /// At boot with linger, otherwise from login to logout.
     fn startup(&self) -> ServiceStartup {
-        ServiceStartup::AtBoot
+        if self.linger().is_ok() {
+            ServiceStartup::AtBoot
+        } else {
+            ServiceStartup::AtLogin
+        }
     }
     fn check(&self, runtime: &Path, removing: bool) -> Result<(), CoreError> {
         self.registration()
@@ -409,8 +414,11 @@ impl Supervisor for UserService {
         self.systemctl(&["daemon-reload"])?;
         self.check(runtime, false)
     }
+    /// Starting needs no linger. Without it the account's user manager, and SpaceTerm Core with
+    /// it, runs while the user is logged in and stops at logout. Remote setup and pairing
+    /// require linger themselves.
     fn prepare_start(&self) -> Result<(), CoreError> {
-        self.linger()
+        Ok(())
     }
     fn linger_authorized(&self) -> Result<Option<bool>, CoreError> {
         match self.linger() {

@@ -948,7 +948,7 @@ impl State {
                     return Err(DirectError::Disabled);
                 };
                 let endpoint = if let Some(authority) = advertise {
-                    super::Endpoint::parse(&authority)?.url()
+                    super::Endpoint::parse(&authority, super::default_port(&self.pin.build))?.url()
                 } else {
                     let address = if addr.ip().is_unspecified() {
                         network::snapshot(self.network.as_ref())?

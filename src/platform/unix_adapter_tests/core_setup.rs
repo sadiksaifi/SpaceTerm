@@ -886,7 +886,7 @@ impl NativeDnsHome {
             request.address.is_none(),
             "the DNS fixture must derive its address from OpenSSH"
         );
-        let address = SetupAddress::parse(hostname).expect("select a valid DNS HostName");
+        let address = SetupAddress::parse(hostname, 9231).expect("select a valid DNS HostName");
         assert!(address.host().parse::<std::net::IpAddr>().is_err());
         assert_eq!(
             hostname.trim_end_matches('.').to_ascii_lowercase(),
@@ -1005,7 +1005,7 @@ fn native_request(approvals: Arc<NativeApprovals>) -> SetupRequest {
         )
         .unwrap(),
         address: std::env::var_os("SPACETERM_SETUP_NATIVE_ADDRESS").map(|address| {
-            SetupAddress::parse(address.to_str().expect("the setup address must be UTF-8")).unwrap()
+            SetupAddress::parse(address.to_str().expect("the setup address must be UTF-8"), 9231).unwrap()
         }),
         name: "setup-native-653".into(),
         prompts: approvals.prompts.clone(),
@@ -1276,7 +1276,7 @@ fn native_core_setup_acceptance() {
     let expected_address = request.address.clone().unwrap_or_else(|| {
         let expected = std::env::var("SPACETERM_SETUP_NATIVE_EXPECT_ADDRESS")
             .expect("confirm the SSH alias's effective DNS HostName and QUIC port");
-        let address = SetupAddress::parse(&expected).unwrap();
+        let address = SetupAddress::parse(&expected, 9231).unwrap();
         assert!(
             address.host().parse::<std::net::IpAddr>().is_err(),
             "the default-address acceptance cell must retain a DNS name"
@@ -2047,7 +2047,7 @@ fn native_core_setup_refuses_unsafe_runtime_config_paths_before_spawning_ssh() {
         let result = backend.setup(
             SetupRequest {
                 destination: SshDestination::new("fixture-target".into()).unwrap(),
-                address: Some(SetupAddress::parse("192.0.2.1:9231").unwrap()),
+                address: Some(SetupAddress::parse("192.0.2.1:9231", 9231).unwrap()),
                 name: "Fixture".into(),
                 prompts: Arc::new(NoPrompt),
                 approvals: NativeApprovals::new(&fixture.adapter, (false, false, false)),
@@ -2450,7 +2450,7 @@ fn native_core_setup_proxyjump_cancellation_leaves_no_persistent_hop_and_preserv
         attempted.setup(
             SetupRequest {
                 destination: SshDestination::new("fixture-target".into()).unwrap(),
-                address: Some(SetupAddress::parse("192.0.2.1:9231").unwrap()),
+                address: Some(SetupAddress::parse("192.0.2.1:9231", 9231).unwrap()),
                 name: "ProxyJump fixture".into(),
                 prompts,
                 approvals,
@@ -2504,7 +2504,7 @@ fn native_core_setup_missing_master_refuses_fresh_authentication_and_preserves_a
     Arc::get_mut(&mut approvals).unwrap().pause_on_offer = true;
     let request = SetupRequest {
         destination: SshDestination::new("fixture-target".into()).unwrap(),
-        address: Some(SetupAddress::parse("192.0.2.1:9231").unwrap()),
+        address: Some(SetupAddress::parse("192.0.2.1:9231", 9231).unwrap()),
         name: "Missing setup master fixture".into(),
         prompts: approvals.prompts.clone(),
         approvals: approvals.clone(),

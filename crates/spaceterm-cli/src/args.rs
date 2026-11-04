@@ -794,9 +794,12 @@ fn network(text: &str) -> Result<Network, String> {
     match text {
         "all" => Ok(Network::All),
         "off" => Ok(Network::Off),
-        address => spaceterm_core::direct::NetworkPolicy::parse(address)
-            .map(Network::Address)
-            .map_err(|_| String::new()),
+        address => spaceterm_core::direct::NetworkPolicy::parse(
+            address,
+            spaceterm_core::direct::default_port(env!("SPACETERM_CLI_IDENTITY")),
+        )
+        .map(Network::Address)
+        .map_err(|_| String::new()),
     }
 }
 

@@ -54,7 +54,7 @@ fn native_owner() {
         .expect("fixture server ready");
     let connection = MachineConnection::for_identity(IDENTITY).unwrap();
     connection
-        .set_direct_policy(Some(NetworkPolicy::parse(&bind).unwrap()), true)
+        .set_direct_policy(Some(NetworkPolicy::parse(&bind, 9231).unwrap()), true)
         .unwrap();
     emit(serde_json::json!({"ready":true}));
     let mut invitation: Option<Invitation> = None;

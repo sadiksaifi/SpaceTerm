@@ -3,7 +3,9 @@
 //! The steps run through the existing service code, in order: install the service from the
 //! installation the launcher points at, authorize boot startup on Linux, start the server
 //! unless it was deliberately stopped, set Network Access, automatic start and the proxy its
-//! update checks go through. Each step reports `done` or
+//! update checks go through. Linux without linger runs SpaceTerm Core while the user is logged
+//! in, so declining linger skips that step, unless Network Access turns on: paired devices need
+//! SpaceTerm Core after logout. Each step reports `done` or
 //! `already_done`, so a repeated setup changes only what its flags name. Setup never reverses a
 //! deliberate Stop, and it needs no credential store.
 use super::{Context, Reply};
@@ -12,7 +14,7 @@ use crate::contract::{
     self, Code, CoreSetup, Details, Envelope, Failure, Launcher, SetupNetwork, SetupStep,
     SetupStepName, StepResult, UnsupportedSessionDetails, UnsupportedSessionReason, Version,
 };
-use spaceterm_core::direct::{DEFAULT_PORT, NetworkPolicy};
+use spaceterm_core::direct::{NetworkPolicy, default_port};
 use spaceterm_core::service::lane::Offline;
 use spaceterm_core::service::{LingerAuthorization, Service};
 use std::path::{Path, PathBuf};
@@ -156,18 +158,23 @@ fn setup(
     let mut steps = Vec::new();
     let before = service.status().map_err(contract::from_core_error)?;
     crate::interrupt::dispatch()?;
-    // Linux starts the server only with boot startup authorized, so authorize it before the
-    // first start. macOS starts at login and has no such step.
+    // Linux asks for boot startup before the first start. macOS starts at login and has no
+    // such step.
+    let opens = network.is_some_and(|network| !matches!(network, Network::Off));
     let linger = match service.linger().map_err(contract::from_core_error)? {
         None => StepResult::Skipped,
         Some(true) => StepResult::AlreadyDone,
-        Some(false) if context.interactive() => {
-            service
-                .enable_linger(LingerAuthorization::Terminal)
-                .map_err(contract::from_core_error)?;
-            StepResult::Done
+        Some(false) => {
+            let authorized = context.interactive()
+                && service.enable_linger(LingerAuthorization::Terminal).is_ok();
+            if authorized {
+                StepResult::Done
+            } else if opens {
+                return Err(Failure::new(Code::LingerRequired));
+            } else {
+                StepResult::Skipped
+            }
         }
-        Some(false) => return Err(Failure::new(Code::AuthorizationRequired)),
     };
     let install = if before.installed {
         StepResult::AlreadyDone
@@ -296,7 +303,9 @@ fn set_network(
             let port = current
                 .policy
                 .as_ref()
-                .map_or(DEFAULT_PORT, |policy| policy.bind.port());
+                .map_or(default_port(&current.pin.build), |policy| {
+                    policy.bind.port()
+                });
             (
                 Some(NetworkPolicy::every_interface(port).map_err(contract::from_direct_error)?),
                 true,

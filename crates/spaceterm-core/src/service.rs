@@ -232,7 +232,7 @@ impl Service {
     }
     /// Change only automatic startup using owning-account host authority.
     /// A deliberate Stop remains in force until explicit Start, regardless of this preference.
-    /// Linux requires confirmed linger before automatic startup can be enabled.
+    /// A service manager that needs authorization before a start refuses it here first.
     pub fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, CoreError> {
         let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
@@ -2016,7 +2016,7 @@ mod tests {
         }
 
         #[test]
-        fn automatic_start_and_explicit_start_preserve_registration_and_require_linger() {
+        fn automatic_start_and_explicit_start_preserve_registration_and_require_authorization() {
             let fixture = Fixture::new();
             fresh(&fixture);
             let supervisor = AccountSupervisor::new(fixture.paths.clone());
@@ -2352,7 +2352,7 @@ mod tests {
         }
 
         #[test]
-        fn linux_first_setup_resumes_only_after_explicit_linger_authorization() {
+        fn first_setup_resumes_only_after_a_required_authorization() {
             let fixture = Fixture::new();
             fresh(&fixture);
             let supervisor = AccountSupervisor::new(fixture.paths.clone());

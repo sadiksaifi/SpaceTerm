@@ -685,7 +685,7 @@ impl Sheet<'_> {
 }
 
 fn address(text: &str) -> SetupAddress {
-    SetupAddress::parse(text).unwrap()
+    SetupAddress::parse(text, 9231).unwrap()
 }
 
 /// A network address that names no host is refused before SSH runs, and stays shown so the

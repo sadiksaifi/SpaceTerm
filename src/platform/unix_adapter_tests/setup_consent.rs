@@ -630,7 +630,7 @@ fn uninstalled_stopped_core_reinstall_then_start_then_network_uses_one_authentic
             },
             SetupOffer::Startup,
             SetupOffer::Network {
-                address: SetupAddress::parse("configured.example").unwrap(),
+                address: SetupAddress::parse("configured.example", 9231).unwrap(),
                 bind: "192.0.2.9:9231".parse().unwrap(),
                 current: Some("192.0.2.9:9231".parse().unwrap()),
                 enabled: false,
@@ -810,7 +810,7 @@ fn setup_derives_dns_from_effective_hostname_and_keeps_bind_and_ssh_port_separat
         assert_eq!(
             offer,
             SetupOffer::Network {
-                address: SetupAddress::parse("actual.tail.example:9231").unwrap(),
+                address: SetupAddress::parse("actual.tail.example:9231", 9231).unwrap(),
                 bind: "192.0.2.9:9231".parse().unwrap(),
                 current: None,
                 enabled: false,
@@ -841,7 +841,7 @@ fn default_hostname_offers_the_authenticated_interface_instead_of_an_unrelated_l
         assert_eq!(
             offer,
             SetupOffer::Network {
-                address: SetupAddress::parse("actual.tail.example").unwrap(),
+                address: SetupAddress::parse("actual.tail.example", 9231).unwrap(),
                 bind: "100.64.0.9:9231".parse().unwrap(),
                 current: Some("192.168.1.9:9231".parse().unwrap()),
                 enabled: true,
@@ -867,7 +867,7 @@ fn default_hostname_preserves_a_configured_wildcard_bind_when_enabling_network_a
         assert_eq!(
             offer,
             SetupOffer::Network {
-                address: SetupAddress::parse("configured.example").unwrap(),
+                address: SetupAddress::parse("configured.example", 9231).unwrap(),
                 bind: "0.0.0.0:9231".parse().unwrap(),
                 current: Some("0.0.0.0:9231".parse().unwrap()),
                 enabled: false,
@@ -994,7 +994,7 @@ fn optional_dns_override_preserves_configured_bind_with_an_independent_public_po
     let mut current = status();
     current.policy = Some(NetworkPolicy::new("192.168.1.9:9231".parse().unwrap()).unwrap());
     *fixture.adapter.status.lock().unwrap() = Some(current);
-    let address = SetupAddress::parse("public.example:9443").unwrap();
+    let address = SetupAddress::parse("public.example:9443", 9231).unwrap();
     let expected = address.clone();
     let result = fixture.setup_at(
         Some(address),
@@ -1019,7 +1019,7 @@ fn optional_dns_override_preserves_configured_bind_with_an_independent_public_po
 fn optional_custom_port_uses_the_requested_port_when_no_bind_is_configured() {
     let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
     *fixture.adapter.status.lock().unwrap() = Some(status());
-    let address = SetupAddress::parse("public.example:9443").unwrap();
+    let address = SetupAddress::parse("public.example:9443", 9231).unwrap();
     let expected = address.clone();
 
     let result = fixture.setup_at(
@@ -1057,7 +1057,7 @@ fn fresh_explicit_core_local_ip_uses_the_requested_interface_and_port() {
         suggested: Some("100.69.199.110".parse().unwrap()),
     });
     *fixture.adapter.status.lock().unwrap() = Some(current);
-    let address = SetupAddress::parse("192.168.1.41:45366").unwrap();
+    let address = SetupAddress::parse("192.168.1.41:45366", 9231).unwrap();
     let expected = address.clone();
 
     let result = fixture.setup_at(
@@ -1099,7 +1099,7 @@ fn fresh_explicit_nonlocal_ip_preserves_the_authenticated_bind_for_nat() {
         suggested: Some("192.168.1.41".parse().unwrap()),
     });
     *fixture.adapter.status.lock().unwrap() = Some(current);
-    let address = SetupAddress::parse("203.0.113.41:45366").unwrap();
+    let address = SetupAddress::parse("203.0.113.41:45366", 9231).unwrap();
     let expected = address.clone();
 
     let result = fixture.setup_at(

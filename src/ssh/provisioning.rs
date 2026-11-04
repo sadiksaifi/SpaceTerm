@@ -885,8 +885,16 @@ fn resolved_setup_address(output: &CapturedProcessOutput) -> Result<SetupAddress
     if port.is_none() {
         return Err(SetupFailure::Refused(RefusalKind::InvalidEndpoint));
     }
-    SetupAddress::parse(hostname.ok_or(SetupFailure::Refused(RefusalKind::InvalidEndpoint))?)
-        .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))
+    SetupAddress::parse(
+        hostname.ok_or(SetupFailure::Refused(RefusalKind::InvalidEndpoint))?,
+        own_port(),
+    )
+    .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))
+}
+
+/// The UDP port this desktop's build identity uses unless an address names one.
+pub(crate) fn own_port() -> u16 {
+    spaceterm_core::direct::default_port(ApplicationIdentity::current().directory_name())
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<(), SetupFailure> {

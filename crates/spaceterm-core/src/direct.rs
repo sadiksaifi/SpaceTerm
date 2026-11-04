@@ -4,7 +4,16 @@ use crate::{CoreError, pane::control::ClientName};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 pub use wire::{Management, ManagementReply};
-pub const DEFAULT_PORT: u16 = 9231;
+
+/// The UDP port a build identity's Network Access uses when no port is given: Release 9231,
+/// Preflight 9232 and Development 9233. One account can then run every identity at once.
+pub fn default_port(identity: &str) -> u16 {
+    match identity {
+        "spaceterm-preflight" => 9232,
+        "spaceterm-development" => 9233,
+        _ => 9231,
+    }
+}
 
 mod client;
 mod crypto;
@@ -102,12 +111,13 @@ impl NetworkPolicy {
     pub fn covers(&self, address: SocketAddr) -> bool {
         self.bind.port() == address.port() && (self.is_every_interface() || self.bind == address)
     }
-    pub fn parse(address: &str) -> Result<Self, DirectError> {
+    /// An `IP` or `IP:PORT`. `default_port` applies when no port is given.
+    pub fn parse(address: &str, default_port: u16) -> Result<Self, DirectError> {
         if let Ok(bind) = address.parse() {
             return Self::new(bind);
         }
         let ip: std::net::IpAddr = address.parse().map_err(|_| DirectError::InvalidAddress)?;
-        Self::new(SocketAddr::new(ip, DEFAULT_PORT))
+        Self::new(SocketAddr::new(ip, default_port))
     }
 }
 
@@ -331,7 +341,8 @@ impl Invitation {
     }
     /// Connect through a different authority while retaining the invitation's pinned identity.
     pub fn with_address(mut self, address: &str) -> Result<Self, DirectError> {
-        self.payload.endpoint = Endpoint::parse(address)?.url();
+        let port = default_port(&self.payload.pin.build);
+        self.payload.endpoint = Endpoint::parse(address, port)?.url();
         client::invitation(self.payload.clone())
     }
     pub fn machine_pin(&self) -> &MachinePin {

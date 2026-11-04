@@ -42,7 +42,7 @@ use super::{AddMachineRequest, SettingsWindow};
 use crate::cancellation::CancellationToken;
 use crate::direct_connections::{DirectConnections, DirectRouteId, JoinId, JoinStatus};
 use crate::domain::SshDestination;
-use crate::machine_connection::direct::{DEFAULT_PORT, DirectError, Endpoint, Invitation};
+use crate::machine_connection::direct::{DirectError, Endpoint, Invitation, default_port};
 use crate::machine_connection::pane::control::ClientName;
 use crate::ssh::provisioning::{
     SetupAddress, SetupFailure, SetupOffer, SetupPhase, SetupProgress, SetupRequest,
@@ -97,18 +97,25 @@ const DISCLOSURE_HIDE: &str = "Hide the network address";
 /// How long the host, address and link fields are, so a long value scrolls inside the field.
 const FIELD_WIDTH: f32 = 260.0;
 
+/// The UDP port this build identity's machines use unless an address names one.
+fn own_port() -> u16 {
+    default_port(crate::application_identity::ApplicationIdentity::current().directory_name())
+}
+
 /// What the address field's description says, naming the port SpaceTerm uses unless one is given.
 fn address_description() -> SharedString {
+    let port = own_port();
     format!(
-        "The name or IP address this computer uses to reach the machine. Leave it empty to use the one SSH reaches. Port {DEFAULT_PORT} unless you add one."
+        "The name or IP address this computer uses to reach the machine. Leave it empty to use the one SSH reaches. Port {port} unless you add one."
     )
     .into()
 }
 
 /// What the invitation's address field says, naming the port SpaceTerm uses unless one is given.
 fn endpoint_description() -> SharedString {
+    let port = own_port();
     format!(
-        "The name or IP address this computer uses to reach the machine. Leave it empty to use the one in the invitation. Port {DEFAULT_PORT} unless you add one."
+        "The name or IP address this computer uses to reach the machine. Leave it empty to use the one in the invitation. Port {port} unless you add one."
     )
     .into()
 }
@@ -1233,7 +1240,7 @@ impl AddMachineSheet {
         let address = if entered.is_empty() {
             Ok(None)
         } else {
-            SetupAddress::parse(&entered).map(Some)
+            SetupAddress::parse(&entered, own_port()).map(Some)
         };
         self.host_invalid = destination.is_none();
         self.address_invalid = address.is_err();
@@ -1461,7 +1468,7 @@ impl AddMachineSheet {
         let entered = self.endpoint.read(cx).value().trim().to_owned();
         let endpoint = if entered.is_empty() {
             None
-        } else if let Ok(endpoint) = Endpoint::parse(&entered) {
+        } else if let Ok(endpoint) = Endpoint::parse(&entered, own_port()) {
             Some(endpoint)
         } else {
             self.endpoint_invalid = true;

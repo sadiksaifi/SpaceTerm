@@ -31,7 +31,7 @@ use super::machines::LocalCoreStatus;
 use crate::core_context::{
     LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts, PairedDevicesFacts,
 };
-use crate::machine_connection::direct::{DEFAULT_PORT, NetworkPolicy, PairingId};
+use crate::machine_connection::direct::{NetworkPolicy, PairingId, default_port};
 use crate::machine_connection::{CoreError, MachineConnection};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
@@ -772,7 +772,15 @@ impl SettingsWindow {
             .direct_access
             .state()
             .and_then(|state| state.policy.or(state.configured))
-            .map_or(DEFAULT_PORT, |policy| policy.port());
+            .map_or_else(
+                || {
+                    default_port(
+                        crate::application_identity::ApplicationIdentity::current()
+                            .directory_name(),
+                    )
+                },
+                |policy| policy.port(),
+            );
         let Ok(policy) = NetworkPolicy::new(SocketAddr::new(address, port)) else {
             self.direct_access.problem = Some(AccessFailure::InvalidAddress);
             cx.notify();

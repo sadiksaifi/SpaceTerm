@@ -310,7 +310,7 @@ fn network_access_refuses_an_address_this_machine_doesnt_have() {
 #[test]
 fn an_ipv6_wildcard_parses_as_every_interface() {
     assert_eq!(
-        NetworkPolicy::parse("[::]:9231"),
+        NetworkPolicy::parse("[::]:9231", 9231),
         NetworkPolicy::every_interface(9231)
     );
 }

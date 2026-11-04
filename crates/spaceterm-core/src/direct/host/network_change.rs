@@ -148,7 +148,7 @@ impl State {
             },
             NetworkAccess::All => Target {
                 policy: Some(NetworkPolicy::every_interface(
-                    current.map_or(DEFAULT_PORT, |policy| policy.bind.port()),
+                    current.map_or(default_port(&self.pin.build), |policy| policy.bind.port()),
                 )?),
                 enabled: true,
             },

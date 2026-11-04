@@ -95,8 +95,11 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
         InternalCommand::SshDirect { address } => {
             setup_pipe()?;
             let request = read_setup::<spaceterm_core::provisioning::SetupRequest>()?;
-            let policy =
-                spaceterm_core::direct::NetworkPolicy::parse(address).map_err(CoreError::from)?;
+            let policy = spaceterm_core::direct::NetworkPolicy::parse(
+                address,
+                spaceterm_core::direct::default_port(IDENTITY),
+            )
+            .map_err(CoreError::from)?;
             write_setup(&spaceterm_core::provisioning::setup_direct(
                 IDENTITY, policy, request,
             )?)?;
@@ -104,8 +107,11 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
         InternalCommand::SshDirectPrepare { address } => {
             setup_pipe()?;
             let request = read_setup::<spaceterm_core::provisioning::SetupRequest>()?;
-            let policy =
-                spaceterm_core::direct::NetworkPolicy::parse(address).map_err(CoreError::from)?;
+            let policy = spaceterm_core::direct::NetworkPolicy::parse(
+                address,
+                spaceterm_core::direct::default_port(IDENTITY),
+            )
+            .map_err(CoreError::from)?;
             spaceterm_core::provisioning::prepare_direct(IDENTITY, policy, request)?;
             write_setup(&serde_json::json!({"prepared":true}))?;
         }
