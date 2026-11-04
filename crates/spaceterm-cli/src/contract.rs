@@ -821,7 +821,6 @@ codes! {
     Stopped = "stopped", Unavailable, false, "SpaceTerm Core was stopped. Start it with: spaceterm start.";
     Changed = "changed", Target, true, "The target changed. Review it and try again.";
     ActivationUnresolved = "activation_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm whether SpaceTerm Core restarted on the new version.";
-    ReturnUnavailable = "return_unavailable", Failed, false, "The previous SpaceTerm Core version can\u{2019}t be restored safely.";
     CandidateUnverified = "candidate_unverified", Failed, false, "SpaceTerm couldn\u{2019}t verify the SpaceTerm Core package.";
     NoCandidate = "no_candidate", Target, false, "There is no SpaceTerm Core package to install.";
     AuthorizationRequired = "authorization_required", ActionRequired, false, "Administrator authorization is required.";
@@ -902,7 +901,6 @@ pub fn from_core_error(error: CoreError) -> Failure {
         CoreError::Stopped => Code::Stopped,
         CoreError::Changed => Code::Changed,
         CoreError::ActivationUnresolved => Code::ActivationUnresolved,
-        CoreError::ReturnUnavailable => Code::ReturnUnavailable,
         CoreError::RuntimeUnavailable => Code::CandidateUnverified,
         CoreError::CandidateMissing => Code::NoCandidate,
         CoreError::AuthorizationRequired => Code::AuthorizationRequired,
@@ -1197,7 +1195,6 @@ pub struct ServiceEffects {
 #[serde(rename_all = "snake_case")]
 pub enum UpdateKind {
     Update,
-    Return,
 }
 
 /// `effects` of `update`.
@@ -1553,7 +1550,6 @@ pub enum ServiceAction {
     Stop,
     Restart,
     Update,
-    Return,
     Network,
 }
 
@@ -2194,7 +2190,6 @@ mod tests {
             (E::Stopped, "stopped", 5),
             (E::Changed, "changed", 4),
             (E::ActivationUnresolved, "activation_unresolved", 7),
-            (E::ReturnUnavailable, "return_unavailable", 1),
             (E::RuntimeUnavailable, "candidate_unverified", 1),
             (E::CandidateMissing, "no_candidate", 4),
             (E::AuthorizationRequired, "authorization_required", 3),

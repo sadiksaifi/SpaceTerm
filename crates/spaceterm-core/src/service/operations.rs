@@ -1,4 +1,4 @@
-//! The service-operation ledger: one record per Stop, Restart, Update, Return or Network Access
+//! The service-operation ledger: one record per Stop, Restart, Update or Network Access
 //! change that the service lane admitted, from admission through its outcome. It lives in
 //! `service-operations.json` beside the server identity, under `service-operations.lock`, so an
 //! outcome survives the server that admitted it and the helper that performed it.
@@ -71,7 +71,6 @@ pub enum Action {
     Stop,
     Restart,
     Update,
-    Return,
     /// The lane applies it in-process. No helper claims it.
     Network(super::lane::network::NetworkAccess),
 }
@@ -149,7 +148,7 @@ pub enum Admission {
 pub(crate) trait Evidence {
     /// Whether a helper holds [`HELPER_LOCK`].
     fn helper_active(&self) -> Result<bool, CoreError>;
-    /// The settled outcome of an Update or Return that the activation journal proves, if any.
+    /// The settled outcome of an Update that the activation journal proves, if any.
     /// `ServiceBusy` means the journal is mid-step, so settlement waits.
     fn activation(&self, record: &Record) -> Result<Option<State>, CoreError>;
 }
@@ -329,7 +328,7 @@ impl Ledger {
                         State::NotPerformed(NotPerformed::LaunchFailed)
                     }
                     State::Running => match record.action {
-                        Action::Update | Action::Return => match evidence.activation(record) {
+                        Action::Update => match evidence.activation(record) {
                             Ok(state) => state.unwrap_or(State::Unresolved),
                             // The activation is mid-step under the service lock. Settle later.
                             Err(CoreError::ServiceBusy) => continue,

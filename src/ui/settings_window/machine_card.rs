@@ -824,9 +824,6 @@ struct VersionView {
     /// The Server row's line under its label, such as "Version 0.14.2 · 0.15.0 is available".
     subtitle: SharedString,
     actions: Vec<VersionStep>,
-    /// The version a failed update can return to, as the server's record of that update names
-    /// it.
-    restore: Option<SharedString>,
 }
 
 /// How the Server row's steps read.
@@ -836,8 +833,6 @@ struct MachineRowView {
     /// Work underway changes the server, so the row's steps wait for it.
     busy: bool,
     menu: Vec<MenuItem>,
-    /// The label of the safe return after a failed update, naming the version it returns to.
-    restore: Option<SharedString>,
 }
 
 /// How long work runs before the Server row shows it, so quick work never flashes.
@@ -954,7 +949,6 @@ impl SettingsWindow {
             return VersionView {
                 subtitle: SharedString::default(),
                 actions: Vec::new(),
-                restore: None,
             };
         };
         let needs_update = self.core_state(&choice).state.as_ref() == "Needs update";
@@ -971,8 +965,7 @@ impl SettingsWindow {
                 VersionView {
                     subtitle: subtitle.into(),
                     actions: vec![VersionStep::Observe],
-                    restore: None,
-                }
+                    }
             }
         }
     }
@@ -988,7 +981,6 @@ impl SettingsWindow {
                     "This run builds its own SpaceTerm Core, so it has no update.",
                 ),
                 actions: vec![VersionStep::Observe],
-                restore: None,
             };
         };
         let presentation = row.presentation();
@@ -1001,9 +993,7 @@ impl SettingsWindow {
         let included = facts
             .and_then(|facts| facts.included.as_ref().ok())
             .map(|included| included.version.clone());
-        let activation = facts
-            .and_then(|facts| facts.activation.as_ref())
-            .filter(|activation| !activation.returned);
+        let activation = facts.and_then(|facts| facts.activation.as_ref());
         let candidate = activation
             .map(|activation| activation.candidate.version.clone())
             .or_else(|| included.clone());
@@ -1015,16 +1005,10 @@ impl SettingsWindow {
             || value.as_ref().map_or_else(String::new, ToString::to_string),
             |activation| activation.previous.version.clone(),
         );
-        let restore = (failed && offered(UpdateAction::Return) && !previous.is_empty())
-            .then(|| SharedString::from(previous.clone()));
         let (subtitle, actions): (String, Vec<UpdateAction>) = if failed {
             (
                 failed_subtitle(candidate.as_deref(), &previous),
-                if offered(UpdateAction::Return) {
-                    vec![UpdateAction::Return, UpdateAction::Check]
-                } else {
-                    vec![UpdateAction::Check]
-                },
+                vec![UpdateAction::Check],
             )
         } else if offered(UpdateAction::Finish) {
             (
@@ -1052,12 +1036,11 @@ impl SettingsWindow {
         VersionView {
             subtitle: subtitle.into(),
             actions: actions.into_iter().map(VersionStep::Local).collect(),
-            restore,
         }
     }
 
     /// The Server row's steps: at most one button, and every other step in the ⋯ menu. The
-    /// button is a safe restore after a failed update, Update when one is offered, otherwise
+    /// button is Update when one is offered, otherwise
     /// Start SpaceTerm Core for a stopped server.
     fn machine_row_view(&self, cx: &App) -> Option<MachineRowView> {
         let choice = self.selected_machine()?;
@@ -1133,14 +1116,10 @@ impl SettingsWindow {
                 item
             });
         }
-        let restore = version
-            .restore
-            .map(|previous| SharedString::from(format!("Restore {previous}\u{2026}")));
         Some(MachineRowView {
             button,
             busy,
             menu: items,
-            restore,
         })
     }
 
@@ -1387,24 +1366,11 @@ impl SettingsWindow {
             );
         let owner = cx.weak_entity();
         let busy = view.busy;
-        let restore = view.restore.clone();
-        // Restore prepares through the update row, which takes no step while it reads, so it
-        // waits for that read rather than taking a click it would drop.
-        let reading_update = self
-            .core_update
-            .as_ref()
-            .is_some_and(|row| row.state.working.is_some());
         let button = view.button.map(|step| {
             let owner = owner.clone();
-            let waits = busy
-                || (reading_update
-                    && step == StatusStep::Version(VersionStep::Local(UpdateAction::Return)));
-            let label: SharedString = match (&step, &restore) {
-                (StatusStep::Version(VersionStep::Local(UpdateAction::Return)), Some(restore)) => {
-                    restore.clone()
-                }
+            let label: SharedString = match &step {
                 // The row names the server, so its update reads as one word.
-                (StatusStep::Version(VersionStep::Local(UpdateAction::Update)), _) => {
+                StatusStep::Version(VersionStep::Local(UpdateAction::Update)) => {
                     SharedString::new_static("Update\u{2026}")
                 }
                 _ => SharedString::new_static(status_step_label(&step)),
@@ -1426,7 +1392,7 @@ impl SettingsWindow {
             })
             .size(ButtonSize::Regular)
             .tab_stop(true)
-            .disabled(waits)
+            .disabled(busy)
             .debug_selector(status_step_selector(&step))
             .accessibility_description(description)
             .on_activate(move |_, window, cx| {
@@ -1641,7 +1607,6 @@ fn status_step_primary(step: &StatusStep) -> bool {
 /// ⋯ menu.
 fn button_rank(step: &StatusStep) -> Option<u8> {
     match step {
-        StatusStep::Version(VersionStep::Local(UpdateAction::Return)) => Some(0),
         StatusStep::Version(VersionStep::Local(UpdateAction::Update))
         | StatusStep::Remote(Change::Update) => Some(1),
         StatusStep::Local(ServiceAction::Start) => Some(2),
@@ -1693,7 +1658,6 @@ fn update_progress(step: UpdateStep, state: &UpdateState) -> Option<String> {
     let candidate = activation
         .map(|activation| activation.candidate.version.as_str())
         .or(included);
-    let previous = activation.map(|activation| activation.previous.version.as_str());
     let named = |version: Option<&str>, named: &str, unnamed: &str| {
         version.map_or_else(
             || unnamed.to_owned(),
@@ -1710,16 +1674,6 @@ fn update_progress(step: UpdateStep, state: &UpdateState) -> Option<String> {
         UpdateStep::Update { .. } => {
             named(included, "Updating to", "Updating SpaceTerm Core\u{2026}")
         }
-        UpdateStep::PrepareReturn => named(
-            previous,
-            "Preparing to restore",
-            "Preparing to restore the previous version\u{2026}",
-        ),
-        UpdateStep::Return => named(
-            previous,
-            "Restoring",
-            "Restoring the previous version\u{2026}",
-        ),
         UpdateStep::Finish => named(
             candidate,
             "Finishing the update to",

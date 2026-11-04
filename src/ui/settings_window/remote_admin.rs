@@ -14,11 +14,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{AnyWindowHandle, App, AppContext as _, Context, Global, SharedString, Task};
-use spaceterm_core::service::control::{self, BuildName, UpdateChange, UpdateWording, Wording};
-use spaceterm_core::service::lane::admin::{self, Preview, UpdatePlan, Verdict};
+use spaceterm_core::service::control::{self, BuildName, UpdateWording, Wording};
+use spaceterm_core::service::lane::admin::{self, Preview, Verdict};
 use spaceterm_core::service::lane::client::{LaneError, Outcome};
 use spaceterm_core::service::lane::{
-    LaneAction, LaneCheck, LaneReceipt, LaneStatus, LaneUpdateKind, LaneVersion,
+    LaneAction, LaneCheck, LaneReceipt, LaneStatus, LaneVersion,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
@@ -245,9 +245,7 @@ impl RemoteMachineControl for LaneControl {
         let (_, _, mut session, settled) = self.open()?;
         let preview = match change {
             Change::Restart => admin::preview(&mut session, LaneAction::Restart),
-            Change::Update => admin::plan_update(&mut session).map(|plan| match plan {
-                UpdatePlan::Return(preview) | UpdatePlan::Update { preview, .. } => preview,
-            }),
+            Change::Update => admin::plan_update(&mut session).map(|plan| plan.preview),
         }
         .map_err(RemoteFailure::of_lane)?;
         Ok(Prepared { preview, settled })
@@ -302,7 +300,6 @@ pub(super) enum Act {
     Stop,
     Restart,
     Update(Option<SharedString>),
-    Return(Option<SharedString>),
     /// A Network Access change. Only the CLI makes one, so the card names it only as an earlier
     /// operation a connection settled.
     NetworkAccess,
@@ -315,7 +312,6 @@ impl Act {
             LaneAction::Stop => Self::Stop,
             LaneAction::Restart => Self::Restart,
             LaneAction::Update { .. } => Self::Update(to),
-            LaneAction::Return => Self::Return(to),
             LaneAction::Network { .. } => Self::NetworkAccess,
         }
     }
@@ -326,7 +322,6 @@ impl Act {
             Self::Stop => "stop",
             Self::Restart => "restart",
             Self::Update(_) => "update",
-            Self::Return(_) => "return to the previous version",
             Self::NetworkAccess => "Network Access change",
         }
     }
@@ -337,7 +332,6 @@ impl Act {
             Self::Stop => "stop",
             Self::Restart => "restart",
             Self::Update(_) => "update",
-            Self::Return(_) => "return to its previous version",
             Self::NetworkAccess => "change its Network Access",
         }
     }
@@ -483,7 +477,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
             detail: "Paired connections to it may end.".to_owned(),
             confirm: "Change".to_owned(),
         },
-        LaneAction::Update { .. } | LaneAction::Return => {
+        LaneAction::Update { .. } => {
             let unnamed = LaneVersion {
                 version: String::new(),
                 commit: String::new(),
@@ -491,28 +485,7 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
             };
             let from = effects.from.as_ref().unwrap_or(&unnamed);
             let to = effects.to.as_ref().unwrap_or(&unnamed);
-            let returning = effects.kind == Some(LaneUpdateKind::Return)
-                || preview.action == LaneAction::Return;
-            // A return names the version it returns to as the previous one.
-            let wording = if returning {
-                UpdateWording::for_machine(
-                    name,
-                    UpdateChange::Return,
-                    build(to),
-                    build(from),
-                    true,
-                    false,
-                )
-            } else {
-                UpdateWording::for_machine(
-                    name,
-                    UpdateChange::Update,
-                    build(from),
-                    build(to),
-                    true,
-                    false,
-                )
-            };
+            let wording = UpdateWording::for_machine(name, build(from), build(to), true, false);
             let (previous, candidate) = control::build_labels(build(from), build(to));
             let mut detail = format!(
                 "It changes from {previous} to {candidate}, replacing the running SpaceTerm Core. {ends} \
@@ -566,13 +539,6 @@ pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) 
             to.as_ref().map_or_else(
                 || format!("{name} updated."),
                 |to| format!("{name} updated to {to}."),
-            ),
-            CaptionTone::Guidance,
-        ),
-        Ended::Changed(Act::Return(to), Settlement::Done) => (
-            to.as_ref().map_or_else(
-                || format!("{name} returned to its previous version."),
-                |to| format!("{name} returned to {to}."),
             ),
             CaptionTone::Guidance,
         ),
@@ -735,7 +701,6 @@ impl SettingsWindow {
             Work::Performing(Act::Stop) => Some("Stopping\u{2026}"),
             Work::Performing(Act::Restart) => Some("Restarting\u{2026}"),
             Work::Performing(Act::Update(_)) => Some("Updating\u{2026}"),
-            Work::Performing(Act::Return(_)) => Some("Restoring\u{2026}"),
             // The card never performs a Network Access change.
             Work::Performing(Act::NetworkAccess) => None,
             Work::Preparing(Change::Update) => Some("Preparing\u{2026}"),
@@ -765,9 +730,6 @@ impl SettingsWindow {
             Work::Performing(Act::Restart) => "Restarting SpaceTerm Core\u{2026}".to_owned(),
             Work::Performing(Act::Update(to)) => {
                 named(to, "Updating to", "Updating SpaceTerm Core\u{2026}")
-            }
-            Work::Performing(Act::Return(to)) => {
-                named(to, "Restoring", "Restoring the previous version\u{2026}")
             }
             Work::Performing(Act::NetworkAccess) => return None,
             Work::Preparing(Change::Update) => named(

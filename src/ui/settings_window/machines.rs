@@ -520,11 +520,6 @@ fn failure(error: CoreError) -> (&'static str, &'static str, bool) {
             "settings-local-server-state-update-unfinished",
             true,
         ),
-        CoreError::ReturnUnavailable => (
-            "Update failed",
-            "settings-local-server-state-return-unavailable",
-            true,
-        ),
     }
 }
 

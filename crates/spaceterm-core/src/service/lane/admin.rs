@@ -1,6 +1,6 @@
 //! The administration steps every SpaceTerm Client shares over a server's service lane: settle
 //! the operations this identity left pending, read Status and the update check, preview Stop,
-//! Restart, Update, Return or a Network Access change, and execute a confirmed preview until it
+//! Restart, Update or a Network Access change, and execute a confirmed preview until it
 //! settles.
 //!
 //! The CLI and the desktop present each result their own way. Both take the same steps here, so
@@ -9,7 +9,7 @@ use super::client::{Lane, LaneError, Leftover, Outcome, Session, settle_leftover
 use super::network::{LaneNetworkEffects, NetworkAccess};
 use super::{
     LaneAction, LaneCheck, LaneEffects, LaneOperationState, LaneReceipt, LaneReply, LaneRequest,
-    LaneStatus, LaneUpdateKind, LaneVersion,
+    LaneStatus, LaneVersion,
 };
 use crate::CoreError;
 use crate::service::operations::OperationId;
@@ -23,7 +23,7 @@ pub const STAGE_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// How long a Stop is followed: until the server closes the lane.
 pub const STOP_WAIT: Duration = Duration::from_secs(90);
 /// How long any other action is followed: until it settles, or until a server that replaces
-/// itself, as Restart, Update and Return do, returns.
+/// itself, as Restart and Update do, returns.
 pub const RETURN_WAIT: Duration = Duration::from_secs(180);
 /// How long a Network Access change is followed. It covers the server's own
 /// [`super::network::LISTEN_LIMIT`] for the new listener, and a reconnect after it. One the new
@@ -213,36 +213,6 @@ pub fn preview_network(
     }
 }
 
-/// The return to the previous runtime the server offers, when its settled state allows one.
-pub fn probe_return(session: &mut Session) -> Result<Option<Preview>, LaneError> {
-    offered_return(session.request(
-        &LaneRequest::Preview {
-            action: LaneAction::Return,
-        },
-        Instant::now() + REQUEST_LIMIT,
-    ))
-}
-
-/// The return a server offers, from its reply to `Preview { Return }`. `return_unavailable`
-/// means no return applies, so an update proceeds.
-pub fn offered_return(reply: Result<LaneReply, CoreError>) -> Result<Option<Preview>, LaneError> {
-    match reply? {
-        LaneReply::Preview {
-            token,
-            expires_at,
-            effects,
-        } if effects.kind == Some(LaneUpdateKind::Return) => Ok(Some(Preview {
-            action: LaneAction::Return,
-            token,
-            expires_at,
-            effects,
-        })),
-        LaneReply::Error { code } if code == "return_unavailable" => Ok(None),
-        LaneReply::Error { code } => Err(LaneError::Code(code)),
-        _ => Err(LaneError::Core(CoreError::Protocol)),
-    }
-}
-
 /// Asks the server to fetch, verify and stage the newest signed release for itself.
 pub fn stage_fetch(session: &mut Session) -> Result<LaneVersion, LaneError> {
     let reply = session.call(&LaneRequest::StageFetch, Instant::now() + STAGE_LIMIT)?;
@@ -267,22 +237,15 @@ pub fn staged(reply: LaneReply) -> Result<LaneVersion, LaneError> {
 
 /// The change Update offers a running server.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UpdatePlan {
-    /// The settled state allows return to the previous runtime, which is offered instead.
-    Return(Preview),
+pub struct UpdatePlan {
     /// The server staged `candidate` from its signed release feed.
-    Update {
-        candidate: LaneVersion,
-        preview: Preview,
-    },
+    pub candidate: LaneVersion,
+    pub preview: Preview,
 }
 
-/// Prepares Update the way `spaceterm update` does without local files: a return the
-/// server offers comes first, otherwise the server stages its newest release and previews it.
+/// Prepares Update the way `spaceterm update` does without local files: the server stages its
+/// newest release and previews it.
 pub fn plan_update(session: &mut Session) -> Result<UpdatePlan, LaneError> {
-    if let Some(preview) = probe_return(session)? {
-        return Ok(UpdatePlan::Return(preview));
-    }
     let candidate = stage_fetch(session)?;
     let preview = preview(
         session,
@@ -290,7 +253,7 @@ pub fn plan_update(session: &mut Session) -> Result<UpdatePlan, LaneError> {
             installation: candidate.sha256.clone(),
         },
     )?;
-    Ok(UpdatePlan::Update { candidate, preview })
+    Ok(UpdatePlan { candidate, preview })
 }
 
 /// Executes a confirmed preview of any action and follows it under [`Lane::perform`]. The
@@ -368,49 +331,6 @@ pub fn verdict(outcome: &Outcome) -> Verdict {
 mod tests {
     use super::*;
 
-    fn effects(kind: LaneUpdateKind) -> LaneEffects {
-        LaneEffects {
-            ends_sessions: 0,
-            sessions: Vec::new(),
-            start_requires_machine: false,
-            from: None,
-            to: None,
-            kind: Some(kind),
-            to_major: None,
-        }
-    }
-
-    #[test]
-    fn a_running_core_offers_return_only_when_its_preview_is_a_return() {
-        let preview = |kind| {
-            Ok(LaneReply::Preview {
-                token: "c1-00".into(),
-                expires_at: "2026-10-30T12:10:00Z".into(),
-                effects: effects(kind),
-            })
-        };
-        assert!(matches!(
-            offered_return(preview(LaneUpdateKind::Return)),
-            Ok(Some(Preview { action: LaneAction::Return, token, .. })) if token == "c1-00"
-        ));
-        assert_eq!(
-            offered_return(Ok(LaneReply::Error {
-                code: "return_unavailable".into()
-            })),
-            Ok(None)
-        );
-        assert_eq!(
-            offered_return(Ok(LaneReply::Error {
-                code: "not_installed".into()
-            })),
-            Err(LaneError::Code("not_installed".into()))
-        );
-        assert_eq!(
-            offered_return(preview(LaneUpdateKind::Update)),
-            Err(LaneError::Core(CoreError::Protocol))
-        );
-    }
-
     fn receipt(state: LaneOperationState, code: Option<&str>) -> LaneReceipt {
         LaneReceipt {
             operation: "00".into(),
@@ -475,7 +395,6 @@ mod tests {
         assert!(NETWORK_WAIT >= super::super::network::LISTEN_LIMIT + Duration::from_secs(10));
         for action in [
             LaneAction::Restart,
-            LaneAction::Return,
             LaneAction::Update {
                 installation: "00".into(),
             },

@@ -48,7 +48,7 @@ fn update_preview(to_major: Option<u16>) -> Preview {
         LaneEffects {
             from: Some(version("1.2.0", "aaaaaaaaaa")),
             to: Some(version("1.3.0", "bbbbbbbbbb")),
-            kind: Some(LaneUpdateKind::Update),
+            kind: Some(spaceterm_core::service::lane::LaneUpdateKind::Update),
             to_major,
             ..effects(2)
         },
@@ -154,35 +154,6 @@ fn confirmation_detail(to_major: Option<u16>) -> String {
     confirmation("penguin", &update_preview(to_major)).detail
 }
 
-#[test]
-fn a_return_confirmation_names_the_version_it_returns_to() {
-    let returning = preview(
-        LaneAction::Return,
-        LaneEffects {
-            from: Some(version("1.3.0", "bbbbbbbbbb")),
-            to: Some(version("1.2.0", "aaaaaaaaaa")),
-            kind: Some(LaneUpdateKind::Return),
-            ..effects(0)
-        },
-    );
-    let confirmation = confirmation("penguin", &returning);
-
-    assert_eq!(confirmation.title, "Return to Previous Version");
-    assert_eq!(
-        confirmation.message,
-        "Return SpaceTerm Core on penguin to 1.2.0 (commit aaaaaaa)?"
-    );
-    assert_eq!(confirmation.confirm, "Return to 1.2.0 (commit aaaaaaa)");
-    assert!(
-        confirmation
-            .detail
-            .contains("No Terminal Sessions are running on it."),
-        "got {:?}",
-        confirmation.detail
-    );
-}
-
-/// The CLI contract's uncertain outcome reads as uncertain, never as success or failure.
 #[test]
 fn an_outcome_the_client_cannot_confirm_says_so() {
     let (stop, tone) = ended_message("penguin", &Ended::Changed(Act::Stop, Settlement::Shutdown));

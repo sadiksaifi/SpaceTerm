@@ -127,6 +127,8 @@ struct Record {
     check: UpdateCheck,
     /// The boot and Pending Version of the last silent restart, which is tried once.
     silent: Option<Attempt>,
+    /// The activation whose start failure was recorded last, so it is recorded once.
+    activation: Option<[u8; 32]>,
 }
 
 impl Default for Record {
@@ -138,6 +140,7 @@ impl Default for Record {
             failures: 0,
             check: UpdateCheck::Never,
             silent: None,
+            activation: None,
         }
     }
 }
@@ -163,11 +166,15 @@ fn load(data: &Directory) -> Result<Record, CoreError> {
         .unwrap_or_default())
 }
 
+/// Edits the update record under its lock, writing it only when it changed.
 fn change<T>(data: &Directory, edit: impl FnOnce(&mut Record) -> T) -> Result<T, CoreError> {
     let _lock = data.lock(LOCK, false)?;
-    let mut record = load(data)?;
+    let before = load(data)?;
+    let mut record = before.clone();
     let result = edit(&mut record);
-    data.write_json(RECORD, &record)?;
+    if record != before {
+        data.write_json(RECORD, &record)?;
+    }
     Ok(result)
 }
 
@@ -203,12 +210,17 @@ pub(in crate::service) fn record_completed(
 /// version. A version that is not ready is skipped; a transient failure keeps it pending.
 pub(in crate::service) fn record_start_failure(
     data: &Directory,
+    activation: [u8; 32],
     candidate: &str,
     version: &str,
     failure: StartFailure,
 ) -> Result<(), CoreError> {
     let version = Version::parse(version).map_err(|_| CoreError::UnsafeStorage)?;
     change(data, |record| {
+        if record.activation == Some(activation) {
+            return;
+        }
+        record.activation = Some(activation);
         record.failures += 1;
         record.last_failure = Some(UpdateFailure {
             id: record.failures,

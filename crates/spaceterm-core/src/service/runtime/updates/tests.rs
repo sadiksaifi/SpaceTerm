@@ -349,7 +349,7 @@ fn a_version_that_never_became_ready_is_skipped_and_a_transient_failure_stays_pe
         )
         .unwrap();
         let digest = pending_digest(&data).unwrap().unwrap();
-        record_start_failure(&data, &digest, "1.1.0", StartFailure::PortInUse).unwrap();
+        record_start_failure(&data, [1; 32], &digest, "1.1.0", StartFailure::PortInUse).unwrap();
         let facts = Updates::stored(&machine.service).unwrap();
         assert_eq!(facts.pending.unwrap().version, version("1.1.0"));
         assert_eq!(facts.skipped, None);
@@ -357,7 +357,7 @@ fn a_version_that_never_became_ready_is_skipped_and_a_transient_failure_stays_pe
             facts.last_failure.as_ref().map(|f| (f.id, f.kind)),
             Some((1, FailureKind::Start(StartFailure::PortInUse)))
         );
-        record_start_failure(&data, &digest, "1.1.0", StartFailure::NotReady).unwrap();
+        record_start_failure(&data, [2; 32], &digest, "1.1.0", StartFailure::NotReady).unwrap();
         let updates = Updates::open(machine.service.clone()).unwrap();
         let facts = updates.facts();
         assert_eq!(facts.pending, None);

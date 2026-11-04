@@ -62,8 +62,6 @@ pub enum CoreError {
         "SpaceTerm couldn\u{2019}t confirm whether the SpaceTerm Core update finished. Check the update in Machine Settings."
     )]
     ActivationUnresolved,
-    #[error("SpaceTerm can\u{2019}t safely restore the previous SpaceTerm Core version.")]
-    ReturnUnavailable,
     #[error("Couldn\u{2019}t verify this SpaceTerm Core package.")]
     RuntimeUnavailable,
     /// This build includes no server package to verify. Distinct from a package that failed

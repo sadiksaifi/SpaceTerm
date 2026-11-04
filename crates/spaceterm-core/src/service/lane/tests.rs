@@ -705,19 +705,6 @@ fn a_confirmed_stop_is_admitted_once_behind_the_fence() {
 }
 
 #[test]
-fn a_running_core_without_a_failed_activation_offers_no_return() {
-    with_lane(|lane| {
-        let reply = lane.lane.answer(
-            LaneRequest::Preview {
-                action: LaneAction::Return,
-            },
-            &ACTOR,
-        );
-        assert_eq!(code(reply), "return_unavailable");
-    });
-}
-
-#[test]
 fn a_spent_foreign_or_changed_observation_token_is_refused_as_changed() {
     with_lane(|lane| {
         let (token, _) = preview(&lane.lane, LaneAction::Restart);
@@ -1713,9 +1700,7 @@ mod flow {
             assert!(check.staged.is_empty(), "the check stages nothing");
 
             let plan = admin::plan_update(&mut session).unwrap();
-            let UpdatePlan::Update { candidate, preview } = plan else {
-                panic!("expected an update, got {plan:?}");
-            };
+            let UpdatePlan { candidate, preview } = plan;
             assert_eq!(candidate.sha256, latest.sha256);
             assert_eq!(candidate.version, VERSION);
             assert_eq!(

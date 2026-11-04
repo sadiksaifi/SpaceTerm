@@ -89,7 +89,6 @@ fn perform(identity: &str, record: &Record) -> Result<State, CoreError> {
             };
             service.activate(approval)?.phase
         }
-        Action::Return => service.return_to_previous(service.prepare_return()?)?.phase,
         // The lane applies Network Access changes itself and never launches a helper for one.
         Action::Network(_) => return Err(CoreError::Unsupported),
     };
@@ -101,7 +100,7 @@ pub(crate) fn activation_outcome(phase: super::activation::ActivationPhase) -> S
     use super::activation::ActivationPhase;
     match phase {
         ActivationPhase::Completed { .. } => State::Done,
-        ActivationPhase::Failed { .. } => State::Failed {
+        ActivationPhase::Returned { .. } => State::Failed {
             code: "startup_failed".to_owned(),
         },
         ActivationPhase::Activating | ActivationPhase::Uncertain => State::Unresolved,

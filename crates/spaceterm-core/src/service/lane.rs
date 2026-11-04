@@ -5,7 +5,7 @@
 //! frame is length-prefixed JSON of at most [`MAX_FRAME`] bytes. Fields may be added to these
 //! messages. They are never removed or renamed.
 //!
-//! Stop, Restart, Update, Return and Network Access changes run in two steps. `Preview` observes the service, the live
+//! Stop, Restart, Update and Network Access changes run in two steps. `Preview` observes the service, the live
 //! Session set and the candidate, and returns a token bound to that observation. `Execute`
 //! recomputes the observation under the hierarchy lock, sets the membership fence so no new
 //! Session starts, admits the operation in the ledger and launches the helper that performs it.
@@ -131,7 +131,6 @@ pub enum LaneAction {
     Stop,
     Restart,
     Update { installation: String },
-    Return,
     Network { access: NetworkAccess },
 }
 
@@ -274,7 +273,6 @@ pub struct LaneCheck {
 #[serde(rename_all = "snake_case")]
 pub enum LaneUpdateKind {
     Update,
-    Return,
 }
 
 /// Mirrors the confirmation `effects` of `server.stop`, `server.restart` and `server.update`.
@@ -970,7 +968,6 @@ impl LaneCore {
                 LaneAction::Stop => Action::Stop,
                 LaneAction::Restart => Action::Restart,
                 LaneAction::Update { .. } => Action::Update,
-                LaneAction::Return => Action::Return,
                 LaneAction::Network { .. } => return Err(CoreError::Protocol),
             },
             observation_digest: expected,
@@ -1093,7 +1090,6 @@ impl LaneCore {
                         .map(|v| hex(v))
                         .unwrap_or_default(),
                 },
-                Action::Return => LaneAction::Return,
                 Action::Network(access) => LaneAction::Network { access },
             },
             state,
@@ -1307,16 +1303,6 @@ impl Admin<'_> {
                 effects.to_major = protocol_major(approval.candidate());
                 (approval.running(), Some(digest_bytes(installation)?))
             }
-            LaneAction::Return => {
-                let approval = self.service.prepare_return()?;
-                digest.update(approval.confirmation_token()?.as_bytes());
-                // Return activates the previous runtime, and the candidate stays retained.
-                effects.from = Some(version_of(approval.candidate()));
-                effects.to = Some(version_of(approval.previous()));
-                effects.kind = Some(LaneUpdateKind::Return);
-                effects.to_major = protocol_major(approval.previous());
-                (false, None)
-            }
             LaneAction::Network { .. } => return Err(CoreError::Unsupported),
         };
         Ok(Prepared {
@@ -1468,7 +1454,6 @@ impl Evidence for Journal {
             Action::Update if digest(&status.candidate) == record.candidate => {
                 Some(super::helper::activation_outcome(status.phase))
             }
-            Action::Return if status.returned => Some(State::Done),
             _ => None,
         })
     }

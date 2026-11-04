@@ -139,6 +139,11 @@ trait Supervisor: Send + Sync {
     /// How long Stop waits for the server to exit. Restart and Update stop through the same wait.
     /// A server still running afterwards leaves the operation unresolved.
     fn stop_timeout(&self) -> Duration;
+    /// How long a started Pending Version has to become ready before the Core returns to the
+    /// previous version.
+    fn ready_deadline(&self) -> Duration {
+        Duration::from_secs(60)
+    }
     /// Change startup activation only. Never stop, start or unregister the service.
     fn set_automatic_start(&self, enabled: bool) -> Result<(), CoreError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), CoreError>;
@@ -615,11 +620,22 @@ impl Service {
             .and_then(|()| self.supervisor.set_automatic_start(state.automatic_start))
             .and_then(|()| self.wait_running(true));
         if result.is_err() {
-            let _intent = data.lock("service-intent.lock", false)?;
-            let mut latest = Self::state(data)?.ok_or(CoreError::StorageUnavailable)?;
-            if let Some(operation) = latest.activation.as_mut() {
-                operation.startup_failed();
-                data.write_json(c"service.json", &latest)?;
+            let returning = {
+                let _intent = data.lock("service-intent.lock", false)?;
+                let mut latest = Self::state(data)?.ok_or(CoreError::StorageUnavailable)?;
+                let returning = latest
+                    .activation
+                    .as_mut()
+                    .is_some_and(|operation| operation.startup_failed(latest.stopped));
+                if returning {
+                    data.write_json(c"service.json", &latest)?;
+                }
+                returning
+            };
+            // A stopped update's candidate failed its first start: return to the previous
+            // version now, as the helper does after a failed restart.
+            if returning {
+                let _ = self.resume_activation(data);
             }
         }
         result

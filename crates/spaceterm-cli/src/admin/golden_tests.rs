@@ -307,26 +307,6 @@ fn an_update_preview_warns_when_the_candidate_has_another_protocol_major() {
 }
 
 #[test]
-fn a_return_preview_on_the_machine_itself_ends_no_sessions() {
-    let envelope = update::preview_envelope(
-        local(),
-        format!("c1-{}", "ef".repeat(32)),
-        EXPIRES.into(),
-        UpdateEffects {
-            from: version("0.8.0", 'b'),
-            to: version("0.7.0", 'a'),
-            kind: UpdateKind::Return,
-            ends_sessions: 0,
-            sessions: Vec::new(),
-        },
-        None,
-        Vec::new(),
-    );
-    assert_exit(&envelope, 3);
-    assert_golden("update_return_preview", &envelope);
-}
-
-#[test]
 fn a_settled_update_reports_its_receipt_and_version() {
     let settled = lifecycle::settle(
         ServiceAction::Update,
@@ -492,18 +472,18 @@ fn pair_without_a_terminal_needs_interaction() {
 #[test]
 fn receipts_keep_the_lane_state_and_code() {
     let receipt = lifecycle::receipt_of(&receipt(
-        LaneAction::Return,
+        LaneAction::Restart,
         LaneOperationState::Failed,
-        Some("return_unavailable"),
+        Some("startup_failed"),
         BOOT,
     ));
     assert_eq!(
         receipt,
         Receipt {
             operation: OPERATION.into(),
-            action: ServiceAction::Return,
+            action: ServiceAction::Restart,
             state: ReceiptState::Failed,
-            code: Some(Code::ReturnUnavailable),
+            code: Some(Code::StartupFailed),
             boot: BOOT.into(),
         }
     );

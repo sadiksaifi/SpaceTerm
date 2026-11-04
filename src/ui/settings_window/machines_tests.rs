@@ -74,7 +74,6 @@ core_error_cases! {
     Stopped => (false, Guidance),
     Changed => (true, Error),
     ActivationUnresolved => (true, Guidance),
-    ReturnUnavailable => (true, Error),
     RuntimeUnavailable => (true, Error),
     CandidateMissing => (false, Error),
     AuthorizationRequired => (false, Guidance),

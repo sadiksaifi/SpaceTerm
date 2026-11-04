@@ -18,6 +18,48 @@ struct SupervisorFixture {
     exits_at: Mutex<Option<Instant>>,
     /// When the last Start was dispatched. Activation holds the service lock meanwhile.
     started_at: Mutex<Option<Instant>>,
+    /// The account whose server this fixture's Start runs.
+    paths: Mutex<Option<Paths>>,
+    /// Runtimes whose Start runs a server that becomes ready, as its own run records it.
+    ready: Mutex<Vec<PathBuf>>,
+    /// Runtimes whose Start runs a server that never becomes ready.
+    hangs: Mutex<Vec<PathBuf>>,
+    /// Every runtime a Start was dispatched for, in order.
+    started: Mutex<Vec<PathBuf>>,
+    /// What a server that never becomes ready changes in the retained state meanwhile.
+    meddles: Mutex<Option<Box<dyn FnMut(&Directory) + Send>>>,
+}
+impl SupervisorFixture {
+    /// The server's own run: it admits itself into the service state, then marks readiness.
+    fn serve(&self, ready: bool) {
+        let paths = self.paths.lock().unwrap().clone().unwrap();
+        let data = Directory::open(&paths.data, false).unwrap();
+        {
+            let _intent = data.lock("service-intent.lock", false).unwrap();
+            let mut state = Service::state(&data).unwrap().unwrap();
+            let run = Run {
+                boot: boot().unwrap(),
+                token: crate::protocol::random().unwrap(),
+            };
+            admit_run(&mut state, &run).unwrap();
+            state.run = Some(run);
+            data.write_json(c"service.json", &state).unwrap();
+        }
+        if ready {
+            super::ready(&paths).unwrap();
+        } else if let Some(meddle) = self.meddles.lock().unwrap().as_mut() {
+            meddle(&data);
+        }
+    }
+    /// The server exited, and its run recorded that it ended, as `service::run` does.
+    fn exited(&self) {
+        let paths = self.paths.lock().unwrap().clone().unwrap();
+        let data = Directory::open(&paths.data, false).unwrap();
+        let _intent = data.lock("service-intent.lock", false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        state.run = None;
+        data.write_json(c"service.json", &state).unwrap();
+    }
 }
 /// How long this fixture's service manager lets a stopping server finish.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -41,7 +83,18 @@ impl Supervisor for SupervisorFixture {
     fn start(&self) -> Result<(), CoreError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         *self.started_at.lock().unwrap() = Some(Instant::now());
-        Err(CoreError::StartupFailed)
+        let runtime = self.approved.lock().unwrap().clone();
+        self.started.lock().unwrap().push(runtime.clone());
+        let ready = self.ready.lock().unwrap().contains(&runtime);
+        if !ready && !self.hangs.lock().unwrap().contains(&runtime) {
+            return Err(CoreError::StartupFailed);
+        }
+        self.running.store(true, Ordering::SeqCst);
+        self.serve(ready);
+        Ok(())
+    }
+    fn ready_deadline(&self) -> Duration {
+        Duration::from_secs(1)
     }
     fn set_automatic_start(&self, enabled: bool) -> Result<(), CoreError> {
         self.automatic_start.store(enabled, Ordering::SeqCst);
@@ -55,7 +108,12 @@ impl Supervisor for SupervisorFixture {
         }
         match *self.stop_takes.lock().unwrap() {
             Some(takes) => *self.exits_at.lock().unwrap() = Some(Instant::now() + takes),
-            None => self.running.store(false, Ordering::SeqCst),
+            None => {
+                self.running.store(false, Ordering::SeqCst);
+                if self.paths.lock().unwrap().is_some() {
+                    self.exited();
+                }
+            }
         }
         Ok(())
     }
@@ -120,6 +178,11 @@ fn with_service_identity(
                 stop_takes: Mutex::new(None),
                 exits_at: Mutex::new(None),
                 started_at: Mutex::new(None),
+                paths: Mutex::new(None),
+                ready: Mutex::new(Vec::new()),
+                hangs: Mutex::new(Vec::new()),
+                started: Mutex::new(Vec::new()),
+                meddles: Mutex::new(None),
             });
             let service = Service::new(
                 fixture.paths.clone(),
@@ -332,7 +395,7 @@ fn interrupted(
     let new = Build::from_installation(candidate).unwrap();
     state.installation = if matches!(
         step,
-        Step::Approved | Step::StartDispatched | Step::Completed | Step::ReturnAdmitted
+        Step::Approved | Step::StartDispatched | Step::Completed
     ) {
         new.digest.clone()
     } else {
@@ -351,19 +414,17 @@ fn interrupted(
         saved: if matches!(step, Step::Admitted | Step::StopDispatched) {
             None
         } else {
-            Some(saved_state(&data).unwrap())
+            Some(take_snapshot(&data).unwrap())
         },
+        started_at: None,
         ready: false,
         failed: false,
+        failure: None,
     });
     data.write_json(c"service.json", &state).unwrap();
     *supervisor.approved.lock().unwrap() = if matches!(
         step,
-        Step::RegistrationReplaced
-            | Step::Approved
-            | Step::StartDispatched
-            | Step::Completed
-            | Step::ReturnAdmitted
+        Step::RegistrationReplaced | Step::Approved | Step::StartDispatched | Step::Completed
     ) {
         candidate.directory.clone()
     } else {
@@ -472,8 +533,14 @@ fn stop_dispatch_gap_refuses_repeated_dispatch_and_ordinary_lifecycle_consent() 
 }
 
 #[test]
-fn admitted_running_operation_stops_once_and_failed_start_is_never_redispatched() {
+fn admitted_running_operation_stops_once_and_a_refused_start_returns_without_redispatch() {
     with_service(|service, previous, candidate, supervisor| {
+        *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(previous.directory.clone());
         let id = interrupted(
             &service,
             &previous,
@@ -483,31 +550,24 @@ fn admitted_running_operation_stops_once_and_failed_start_is_never_redispatched(
             false,
         );
         supervisor.running.store(true, Ordering::SeqCst);
-        assert_eq!(service.recover_activation(), Err(CoreError::StartupFailed));
-        assert_eq!(
-            (
-                supervisor.stops.load(Ordering::SeqCst),
-                supervisor.starts.load(Ordering::SeqCst)
-            ),
-            (1, 1)
-        );
-        let status = service.activation_status().unwrap().unwrap();
+        let status = service.recover_activation().unwrap().unwrap();
         assert_eq!(
             (status.operation, status.phase),
-            (id, ActivationPhase::Failed { can_return: true })
-        );
-        assert_eq!(
-            service.recover_activation(),
-            Err(CoreError::ActivationUnresolved)
-        );
-        assert_eq!(
             (
-                supervisor.stops.load(Ordering::SeqCst),
-                supervisor.starts.load(Ordering::SeqCst)
-            ),
-            (1, 1)
+                id,
+                ActivationPhase::Returned {
+                    failure: StartFailure::NotReady,
+                    running: true
+                }
+            )
         );
-        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+        service.recover_activation().unwrap();
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *supervisor.started.lock().unwrap(),
+            [candidate.directory.clone(), previous.directory.clone()]
+        );
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
     });
 }
 
@@ -519,18 +579,18 @@ fn update_waits_for_a_slow_stop_within_the_service_managers_timeout() {
         set_running(&service, &supervisor);
         *supervisor.stop_takes.lock().unwrap() = Some(STOP_TIMEOUT * 3 / 4);
         let approval = service.prepare_activation(&candidate).unwrap().unwrap();
-        // The fixture's Start always fails, so reaching it proves the stop was confirmed.
+        // The fixture's Start fails, so reaching it proves the stop was confirmed. The return
+        // then starts the previous version, whose Start fails as well.
         assert_eq!(service.activate(approval), Err(CoreError::StartupFailed));
         let status = service.activation_status().unwrap().unwrap();
-        assert_eq!(status.phase, ActivationPhase::Failed { can_return: true });
+        assert_eq!(status.phase, ActivationPhase::Uncertain);
         assert_eq!(
             (
                 supervisor.stops.load(Ordering::SeqCst),
-                supervisor.starts.load(Ordering::SeqCst)
+                *supervisor.started.lock().unwrap().first().unwrap() == candidate.directory
             ),
-            (1, 1)
+            (1, true)
         );
-        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
     });
 }
 
@@ -561,15 +621,13 @@ fn stop_past_the_service_managers_timeout_stays_recoverable_without_another_stop
         );
 
         *supervisor.exits_at.lock().unwrap() = Some(Instant::now());
+        // The candidate's Start fails, and so does the previous version's after the return.
         assert_eq!(service.recover_activation(), Err(CoreError::StartupFailed));
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 1);
         assert_eq!(
-            (
-                supervisor.stops.load(Ordering::SeqCst),
-                supervisor.starts.load(Ordering::SeqCst)
-            ),
-            (1, 1)
+            *supervisor.started.lock().unwrap(),
+            [candidate.directory.clone(), previous.directory.clone()]
         );
-        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
     });
 }
 
@@ -675,150 +733,6 @@ fn published_registration_with_failed_reload_resumes_only_the_same_candidate() {
 }
 
 #[test]
-fn explicit_return_requires_never_ready_and_unchanged_saved_state_and_stays_stopped() {
-    with_service(|service, previous, candidate, supervisor| {
-        let id = interrupted(
-            &service,
-            &previous,
-            &candidate,
-            &supervisor,
-            Step::StartDispatched,
-            false,
-        );
-        assert_eq!(
-            service.recover_activation(),
-            Err(CoreError::ActivationUnresolved)
-        );
-        assert_eq!(supervisor.starts.load(Ordering::SeqCst), 0);
-        let before = std::fs::read(service.paths.data.join("identity.json")).unwrap();
-        let approval = service.prepare_return().unwrap();
-        let status = service.return_to_previous(approval).unwrap();
-        assert!(status.returned && status.stopped);
-        assert_eq!(status.operation, id);
-        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
-        assert_eq!(
-            service.passive_status(),
-            Ok(ServiceStatus {
-                installed: true,
-                stopped: true,
-                enabled: true,
-                running: false,
-            }),
-            "a completed return settles the failed candidate without another recovery"
-        );
-        assert_eq!(
-            service.status().unwrap(),
-            ServiceStatus {
-                installed: true,
-                stopped: true,
-                enabled: true,
-                running: false
-            }
-        );
-        assert_eq!(
-            before,
-            std::fs::read(service.paths.data.join("identity.json")).unwrap()
-        );
-    });
-}
-
-#[test]
-fn candidate_state_mutation_refuses_return_without_restoring_a_snapshot() {
-    with_service(|service, previous, candidate, supervisor| {
-        interrupted(
-            &service,
-            &previous,
-            &candidate,
-            &supervisor,
-            Step::StartDispatched,
-            false,
-        );
-        let data = Directory::open(&service.paths.data, false).unwrap();
-        let mut record = data.read().unwrap();
-        record.organization = Some(
-            crate::hierarchy::State::first("/".as_ref())
-                .unwrap()
-                .envelope(),
-        );
-        data.write(&record).unwrap();
-        let newer = std::fs::read(service.paths.data.join("identity.json")).unwrap();
-        assert!(matches!(
-            service.prepare_return(),
-            Err(CoreError::ReturnUnavailable)
-        ));
-        assert_eq!(
-            service.activation_status().unwrap().unwrap().phase,
-            ActivationPhase::Failed { can_return: false }
-        );
-        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
-        assert_eq!(
-            newer,
-            std::fs::read(service.paths.data.join("identity.json")).unwrap()
-        );
-    });
-}
-
-#[test]
-fn changed_direct_policy_refuses_return_and_preserves_the_current_machine_credentials() {
-    with_service(|service, previous, candidate, supervisor| {
-        let direct = crate::direct::host::State::open(&service.paths).unwrap();
-        drop(direct);
-        interrupted(
-            &service,
-            &previous,
-            &candidate,
-            &supervisor,
-            Step::StartDispatched,
-            false,
-        );
-        let data = Directory::open(&service.paths.data, false).unwrap();
-        let mut direct: serde_json::Value = data.read_json("direct.json").unwrap().unwrap();
-        direct["policy"] = serde_json::json!({"bind":"127.0.0.1:9231"});
-        data.write_json(c"direct.json", &direct).unwrap();
-        let retained = std::fs::read(service.paths.data.join("direct.json")).unwrap();
-        assert!(matches!(
-            service.prepare_return(),
-            Err(CoreError::ReturnUnavailable)
-        ));
-        assert_eq!(
-            service.activation_status().unwrap().unwrap().phase,
-            ActivationPhase::Failed { can_return: false }
-        );
-        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
-        assert!(
-            retained == std::fs::read(service.paths.data.join("direct.json")).unwrap(),
-            "a refused return must preserve exact current direct state"
-        );
-    });
-}
-
-#[test]
-fn creating_a_direct_document_distinguishes_absence_from_a_present_json_null_before_return() {
-    with_service(|service, previous, candidate, supervisor| {
-        interrupted(
-            &service,
-            &previous,
-            &candidate,
-            &supervisor,
-            Step::StartDispatched,
-            false,
-        );
-        let data = Directory::open(&service.paths.data, false).unwrap();
-        data.write_json(c"direct.json", &serde_json::Value::Null)
-            .unwrap();
-        assert!(matches!(
-            service.prepare_return(),
-            Err(CoreError::ReturnUnavailable)
-        ));
-        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
-        assert_eq!(
-            data.read_json::<serde_json::Value>("direct.json").unwrap(),
-            Some(serde_json::Value::Null)
-        );
-    });
-}
-
-#[test]
 fn readiness_and_lost_reply_never_repeat_dispatch_or_offer_return() {
     with_service(|service, previous, candidate, supervisor| {
         let id = interrupted(
@@ -845,10 +759,6 @@ fn readiness_and_lost_reply_never_repeat_dispatch_or_offer_return() {
             (status.operation, status.phase),
             (id, ActivationPhase::Completed { running: true })
         );
-        assert!(matches!(
-            service.prepare_return(),
-            Err(CoreError::ReturnUnavailable)
-        ));
         assert_eq!(
             (
                 supervisor.stops.load(Ordering::SeqCst),
@@ -888,11 +798,19 @@ fn failed_candidate_never_reexecutes_even_after_a_simulated_boot_change() {
             admit_run(&mut recovered, &retry),
             Err(CoreError::ActivationUnresolved)
         );
+        *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(previous.directory.clone());
+        let status = service.recover_activation().unwrap().unwrap();
+        assert!(matches!(status.phase, ActivationPhase::Returned { .. }));
         assert_eq!(
-            service.recover_activation(),
-            Err(CoreError::ActivationUnresolved)
+            *supervisor.started.lock().unwrap(),
+            [previous.directory.clone()],
+            "the candidate never starts again"
         );
-        assert_eq!(supervisor.starts.load(Ordering::SeqCst), 0);
     });
 }
 
@@ -1051,18 +969,24 @@ fn released_version_order_refuses_downgrades_without_inventing_development_order
 }
 
 #[test]
-fn a_stopped_update_tracks_its_later_first_start_failure_before_offering_safe_return() {
-    with_service(|service, previous, candidate, _| {
+fn a_stopped_updates_failed_first_start_returns_to_the_previous_version() {
+    with_service(|service, previous, candidate, supervisor| {
+        *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(previous.directory.clone());
         let approval = service.prepare_activation(&candidate).unwrap().unwrap();
         service.activate(approval).unwrap();
         assert_eq!(service.start(), Err(CoreError::StartupFailed));
         assert_eq!(
             service.activation_status().unwrap().unwrap().phase,
-            ActivationPhase::Failed { can_return: true }
+            ActivationPhase::Returned {
+                failure: StartFailure::NotReady,
+                running: true
+            }
         );
-        let approval = service.prepare_return().unwrap();
-        service.return_to_previous(approval).unwrap();
-        assert!(service.status().unwrap().stopped);
         let data = Directory::open(&service.paths.data, false).unwrap();
         assert_eq!(
             service.runtime(&Service::state(&data).unwrap().unwrap()),
@@ -1072,7 +996,7 @@ fn a_stopped_update_tracks_its_later_first_start_failure_before_offering_safe_re
 }
 
 #[test]
-fn returning_after_a_stopped_update_is_unavailable_once_its_first_start_reaches_ready() {
+fn a_stopped_updates_first_start_that_reaches_ready_completes_it() {
     with_service(|service, _, candidate, supervisor| {
         let approval = service.prepare_activation(&candidate).unwrap().unwrap();
         service.activate(approval).unwrap();
@@ -1088,13 +1012,138 @@ fn returning_after_a_stopped_update_is_unavailable_once_its_first_start_reaches_
         data.write_json(c"service.json", &state).unwrap();
         ready(&service.paths).unwrap();
         supervisor.running.store(true, Ordering::SeqCst);
-        assert!(matches!(
-            service.prepare_return(),
-            Err(CoreError::ReturnUnavailable)
-        ));
         assert_eq!(
             service.activation_status().unwrap().unwrap().phase,
             ActivationPhase::Completed { running: true }
         );
+    });
+}
+
+/// Runs the update from a running previous version whose own Start becomes ready again.
+fn update_running(
+    service: &Service,
+    previous: &RetainedInstallation,
+    candidate: &RetainedInstallation,
+    supervisor: &SupervisorFixture,
+) -> Result<ActivationStatus, CoreError> {
+    *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+    supervisor
+        .ready
+        .lock()
+        .unwrap()
+        .push(previous.directory.clone());
+    set_running(service, supervisor);
+    let approval = service.prepare_activation(candidate).unwrap().unwrap();
+    service.activate(approval)
+}
+
+fn update_facts(service: &Service) -> crate::update::facts::UpdateFacts {
+    runtime::updates::Updates::stored(service).unwrap()
+}
+
+#[test]
+fn a_candidate_that_never_becomes_ready_returns_with_the_retained_state_it_changed_restored() {
+    with_service(|service, previous, candidate, supervisor| {
+        let identity = std::fs::read(service.paths.data.join("identity.json")).unwrap();
+        supervisor
+            .hangs
+            .lock()
+            .unwrap()
+            .push(candidate.directory.clone());
+        // The candidate rewrites the organization and creates direct state, then hangs.
+        *supervisor.meddles.lock().unwrap() = Some(Box::new(|data: &Directory| {
+            let mut record = data.read().unwrap();
+            record.organization = Some(
+                crate::hierarchy::State::first("/".as_ref())
+                    .unwrap()
+                    .envelope(),
+            );
+            data.write(&record).unwrap();
+            data.write_json(c"direct.json", &serde_json::Value::Null)
+                .unwrap();
+        }));
+        let status = update_running(&service, &previous, &candidate, &supervisor).unwrap();
+        assert_eq!(
+            status.phase,
+            ActivationPhase::Returned {
+                failure: StartFailure::NotReady,
+                running: true
+            }
+        );
+        assert_eq!(
+            std::fs::read(service.paths.data.join("identity.json")).unwrap(),
+            identity
+        );
+        assert!(!service.paths.data.join("direct.json").exists());
+        for (_, copy) in SNAPSHOT {
+            assert!(!service.paths.data.join(copy.to_str().unwrap()).exists());
+        }
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 2);
+        let facts = update_facts(&service);
+        let version = crate::update::facts::Version::parse(&candidate.version).unwrap();
+        assert_eq!(facts.skipped, Some(version.clone()));
+        let failure = facts.last_failure.unwrap();
+        assert_eq!(
+            (failure.version, failure.kind),
+            (
+                version,
+                crate::update::facts::FailureKind::Start(StartFailure::NotReady)
+            )
+        );
+    });
+}
+
+#[test]
+fn a_port_another_program_holds_is_a_transient_failure_that_skips_nothing() {
+    with_service(|service, previous, candidate, supervisor| {
+        let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        drop(crate::direct::host::State::open(&service.paths).unwrap());
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let mut direct: serde_json::Value = data.read_json("direct.json").unwrap().unwrap();
+        direct["policy"] = serde_json::json!({"bind": held.local_addr().unwrap()});
+        direct["enabled"] = true.into();
+        data.write_json(c"direct.json", &direct).unwrap();
+        supervisor
+            .hangs
+            .lock()
+            .unwrap()
+            .push(candidate.directory.clone());
+        let status = update_running(&service, &previous, &candidate, &supervisor).unwrap();
+        assert_eq!(
+            status.phase,
+            ActivationPhase::Returned {
+                failure: StartFailure::PortInUse,
+                running: true
+            }
+        );
+        let facts = update_facts(&service);
+        assert_eq!(facts.skipped, None);
+        assert_eq!(
+            facts.last_failure.map(|failure| failure.kind),
+            Some(crate::update::facts::FailureKind::Start(
+                StartFailure::PortInUse
+            ))
+        );
+    });
+}
+
+#[test]
+fn a_candidate_that_becomes_ready_completes_and_drops_its_snapshot() {
+    with_service(|service, previous, candidate, supervisor| {
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(candidate.directory.clone());
+        let status = update_running(&service, &previous, &candidate, &supervisor).unwrap();
+        assert_eq!(status.phase, ActivationPhase::Completed { running: true });
+        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+        assert_eq!(supervisor.starts.load(Ordering::SeqCst), 1);
+        for (_, copy) in SNAPSHOT {
+            assert!(!service.paths.data.join(copy.to_str().unwrap()).exists());
+        }
+        let facts = update_facts(&service);
+        assert_eq!((facts.skipped, facts.last_failure), (None, None));
     });
 }

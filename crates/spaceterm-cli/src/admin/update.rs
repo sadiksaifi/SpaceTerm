@@ -17,8 +17,7 @@ use spaceterm_core::service::activation::{ActivationPhase, ActivationStatus};
 use spaceterm_core::service::lane::admin;
 use spaceterm_core::service::lane::client::within;
 use spaceterm_core::service::lane::{
-    LaneAction, LaneEffects, LaneReply, LaneRequest, LaneUpdateKind, LaneVersion, MAX_CHUNK,
-    Offline,
+    LaneAction, LaneEffects, LaneReply, LaneRequest, LaneVersion, MAX_CHUNK, Offline,
 };
 use spaceterm_core::service::{RetainedInstallation, Service};
 use std::io::Read;
@@ -140,43 +139,6 @@ fn running(
             Err(error) => fail(super::lane_failure(error), opened.recovered),
         };
     }
-    // When the settled state allows return to the previous runtime, the return is the offered
-    // action instead of an update.
-    match admin::probe_return(&mut opened.session) {
-        Ok(Some(admin::Preview {
-            token: token_now,
-            expires_at,
-            effects,
-            ..
-        })) => {
-            let Some(to) = effects.to.as_ref().map(version) else {
-                return fail(Failure::new(Code::ProtocolError), opened.recovered);
-            };
-            return match token {
-                None => preview(
-                    context,
-                    routed,
-                    opened,
-                    pending,
-                    (LaneAction::Return, to),
-                    token_now,
-                    expires_at,
-                    &effects,
-                ),
-                Some(given) => execute(
-                    context,
-                    routed,
-                    opened,
-                    pending,
-                    LaneAction::Return,
-                    given.to_owned(),
-                    to,
-                ),
-            };
-        }
-        Ok(None) => {}
-        Err(error) => return fail(super::lane_failure(error), opened.recovered),
-    }
     // Stage the candidate. Local files stage directly on this machine; a remote server
     // receives them over the lane.
     let staged = match files {
@@ -248,10 +210,7 @@ fn preview(
     let data = UpdateEffects {
         from: version(from),
         to: version(to),
-        kind: match effects.kind {
-            Some(LaneUpdateKind::Return) => UpdateKind::Return,
-            _ => UpdateKind::Update,
-        },
+        kind: UpdateKind::Update,
         ends_sessions: effects.ends_sessions,
         sessions: effects.sessions.clone(),
     };
@@ -329,16 +288,10 @@ fn major_warning(to_major: Option<u16>) -> Option<Warning> {
 }
 
 fn summary(machine: &str, effects: &UpdateEffects) -> String {
-    let change = match effects.kind {
-        UpdateKind::Update => format!(
-            "Update SpaceTerm Core on {machine} from {} to {}?",
-            effects.from.version, effects.to.version
-        ),
-        UpdateKind::Return => format!(
-            "Return SpaceTerm Core on {machine} from {} to {}?",
-            effects.from.version, effects.to.version
-        ),
-    };
+    let change = format!(
+        "Update SpaceTerm Core on {machine} from {} to {}?",
+        effects.from.version, effects.to.version
+    );
     let ends = if effects.ends_sessions == 0 {
         "No Terminal Sessions end.".to_owned()
     } else {
@@ -551,39 +504,6 @@ fn stopped(
         Ok(service) => service,
         Err(error) => return fail(contract::from_core_error(error)),
     };
-    // A candidate that never became ready can return to the previous runtime instead.
-    if let Ok(approval) = service.prepare_return() {
-        let effects = UpdateEffects {
-            from: installed(approval.candidate()),
-            to: installed(approval.previous()),
-            kind: UpdateKind::Return,
-            ends_sessions: 0,
-            sessions: Vec::new(),
-        };
-        let observed = match approval.confirmation_token() {
-            Ok(observed) => observed,
-            Err(error) => return fail(contract::from_core_error(error)),
-        };
-        match confirmed(
-            context,
-            super::display_name(&routed.machine),
-            &effects,
-            ("return", &observed),
-            token,
-        ) {
-            Ok(true) => {}
-            Ok(false) => return offline_preview(context, routed, effects, ("return", &observed)),
-            Err(failure) => return fail(failure),
-        }
-        let to = effects.to.clone();
-        if let Err(failure) = crate::interrupt::dispatch() {
-            return fail(failure);
-        }
-        let returned = within(ACTIVATION, &crate::interrupt::settle_by, move || {
-            service.return_to_previous(approval)
-        });
-        return offline_activated(routed, ServiceAction::Return, returned, to);
-    }
     let staged = match files {
         Some((archive, signature)) => admin.stage_files(archive, signature),
         None => admin.stage_fetch(),
@@ -724,7 +644,7 @@ fn offline_finish(
 ) -> Reply {
     let (state, failure) = match status.phase {
         ActivationPhase::Completed { .. } => (ReceiptState::Done, None),
-        ActivationPhase::Failed { .. } => (
+        ActivationPhase::Returned { .. } => (
             ReceiptState::Failed,
             Some(Failure::new(Code::StartupFailed)),
         ),

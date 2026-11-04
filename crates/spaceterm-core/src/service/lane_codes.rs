@@ -18,7 +18,6 @@ pub fn code(error: &CoreError) -> &'static str {
         CoreError::Stopped => "stopped",
         CoreError::Changed => "changed",
         CoreError::ActivationUnresolved => "activation_unresolved",
-        CoreError::ReturnUnavailable => "return_unavailable",
         CoreError::RuntimeUnavailable => "candidate_unverified",
         CoreError::CandidateMissing => "no_candidate",
         CoreError::AuthorizationRequired => "authorization_required",

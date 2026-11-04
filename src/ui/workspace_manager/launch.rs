@@ -303,7 +303,7 @@ const fn failure_title(error: CoreError) -> &'static str {
         CoreError::IncompatibleState | CoreError::IncompatibleProtocol => {
             "Incompatible SpaceTerm Core"
         }
-        CoreError::ActivationUnresolved | CoreError::ReturnUnavailable => {
+        CoreError::ActivationUnresolved => {
             "SpaceTerm Core Update Unfinished"
         }
         CoreError::CandidateChanged => "Restart SpaceTerm",
