@@ -7,9 +7,8 @@ use gpui::prelude::*;
 use gpui::{AnyElement, AnyWindowHandle, App, Context, Pixels, Rgba, SharedString, Window, div};
 use spaceterm_ui::{
     Button, ButtonPaint, ButtonShape, ButtonSize, ButtonVariant, ButtonVariantStyle,
-    DeterminateProgress, Icon, IconName, Menu, MenuAlignment, MenuEntry, MenuLifecycleEvent,
-    MenuPlacement, MenuPlacementConfig, MenuSize, ProgressRing, ProgressSize, ProgressState,
-    Tooltip,
+    DeterminateProgress, Icon, IconName, Menu, MenuAlignment, MenuEntry, MenuPlacement,
+    MenuPlacementConfig, MenuSize, ProgressRing, ProgressSize, ProgressState, Tooltip,
 };
 
 use super::commands;
@@ -19,7 +18,7 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::updates::machines::store::MachineUpdates;
 use crate::updates::presentation::{
-    self, Command, Control, DesktopState, Glyph, Item, MenuRow, Presentation, Tone,
+    self, Command, Control, Glyph, Item, MenuRow, Presentation, Tone,
 };
 
 /// The control at the trailing end of one window's title bar.
@@ -222,21 +221,6 @@ fn menu_entries(presentation: &Presentation, warning: Rgba, cx: &App) -> Vec<Men
     entries
 }
 
-/// Closing the menu reads a "What's new" item, because the menu showed it. Recent lists the
-/// update from its relaunch.
-fn retire_whats_new(whats_new: bool) -> impl Fn(&MenuLifecycleEvent, &mut App) + 'static {
-    move |event, cx| {
-        if !whats_new || !matches!(event, MenuLifecycleEvent::Closed(_)) {
-            return;
-        }
-        cx.defer(|cx| {
-            if let Some(updates) = service(cx) {
-                updates.update(cx, |updates, cx| updates.read_release_notes(cx));
-            }
-        });
-    }
-}
-
 impl Render for UpdateControl {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let presentation = presentation::current(cx);
@@ -257,7 +241,6 @@ impl Render for UpdateControl {
                 glyph: mark,
                 sentence: _,
             } => {
-                let whats_new = matches!(presentation.desktop, DesktopState::WhatsNew { .. });
                 let inherited = tone == Tone::Action;
                 Menu::new(
                     "update-control-menu",
@@ -276,7 +259,6 @@ impl Render for UpdateControl {
                     MenuAlignment::End,
                 ))
                 .debug_selector("update-control-menu")
-                .on_lifecycle(retire_whats_new(whats_new))
                 .on_activate(move |activation, _, cx| {
                     if let Choice::Perform(command) = activation.action() {
                         commands::perform(command.clone(), Some(handle), cx);

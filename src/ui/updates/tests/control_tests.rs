@@ -60,6 +60,113 @@ fn services(
     (adapter, updates, machines)
 }
 
+/// Exercise the real title bar without a status item, with release notes from a previous launch.
+#[cfg(spaceterm_release_notes)]
+fn unread_notes_workspace(
+    cx: &mut gpui::TestAppContext,
+) -> (
+    Entity<ApplicationUpdates>,
+    Rc<ScriptedMachines>,
+    &mut gpui::VisualTestContext,
+) {
+    let machines = Rc::new(ScriptedMachines::default());
+    let mut adapter = crate::updates::testing::RecordingAdapter::available();
+    adapter.history.launched("0.0.1", 0);
+    cx.update(|cx| {
+        MachineUpdates::install(machines.clone(), cx);
+        ApplicationUpdates::install(Rc::new(adapter), cx);
+    });
+    cx.update(crate::ui::init).unwrap();
+    let updates = cx.update(|cx| service(cx).unwrap());
+    let (workspace, visual) = cx.add_window_view(|window, cx| {
+        crate::ui::WorkspaceManager::new_with_adapters(
+            std::env::temp_dir(),
+            crate::ui::workspace_manager::tests::workspace_adapters(),
+            crate::settings::sidebar::SidebarState::Expanded,
+            window,
+            cx,
+        )
+    });
+    visual.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| workspace.focus(window, cx));
+    });
+    visual.run_until_parked();
+    (updates, machines, visual)
+}
+
+#[cfg(spaceterm_release_notes)]
+#[gpui::test]
+fn the_title_bar_opens_unread_notes_with_and_without_an_application_menu(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::desktop_profile::{DesktopPresentation, HostFeature};
+    use crate::updates::presentation::{Control, Glyph};
+
+    for application_menu in [true, false] {
+        let (updates, _, visual) = unread_notes_workspace(cx);
+        visual.update(|_, cx| {
+            let presentation =
+                DesktopPresentation::get(cx)
+                    .clone()
+                    .without_features(if application_menu {
+                        &[]
+                    } else {
+                        &[HostFeature::ApplicationMenuBar]
+                    });
+            cx.set_global(presentation);
+            let Control::Single(item) = crate::updates::presentation::current(cx).control() else {
+                panic!("unread notes offer a plain title-bar button");
+            };
+            assert_eq!(item.glyph, Glyph::WhatsNew, "the control uses sparkles");
+        });
+        A11yTree::read(visual).node("What's new");
+        let button = visual.debug_bounds("update-control").unwrap();
+        visual.simulate_click(button.center(), gpui::Modifiers::none());
+        visual.run_until_parked();
+
+        let tree = A11yTree::read(visual);
+        tree.node(&crate::updates::release_notes::embedded().unwrap().title());
+        tree.node("View on GitHub");
+        assert!(!visual.update(|_, cx| updates.read(cx).release_notes_unread()));
+        spaceterm_ui::a11y_testing::perform(
+            visual,
+            tree.node("Done"),
+            gpui::accesskit::Action::Click,
+        );
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("update-control").is_none());
+        visual.update(|window, _| window.remove_window());
+    }
+}
+
+#[cfg(spaceterm_release_notes)]
+#[gpui::test]
+fn closing_the_update_menu_keeps_notes_unread_until_the_sheet_opens(cx: &mut gpui::TestAppContext) {
+    let (updates, machines, visual) = unread_notes_workspace(cx);
+    machines.emit(MachineUpdatesEvent::Machines(vec![waiting(
+        PENGUIN, "penguin", 0,
+    )]));
+    visual.run_until_parked();
+    let trigger = visual.debug_bounds("update-control-menu").unwrap();
+    visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("update-row-0").is_some());
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    assert!(visual.update(|_, cx| updates.read(cx).release_notes_unread()));
+
+    let trigger = visual.debug_bounds("update-control-menu").unwrap();
+    visual.simulate_click(trigger.center(), gpui::Modifiers::none());
+    visual.run_until_parked();
+    let notes = visual
+        .debug_bounds("update-row-0")
+        .expect("unread notes stay available");
+    visual.simulate_click(notes.center(), gpui::Modifiers::none());
+    visual.run_until_parked();
+    A11yTree::read(visual).node("View on GitHub");
+    assert!(!visual.update(|_, cx| updates.read(cx).release_notes_unread()));
+}
+
 #[gpui::test]
 fn one_ready_desktop_update_is_a_plain_button_that_relaunches_without_asking(
     cx: &mut gpui::TestAppContext,
