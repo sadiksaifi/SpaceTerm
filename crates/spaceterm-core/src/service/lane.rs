@@ -86,11 +86,13 @@ pub enum LaneRequest {
     Check,
     /// Installs the release the Core's own feed names. Answers `Installed`.
     StageFetch,
-    /// Begins a push of `length` archive bytes of `version` with the Update Floor `floor`. The
-    /// Core refuses a version it would not install before any byte arrives.
+    /// Begins a push of `length` archive bytes of `version` with the Update Floor `floor`, null
+    /// for a Preflight or Development version. The Core refuses a version it would not install
+    /// before any byte arrives.
     StageUpload {
         version: String,
-        floor: String,
+        #[serde(deserialize_with = "crate::update::ordering::present")]
+        floor: Option<String>,
         length: u64,
         sha256: String,
         /// Base64.
@@ -633,8 +635,13 @@ impl LaneCore {
                 sha256,
                 signature,
             } => {
-                let reply =
-                    self.stage_upload(connection, (&version, &floor), length, &sha256, &signature);
+                let reply = self.stage_upload(
+                    connection,
+                    (&version, floor.as_deref()),
+                    length,
+                    &sha256,
+                    &signature,
+                );
                 return (sourced(reply), None);
             }
             LaneRequest::UploadChunk {
@@ -750,14 +757,15 @@ impl LaneCore {
     fn stage_upload(
         &self,
         connection: u64,
-        (version, floor): (&str, &str),
+        (version, floor): (&str, Option<&str>),
         length: u64,
         sha256: &str,
         signature: &str,
     ) -> Result<LaneReply, SourceError> {
+        let floor = floor.map(Floor::parse).transpose();
         let candidate = Version::parse(version)
             .ok()
-            .zip(Floor::parse(floor).ok())
+            .zip(floor.ok())
             .and_then(|(version, floor)| Candidate::new(version, floor).ok());
         let (Some(candidate), Ok(signature)) = (
             candidate,

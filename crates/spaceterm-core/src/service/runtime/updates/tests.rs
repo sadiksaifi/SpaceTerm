@@ -65,7 +65,7 @@ const IDENTITY: &str = "spaceterm-development";
 
 /// `text` with a floor every version meets.
 fn candidate(text: &str) -> Candidate {
-    Candidate::new(version(text), no_floor()).unwrap()
+    Candidate::new(version(text), no_floor(text)).unwrap()
 }
 
 fn version(text: &str) -> Version {
@@ -231,7 +231,7 @@ fn a_core_refuses_any_version_not_newer_than_the_newest_it_has() {
 fn floored(machine: &Machine, text: &str, floor: &str) -> (PathBuf, PathBuf, String) {
     let directory = machine.fixture.root.join(format!("floored-{text}-{floor}"));
     let floor = Floor::parse(floor).unwrap();
-    with_floor(text, floor, Protocols::CURRENT, || {
+    with_floor(text, Some(floor), Protocols::CURRENT, || {
         with_artifact(&directory, IDENTITY, |archive, signature| {
             let sha = super::super::digest(&std::fs::read(archive).unwrap());
             (archive.to_owned(), signature.to_owned(), sha)
@@ -256,7 +256,7 @@ fn every_source_refuses_a_release_whose_floor_is_above_the_running_version() {
         };
         assert_eq!(updates.install(local).map(|_| ()), below);
         // The feed and a push declare it before any byte arrives.
-        let declared = Candidate::new(version("1.2.2"), floor).unwrap();
+        let declared = Candidate::new(version("1.2.2"), Some(floor)).unwrap();
         assert_eq!(updates.admits(&declared), below);
         assert_eq!(
             updates.begin_install(declared.clone(), 10).map(|_| ()),
@@ -635,7 +635,7 @@ mod feed_checks {
         let feed = Feed {
             target,
             version: version(text),
-            floor: no_floor(),
+            floor: Floor::parse("0.0.0").unwrap(),
             published_at: now() - 60,
             protocols: Protocols::CURRENT,
             minimum_system: SystemVersion { major: 0, minor: 0 },

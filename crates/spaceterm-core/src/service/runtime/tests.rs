@@ -49,20 +49,31 @@ fn a_build_document_names_a_floor_no_newer_than_its_release_version() {
         ("older", "1.4.0", serde_json::json!("1.2.0"), true),
         ("own", "1.4.0", serde_json::json!("1.4.0"), true),
         ("newer", "1.4.0", serde_json::json!("1.4.1"), false),
-        ("development", VERSION, serde_json::json!("0.0.0"), true),
+        ("development", VERSION, serde_json::Value::Null, true),
+        (
+            "development with a floor",
+            VERSION,
+            serde_json::json!("0.0.0"),
+            false,
+        ),
+        (
+            "release without a floor",
+            "1.4.0",
+            serde_json::Value::Null,
+            false,
+        ),
         ("malformed", "1.4.0", serde_json::json!("1.4"), false),
-        ("missing", "1.4.0", serde_json::Value::Null, false),
+        ("missing", "1.4.0", serde_json::json!("missing"), false),
     ] {
         with_artifact(&root.join(case), identity, |archive, signature| {
             rewrite(archive, signature, |entries| {
                 let mut manifest: serde_json::Value =
                     serde_json::from_slice(&entries[0].1).unwrap();
                 manifest["version"] = version.into();
-                match &floor {
-                    serde_json::Value::Null => {
-                        manifest.as_object_mut().unwrap().remove("floor");
-                    }
-                    floor => manifest["floor"] = floor.clone(),
+                if floor == "missing" {
+                    manifest.as_object_mut().unwrap().remove("floor");
+                } else {
+                    manifest["floor"] = floor.clone();
                 }
                 entries[0].1 = serde_json::to_vec(&manifest).unwrap();
             });
@@ -72,8 +83,8 @@ fn a_build_document_names_a_floor_no_newer_than_its_release_version() {
                 service.inspect_candidate(archive, signature, &pin, crate::protocol::MAJOR);
             if admitted {
                 assert_eq!(
-                    result.unwrap().floor.to_string(),
-                    floor.as_str().unwrap(),
+                    result.unwrap().floor.map(|floor| floor.to_string()),
+                    floor.as_str().map(str::to_owned),
                     "{case}"
                 );
             } else {
@@ -931,6 +942,7 @@ fn signed_manifest_cannot_claim_a_different_compiled_build() {
                 let compiled = entries[0].1.clone();
                 let mut info: serde_json::Value = serde_json::from_slice(&compiled).unwrap();
                 info["version"] = "1.2.3".into();
+                info["floor"] = "0.0.0".into();
                 entries[0].1 = serde_json::to_vec(&info).unwrap();
                 entries
                     .iter_mut()

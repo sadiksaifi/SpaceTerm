@@ -199,7 +199,7 @@ mod tests {
         cores.verified.lock().unwrap().insert(
             Platform::LinuxX86_64,
             Some(Arc::new(EmbeddedCore {
-                candidate: Candidate::new(version(embedded), floor).unwrap(),
+                candidate: Candidate::new(version(embedded), Some(floor)).unwrap(),
                 archive: PathBuf::from("/nonexistent"),
                 signature: vec![0; 64],
                 sha256: "ab".repeat(32),

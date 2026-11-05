@@ -1050,7 +1050,7 @@ fn a_push_of_the_running_version_is_refused_before_any_byte() {
             code(lane.lane.answer(
                 LaneRequest::StageUpload {
                     version: VERSION.into(),
-                    floor: "0.0.0".into(),
+                    floor: None,
                     length: 10,
                     sha256: "ab".repeat(32),
                     signature: encode(&[3; 64]),
@@ -1068,7 +1068,7 @@ fn a_push_whose_floor_is_above_the_running_version_is_refused_with_its_floor() {
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         let push = |floor: &str| LaneRequest::StageUpload {
             version: "1.2.2".into(),
-            floor: floor.into(),
+            floor: Some(floor.into()),
             length: 10,
             sha256: "ab".repeat(32),
             signature: encode(&[3; 64]),
@@ -1098,35 +1098,35 @@ fn a_malformed_push_is_refused_before_anything_is_received() {
         for request in [
             LaneRequest::StageUpload {
                 version: "not a version".into(),
-                floor: "0.0.0".into(),
+                floor: None,
                 length: 10,
                 sha256: sha256.clone(),
                 signature: encode(&[3; 64]),
             },
             LaneRequest::StageUpload {
                 version: VERSION.into(),
-                floor: "0.0.0".into(),
+                floor: None,
                 length: 10,
                 sha256: sha256.clone(),
                 signature: "not base64".into(),
             },
             LaneRequest::StageUpload {
                 version: VERSION.into(),
-                floor: "0.0.0".into(),
+                floor: None,
                 length: 0,
                 sha256: sha256.clone(),
                 signature: encode(&[3; 64]),
             },
             LaneRequest::StageUpload {
                 version: VERSION.into(),
-                floor: "0.0.0".into(),
+                floor: None,
                 length: 10,
                 sha256: sha256.to_uppercase(),
                 signature: encode(&[3; 64]),
             },
             LaneRequest::StageUpload {
                 version: VERSION.into(),
-                floor: "0.0.0".into(),
+                floor: None,
                 length: 10,
                 sha256,
                 signature: encode(&[3; 63]),
@@ -2189,7 +2189,7 @@ fn a_confirmed_restart_waits_for_an_install_in_progress() {
             .begin_install(
                 crate::update::ordering::Candidate::new(
                     crate::update::facts::Version::parse("2.0.0").unwrap(),
-                    crate::update::ordering::Floor::parse("0.0.0").unwrap(),
+                    Some(crate::update::ordering::Floor::parse("0.0.0").unwrap()),
                 )
                 .unwrap(),
                 10,

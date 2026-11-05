@@ -254,7 +254,7 @@ pub fn push(
     let reply = session.call(
         &LaneRequest::StageUpload {
             version: archive.candidate.version().to_string(),
-            floor: archive.candidate.floor().to_string(),
+            floor: archive.candidate.floor().map(|floor| floor.to_string()),
             length: archive.length,
             sha256: archive.sha256.to_owned(),
             signature: encode(archive.signature),

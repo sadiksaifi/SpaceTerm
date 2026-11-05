@@ -34,8 +34,9 @@ pub struct CandidateMetadata {
     pub version: String,
     pub commit: String,
     pub protocols: crate::update::facts::Protocols,
-    /// The build's Update Floor, never newer than a Release `version`.
-    pub floor: Floor,
+    /// The build's Update Floor, never newer than a Release `version`. None exactly for a
+    /// Preflight or Development build.
+    pub floor: Option<Floor>,
 }
 
 impl CandidateMetadata {
@@ -574,8 +575,10 @@ struct Build {
     target: String,
     commit: String,
     version: String,
-    /// Never newer than a Release `version`. Development builds name `0.0.0`.
-    floor: Floor,
+    /// Never newer than a Release `version`. Null exactly for a Preflight or Development
+    /// build, whose version names a commit. The key is required.
+    #[serde(deserialize_with = "crate::update::ordering::present")]
+    floor: Option<Floor>,
     protocols: crate::update::facts::Protocols,
     source_sha256: Option<String>,
 }

@@ -22,7 +22,7 @@ fn floor(text: &str) -> Floor {
 
 /// `text` with a floor every version meets.
 fn candidate(text: &str) -> Candidate {
-    Candidate::new(version(text), floor("0.0.0")).unwrap()
+    Candidate::new(version(text), Some(floor("0.0.0"))).unwrap()
 }
 
 /// What the fake engine saw, in order.

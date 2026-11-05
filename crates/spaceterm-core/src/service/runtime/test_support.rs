@@ -11,11 +11,15 @@ use std::{
 pub(crate) const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub(crate) const VERSION: &str = "dev.aaaaaaaaaaaa";
 thread_local! { static FIXTURE_TRUST: Cell<bool> = const { Cell::new(false) }; }
-thread_local! { static FIXTURE_BUILD: RefCell<Option<(String, Floor, Protocols)>> = const { RefCell::new(None) }; }
+thread_local! { static FIXTURE_BUILD: RefCell<Option<(String, Option<Floor>, Protocols)>> = const { RefCell::new(None) }; }
 
-/// The Update Floor fixtures declare unless a test names one: every version meets it.
-pub(crate) fn no_floor() -> Floor {
-    Floor::parse("0.0.0").unwrap()
+/// The Update Floor fixtures of `version` declare unless a test names one: one every version
+/// meets for a Release version, and none for a development one.
+pub(crate) fn no_floor(version: &str) -> Option<Floor> {
+    crate::update::facts::Version::parse(version)
+        .ok()?
+        .release()
+        .map(|_| Floor::parse("0.0.0").unwrap())
 }
 
 /// Builds fixtures inside `run` that declare work protocol `major`, as a later release would.
@@ -28,17 +32,17 @@ pub(crate) fn with_major<T>(major: u16, run: impl FnOnce() -> T) -> T {
 /// Builds fixtures inside `run` that declare `version` and `protocols`. A Release `version`
 /// keeps [`COMMIT`]; a development one must name it.
 pub(crate) fn with_build<T>(version: &str, protocols: Protocols, run: impl FnOnce() -> T) -> T {
-    with_floor(version, no_floor(), protocols, run)
+    with_floor(version, no_floor(version), protocols, run)
 }
 
 /// Builds fixtures inside `run` that declare `version` with the Update Floor `floor`.
 pub(crate) fn with_floor<T>(
     version: &str,
-    floor: Floor,
+    floor: Option<Floor>,
     protocols: Protocols,
     run: impl FnOnce() -> T,
 ) -> T {
-    struct Restore(Option<(String, Floor, Protocols)>);
+    struct Restore(Option<(String, Option<Floor>, Protocols)>);
     impl Drop for Restore {
         fn drop(&mut self) {
             FIXTURE_BUILD.set(self.0.take());
@@ -53,7 +57,7 @@ fn manifest(identity: &str) -> serde_json::Value {
     let (version, floor, protocols) = FIXTURE_BUILD.with_borrow(|build| {
         build
             .clone()
-            .unwrap_or((VERSION.to_owned(), no_floor(), Protocols::CURRENT))
+            .unwrap_or((VERSION.to_owned(), None, Protocols::CURRENT))
     });
     serde_json::json!({"schema":1,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":version,"floor":floor,"protocols":protocols})
 }

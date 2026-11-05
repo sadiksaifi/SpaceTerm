@@ -58,19 +58,23 @@ impl From<Floor> for String {
     }
 }
 
-/// A version a source offers and the Update Floor it declares. A Release version's floor is
-/// never newer than the version itself.
+/// A version a source offers and the Update Floor it declares. A Release version names a floor
+/// never newer than itself. A Preflight or Development version names a commit and has no order,
+/// so it names no floor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
     version: Version,
-    floor: Floor,
+    floor: Option<Floor>,
 }
 
 impl Candidate {
-    /// Refuses a Release `version` older than its `floor`.
-    pub fn new(version: Version, floor: Floor) -> Result<Self, InvalidVersion> {
-        if version.release().is_some_and(|release| release < floor.0) {
-            return Err(InvalidVersion);
+    /// Refuses a Release `version` without a floor or older than its floor, and a development
+    /// `version` with a floor.
+    pub fn new(version: Version, floor: Option<Floor>) -> Result<Self, InvalidVersion> {
+        match (version.release(), floor) {
+            (Some(release), Some(floor)) if floor.0 <= release => {}
+            (None, None) => {}
+            _ => return Err(InvalidVersion),
         }
         Ok(Self { version, floor })
     }
@@ -79,9 +83,20 @@ impl Candidate {
         &self.version
     }
 
-    pub fn floor(&self) -> Floor {
+    /// None exactly for a Preflight or Development version.
+    pub fn floor(&self) -> Option<Floor> {
         self.floor
     }
+}
+
+/// Reads a field whose key must be present and whose value may be null, such as `floor` in a
+/// build document. Serde would otherwise read a missing key as null.
+pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 /// Why the Core refuses a version from every source.
@@ -122,10 +137,10 @@ pub fn admit(
     if installed.any(|have| have.release().is_some_and(|have| have > release)) {
         return Err(Refusal::NotNewer);
     }
-    if !candidate.floor.admits(running) {
-        return Err(Refusal::BelowFloor {
-            floor: candidate.floor,
-        });
+    if let Some(floor) = candidate.floor
+        && !floor.admits(running)
+    {
+        return Err(Refusal::BelowFloor { floor });
     }
     Ok(())
 }
@@ -139,12 +154,14 @@ mod tests {
     }
 
     fn floored(text: &str, floor: &str) -> Candidate {
-        Candidate::new(version(text), Floor::parse(floor).unwrap()).unwrap()
+        Candidate::new(version(text), Some(Floor::parse(floor).unwrap())).unwrap()
     }
 
-    /// A candidate whose floor every version meets.
+    /// A candidate whose floor every version meets, or a development one with none.
     fn candidate(text: &str) -> Candidate {
-        floored(text, "0.0.0")
+        let version = version(text);
+        let floor = version.release().map(|_| Floor::parse("0.0.0").unwrap());
+        Candidate::new(version, floor).unwrap()
     }
 
     #[test]
@@ -216,14 +233,16 @@ mod tests {
     }
 
     #[test]
-    fn a_floor_is_never_newer_than_its_release() {
-        let floor = |text: &str| Floor::parse(text).unwrap();
+    fn a_release_names_a_floor_no_newer_than_itself_and_a_development_version_none() {
+        let floor = |text: &str| Some(Floor::parse(text).unwrap());
         assert!(Candidate::new(version("1.4.0"), floor("1.4.1")).is_err());
         assert!(Candidate::new(version("1.4.0"), floor("1.4.0")).is_ok());
-        assert!(Candidate::new(version("dev.0123456789ab"), floor("9.9.9")).is_ok());
+        assert!(Candidate::new(version("1.4.0"), None).is_err());
+        assert!(Candidate::new(version("dev.0123456789ab"), None).is_ok());
+        assert!(Candidate::new(version("dev.0123456789ab"), floor("0.0.0")).is_err());
         assert!(Floor::parse("dev.0123456789ab").is_err());
         assert!(Floor::parse("1.4").is_err());
-        assert_eq!(floor("1.10.0").to_string(), "1.10.0");
+        assert_eq!(Floor::parse("1.10.0").unwrap().to_string(), "1.10.0");
     }
 
     #[test]

@@ -259,7 +259,7 @@ pub fn read(
         .ok_or(FeedError::Version)?;
     let floor = Floor::parse(&document.floor)
         .ok()
-        .filter(|floor| Candidate::new(version.clone(), *floor).is_ok())
+        .filter(|floor| Candidate::new(version.clone(), Some(*floor)).is_ok())
         .ok_or(FeedError::Floor)?;
     if document.published_at == 0 || document.published_at > now.saturating_add(MAX_CLOCK_SKEW) {
         return Err(FeedError::PublishedAt);
@@ -301,7 +301,8 @@ pub fn read(
 impl Feed {
     /// The release as a source offers it to the engine: its version and Update Floor.
     pub fn candidate(&self) -> Candidate {
-        Candidate::new(self.version.clone(), self.floor).expect("a read feed keeps its floor rule")
+        Candidate::new(self.version.clone(), Some(self.floor))
+            .expect("a read feed keeps its floor rule")
     }
 
     /// The feed document: compact UTF-8 JSON with no trailing newline.
