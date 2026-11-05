@@ -1,18 +1,39 @@
 //! The launch questions about retained data as AppKit alerts that run by themselves, before any
 //! SpaceTerm window opens.
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSView};
+use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSModalResponseAbort, NSView};
 use objc2_foundation::NSString;
 
 use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
 use crate::ui::data_reset::{LaunchAlerts, LaunchButtonRole, LaunchChoice, LaunchPrompt};
 
 /// Runs each launch question as an application-modal `NSAlert`.
-pub(crate) struct MacosLaunchAlerts;
+#[derive(Default)]
+pub(crate) struct MacosLaunchAlerts {
+    /// An alert's modal loop is running, so the application can't terminate until it ends.
+    running: Arc<AtomicBool>,
+}
 
 impl LaunchAlerts for MacosLaunchAlerts {
+    fn dismiss(&self, _: &mut gpui::App) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        if !self.running.load(Ordering::Acquire) {
+            return false;
+        }
+        // The menu's Quit reaches this from inside the alert's modal loop, where stopModal ends
+        // the loop without the exception abortModal raises through these Rust frames.
+        // runModal then returns NSModalResponseAbort, which answers Quit.
+        NSApplication::sharedApplication(mtm).stopModalWithCode(NSModalResponseAbort);
+        true
+    }
+
     fn ask(&self, prompt: LaunchPrompt, cx: &mut gpui::App) -> gpui::Task<LaunchChoice> {
         let (answered, answers) = async_channel::bounded(1);
         let task = cx.spawn(async move |_| answers.recv().await.unwrap_or(LaunchChoice::Quit));
@@ -21,6 +42,7 @@ impl LaunchAlerts for MacosLaunchAlerts {
             return task;
         };
         let alert = MainThreadBound::new(launch_alert(&prompt, mtm), mtm);
+        let running = Arc::clone(&self.running);
         // The alert runs its own modal loop outside GPUI's current dispatch.
         DispatchQueue::main().exec_async(move || {
             let Some(mtm) = MainThreadMarker::new() else {
@@ -28,10 +50,12 @@ impl LaunchAlerts for MacosLaunchAlerts {
                 return;
             };
             let roles: Vec<_> = prompt.buttons.iter().map(|button| button.role).collect();
+            running.store(true, Ordering::Release);
             let response =
                 run_modal_alert(alert.get(mtm), AlertActivation::FORCEFUL, move |alert| {
                     bind_keys(alert, &roles);
                 });
+            running.store(false, Ordering::Release);
             let choice = usize::try_from(response - NSAlertFirstButtonReturn)
                 .ok()
                 .and_then(|index| prompt.buttons.get(index))

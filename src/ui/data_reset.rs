@@ -202,6 +202,12 @@ pub(crate) struct LaunchPrompt {
 /// Shows a [`LaunchPrompt`] as the platform's own application-modal dialog and answers once.
 pub(crate) trait LaunchAlerts {
     fn ask(&self, prompt: LaunchPrompt, cx: &mut App) -> gpui::Task<LaunchChoice>;
+    /// Ends the question it is asking now, answering Quit, and returns whether one was open.
+    /// A native dialog that runs its own modal loop holds back the application's termination
+    /// until that loop ends, so Quit from the menu ends the dialog first.
+    fn dismiss(&self, _: &mut App) -> bool {
+        false
+    }
 }
 
 /// The question launch asks for a desktop state root that `check` refuses, or None when the
