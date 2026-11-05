@@ -246,6 +246,9 @@ pub fn render<D: Serialize>(
             {
                 let _ = writeln!(stderr, "argument: {argument}");
             }
+            if let Details::StateTooOld(StateTooOldDetails { floor, .. }) = &error.details {
+                let _ = writeln!(stderr, "install first: SpaceTerm Core {floor}");
+            }
         }
         write_warnings(&envelope.warnings, stderr);
     }
@@ -2655,6 +2658,39 @@ mod tests {
                 "message": "SpaceTerm reset this CLI's view state, which this version couldn't read. The previous files were set aside.",
                 "details": {"kinds": ["view"]},
             }])
+        );
+    }
+
+    #[test]
+    fn state_too_old_names_the_version_to_install_in_text() {
+        let envelope = Envelope::error(
+            "list",
+            None,
+            Failure::with(
+                Code::StateTooOld,
+                Details::StateTooOld(StateTooOldDetails {
+                    floor: Floor::parse("1.1.0").unwrap(),
+                    kinds: vec![DataKind::SavedConnections],
+                }),
+            ),
+            Empty {},
+        );
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        render(
+            &envelope,
+            "",
+            "",
+            Mode::default(),
+            false,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            format!(
+                "error: {} (state_too_old)\ninstall first: SpaceTerm Core 1.1.0\n",
+                Code::StateTooOld.message()
+            )
         );
     }
 
