@@ -298,7 +298,9 @@ def update(tag, archive, signature):
             raise TaskError(f"the floor release {floor} did not install {tag}")
         restart_into(
             version,
-            lambda arguments, status="ok": _envelope(LAUNCHER, arguments, environment, status),
+            lambda arguments, status="ok", timeout=COMMAND: _envelope(
+                LAUNCHER, arguments, environment, status, timeout
+            ),
         )
         for arguments in (["list"], ["list", "--machine", SAVED_MACHINE]):
             listed = _envelope(LAUNCHER, arguments, environment)
@@ -313,23 +315,35 @@ def restart_into(version, cli, deadline=RESTART, *, clock=time.monotonic, sleep=
 
     With no live Terminal Session, the Core's update engine may restart into a nonbreaking
     Pending Version on its own at any moment under ADR 0034, which makes an issued confirmation
-    stale. So this reads `status`, previews and confirms a restart only while `version` still
-    waits and no confirmed restart has run, and repeats until the Core runs `version`. Either
-    transition passes, and the verdict depends only on where the Core ends. `cli(arguments,
-    status)` returns the CLI's envelope or raises TaskError.
+    stale. So this reads `status`, previews a restart only while `version` still waits and no
+    confirmed restart has run, confirms it only when the preview still moves to `version`, and
+    repeats until the Core runs `version`. Either transition passes, and the verdict depends
+    only on where the Core ends. No command starts after the deadline, and each one's timeout
+    ends by it. `cli(arguments, status, timeout)` returns the CLI's envelope or raises
+    TaskError.
     """
     end = clock() + deadline
+
+    def run(arguments, status="ok"):
+        remaining = end - clock()
+        if remaining <= 0:
+            raise TaskError(f"SpaceTerm Core did not restart into {version}")
+        return cli(arguments, status, min(remaining, COMMAND))
+
     restarted = False
     while True:
         try:
-            status = cli(["status"])
+            status = run(["status"])
             data = status["data"]
             if data["runtime"]["version"] == version and data["running"]:
                 return status
             if not restarted and (data.get("pending") or {}).get("version") == version:
-                preview = cli(["restart"], "confirmation_required")
-                cli(["restart", "--confirm", preview["data"]["confirmation"]["token"]])
-                restarted = True
+                confirmation = run(["restart"], "confirmation_required")["data"]["confirmation"]
+                # The Core may have started the release since `status`, leaving a preview that
+                # would restart it again.
+                if (confirmation["effects"].get("pending") or {}).get("to") == version:
+                    run(["restart", "--confirm", confirmation["token"]])
+                    restarted = True
         except TaskError:
             pass
         if clock() >= end:
@@ -411,7 +425,7 @@ def _read_until(descriptor, pattern, deadline):
     return found.group(0)
 
 
-def _envelope(client, arguments, environment, status="ok"):
+def _envelope(client, arguments, environment, status="ok", timeout=COMMAND):
     """Run `client` with `--json` and return its envelope, which must have `status`."""
     try:
         result = subprocess.run(
@@ -419,7 +433,7 @@ def _envelope(client, arguments, environment, status="ok"):
             env=environment,
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            timeout=COMMAND,
+            timeout=timeout,
         )
         envelope = json.loads(result.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError):
