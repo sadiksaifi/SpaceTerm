@@ -222,6 +222,25 @@ pub struct Context<'a> {
 }
 
 impl Context<'_> {
+    /// Runs a direct service call that may wait for a SpaceTerm Core to start, as an
+    /// activation's return does, without the command's share of its CLI state. The Core that
+    /// starts can then migrate or restore the state. Code that touches the state afterward
+    /// checks [`Self::shares_state`] first.
+    pub fn unshared<T>(&self, call: impl FnOnce() -> T) -> T {
+        use spaceterm_core::service::lane::admin::Share;
+        self.state.borrow_mut().release();
+        let result = call();
+        self.state.borrow_mut().resume();
+        result
+    }
+
+    /// Whether the command shares its CLI state at this build's generation, taking the share
+    /// again after [`Self::unshared`].
+    pub fn shares_state(&self) -> bool {
+        use spaceterm_core::service::lane::admin::Share;
+        self.state.borrow_mut().resume()
+    }
+
     /// Whether the command acts on this machine: `--machine`, else `SPACETERM_MACHINE`, else
     /// `local`, with the same rule work commands use.
     pub fn is_local(&self) -> bool {

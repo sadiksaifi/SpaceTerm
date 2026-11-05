@@ -134,7 +134,8 @@ pub fn run(
     if network.is_none() && !context.interactive() {
         return Reply::failure(COMMAND, None, Failure::new(Code::InteractionRequired));
     }
-    match setup(context, network, automatic, proxy) {
+    // Setup touches no CLI state, and its service calls may wait for an activation to settle.
+    match context.unshared(|| setup(context, network, automatic, proxy)) {
         Ok((data, text)) => {
             let core = super::local_ref(context.identity).ok();
             Reply::new(&Envelope::ok(COMMAND, core, data), text)

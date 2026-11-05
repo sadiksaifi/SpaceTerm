@@ -329,9 +329,12 @@ impl Directory {
     }
     /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
     pub fn try_lock(&self, name: &str) -> Result<Option<Lock>, CoreError> {
+        self.try_flock(name, libc::LOCK_EX)
+    }
+    fn try_flock(&self, name: &str, operation: libc::c_int) -> Result<Option<Lock>, CoreError> {
         let file = self.file(name, true)?;
         // SAFETY: flock acts only on the supplied live descriptor.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
             return Ok(Some(Lock(file)));
         }
         if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
@@ -351,8 +354,25 @@ impl Directory {
         limit: std::time::Duration,
         cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<LockWait, CoreError> {
+        self.wait_flock(name, libc::LOCK_EX, limit, cancelled)
+    }
+    /// Wait at most `limit` for a shared lock, the way [`Self::wait_lock`] waits.
+    pub fn wait_lock_shared(
+        &self,
+        name: &str,
+        limit: std::time::Duration,
+    ) -> Result<LockWait, CoreError> {
+        self.wait_flock(name, libc::LOCK_SH, limit, None)
+    }
+    fn wait_flock(
+        &self,
+        name: &str,
+        operation: libc::c_int,
+        limit: std::time::Duration,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Result<LockWait, CoreError> {
         let deadline = std::time::Instant::now() + limit;
-        if let Some(lock) = self.try_lock(name)? {
+        if let Some(lock) = self.try_flock(name, operation)? {
             return Ok(LockWait::Locked(lock));
         }
         loop {
@@ -363,7 +383,7 @@ impl Directory {
             if remaining.is_zero() {
                 return Ok(LockWait::Held);
             }
-            if let Some(lock) = self.try_lock(name)? {
+            if let Some(lock) = self.try_flock(name, operation)? {
                 return Ok(LockWait::Locked(lock));
             }
             std::thread::sleep(remaining.min(LOCK_RETRY_INTERVAL));

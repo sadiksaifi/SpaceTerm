@@ -179,16 +179,28 @@ pub fn prepare(identity: &str) -> Result<StateShare, CoreError> {
     Ok(StateShare {
         root: Some(root),
         lock: Some(lock),
+        registry: &REGISTRY,
     })
 }
 
 /// A command's share of its CLI state root, which [`prepare`] takes. A command that waits for a
 /// SpaceTerm Core to restart lets it go meanwhile, so the Core can migrate the state.
-#[derive(Default)]
 pub struct StateShare {
     /// None for a command that shares no state root.
     root: Option<PathBuf>,
     lock: Option<Lock>,
+    /// The generations this build reads.
+    registry: &'static Registry,
+}
+
+impl Default for StateShare {
+    fn default() -> Self {
+        Self {
+            root: None,
+            lock: None,
+            registry: &REGISTRY,
+        }
+    }
 }
 
 impl spaceterm_core::service::lane::admin::Share for StateShare {
@@ -208,7 +220,7 @@ impl spaceterm_core::service::lane::admin::Share for StateShare {
         let Ok(lock) = directory.lock_shared(GENERATION_LOCK) else {
             return false;
         };
-        if !migration::is_current(&REGISTRY, &store_at(root.clone())).unwrap_or(false) {
+        if !migration::is_current(self.registry, &store_at(root.clone())).unwrap_or(false) {
             return false;
         }
         self.lock = Some(lock);
@@ -246,14 +258,19 @@ fn prepare_for_core_at(
 ) -> Result<(), CoreError> {
     let directory = Directory::open(&root, true)?;
     let store = store_at(root);
+    // A CLI that keeps the state, alone or shared, past the limit refuses this start, and the
+    // Core stays unready.
+    let deadline = Instant::now() + limit;
+    let left = || deadline.saturating_duration_since(Instant::now());
     {
-        let _shared = directory.lock_shared(GENERATION_LOCK)?;
+        let LockWait::Locked(_shared) = directory.wait_lock_shared(GENERATION_LOCK, left())? else {
+            return Err(CoreError::ServiceBusy);
+        };
         if migration::is_current(registry, &store).map_err(storage)? {
             return Ok(());
         }
     }
-    // A command that still shares the state refuses this start, and the Core stays unready.
-    let LockWait::Locked(_alone) = directory.wait_lock(GENERATION_LOCK, limit, None)? else {
+    let LockWait::Locked(_alone) = directory.wait_lock(GENERATION_LOCK, left(), None)? else {
         return Err(CoreError::ServiceBusy);
     };
     let returned = returned().unwrap_or(false);
@@ -753,6 +770,7 @@ mod tests {
         let state = temporary("migration-released");
         let never = || Ok(false);
         let mut share = StateShare {
+            registry: &REGISTRY,
             root: Some(state.root.clone()),
             lock: Some(
                 prepare_at(state.root.clone(), &mut migration::NoCredentials, &never).unwrap(),
@@ -773,6 +791,103 @@ mod tests {
         .unwrap();
         // This build no longer reads the state, so the command leaves it alone.
         assert!(!share.resume());
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn a_first_start_after_a_stopped_update_lets_the_previous_core_undo_its_cli_state_migration() {
+        use migration::{Area, Store};
+        let state = temporary("migration-start-return");
+        let never = || Ok(false);
+        drop(prepare_at(state.root.clone(), &mut migration::NoCredentials, &never).unwrap());
+        // The stopped update installed a candidate whose CLI migrates the state to generation
+        // 2. Its `spaceterm start` then shares that state.
+        prepare_for_core_at(
+            state.root.clone(),
+            &STEPPING_STONE,
+            &mut migration::NoCredentials,
+            &never,
+            CORE_LOCK_LIMIT,
+        )
+        .unwrap();
+        let directory = Directory::open(&state.root, false).unwrap();
+        let global = crate::args::Global {
+            machine: None,
+            agent: None,
+            json: true,
+            quiet: false,
+            verbose: false,
+            no_input: true,
+            timeout: None,
+        };
+        let context = crate::admin::Context {
+            identity: "spaceterm-development",
+            global: &global,
+            credentials: crate::connection::CliCredentials::new("spaceterm-development"),
+            facts: Default::default(),
+            state: std::cell::RefCell::new(StateShare {
+                root: Some(state.root.clone()),
+                lock: Some(directory.lock_shared(GENERATION_LOCK).unwrap()),
+                registry: &STEPPING_STONE,
+            }),
+        };
+        // The candidate fails before readiness, and Start waits while the activation returns to
+        // the previous Core, which restores generation 1 before it is ready.
+        let returned = context.unshared(|| {
+            prepare_for_core_at(
+                state.root.clone(),
+                &REGISTRY,
+                &mut migration::NoCredentials,
+                &|| Ok(true),
+                std::time::Duration::from_millis(200),
+            )
+        });
+        assert_eq!(returned, Ok(()));
+        let store = store_at(state.root.clone());
+        assert_eq!(
+            store.read(Area::Root, "generation.json").unwrap(),
+            Some(br#"{"generation":1}"#.to_vec())
+        );
+        // The candidate's CLI no longer reads the state.
+        assert!(!context.shares_state());
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn a_cli_state_migration_at_core_start_waits_a_bounded_time_for_a_stalled_migration() {
+        use migration::{Area, Store};
+        let state = temporary("migration-core-stalled");
+        let never = || Ok(false);
+        drop(prepare_at(state.root.clone(), &mut migration::NoCredentials, &never).unwrap());
+        let directory = Directory::open(&state.root, false).unwrap();
+        // Another CLI stalls while it migrates or restores the state.
+        let stalled = directory.lock(GENERATION_LOCK, false).unwrap();
+        let limit = std::time::Duration::from_millis(200);
+        let (sent, received) = std::sync::mpsc::channel();
+        let root = state.root.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = prepare_for_core_at(
+                root,
+                &STEPPING_STONE,
+                &mut migration::NoCredentials,
+                &|| Ok(false),
+                limit,
+            );
+            let _ = sent.send((result, started.elapsed()));
+        });
+        let (result, waited) = received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the Core start waited past its limit");
+        assert_eq!(result, Err(CoreError::ServiceBusy));
+        assert!(waited >= limit);
+        assert_eq!(
+            store_at(state.root.clone())
+                .read(Area::Root, "generation.json")
+                .unwrap(),
+            Some(br#"{"generation":1}"#.to_vec())
+        );
+        drop(stalled);
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 
