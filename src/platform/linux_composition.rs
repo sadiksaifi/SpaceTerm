@@ -305,6 +305,9 @@ fn compose(
             lifecycle,
             capture_access: None,
             permission_access: None,
+            notification_access: Some(Rc::new(
+                super::linux_notification::LinuxNotificationAccess::new(bus.clone()),
+            )),
             setup_guide: None,
             theme_registry: Arc::new(super::https_transport::HttpsTransport::new()),
             repository_status,

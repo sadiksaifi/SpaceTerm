@@ -20,4 +20,4 @@ Linux has no per-application notification authorization. The desktop posts throu
 
 ## Client Setting
 
-"Notify when a terminal needs attention" is a Client Setting in the Settings Document. Turning it off stops terminal attention notifications and removes one already shown. Bells and dock attention keep their own behavior. Update Reminders do not follow it, because an Overdue Update relies on them.
+"Terminal attention notifications" is a Client Setting in the Settings Document. Turning it off stops terminal attention notifications and removes one already shown. Bells and dock attention keep their own behavior. Update Reminders do not follow it, because an Overdue Update relies on them.

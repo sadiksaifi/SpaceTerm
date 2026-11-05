@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::attention_runtime::{AttentionFailure, NotificationDelivery, NotificationDriver};
+use crate::platform::notification_access::{NotificationAccessError, NotificationAccessState};
 
 #[cfg_attr(
     not(target_os = "macos"),
@@ -55,6 +56,33 @@ fn authorization_decision(settings: NotificationSettings) -> AuthorizationDecisi
         }
         NotificationAuthorization::NotDetermined => AuthorizationDecision::RequestProvisional,
         _ => AuthorizationDecision::Suppress,
+    }
+}
+
+impl NotificationSettings {
+    /// The authorization Settings presents. A state that shows notifications is exactly one that
+    /// delivery submits to.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "only macOS asks each application for notification authorization"
+        )
+    )]
+    pub(crate) fn access_state(self) -> Result<NotificationAccessState, NotificationAccessError> {
+        let shown = self.alert_enabled || self.center_enabled;
+        Ok(match self.authorization {
+            NotificationAuthorization::NotDetermined => NotificationAccessState::NotDetermined,
+            NotificationAuthorization::Denied => NotificationAccessState::Denied,
+            NotificationAuthorization::Authorized | NotificationAuthorization::Provisional
+                if !shown =>
+            {
+                NotificationAccessState::Hidden
+            }
+            NotificationAuthorization::Authorized => NotificationAccessState::Allowed,
+            NotificationAuthorization::Provisional => NotificationAccessState::Quiet,
+            NotificationAuthorization::Unknown => return Err(NotificationAccessError::Unavailable),
+        })
     }
 }
 
@@ -271,6 +299,51 @@ mod tests {
         assert_eq!(
             authorization_decision(settings(NotificationAuthorization::NotDetermined)),
             AuthorizationDecision::RequestProvisional
+        );
+    }
+
+    #[test]
+    fn presented_authorization_shows_notifications_exactly_when_delivery_submits() {
+        use NotificationAccessState as State;
+        use NotificationAuthorization as Authorization;
+        for authorization in [
+            Authorization::NotDetermined,
+            Authorization::Denied,
+            Authorization::Authorized,
+            Authorization::Provisional,
+            Authorization::Unknown,
+        ] {
+            for (alert_enabled, center_enabled) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let settings = NotificationSettings {
+                    authorization,
+                    alert_enabled,
+                    center_enabled,
+                };
+                let shows = matches!(settings.access_state(), Ok(State::Allowed | State::Quiet));
+                assert_eq!(
+                    shows,
+                    authorization_decision(settings) == AuthorizationDecision::Submit,
+                    "{settings:?}"
+                );
+            }
+        }
+        let quiet = NotificationSettings {
+            authorization: Authorization::Provisional,
+            alert_enabled: false,
+            center_enabled: true,
+        };
+        assert_eq!(quiet.access_state(), Ok(State::Quiet));
+        let hidden = NotificationSettings {
+            authorization: Authorization::Authorized,
+            alert_enabled: false,
+            center_enabled: false,
+        };
+        assert_eq!(hidden.access_state(), Ok(State::Hidden));
+        assert_eq!(
+            settings(Authorization::Unknown).access_state(),
+            Err(NotificationAccessError::Unavailable)
         );
     }
 

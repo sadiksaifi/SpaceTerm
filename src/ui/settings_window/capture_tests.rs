@@ -646,6 +646,7 @@ fn a_reported_permission_change_refreshes_the_microphone_row(cx: &mut TestAppCon
             super::super::PermissionCapabilities {
                 capture: Some(microphone.clone()),
                 system_permissions: Some(system.clone()),
+                notifications: None,
                 permission_setup: None,
             },
             crate::theme_registry::testing::offline(),

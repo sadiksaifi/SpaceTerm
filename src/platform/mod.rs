@@ -61,6 +61,8 @@ mod macos_text_input_focus;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
 pub(crate) mod macos_updates;
+#[cfg(feature = "desktop")]
+pub(crate) mod notification_access;
 #[cfg_attr(
     not(feature = "desktop"),
     allow(

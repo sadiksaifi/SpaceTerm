@@ -61,6 +61,7 @@ fn open_settings(
             PermissionCapabilities {
                 capture: None,
                 system_permissions: access,
+                notifications: None,
                 permission_setup,
             },
             crate::theme_registry::testing::offline(),

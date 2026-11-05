@@ -25,6 +25,7 @@ mod machine_location;
 mod machine_selection;
 pub(crate) mod machines;
 mod notices;
+mod notifications;
 mod permission_access;
 pub(crate) mod remote_admin;
 mod sidebar;
@@ -130,6 +131,9 @@ pub(crate) struct PermissionCapabilities {
     /// The microphone and camera, which programs in a Terminal Session use.
     pub(crate) capture: Option<Rc<dyn CaptureAccess>>,
     pub(crate) system_permissions: Option<Rc<dyn PermissionAccess>>,
+    /// The desktop's own notification authorization, which no Terminal Session inherits.
+    pub(crate) notifications:
+        Option<Rc<dyn crate::platform::notification_access::NotificationAccess>>,
     /// The application's Permission Setup, shared with every Pane.
     pub(crate) permission_setup: Option<Entity<super::permission_setup::PermissionSetup>>,
 }
@@ -425,6 +429,7 @@ pub(crate) struct SettingsWindow {
     window_movement: WindowMovement,
     microphone_access: CaptureAccessRow,
     camera_access: CaptureAccessRow,
+    notification_access: notifications::NotificationAccessRow,
     /// The sections and rows this desktop presents. A desktop omits only the surfaces of features
     /// it has no equivalent for; an unavailable feature keeps its rows to explain why.
     available_sections: Vec<SettingsSectionId>,
@@ -573,6 +578,7 @@ enum RowReset {
     Appearance(ResetTarget),
     Update,
     Clipboard,
+    Notifications,
     Git,
     Sidebar,
     Shortcut(crate::keybindings::Command),
@@ -721,6 +727,7 @@ impl SettingsWindow {
             if window.is_window_active() {
                 settings.refresh_capture_access(cx);
                 settings.refresh_permission_access(cx);
+                settings.refresh_notification_access(cx);
                 // The person may have turned SpaceTerm Core on in Login Items meanwhile.
                 if settings
                     .core_service
@@ -851,6 +858,9 @@ impl SettingsWindow {
                 permissions.capture.clone(),
             ),
             camera_access: CaptureAccessRow::new(CaptureDevice::Camera, permissions.capture),
+            notification_access: notifications::NotificationAccessRow::new(
+                permissions.notifications,
+            ),
             permission_access: PermissionAccessRows::new(
                 permissions.system_permissions,
                 permission_setup,
@@ -909,6 +919,7 @@ impl SettingsWindow {
         settings.follow_machine_selection(cx);
         settings.reconcile_machines(cx);
         settings.synchronize_local_operations(cx);
+        settings.refresh_notification_access(cx);
         settings
     }
 
@@ -1120,6 +1131,11 @@ impl SettingsWindow {
         if let Some(differs) = self.clipboard_preference_differs(row) {
             return differs.then_some(RowReset::Clipboard);
         }
+        if row == SettingsRowId::TerminalAttentionNotifications {
+            return self
+                .notification_preference_differs()
+                .then_some(RowReset::Notifications);
+        }
         if let Some(differs) = self.git_preference_differs(row) {
             return differs.then_some(RowReset::Git);
         }
@@ -1168,6 +1184,7 @@ impl SettingsWindow {
                         RowReset::Appearance(target) => settings.editor.reset(target, cx),
                         RowReset::Update => settings.reset_update_preference(row, cx),
                         RowReset::Clipboard => settings.reset_clipboard_preference(row, cx),
+                        RowReset::Notifications => settings.reset_notification_preference(cx),
                         RowReset::Git => settings.reset_git_preference(row, cx),
                         RowReset::Sidebar => settings.reset_sidebar_preference(cx),
                         RowReset::Shortcut(command) => settings.reset_shortcut(command, cx),
@@ -1699,6 +1716,10 @@ impl SettingsWindow {
             }
             SettingsRowId::AccessibilityAccess => {
                 self.render_permission_access(SystemPermission::Accessibility, appearance, cx)
+            }
+            SettingsRowId::NotificationAccess => self.render_notification_access(appearance, cx),
+            SettingsRowId::TerminalAttentionNotifications => {
+                self.render_terminal_attention_notifications(cx)
             }
             SettingsRowId::ClipboardWrites | SettingsRowId::ClipboardReads => {
                 self.render_clipboard_preference(row, cx)
@@ -2660,6 +2681,12 @@ impl SettingsWindow {
                 Some(self.microphone_access.presentation().explanation)
             }
             SettingsRowId::CameraAccess => Some(self.camera_access.presentation().explanation),
+            SettingsRowId::NotificationAccess => {
+                Some(self.notification_access.presentation().explanation)
+            }
+            SettingsRowId::TerminalAttentionNotifications => Some(
+                "Notify when a bell rings or a command finishes in a Pane while SpaceTerm is in the background.",
+            ),
             SettingsRowId::ClipboardWrites => {
                 Some("Programs in the Focused Pane can replace clipboard text, including over SSH.")
             }
