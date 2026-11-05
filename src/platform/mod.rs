@@ -630,7 +630,10 @@ mod linux_updates;
 #[cfg(feature = "desktop")]
 #[cfg_attr(
     not(any(target_os = "linux", spaceterm_sparkle)),
-    allow(dead_code, reason = "only builds with a signed updater keep update history")
+    allow(
+        dead_code,
+        reason = "only builds with a signed updater keep update history"
+    )
 )]
 pub(crate) mod update_history_file;
 

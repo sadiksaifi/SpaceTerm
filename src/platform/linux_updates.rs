@@ -15,9 +15,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::app_directories::AppDirectoryRoot;
 use super::app_paths::AppPaths;
-use super::secure_filesystem::{SecureCommitOutcome, SecureEntryIdentity};
 use crate::application_identity::ApplicationIdentity;
 use crate::updates::policy::UpdateHistory;
 use crate::updates::release_feed::{

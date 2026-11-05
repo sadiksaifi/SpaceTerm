@@ -91,4 +91,3 @@ impl UpdateHistoryFile {
         *self.written.borrow_mut() = Some(bytes);
     }
 }
-

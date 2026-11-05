@@ -277,12 +277,16 @@ fn update_adapter(
 fn signed_feed_updates(
     paths: &Arc<super::app_paths::AppPaths>,
 ) -> Rc<dyn crate::updates::UpdateAdapter> {
-    Rc::new(super::macos_updates::MacosUpdates::new(Some(Arc::clone(paths))))
+    Rc::new(super::macos_updates::MacosUpdates::new(Some(Arc::clone(
+        paths,
+    ))))
 }
 
 /// Only builds that link the signed updater can read the release feed.
 #[cfg(not(spaceterm_sparkle))]
-fn signed_feed_updates(_: &Arc<super::app_paths::AppPaths>) -> Rc<dyn crate::updates::UpdateAdapter> {
+fn signed_feed_updates(
+    _: &Arc<super::app_paths::AppPaths>,
+) -> Rc<dyn crate::updates::UpdateAdapter> {
     Rc::new(crate::updates::UnavailableUpdates)
 }
 

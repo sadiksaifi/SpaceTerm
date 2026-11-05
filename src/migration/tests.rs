@@ -79,8 +79,8 @@ fn capture_desktop_state_migration_fixture() {
         None,
     )
     .unwrap();
-    let paths = crate::platform::app_paths::AppPaths::from_directories(directories, 103, native())
-        .unwrap();
+    let paths =
+        crate::platform::app_paths::AppPaths::from_directories(directories, 103, native()).unwrap();
     crate::platform::update_history_file::UpdateHistoryFile::new(Some(Arc::new(paths)))
         .save(&crate::updates::policy::UpdateHistory::default());
     assert!(root.join("state/update-history.json").is_file());
@@ -203,7 +203,13 @@ fn the_update_history_the_updaters_write_is_a_desktop_state_migration_file() {
         .save(&crate::updates::policy::UpdateHistory::default());
     let store = desktop_state(&root);
     let path = "state/update-history.json";
-    assert!(store.list(Area::Root).unwrap().iter().any(|listed| listed == path));
+    assert!(
+        store
+            .list(Area::Root)
+            .unwrap()
+            .iter()
+            .any(|listed| listed == path)
+    );
     assert!(STATE.readable(path, &store.read(Area::Root, path).unwrap().unwrap()));
     std::fs::remove_dir_all(&root).unwrap();
 }
