@@ -97,10 +97,11 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def build_document(version, identity="spaceterm"):
+def build_document(version, identity="spaceterm", floor="1.0.0"):
     return json.dumps(
         {
             "commit": "0" * 40,
+            "floor": floor,
             "identity": identity,
             "protocol_major": 1,
             "schema": 1,

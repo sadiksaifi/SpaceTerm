@@ -449,6 +449,20 @@ class InstallTests(unittest.TestCase):
                 self.assertIn("does not hold the SpaceTerm Core 1.2.0 release", result.stderr)
                 self.assert_nothing_ran()
 
+    def test_a_core_below_the_update_floor_is_refused_before_it_runs(self):
+        self.publish("1.1.0", latest=False)
+        self.succeed("--version", "1.1.0")
+        self.publish("1.2.0", document=build_document("1.2.0", floor="1.1.5"))
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "SpaceTerm Core 1.1.0 is older than 1.1.5, the oldest version that updates "
+            "directly to SpaceTerm Core 1.2.0; install SpaceTerm Core 1.1.5 first with "
+            "--version 1.1.5",
+            result.stderr,
+        )
+        self.assertEqual(list(self.installations().values()), ["1.1.0"])
+
     def test_a_dry_run_accepts_placeholder_keys_and_says_so(self):
         installer = render(self.root, kind="dry-run", team_id="")
         result = self.install(installer=installer)

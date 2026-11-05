@@ -364,6 +364,12 @@ install_core() {
     [ "$(json_field identity <"$runtime/build.json")" = spaceterm ] \
         && [ "$(json_field version <"$runtime/build.json")" = "$version" ] \
         || die "$archive does not hold the SpaceTerm Core $version release"
+    # The Update Floor: the oldest version that updates directly to this release.
+    floor="$(json_field floor <"$runtime/build.json")"
+    valid_version "$floor" || die "$archive names no valid Update Floor"
+    if [ -n "$core_before" ] && [ "$(compare_versions "$core_before" "$floor")" = older ]; then
+        die "SpaceTerm Core $core_before is older than $floor, the oldest version that updates directly to SpaceTerm Core $version; install SpaceTerm Core $floor first with --version $floor"
+    fi
     if [ "$platform" = macos-arm64 ]; then
         verify_code "$runtime/SpaceTerm Core.app" "$CORE_IDENTIFIER"
     fi
