@@ -20,6 +20,11 @@ struct Choices {
     attached: Vec<Attachment>,
     pending: Vec<Attachment>,
 }
+/// Whether `value` is a `attachments.json` this build reads.
+#[cfg(feature = "client")]
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<Record>(value)
+}
 #[cfg(feature = "client")]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

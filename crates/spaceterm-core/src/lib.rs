@@ -11,6 +11,7 @@ pub mod direct;
 pub mod hierarchy;
 mod host;
 pub mod labels;
+pub mod migration;
 pub mod organization;
 #[cfg(feature = "client")]
 pub mod organize;
@@ -84,6 +85,10 @@ pub enum CoreError {
     StorageUnavailable,
     #[error("This SpaceTerm Core\u{2019}s saved state is from an incompatible SpaceTerm.")]
     IncompatibleState,
+    /// The Core's data is older than any generation it migrates, or its migration failed. The
+    /// runtime refuses to read it until the person resets it or installs a Stepping Stone.
+    #[error("SpaceTerm Core\u{2019}s saved data needs a reset before it can start.")]
+    DataResetRequired,
     #[error("SpaceTerm Core storage has unsafe permissions.")]
     UnsafeStorage,
     #[error("SpaceTerm couldn\u{2019}t verify the machine or account for this connection.")]

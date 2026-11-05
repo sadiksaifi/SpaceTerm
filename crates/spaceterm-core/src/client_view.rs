@@ -466,6 +466,16 @@ impl RetainedInventory {
     }
 }
 
+/// Whether `value` is a `view.json` this build reads.
+#[cfg(feature = "client")]
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<Record>(value)
+}
+/// Whether `value` is a `inventory.json` this build reads.
+#[cfg(feature = "client")]
+pub(crate) fn readable_inventory(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<InventoryRecord>(value)
+}
 #[cfg(feature = "client")]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

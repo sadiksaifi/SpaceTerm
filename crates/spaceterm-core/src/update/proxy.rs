@@ -79,6 +79,11 @@ impl From<Proxy> for String {
     }
 }
 
+/// Whether `value` is an `update-proxy.json` this build reads.
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<Document>(value)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {

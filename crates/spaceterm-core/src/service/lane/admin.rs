@@ -51,6 +51,11 @@ const PENDING_FILE: &std::ffi::CStr = c"service-operations.json";
 /// At most this many pending operations are kept. The server holds no more than 16.
 const MAX_PENDING: usize = 16;
 
+/// Whether `value` is a client's `service-operations.json` this build reads.
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<Vec<String>>(value)
+}
+
 /// The service operations one client identity admitted on one route and has not acknowledged,
 /// so the next lane connection settles them.
 pub struct PendingOperations {

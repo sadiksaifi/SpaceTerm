@@ -25,6 +25,7 @@ pub fn code(error: &CoreError) -> &'static str {
         CoreError::NotRunning => "not_running",
         CoreError::StorageUnavailable => "storage_unavailable",
         CoreError::IncompatibleState => "incompatible_state",
+        CoreError::DataResetRequired => "data_reset_required",
         CoreError::UnsafeStorage => "unsafe_storage",
         CoreError::AuthenticationRefused => "authentication_refused",
         CoreError::IncompatibleProtocol(_) => "incompatible_protocol",

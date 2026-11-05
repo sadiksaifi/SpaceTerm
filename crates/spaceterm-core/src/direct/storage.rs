@@ -66,6 +66,16 @@ impl Drop for Record {
     }
 }
 
+/// Whether `value` is a `direct.json` this build reads.
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<Record>(value) && value.get("schema") == Some(&1.into())
+}
+
+/// Whether `value` is a `paired-majors.json` this build reads.
+pub(crate) fn readable_offered(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<Vec<Offered>>(value)
+}
+
 /// The work majors one pairing's last admitted Hello offered, highest first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

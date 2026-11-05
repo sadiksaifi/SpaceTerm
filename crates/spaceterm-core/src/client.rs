@@ -8,6 +8,16 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, Weak};
 
+/// Whether `value` is a `client.json` this build reads.
+pub(crate) fn readable_identity(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<ClientIdentity>(value)
+}
+
+/// Whether `value` is a `route.json` this build reads.
+pub(crate) fn readable_route(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<DirectRecord>(value)
+}
+
 /// A stable presentation identity. Possession grants no connection authority.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

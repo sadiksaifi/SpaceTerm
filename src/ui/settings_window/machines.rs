@@ -497,6 +497,12 @@ fn failure(error: CoreError) -> (&'static str, &'static str, bool) {
             "settings-local-server-state-incompatible-state",
             true,
         ),
+        // A reset or a Stepping Stone install happens outside this row.
+        CoreError::DataResetRequired => (
+            "Needs reset",
+            "settings-local-server-state-data-reset-required",
+            true,
+        ),
         CoreError::Protocol => (
             "Protocol error",
             "settings-local-server-state-protocol-error",
