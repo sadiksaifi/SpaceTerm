@@ -39,19 +39,20 @@ The order is: migrate, then stay on the previous version, then reset. Data below
 
 ## Computing the floor
 
-The release computes each product's floor with no manual step: the oldest published release whose `current` generation in every root of that product is at least the root's `oldest` today. Core uses Core data and CLI state, and the desktops use desktop config and desktop state. A release that predates `generations.rs` is not eligible. A release whose roots no published release reaches is refused, because no update could reach it. [The floor module](../../mise-tasks/lib/spaceterm_tasks/release_floor.py) reads older releases' declarations with `git show v<release>:<file>`.
+The release computes each product's floor with no manual step: the oldest published release, not withdrawn, whose `current` generation in every root of that product is at least the root's `oldest` today. Core uses Core data and CLI state, and the desktops use desktop config and desktop state. A release is published when GitHub lists it as a published, non-draft release. A tag alone does not count, so a release that failed before publication is never a floor. A release that predates `generations.rs` is not eligible. A release whose roots no eligible release reaches is refused, because no update could reach it. [The floor module](../../mise-tasks/lib/spaceterm_tasks/release_floor.py) lists the published releases with the GitHub CLI and reads their declarations with `git show v<release>:<file>`.
+
+A broken Stepping Stone is replaced in two steps. First, publish a patch release on its line at the same Data Generations, such as 1.1.1 for a broken 1.1.0. Then list the broken release in [the withdrawn release list](../../packaging/withdrawn-releases.toml). The floor computation skips a withdrawn release, so the next floor is the repair. An ordinary patch release changes no floor, so updates gain no step. A withdrawn release stays published, because people still run it and its feed still leads them on, and it still counts as the previous release below.
 
 To retire old steps, delete them and their fixtures and raise `oldest`. The next release's floor rises on its own. Steps retire only when keeping them costs too much, on no calendar.
 
 [The release workflow](../../.github/workflows/release.yml) checks, before it publishes:
 
-- No root's `oldest` or `current` decreases against the previous release.
+- No root's `oldest` or `current` decreases against the previous published release.
 - Every generation from `oldest` to `current` has a fixture under `fixtures/migrations/<root>/gen-<N>/`, and every fixture migrates and parses with the strict readers.
-- Each floor is a published release or the release itself.
 - The floor release's Core, with Workspace organization and a pairing, installs the release's Core archive, restarts into it and still answers `status`, `list` and the pairing.
 - The macOS updater test installs from below a floor and lands on the Stepping Stone.
 
-The feed format freezes at the first release. A field added later needs a new feed file name. A broken floor release is fixed by a patch release on its line at the same generations, such as 1.1.1, which the next floor computation selects.
+The feed format freezes at the first release. A field added later needs a new feed file name.
 
 ## Rejected
 

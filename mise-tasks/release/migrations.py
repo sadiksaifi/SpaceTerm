@@ -3,9 +3,9 @@
 # USAGE arg "<tag>" help="Stable release tag, for example v1.2.3"
 """Check the release's Data Generations, migration fixtures and Update Floors.
 
-No root's oldest or current generation decreases against the previous release, every
-generation from oldest to current has a fixture, and each product's floor is this release or
-a published one, which the GitHub CLI confirms.
+No root's oldest or current generation decreases against the previous published release,
+every generation from oldest to current has a fixture, and each product's floor is this
+release or a published, non-withdrawn one. The GitHub CLI lists the published releases.
 """
 
 import argparse

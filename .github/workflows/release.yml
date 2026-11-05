@@ -60,7 +60,7 @@ jobs:
         timeout-minutes: 5
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag || steps.dry-run.outputs.tag }}
-          # gh confirms that each floor is a published release.
+          # gh lists the published releases the Update Floors come from.
           GH_TOKEN: ${{ github.token }}
         run: mise run release:migrations "$RELEASE_TAG"
 
@@ -185,6 +185,8 @@ jobs:
           APP_STORE_CONNECT_API_KEY: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_API_KEY || '' }}
           APP_STORE_CONNECT_KEY_ID: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_KEY_ID || '' }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_ISSUER_ID || '' }}
+          # gh lists the published releases the Core's Update Floor comes from.
+          GH_TOKEN: ${{ github.token }}
         run: mise run release:core "$RELEASE_TAG"
       - uses: actions/upload-artifact@v7
         with:
@@ -239,6 +241,8 @@ jobs:
           APP_STORE_CONNECT_API_KEY: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_API_KEY || '' }}
           APP_STORE_CONNECT_KEY_ID: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_KEY_ID || '' }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_ISSUER_ID || '' }}
+          # gh lists the published releases the desktop's Update Floor comes from.
+          GH_TOKEN: ${{ github.token }}
         run: mise run release:desktop:macos "$RELEASE_TAG" --notes dist/release-notes.md --core dist/release-core
       - uses: actions/upload-artifact@v7
         with:
@@ -389,6 +393,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.plan.outputs.tag }}
           UPDATE_SIGNING_KEY: ${{ github.event_name == 'push' && secrets.UPDATE_SIGNING_KEY || needs.plan.outputs.dry-run-key }}
+          # gh lists the published releases the feeds' Update Floors come from.
+          GH_TOKEN: ${{ github.token }}
         run: mise run release:assemble "$RELEASE_TAG"
       - name: Publish the GitHub release
         timeout-minutes: 10

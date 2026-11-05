@@ -1,0 +1,4 @@
+# Published releases that are never an Update Floor. List a release here only when it is broken
+# as a Stepping Stone and a patch release on its line, at the same Data Generations, replaces
+# it. The next floor computation then selects the repair. ADR 0064 owns the rule.
+releases = []
