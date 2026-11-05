@@ -10,6 +10,7 @@ pub const LIFETIME: Duration = Duration::from_secs(10 * 60);
 const PREFIX: &str = "c1-";
 
 /// A token and its RFC 3339 expiry.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Issued {
     pub token: String,
     pub expires_at: String,

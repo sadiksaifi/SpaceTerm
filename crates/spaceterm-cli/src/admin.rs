@@ -4,7 +4,7 @@
 //! `status`, `restart`, `update` and `network` reach a running SpaceTerm Core through its service
 //! lane, locally over account IPC and on a paired machine over the paired connection, so they
 //! work across protocol majors. `setup`, `start`, `stop`, `pair`, `unpair`, `end-all-sessions`,
-//! `permissions` and `uninstall` stay on this machine. While SpaceTerm Core is stopped, local
+//! `permissions`, `uninstall` and `reset` stay on this machine. While SpaceTerm Core is stopped, local
 //! `status` and `update` read and change the service directly.
 pub mod end_all_sessions;
 pub mod lifecycle;
@@ -12,6 +12,7 @@ pub mod network;
 pub mod offline_token;
 pub mod pair;
 pub mod permissions;
+pub mod reset;
 pub mod setup;
 pub mod status;
 pub mod uninstall;
@@ -184,6 +185,7 @@ pub fn run(
             delete_data,
             confirm,
         } => uninstall::run(&context, *delete_data, confirm.as_deref()),
+        CoreCommand::Reset(confirm) => reset::run(&context, confirm.confirm.as_deref()),
     };
     context.credentials.report(&mut reply.envelope);
     reply.notice = notice(&context, command, &reply);
