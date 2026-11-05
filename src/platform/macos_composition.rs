@@ -171,6 +171,7 @@ fn compose(
                 super::macos_notification::MacosUpdateReminders::new(),
             )),
             selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
+            file_viewer: Some(Arc::new(super::macos_file_viewer::FinderViewer)),
             settings_file,
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),

@@ -67,6 +67,12 @@ pub(crate) fn init(cx: &mut App) {
     });
 }
 
+/// Whether the update presentation subscribed to the update services.
+#[cfg(test)]
+pub(crate) fn presenting(cx: &App) -> bool {
+    cx.has_global::<UpdatePrompts>()
+}
+
 /// What the user is waiting to hear about. Update state itself stays in the service.
 struct UpdatePrompts {
     results: CheckResults,

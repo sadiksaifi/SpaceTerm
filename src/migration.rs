@@ -101,7 +101,8 @@ pub(crate) fn credentials(identity: &'static str) -> StoreCredentials {
 /// How the desktop state root stands when the desktop launches.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StateCheck {
-    /// Readable. `reset` names the rebuildable data a reset replaced since the last check.
+    /// Readable. `reset` names the rebuildable data a reset replaced that the person hasn't
+    /// acknowledged yet.
     Ready {
         reset: Vec<DataKind>,
     },
@@ -120,7 +121,7 @@ pub(crate) fn check_state(store: &DirectoryStore, identity: &'static str) -> Sta
     match migration::run(&STATE, store, &mut credentials(identity), false) {
         Ok(Outcome::Current | Outcome::Migrated { .. } | Outcome::Restored | Outcome::Reset) => {
             StateCheck::Ready {
-                reset: migration::take_notice(store).unwrap_or_default(),
+                reset: migration::pending_notice(store).unwrap_or_default(),
             }
         }
         Err(Refusal::Newer) => StateCheck::Newer,
@@ -129,11 +130,15 @@ pub(crate) fn check_state(store: &DirectoryStore, identity: &'static str) -> Sta
     }
 }
 
-/// Whether the desktop state root in `store` reached this build's generation, so its readers
-/// and writers may open it. Unavailable storage counts as not ready: a migration may have
-/// rewritten files without committing its generation.
-pub(crate) fn state_ready(store: &DirectoryStore, identity: &'static str) -> bool {
-    matches!(check_state(store, identity), StateCheck::Ready { .. })
+/// Resets the desktop state that waits for a reset, after the person confirmed it.
+pub(crate) fn reset_state(store: &DirectoryStore, identity: &'static str) -> bool {
+    migration::reset_confirmed(&STATE, store, &mut credentials(identity)).is_ok()
+}
+
+/// This build's desktop Update Floor: the Stepping Stone release that still migrates data too
+/// old for this one. None for a build that names a commit.
+pub(crate) fn stepping_stone() -> Option<&'static str> {
+    Some(env!("SPACETERM_DESKTOP_FLOOR")).filter(|floor| !floor.is_empty())
 }
 
 /// The desktop state root of this build's identity, or `None` when its directories are unknown.

@@ -19,6 +19,9 @@ RELEASE_NOTES = "SPACETERM_RELEASE_NOTES"
 # The Core's Update Floor, which crates/spaceterm-cli/build.rs writes into a release build's
 # document as `floor`.
 RELEASE_FLOOR = "SPACETERM_RELEASE_FLOOR"
+# The desktops' Update Floor, which build.rs compiles into a release desktop as the Stepping Stone
+# it names when it can't read retained data.
+DESKTOP_FLOOR = "SPACETERM_DESKTOP_FLOOR"
 STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 ASKPASS_HELPER_MODE = "broker-v1"
 
@@ -61,12 +64,20 @@ def require_clean_checkout():
         raise TaskError("a release package requires a clean checkout")
 
 
+def desktop_floor(release_tag):
+    """The desktops' Update Floor of `release_tag`, which the release computes."""
+    from spaceterm_tasks import release_floor
+
+    return release_floor.floor("desktop", release_version(release_tag))
+
+
 def packaged_environment(release_tag, removed=()):
     """The build environment of a packaged identity, without inherited packaging inputs."""
     environment = {
         key: value
         for key, value in os.environ.items()
-        if key not in ("SPACETERM_RELEASE_TAG", RELEASE_NOTES, RELEASE_FLOOR, *removed)
+        if key
+        not in ("SPACETERM_RELEASE_TAG", RELEASE_NOTES, RELEASE_FLOOR, DESKTOP_FLOOR, *removed)
     }
     # Leaves the SpaceTerm Development identity.
     environment["SPACETERM_PACKAGED"] = "1"

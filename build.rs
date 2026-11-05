@@ -77,6 +77,18 @@ fn main() {
         identity.bundle_version
     );
     release_notes::emit(&root, release_tag.as_deref()).unwrap_or_else(|error| panic!("{error}"));
+    // The desktops' Update Floor: the Stepping Stone a person installs first when this build
+    // can't read their data. Only a release has one.
+    println!("cargo:rerun-if-env-changed=SPACETERM_DESKTOP_FLOOR");
+    let floor = env::var("SPACETERM_DESKTOP_FLOOR").ok();
+    assert!(
+        floor.is_none() || release_tag.is_some(),
+        "only a release takes an Update Floor"
+    );
+    println!(
+        "cargo:rustc-env=SPACETERM_DESKTOP_FLOOR={}",
+        floor.unwrap_or_default()
+    );
     // The application identity follows these inputs.
     let packaged = env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
     // The headless server depends on this library but does not carry a client candidate.

@@ -161,6 +161,14 @@ fn desktop_state_migration_refuses_newer_data_and_asks_before_resetting_client_r
             reset: vec![DataKind::View]
         }
     );
+    // The notice stays until the person acknowledges it, across launches that never showed it.
+    assert_eq!(
+        check_state(&store, identity),
+        StateCheck::Ready {
+            reset: vec![DataKind::View]
+        }
+    );
+    crate::ui::data_reset::acknowledge(&store);
     assert_eq!(
         check_state(&store, identity),
         StateCheck::Ready { reset: Vec::new() }
@@ -173,13 +181,15 @@ fn desktop_state_migration_opens_nothing_on_unavailable_storage() {
     use std::os::unix::fs::PermissionsExt;
     let root = fixtures::scratch("desktop-state-unsafe");
     let store = desktop_state(&root);
-    assert!(state_ready(&store, "spaceterm-development"));
+    assert!(matches!(
+        check_state(&store, "spaceterm-development"),
+        StateCheck::Ready { .. }
+    ));
     std::fs::set_permissions(root.join("data"), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
         check_state(&store, "spaceterm-development"),
         StateCheck::Unavailable
     );
-    assert!(!state_ready(&store, "spaceterm-development"));
     std::fs::remove_dir_all(&root).unwrap();
 }
 

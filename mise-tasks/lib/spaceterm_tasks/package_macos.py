@@ -30,11 +30,13 @@ from spaceterm_tasks import (
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
+    DESKTOP_FLOOR,
     DIST,
     PREFLIGHT_VERSION,
     RELEASE_NOTES,
     TERMINFO,
     checked,
+    desktop_floor,
     packaged_environment,
     release_notes_file,
     release_version,
@@ -110,6 +112,7 @@ def package_bundle(release_tag=None, notes=None):
     identity_name, team = signer(release_tag)
     if release_tag:
         environment[RELEASE_NOTES] = str(release_notes_file(release_tag, notes))
+        environment[DESKTOP_FLOOR] = desktop_floor(release_tag)
         updater = sparkle.directory()
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]

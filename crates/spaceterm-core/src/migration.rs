@@ -101,6 +101,32 @@ impl DataKind {
             Self::View | Self::WorkspaceOrder | Self::UpdateHistory
         )
     }
+
+    /// The kind's name in a sentence, such as a reset's notice or confirmation.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Self::View => "Workspace views",
+            Self::WorkspaceOrder => "Workspace order",
+            Self::UpdateHistory => "update history",
+            Self::Settings => "Settings",
+            Self::WorkspaceOrganization => "Workspace organization",
+            Self::MachineId => "Machine ID",
+            Self::Pairings => "pairings",
+            Self::SavedConnections => "saved machines",
+            Self::ClientRecords => "unsettled operations",
+            Self::CoreRecords => "SpaceTerm Core records",
+        }
+    }
+}
+
+/// `kinds` as one phrase: "a", "a and b", or "a, b and c".
+pub fn nouns(kinds: &[DataKind]) -> String {
+    let names: Vec<&str> = kinds.iter().map(|kind| kind.noun()).collect();
+    match names.split_last() {
+        None => String::new(),
+        Some((last, [])) => (*last).to_owned(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// One kind of file a root holds, matched by its file name in any directory of the root.
@@ -404,6 +430,21 @@ pub fn reset_confirmed(
     write_marker(store, Area::Root, registry.generations.current)?;
     store.remove(Area::Reset, PENDING)?;
     Ok(kinds.into_iter().collect())
+}
+
+/// The rebuildable data a reset replaced since the person last acknowledged it. Reading it
+/// changes nothing, so a notice that never showed shows next time.
+pub fn pending_notice(store: &dyn Store) -> Result<Vec<DataKind>, StoreError> {
+    Ok(store
+        .read(Area::Reset, NOTICE)?
+        .and_then(|bytes| serde_json::from_slice::<Notice>(&bytes).ok())
+        .map(|notice| notice.kinds.into_iter().collect())
+        .unwrap_or_default())
+}
+
+/// Forgets the notice once the person acknowledged it.
+pub fn acknowledge_notice(store: &dyn Store) -> Result<(), StoreError> {
+    store.remove(Area::Reset, NOTICE)
 }
 
 /// The rebuildable data a reset replaced since the last call, once.
