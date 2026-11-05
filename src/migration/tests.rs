@@ -167,3 +167,43 @@ fn desktop_state_migration_refuses_newer_data_and_asks_before_resetting_client_r
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn desktop_state_migration_opens_nothing_on_unavailable_storage() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = fixtures::scratch("desktop-state-unsafe");
+    let store = desktop_state(&root);
+    assert!(state_ready(&store, "spaceterm-development"));
+    std::fs::set_permissions(root.join("data"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        check_state(&store, "spaceterm-development"),
+        StateCheck::Unavailable
+    );
+    assert!(!state_ready(&store, "spaceterm-development"));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn the_update_history_the_updaters_write_is_a_desktop_state_migration_file() {
+    use migration::{Area, Store};
+    let root = fixtures::scratch("desktop-state-history");
+    let directories = spaceterm_directories::AppDirectories::resolve_xdg(
+        "state",
+        &spaceterm_directories::AppDirectoryEnvironment {
+            home: Some(root.clone().into()),
+            xdg_state_home: Some(root.clone().into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let paths =
+        crate::platform::app_paths::AppPaths::from_directories(directories, 103, native()).unwrap();
+    crate::platform::update_history_file::UpdateHistoryFile::new(Some(Arc::new(paths)))
+        .save(&crate::updates::policy::UpdateHistory::default());
+    let store = desktop_state(&root);
+    let path = "state/update-history.json";
+    assert!(store.list(Area::Root).unwrap().iter().any(|listed| listed == path));
+    assert!(STATE.readable(path, &store.read(Area::Root, path).unwrap().unwrap()));
+    std::fs::remove_dir_all(&root).unwrap();
+}

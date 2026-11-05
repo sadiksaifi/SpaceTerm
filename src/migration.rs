@@ -129,6 +129,13 @@ pub(crate) fn check_state(store: &DirectoryStore, identity: &'static str) -> Sta
     }
 }
 
+/// Whether the desktop state root in `store` reached this build's generation, so its readers
+/// and writers may open it. Unavailable storage counts as not ready: a migration may have
+/// rewritten files without committing its generation.
+pub(crate) fn state_ready(store: &DirectoryStore, identity: &'static str) -> bool {
+    matches!(check_state(store, identity), StateCheck::Ready { .. })
+}
+
 /// The desktop state root of this build's identity, or `None` when its directories are unknown.
 pub(crate) fn current_state_store(directories: &AppDirectories) -> Option<Arc<DirectoryStore>> {
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();

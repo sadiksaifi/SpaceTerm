@@ -870,12 +870,7 @@ fn present_quit_prompt(
 fn desktop_state_ready(host: &HostComposition) -> bool {
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
     crate::migration::current_state_store(host.adapters.core_context_paths.directories())
-        .is_some_and(|store| {
-            matches!(
-                crate::migration::check_state(&store, identity),
-                crate::migration::StateCheck::Ready { .. }
-            )
-        })
+        .is_some_and(|store| crate::migration::state_ready(&store, identity))
 }
 
 fn close_quit_prompt_host(place: QuitPromptPlace, cx: &mut App) {
