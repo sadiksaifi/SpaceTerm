@@ -3722,9 +3722,7 @@ mod runtime_tests {
     /// ADR 0049: with the status item showing, Quit from the app menu with no window open leaves
     /// SpaceTerm in the menu bar. The launch window's own Quit no longer answers once admitted.
     #[gpui::test]
-    fn app_menu_quit_with_no_window_keeps_spaceterm_in_the_menu_bar(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn app_menu_quit_with_no_window_keeps_spaceterm_in_the_menu_bar(cx: &mut gpui::TestAppContext) {
         let quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         );
