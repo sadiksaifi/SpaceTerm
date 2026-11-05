@@ -397,7 +397,7 @@ fn an_interrupted_return_restore_repeats_until_its_marker_is_written() {
 }
 
 #[test]
-fn a_root_below_oldest_resets_rebuildable_data_and_waits_to_confirm_the_rest() {
+fn a_root_below_oldest_changes_nothing_until_the_person_confirms_its_reset() {
     let registry = Registry {
         generations: Generations {
             oldest: 2,
@@ -414,10 +414,17 @@ fn a_root_below_oldest_resets_rebuildable_data_and_waits_to_confirm_the_rest() {
             kinds: vec![DataKind::MachineId],
         })
     );
-    assert_eq!(store.get(Area::Root, "clients/a/view.json"), None);
+    // The rebuildable data waits with the rest, so Quit leaves every file where it was.
     assert_eq!(
-        store.get(Area::Reset, "gen-1/clients/a/view.json"),
+        store.get(Area::Root, "clients/a/view.json"),
         Some(json!({ "n": 4 }))
+    );
+    assert!(
+        store
+            .list(Area::Reset)
+            .unwrap()
+            .iter()
+            .all(|path| path == PENDING)
     );
     assert!(store.get(Area::Root, "identity.json").is_some());
     assert_eq!(store.generation(Area::Root), Some(json!(1)));
@@ -429,7 +436,11 @@ fn a_root_below_oldest_resets_rebuildable_data_and_waits_to_confirm_the_rest() {
 
     assert_eq!(
         reset_confirmed(&registry, &store, &mut Recorded(&store)),
-        Ok(vec![DataKind::MachineId])
+        Ok(vec![DataKind::View, DataKind::MachineId])
+    );
+    assert_eq!(
+        store.get(Area::Reset, "gen-1/clients/a/view.json"),
+        Some(json!({ "n": 4 }))
     );
     assert_eq!(store.get(Area::Root, "identity.json"), None);
     assert_eq!(

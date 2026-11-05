@@ -137,10 +137,12 @@ fn desktop_state_migration_refuses_newer_data_and_asks_before_resetting_client_r
             kinds: vec![DataKind::ClientRecords],
         }
     );
+    // Nothing moves before the person decides, the rebuildable view included.
     assert_eq!(
         store.read(Area::Root, "core/desktop/view.json").unwrap(),
-        None
+        Some(br#"{"old":true}"#.to_vec())
     );
+    assert_eq!(migration::pending_notice(&store), Ok(Vec::new()));
     assert!(
         store
             .read(Area::Root, "core/desktop/client.json")
@@ -149,7 +151,7 @@ fn desktop_state_migration_refuses_newer_data_and_asks_before_resetting_client_r
     );
     assert_eq!(
         migration::reset_confirmed(&STATE, &store, &mut migration::NoCredentials),
-        Ok(vec![DataKind::ClientRecords])
+        Ok(vec![DataKind::View, DataKind::ClientRecords])
     );
     assert_eq!(
         store.read(Area::Root, "core/desktop/client.json").unwrap(),
