@@ -4,18 +4,14 @@
 """Build, verify, and install SpaceTerm Preflight beside a SpaceTerm release."""
 
 import argparse
-import subprocess
 
-from spaceterm_tasks import TaskError, main
-from spaceterm_tasks.package_linux import archive_path, package
-from spaceterm_tasks.release import INSTALLER_SOURCE
+from spaceterm_tasks import main
+from spaceterm_tasks.package_linux import archive_path, install_preflight, package
 
 
 def install():
     package()
-    archive = archive_path("preflight")
-    if subprocess.run(["sh", str(INSTALLER_SOURCE), "--archive", str(archive)]).returncode:
-        raise TaskError("SpaceTerm Preflight could not be installed")
+    install_preflight(archive_path("preflight"))
 
 
 if __name__ == "__main__":
