@@ -569,12 +569,17 @@ fn wake_for_signal() {
 /// The owner receives readiness only after this process owns and publishes the endpoint.
 fn serve_runtime_ready(
     paths: &Paths,
-    panes: Option<crate::PaneFactory>,
+    mut panes: Option<crate::PaneFactory>,
     supervised: bool,
     ready: impl FnOnce() -> Result<(), CoreError>,
 ) -> Result<(), CoreError> {
     raise_descriptor_limit();
     crate::service::check_runtime(paths, supervised)?;
+    // The data reaches this runtime's generation before anything here reads it.
+    crate::migration::core_data::prepare(paths)?;
+    if let Some(prepare) = panes.as_mut().and_then(|panes| panes.client_data.take()) {
+        prepare()?;
+    }
     let data = Directory::open(&paths.data, false)?;
     // Verify retained identity before changing any runtime state. Never generate a replacement.
     // The identity never changes while this host runs, so admission reuses it.
@@ -1191,6 +1196,7 @@ pub(crate) fn serve_owned(
     install_shutdown_signals()?;
     crate::service::check_runtime(paths, false)?;
     let data = Directory::open(&paths.data, true)?;
+    crate::migration::core_data::prepare(paths)?;
     let setup = data.lock("setup.lock", false)?;
     data.read_or_create()?;
     drop(setup);
@@ -2189,6 +2195,61 @@ mod startup_tests {
             assert!(Instant::now() < deadline, "owned server did not finish");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_core_refuses_to_serve_data_it_cannot_read_and_leaves_it_unchanged() {
+        let fixture = Fixture::new();
+        let marker = fixture.paths.data.join("generation.json");
+        let identity = fs::read(fixture.paths.data.join("identity.json")).unwrap();
+        // A newer SpaceTerm Core wrote this data.
+        fs::write(&marker, br#"{"generation":99}"#).unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            serve_with_panes(&fixture.paths, None),
+            Err(CoreError::IncompatibleState)
+        );
+        assert_eq!(fs::read(&marker).unwrap(), br#"{"generation":99}"#);
+        // Data older than any generation this Core migrates waits for a confirmed reset.
+        fs::write(&marker, br#"{"generation":0}"#).unwrap();
+        assert_eq!(
+            serve_with_panes(&fixture.paths, None),
+            Err(CoreError::DataResetRequired)
+        );
+        assert_eq!(
+            fs::read(fixture.paths.data.join("identity.json")).unwrap(),
+            identity
+        );
+        assert_eq!(
+            crate::migration::pending(&crate::migration::core_data::store(&fixture.paths.data))
+                .unwrap()
+                .map(|pending| pending.kinds),
+            Some(vec![crate::migration::DataKind::MachineId])
+        );
+        fs::remove_dir_all(&fixture.root).unwrap();
+    }
+
+    #[test]
+    fn a_core_brings_client_data_to_its_generation_before_readiness() {
+        let fixture = Fixture::new();
+        let marker = fixture.paths.data.join("generation.json");
+        let panes = crate::panes(Arc::default(), |_| -> Result<NoPanes, CoreError> {
+            panic!("a Core built its Panes before its client data was current")
+        })
+        .with_client_data({
+            let marker = marker.clone();
+            move || {
+                // Core data comes first.
+                assert!(marker.exists());
+                Err(CoreError::DataResetRequired)
+            }
+        });
+        assert_eq!(
+            serve_with_panes(&fixture.paths, Some(panes)),
+            Err(CoreError::DataResetRequired)
+        );
+        assert!(!fixture.paths.socket().exists());
+        fs::remove_dir_all(&fixture.root).unwrap();
     }
 
     #[test]

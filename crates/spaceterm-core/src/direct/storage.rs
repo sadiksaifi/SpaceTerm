@@ -66,6 +66,104 @@ impl Drop for Record {
     }
 }
 
+/// Every check of a `direct.json` record. `core` is the identity it must belong to, when known.
+fn validate_record(record: &Record, core: Option<&[u8; 32]>) -> Result<(), DirectError> {
+    if record.schema != 1
+        || core.is_some_and(|core| record.core != *core)
+        || record.setups.len() > MAX_DEVICES
+        || record.devices.len() > MAX_DEVICES
+        || record.revocations.len() > MAX_REVOCATIONS
+        || record.key.len() > 256
+        || record.certificate.len() > 8192
+    {
+        return Err(DirectError::StorageUnavailable);
+    }
+    crypto::public(&record.key)?;
+    if let Some(policy) = &record.policy {
+        NetworkPolicy::new(policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
+    }
+    if record.enabled && record.policy.is_none() {
+        return Err(DirectError::StorageUnavailable);
+    }
+    let mut setups = std::collections::BTreeSet::new();
+    for setup in &record.setups {
+        let endpoint =
+            Endpoint::from_url(&setup.endpoint).map_err(|_| DirectError::StorageUnavailable)?;
+        if endpoint.url() != setup.endpoint
+            || (setup.expected_enabled && setup.expected_policy.is_none())
+        {
+            return Err(DirectError::StorageUnavailable);
+        }
+        if let Some(policy) = &setup.expected_policy {
+            NetworkPolicy::new(policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
+        }
+        NetworkPolicy::new(setup.policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
+        if setup.operation == [0; 32]
+            || setup.public_key == [0; 32]
+            || setup_generation(&setup.operation) >= record.setup_generation
+            || !setups.insert(setup.operation)
+        {
+            return Err(DirectError::StorageUnavailable);
+        }
+        if let Some(device) = record
+            .devices
+            .iter()
+            .find(|device| device.claim == setup.operation)
+            && (device.info.public_key != setup.public_key || device.info.name != setup.name)
+        {
+            return Err(DirectError::StorageUnavailable);
+        }
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut clients = std::collections::BTreeSet::new();
+    let mut claims = std::collections::BTreeSet::new();
+    for device in &record.devices {
+        if device.info.pairing == [0; 32]
+            || device.info.client == [0; 32]
+            || device.info.public_key == [0; 32]
+            || device.claim == [0; 32]
+            || device
+                .info
+                .last_connected_at_unix_seconds
+                .is_some_and(|time| time > MAX_CONNECTION_TIME)
+            || !claims.insert(device.claim)
+            || !ids.insert(device.info.pairing)
+            || !clients.insert(device.info.client)
+            || device.agents.len() > MAX_AGENTS
+            || (1..device.agents.len()).any(|i| device.agents[..i].contains(&device.agents[i]))
+        {
+            return Err(DirectError::StorageUnavailable);
+        }
+    }
+    let mut originals = std::collections::BTreeSet::new();
+    for original in &record.revocations {
+        if original.receipt.core != record.core
+            || original.receipt.operation == [0; 32]
+            || !record
+                .devices
+                .iter()
+                .any(|d| d.info.pairing == original.receipt.target && d.revoked)
+            || original.actor.is_some_and(|actor| !ids.contains(&actor))
+            || !originals.insert((original.actor, original.receipt.operation))
+        {
+            return Err(DirectError::StorageUnavailable);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `value` is a `direct.json` this build reads.
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    Record::deserialize(value).is_ok_and(|record| validate_record(&record, None).is_ok())
+}
+
+/// Whether `value` is a `paired-majors.json` this build reads.
+pub(crate) fn readable_offered(value: &serde_json::Value) -> bool {
+    Vec::<Offered>::deserialize(value).is_ok_and(|offered| {
+        offered.len() <= MAX_DEVICES && offered.iter().all(|entry| entry.majors.len() <= 2)
+    })
+}
+
 /// The work majors one pairing's last admitted Hello offered, highest first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,88 +220,7 @@ impl Store {
         Ok(record)
     }
     fn validate(&self, record: &Record) -> Result<(), DirectError> {
-        if record.schema != 1
-            || record.core != self.core
-            || record.setups.len() > MAX_DEVICES
-            || record.devices.len() > MAX_DEVICES
-            || record.revocations.len() > MAX_REVOCATIONS
-            || record.key.len() > 256
-            || record.certificate.len() > 8192
-        {
-            return Err(DirectError::StorageUnavailable);
-        }
-        crypto::public(&record.key)?;
-        if let Some(policy) = &record.policy {
-            NetworkPolicy::new(policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
-        }
-        if record.enabled && record.policy.is_none() {
-            return Err(DirectError::StorageUnavailable);
-        }
-        let mut setups = std::collections::BTreeSet::new();
-        for setup in &record.setups {
-            let endpoint =
-                Endpoint::from_url(&setup.endpoint).map_err(|_| DirectError::StorageUnavailable)?;
-            if endpoint.url() != setup.endpoint
-                || (setup.expected_enabled && setup.expected_policy.is_none())
-            {
-                return Err(DirectError::StorageUnavailable);
-            }
-            if let Some(policy) = &setup.expected_policy {
-                NetworkPolicy::new(policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
-            }
-            NetworkPolicy::new(setup.policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
-            if setup.operation == [0; 32]
-                || setup.public_key == [0; 32]
-                || setup_generation(&setup.operation) >= record.setup_generation
-                || !setups.insert(setup.operation)
-            {
-                return Err(DirectError::StorageUnavailable);
-            }
-            if let Some(device) = record
-                .devices
-                .iter()
-                .find(|device| device.claim == setup.operation)
-                && (device.info.public_key != setup.public_key || device.info.name != setup.name)
-            {
-                return Err(DirectError::StorageUnavailable);
-            }
-        }
-        let mut ids = std::collections::BTreeSet::new();
-        let mut clients = std::collections::BTreeSet::new();
-        let mut claims = std::collections::BTreeSet::new();
-        for device in &record.devices {
-            if device.info.pairing == [0; 32]
-                || device.info.client == [0; 32]
-                || device.info.public_key == [0; 32]
-                || device.claim == [0; 32]
-                || device
-                    .info
-                    .last_connected_at_unix_seconds
-                    .is_some_and(|time| time > MAX_CONNECTION_TIME)
-                || !claims.insert(device.claim)
-                || !ids.insert(device.info.pairing)
-                || !clients.insert(device.info.client)
-                || device.agents.len() > MAX_AGENTS
-                || (1..device.agents.len()).any(|i| device.agents[..i].contains(&device.agents[i]))
-            {
-                return Err(DirectError::StorageUnavailable);
-            }
-        }
-        let mut originals = std::collections::BTreeSet::new();
-        for original in &record.revocations {
-            if original.receipt.core != self.core
-                || original.receipt.operation == [0; 32]
-                || !record
-                    .devices
-                    .iter()
-                    .any(|d| d.info.pairing == original.receipt.target && d.revoked)
-                || original.actor.is_some_and(|actor| !ids.contains(&actor))
-                || !originals.insert((original.actor, original.receipt.operation))
-            {
-                return Err(DirectError::StorageUnavailable);
-            }
-        }
-        Ok(())
+        validate_record(record, Some(&self.core))
     }
     pub fn save(&self, record: &Record) -> Result<(), DirectError> {
         self.validate(record)?;

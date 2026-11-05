@@ -61,6 +61,8 @@ mod invitation_links;
 #[cfg(feature = "desktop")]
 mod keybindings;
 mod machine_settings;
+#[cfg(feature = "desktop")]
+mod migration;
 mod platform;
 #[cfg_attr(
     not(feature = "desktop"),

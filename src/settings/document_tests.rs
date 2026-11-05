@@ -593,3 +593,24 @@ fn sidebar_settings_reject_unknown_states_and_fields() {
         ));
     }
 }
+
+#[test]
+fn an_import_reads_its_generation_from_schema_version_and_refuses_a_newer_one() {
+    let exported = export_settings(&SettingsDocument::default()).unwrap();
+    assert_eq!(
+        import_settings(exported.as_bytes()),
+        Ok(SettingsDocument::default())
+    );
+    let mut newer: serde_json::Value = serde_json::from_str(&exported).unwrap();
+    newer["schema_version"] = (document::SETTINGS_SCHEMA_VERSION + 1).into();
+    assert_eq!(
+        import_settings(newer.to_string().as_bytes()),
+        Err(SettingsDocumentError::UnsupportedVersion)
+    );
+    let mut older = newer;
+    older["schema_version"] = 0.into();
+    assert_eq!(
+        import_settings(older.to_string().as_bytes()),
+        Err(SettingsDocumentError::TooOld)
+    );
+}

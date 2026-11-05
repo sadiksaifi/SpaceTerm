@@ -22,8 +22,12 @@ const MAX_RECORD: usize = 12 * 1024 * 1024;
 pub(crate) struct Record {
     pub format: String,
     pub core: [u8; 32],
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub organization: Option<crate::organization::Organization>,
+}
+
+/// Whether `value` is an `identity.json` this build reads.
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    Record::deserialize(value)
+        .is_ok_and(|record| record.format == "account-local-1" && record.core != [0; 32])
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct SocketIdentity {
@@ -313,11 +317,24 @@ impl Directory {
         }
         Ok(Lock(file))
     }
-    /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
-    pub fn try_lock(&self, name: &str) -> Result<Option<Lock>, CoreError> {
+    /// Take a shared lock that ends when the returned guard drops. Shared holders exclude only
+    /// an exclusive [`Self::lock`] of the same name.
+    pub fn lock_shared(&self, name: &str) -> Result<Lock, CoreError> {
         let file = self.file(name, true)?;
         // SAFETY: flock acts only on the supplied live descriptor.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(CoreError::StorageUnavailable);
+        }
+        Ok(Lock(file))
+    }
+    /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
+    pub fn try_lock(&self, name: &str) -> Result<Option<Lock>, CoreError> {
+        self.try_flock(name, libc::LOCK_EX)
+    }
+    fn try_flock(&self, name: &str, operation: libc::c_int) -> Result<Option<Lock>, CoreError> {
+        let file = self.file(name, true)?;
+        // SAFETY: flock acts only on the supplied live descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
             return Ok(Some(Lock(file)));
         }
         if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
@@ -337,8 +354,25 @@ impl Directory {
         limit: std::time::Duration,
         cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<LockWait, CoreError> {
+        self.wait_flock(name, libc::LOCK_EX, limit, cancelled)
+    }
+    /// Wait at most `limit` for a shared lock, the way [`Self::wait_lock`] waits.
+    pub fn wait_lock_shared(
+        &self,
+        name: &str,
+        limit: std::time::Duration,
+    ) -> Result<LockWait, CoreError> {
+        self.wait_flock(name, libc::LOCK_SH, limit, None)
+    }
+    fn wait_flock(
+        &self,
+        name: &str,
+        operation: libc::c_int,
+        limit: std::time::Duration,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Result<LockWait, CoreError> {
         let deadline = std::time::Instant::now() + limit;
-        if let Some(lock) = self.try_lock(name)? {
+        if let Some(lock) = self.try_flock(name, operation)? {
             return Ok(LockWait::Locked(lock));
         }
         loop {
@@ -349,7 +383,7 @@ impl Directory {
             if remaining.is_zero() {
                 return Ok(LockWait::Held);
             }
-            if let Some(lock) = self.try_lock(name)? {
+            if let Some(lock) = self.try_flock(name, operation)? {
                 return Ok(LockWait::Locked(lock));
             }
             std::thread::sleep(remaining.min(LOCK_RETRY_INTERVAL));
@@ -364,12 +398,6 @@ impl Directory {
             .and_then(|()| self.0.sync_all())
             .map_err(|_| CoreError::StorageUnavailable)?;
         Ok(record)
-    }
-    /// Validates the visible record without confirming its durability. Only a caller that
-    /// replaces the whole record and then syncs it, as [`Self::write`] does, may skip the sync:
-    /// the replacement's own file and directory syncs make everything it carries forward durable.
-    pub(crate) fn read_unconfirmed(&self) -> Result<Record, CoreError> {
-        self.read_visible().map(|(record, _)| record)
     }
     fn read_visible(&self) -> Result<(Record, File), CoreError> {
         let file = self.file("identity.json", false)?;
@@ -392,9 +420,6 @@ impl Directory {
         if record.format != "account-local-1" || record.core == [0; 32] {
             return Err(CoreError::UnsafeStorage);
         }
-        if let Some(value) = &record.organization {
-            value.validate()?;
-        }
         Ok((record, file))
     }
     pub(crate) fn read_or_create(&self) -> Result<Record, CoreError> {
@@ -404,7 +429,6 @@ impl Directory {
                 let record = Record {
                     format: "account-local-1".into(),
                     core: protocol::random()?,
-                    organization: None,
                 };
                 self.write(&record)?;
                 Ok(record)
@@ -414,9 +438,6 @@ impl Directory {
     }
     /// Caller holds setup.lock. Publish once after fsync so crashes never truncate the old identity.
     pub(crate) fn write(&self, record: &Record) -> Result<(), CoreError> {
-        if let Some(value) = &record.organization {
-            value.validate()?;
-        }
         let bytes = serde_json::to_vec(record).map_err(|_| CoreError::StorageUnavailable)?;
         self.write_bytes(c"identity.json", &bytes)
     }
@@ -424,6 +445,15 @@ impl Directory {
         &self,
         name: &str,
     ) -> Result<Option<T>, CoreError> {
+        let Some(bytes) = self.read_bytes(name)? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| CoreError::UnsafeStorage)
+    }
+    /// The durable bytes of the private record `name`, or `None` when it is absent.
+    pub(crate) fn read_bytes(&self, name: &str) -> Result<Option<Vec<u8>>, CoreError> {
         let file = match self.file(name, false) {
             Ok(file) => file,
             Err(CoreError::NotSetUp) => return Ok(None),
@@ -437,11 +467,10 @@ impl Directory {
         if bytes.len() > MAX_RECORD {
             return Err(CoreError::UnsafeStorage);
         }
-        let value = serde_json::from_slice(&bytes).map_err(|_| CoreError::UnsafeStorage)?;
         file.sync_all()
             .and_then(|()| self.0.sync_all())
             .map_err(|_| CoreError::StorageUnavailable)?;
-        Ok(Some(value))
+        Ok(Some(bytes))
     }
     pub fn write_json<T: Serialize>(
         &self,
@@ -453,7 +482,11 @@ impl Directory {
             &serde_json::to_vec(value).map_err(|_| CoreError::StorageUnavailable)?,
         )
     }
-    fn write_bytes(&self, destination: &std::ffi::CStr, bytes: &[u8]) -> Result<(), CoreError> {
+    pub(crate) fn write_bytes(
+        &self,
+        destination: &std::ffi::CStr,
+        bytes: &[u8],
+    ) -> Result<(), CoreError> {
         if bytes.len() > MAX_RECORD {
             return Err(CoreError::StorageUnavailable);
         }
@@ -856,26 +889,22 @@ mod tests {
         );
     }
     #[test]
-    fn organization_is_retained_with_nonsecret_identity() {
+    fn organization_is_retained_apart_from_the_nonsecret_identity() {
         let fixture = Fixture::new();
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
-        let original = data.read_or_create().unwrap();
-        let mut value = serde_json::to_value(&original).unwrap();
-        value["organization"] = serde_json::to_value(
-            crate::hierarchy::State::first("/tmp".as_ref())
-                .unwrap()
-                .envelope(),
-        )
-        .unwrap();
-        std::fs::write(
-            fixture.0.join("identity.json"),
-            serde_json::to_vec(&value).unwrap(),
-        )
-        .unwrap();
-        let reopened = fixture.open();
-        let restored = reopened.read().unwrap();
-        assert_eq!(serde_json::to_value(&restored).unwrap(), value);
+        data.read_or_create().unwrap();
+        let identity = fs::read(fixture.0.join("identity.json")).unwrap();
+        let organization = crate::hierarchy::State::first("/tmp".as_ref())
+            .unwrap()
+            .envelope();
+        let store = crate::organization::OrganizationStore(fixture.open());
+        store.write(Some(&organization)).unwrap();
+        assert_eq!(fs::read(fixture.0.join("identity.json")).unwrap(), identity);
+        assert!(store.read().unwrap() == Some(organization));
+        store.write(None).unwrap();
+        assert!(!fixture.0.join("organization.json").exists());
+        assert!(store.read().unwrap().is_none());
     }
 
     #[test]
@@ -883,14 +912,14 @@ mod tests {
         let fixture = Fixture::new();
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
-        let mut record = data.read_or_create().unwrap();
-        record.organization = Some(
+        data.read_or_create().unwrap();
+        let mut value = serde_json::to_value(
             crate::hierarchy::State::first(&fixture.0)
                 .unwrap()
                 .envelope(),
-        );
-        let mut value = serde_json::to_value(&record).unwrap();
-        let shared = value["organization"]["shared"].as_object_mut().unwrap();
+        )
+        .unwrap();
+        let shared = value["shared"].as_object_mut().unwrap();
         // A newer build's retained organization has a field this build doesn't know.
         assert!(
             shared
@@ -898,17 +927,13 @@ mod tests {
                 .is_none()
         );
         let original = serde_json::to_vec(&value).unwrap();
-        let path = fixture.0.join("identity.json");
-        fs::write(&path, &original).unwrap();
-        assert_eq!(fs::metadata(&fixture.0).unwrap().mode() & 0o7777, 0o700);
+        data.write_bytes(c"organization.json", &original).unwrap();
+        let path = fixture.0.join("organization.json");
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
 
-        let reopened = fixture.open();
-        assert_eq!(reopened.read().err(), Some(CoreError::IncompatibleState));
-        assert_eq!(
-            reopened.read_or_create().err(),
-            Some(CoreError::IncompatibleState)
-        );
+        let store = crate::organization::OrganizationStore(fixture.open());
+        assert!(matches!(store.read(), Err(CoreError::IncompatibleState)));
+        assert!(fixture.open().read().is_ok(), "the identity stays readable");
         assert_eq!(fs::read(&path).unwrap(), original);
     }
 
@@ -1094,9 +1119,10 @@ mod tests {
     fn uncertain_organization_publication_blocks_recovery_until_synced() {
         let fixture = Fixture::new();
         let data = fixture.open();
-        let _lock = data.lock("setup.lock", false).unwrap();
-        let mut record = data.read_or_create().unwrap();
-        record.core = [42; 32];
+        {
+            let _lock = data.lock("setup.lock", false).unwrap();
+            data.read_or_create().unwrap();
+        }
         let mut shared = crate::hierarchy::State::first(&fixture.0).unwrap();
         shared.inventory.workspaces[0].pinned_directory = Some(fixture.0.clone());
         shared.inventory.workspaces[0].tabs[0].panes[0].confirmed_directory = Some("/".into());
@@ -1109,20 +1135,21 @@ mod tests {
             .apply([42; 32], 1, creation.clone(), &fixture.0, |_| true)
             .unwrap();
         let organization = shared.envelope();
-        record.organization = Some(organization.clone());
+        let store = crate::organization::OrganizationStore(fixture.open());
         let fault = sync_failure::fail_directory(&data.0);
-        assert_eq!(data.write(&record), Err(CoreError::StorageUnavailable));
-        let reopened = fixture.open();
+        assert_eq!(
+            store.write(Some(&organization)),
+            Err(CoreError::StorageUnavailable)
+        );
+        let reopened = crate::organization::OrganizationStore(fixture.open());
         assert!(matches!(
             reopened.read(),
             Err(CoreError::StorageUnavailable)
         ));
         drop(fault);
-        let recovered = reopened.read_or_create().unwrap();
-        assert_eq!(recovered.core, record.core);
-        assert_eq!(recovered.core, [42; 32]);
-        assert!(recovered.organization.as_ref() == Some(&organization));
-        let mut restored = *recovered.organization.unwrap().shared;
+        let recovered = reopened.read().unwrap();
+        assert!(recovered.as_ref() == Some(&organization));
+        let mut restored = *recovered.unwrap().shared;
         assert_eq!(
             restored
                 .apply([42; 32], 1, creation, &fixture.0, |_| true)
@@ -1155,31 +1182,31 @@ mod tests {
     fn a_failed_pending_write_preserves_the_previous_organization() {
         let fixture = Fixture::new();
         let data = fixture.open();
-        let _lock = data.lock("setup.lock", false).unwrap();
-        let mut record = data.read_or_create().unwrap();
+        {
+            let _lock = data.lock("setup.lock", false).unwrap();
+            data.read_or_create().unwrap();
+        }
+        let store = crate::organization::OrganizationStore(fixture.open());
         let original = crate::hierarchy::State::first(&fixture.0)
             .unwrap()
             .envelope();
-        record.organization = Some(original.clone());
-        data.write(&record).unwrap();
-        record
-            .organization
-            .as_mut()
-            .unwrap()
-            .shared
-            .inventory
-            .workspaces[0]
-            .name = "Uncommitted".into();
+        store.write(Some(&original)).unwrap();
+        let mut changed = original.clone();
+        changed.shared.inventory.workspaces[0].name = "Uncommitted".into();
         let fault = sync_failure::fail_files();
-        assert_eq!(data.write(&record), Err(CoreError::StorageUnavailable));
+        assert_eq!(
+            store.write(Some(&changed)),
+            Err(CoreError::StorageUnavailable)
+        );
         assert!(matches!(
-            fixture.open().read(),
+            crate::organization::OrganizationStore(fixture.open()).read(),
             Err(CoreError::StorageUnavailable)
         ));
         drop(fault);
-        let recovered = fixture.open().read_or_create().unwrap();
-        assert!(recovered.organization.as_ref() == Some(&original));
-        assert_eq!(recovered.core, record.core);
+        let recovered = crate::organization::OrganizationStore(fixture.open())
+            .read()
+            .unwrap();
+        assert!(recovered.as_ref() == Some(&original));
     }
 
     // Interpose only the native syscall in the Linux test executable. Production storage has

@@ -154,6 +154,7 @@ fn paired_route_is_refused_before_local_state_or_transport_access() {
         &Context {
             credentials: crate::connection::CliCredentials::new("no-such-application"),
             facts: Default::default(),
+            state: Default::default(),
             identity: "no-such-application",
             global: &cli.global,
         },

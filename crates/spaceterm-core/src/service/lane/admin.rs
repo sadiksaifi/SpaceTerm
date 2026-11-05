@@ -52,6 +52,11 @@ const PENDING_FILE: &std::ffi::CStr = c"service-operations.json";
 /// At most this many pending operations are kept. The server holds no more than 16.
 const MAX_PENDING: usize = 16;
 
+/// Whether `value` is a client's `service-operations.json` this build reads.
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<Vec<String>>(value)
+}
+
 /// The service operations one client identity admitted on one route and has not acknowledged,
 /// so the next lane connection settles them.
 pub struct PendingOperations {
@@ -307,9 +312,31 @@ fn read_full(from: &mut dyn Read, buffer: &mut [u8]) -> std::io::Result<usize> {
     Ok(filled)
 }
 
+/// The client's share of the state its pending record lives in. [`execute`] lets the share go
+/// while it waits for a receipt, because a SpaceTerm Core that starts meanwhile, such as the
+/// Pending Version a Restart starts, may migrate that state.
+pub trait Share {
+    /// Lets the state go once the record is written.
+    fn release(&mut self);
+    /// Shares the state again after the wait. False when the state left this build's
+    /// generation meanwhile: the record then stays for the client that reads it.
+    fn resume(&mut self) -> bool;
+}
+
+/// The share of a client that holds no lock on its state, such as the desktop's.
+pub struct Unshared;
+
+impl Share for Unshared {
+    fn release(&mut self) {}
+    fn resume(&mut self) -> bool {
+        true
+    }
+}
+
 /// Executes a confirmed preview of any action and follows it under [`Lane::perform`]. The
 /// operation is recorded in `pending` right before its `Execute`, after `dispatch` allows it,
-/// and removed once its receipt settled and was acknowledged.
+/// and removed once its receipt settled and was acknowledged. `share` is released between the
+/// two.
 #[allow(
     clippy::too_many_arguments,
     reason = "one execution's parts, used once"
@@ -321,6 +348,7 @@ pub fn execute(
     token: String,
     wait: Duration,
     pending: &PendingOperations,
+    share: &mut dyn Share,
     dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
@@ -333,11 +361,15 @@ pub fn execute(
             dispatch()?;
             pending
                 .add(operation)
-                .map_err(|_| LaneError::Core(CoreError::StorageUnavailable))
+                .map_err(|_| LaneError::Core(CoreError::StorageUnavailable))?;
+            share.release();
+            Ok(())
         },
         interrupted,
-    )?;
-    if let Outcome::Settled { receipt, .. } = &outcome {
+    );
+    let shared = share.resume();
+    let outcome = outcome?;
+    if shared && let Outcome::Settled { receipt, .. } = &outcome {
         let _ = pending.remove(&receipt.operation);
     }
     Ok(outcome)

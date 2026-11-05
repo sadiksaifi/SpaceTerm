@@ -197,14 +197,3 @@ bool spt_updater_finish_on_quit(void *pointer) {
     reply(SPUUserUpdateChoiceDismiss);
     return true;
 }
-uint64_t spt_updater_read_history(void *pointer, uint8_t *bytes, uint64_t capacity) {
-    if (![NSThread isMainThread] || !pointer || capacity > 4096) return 0;
-    NSData *data = [NSUserDefaults.standardUserDefaults dataForKey:@"SpaceTermUpdateHistory"];
-    if (!data || data.length > capacity) return 0;
-    memcpy(bytes, data.bytes, data.length);
-    return data.length;
-}
-void spt_updater_write_history(void *pointer, const uint8_t *bytes, uint64_t length) {
-    if (![NSThread isMainThread] || !pointer || length > 4096) return;
-    [NSUserDefaults.standardUserDefaults setObject:[NSData dataWithBytes:bytes length:length] forKey:@"SpaceTermUpdateHistory"];
-}

@@ -29,7 +29,7 @@ use crate::appearance::{
 };
 use crate::platform::secure_filesystem::SecureEntryIdentity;
 pub(crate) use document::{
-    SettingsDocument, SettingsDocumentError, export_settings, parse_settings,
+    SettingsDocument, SettingsDocumentError, export_settings, import_settings, parse_settings,
 };
 use storage::{Durability, SettingsStorage, StorageError};
 
@@ -45,6 +45,10 @@ pub(crate) enum SettingsError {
     Invalid,
     #[error("settings come from a newer SpaceTerm")]
     Unsupported,
+    /// The desktop config root is older than any generation this build migrates, or its
+    /// migration failed. It resets only through Settings Recovery.
+    #[error("settings come from a SpaceTerm this one can\u{2019}t migrate")]
+    Outdated,
     #[error(transparent)]
     Import(#[from] ImportError),
     #[error(transparent)]
@@ -55,7 +59,10 @@ pub(crate) enum SettingsError {
 
 impl SettingsError {
     pub(crate) fn is_malformed(self) -> bool {
-        matches!(self, Self::Invalid | Self::Storage(StorageError::TooLarge))
+        matches!(
+            self,
+            Self::Invalid | Self::Outdated | Self::Storage(StorageError::TooLarge)
+        )
     }
 }
 
@@ -65,6 +72,7 @@ impl From<SettingsDocumentError> for SettingsError {
     fn from(error: SettingsDocumentError) -> Self {
         match error {
             SettingsDocumentError::UnsupportedVersion => Self::Unsupported,
+            SettingsDocumentError::TooOld => Self::Outdated,
             _ => Self::Invalid,
         }
     }
@@ -239,7 +247,10 @@ impl Settings {
             next_preview: 0,
             transaction: Transaction::Idle,
         };
-        match read_document(storage.as_ref()) {
+        match storage
+            .prepare()
+            .and_then(|()| read_document(storage.as_ref()))
+        {
             Ok((document, identity)) => {
                 state.committed = Arc::new(document);
                 state.expected = identity;

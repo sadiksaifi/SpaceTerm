@@ -3,15 +3,20 @@
 
 use crate::updates::{UpdateAdapter, UpdateError, UpdateEvent};
 
-#[derive(Default)]
 pub(crate) struct MacosUpdates {
     session: std::cell::RefCell<Option<native::Session>>,
     clock_changes: std::cell::RefCell<Option<crate::platform::macos_clock_changes::ClockChanges>>,
+    history: crate::platform::update_history_file::UpdateHistoryFile,
 }
 
 impl MacosUpdates {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// Keeps the update history in `paths`' state directory, with the desktop's other state.
+    pub(crate) fn new(paths: Option<std::sync::Arc<crate::platform::app_paths::AppPaths>>) -> Self {
+        Self {
+            session: Default::default(),
+            clock_changes: Default::default(),
+            history: crate::platform::update_history_file::UpdateHistoryFile::new(paths),
+        }
     }
 }
 
@@ -37,8 +42,6 @@ mod native {
         fn spt_updater_install(session: *mut c_void) -> bool;
         fn spt_updater_destroy(session: *mut c_void);
         fn spt_updater_finish_on_quit(session: *mut c_void) -> bool;
-        fn spt_updater_read_history(session: *mut c_void, bytes: *mut u8, capacity: u64) -> u64;
-        fn spt_updater_write_history(session: *mut c_void, bytes: *const u8, length: u64);
     }
 
     pub(super) struct Session {
@@ -161,36 +164,10 @@ mod native {
             );
         }
         fn load_history(&self) -> crate::updates::policy::UpdateHistory {
-            let session = self.session.borrow();
-            let Some(session) = session.as_ref() else {
-                return Default::default();
-            };
-            let mut bytes = [0u8; 4096];
-            // SAFETY: retained main-thread session; buffer capacity is passed exactly.
-            let length = unsafe {
-                spt_updater_read_history(
-                    session.pointer.as_ptr(),
-                    bytes.as_mut_ptr(),
-                    bytes.len() as u64,
-                )
-            } as usize;
-            bytes
-                .get(..length)
-                .and_then(|bytes| serde_json::from_slice(bytes).ok())
-                .unwrap_or_default()
+            self.history.load()
         }
         fn save_history(&self, history: &crate::updates::policy::UpdateHistory) {
-            let session = self.session.borrow();
-            if let (Some(session), Ok(bytes)) = (session.as_ref(), serde_json::to_vec(history)) {
-                // SAFETY: the bridge copies bounded bytes synchronously on the main thread.
-                unsafe {
-                    spt_updater_write_history(
-                        session.pointer.as_ptr(),
-                        bytes.as_ptr(),
-                        bytes.len() as u64,
-                    )
-                };
-            }
+            self.history.save(history);
         }
         fn cancel(&self) {
             if let Some(session) = self.session.borrow().as_ref() {

@@ -259,6 +259,19 @@ impl Service {
             .set_automatic_start(enabled && !state.stopped)?;
         self.snapshot(&state)
     }
+    /// Whether the latest activation returned to the installation that holds `executable`. Data
+    /// its candidate migrated may then come back from the backup the candidate took first.
+    pub fn returned_to(&self, executable: &Path) -> Result<bool, CoreError> {
+        let Some((_, state)) = self.read()? else {
+            return Ok(false);
+        };
+        Ok(state.activation.as_ref().is_some_and(|operation| {
+            operation
+                .outcome()
+                .is_some_and(|outcome| matches!(outcome, activation::Outcome::Returned { .. }))
+                && executable.starts_with(operation.previous_installation(self))
+        }))
+    }
     pub fn status(&self) -> Result<ServiceStatus, CoreError> {
         self.recover_activation()?;
         let Some((_, state)) = self.read()? else {
@@ -647,6 +660,10 @@ impl Service {
             .map_err(|error| {
                 if self.supervisor.login_item_off() {
                     CoreError::LoginItemOff
+                } else if crate::migration::core_data::pending_reset_at(&self.paths.data).is_some()
+                {
+                    // The runtime refused data it can't read and recorded why.
+                    CoreError::DataResetRequired
                 } else {
                     error
                 }

@@ -41,6 +41,15 @@ pub(crate) struct StorageCommit {
 
 /// Supplies file effects without exposing paths or native handles to settings policy.
 pub(crate) trait SettingsStorage: Send + Sync {
+    /// Brings the desktop config root to this build's generation before anything reads it.
+    fn prepare(&self) -> Result<(), super::SettingsError> {
+        Ok(())
+    }
+    /// Moves aside a document that waits for a confirmed reset. Returns whether it did, so
+    /// recovery quarantines only a document that is merely malformed.
+    fn reset_generation(&self) -> Result<bool, StorageError> {
+        Ok(false)
+    }
     /// Quarantines only the identity retained by the most recent read, including oversized reads.
     fn quarantine(&self) -> Result<(), StorageError>;
     fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError>;
@@ -95,6 +104,36 @@ impl ConfigSettingsStorage {
 }
 
 impl SettingsStorage for ConfigSettingsStorage {
+    fn prepare(&self) -> Result<(), super::SettingsError> {
+        use spaceterm_core::migration::{NoCredentials, Refusal, StoreError, run};
+        let store = crate::migration::config_store(
+            Arc::clone(self.paths.filesystem()),
+            self.paths.directories().config.clone(),
+        );
+        match run(&crate::migration::CONFIG, &store, &mut NoCredentials, false) {
+            Ok(_) => Ok(()),
+            Err(Refusal::Newer) => Err(super::SettingsError::Unsupported),
+            Err(Refusal::Reset { .. }) => Err(super::SettingsError::Outdated),
+            Err(Refusal::Storage(StoreError::Unsafe)) => Err(StorageError::Unsafe.into()),
+            Err(Refusal::Storage(StoreError::Unavailable)) => Err(StorageError::Unavailable.into()),
+        }
+    }
+
+    fn reset_generation(&self) -> Result<bool, StorageError> {
+        use spaceterm_core::migration::{NoCredentials, StoreError, reset_confirmed};
+        let store = crate::migration::config_store(
+            Arc::clone(self.paths.filesystem()),
+            self.paths.directories().config.clone(),
+        );
+        match reset_confirmed(&crate::migration::CONFIG, &store, &mut NoCredentials) {
+            Ok(kinds) => Ok(!kinds.is_empty()),
+            Err(spaceterm_core::migration::Refusal::Storage(StoreError::Unsafe)) => {
+                Err(StorageError::Unsafe)
+            }
+            Err(_) => Err(StorageError::Unavailable),
+        }
+    }
+
     fn quarantine(&self) -> Result<(), StorageError> {
         let expected = self
             .observed

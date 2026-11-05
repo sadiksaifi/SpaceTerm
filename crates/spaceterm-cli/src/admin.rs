@@ -132,12 +132,18 @@ impl Reply {
 
 /// Runs one machine verb for SpaceTerm Core of `identity`, the identity this executable was
 /// built as.
-pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
+pub fn run(
+    identity: &str,
+    global: &Global,
+    command: &CoreCommand,
+    state: crate::state::StateShare,
+) -> Reply {
     let context = Context {
         identity,
         global,
         credentials: crate::connection::CliCredentials::new(identity),
         facts: std::cell::RefCell::new(None),
+        state: std::cell::RefCell::new(state),
     };
     let mut reply = match command {
         CoreCommand::Setup {
@@ -210,9 +216,47 @@ pub struct Context<'a> {
     pub credentials: crate::connection::CliCredentials<'a>,
     /// The update facts of the Core this command reached, for its notice.
     pub facts: std::cell::RefCell<Option<spaceterm_core::update::facts::UpdateFacts>>,
+    /// The command's share of its CLI state, which a Stop, Restart or network change lets go
+    /// while it waits.
+    pub state: std::cell::RefCell<crate::state::StateShare>,
 }
 
 impl Context<'_> {
+    /// Runs a direct service call that may wait for a SpaceTerm Core to start, as an
+    /// activation's return does, without the command's share of its CLI state. The Core that
+    /// starts can then migrate or restore the state. Code that touches the state afterward,
+    /// such as a CLI connection, calls [`Self::require_state`] first.
+    pub fn unshared<T>(&self, call: impl FnOnce() -> T) -> T {
+        use spaceterm_core::service::lane::admin::Share;
+        self.state.borrow_mut().release();
+        let result = call();
+        self.state.borrow_mut().resume();
+        result
+    }
+
+    /// Takes the command's share of its CLI state again after [`Self::unshared`]. A state that
+    /// left this build's generation meanwhile fails with `IncompatibleState`.
+    pub fn require_state(&self) -> Result<(), Failure> {
+        use spaceterm_core::service::lane::admin::Share;
+        if self.state.borrow_mut().resume() {
+            Ok(())
+        } else {
+            Err(contract::from_core_error(CoreError::IncompatibleState))
+        }
+    }
+
+    /// Runs `service`, direct service calls that touch no CLI state, through
+    /// [`Self::unshared`], then `connected` only once [`Self::require_state`] holds.
+    pub fn after_service<S, T>(
+        &self,
+        service: impl FnOnce() -> Result<S, Failure>,
+        connected: impl FnOnce(S) -> Result<T, Failure>,
+    ) -> Result<T, Failure> {
+        let serviced = self.unshared(service)?;
+        self.require_state()?;
+        connected(serviced)
+    }
+
     /// Whether the command acts on this machine: `--machine`, else `SPACETERM_MACHINE`, else
     /// `local`, with the same rule work commands use.
     pub fn is_local(&self) -> bool {
@@ -454,7 +498,13 @@ pub fn open_lane(
 const LAST_CONNECTED: &str = "last-connected.json";
 const LAST_CONNECTED_FILE: &std::ffi::CStr = c"last-connected.json";
 
+/// Whether `value` is a `last-connected.json` this build reads.
+pub(crate) fn readable_last_connected(value: &serde_json::Value) -> bool {
+    spaceterm_core::migration::strict::<LastConnected>(value)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LastConnected {
     /// Seconds since the Unix epoch.
     at: u64,

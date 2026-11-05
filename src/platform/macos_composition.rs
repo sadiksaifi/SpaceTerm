@@ -162,7 +162,7 @@ fn compose(
         profile: desktop_profile(Rc::new(super::macos_locale::ApplicationLocale))?,
         home_directory: startup.home_directory,
         adapters: crate::app::ApplicationCapabilities {
-            updates: update_adapter(identity),
+            updates: update_adapter(identity, &core_context_paths),
             machine_updates: Some(crate::updates::machines::composed(
                 identity.directory_name(),
                 &direct_machines,
@@ -262,22 +262,31 @@ fn command_line_tool(
     )))
 }
 
-fn update_adapter(identity: ApplicationIdentity) -> Rc<dyn crate::updates::UpdateAdapter> {
+fn update_adapter(
+    identity: ApplicationIdentity,
+    paths: &Arc<super::app_paths::AppPaths>,
+) -> Rc<dyn crate::updates::UpdateAdapter> {
     match identity.update_source() {
-        UpdateSource::SignedFeed => signed_feed_updates(),
+        UpdateSource::SignedFeed => signed_feed_updates(paths),
         UpdateSource::Simulation => simulated_updates(),
         UpdateSource::Unavailable => Rc::new(crate::updates::UnavailableUpdates),
     }
 }
 
 #[cfg(spaceterm_sparkle)]
-fn signed_feed_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
-    Rc::new(super::macos_updates::MacosUpdates::new())
+fn signed_feed_updates(
+    paths: &Arc<super::app_paths::AppPaths>,
+) -> Rc<dyn crate::updates::UpdateAdapter> {
+    Rc::new(super::macos_updates::MacosUpdates::new(Some(Arc::clone(
+        paths,
+    ))))
 }
 
 /// Only builds that link the signed updater can read the release feed.
 #[cfg(not(spaceterm_sparkle))]
-fn signed_feed_updates() -> Rc<dyn crate::updates::UpdateAdapter> {
+fn signed_feed_updates(
+    _: &Arc<super::app_paths::AppPaths>,
+) -> Rc<dyn crate::updates::UpdateAdapter> {
     Rc::new(crate::updates::UnavailableUpdates)
 }
 

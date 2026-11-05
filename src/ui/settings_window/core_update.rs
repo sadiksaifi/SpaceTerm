@@ -191,6 +191,7 @@ impl CoreUpdateControl for Service {
                     preview.token,
                     admin::wait(&LaneAction::Restart),
                     &pending,
+                    &mut admin::Unshared,
                     &mut || Ok(()),
                     &|| None,
                 )

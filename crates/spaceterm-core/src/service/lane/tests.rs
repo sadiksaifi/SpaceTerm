@@ -1959,6 +1959,71 @@ mod flow {
         )
     }
 
+    /// A client's shared lock on its state root, as the CLI holds it for each command.
+    struct Shared {
+        directory: Directory,
+        lock: Option<crate::storage::Lock>,
+    }
+    impl crate::service::lane::admin::Share for Shared {
+        fn release(&mut self) {
+            self.lock = None;
+        }
+        fn resume(&mut self) -> bool {
+            self.lock = Some(self.directory.lock_shared("state.lock").unwrap());
+            true
+        }
+    }
+
+    /// The Pending Version a Restart starts may migrate the client's state before it is ready,
+    /// so the client lets its share go while it waits.
+    #[test]
+    fn a_client_waiting_for_a_restart_lets_its_state_migrate() {
+        use crate::service::lane::admin;
+        with_lane(|lane| {
+            let switch = Arc::new(Switch::default());
+            switch.up(lane.lane.clone());
+            let state = lane.service.paths.data.join("client-state");
+            let migrated = Arc::new(Mutex::new(None));
+            let (old, seen, root) = (lane.lane.clone(), migrated.clone(), state.clone());
+            let helper_switch = switch.clone();
+            *lane.hook.lock().unwrap() = Some(Box::new(move |op: &OperationId| {
+                // The new runtime takes the state alone, as its CLI state migration does.
+                let directory = Directory::open(&root, false).unwrap();
+                *seen.lock().unwrap() = Some(directory.try_lock("state.lock").unwrap().is_some());
+                let (switch, old, op) = (helper_switch.clone(), old.clone(), *op);
+                std::thread::spawn(move || {
+                    let helper = helper_lock(&old);
+                    old.ledger().unwrap().claim(&op).unwrap();
+                    switch.down();
+                    drop(helper);
+                });
+            }));
+            let directory = Directory::open(&state, true).unwrap();
+            let mut share = Shared {
+                lock: Some(directory.lock_shared("state.lock").unwrap()),
+                directory,
+            };
+            let pending = pending_record(&lane);
+            let route = client::Lane::over(switch.clone());
+            let (mut session, _) = admin::open(&route, &pending).unwrap();
+            let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+            admin::execute(
+                &route,
+                session,
+                LaneAction::Restart,
+                preview.token,
+                Duration::from_secs(1),
+                &pending,
+                &mut share,
+                &mut || Ok(()),
+                &|| None,
+            )
+            .unwrap();
+            assert_eq!(*migrated.lock().unwrap(), Some(true));
+            assert!(share.lock.is_some(), "the client shares its state again");
+        });
+    }
+
     /// A Restart whose receipt never arrives stays in the route's pending record, and the next
     /// connection after the server returns settles and acknowledges it.
     #[test]
@@ -1991,6 +2056,7 @@ mod flow {
                 preview.token,
                 Duration::from_secs(3),
                 &pending,
+                &mut admin::Unshared,
                 &mut || Ok(()),
                 &|| None,
             )

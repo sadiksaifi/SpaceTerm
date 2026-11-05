@@ -28,11 +28,20 @@ impl Organization {
     }
 }
 
+/// The file that retains the organization, apart from the Machine ID in `identity.json`, so a
+/// reset can replace one without the other.
+pub(crate) const FILE: &str = "organization.json";
+const FILE_NAME: &std::ffi::CStr = c"organization.json";
+
+/// Whether `value` is an `organization.json` this build reads.
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    Organization::deserialize(value).is_ok_and(|organization| organization.validate().is_ok())
+}
+
 /// The host hands this store to the runtime only while holding its instance lock.
 ///
 /// [`Self::read`] confirms that what it returns is durable. A publication syncs its new file and
-/// the directory after renaming it; that makes the whole record durable, so a publication does not
-/// first confirm the record it replaces. Two syncs remain per publication.
+/// the directory after renaming it. Two syncs remain per publication.
 pub struct OrganizationStore(pub(crate) Directory);
 impl OrganizationStore {
     /// A Git child retains this lock across exec through [`WorktreeLock::into_inheritable`],
@@ -42,16 +51,24 @@ impl OrganizationStore {
         self.0.lock("worktree.lock", true)
     }
     pub fn read(&self) -> Result<Option<Organization>, CoreError> {
-        let _lock = self.0.lock("setup.lock", false)?;
-        Ok(self.0.read()?.organization.clone())
+        let Some(bytes) = self.0.read_bytes(FILE)? else {
+            return Ok(None);
+        };
+        // Valid JSON can retain a schema this build no longer understands.
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| CoreError::UnsafeStorage)?;
+        let organization =
+            Organization::deserialize(&value).map_err(|_| CoreError::IncompatibleState)?;
+        organization.validate()?;
+        Ok(Some(organization))
     }
     pub fn write(&self, organization: Option<&Organization>) -> Result<(), CoreError> {
-        if let Some(value) = organization {
-            value.validate()?;
+        match organization {
+            Some(value) => {
+                value.validate()?;
+                self.0.write_json(FILE_NAME, value)
+            }
+            None => self.0.remove_record(FILE_NAME),
         }
-        let _lock = self.0.lock("setup.lock", false)?;
-        let mut record = self.0.read_unconfirmed()?;
-        record.organization = organization.cloned();
-        self.0.write(&record)
     }
 }

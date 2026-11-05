@@ -7,7 +7,7 @@ use crate::platform::{
 use spaceterm_connections::records::{Durability, RecordFile, SaveError};
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
-const FILE: &str = "direct-device-connections.json";
+pub(crate) const FILE: &str = "direct-device-connections.json";
 const MAX_BYTES: usize = 512 * 1024;
 #[derive(Default)]
 struct WriteAuthority {

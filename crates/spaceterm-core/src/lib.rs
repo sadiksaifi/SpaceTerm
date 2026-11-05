@@ -11,6 +11,7 @@ pub mod direct;
 pub mod hierarchy;
 mod host;
 pub mod labels;
+pub mod migration;
 pub mod organization;
 #[cfg(feature = "client")]
 pub mod organize;
@@ -84,6 +85,10 @@ pub enum CoreError {
     StorageUnavailable,
     #[error("This SpaceTerm Core\u{2019}s saved state is from an incompatible SpaceTerm.")]
     IncompatibleState,
+    /// The Core's data is older than any generation it migrates, or its migration failed. The
+    /// runtime refuses to read it until the person resets it or installs a Stepping Stone.
+    #[error("SpaceTerm Core\u{2019}s saved data needs a reset before it can start.")]
+    DataResetRequired,
     #[error("SpaceTerm Core storage has unsafe permissions.")]
     UnsafeStorage,
     #[error("SpaceTerm couldn\u{2019}t verify the machine or account for this connection.")]
@@ -146,9 +151,19 @@ pub struct PaneFactory {
     build: BuildPanes,
     counters: std::sync::Arc<diagnostics::TerminalCounters>,
     version: Option<update::facts::Version>,
+    client_data: Option<Box<dyn FnOnce() -> Result<(), CoreError>>>,
 }
 
 impl PaneFactory {
+    /// Brings the data root of a client this run's installation ships to its generation before
+    /// the run reports readiness, after this Core's own data. A refusal ends the start unready.
+    pub fn with_client_data(
+        mut self,
+        prepare: impl FnOnce() -> Result<(), CoreError> + 'static,
+    ) -> Self {
+        self.client_data = Some(Box::new(prepare));
+        self
+    }
     /// Names this run's release version, which admission offers to every client. Without it,
     /// the run offers [`UNVERSIONED`].
     pub fn with_version(mut self, version: update::facts::Version) -> Self {
@@ -177,6 +192,7 @@ pub fn panes<P: connection::service::PaneService + 'static>(
         }),
         counters,
         version: None,
+        client_data: None,
     }
 }
 

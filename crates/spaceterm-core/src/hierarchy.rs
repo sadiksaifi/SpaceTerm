@@ -1648,6 +1648,11 @@ pub struct ClientOperation {
 /// is forgotten, and the client counts it so it can say that some went unseen.
 #[cfg(feature = "client")]
 pub const UNSEEN_OUTCOMES: usize = 32;
+/// Whether `value` is a `operations.json` this build reads.
+#[cfg(feature = "client")]
+pub(crate) fn readable_journal(value: &serde_json::Value) -> bool {
+    crate::migration::strict::<JournalRecord>(value)
+}
 #[cfg(feature = "client")]
 #[derive(Default, Serialize, Deserialize)]
 struct JournalRecord {

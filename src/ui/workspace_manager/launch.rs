@@ -377,6 +377,7 @@ const fn ends_opening(error: CoreError) -> bool {
         CoreError::IncompatibleProtocol(_)
             | CoreError::ActivationUnresolved
             | CoreError::IncompatibleState
+            | CoreError::DataResetRequired
             | CoreError::StorageUnavailable
             | CoreError::UnsafeStorage
             | CoreError::AuthenticationRefused

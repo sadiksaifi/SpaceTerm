@@ -57,8 +57,13 @@ pub fn start(context: &Context<'_>) -> Reply {
     if let Err(failure) = crate::interrupt::dispatch() {
         return Reply::failure(COMMAND, core, failure);
     }
-    let started = Service::for_identity(context.identity)
-        .and_then(|service| Controller::new(service).start())
+    // Start may wait for an activation to return to the previous Core, which restores the CLI
+    // state its candidate migrated.
+    let started = context
+        .unshared(|| {
+            Service::for_identity(context.identity)
+                .and_then(|service| Controller::new(service).start())
+        })
         .map_err(contract::from_core_error);
     match started {
         Ok(status) => Reply::new(
@@ -105,8 +110,9 @@ pub fn stop_or_restart(context: &Context<'_>, kind: Kind, token: Option<&str>) -
 /// changes nothing.
 fn not_running(context: &Context<'_>, routed: &Routed, command: &str, failure: Failure) -> Reply {
     if routed.local
-        && let Ok(Some(_)) =
+        && let Ok(Some(_)) = context.unshared(|| {
             Service::for_identity(context.identity).and_then(|service| service.stop_if_stopped())
+        })
     {
         return Reply::failure(
             command,
@@ -333,6 +339,7 @@ fn execute(
         token,
         context.timeout(kind.wait()),
         pending.operations(),
+        &mut *context.state.borrow_mut(),
         &mut super::dispatch,
         &crate::interrupt::settle_by,
     );

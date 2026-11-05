@@ -87,6 +87,7 @@ core_error_cases! {
     NotRunning => (true, Guidance),
     StorageUnavailable => (true, Error),
     IncompatibleState => (true, Error),
+    DataResetRequired => (true, Error),
     UnsafeStorage => (true, Error),
     AuthenticationRefused => (true, Error),
     CandidateChanged => (false, Error),

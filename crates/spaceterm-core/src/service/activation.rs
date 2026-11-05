@@ -8,8 +8,9 @@ use super::*;
 use crate::update::facts::StartFailure;
 
 /// The snapshot of the retained state an activation may restore, beside the files it copies.
-const SNAPSHOT: [(&std::ffi::CStr, &std::ffi::CStr); 2] = [
+const SNAPSHOT: [(&std::ffi::CStr, &std::ffi::CStr); 3] = [
     (c"identity.json", c"activation-identity.json"),
+    (c"organization.json", c"activation-organization.json"),
     (c"direct.json", c"activation-direct.json"),
 ];
 
@@ -605,6 +606,14 @@ impl Service {
                         .map_err(|_| CoreError::CleanupUnresolved)?;
                     let _setup = data.lock("setup.lock", false)?;
                     restore_snapshot(data, operation.saved.ok_or(CoreError::UnsafeStorage)?)?;
+                    // A candidate that migrated the data left the backup it took first. This
+                    // runtime's own generation comes back from it. Data it still can't read
+                    // refuses at its start.
+                    match crate::migration::core_data::run_locked(&self.paths.data, true) {
+                        Ok(_)
+                        | Err(CoreError::IncompatibleState | CoreError::DataResetRequired) => {}
+                        Err(error) => return Err(error),
+                    }
                     self.verify_choice(&previous)?;
                     self.supervisor
                         .replace(&candidate.directory, &previous.directory)?;

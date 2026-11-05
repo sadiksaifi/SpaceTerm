@@ -864,6 +864,15 @@ fn present_quit_prompt(
     }
 }
 
+/// Whether the desktop state root reached this build's generation. Data that is unavailable,
+/// waits for a confirmed reset, or that a newer SpaceTerm wrote is never read or changed, so the
+/// launch ends instead. Telling the person why is not built yet.
+fn desktop_state_ready(host: &HostComposition) -> bool {
+    let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+    crate::migration::current_state_store(host.adapters.core_context_paths.directories())
+        .is_some_and(|store| crate::migration::state_ready(&store, identity))
+}
+
 fn close_quit_prompt_host(place: QuitPromptPlace, cx: &mut App) {
     if let QuitPromptPlace::Host(host) = place {
         let _ = host.update(cx, |_, window, _| window.remove_window());
@@ -1475,13 +1484,20 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
         }
     });
     let pending_invitations = Rc::new(RefCell::new(Some(pending_invitations)));
-    let desktop_channel = RefCell::new(host.adapters.desktop_channel.clone());
+    let desktop_channel = Rc::new(RefCell::new(host.adapters.desktop_channel.clone()));
     application.on_reopen(move |cx| {
         leave_menu_only(cx);
         restore_default_window(cx, &reopened_host);
     });
     application.run(move |cx| {
         if crate::local_startup::leave_disk_image() {
+            cx.quit();
+            return;
+        }
+        // The desktop state root reaches this build's generation before initialization or any
+        // reader or writer opens it.
+        if !desktop_state_ready(&host) {
+            eprintln!("SpaceTerm can\u{2019}t read its saved data");
             cx.quit();
             return;
         }
@@ -1497,35 +1513,42 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             service.update(cx, |updates, cx| {
                 updates.begin_launch(
                     Rc::new(move |cx| {
-                        if let Err(error) = open_initial_workspace(cx, &host) {
-                            reported_failure.set(Some(error));
-                            cx.quit();
-                            return;
-                        }
-                        if let Some(endpoint) = desktop_channel.borrow_mut().take() {
-                            crate::ui::serve_desktop_requests(
-                                endpoint,
-                                crate::application_identity::ApplicationIdentity::current()
-                                    .directory_name(),
-                                Arc::clone(&host.adapters.lifecycle.counters),
-                                cx,
-                            );
-                        }
-                        if let Some(receiver) = pending_invitations.borrow_mut().take() {
-                            cx.spawn(async move |cx| {
-                                while let Ok(link) = receiver.recv().await {
-                                    cx.update(|cx| {
-                                        leave_menu_only(cx);
-                                        crate::ui::settings_window::open_add_machine(
-                                            Some(link),
-                                            None,
-                                            cx,
-                                        );
-                                    });
-                                }
-                            })
-                            .detach();
-                        }
+                        let host = Rc::clone(&host);
+                        let reported_failure = Rc::clone(&reported_failure);
+                        let desktop_channel = Rc::clone(&desktop_channel);
+                        let pending_invitations = Rc::clone(&pending_invitations);
+                        let open = Rc::new(move |cx: &mut App| {
+                            if let Err(error) = open_initial_workspace(cx, &host) {
+                                reported_failure.set(Some(error));
+                                cx.quit();
+                                return;
+                            }
+                            if let Some(endpoint) = desktop_channel.borrow_mut().take() {
+                                crate::ui::serve_desktop_requests(
+                                    endpoint,
+                                    crate::application_identity::ApplicationIdentity::current()
+                                        .directory_name(),
+                                    Arc::clone(&host.adapters.lifecycle.counters),
+                                    cx,
+                                );
+                            }
+                            if let Some(receiver) = pending_invitations.borrow_mut().take() {
+                                cx.spawn(async move |cx| {
+                                    while let Ok(link) = receiver.recv().await {
+                                        cx.update(|cx| {
+                                            leave_menu_only(cx);
+                                            crate::ui::settings_window::open_add_machine(
+                                                Some(link),
+                                                None,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                })
+                                .detach();
+                            }
+                        });
+                        open(cx);
                     }),
                     cx,
                 );

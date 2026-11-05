@@ -1088,15 +1088,19 @@ fn a_candidate_that_never_becomes_ready_returns_with_the_retained_state_it_chang
             .lock()
             .unwrap()
             .push(candidate.directory.clone());
-        // The candidate rewrites the organization and creates direct state, then hangs.
+        // The candidate rewrites the identity, creates the organization and direct state, then
+        // hangs.
         *supervisor.meddles.lock().unwrap() = Some(Box::new(|data: &Directory| {
             let mut record = data.read().unwrap();
-            record.organization = Some(
-                crate::hierarchy::State::first("/".as_ref())
+            record.core = [42; 32];
+            data.write(&record).unwrap();
+            data.write_json(
+                c"organization.json",
+                &crate::hierarchy::State::first("/".as_ref())
                     .unwrap()
                     .envelope(),
-            );
-            data.write(&record).unwrap();
+            )
+            .unwrap();
             data.write_json(c"direct.json", &serde_json::Value::Null)
                 .unwrap();
         }));
@@ -1113,6 +1117,7 @@ fn a_candidate_that_never_becomes_ready_returns_with_the_retained_state_it_chang
             identity
         );
         assert!(!service.paths.data.join("direct.json").exists());
+        assert!(!service.paths.data.join("organization.json").exists());
         for (_, copy) in SNAPSHOT {
             assert!(!service.paths.data.join(copy.to_str().unwrap()).exists());
         }
@@ -1336,6 +1341,52 @@ fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
             }
         );
         assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+    });
+}
+
+#[test]
+fn a_return_restores_the_data_generation_a_candidate_migrated_from() {
+    use crate::migration::{Area, Store};
+    with_service(|service, previous, candidate, supervisor| {
+        supervisor
+            .hangs
+            .lock()
+            .unwrap()
+            .push(candidate.directory.clone());
+        let root = service.paths.data.clone();
+        let identity = std::fs::read(root.join("identity.json")).unwrap();
+        // The candidate migrates the data to a newer generation, as its runner does, then hangs.
+        *supervisor.meddles.lock().unwrap() = Some(Box::new(move |_: &Directory| {
+            let store = crate::migration::core_data::store(&root);
+            store
+                .write(Area::Backup, "identity.json", &identity)
+                .unwrap();
+            store
+                .write(Area::Backup, "generation.json", br#"{"generation":1}"#)
+                .unwrap();
+            store
+                .write(Area::Root, "generation.json", br#"{"generation":2}"#)
+                .unwrap();
+        }));
+        let status = update_running(&service, &previous, &candidate, &supervisor).unwrap();
+        assert!(matches!(status.phase, ActivationPhase::Returned { .. }));
+        let marker: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(service.paths.data.join("generation.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker, serde_json::json!({ "generation": 1 }));
+        assert!(crate::migration::core_data::prepare(&service.paths).is_ok());
+        // The CLI of the version it returned to may restore its own state the same way.
+        assert!(
+            service
+                .returned_to(&previous.directory.join("bin/spaceterm"))
+                .unwrap()
+        );
+        assert!(
+            !service
+                .returned_to(&candidate.directory.join("bin/spaceterm"))
+                .unwrap()
+        );
     });
 }
 

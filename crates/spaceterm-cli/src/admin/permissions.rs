@@ -379,6 +379,7 @@ mod tests {
         let context = Context {
             credentials: crate::connection::CliCredentials::new("spaceterm"),
             facts: Default::default(),
+            state: Default::default(),
             identity: "spaceterm",
             global: &global,
         };
@@ -442,6 +443,7 @@ mod tests {
         let context = Context {
             credentials: crate::connection::CliCredentials::new("spaceterm-development"),
             facts: Default::default(),
+            state: Default::default(),
             identity: "spaceterm-development",
             global: &global,
         };

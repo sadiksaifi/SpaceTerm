@@ -405,6 +405,10 @@ fn remove(document: &mut Document, index: usize) -> SavedConnection {
     });
     connection
 }
+/// Whether `value` is a `connections.json` this build reads.
+pub fn readable(value: &serde_json::Value) -> bool {
+    Document::deserialize(value).is_ok_and(|document| validate(&document).is_ok())
+}
 fn read(directory: &Directory) -> Result<Document, StoreError> {
     let document = directory
         .read_json("connections.json")

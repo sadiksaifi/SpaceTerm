@@ -29,6 +29,22 @@ fn main() -> ExitCode {
     if let Err(error) = resolve_launcher() {
         return finish(command, cli.global.json, contract::from_core_error(error));
     }
+    // The CLI's state reaches this build's generation before any command reads it. SpaceTerm
+    // Core's internal commands skip this step. `internal serve` migrates the state at startup.
+    // The command shares the root through this guard until it ends.
+    let mut state = if matches!(
+        cli.command,
+        Command::Internal(_) | Command::Completion { .. }
+    ) {
+        None
+    } else {
+        match spaceterm_cli::state::prepare(IDENTITY) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                return finish(command, cli.global.json, contract::from_core_error(error));
+            }
+        }
+    };
     if let args::Command::Machine(command) = &cli.command {
         let result = spaceterm_cli::connection::execute(
             command,
@@ -117,7 +133,8 @@ fn main() -> ExitCode {
             };
         }
         Command::Core(core) => {
-            let reply = spaceterm_cli::admin::run(IDENTITY, &cli.global, core);
+            let state = state.take().unwrap_or_default();
+            let reply = spaceterm_cli::admin::run(IDENTITY, &cli.global, core, state);
             return ExitCode::from(reply.write(
                 (&cli.global).into(),
                 &mut std::io::stdout().lock(),
@@ -190,7 +207,9 @@ fn serve(service: bool, owned: bool) -> Result<(), CoreError> {
                 .with_session_context(spaceterm::runtime::CoreSessionContext::current(IDENTITY)?),
         ))
     })
-    .with_version(version);
+    .with_version(version)
+    // The CLI's state ships in this installation, so every Stepping Stone migrates it too.
+    .with_client_data(|| spaceterm_cli::state::prepare_for_core(IDENTITY));
     if service {
         spaceterm_core::service::run(IDENTITY, panes)
     } else if owned {

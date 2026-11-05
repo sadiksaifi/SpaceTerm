@@ -22,7 +22,7 @@ pub use endpoint::Endpoint;
 pub(crate) mod host;
 mod network;
 mod quic;
-mod storage;
+pub(crate) mod storage;
 pub(crate) use storage::{forget, observe};
 #[cfg(test)]
 pub(crate) mod tests;
@@ -328,7 +328,8 @@ impl From<CoreError> for DirectError {
             CoreError::Direct(error) => error,
             CoreError::StorageUnavailable
             | CoreError::UnsafeStorage
-            | CoreError::IncompatibleState => Self::StorageUnavailable,
+            | CoreError::IncompatibleState
+            | CoreError::DataResetRequired => Self::StorageUnavailable,
             CoreError::IncompatibleProtocol(_) => Self::IncompatibleProtocol,
             CoreError::AuthenticationRefused => Self::AuthenticationRefused,
             CoreError::Capacity => Self::Capacity,
