@@ -5,6 +5,7 @@
 //! any field, then refuses unknown fields and every value that breaks a field rule. It never
 //! decides whether the version is newer, skipped or runnable on this host: the updater does.
 use super::facts::{Platform, Protocols, Version, decimal, lowercase_hex};
+use super::ordering::{Candidate, Floor};
 use super::trust::{SIGNATURE_BYTES, UpdateTrust};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -154,6 +155,8 @@ pub struct Feed {
     pub target: FeedTarget,
     /// A Release version: `MAJOR.MINOR.PATCH`.
     pub version: Version,
+    /// The release's Update Floor, never newer than `version`.
+    pub floor: Floor,
     /// Unix seconds.
     pub published_at: u64,
     pub protocols: Protocols,
@@ -187,6 +190,8 @@ pub enum FeedError {
     Target,
     #[error("the feed's version is not a release version")]
     Version,
+    #[error("the feed's floor is not a release version at most its own")]
+    Floor,
     #[error("the feed's publication time is out of range")]
     PublishedAt,
     #[error("the feed's minimum system is malformed")]
@@ -210,6 +215,7 @@ struct Document {
     product: Product,
     platform: Platform,
     version: String,
+    floor: String,
     published_at: u64,
     protocols: Protocols,
     minimum_system: String,
@@ -251,6 +257,10 @@ pub fn read(
         .ok()
         .filter(|version| version.release().is_some())
         .ok_or(FeedError::Version)?;
+    let floor = Floor::parse(&document.floor)
+        .ok()
+        .filter(|floor| Candidate::new(version.clone(), *floor).is_ok())
+        .ok_or(FeedError::Floor)?;
     if document.published_at == 0 || document.published_at > now.saturating_add(MAX_CLOCK_SKEW) {
         return Err(FeedError::PublishedAt);
     }
@@ -275,6 +285,7 @@ pub fn read(
     Ok(Feed {
         target,
         version,
+        floor,
         published_at: document.published_at,
         protocols: document.protocols,
         minimum_system,
@@ -288,6 +299,11 @@ pub fn read(
 }
 
 impl Feed {
+    /// The release as a source offers it to the engine: its version and Update Floor.
+    pub fn candidate(&self) -> Candidate {
+        Candidate::new(self.version.clone(), self.floor).expect("a read feed keeps its floor rule")
+    }
+
     /// The feed document: compact UTF-8 JSON with no trailing newline.
     pub fn to_bytes(&self) -> Vec<u8> {
         let hex: String = self
@@ -301,6 +317,7 @@ impl Feed {
             product: self.target.product,
             platform: self.target.platform,
             version: self.version.to_string(),
+            floor: self.floor.to_string(),
             published_at: self.published_at,
             protocols: self.protocols,
             minimum_system: format!(
@@ -339,6 +356,7 @@ mod tests {
             "product": "core",
             "platform": "linux-x86_64",
             "version": "1.4.0",
+            "floor": "1.2.0",
             "published_at": NOW,
             "protocols": {
                 "work": { "major": 2, "minor": 1 },
@@ -390,6 +408,7 @@ mod tests {
             Feed {
                 target: FeedTarget::CORE_LINUX,
                 version: version("1.4.0"),
+                floor: Floor::parse("1.2.0").unwrap(),
                 published_at: NOW,
                 protocols: Protocols {
                     work: ProtocolVersion { major: 2, minor: 1 },
@@ -462,7 +481,7 @@ mod tests {
     fn every_field_rule_refuses_its_breach() {
         let signer = Signer::new();
         type Breach = (fn(&mut Value), FeedError);
-        let refused: [Breach; 18] = [
+        let refused: [Breach; 22] = [
             (|f| f["channel"] = "stable".into(), FeedError::Malformed),
             (|f| f["archive"]["url"] = "x".into(), FeedError::Malformed),
             (
@@ -480,6 +499,15 @@ mod tests {
                 FeedError::Malformed,
             ),
             (|f| f["minimum_system"] = Value::Null, FeedError::Malformed),
+            (
+                |f| {
+                    f.as_object_mut().unwrap().remove("floor");
+                },
+                FeedError::Malformed,
+            ),
+            (|f| f["floor"] = "1.2".into(), FeedError::Floor),
+            (|f| f["floor"] = "dev.0123456789ab".into(), FeedError::Floor),
+            (|f| f["floor"] = "1.4.1".into(), FeedError::Floor),
             (|f| f["schema"] = 2.into(), FeedError::Schema),
             (|f| f["product"] = "desktop".into(), FeedError::Target),
             (
@@ -537,6 +565,11 @@ mod tests {
         );
         let skewed = edited(|f| f["published_at"] = (NOW + MAX_CLOCK_SKEW).into());
         assert!(signer.read(FeedTarget::CORE_LINUX, &skewed).is_ok());
+        let own = edited(|f| f["floor"] = "1.4.0".into());
+        assert!(
+            signer.read(FeedTarget::CORE_LINUX, &own).is_ok(),
+            "the first release with floors names itself as its floor"
+        );
     }
 
     #[test]

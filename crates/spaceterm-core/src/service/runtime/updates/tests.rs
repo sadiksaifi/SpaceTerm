@@ -1,6 +1,8 @@
 use super::*;
 use crate::protocol::version::ProtocolVersion;
-use crate::service::runtime::test_support::{with_artifact, with_build, with_fixture_trust};
+use crate::service::runtime::test_support::{
+    no_floor, with_artifact, with_build, with_fixture_trust,
+};
 use crate::service::tests::Fixture;
 use crate::service::{ServiceStartup, Supervisor};
 use std::path::PathBuf;
@@ -556,6 +558,7 @@ mod feed_checks {
         let feed = Feed {
             target,
             version: version(text),
+            floor: no_floor(),
             published_at: now() - 60,
             protocols: Protocols::CURRENT,
             minimum_system: SystemVersion { major: 0, minor: 0 },

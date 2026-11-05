@@ -3,6 +3,7 @@ use crate::protocol::version::ProtocolVersion;
 use crate::update::facts::{Platform, Protocols};
 use crate::update::feed::{Feed, FeedArchive};
 use crate::update::fetch::Signed;
+use crate::update::ordering::Floor;
 use crate::update::trust::testing::{TestKey, trust};
 
 const NOW: u64 = 1_793_750_400;
@@ -301,6 +302,7 @@ fn release(key: &TestKey, version: &str, minimum: SystemVersion, archive: &[u8])
             signature: key.sign(archive).try_into().unwrap(),
         },
         version,
+        floor: Floor::parse("0.0.0").unwrap(),
         published_at: NOW,
         protocols: Protocols {
             work: ProtocolVersion { major: 1, minor: 0 },

@@ -1,11 +1,88 @@
-//! Version ordering: which versions a Core installs, from any source. Its feed, a desktop push,
-//! a local archive and `install.sh` all pass through [`admit`], so no source installs a version
-//! that is not newer than the newest one the Core has, or the skipped one.
+//! Version ordering: which versions a Core installs, from any source. Its feed, a desktop push
+//! and a local archive all pass through [`admit`], so no source installs a version that is not
+//! newer than the newest one the Core has, the skipped one, or one whose Update Floor is above
+//! the running version.
 //!
 //! Release versions order by `MAJOR.MINOR.PATCH`. Preflight and Development versions name a
-//! commit and have no order, so among them only equality refuses. A Release version and a
-//! development version never order against each other.
-use super::facts::Version;
+//! commit and have no order, so among them only equality refuses, and floors never apply to
+//! them. A Release version and a development version never order against each other.
+use super::facts::{InvalidVersion, Version};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// An Update Floor: the oldest Release version allowed to update directly to a release. JSON:
+/// `"MAJOR.MINOR.PATCH"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Floor([u64; 3]);
+
+impl Floor {
+    /// Parses `MAJOR.MINOR.PATCH`. Any other text, a development version included, is refused.
+    pub fn parse(text: &str) -> Result<Self, InvalidVersion> {
+        Version::parse(text)?
+            .release()
+            .map(Self)
+            .ok_or(InvalidVersion)
+    }
+
+    /// Whether `running` may update directly to a release with this floor. A development
+    /// version has no order, so every floor admits it.
+    pub fn admits(self, running: &Version) -> bool {
+        running.release().is_none_or(|running| running >= self.0)
+    }
+
+    /// The release this floor names, whose own feed an updater fetches next.
+    pub fn version(self) -> Version {
+        Version::parse(&self.to_string()).expect("a floor is a release version")
+    }
+}
+
+impl fmt::Display for Floor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let [major, minor, patch] = self.0;
+        write!(formatter, "{major}.{minor}.{patch}")
+    }
+}
+
+impl TryFrom<String> for Floor {
+    type Error = InvalidVersion;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
+    }
+}
+
+impl From<Floor> for String {
+    fn from(floor: Floor) -> Self {
+        floor.to_string()
+    }
+}
+
+/// A version a source offers and the Update Floor it declares. A Release version's floor is
+/// never newer than the version itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    version: Version,
+    floor: Floor,
+}
+
+impl Candidate {
+    /// Refuses a Release `version` older than its `floor`.
+    pub fn new(version: Version, floor: Floor) -> Result<Self, InvalidVersion> {
+        if version.release().is_some_and(|release| release < floor.0) {
+            return Err(InvalidVersion);
+        }
+        Ok(Self { version, floor })
+    }
+
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    pub fn floor(&self) -> Floor {
+        self.floor
+    }
+}
 
 /// Why the Core refuses a version from every source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

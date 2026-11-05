@@ -170,6 +170,7 @@ pub(crate) mod testing {
                     sha256: Sha256::digest(archive).into(),
                     signature: self.sign(archive).try_into().unwrap(),
                 },
+                floor: spaceterm_core::update::ordering::Floor::parse("0.0.0").unwrap(),
                 version,
             }
             .to_bytes();

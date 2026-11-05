@@ -734,7 +734,7 @@ impl Catalog {
         let manifest = serde_json::json!({
             "schema": 1, "source_sha256": null, "identity": identity, "target": target,
             "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "version": "0.9.0",
-            "protocols": Protocols::CURRENT,
+            "floor": "0.9.0", "protocols": Protocols::CURRENT,
         });
         let mut entries = vec![
             (
