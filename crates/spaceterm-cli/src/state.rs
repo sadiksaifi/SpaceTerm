@@ -499,6 +499,79 @@ mod tests {
     }
 
     #[test]
+    fn every_cli_state_migration_fixture_migrates_and_reads_strictly() {
+        use spaceterm_core::migration::fixtures;
+        fixtures::check(&REGISTRY, &fixtures::directory("cli-state"), &[], |root| {
+            Box::new(store_at(root.to_path_buf()))
+        });
+    }
+
+    /// `mise run migration:fixture cli-state` writes this build's generation's fixture.
+    #[test]
+    #[ignore = "writes the fixture of the current generation"]
+    fn capture_cli_state_migration_fixture() {
+        use spaceterm_core::migration::fixtures;
+        let root = fixtures::scratch("cli-state");
+        let mut none = migration::NoCredentials;
+        bring(root.clone(), &mut none).unwrap();
+        let directory = |path: &str| Directory::open(&root.join(path), true).unwrap();
+        directory("")
+            .write_json(
+                c"connections.json",
+                &serde_json::json!({
+                    "connections": [],
+                    "pending": [],
+                    "enrollments": [],
+                    "confirmations": [],
+                }),
+            )
+            .unwrap();
+        let state = CliState::at(root.clone());
+        let mut runs = state.runs(&RouteKey::Local, None, Instant::now()).unwrap();
+        drop(
+            runs.add(PendingRun {
+                run: RunId([1; 16]),
+                pane: [2; 32],
+                session: [3; 32],
+                created_at: 1,
+            })
+            .unwrap(),
+        );
+        let base = state.identity_path(&RouteKey::Local, None);
+        fixtures::write_client_records(&base);
+        directory("routes/local/base")
+            .write_json(c"last-connected.json", &serde_json::json!({ "at": 1 }))
+            .unwrap();
+        let paired = state.identity_path(&RouteKey::Paired([9; 32]), None);
+        Directory::open(&paired, true)
+            .unwrap()
+            .write_json(
+                c"route.json",
+                &serde_json::json!({
+                    "version": 1,
+                    "paired": spaceterm_core::direct::PairedDevice {
+                        pin: spaceterm_core::direct::MachinePin {
+                            build: "spaceterm-development".into(),
+                            core: [1; 32],
+                            public_key: [2; 32],
+                            certificate: [3; 32],
+                        },
+                        pairing: [4; 32],
+                        client: [5; 32],
+                    },
+                }),
+            )
+            .unwrap();
+        fixtures::capture(
+            &REGISTRY,
+            &root,
+            &store_at(root.clone()),
+            &fixtures::directory("cli-state"),
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn identities_live_under_their_route() {
         let state = CliState::at(PathBuf::from("/state/clients/cli"));
         let agent: AgentName = "agent-1".parse().unwrap();

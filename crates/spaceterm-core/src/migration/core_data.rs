@@ -114,3 +114,56 @@ fn storage(error: StoreError) -> CoreError {
         StoreError::Unsafe => CoreError::UnsafeStorage,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migration::fixtures;
+
+    #[test]
+    fn every_core_data_fixture_migrates_and_reads_strictly() {
+        fixtures::check(&REGISTRY, &fixtures::directory("core-data"), &[], |root| {
+            Box::new(store(root))
+        });
+    }
+
+    /// `mise run migration:fixture core-data` writes this build's generation's fixture.
+    #[test]
+    #[ignore = "writes the fixture of the current generation"]
+    fn capture_core_data_fixture() {
+        let root = fixtures::scratch("core-data");
+        let paths = Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("data"),
+            runtime: root.join("runtime"),
+        };
+        let data = Directory::open(&paths.data, true).unwrap();
+        prepare(&paths).unwrap();
+        {
+            let _setup = data.lock("setup.lock", false).unwrap();
+            data.read_or_create().unwrap();
+        }
+        crate::organization::OrganizationStore(Directory::open(&paths.data, false).unwrap())
+            .write(Some(
+                &crate::hierarchy::State::first("/".as_ref())
+                    .unwrap()
+                    .envelope(),
+            ))
+            .unwrap();
+        drop(crate::direct::host::State::open(&paths).unwrap());
+        data.write_json(c"paired-majors.json", &serde_json::json!([]))
+            .unwrap();
+        crate::update::proxy::write(
+            &paths.data,
+            Some(&crate::update::proxy::Proxy::parse("http://127.0.0.1:3128").unwrap()),
+        )
+        .unwrap();
+        fixtures::capture(
+            &REGISTRY,
+            &paths.data,
+            &store(&paths.data),
+            &fixtures::directory("core-data"),
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

@@ -29,3 +29,4 @@ spaceterm-core = { path = "../spaceterm-core", features = ["client"] }
 [dev-dependencies]
 quircs = "=0.10.3"
 spaceterm-directories = { path = "../spaceterm-directories" }
+spaceterm-core = { path = "../spaceterm-core", features = ["client", "test-support"] }

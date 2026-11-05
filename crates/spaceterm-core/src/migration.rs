@@ -24,6 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod client_files;
 pub mod core_data;
 mod directory;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
 pub mod generations;
 #[cfg(test)]
 mod tests;
