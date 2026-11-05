@@ -16,7 +16,7 @@ use crate::contract::{
 };
 use spaceterm_core::direct::{NetworkPolicy, default_port};
 use spaceterm_core::service::lane::Offline;
-use spaceterm_core::service::{LingerAuthorization, Service};
+use spaceterm_core::service::{LingerAuthorization, Service, ServiceStatus};
 use std::path::{Path, PathBuf};
 
 const COMMAND: &str = "setup";
@@ -134,8 +134,7 @@ pub fn run(
     if network.is_none() && !context.interactive() {
         return Reply::failure(COMMAND, None, Failure::new(Code::InteractionRequired));
     }
-    // Setup touches no CLI state, and its service calls may wait for an activation to settle.
-    match context.unshared(|| setup(context, network, automatic, proxy)) {
+    match setup(context, network, automatic, proxy) {
         Ok((data, text)) => {
             let core = super::local_ref(context.identity).ok();
             Reply::new(&Envelope::ok(COMMAND, core, data), text)
@@ -156,12 +155,46 @@ fn setup(
         .account_home()
         .ok_or(Failure::new(Code::StorageUnavailable))?;
     let launcher = launcher(&home, &installations, context.identity);
-    let mut steps = Vec::new();
+    let opens = network.is_some_and(|network| !matches!(network, Network::Off));
+    // The service calls may wait for an activation to settle, which starts a Core. The CLI
+    // connection that follows reads the CLI state.
+    context.after_service(
+        || {
+            serviced(
+                context,
+                &service,
+                &launcher,
+                &installations,
+                opens,
+                automatic,
+            )
+        },
+        |serviced| connected(context, serviced, network, proxy, &launcher, &home),
+    )
+}
+
+/// What setup's service calls did, in step order.
+struct Serviced {
+    install: StepResult,
+    linger: StepResult,
+    start: StepResult,
+    automatic: StepResult,
+    status: ServiceStatus,
+}
+
+/// Installs and starts SpaceTerm Core and sets its automatic start. Touches no CLI state.
+fn serviced(
+    context: &Context<'_>,
+    service: &Service,
+    launcher: &LauncherState,
+    installations: &Path,
+    opens: bool,
+    automatic: Option<Toggle>,
+) -> Result<Serviced, Failure> {
     let before = service.status().map_err(contract::from_core_error)?;
     crate::interrupt::dispatch()?;
     // Linux asks for boot startup before the first start. macOS starts at login and has no
     // such step.
-    let opens = network.is_some_and(|network| !matches!(network, Network::Off));
     let linger = match service.linger().map_err(contract::from_core_error)? {
         None => StepResult::Skipped,
         Some(true) => StepResult::AlreadyDone,
@@ -183,15 +216,13 @@ fn setup(
         let installation = launcher
             .installation
             .clone()
-            .or_else(|| running_installation(&installations, context.identity))
+            .or_else(|| running_installation(installations, context.identity))
             .ok_or(Failure::new(Code::NoCandidate))?;
         service
             .install(&installation)
             .map_err(contract::from_core_error)?;
         StepResult::Done
     };
-    steps.push(step(SetupStepName::InstallService, install));
-    steps.push(step(SetupStepName::Linger, linger));
     let status = service.status().map_err(contract::from_core_error)?;
     let start = if status.stopped {
         // Only `start` reverses a deliberate Stop.
@@ -206,14 +237,7 @@ fn setup(
         service.connect().map_err(contract::from_core_error)?;
         StepResult::Done
     };
-    steps.push(step(SetupStepName::Start, start));
-    let connection = context.local_connection()?;
-    let network_step = match network {
-        None => StepResult::Skipped,
-        Some(network) => set_network(&connection, network)?,
-    };
-    steps.push(step(SetupStepName::Network, network_step));
-    let automatic_step = match automatic {
+    let automatic = match automatic {
         None => StepResult::Skipped,
         Some(toggle) => {
             let enabled = toggle == Toggle::On;
@@ -227,8 +251,37 @@ fn setup(
             }
         }
     };
-    steps.push(step(SetupStepName::AutomaticStart, automatic_step));
     let status = service.status().map_err(contract::from_core_error)?;
+    Ok(Serviced {
+        install,
+        linger,
+        start,
+        automatic,
+        status,
+    })
+}
+
+/// Sets Network Access and the update proxy and reports the result, over a CLI connection.
+fn connected(
+    context: &Context<'_>,
+    serviced: Serviced,
+    network: Option<&Network>,
+    proxy: Option<&UpdateProxy>,
+    launcher: &LauncherState,
+    home: &Path,
+) -> Result<(CoreSetup, String), Failure> {
+    let connection = context.local_connection()?;
+    let network_step = match network {
+        None => StepResult::Skipped,
+        Some(network) => set_network(&connection, network)?,
+    };
+    let mut steps = vec![
+        step(SetupStepName::InstallService, serviced.install),
+        step(SetupStepName::Linger, serviced.linger),
+        step(SetupStepName::Start, serviced.start),
+        step(SetupStepName::Network, network_step),
+        step(SetupStepName::AutomaticStart, serviced.automatic),
+    ];
     let offline = Offline::new(context.identity).map_err(contract::from_core_error)?;
     let proxy_step = match proxy {
         None => StepResult::Skipped,
@@ -279,9 +332,9 @@ fn setup(
             sha256: lane.runtime.sha256.clone(),
         },
         network,
-        automatic_start: status.enabled,
+        automatic_start: serviced.status.enabled,
         launcher: launcher.launcher,
-        path_ok: path_ok(&home, std::env::var_os("PATH").as_deref()),
+        path_ok: path_ok(home, std::env::var_os("PATH").as_deref()),
         update_proxy,
     };
     let text = text(&data);

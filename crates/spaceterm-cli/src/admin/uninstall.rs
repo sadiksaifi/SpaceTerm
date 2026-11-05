@@ -169,12 +169,8 @@ impl Removal for Native<'_> {
         choice: Data,
         forget: &mut dyn FnMut() -> Result<(), Failure>,
     ) -> Result<CliUninstall, Failure> {
-        // Uninstall may first settle an activation, which starts a Core.
-        self.context
-            .unshared(|| {
-                self.service
-                    .uninstall_cli_forgetting(token, choice, || forget().map_err(Forget::Failed))
-            })
+        self.service
+            .uninstall_cli_forgetting(token, choice, || forget().map_err(Forget::Failed))
             .map_err(|error| match error {
                 Forget::Core(error) => contract::from_core_error(error),
                 Forget::Failed(failure) => failure,
@@ -182,11 +178,6 @@ impl Removal for Native<'_> {
     }
 
     fn forget_credentials(&self) -> Result<(), Failure> {
-        if !self.context.shares_state() {
-            return Err(contract::from_core_error(
-                spaceterm_core::CoreError::IncompatibleState,
-            ));
-        }
         let root = spaceterm_core::cli_state_root(self.context.identity)
             .map_err(contract::from_core_error)?;
         let items = connections::ConnectionStore::new(root)

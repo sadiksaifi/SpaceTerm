@@ -849,7 +849,73 @@ mod tests {
             Some(br#"{"generation":1}"#.to_vec())
         );
         // The candidate's CLI no longer reads the state.
-        assert!(!context.shares_state());
+        assert!(context.require_state().is_err());
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn setup_opens_no_cli_connection_after_a_return_undid_its_cli_state_migration() {
+        let state = temporary("migration-setup-return");
+        let never = || Ok(false);
+        drop(prepare_at(state.root.clone(), &mut migration::NoCredentials, &never).unwrap());
+        // The candidate's CLI migrated the state to generation 2 and shares it.
+        prepare_for_core_at(
+            state.root.clone(),
+            &STEPPING_STONE,
+            &mut migration::NoCredentials,
+            &never,
+            CORE_LOCK_LIMIT,
+        )
+        .unwrap();
+        let directory = Directory::open(&state.root, false).unwrap();
+        let global = crate::args::Global {
+            machine: None,
+            agent: None,
+            json: true,
+            quiet: false,
+            verbose: false,
+            no_input: true,
+            timeout: None,
+        };
+        let context = crate::admin::Context {
+            identity: "spaceterm-development",
+            global: &global,
+            credentials: crate::connection::CliCredentials::new("spaceterm-development"),
+            facts: Default::default(),
+            state: std::cell::RefCell::new(StateShare {
+                root: Some(state.root.clone()),
+                lock: Some(directory.lock_shared(GENERATION_LOCK).unwrap()),
+                registry: &STEPPING_STONE,
+            }),
+        };
+        let client = state.root.join("routes/local/base/client.json");
+        // A CLI connection reads or creates the route's client identity.
+        let connect = |()| {
+            std::fs::create_dir_all(client.parent().unwrap()).unwrap();
+            std::fs::write(&client, b"{}").unwrap();
+            Ok(())
+        };
+        // Nothing changed while the service calls ran, so setup connects.
+        assert_eq!(context.after_service(|| Ok(()), connect), Ok(()));
+        std::fs::remove_file(&client).unwrap();
+        // This time the service call settled an activation that returned to the previous Core,
+        // which restored generation 1.
+        let restore = || {
+            prepare_for_core_at(
+                state.root.clone(),
+                &REGISTRY,
+                &mut migration::NoCredentials,
+                &|| Ok(true),
+                std::time::Duration::from_millis(200),
+            )
+            .map_err(crate::contract::from_core_error)
+        };
+        let refused = context.after_service(restore, connect).unwrap_err();
+        assert_eq!(
+            refused,
+            crate::contract::from_core_error(CoreError::IncompatibleState)
+        );
+        assert!(!client.exists(), "setup touched the CLI state");
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 
