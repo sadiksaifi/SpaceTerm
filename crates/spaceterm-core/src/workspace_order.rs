@@ -111,7 +111,8 @@ fn validate(workspaces: &[WorkspaceReference]) -> Result<(), CoreError> {
 /// Whether `value` is a `workspace-order.json` this build reads.
 #[cfg(feature = "client")]
 pub(crate) fn readable(value: &serde_json::Value) -> bool {
-    crate::migration::strict::<Record>(value)
+    Record::deserialize(value)
+        .is_ok_and(|record| record.version == 1 && record.order.validate().is_ok())
 }
 #[cfg(feature = "client")]
 #[derive(Serialize, Deserialize)]

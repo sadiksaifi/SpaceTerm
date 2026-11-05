@@ -132,6 +132,29 @@ mod tests {
         });
     }
 
+    #[test]
+    fn a_migration_reader_refuses_what_the_store_would_refuse() {
+        let fixture = fixtures::directory("core-data").join("gen-1/direct.json");
+        let bytes = std::fs::read(fixture).unwrap();
+        assert!(REGISTRY.readable("direct.json", &bytes));
+        let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        record["key"] = serde_json::json!([]);
+        assert!(!REGISTRY.readable("direct.json", &serde_json::to_vec(&record).unwrap()));
+        let client = fixtures::directory("cli-state").join("gen-1/routes/local/base");
+        let order = std::fs::read(client.join("workspace-order.json")).unwrap();
+        let rules = Registry {
+            files: &[super::super::client_files::RULES],
+            ..REGISTRY
+        };
+        assert!(rules.readable("workspace-order.json", &order));
+        let mut record: serde_json::Value = serde_json::from_slice(&order).unwrap();
+        record["version"] = 2.into();
+        assert!(!rules.readable(
+            "workspace-order.json",
+            &serde_json::to_vec(&record).unwrap()
+        ));
+    }
+
     /// `mise run migration:fixture core-data` writes this build's generation's fixture.
     #[test]
     #[ignore = "writes the fixture of the current generation"]

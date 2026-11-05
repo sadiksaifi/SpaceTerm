@@ -10,12 +10,13 @@ use std::sync::{Arc, Mutex, Weak};
 
 /// Whether `value` is a `client.json` this build reads.
 pub(crate) fn readable_identity(value: &serde_json::Value) -> bool {
-    crate::migration::strict::<ClientIdentity>(value)
+    ClientIdentity::deserialize(value)
+        .is_ok_and(|record| record.format == "account-local-1" && record.client != [0; 32])
 }
 
 /// Whether `value` is a `route.json` this build reads.
 pub(crate) fn readable_route(value: &serde_json::Value) -> bool {
-    crate::migration::strict::<DirectRecord>(value)
+    DirectRecord::deserialize(value).is_ok_and(|record| record.version == 1)
 }
 
 /// A stable presentation identity. Possession grants no connection authority.

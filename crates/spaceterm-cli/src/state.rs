@@ -129,7 +129,9 @@ const RULES: &[FileRule] = &[
     FileRule {
         name: "runs.json",
         kind: DataKind::ClientRecords,
-        read: migration::strict::<RunsRecord>,
+        read: |value| {
+            RunsRecord::deserialize(value).is_ok_and(|record| record.runs.len() <= MAX_PENDING_RUNS)
+        },
         stamp: None,
     },
     FileRule {

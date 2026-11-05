@@ -23,7 +23,28 @@ struct Choices {
 /// Whether `value` is a `attachments.json` this build reads.
 #[cfg(feature = "client")]
 pub(crate) fn readable(value: &serde_json::Value) -> bool {
-    crate::migration::strict::<Record>(value)
+    Record::deserialize(value)
+        .is_ok_and(|record| record.version == 1 && valid_choices(&record.choices))
+}
+
+#[cfg(feature = "client")]
+fn valid_choices(choices: &Choices) -> bool {
+    let unique: std::collections::BTreeSet<_> =
+        choices.attached.iter().map(|a| a.workspace).collect();
+    let generations: std::collections::BTreeSet<_> = choices
+        .attached
+        .iter()
+        .chain(&choices.pending)
+        .map(|a| a.generation)
+        .collect();
+    unique.len() == choices.attached.len()
+        && unique.len() <= MAX_WORKSPACES
+        && choices.pending.len() <= MAX_WORKSPACES
+        && (choices.initialized || *choices == Choices::default())
+        && generations.len() == choices.attached.len() + choices.pending.len()
+        && generations
+            .iter()
+            .all(|g| *g != 0 && *g <= choices.next_generation)
 }
 #[cfg(feature = "client")]
 #[derive(Serialize, Deserialize)]
@@ -123,23 +144,7 @@ impl Attachments {
             return Err(CoreError::AuthenticationRefused);
         }
         let choices = record.choices;
-        let unique: std::collections::BTreeSet<_> =
-            choices.attached.iter().map(|a| a.workspace).collect();
-        let generations: std::collections::BTreeSet<_> = choices
-            .attached
-            .iter()
-            .chain(&choices.pending)
-            .map(|a| a.generation)
-            .collect();
-        if unique.len() != choices.attached.len()
-            || unique.len() > MAX_WORKSPACES
-            || choices.pending.len() > MAX_WORKSPACES
-            || (!choices.initialized && choices != Choices::default())
-            || generations.len() != choices.attached.len() + choices.pending.len()
-            || generations
-                .iter()
-                .any(|g| *g == 0 || *g > choices.next_generation)
-        {
+        if !valid_choices(&choices) {
             return Err(CoreError::UnsafeStorage);
         }
         Ok(Self(Arc::new(Mutex::new(State {
