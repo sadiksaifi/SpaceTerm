@@ -1,6 +1,23 @@
 use super::*;
 use spaceterm_core::migration::fixtures;
 
+/// Every file under `root` with its bytes.
+fn files(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut found = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    found
+}
+
 fn native() -> Arc<dyn crate::platform::secure_filesystem::SecureFilesystem> {
     Arc::new(crate::platform::unix_secure_filesystem::UnixSecureFilesystem)
 }
@@ -130,6 +147,7 @@ fn desktop_state_migration_refuses_newer_data_and_asks_before_resetting_client_r
     store
         .write(Area::Root, "core/desktop/view.json", br#"{"old":true}"#)
         .unwrap();
+    let before = files(&root);
     assert_eq!(
         check_state(&store, identity),
         StateCheck::ResetRequired {
@@ -137,6 +155,8 @@ fn desktop_state_migration_refuses_newer_data_and_asks_before_resetting_client_r
             kinds: vec![DataKind::ClientRecords],
         }
     );
+    // Quit leaves the root as it was: no file moves, changes or appears.
+    assert_eq!(files(&root), before);
     // Nothing moves before the person decides, the rebuildable view included.
     assert_eq!(
         store.read(Area::Root, "core/desktop/view.json").unwrap(),

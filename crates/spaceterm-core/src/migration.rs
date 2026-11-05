@@ -335,8 +335,20 @@ pub fn run(
     credentials: &mut dyn Credentials,
     returned: bool,
 ) -> Result<Outcome, Refusal> {
+    bring(registry, store, credentials, returned)
+}
+
+/// [`run`], recording a refusal's reset in the root for another process to explain, as SpaceTerm
+/// Core's runtime does for the desktop and the CLI that started it. A root whose own reader
+/// presents the refusal derives it again on its next [`run`] and records nothing, so a pending
+/// confirmation changes nothing before the person decides.
+pub fn run_recorded(
+    registry: &Registry,
+    store: &dyn Store,
+    credentials: &mut dyn Credentials,
+    returned: bool,
+) -> Result<Outcome, Refusal> {
     let result = bring(registry, store, credentials, returned);
-    // Clients of any version read the recorded reset to explain a refusal.
     match &result {
         Err(Refusal::Reset { reason, kinds }) => {
             let pending = PendingReset {
@@ -359,7 +371,8 @@ pub fn is_current(registry: &Registry, store: &dyn Store) -> Result<bool, StoreE
     Ok(marker(store, Area::Root)? == current && marker(store, Area::Backup)? != current)
 }
 
-/// The reset the root in `store` waits for, as the last [`run`] that refused it recorded.
+/// The reset the root in `store` waits for, as the last [`run_recorded`] that refused it
+/// recorded.
 pub fn pending(store: &dyn Store) -> Result<Option<PendingReset>, StoreError> {
     Ok(store
         .read(Area::Reset, PENDING)?

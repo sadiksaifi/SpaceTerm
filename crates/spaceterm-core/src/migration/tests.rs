@@ -407,6 +407,7 @@ fn a_root_below_oldest_changes_nothing_until_the_person_confirms_its_reset() {
         files: &[RULES],
     };
     let store = generation_one();
+    let before = store.files.borrow().clone();
     assert_eq!(
         run_once(&registry, &store),
         Err(Refusal::Reset {
@@ -414,18 +415,9 @@ fn a_root_below_oldest_changes_nothing_until_the_person_confirms_its_reset() {
             kinds: vec![DataKind::MachineId],
         })
     );
-    // The rebuildable data waits with the rest, so Quit leaves every file where it was.
-    assert_eq!(
-        store.get(Area::Root, "clients/a/view.json"),
-        Some(json!({ "n": 4 }))
-    );
-    assert!(
-        store
-            .list(Area::Reset)
-            .unwrap()
-            .iter()
-            .all(|path| path == PENDING)
-    );
+    // Every file stays as it was, the rebuildable data included, and nothing records the
+    // refusal, so Quit leaves the root unchanged.
+    assert_eq!(*store.files.borrow(), before);
     assert!(store.get(Area::Root, "identity.json").is_some());
     assert_eq!(store.generation(Area::Root), Some(json!(1)));
     // The refusal repeats until the person confirms.
@@ -450,6 +442,29 @@ fn a_root_below_oldest_changes_nothing_until_the_person_confirms_its_reset() {
     assert_eq!(store.generation(Area::Root), Some(json!(3)));
     assert_eq!(take_notice(&store), Ok(vec![DataKind::View]));
     assert_eq!(take_notice(&store), Ok(Vec::new()), "the notice shows once");
+}
+
+#[test]
+fn only_a_recorded_run_records_a_refusal_for_another_process() {
+    let registry = Registry {
+        generations: Generations {
+            oldest: 2,
+            current: 3,
+        },
+        steps: &STEPS[1..],
+        files: &[RULES],
+    };
+    let store = generation_one();
+    assert!(run(&registry, &store, &mut Recorded(&store), false).is_err());
+    assert_eq!(pending(&store), Ok(None));
+    assert!(run_recorded(&registry, &store, &mut Recorded(&store), false).is_err());
+    assert_eq!(
+        pending(&store),
+        Ok(Some(PendingReset {
+            reason: ResetReason::TooOld,
+            kinds: vec![DataKind::MachineId],
+        }))
+    );
 }
 
 #[test]

@@ -61,7 +61,8 @@ pub fn store(data: &Path) -> DirectoryStore {
 /// activation returned to this runtime. The caller holds `service-intent.lock` and
 /// `setup.lock`, which every other writer of the root's records takes.
 pub(crate) fn run_locked(data: &Path, returned: bool) -> Result<Outcome, CoreError> {
-    super::run(&REGISTRY, &store(data), &mut NoCredentials, returned).map_err(refusal)
+    // The runtime refuses in its own process, so the client that started it reads the record.
+    super::run_recorded(&REGISTRY, &store(data), &mut NoCredentials, returned).map_err(refusal)
 }
 
 /// Brings this Core's data to this build's generation before its runtime reads any of it.
