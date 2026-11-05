@@ -20,9 +20,7 @@ use super::app_paths::AppPaths;
 use super::secure_filesystem::{SecureCommitOutcome, SecureEntryIdentity};
 use crate::application_identity::ApplicationIdentity;
 use crate::updates::policy::UpdateHistory;
-use crate::updates::release_feed::{
-    MAX_ARCHIVE_BYTES, MAX_FEED_BYTES, MAX_FEED_SIGNATURE_BYTES, ReleaseFeed, release_trust,
-};
+use crate::updates::release_feed::{MAX_ARCHIVE_BYTES, ReleaseFeed, release_trust};
 use crate::updates::{UpdateAdapter, UpdateError, UpdateEvent, UpdateTransport};
 use spaceterm_core::update::feed::FeedTarget;
 use spaceterm_core::update::trust::UpdateTrust;
@@ -369,23 +367,16 @@ impl Shared {
     }
 
     fn fetch_feed(&self) -> Result<ReleaseFeed, UpdateError> {
-        let feed = self
-            .transport
-            .get(&self.target.feed_url(None), MAX_FEED_BYTES)
-            .map_err(|_| UpdateError::Check)?;
-        let signature = self
-            .transport
-            .get(
-                &self.target.feed_signature_url(None),
-                MAX_FEED_SIGNATURE_BYTES,
-            )
-            .map_err(|_| UpdateError::Check)?;
-        ReleaseFeed::verify(
+        ReleaseFeed::next(
             &self.trust,
             self.target,
-            &feed,
-            &signature,
+            self.current_version,
             crate::updates::now(),
+            |url, limit| {
+                self.transport
+                    .get(url, limit)
+                    .map_err(|_| UpdateError::Check)
+            },
         )
     }
 
@@ -1011,18 +1002,32 @@ mod tests {
     }
 
     fn served(signer: &ReleaseSigner, version: &str, archive: &[u8]) -> ServedRelease {
+        published(signer, &[(version, "0.0.0", archive)])
+    }
+
+    /// Serves `releases`, as `(version, floor, archive)` and newest first, at their versions,
+    /// and the first as the newest release.
+    fn published(signer: &ReleaseSigner, releases: &[(&str, &str, &[u8])]) -> ServedRelease {
         let target = FeedTarget::DESKTOP_LINUX;
-        let (feed, signature) = signer.feed(target, version, crate::updates::now() - 60, archive);
-        ServedRelease(HashMap::from([
-            (target.feed_url(None), feed),
-            (target.feed_signature_url(None), signature),
-            (
+        let mut served = HashMap::new();
+        for (index, &(version, floor, archive)) in releases.iter().enumerate() {
+            let (feed, signature) =
+                signer.floored_feed(target, version, floor, crate::updates::now() - 60, archive);
+            let parsed = spaceterm_core::update::facts::Version::parse(version).unwrap();
+            if index == 0 {
+                served.insert(target.feed_url(None), feed.clone());
+                served.insert(target.feed_signature_url(None), signature.clone());
+            }
+            served.insert(target.feed_url(Some(&parsed)), feed);
+            served.insert(target.feed_signature_url(Some(&parsed)), signature);
+            served.insert(
                 format!(
                     "https://github.com/sadiksaifi/SpaceTerm/releases/download/v{version}/spaceterm-desktop-{version}-linux-x86_64.tar.gz"
                 ),
                 archive.to_vec(),
-            ),
-        ]))
+            );
+        }
+        ServedRelease(served)
     }
 
     fn shared(
@@ -1098,6 +1103,55 @@ mod tests {
             .unwrap();
         shared.check(generation);
         assert_eq!(drained(&receiver), ["UpToDate", "Finished"]);
+    }
+
+    #[test]
+    fn linux_desktop_below_the_newest_floor_should_install_the_release_at_that_floor() {
+        let fixture = installed("old");
+        let signer = ReleaseSigner::new(3);
+        let transport = published(
+            &signer,
+            &[
+                ("1.2.0", "1.1.0", &release(b"newest")),
+                ("1.1.0", "1.0.0", &release(b"stone")),
+            ],
+        );
+        let (shared, receiver) = shared(&fixture, transport, signer.trust());
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
+        shared.check(generation);
+        assert_eq!(
+            drained(&receiver),
+            ["ReleaseMetadata", "Available(\"1.1.0\")"]
+        );
+        let Phase::Available(feed) = std::mem::take(&mut shared.lock().phase) else {
+            panic!("the Stepping Stone should be available");
+        };
+        shared.lock().phase = Phase::Downloading;
+        shared.download(&feed, generation);
+        assert_eq!(drained(&receiver), ["Downloading", "Verifying", "Ready"]);
+        fixture.installation.replace().unwrap();
+        assert_eq!(installed_contents(&fixture.installation), "stone");
+    }
+
+    #[test]
+    fn linux_floors_that_lead_to_no_release_should_fail_verification() {
+        let fixture = installed("old");
+        let signer = ReleaseSigner::new(3);
+        let transport = published(
+            &signer,
+            &[
+                ("1.2.0", "1.1.0", &release(b"newest")),
+                ("1.1.0", "1.1.0", &release(b"stone")),
+            ],
+        );
+        let (shared, receiver) = shared(&fixture, transport, signer.trust());
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
+        shared.check(generation);
+        assert_eq!(drained(&receiver), ["Failed(Verification)", "Finished"]);
     }
 
     #[test]
@@ -1353,12 +1407,12 @@ mod tests {
         let trust =
             UpdateTrust::parse(&fs::read(directory.join("update-trust.json")).unwrap()).unwrap();
         let target = FeedTarget::DESKTOP_LINUX;
-        let feed = ReleaseFeed::verify(
+        let feed = ReleaseFeed::next(
             &trust,
             target,
-            &fs::read(directory.join(target.feed())).unwrap(),
-            &fs::read(directory.join(target.feed_signature())).unwrap(),
+            "dev.0123456789ab",
             crate::updates::now(),
+            |url, _| Ok(fs::read(directory.join(url.rsplit('/').next().unwrap())).unwrap()),
         )
         .unwrap();
         let name = feed.archive.url.rsplit('/').next().unwrap();

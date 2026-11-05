@@ -4,7 +4,8 @@
 //! bytes. [`feed::read`] verifies that signature under the current or the backup key of
 //! `packaging/update-trust.json` before it reads any field, then holds the feed to every rule of
 //! its schema. The archive the feed names grants nothing until its size, digest and own signature
-//! verify under the same keys.
+//! verify under the same keys. A desktop below the newest release's Update Floor installs the
+//! release at that floor first ([`ReleaseFeed::next`]).
 #![cfg_attr(
     not(target_os = "linux"),
     allow(
@@ -14,7 +15,8 @@
 )]
 
 use sha2::{Digest as _, Sha256};
-use spaceterm_core::update::feed::{self, FeedTarget};
+use spaceterm_core::update::facts::Version;
+use spaceterm_core::update::feed::{self, Feed, FeedTarget};
 use spaceterm_core::update::trust::{SIGNATURE_BYTES, UpdateTrust};
 
 use super::{UpdateError, stable_version};
@@ -46,26 +48,32 @@ pub(crate) struct ReleaseArchive {
 }
 
 impl ReleaseFeed {
-    /// Verifies the feed's detached signature before reading any field the feed claims.
-    pub(crate) fn verify(
+    /// The release a desktop running `current` installs next: the newest release, or, while
+    /// `current` is below a release's Update Floor, the release at that floor, down to the
+    /// first whose floor `current` meets. `get` fetches a URL's body of at most `limit` bytes.
+    /// Each feed's detached signature verifies before any field the feed claims is read. Floors
+    /// that lead to no release fail verification.
+    pub(crate) fn next(
         trust: &UpdateTrust,
         target: FeedTarget,
-        document: &[u8],
-        signature: &[u8],
+        current: &str,
         now: u64,
+        get: impl Fn(&str, usize) -> Result<Vec<u8>, UpdateError>,
     ) -> Result<Self, UpdateError> {
-        let read = feed::read(target, document, signature, trust, now)
-            .map_err(|_| UpdateError::Verification)?;
-        Ok(Self {
-            archive: ReleaseArchive {
-                url: target.archive_url(&read.version),
-                size: read.archive.size,
-                sha256: read.archive.sha256,
-                signature: read.archive.signature,
-            },
-            version: read.version.to_string(),
-            published_at: read.published_at,
-        })
+        let read = |release: Option<&Version>| {
+            let document = get(&target.feed_url(release), MAX_FEED_BYTES)?;
+            let signature = get(
+                &target.feed_signature_url(release),
+                MAX_FEED_SIGNATURE_BYTES,
+            )?;
+            feed::read(target, &document, &signature, trust, now)
+                .map_err(|_| UpdateError::Verification)
+        };
+        // Every build names a release version or a commit, which has no order and no floor.
+        let current = Version::parse(current).map_err(|_| UpdateError::Verification)?;
+        feed::walk(&current, read)?
+            .map(|next| Self::from(next.feed))
+            .ok_or(UpdateError::Verification)
     }
 
     /// Whether this release is newer than `current`. A build without a stable version, such as
@@ -74,6 +82,21 @@ impl ReleaseFeed {
         match (stable_version(&self.version), stable_version(current)) {
             (Some(release), Some(current)) => release > current,
             _ => false,
+        }
+    }
+}
+
+impl From<Feed> for ReleaseFeed {
+    fn from(read: Feed) -> Self {
+        Self {
+            archive: ReleaseArchive {
+                url: read.target.archive_url(&read.version),
+                size: read.archive.size,
+                sha256: read.archive.sha256,
+                signature: read.archive.signature,
+            },
+            version: read.version.to_string(),
+            published_at: read.published_at,
         }
     }
 }
@@ -155,6 +178,18 @@ pub(crate) mod testing {
             published_at: u64,
             archive: &[u8],
         ) -> (Vec<u8>, Vec<u8>) {
+            self.floored_feed(target, version, "0.0.0", published_at, archive)
+        }
+
+        /// As [`Self::feed`], for a release whose Update Floor is `floor`.
+        pub(crate) fn floored_feed(
+            &self,
+            target: FeedTarget,
+            version: &str,
+            floor: &str,
+            published_at: u64,
+            archive: &[u8],
+        ) -> (Vec<u8>, Vec<u8>) {
             let version = Version::parse(version).unwrap();
             let feed = Feed {
                 target,
@@ -170,7 +205,7 @@ pub(crate) mod testing {
                     sha256: Sha256::digest(archive).into(),
                     signature: self.sign(archive).try_into().unwrap(),
                 },
-                floor: spaceterm_core::update::ordering::Floor::parse("0.0.0").unwrap(),
+                floor: spaceterm_core::update::ordering::Floor::parse(floor).unwrap(),
                 version,
             }
             .to_bytes();
@@ -193,7 +228,21 @@ mod tests {
         feed: &[u8],
         signature: &[u8],
     ) -> Result<ReleaseFeed, UpdateError> {
-        ReleaseFeed::verify(&signer.trust(), TARGET, feed, signature, NOW)
+        // A build that names a commit has no floor, so it reads the newest release only.
+        ReleaseFeed::next(
+            &signer.trust(),
+            TARGET,
+            "dev.0123456789ab",
+            NOW,
+            |url, _| {
+                Ok(if url.ends_with(".sig") {
+                    signature
+                } else {
+                    feed
+                }
+                .to_vec())
+            },
+        )
     }
 
     #[test]
