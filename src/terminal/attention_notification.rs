@@ -303,6 +303,64 @@ mod tests {
     }
 
     #[test]
+    fn presented_authorization_names_each_exact_state() {
+        use NotificationAccessState as State;
+        use NotificationAuthorization as Authorization;
+        let unavailable = Err(NotificationAccessError::Unavailable);
+        // (authorization, alert_enabled, center_enabled, expected presented state)
+        let expectations = [
+            (
+                Authorization::NotDetermined,
+                false,
+                false,
+                Ok(State::NotDetermined),
+            ),
+            (
+                Authorization::NotDetermined,
+                true,
+                false,
+                Ok(State::NotDetermined),
+            ),
+            (
+                Authorization::NotDetermined,
+                false,
+                true,
+                Ok(State::NotDetermined),
+            ),
+            (
+                Authorization::NotDetermined,
+                true,
+                true,
+                Ok(State::NotDetermined),
+            ),
+            (Authorization::Denied, false, false, Ok(State::Denied)),
+            (Authorization::Denied, true, false, Ok(State::Denied)),
+            (Authorization::Denied, false, true, Ok(State::Denied)),
+            (Authorization::Denied, true, true, Ok(State::Denied)),
+            (Authorization::Authorized, false, false, Ok(State::Hidden)),
+            (Authorization::Authorized, true, false, Ok(State::Allowed)),
+            (Authorization::Authorized, false, true, Ok(State::Allowed)),
+            (Authorization::Authorized, true, true, Ok(State::Allowed)),
+            (Authorization::Provisional, false, false, Ok(State::Hidden)),
+            (Authorization::Provisional, true, false, Ok(State::Quiet)),
+            (Authorization::Provisional, false, true, Ok(State::Quiet)),
+            (Authorization::Provisional, true, true, Ok(State::Quiet)),
+            (Authorization::Unknown, false, false, unavailable),
+            (Authorization::Unknown, true, false, unavailable),
+            (Authorization::Unknown, false, true, unavailable),
+            (Authorization::Unknown, true, true, unavailable),
+        ];
+        for (authorization, alert_enabled, center_enabled, expected) in expectations {
+            let settings = NotificationSettings {
+                authorization,
+                alert_enabled,
+                center_enabled,
+            };
+            assert_eq!(settings.access_state(), expected, "{settings:?}");
+        }
+    }
+
+    #[test]
     fn presented_authorization_shows_notifications_exactly_when_delivery_submits() {
         use NotificationAccessState as State;
         use NotificationAuthorization as Authorization;
@@ -329,22 +387,6 @@ mod tests {
                 );
             }
         }
-        let quiet = NotificationSettings {
-            authorization: Authorization::Provisional,
-            alert_enabled: false,
-            center_enabled: true,
-        };
-        assert_eq!(quiet.access_state(), Ok(State::Quiet));
-        let hidden = NotificationSettings {
-            authorization: Authorization::Authorized,
-            alert_enabled: false,
-            center_enabled: false,
-        };
-        assert_eq!(hidden.access_state(), Ok(State::Hidden));
-        assert_eq!(
-            settings(Authorization::Unknown).access_state(),
-            Err(NotificationAccessError::Unavailable)
-        );
     }
 
     #[test]
