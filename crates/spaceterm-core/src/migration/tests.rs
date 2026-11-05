@@ -328,6 +328,46 @@ fn a_newer_root_is_refused_unchanged_unless_an_activation_returned_to_its_backup
 }
 
 #[test]
+fn a_migration_a_newer_build_left_unfinished_is_undone_by_the_build_it_started_from() {
+    let newer = generation_one();
+    // A newer build took its backup and rewrote the files, then stopped before its marker.
+    newer.put(Area::Backup, MARKER, &json!({ "generation": 1 }));
+    newer.put(
+        Area::Backup,
+        "clients/a/view.json",
+        &newer.get(Area::Root, "clients/a/view.json").unwrap(),
+    );
+    newer.put(
+        Area::Backup,
+        "identity.json",
+        &newer.get(Area::Root, "identity.json").unwrap(),
+    );
+    newer.put(Area::Root, "clients/a/view.json", &json!({ "count": 9 }));
+    newer.put(Area::Root, "organization.json", &json!({ "name": "work" }));
+    let older = Registry {
+        generations: Generations {
+            oldest: 1,
+            current: 1,
+        },
+        steps: &[],
+        files: &[RULES],
+    };
+    assert_eq!(run_once(&older, &newer), Ok(Outcome::Current));
+    assert_eq!(
+        newer.get(Area::Root, "clients/a/view.json"),
+        Some(json!({ "n": 4 }))
+    );
+    assert_eq!(newer.get(Area::Root, "organization.json"), None);
+    // The backup is settled, so a later write of this build stays.
+    newer.put(Area::Root, "clients/a/view.json", &json!({ "n": 5 }));
+    assert_eq!(run_once(&older, &newer), Ok(Outcome::Current));
+    assert_eq!(
+        newer.get(Area::Root, "clients/a/view.json"),
+        Some(json!({ "n": 5 }))
+    );
+}
+
+#[test]
 fn a_root_below_oldest_resets_rebuildable_data_and_waits_to_confirm_the_rest() {
     let registry = Registry {
         generations: Generations {
@@ -456,34 +496,79 @@ fn replace_then_refuse(migration: &mut Migration<'_>) -> Result<(), Unmigratable
 }
 
 #[test]
-fn replacement_credentials_come_first_and_old_items_go_only_after_the_marker() {
-    const REPLACING: &[&[Step]] = &[&[Step::Root(replace)]];
+fn replacement_credentials_come_first_and_old_items_go_only_once_their_backup_is_gone() {
+    const REPLACING: &[&[Step]] = &[&[Step::Root(replace)], &[]];
     let registry = Registry {
         generations: Generations {
             oldest: 1,
             current: 2,
         },
+        steps: &REPLACING[..1],
+        files: &[RULES],
+    };
+    let later = Registry {
+        generations: Generations {
+            oldest: 1,
+            current: 3,
+        },
         steps: REPLACING,
+        files: &[RULES],
+    };
+    let older = Registry {
+        generations: Generations {
+            oldest: 1,
+            current: 1,
+        },
+        steps: &[],
         files: &[RULES],
     };
     let store = Memory::with(&[
         (MARKER, json!({ "generation": 1 })),
         ("identity.json", json!({ "name": "core" })),
     ]);
+    // The marker may have published even though its write failed, so the replacement stays.
     store.marker_fails.set(true);
     assert!(run_once(&registry, &store).is_err());
-    assert_eq!(
-        *store.events.borrow(),
-        ["copy 1 2", "remove 2"],
-        "an uncommitted replacement is removed and the old item stays"
-    );
+    assert_eq!(*store.events.borrow(), ["copy 1 2"]);
     store.events.borrow_mut().clear();
     store.marker_fails.set(false);
     assert_eq!(
         run_once(&registry, &store),
         Ok(Outcome::Migrated { from: 1 })
     );
-    assert_eq!(*store.events.borrow(), ["copy 1 2", "marker", "remove 1"]);
+    assert_eq!(
+        *store.events.borrow(),
+        ["copy 1 2", "marker"],
+        "the original stays while its backup can come back"
+    );
+    store.events.borrow_mut().clear();
+    assert_eq!(run_once(&registry, &store), Ok(Outcome::Current));
+    assert!(store.events.borrow().is_empty());
+    // A later migration replaces the backup, so the original goes first.
+    assert_eq!(run_once(&later, &store), Ok(Outcome::Migrated { from: 2 }));
+    assert_eq!(*store.events.borrow(), ["remove 1", "marker"]);
+
+    // A return restores the files that refer to the original, which stays for good.
+    let store = Memory::with(&[
+        (MARKER, json!({ "generation": 1 })),
+        ("identity.json", json!({ "name": "core" })),
+    ]);
+    run_once(&registry, &store).unwrap();
+    assert_eq!(
+        run(&older, &store, &mut Recorded(&store), true),
+        Ok(Outcome::Restored)
+    );
+    assert_eq!(store.get(Area::Backup, RETIRE), None);
+    assert_eq!(run_once(&older, &store), Ok(Outcome::Current));
+    assert!(
+        !store
+            .events
+            .borrow()
+            .iter()
+            .any(|event| event == "remove 1"),
+        "{:?}",
+        store.events.borrow()
+    );
 
     const REFUSING: &[&[Step]] = &[&[Step::Root(replace_then_refuse)]];
     let refusing = Registry {

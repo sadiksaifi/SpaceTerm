@@ -349,16 +349,20 @@ fn bring(
         }
         None => 1,
     };
+    // A backup of the root's own generation belongs to a migration that stopped before its
+    // marker, whichever build ran it. Its files may already be rewritten.
+    if marker(store, Area::Backup)? == Some(generation) {
+        settle_backup(registry, store)?;
+    }
     if generation == current {
         if marked.is_none() {
             write_marker(store, Area::Root, current)?;
         }
-        retire(store, credentials)?;
         return Ok(Outcome::Current);
     }
     if generation > current {
         if returned && marker(store, Area::Backup)? == Some(current) {
-            restore_backup(registry, store)?;
+            settle_backup(registry, store)?;
             write_marker(store, Area::Root, current)?;
             return Ok(Outcome::Restored);
         }
@@ -467,14 +471,9 @@ fn migrate(
     from: u32,
 ) -> Result<Outcome, Refusal> {
     let Generations { oldest, current } = registry.generations;
-    if marker(store, Area::Backup)? == Some(from) {
-        // An earlier attempt stopped after its backup and before its marker. Its replaced
-        // credential items are still in use.
-        store.remove(Area::Backup, RETIRE)?;
-        restore_backup(registry, store)?;
-    } else {
-        take_backup(registry, store, from)?;
-    }
+    // The previous backup can no longer come back, so the items its migration replaced go now.
+    retire(store, credentials)?;
+    take_backup(registry, store, from)?;
     let before = members(registry, store, Area::Root)?;
     let mut files = BTreeMap::new();
     for path in &before {
@@ -522,7 +521,7 @@ fn migrate(
         migration.abandon();
         return reset_rebuildable(registry, store, from, reason);
     }
-    let written = (|| {
+    let written: Result<(), StoreError> = (|| {
         for (path, value) in &migration.files {
             let bytes = serde_json::to_vec(value).map_err(|_| StoreError::Unavailable)?;
             store.write(Area::Root, path, &bytes)?;
@@ -540,7 +539,7 @@ fn migrate(
             let bytes = serde_json::to_vec(&items).map_err(|_| StoreError::Unavailable)?;
             store.write(Area::Backup, RETIRE, &bytes)?;
         }
-        write_marker(store, Area::Root, current)
+        Ok(())
     })();
     if let Err(error) = written {
         // The marker never moved, so the next run restores the backup and tries again.
@@ -548,12 +547,21 @@ fn migrate(
         migration.abandon();
         return Err(error.into());
     }
-    let Migration { credentials, .. } = migration;
-    retire(store, credentials)?;
+    // A failed marker write may still have published it, so its replacements stay either way.
+    // The originals stay too, until a later migration replaces the backup that refers to them.
+    write_marker(store, Area::Root, current)?;
     Ok(Outcome::Migrated { from })
 }
 
-/// Deletes the credential items a committed migration replaced.
+/// Restores the root's files from the backup and retires the backup, whose replaced
+/// credential items are in use again. The caller then decides the root's marker.
+fn settle_backup(registry: &Registry, store: &dyn Store) -> Result<(), StoreError> {
+    restore_backup(registry, store)?;
+    store.remove(Area::Backup, RETIRE)?;
+    store.remove(Area::Backup, MARKER)
+}
+
+/// Deletes the credential items a committed migration replaced, once its backup is gone.
 fn retire(store: &dyn Store, credentials: &mut dyn Credentials) -> Result<(), StoreError> {
     let Some(bytes) = store.read(Area::Backup, RETIRE)? else {
         return Ok(());
