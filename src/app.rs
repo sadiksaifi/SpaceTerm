@@ -864,13 +864,71 @@ fn present_quit_prompt(
     }
 }
 
-/// Whether the desktop state root reached this build's generation. Data that is unavailable,
-/// waits for a confirmed reset, or that a newer SpaceTerm wrote is never read or changed, so the
-/// launch ends instead. Telling the person why is not built yet.
-fn desktop_state_ready(host: &HostComposition) -> bool {
+/// Starts `launch` once the desktop state root reaches this build's generation. Data that waits
+/// for a confirmed reset, that a newer SpaceTerm wrote, or storage that is unavailable is asked
+/// about first in a launch window, and nothing reads or changes it until the person decides:
+/// Reset, Try Again or Quit.
+fn open_after_data_check(host: &Rc<HostComposition>, launch: Rc<dyn Fn(&mut App)>, cx: &mut App) {
+    use crate::migration::StateCheck;
+    use crate::ui::data_reset::{self, DataAction};
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-    crate::migration::current_state_store(host.adapters.core_context_paths.directories())
-        .is_some_and(|store| crate::migration::state_ready(&store, identity))
+    let store =
+        crate::migration::current_state_store(host.adapters.core_context_paths.directories());
+    let check = store
+        .as_ref()
+        .map_or(StateCheck::Unavailable, |store| {
+            crate::migration::check_state(store, identity)
+        });
+    let alert = match check {
+        StateCheck::Ready { reset } => {
+            if let Some(store) = store
+                && !reset.is_empty()
+            {
+                cx.set_global(data_reset::PendingNotice {
+                    reset,
+                    files: store.reset_directory(),
+                    viewer: host.adapters.file_viewer.clone(),
+                });
+            }
+            launch(cx);
+            return;
+        }
+        StateCheck::Newer => data_reset::newer_alert(),
+        StateCheck::ResetRequired { reason, kinds } => {
+            data_reset::confirmation_alert(reason, &kinds, crate::migration::stepping_stone())
+        }
+        StateCheck::Unavailable => data_reset::unavailable_alert(),
+    };
+    let Ok(window) = open_quit_prompt_host(cx) else {
+        cx.quit();
+        return;
+    };
+    let host = Rc::clone(host);
+    let presented = window.update(cx, |_, window_ref, cx| {
+        alert.present(window_ref, cx, move |outcome, cx| {
+            let action = match outcome {
+                spaceterm_ui::AlertOutcome::Activated { action_id, .. } => action_id,
+                _ => DataAction::Quit,
+            };
+            let again = match action {
+                DataAction::Reset => store
+                    .as_ref()
+                    .is_some_and(|store| crate::migration::reset_state(store, identity)),
+                DataAction::TryAgain => true,
+                _ => false,
+            };
+            if !again {
+                cx.quit();
+                return;
+            }
+            // The launch window closes first. Closing it never counts as the last window.
+            close_quit_prompt_host(QuitPromptPlace::Host(window), cx);
+            open_after_data_check(&host, launch, cx);
+        })
+    });
+    if !matches!(presented, Ok(Ok(_))) {
+        cx.quit();
+    }
 }
 
 fn close_quit_prompt_host(place: QuitPromptPlace, cx: &mut App) {
@@ -1293,6 +1351,9 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) desktop_events: Rc<dyn crate::platform::desktop_events::DesktopEventAdapter>,
     pub(crate) application_quit: Rc<dyn ApplicationQuitAdapter>,
     pub(crate) selected_files: Arc<dyn crate::platform::selected_file::SelectedFileOpener>,
+    /// Shows a folder in the file manager, such as where a reset put earlier files. None shows
+    /// nothing.
+    pub(crate) file_viewer: Option<Arc<dyn crate::command_line_tool::FileViewer>>,
     /// Opens and watches the settings file the person edits in their own editor.
     pub(crate) settings_file: Rc<dyn crate::platform::settings_file::SettingsFileAccess>,
     pub(crate) local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
@@ -1494,17 +1555,20 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             cx.quit();
             return;
         }
-        // The desktop state root reaches this build's generation before initialization or any
-        // reader or writer opens it.
-        if !desktop_state_ready(&host) {
-            eprintln!("SpaceTerm can\u{2019}t read its saved data");
+        // Only presentation starts before the desktop state root reaches this build's
+        // generation. Nothing reads or changes that state until the person decides.
+        if let Err(error) = initialize_presentation(cx, &host) {
+            reported_failure.set(Some(error));
             cx.quit();
             return;
         }
-        if let Err(error) = initialize_application(cx, &host) {
-            reported_failure.set(Some(error));
-            cx.quit();
-        } else {
+        let check = Rc::clone(&host);
+        let launch: Rc<dyn Fn(&mut App)> = Rc::new(move |cx: &mut App| {
+            let host = Rc::clone(&host);
+            let reported_failure = Rc::clone(&reported_failure);
+            let desktop_channel = Rc::clone(&desktop_channel);
+            let pending_invitations = Rc::clone(&pending_invitations);
+            initialize_state(cx, &host);
             install_headless_window_actions(cx, Rc::clone(&host));
             if let Some(install) = host.status_menu {
                 install(cx, Rc::clone(&host.window_movement));
@@ -1556,21 +1620,25 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             if service.read(cx).launch_state() != crate::updates::LaunchState::Open {
                 crate::ui::updates::show_launch(cx);
             }
-        }
+        });
+        open_after_data_check(&check, launch, cx);
     });
     failure.get().map_or(Ok(()), Err)
 }
 
+#[cfg(test)]
 pub(crate) fn initialize_application(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<(), RuntimeError> {
-    if host.modal_prompts {
-        crate::ui::application_prompt::install(cx);
-    }
-    cx.set_global(host.window_frame);
-    cx.set_global(host.window_chrome.clone());
-    host.window_chrome.install_controls(cx);
+    initialize_presentation(cx, host)?;
+    initialize_state(cx, host);
+    Ok(())
+}
+
+/// Starts what reads and writes the desktop state root: update history, Machine updates, their
+/// reminders and the presentation context. It runs only once that root is readable.
+fn initialize_state(cx: &mut App, host: &HostComposition) {
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(machines) = &host.adapters.machine_updates {
         crate::updates::machines::store::MachineUpdates::install(Rc::clone(machines), cx);
@@ -1578,6 +1646,28 @@ pub(crate) fn initialize_application(
     if let Some(reminders) = &host.adapters.update_reminders {
         crate::updates::reminders::UpdateReminders::install(Rc::clone(reminders), cx);
     }
+    crate::ui::settings_window::configure_core_context(
+        Arc::clone(&host.adapters.core_context_paths),
+        cx,
+    );
+    if let Some(settings) = cx
+        .try_global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+        .map(|runtime| runtime.settings.clone())
+    {
+        let service = cx.global::<crate::updates::UpdateService>().0.clone();
+        service.update(cx, |updates, _| updates.attach_settings(settings));
+    }
+}
+
+/// Starts what presents windows and alerts without reading the desktop state root: window
+/// chrome, controls, the keymap, menus, fonts and Settings, which keep their own root.
+fn initialize_presentation(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
+    if host.modal_prompts {
+        crate::ui::application_prompt::install(cx);
+    }
+    cx.set_global(host.window_frame);
+    cx.set_global(host.window_chrome.clone());
+    host.window_chrome.install_controls(cx);
     cx.set_global(SelectedFileAccess(Arc::clone(
         &host.adapters.selected_files,
     )));
@@ -1598,10 +1688,6 @@ pub(crate) fn initialize_application(
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::about_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
-    crate::ui::settings_window::configure_core_context(
-        Arc::clone(&host.adapters.core_context_paths),
-        cx,
-    );
     if let Some(tool) = &host.adapters.command_line_tool {
         crate::ui::settings_window::configure_command_line_tool(Arc::clone(tool), cx);
     }
@@ -1636,8 +1722,6 @@ pub(crate) fn initialize_application(
     crate::ui::appearance_runtime::register_fonts(cx).map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
         let settings = crate::settings::Settings::load(Arc::clone(storage));
-        let service = cx.global::<crate::updates::UpdateService>().0.clone();
-        service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
         crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
         crate::keybindings::runtime::follow(&settings, cx);
@@ -1684,6 +1768,7 @@ fn open_initial_workspace(
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let workspace = open(cx, host)?;
     crate::ui::settings_recovery::offer_at_launch(workspace, cx);
+    crate::ui::data_reset::offer_notice(workspace, cx);
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::open_at_launch(cx);
     Ok(workspace)
@@ -2486,6 +2571,7 @@ mod runtime_tests {
                 machine_updates: None,
                 update_reminders: None,
                 selected_files: Arc::new(NoSelectedFiles),
+                file_viewer: None,
                 settings_file: Rc::new(
                     crate::platform::settings_file::testing::RecordingSettingsFile::default(),
                 ),

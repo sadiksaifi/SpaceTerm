@@ -39,6 +39,7 @@ mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
 pub(crate) mod settings_file;
+pub(crate) mod data_reset;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
 mod sidebar_motion;

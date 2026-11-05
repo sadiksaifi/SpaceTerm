@@ -173,13 +173,15 @@ fn desktop_state_migration_opens_nothing_on_unavailable_storage() {
     use std::os::unix::fs::PermissionsExt;
     let root = fixtures::scratch("desktop-state-unsafe");
     let store = desktop_state(&root);
-    assert!(state_ready(&store, "spaceterm-development"));
+    assert!(matches!(
+        check_state(&store, "spaceterm-development"),
+        StateCheck::Ready { .. }
+    ));
     std::fs::set_permissions(root.join("data"), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
         check_state(&store, "spaceterm-development"),
         StateCheck::Unavailable
     );
-    assert!(!state_ready(&store, "spaceterm-development"));
     std::fs::remove_dir_all(&root).unwrap();
 }
 

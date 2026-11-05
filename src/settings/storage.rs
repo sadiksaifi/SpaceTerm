@@ -113,7 +113,13 @@ impl SettingsStorage for ConfigSettingsStorage {
         match run(&crate::migration::CONFIG, &store, &mut NoCredentials, false) {
             Ok(_) => Ok(()),
             Err(Refusal::Newer) => Err(super::SettingsError::Unsupported),
-            Err(Refusal::Reset { .. }) => Err(super::SettingsError::Outdated),
+            // Settings a SpaceTerm too old to update directly saved name the Stepping Stone. Any
+            // other reset reads as Malformed Settings.
+            Err(Refusal::Reset {
+                reason: spaceterm_core::migration::ResetReason::TooOld,
+                ..
+            }) => Err(super::SettingsError::Outdated),
+            Err(Refusal::Reset { .. }) => Err(super::SettingsError::Invalid),
             Err(Refusal::Storage(StoreError::Unsafe)) => Err(StorageError::Unsafe.into()),
             Err(Refusal::Storage(StoreError::Unavailable)) => Err(StorageError::Unavailable.into()),
         }

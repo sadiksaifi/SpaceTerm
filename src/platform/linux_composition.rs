@@ -278,6 +278,7 @@ fn compose(
                 super::linux_notification::LinuxUpdateReminders::new(bus.clone(), identity),
             )),
             selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
+            file_viewer: Some(Arc::new(super::linux_file_viewer::FileManagerViewer::new(bus.clone()))),
             settings_file,
             application_menu: Rc::new(
                 super::linux_application_menu::LinuxApplicationMenuAdapter,

@@ -101,6 +101,32 @@ impl DataKind {
             Self::View | Self::WorkspaceOrder | Self::UpdateHistory
         )
     }
+
+    /// The kind's name in a sentence, such as a reset's notice or confirmation.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Self::View => "Workspace views",
+            Self::WorkspaceOrder => "Workspace order",
+            Self::UpdateHistory => "update history",
+            Self::Settings => "Settings",
+            Self::WorkspaceOrganization => "Workspace organization",
+            Self::MachineId => "Machine ID",
+            Self::Pairings => "pairings",
+            Self::SavedConnections => "saved machines",
+            Self::ClientRecords => "unsettled operations",
+            Self::CoreRecords => "SpaceTerm Core records",
+        }
+    }
+}
+
+/// `kinds` as one phrase: "a", "a and b", or "a, b and c".
+pub fn nouns(kinds: &[DataKind]) -> String {
+    let names: Vec<&str> = kinds.iter().map(|kind| kind.noun()).collect();
+    match names.split_last() {
+        None => String::new(),
+        Some((last, [])) => (*last).to_owned(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// One kind of file a root holds, matched by its file name in any directory of the root.

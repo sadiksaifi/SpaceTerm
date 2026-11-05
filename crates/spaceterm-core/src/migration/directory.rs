@@ -54,6 +54,12 @@ impl DirectoryStore {
         Self { home, mounts }
     }
 
+    /// The directory a reset moves files into, for a client to show the person where its data
+    /// went. It never appears in a notice or an error.
+    pub fn reset_directory(&self) -> PathBuf {
+        self.home.join(RESET)
+    }
+
     /// The directory and file name of `path` in `area`.
     fn locate(&self, area: Area, path: &str) -> Result<(PathBuf, String), StoreError> {
         let components: Vec<&str> = path.split('/').collect();
