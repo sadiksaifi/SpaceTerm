@@ -1671,6 +1671,11 @@ fn initialize_launch_window(cx: &mut App, host: &HostComposition) -> Result<(), 
     Ok(())
 }
 
+/// Marks the launch window's menu as the one in use, until admission installs the full one.
+struct LaunchMenu;
+
+impl gpui::Global for LaunchMenu {}
+
 /// The launch window's Settings: the defaults, with nothing read or written.
 struct LaunchDefaults;
 
@@ -1700,18 +1705,40 @@ impl crate::settings::storage::SettingsStorage for LaunchDefaults {
 /// yet that a quit warning protects. Admission's `init` registers the full handlers later, and
 /// a later handler takes the action first.
 fn install_launch_menu(cx: &mut App, application_menu: &Rc<dyn ApplicationMenuAdapter>) {
+    // GPUI's global dispatch runs every listener of an action while no window is active, so
+    // these stay registered but answer only until admission retires the launch menu.
+    cx.set_global(LaunchMenu);
     let about = Rc::clone(application_menu);
     cx.on_action(move |_: &ShowAboutApplication, cx| {
+        if !cx.has_global::<LaunchMenu>() {
+            return;
+        }
         if let Err(error) = about.perform(ApplicationMenuCommand::ShowAbout, cx)
             && error != ApplicationMenuError::Unavailable
         {
             eprintln!("failed to perform an application menu command: {error}");
         }
     });
-    cx.on_action(|_: &DismissApplication, cx| cx.quit());
-    cx.on_action(|_: &HideApplication, cx| cx.hide());
-    cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
-    cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &DismissApplication, cx| {
+        if cx.has_global::<LaunchMenu>() {
+            cx.quit();
+        }
+    });
+    cx.on_action(|_: &HideApplication, cx| {
+        if cx.has_global::<LaunchMenu>() {
+            cx.hide();
+        }
+    });
+    cx.on_action(|_: &HideOtherApplications, cx| {
+        if cx.has_global::<LaunchMenu>() {
+            cx.hide_other_apps();
+        }
+    });
+    cx.on_action(|_: &ShowAllApplications, cx| {
+        if cx.has_global::<LaunchMenu>() {
+            cx.unhide_other_apps();
+        }
+    });
     if let Err(error) = application_menu.install_launch(cx) {
         eprintln!("failed to install the launch menu: {error}");
     }
@@ -1721,6 +1748,11 @@ fn install_launch_menu(cx: &mut App, application_menu: &Rc<dyn ApplicationMenuAd
 /// presentation, Machine updates, the presentation context, application actions and menus,
 /// and the retained Settings with the appearance they choose.
 fn initialize_admitted(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
+    // The launch menu's handlers stop answering, so a Quit with no window follows the quit
+    // policy instead of ending SpaceTerm at once.
+    if cx.has_global::<LaunchMenu>() {
+        cx.remove_global::<LaunchMenu>();
+    }
     // The update presentation that `init` installs subscribes to these services.
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(machines) = &host.adapters.machine_updates {
@@ -3685,6 +3717,50 @@ mod runtime_tests {
             assert!(cx.update(|cx| cx.windows().is_empty()));
             assert_eq!(quit.confirmations(), 0);
         }
+    }
+
+    /// ADR 0049: with the status item showing, Quit from the app menu with no window open leaves
+    /// SpaceTerm in the menu bar. The launch window's own Quit no longer answers once admitted.
+    #[gpui::test]
+    fn app_menu_quit_with_no_window_keeps_spaceterm_in_the_menu_bar(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let menu = Rc::new(
+            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+        );
+        let host = {
+            let mut wiring = parts(Rc::default(), Rc::default());
+            wiring.adapters.application_quit = quit.clone();
+            wiring.adapters.application_menu = Rc::clone(&menu) as Rc<dyn ApplicationMenuAdapter>;
+            HostComposition::new(wiring).unwrap()
+        };
+        cx.update(|cx| {
+            start_application(cx, &host).unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| crate::status_menu::set_available(cx, true));
+        cx.update(|cx| cx.dispatch_action(&DismissApplication));
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+        // With no window, GPUI's global dispatch reaches every listener of an action. The test
+        // platform's quit does nothing, so About, which the launch menu also answers, shows
+        // whether the launch window's handlers still act.
+        cx.update(|cx| {
+            cx.dispatch_action(&DismissApplication);
+            cx.dispatch_action(&ShowAboutApplication);
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+        assert_eq!(quit.confirmations(), 0, "SpaceTerm stays in the menu bar");
+        assert_eq!(
+            menu.commands(),
+            [crate::platform::application_menu::ApplicationMenuCommand::ShowAbout],
+            "only the full menu answers once launch admitted the data"
+        );
+        assert!(!cx.update(|cx| cx.has_global::<LaunchMenu>()));
     }
 
     #[gpui::test]
