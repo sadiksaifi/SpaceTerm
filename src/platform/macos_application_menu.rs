@@ -384,6 +384,14 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
         native::decorate(application_name, &native_shortcuts, &self.symbol_images)
     }
 
+    fn install_launch(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
+        let application_name = self.identity.display_name();
+        let menus = super::application_menu_model::launch_menus(application_name);
+        let native_shortcuts = native_menu_shortcuts(&menus, &cx.key_bindings().borrow());
+        cx.set_menus(menus);
+        native::decorate(application_name, &native_shortcuts, &self.symbol_images)
+    }
+
     fn perform(
         &self,
         command: ApplicationMenuCommand,

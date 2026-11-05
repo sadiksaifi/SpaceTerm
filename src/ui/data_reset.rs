@@ -8,7 +8,7 @@ use std::sync::Arc;
 use gpui::{App, AppContext as _, WindowHandle};
 use spaceterm_core::migration::{self, DataKind, ResetReason};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionIntent,
     ModalActionRole, ModalId,
 };
 
@@ -92,10 +92,14 @@ pub(crate) fn keep_too_old(floor: Option<&str>) -> String {
 
 /// The Settings Recovery detail for settings a SpaceTerm too old to update directly saved.
 pub(crate) fn outdated_settings(floor: Option<&str>) -> String {
+    let release = floor.map_or_else(
+        || "an earlier SpaceTerm release".to_owned(),
+        |floor| format!("SpaceTerm {floor}"),
+    );
     format!(
-        "Your settings are from a SpaceTerm too old to update directly. {} Until then, SpaceTerm \
-         uses default settings.",
-        keep_too_old(floor).replace("keep them", "keep yours")
+        "Your settings are from a SpaceTerm too old to update directly. To keep yours, install \
+         {release} first, then update from it. Until then, SpaceTerm uses default settings. Reset \
+         Settings replaces yours with defaults and keeps the earlier file."
     )
 }
 
@@ -140,13 +144,14 @@ pub(crate) fn notice_alert(reset: &[DataKind], can_show: bool) -> Alert<DataActi
             ModalActionRole::Affirmative,
             "data-reset-notice-ok",
         )
-        .with_emphasis(ModalActionEmphasis::Prominent),
+        .default_action(true),
     ];
     if can_show {
         actions.push(ModalAction::new(
             DataAction::ShowFiles,
             "Show Earlier Files",
-            ModalActionRole::Cancel,
+            // Not Cancel: Escape must never open the file manager.
+            ModalActionRole::Auxiliary,
             "data-reset-notice-show",
         ));
     }
@@ -205,7 +210,7 @@ pub(crate) fn newer_alert() -> Alert<DataAction> {
                 ModalActionRole::Affirmative,
                 "data-newer-quit",
             )
-            .with_emphasis(ModalActionEmphasis::Prominent),
+            .default_action(true),
         ],
     )
     .intent(AlertIntent::Warning)
@@ -226,7 +231,7 @@ pub(crate) fn unavailable_alert() -> Alert<DataAction> {
                 ModalActionRole::Affirmative,
                 "data-unavailable-try-again",
             )
-            .with_emphasis(ModalActionEmphasis::Prominent),
+            .default_action(true),
             ModalAction::new(
                 DataAction::Quit,
                 "Quit",
@@ -241,6 +246,78 @@ pub(crate) fn unavailable_alert() -> Alert<DataAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Context, IntoElement, Render, Styled as _, TestAppContext, Window, div};
+    use spaceterm_ui::ModalLayer;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct LaunchWindow;
+
+    impl Render for LaunchWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full())
+        }
+    }
+
+    /// Presents `alert`, presses `keys`, and returns the action they chose, if any.
+    fn answer(
+        cx: &mut TestAppContext,
+        alert: Alert<DataAction>,
+        keys: &str,
+    ) -> Option<DataAction> {
+        cx.update(crate::ui::init).unwrap();
+        let (root, cx) = cx.add_window_view(|window, _| {
+            window.activate_window();
+            LaunchWindow
+        });
+        let outcome = Rc::new(RefCell::new(None));
+        let recorded = Rc::clone(&outcome);
+        cx.update(|window, cx| {
+            root.update(cx, |_, cx| {
+                alert
+                    .present(window, cx, move |outcome, _| {
+                        if let AlertOutcome::Activated { action_id, .. } = outcome {
+                            *recorded.borrow_mut() = Some(action_id);
+                        }
+                    })
+                    .unwrap();
+            });
+        });
+        cx.run_until_parked();
+        let keystroke = gpui::Keystroke::parse(keys).unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            prefer_character_input: false,
+            is_held: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+        outcome.take()
+    }
+
+    #[gpui::test]
+    fn return_tries_again_when_saved_data_is_unavailable(cx: &mut TestAppContext) {
+        assert_eq!(
+            answer(cx, unavailable_alert(), "enter"),
+            Some(DataAction::TryAgain)
+        );
+    }
+
+    #[gpui::test]
+    fn escape_never_shows_the_earlier_files(cx: &mut TestAppContext) {
+        assert_ne!(
+            answer(cx, notice_alert(&[DataKind::View], true), "escape"),
+            Some(DataAction::ShowFiles)
+        );
+    }
+
+    #[gpui::test]
+    fn return_acknowledges_the_reset_notice(cx: &mut TestAppContext) {
+        assert_eq!(
+            answer(cx, notice_alert(&[DataKind::View], true), "enter"),
+            Some(DataAction::Dismiss)
+        );
+    }
 
     #[test]
     fn too_old_data_names_the_stepping_stone_to_install() {
@@ -250,12 +327,12 @@ mod tests {
                 &[DataKind::SavedConnections, DataKind::ClientRecords],
                 Some("1.1.0"),
             ),
-            "Your saved machines and unsettled operations are from a SpaceTerm too old to update \
-             directly. To keep them, quit and install SpaceTerm 1.1.0 first, then update from \
+            "Your saved machines and unfinished Workspace changes are from a SpaceTerm too old to \
+             update directly. To keep them, quit and install SpaceTerm 1.1.0 first, then update from \
              it. Reset moves them aside and starts over. Machines you added must be added again."
         );
         assert!(outdated_settings(Some("1.1.0")).contains("install SpaceTerm 1.1.0 first"));
-        assert!(outdated_settings(None).contains("To keep yours, quit and install an earlier"));
+        assert!(outdated_settings(None).contains("To keep yours, install an earlier"));
         assert!(
             !confirmation_detail(
                 ResetReason::Invalid,

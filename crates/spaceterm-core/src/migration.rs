@@ -113,7 +113,7 @@ impl DataKind {
             Self::MachineId => "Machine ID",
             Self::Pairings => "pairings",
             Self::SavedConnections => "saved machines",
-            Self::ClientRecords => "unsettled operations",
+            Self::ClientRecords => "unfinished Workspace changes",
             Self::CoreRecords => "SpaceTerm Core records",
         }
     }

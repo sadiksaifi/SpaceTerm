@@ -800,9 +800,11 @@ fn open_quit_prompt_host(cx: &mut App) -> gpui::Result<gpui::WindowHandle<QuitPr
                 window_size,
                 cx,
             ))),
+            // The content draws the title bar area, as in every other SpaceTerm window, so the
+            // window reads as one surface in either appearance.
             titlebar: Some(TitlebarOptions {
                 title: Some(title.into()),
-                appears_transparent: false,
+                appears_transparent: true,
                 traffic_light_position: None,
             }),
             kind: gpui::WindowKind::Normal,
@@ -1657,8 +1659,62 @@ fn initialize_launch_window(cx: &mut App, host: &HostComposition) -> Result<(), 
         },
     );
     crate::ui::appearance_runtime::register_fonts(cx).map_err(|_| RuntimeError::Initialization)?;
+    // Default Settings follow the system appearance, so the launch window matches it without
+    // reading the retained Settings.
+    if let Some((_, platform)) = &host.appearance {
+        let defaults = crate::settings::Settings::load(Arc::new(LaunchDefaults));
+        crate::ui::appearance_runtime::install(defaults, Rc::clone(platform), cx)
+            .map_err(|_| RuntimeError::Initialization)?;
+    }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
+    install_launch_menu(cx, &host.adapters.application_menu);
     Ok(())
+}
+
+/// The launch window's Settings: the defaults, with nothing read or written.
+struct LaunchDefaults;
+
+impl crate::settings::storage::SettingsStorage for LaunchDefaults {
+    fn quarantine(&self) -> Result<(), crate::settings::storage::StorageError> {
+        Err(crate::settings::storage::StorageError::Unavailable)
+    }
+    fn read(
+        &self,
+    ) -> Result<
+        Option<crate::platform::secure_filesystem::PrivateFileSnapshot>,
+        crate::settings::storage::StorageError,
+    > {
+        Ok(None)
+    }
+    fn write(
+        &self,
+        _: &[u8],
+        _: Option<&crate::platform::secure_filesystem::SecureEntryIdentity>,
+    ) -> Result<crate::settings::storage::StorageCommit, crate::settings::storage::StorageError>
+    {
+        Err(crate::settings::storage::StorageError::Unavailable)
+    }
+}
+
+/// The launch window's About, Hide and Quit. Quit ends SpaceTerm at once: nothing has opened
+/// yet that a quit warning protects. Admission's `init` registers the full handlers later, and
+/// a later handler takes the action first.
+fn install_launch_menu(cx: &mut App, application_menu: &Rc<dyn ApplicationMenuAdapter>) {
+    let about = Rc::clone(application_menu);
+    cx.on_action(move |_: &ShowAboutApplication, cx| {
+        if let Err(error) = about.perform(ApplicationMenuCommand::ShowAbout, cx)
+            && error != ApplicationMenuError::Unavailable
+        {
+            eprintln!("failed to perform an application menu command: {error}");
+        }
+    });
+    cx.on_action(|_: &DismissApplication, cx| cx.quit());
+    cx.on_action(|_: &HideApplication, cx| cx.hide());
+    cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
+    if let Err(error) = application_menu.install_launch(cx) {
+        eprintln!("failed to install the launch menu: {error}");
+    }
 }
 
 /// Starts the rest once the desktop state root is admitted: the update services and their
@@ -2867,16 +2923,39 @@ mod runtime_tests {
     #[test]
     fn the_launch_window_reads_no_settings_and_admission_presents_updates() {
         let cx = crate::ui::appearance_runtime::font_catalog_test_app();
-        let host = host_with_settings();
+        let menu = Rc::new(
+            crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+        );
+        let mut launch_parts = parts(Rc::default(), Rc::default());
+        launch_parts.adapters.application_menu = Rc::clone(&menu) as Rc<dyn ApplicationMenuAdapter>;
+        // Unreadable retained Settings show whether anything read them.
+        let storage = Arc::new(crate::settings::storage::testing::MemoryStorage::default());
+        storage.corrupt();
+        let host = HostComposition::new(launch_parts).unwrap().with_appearance(
+            storage,
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+        );
         cx.update(|cx| {
             initialize_launch_window(cx, &host).unwrap();
-            assert!(
-                !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>(),
-                "Settings wait for the desktop state's admission"
+            assert_eq!(
+                (menu.launch_installs(), menu.installs()),
+                (1, 0),
+                "the launch window has its own About, Hide and Quit menu"
+            );
+            let status = |cx: &App| {
+                cx.global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+                    .settings
+                    .snapshot()
+                    .status
+            };
+            assert_eq!(
+                status(cx),
+                None,
+                "the launch window uses default Settings and reads no retained ones"
             );
             assert!(!cx.has_global::<crate::updates::UpdateService>());
             initialize_admitted(cx, &host).unwrap();
-            assert!(cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>());
+            assert_eq!(status(cx), Some(crate::settings::SettingsError::Invalid));
             assert!(
                 crate::ui::updates::presenting(cx),
                 "the update presentation subscribes once the services exist"
