@@ -12,6 +12,7 @@ pub mod network;
 pub mod offline_token;
 pub mod pair;
 pub mod permissions;
+pub mod reset;
 pub mod setup;
 pub mod status;
 pub mod uninstall;
@@ -178,6 +179,7 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
             delete_data,
             confirm,
         } => uninstall::run(&context, *delete_data, confirm.as_deref()),
+        CoreCommand::Reset(confirm) => reset::run(&context, confirm.confirm.as_deref()),
     };
     context.credentials.report(&mut reply.envelope);
     reply.notice = notice(&context, command, &reply);
@@ -453,7 +455,13 @@ pub fn open_lane(
 const LAST_CONNECTED: &str = "last-connected.json";
 const LAST_CONNECTED_FILE: &std::ffi::CStr = c"last-connected.json";
 
+/// Whether `value` is a `last-connected.json` this build reads.
+pub(crate) fn readable_last_connected(value: &serde_json::Value) -> bool {
+    spaceterm_core::migration::strict::<LastConnected>(value)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LastConnected {
     /// Seconds since the Unix epoch.
     at: u64,

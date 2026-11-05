@@ -117,6 +117,11 @@ impl PendingRecord {
     }
 }
 
+/// Whether `value` is a desktop's Saved Connections file this build reads.
+pub fn readable(value: &serde_json::Value) -> bool {
+    Document::deserialize(value).is_ok_and(|document| document.validate().is_ok())
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Document {

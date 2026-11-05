@@ -44,6 +44,7 @@ SpaceTerm Core on this machine. [--machine] marks commands that also reach a pai
   permissions       Show the System Permissions of this machine's Terminal Sessions, or set one up
   end-all-sessions  End every Terminal Session on this machine, keeping Workspaces
   uninstall         Uninstall SpaceTerm and SpaceTerm Core, keeping their data unless asked
+  reset             Reset saved data on this machine that this SpaceTerm can't read
 
 Machines this CLI reaches. These commands reject --machine.
   machine           Add, list, rename and remove machines
@@ -214,6 +215,11 @@ pub enum CoreCommand {
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
     },
+    /// Reset saved data on this machine that this SpaceTerm can't read.
+    ///
+    /// SpaceTerm Core's data and this CLI's state reset only when they can't be carried to this
+    /// version. The files move aside and are never deleted.
+    Reset(Confirm),
 }
 
 /// Setting up one System Permission on this machine.
@@ -741,6 +747,7 @@ impl CoreCommand {
             },
             Self::EndAllSessions(_) => "end-all-sessions",
             Self::Uninstall { .. } => "uninstall",
+            Self::Reset(_) => "reset",
         }
     }
 }
@@ -1142,7 +1149,7 @@ mod tests {
             );
             listed += 1;
         }
-        assert_eq!(listed, 21);
+        assert_eq!(listed, 22);
         assert!(help.contains("--machine <NAME|id:ROUTE>"));
     }
 

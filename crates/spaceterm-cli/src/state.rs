@@ -17,7 +17,11 @@
 //! read or written here.
 use crate::contract::{Code, Failure, RecoveredIdentity, from_core_error};
 use serde::{Deserialize, Serialize};
+use spaceterm_connections::migration::StoreCredentials;
 use spaceterm_core::hierarchy::{ClientJournal, Id};
+use spaceterm_core::migration::{
+    self, DataKind, DirectoryStore, FileRule, Mount, PendingReset, Refusal, Registry, StoreError,
+};
 use spaceterm_core::protocol::{AgentName, RunId};
 use spaceterm_core::{CoreError, Directory, Lock, LockWait, MachineConnection};
 use std::path::PathBuf;
@@ -110,6 +114,105 @@ pub struct PendingRun {
 #[serde(deny_unknown_fields)]
 struct RunsRecord {
     runs: Vec<PendingRun>,
+}
+
+/// The lock the CLI holds while it brings its state root to this build's generation.
+const GENERATION_LOCK: &str = "state.lock";
+
+const RULES: &[FileRule] = &[
+    FileRule {
+        name: "connections.json",
+        kind: DataKind::SavedConnections,
+        read: spaceterm_connections::readable,
+        stamp: None,
+    },
+    FileRule {
+        name: "runs.json",
+        kind: DataKind::ClientRecords,
+        read: migration::strict::<RunsRecord>,
+        stamp: None,
+    },
+    FileRule {
+        name: "last-connected.json",
+        kind: DataKind::View,
+        read: crate::admin::readable_last_connected,
+        stamp: None,
+    },
+];
+
+/// The CLI state root's generations, steps and records.
+pub const REGISTRY: Registry = Registry {
+    generations: migration::generations::CLI_STATE,
+    steps: &[],
+    files: &[RULES, migration::client_files::RULES],
+};
+
+/// The CLI state root of `identity`, `clients/cli` and everything under it.
+pub fn store(identity: &str) -> Result<DirectoryStore, CoreError> {
+    Ok(store_at(spaceterm_core::cli_state_root(identity)?))
+}
+
+fn store_at(root: PathBuf) -> DirectoryStore {
+    DirectoryStore::new(root.clone(), vec![Mount::tree(root)])
+}
+
+/// The credential stores this CLI's Saved Connections use.
+fn credentials(identity: &str) -> StoreCredentials {
+    let identity = identity.to_owned();
+    StoreCredentials::new(move |kind| {
+        spaceterm_connections::credentials::for_cli_record(&identity, kind)
+    })
+}
+
+fn generation_lock(identity: &str) -> Result<Lock, CoreError> {
+    Directory::open(&spaceterm_core::cli_state_root(identity)?, true)?.lock(GENERATION_LOCK, false)
+}
+
+/// Brings this CLI's state to this build's generation before any command reads it, and names
+/// the rebuildable data a reset replaced since the last command, once.
+pub fn prepare(identity: &str) -> Result<Vec<DataKind>, CoreError> {
+    let _lock = generation_lock(identity)?;
+    bring(
+        spaceterm_core::cli_state_root(identity)?,
+        &mut credentials(identity),
+    )
+}
+
+fn bring(
+    root: PathBuf,
+    credentials: &mut dyn migration::Credentials,
+) -> Result<Vec<DataKind>, CoreError> {
+    let store = store_at(root);
+    migration::run(&REGISTRY, &store, credentials, false).map_err(refusal)?;
+    migration::take_notice(&store).map_err(storage)
+}
+
+/// The reset this CLI's state waits for, if any.
+pub fn pending_reset(identity: &str) -> Result<Option<PendingReset>, CoreError> {
+    let _lock = generation_lock(identity)?;
+    migration::pending(&store(identity)?).map_err(storage)
+}
+
+/// Resets this CLI's state that waits for a reset, after the person confirmed it.
+pub fn reset_confirmed(identity: &str) -> Result<Vec<DataKind>, CoreError> {
+    let _lock = generation_lock(identity)?;
+    migration::reset_confirmed(&REGISTRY, &store(identity)?, &mut credentials(identity))
+        .map_err(refusal)
+}
+
+fn refusal(refusal: Refusal) -> CoreError {
+    match refusal {
+        Refusal::Newer => CoreError::IncompatibleState,
+        Refusal::Reset { .. } => CoreError::DataResetRequired,
+        Refusal::Storage(error) => storage(error),
+    }
+}
+
+fn storage(error: StoreError) -> CoreError {
+    match error {
+        StoreError::Unavailable => CoreError::StorageUnavailable,
+        StoreError::Unsafe => CoreError::UnsafeStorage,
+    }
 }
 
 /// One identity's run journal. Each transaction locks and reloads `runs.json`.
@@ -366,6 +469,33 @@ mod tests {
             .join(format!("st-cli-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         CliState::at(root)
+    }
+
+    #[test]
+    fn the_state_root_reaches_this_generation_or_refuses_unchanged() {
+        let state = temporary("generation");
+        let mut none = migration::NoCredentials;
+        assert_eq!(bring(state.root.clone(), &mut none), Ok(Vec::new()));
+        let marker = state.root.join("generation.json");
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            br#"{"generation":1}"#,
+            "an empty root starts at the current generation"
+        );
+        let runs = state.root.join("routes/local/base");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(runs.join("runs.json"), br#"{"runs":[]}"#).unwrap();
+        std::fs::write(&marker, br#"{"generation":2}"#).unwrap();
+        assert_eq!(
+            bring(state.root.clone(), &mut none),
+            Err(CoreError::IncompatibleState)
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), br#"{"generation":2}"#);
+        assert_eq!(
+            std::fs::read(runs.join("runs.json")).unwrap(),
+            br#"{"runs":[]}"#
+        );
+        std::fs::remove_dir_all(&state.root).unwrap();
     }
 
     #[test]

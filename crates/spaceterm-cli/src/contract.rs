@@ -858,6 +858,7 @@ codes! {
     NotRunning = "not_running", Unavailable, true, "SpaceTerm Core is not running.";
     StorageUnavailable = "storage_unavailable", Unavailable, false, "Storage is unavailable.";
     IncompatibleState = "incompatible_state", Unavailable, false, "The saved state is from an incompatible SpaceTerm.";
+    DataResetRequired = "data_reset_required", ActionRequired, false, "Saved data on this machine needs a reset. Review it with: spaceterm reset.";
     UnsafeStorage = "unsafe_storage", Unavailable, false, "Storage has unsafe permissions.";
     AuthenticationRefused = "authentication_refused", ActionRequired, false, "SpaceTerm couldn\u{2019}t verify the machine or account for this connection.";
     IncompatibleProtocol = "incompatible_protocol", Unavailable, false, "This CLI and SpaceTerm Core on that machine are incompatible. Update the older one.";
@@ -941,6 +942,7 @@ pub fn from_core_error(error: CoreError) -> Failure {
         CoreError::NotRunning => Code::NotRunning,
         CoreError::StorageUnavailable => Code::StorageUnavailable,
         CoreError::IncompatibleState => Code::IncompatibleState,
+        CoreError::DataResetRequired => Code::DataResetRequired,
         CoreError::UnsafeStorage => Code::UnsafeStorage,
         CoreError::AuthenticationRefused => Code::AuthenticationRefused,
         CoreError::IncompatibleProtocol(older) => {
@@ -1742,6 +1744,21 @@ pub struct EndAllSessionsEffects {
     pub sessions: Vec<EndedSession>,
 }
 
+/// One data root that waits for a reset, or that a confirmed `reset` replaced.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ResetRoot {
+    /// `core_data` or `cli_state`.
+    pub root: &'static str,
+    pub reason: spaceterm_core::migration::ResetReason,
+    pub kinds: Vec<spaceterm_core::migration::DataKind>,
+}
+
+/// `effects` of `reset`, and `data` after confirmation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ResetEffects {
+    pub reset: Vec<ResetRoot>,
+}
+
 /// `end-all-sessions` after confirmation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CoreEndAllSessions {
@@ -2281,6 +2298,7 @@ mod tests {
             (E::NotRunning, "not_running", 5),
             (E::StorageUnavailable, "storage_unavailable", 5),
             (E::IncompatibleState, "incompatible_state", 5),
+            (E::DataResetRequired, "data_reset_required", 3),
             (E::UnsafeStorage, "unsafe_storage", 5),
             (E::AuthenticationRefused, "authentication_refused", 3),
             (
