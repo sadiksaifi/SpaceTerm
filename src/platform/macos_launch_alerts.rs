@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSModalResponseAbort, NSView};
+use objc2_app_kit::{
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSModalResponseAbort, NSView,
+};
 use objc2_foundation::NSString;
 
 use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
