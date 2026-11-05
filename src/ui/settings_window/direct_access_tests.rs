@@ -644,6 +644,24 @@ fn a_port_another_app_uses_leaves_access_off_and_says_so(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn a_core_reporting_port_in_use_says_so_without_a_policy_change(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::with_state(AccessState {
+        machine_name: CORE.into(),
+        policy: Some(address("192.168.1.20:9231")),
+        configured: Some(address("192.168.1.20:9231")),
+        listener: Listener::PortInUse,
+        addresses: Some(addresses(&["192.168.1.20"], Some("192.168.1.20"))),
+    });
+    let (_, cx) = open_machines(&access, cx);
+
+    assert!(reads(
+        "Another app on \u{201C}studio\u{201D} is using that UDP port, so choose another port.",
+        cx
+    ));
+    assert!(access.policies().is_empty());
+}
+
+#[gpui::test]
 fn a_core_without_a_reachable_address_cant_be_turned_on_and_says_so(cx: &mut TestAppContext) {
     let access = ScriptedAccess::new(Listener::Off, Some(addresses(&[], None)));
     let (_, cx) = open_machines(&access, cx);

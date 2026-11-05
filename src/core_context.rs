@@ -60,7 +60,9 @@ pub(crate) enum ObservedCoreStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum NetworkListenerFacts {
     Off,
+    Starting(SocketAddr),
     Listening(SocketAddr),
+    PortInUse,
     AddressGone,
     Failed,
 }
@@ -108,8 +110,17 @@ impl NetworkAccessFacts {
                 .is_some_and(|address| spaceterm_core::direct::NetworkPolicy::new(address).is_err())
             || !match (self.policy, self.listener) {
                 (None, NetworkListenerFacts::Off) => true,
-                (Some(policy), NetworkListenerFacts::Listening(address)) => policy == address,
-                (Some(_), NetworkListenerFacts::AddressGone | NetworkListenerFacts::Failed) => true,
+                (
+                    Some(policy),
+                    NetworkListenerFacts::Listening(address)
+                    | NetworkListenerFacts::Starting(address),
+                ) => policy == address,
+                (
+                    Some(_),
+                    NetworkListenerFacts::AddressGone
+                    | NetworkListenerFacts::Failed
+                    | NetworkListenerFacts::PortInUse,
+                ) => true,
                 _ => false,
             }
         {

@@ -341,9 +341,9 @@ fn connected(
     Ok((data, text))
 }
 
-/// Applies `--network` through the running server. An unchanged policy is `already_done`. The
-/// server readies the new listener before it changes anything, so an address it can't listen at
-/// fails the step and keeps the current Network Access.
+/// Applies `--network` through the running server. An unchanged policy is `already_done` only
+/// while its listener is ready or access is off. The server readies the new listener before it
+/// changes anything, so an address it can't listen at fails the step and keeps Network Access.
 fn set_network(
     connection: &spaceterm_core::MachineConnection,
     network: &Network,
@@ -369,7 +369,13 @@ fn set_network(
     };
     let unchanged =
         current.enabled == enabled && (!enabled || current.policy.as_ref() == policy.as_ref());
-    if unchanged {
+    if unchanged
+        && (!enabled
+            || matches!(
+                current.listener,
+                spaceterm_core::direct::ListenerState::Listening { .. }
+            ))
+    {
         return Ok(StepResult::AlreadyDone);
     }
     let status = connection
@@ -417,6 +423,90 @@ fn text(data: &CoreSetup) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_enabled_saved_policy_with_no_listener_reports_port_in_use() {
+        use spaceterm_core::connection::carrier::{Carrier, Priority};
+        use spaceterm_core::connection::io::spawn_link;
+        use spaceterm_core::connection::loopback::Loopback;
+        use spaceterm_core::direct::{
+            DirectError, DirectStatus, ListenerState, MachinePin, Management, ManagementReply,
+        };
+        use spaceterm_core::protocol::{ClientMessage, CoreMessage, Operation, Reply, ReplyBody};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let policy = NetworkPolicy::parse("127.0.0.1:9232", 9232).unwrap();
+        for listener in [
+            ListenerState::Starting { addr: policy.bind },
+            ListenerState::Failed(DirectError::PortInUse),
+        ] {
+            let status = DirectStatus {
+                pin: MachinePin {
+                    build: "spaceterm-preflight".into(),
+                    core: [1; 32],
+                    public_key: [2; 32],
+                    certificate: [3; 32],
+                },
+                policy: Some(policy.clone()),
+                enabled: true,
+                listener,
+                machine_name: "test".into(),
+                network_addresses: Err(DirectError::Transport),
+                setup_generation: 0,
+            };
+            let (mut peer, client) = Loopback::pair(8).unwrap();
+            let connection =
+                spaceterm_core::MachineConnection::for_identity("spaceterm-preflight").unwrap();
+            connection.adopt(spawn_link(Box::new(client), Arc::new(|_| {})).unwrap());
+            let serving = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut assembler = spaceterm_core::protocol::frame::Assembler::default();
+                loop {
+                    let frame = match peer.receive() {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "CLI did not close its connection"
+                            );
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    let Some(ClientMessage::Request(request)) = assembler.client(frame).unwrap()
+                    else {
+                        continue;
+                    };
+                    let result = match request.operation {
+                        Operation::Direct(Management::Status) => {
+                            Ok(ManagementReply::Status(status.clone()))
+                        }
+                        Operation::Direct(Management::SetPolicy { .. }) => {
+                            Err(DirectError::PortInUse)
+                        }
+                        _ => panic!("unexpected setup request"),
+                    };
+                    let reply = spaceterm_core::protocol::frame::encode_core(&CoreMessage::Reply(
+                        Box::new(Reply {
+                            id: request.id,
+                            result: Ok(ReplyBody::Direct(result)),
+                        }),
+                    ))
+                    .unwrap();
+                    for frame in reply.frames {
+                        peer.offer(&frame, Priority::L1).unwrap();
+                    }
+                }
+            });
+
+            let result = set_network(&connection, &Network::Address(policy.clone()));
+            connection.disconnect();
+            serving.join().unwrap();
+            assert_eq!(result.unwrap_err().code, Code::PortInUse);
+        }
+    }
 
     #[test]
     fn the_launcher_names_only_this_identitys_installations() {

@@ -141,6 +141,12 @@ mod tests {
         let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         record["key"] = serde_json::json!([]);
         assert!(!REGISTRY.readable("direct.json", &serde_json::to_vec(&record).unwrap()));
+    }
+
+    /// The client records under `clients/` exist only with the client library.
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_migration_reader_refuses_client_records_the_store_would_refuse() {
         let client = fixtures::directory("cli-state").join("gen-1/routes/local/base");
         let order = std::fs::read(client.join("workspace-order.json")).unwrap();
         let rules = Registry {

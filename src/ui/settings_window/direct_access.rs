@@ -95,7 +95,9 @@ impl LastKnown {
             access: facts.network_access.as_ref().map(|access| {
                 let listener = match access.listener {
                     NetworkListenerFacts::Off => Listener::Off,
+                    NetworkListenerFacts::Starting(address) => Listener::Starting(address),
                     NetworkListenerFacts::Listening(address) => Listener::Listening(address),
+                    NetworkListenerFacts::PortInUse => Listener::PortInUse,
                     NetworkListenerFacts::AddressGone => Listener::AddressGone,
                     NetworkListenerFacts::Failed => Listener::Failed,
                 };
@@ -133,7 +135,9 @@ fn access_facts(observed_at: u64, state: &AccessState) -> NetworkAccessFacts {
         policy: state.policy,
         listener: match state.listener {
             Listener::Off => NetworkListenerFacts::Off,
+            Listener::Starting(address) => NetworkListenerFacts::Starting(address),
             Listener::Listening(address) => NetworkListenerFacts::Listening(address),
+            Listener::PortInUse => NetworkListenerFacts::PortInUse,
             Listener::AddressGone => NetworkListenerFacts::AddressGone,
             Listener::Failed => NetworkListenerFacts::Failed,
         },
@@ -310,6 +314,11 @@ fn listening_address(address: SocketAddr) -> String {
 pub(super) fn access_problem(state: &AccessState, core: &str) -> Option<String> {
     let address = state.policy.map(|policy| policy.ip());
     match (state.listener, &state.addresses) {
+        (Listener::Starting(address), _) => Some(format!(
+            "SpaceTerm Core is waiting to listen on UDP port {}.",
+            address.port()
+        )),
+        (Listener::PortInUse, _) => Some(AccessFailure::PortInUse.explanation(core)),
         (Listener::Failed, _) if address.is_some_and(|address| address.is_unspecified()) => {
             Some("Couldn\u{2019}t listen on all interfaces.".to_owned())
         }

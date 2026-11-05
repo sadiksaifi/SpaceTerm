@@ -1675,6 +1675,36 @@ fn direct_status(fixture: &Fixture) -> DirectStatus {
     status
 }
 
+#[test]
+fn setup_reports_port_in_use_when_the_saved_listener_cannot_bind_after_restart() {
+    let mut fixture = Fixture::new();
+    let address = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+    fixture.state.lock().unwrap().stop();
+    let holder = UdpSocket::bind(address).unwrap();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    assert!(matches!(
+        direct_status(&fixture).listener,
+        ListenerState::Starting { .. }
+    ));
+    let credential = DeviceCredential::generate().unwrap();
+    let request = setup(&fixture, [6; 32], &credential);
+    reserve(&fixture, &request);
+
+    assert!(matches!(
+        fixture.management(request.clone()),
+        Err(DirectError::PortInUse)
+    ));
+    assert!(matches!(
+        fixture.management(Management::Devices),
+        Ok(ManagementReply::Devices(devices)) if devices.is_empty()
+    ));
+    drop(holder);
+    assert!(matches!(
+        fixture.management(request),
+        Ok(ManagementReply::Setup(_))
+    ));
+}
+
 /// Sets up a device that turns Network Access on at a new loopback listener, as Add Machine does
 /// on a computer whose Network Access is off or elsewhere. Returns the setup's pin and
 /// operation, and how to put Network Access back as it was.

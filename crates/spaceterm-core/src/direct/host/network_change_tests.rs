@@ -702,7 +702,7 @@ fn a_widening_another_app_blocks_keeps_the_listener_and_every_connection() {
         panic!("expected a receipt");
     };
     assert_eq!(receipt.state, LaneOperationState::Failed);
-    assert_eq!(receipt.code.as_deref(), Some("address_unavailable"));
+    assert_eq!(receipt.code.as_deref(), Some("port_in_use"));
     assert_eq!(policy(&fixture), (Some(at), true));
     let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
         panic!()
@@ -714,7 +714,7 @@ fn a_widening_another_app_blocks_keeps_the_listener_and_every_connection() {
             enabled: true,
             policy: Some(NetworkPolicy::every_interface(at.port()).unwrap()),
         }),
-        Err(DirectError::AddressUnavailable)
+        Err(DirectError::PortInUse)
     ));
     assert_eq!(policy(&fixture), (Some(at), true));
     assert!(call(&mut stream, &LaneRequest::Status).is_ok());

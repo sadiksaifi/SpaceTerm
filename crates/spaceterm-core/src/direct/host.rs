@@ -190,7 +190,8 @@ impl State {
                     .get_or_insert_with(std::time::Instant::now);
                 ListenerState::Starting { addr: address }
             }
-            Err(_) => ListenerState::Failed(DirectError::Transport),
+            Err(Bind::InUse) => ListenerState::Failed(DirectError::PortInUse),
+            Err(Bind::Other) => ListenerState::Failed(DirectError::Transport),
         }
     }
     /// Binds again while `Starting`. Every turn tries the bind, so an address a retired
@@ -243,7 +244,10 @@ impl State {
                 .as_ref()
                 .ok_or(DirectError::AddressUnavailable)?
                 .widen()
-                .map_err(|_| DirectError::AddressUnavailable)?;
+                .map_err(|error| match error {
+                    crate::connection::quic::QuicError::AddressInUse => DirectError::PortInUse,
+                    _ => DirectError::AddressUnavailable,
+                })?;
             self.listener_state = ListenerState::Listening { addr: policy.bind };
             self.listener_changed();
             return Ok(Prepared::Keep);
@@ -859,8 +863,6 @@ impl State {
                         public_key,
                         last_connected_at_unix_seconds: None,
                     };
-                    let changed_policy =
-                        self.record.policy.as_ref() != Some(&policy) || !self.record.enabled;
                     let generation = crypto::random()?;
                     let mut next = self.record.clone();
                     next.policy = Some(policy.clone());
@@ -871,11 +873,9 @@ impl State {
                         revoked: false,
                         agents: Vec::new(),
                     });
-                    let prepared = if changed_policy {
-                        self.prepare_listener(&next)?
-                    } else {
-                        Prepared::Keep
-                    };
+                    // A saved enabled policy does not prove that its listener bound after
+                    // startup. Enrollment must ready it before granting a pairing.
+                    let prepared = self.prepare_listener(&next)?;
                     self.commit(next)?;
                     self.switch_listener(prepared, generation);
                     info
@@ -1992,6 +1992,24 @@ mod agent_tests;
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn a_listener_that_exhausts_bind_retries_reports_port_in_use() {
+        let fixture = crate::direct::tests::Fixture::new();
+        let address = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+        fixture.state.lock().unwrap().stop();
+        let _holder = std::net::UdpSocket::bind(address).unwrap();
+        let reopened = State::open(&fixture.paths).unwrap();
+        let mut state = reopened.lock().unwrap();
+        state.starting_since =
+            Some(std::time::Instant::now() - crate::protocol::limits::STALL_AFTER);
+
+        assert_eq!(state.retry_listen(), None);
+        assert_eq!(
+            state.status().listener,
+            ListenerState::Failed(DirectError::PortInUse)
+        );
+    }
 
     /// A retired listener at one address of the port blocks a widening to every interface at
     /// that port. The bind is this Core's own, so it waits instead of blaming another app.
