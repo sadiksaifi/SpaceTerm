@@ -343,6 +343,7 @@ const fn failure_title(error: CoreError) -> &'static str {
             "Incompatible SpaceTerm Core"
         }
         CoreError::ActivationUnresolved => "SpaceTerm Core Update Unfinished",
+        CoreError::DataResetRequired => "SpaceTerm Core Can\u{2019}t Read Its Data",
         CoreError::CandidateChanged => "Restart SpaceTerm",
         CoreError::CandidateMissing => "SpaceTerm Core Not Included",
         CoreError::RuntimeUnavailable => "Couldn\u{2019}t Verify SpaceTerm Core",
@@ -365,6 +366,11 @@ fn failure_detail(error: CoreError) -> SharedString {
                 .into()
         }
         CoreError::RuntimeUnavailable => "Reinstall SpaceTerm, then try again.".into(),
+        CoreError::DataResetRequired => {
+            "To keep it, install an earlier SpaceTerm release, then update from it. To reset it, \
+             run spaceterm reset in Terminal."
+                .into()
+        }
         error => error.to_string().into(),
     }
 }
@@ -377,6 +383,7 @@ const fn ends_opening(error: CoreError) -> bool {
         CoreError::IncompatibleProtocol(_)
             | CoreError::ActivationUnresolved
             | CoreError::IncompatibleState
+            | CoreError::DataResetRequired
             | CoreError::StorageUnavailable
             | CoreError::UnsafeStorage
             | CoreError::AuthenticationRefused

@@ -82,6 +82,11 @@ pub fn pending_reset(identity: &str) -> Result<Option<PendingReset>, CoreError> 
     super::pending(&store(&paths.data)).map_err(storage)
 }
 
+/// The reset the Core data root in `data` waits for, when it can be read.
+pub(crate) fn pending_reset_at(data: &Path) -> Option<PendingReset> {
+    super::pending(&store(data)).ok().flatten()
+}
+
 /// Resets the records of this Core's data that wait for a reset, after the person confirmed
 /// it, and names the kinds of data it replaced. A root that no longer needs a reset is left
 /// alone. The caller is this Core's approved runtime, and the Core is not running.

@@ -647,6 +647,10 @@ impl Service {
             .map_err(|error| {
                 if self.supervisor.login_item_off() {
                     CoreError::LoginItemOff
+                } else if crate::migration::core_data::pending_reset_at(&self.paths.data).is_some()
+                {
+                    // The runtime refused data it can't read and recorded why.
+                    CoreError::DataResetRequired
                 } else {
                     error
                 }
