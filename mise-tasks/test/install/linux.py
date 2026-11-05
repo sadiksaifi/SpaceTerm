@@ -463,6 +463,20 @@ class InstallTests(unittest.TestCase):
         )
         self.assertEqual(list(self.installations().values()), ["1.1.0"])
 
+    def test_the_floor_applies_to_the_running_core_not_one_waiting_beside_it(self):
+        for version in ("1.0.0", "1.1.0"):
+            self.publish(version, latest=False)
+            self.succeed("--version", version)
+        self.publish("1.2.0", document=build_document("1.2.0", floor="1.1.0"))
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "SpaceTerm Core 1.0.0 is older than 1.1.0, the oldest version that updates "
+            "directly to SpaceTerm Core 1.2.0",
+            result.stderr,
+        )
+        self.assertEqual(sorted(self.installations().values()), ["1.0.0", "1.1.0"])
+
     def test_a_dry_run_accepts_placeholder_keys_and_says_so(self):
         installer = render(self.root, kind="dry-run", team_id="")
         result = self.install(installer=installer)
