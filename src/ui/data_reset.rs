@@ -8,8 +8,7 @@ use std::sync::Arc;
 use gpui::{App, AppContext as _, WindowHandle};
 use spaceterm_core::migration::{self, DataKind, ResetReason};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionIntent,
-    ModalActionRole, ModalId,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionIntent, ModalActionRole, ModalId,
 };
 
 use super::WorkspaceManager;
@@ -260,11 +259,7 @@ mod tests {
     }
 
     /// Presents `alert`, presses `keys`, and returns the action they chose, if any.
-    fn answer(
-        cx: &mut TestAppContext,
-        alert: Alert<DataAction>,
-        keys: &str,
-    ) -> Option<DataAction> {
+    fn answer(cx: &mut TestAppContext, alert: Alert<DataAction>, keys: &str) -> Option<DataAction> {
         cx.update(crate::ui::init).unwrap();
         let (root, cx) = cx.add_window_view(|window, _| {
             window.activate_window();
