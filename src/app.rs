@@ -985,7 +985,7 @@ struct LaunchQuestion;
 /// toolkit offers no native application-modal dialog. The window follows the system appearance
 /// through the launch window's default Settings.
 #[cfg_attr(
-    all(target_os = "macos", not(test)),
+    target_os = "macos",
     allow(dead_code, reason = "macOS asks with native alerts")
 )]
 pub(crate) struct WindowLaunchAlerts;
@@ -3887,11 +3887,6 @@ mod runtime_tests {
 
     impl Drop for LaunchRoot {
         fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                self.0.join("data"),
-                std::fs::Permissions::from_mode(0o700),
-            );
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
@@ -4007,7 +4002,6 @@ mod runtime_tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::ui::data_reset::LaunchChoice;
-        use std::os::unix::fs::PermissionsExt;
         let root = LaunchRoot::new("launch-reset");
         root.write("generation.json", br#"{"generation":0}"#);
         root.write(
@@ -4023,13 +4017,15 @@ mod runtime_tests {
                 .exists()
         );
 
+        // A file where the data directory belongs is storage the root can't open. Try Again
+        // finds the private directory that replaced it.
         let root = LaunchRoot::new("launch-unavailable");
-        root.write("generation.json", br#"{"generation":1}"#);
-        std::fs::set_permissions(root.0.join("data"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        spaceterm_core::Directory::open(&root.0, true).unwrap();
         let data = root.0.join("data");
+        std::fs::write(&data, b"").unwrap();
         let alerts = scripted(&[LaunchChoice::TryAgain], move || {
-            std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::remove_file(&data).unwrap();
+            spaceterm_core::Directory::open(&data, true).unwrap();
         });
         assert_eq!(launch_with(cx, &root, Rc::clone(&alerts)), 1);
         assert_eq!(
