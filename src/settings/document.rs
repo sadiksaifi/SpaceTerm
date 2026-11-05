@@ -26,6 +26,8 @@ pub(crate) struct SettingsDocument {
     #[serde(default)]
     pub(crate) clipboard: crate::terminal::native_services::clipboard::ClipboardPreferences,
     #[serde(default)]
+    pub(crate) notifications: super::notifications::NotificationPreferences,
+    #[serde(default)]
     pub(crate) git: super::git::GitPreferences,
     #[serde(default)]
     pub(crate) sidebar: super::sidebar::SidebarPreferences,
@@ -42,6 +44,7 @@ impl Default for SettingsDocument {
             updates: Default::default(),
             keybindings: Default::default(),
             clipboard: Default::default(),
+            notifications: Default::default(),
             git: Default::default(),
             sidebar: Default::default(),
             appearance: AppearancePreferences::default(),
@@ -98,6 +101,7 @@ impl SettingsDocument {
         self.updates = defaults.updates;
         self.keybindings = defaults.keybindings;
         self.clipboard = defaults.clipboard;
+        self.notifications = defaults.notifications;
         self.git = defaults.git;
         self.sidebar = defaults.sidebar;
         self.terminal_themes = defaults.terminal_themes;
@@ -110,6 +114,7 @@ impl SettingsDocument {
         self.updates = imported.updates;
         self.keybindings = imported.keybindings;
         self.clipboard = imported.clipboard;
+        self.notifications = imported.notifications;
         self.git = imported.git;
         self.sidebar = imported.sidebar;
         self.terminal_themes = imported.terminal_themes;

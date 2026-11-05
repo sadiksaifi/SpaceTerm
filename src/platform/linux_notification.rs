@@ -4,6 +4,10 @@ use super::linux_session_bus::{
     BusSubscription, RETAINED_REPLY_TIMEOUT, SessionBus, SessionBusError,
 };
 use crate::application_identity::ApplicationIdentity;
+use crate::platform::notification_access::{
+    NotificationAccess, NotificationAccessError, NotificationAccessState,
+    NotificationRequestCompletion, NotificationStateCompletion,
+};
 use crate::terminal::attention_notification::{
     AuthorizationCompletion, NotificationAdapter, NotificationAuthorization, NotificationSettings,
     SettingsCompletion, notification_body,
@@ -189,43 +193,56 @@ fn failure(error: SessionBusError) -> AttentionFailure {
         _ => AttentionFailure::DeliveryFailed,
     }
 }
+/// Asks the session bus whether a notification service answers. `completion` runs once.
+fn server_information(
+    bus: Option<&SessionBus>,
+    completion: Box<dyn FnOnce(Result<(), AttentionFailure>) + Send>,
+) {
+    let Some(bus) = bus else {
+        completion(Err(AttentionFailure::Unavailable));
+        return;
+    };
+    let completion = Arc::new(Mutex::new(Some(completion)));
+    let callback = completion.clone();
+    let result = bus.dispatch(move |connection| {
+        let result = proxy(connection)
+            .and_then(|proxy| {
+                let _: (String, String, String, String) = proxy
+                    .call("GetServerInformation", &())
+                    .map_err(SessionBusError::from)?;
+                Ok(())
+            })
+            .map_err(failure);
+        if let Some(completion) = callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            completion(result);
+        }
+    });
+    if let Err(error) = result
+        && let Some(completion) = completion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    {
+        completion(Err(failure(error)));
+    }
+}
+
 impl NotificationAdapter for LinuxNotificationAdapter {
     fn settings(&self, completion: SettingsCompletion) {
-        let Some(bus) = &self.bus else {
-            completion(Err(AttentionFailure::Unavailable));
-            return;
-        };
-        let completion = Arc::new(Mutex::new(Some(completion)));
-        let callback = completion.clone();
-        let result = bus.dispatch(move |connection| {
-            let result = proxy(connection)
-                .and_then(|proxy| {
-                    let _: (String, String, String, String) = proxy
-                        .call("GetServerInformation", &())
-                        .map_err(SessionBusError::from)?;
-                    Ok(NotificationSettings {
-                        authorization: NotificationAuthorization::Authorized,
-                        alert_enabled: true,
-                        center_enabled: true,
-                    })
-                })
-                .map_err(failure);
-            if let Some(completion) = callback
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                completion(result);
-            }
-        });
-        if let Err(error) = result
-            && let Some(completion) = completion
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-        {
-            completion(Err(failure(error)));
-        }
+        server_information(
+            self.bus.as_ref(),
+            Box::new(move |result| {
+                completion(result.map(|()| NotificationSettings {
+                    authorization: NotificationAuthorization::Authorized,
+                    alert_enabled: true,
+                    center_enabled: true,
+                }));
+            }),
+        );
     }
     fn authorize_provisionally(&self, completion: AuthorizationCompletion) {
         completion(Ok(()));
@@ -266,6 +283,40 @@ impl LinuxNotificationAdapter {
                 state.request = None;
                 failure(error)
             })
+    }
+}
+
+/// The Privacy section's view of notifications. Linux grants no per-application authorization,
+/// so it reports only whether a notification service answers.
+pub(super) struct LinuxNotificationAccess {
+    bus: Option<SessionBus>,
+}
+
+impl LinuxNotificationAccess {
+    pub(super) const fn new(bus: Option<SessionBus>) -> Self {
+        Self { bus }
+    }
+}
+
+impl NotificationAccess for LinuxNotificationAccess {
+    fn read(&self, completion: NotificationStateCompletion) {
+        server_information(
+            self.bus.as_ref(),
+            Box::new(move |result| {
+                completion(Ok(match result {
+                    Ok(()) => NotificationAccessState::ServiceAvailable,
+                    Err(_) => NotificationAccessState::ServiceUnavailable,
+                }));
+            }),
+        );
+    }
+
+    fn request(&self, completion: NotificationRequestCompletion) {
+        completion(Err(NotificationAccessError::Unavailable));
+    }
+
+    fn open_settings(&self) -> Result<(), NotificationAccessError> {
+        Err(NotificationAccessError::Unavailable)
     }
 }
 

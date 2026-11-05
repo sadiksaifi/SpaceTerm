@@ -206,6 +206,10 @@ fn compose(
                 as Rc<dyn crate::platform::capture_access::CaptureAccess>),
             permission_access: Some(core_permissions
                 as Rc<dyn crate::platform::permission_access::PermissionAccess>),
+            // The desktop posts notifications under its own authorization, not the server's.
+            notification_access: Some(Rc::new(
+                super::macos_notification::MacosNotificationAccess::new(identity),
+            )),
             setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)
                 as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),
             theme_registry: Arc::new(super::https_transport::HttpsTransport::new()),

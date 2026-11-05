@@ -1256,6 +1256,8 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             | SettingsRowId::CameraAccess
             | SettingsRowId::ScreenRecordingAccess
             | SettingsRowId::AccessibilityAccess
+            | SettingsRowId::NotificationAccess
+            | SettingsRowId::TerminalAttentionNotifications
             | SettingsRowId::ClipboardWrites
             | SettingsRowId::ClipboardReads
             | SettingsRowId::ShowRepositoryStatus
@@ -2781,6 +2783,10 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::CameraAccess => "settings-camera-access-control",
             SettingsRowId::ScreenRecordingAccess => "settings-screen-recording-access-control",
             SettingsRowId::AccessibilityAccess => "settings-accessibility-access-control",
+            SettingsRowId::NotificationAccess => "settings-notifications-access-control",
+            SettingsRowId::TerminalAttentionNotifications => {
+                "settings-terminal-attention-notifications"
+            }
             SettingsRowId::ClipboardWrites => "settings-clipboard-writes",
             SettingsRowId::ClipboardReads => "settings-clipboard-reads",
             SettingsRowId::ShowRepositoryStatus => "settings-show-repository-status",
@@ -4346,6 +4352,36 @@ fn clipboard_privacy_switches_save_reset_and_remain_searchable(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn terminal_attention_notifications_switch_saves_resets_and_remains_searchable(
+    cx: &mut TestAppContext,
+) {
+    let (window, harness, cx) = open_settings(cx);
+    select_section(SettingsSectionId::Privacy, cx);
+    assert!(document_of(&window, cx).notifications.terminal_attention);
+    click("settings-terminal-attention-notifications", cx);
+    settle(cx);
+    assert!(
+        !harness
+            .storage
+            .document()
+            .unwrap()
+            .notifications
+            .terminal_attention
+    );
+    click("settings-row-terminal-attention-notifications-reset", cx);
+    settle(cx);
+    assert_eq!(
+        harness.storage.document().unwrap().notifications,
+        Default::default()
+    );
+    set_query(&window, "bell", cx);
+    assert!(
+        cx.debug_bounds("settings-row-terminal-attention-notifications")
+            .is_some()
+    );
+}
+
+#[gpui::test]
 fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_privacy(
     cx: &mut TestAppContext,
 ) {
@@ -4403,6 +4439,14 @@ fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_priv
     }
     assert!(cx.debug_bounds("settings-row-clipboard-reads").is_some());
     assert!(cx.debug_bounds("settings-row-clipboard-writes").is_some());
+    assert!(
+        cx.debug_bounds("settings-row-notifications-access")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("settings-row-terminal-attention-notifications")
+            .is_some()
+    );
     for query in [
         "microphone",
         "updates",

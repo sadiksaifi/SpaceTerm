@@ -12,6 +12,10 @@ use objc2_user_notifications::{
 };
 
 use crate::application_identity::ApplicationIdentity;
+use crate::platform::notification_access::{
+    NotificationAccess, NotificationAccessError, NotificationRequestCompletion,
+    NotificationStateCompletion,
+};
 use crate::terminal::attention_notification::{
     AuthorizationCompletion, NotificationAdapter, NotificationAuthorization, NotificationSettings,
     SettingsCompletion, notification_body,
@@ -134,6 +138,73 @@ impl NotificationAdapter for UserNotificationAdapter {
         center.removeDeliveredNotificationsWithIdentifiers(&identifiers);
         Ok(())
     }
+}
+
+/// The Privacy section's view of the desktop's own notification authorization.
+pub(crate) struct MacosNotificationAccess {
+    identity: ApplicationIdentity,
+}
+
+impl MacosNotificationAccess {
+    pub(crate) const fn new(identity: ApplicationIdentity) -> Self {
+        Self { identity }
+    }
+}
+
+impl NotificationAccess for MacosNotificationAccess {
+    fn read(&self, completion: NotificationStateCompletion) {
+        UserNotificationAdapter::new(self.identity).settings(Box::new(move |settings| {
+            completion(
+                settings
+                    .map_err(|_| NotificationAccessError::Unavailable)
+                    .and_then(NotificationSettings::access_state),
+            );
+        }));
+    }
+
+    /// Asks for alerts without the provisional option, so the system shows its prompt.
+    fn request(&self, completion: NotificationRequestCompletion) {
+        let Some(center) = notification_center() else {
+            completion(Err(NotificationAccessError::Unavailable));
+            return;
+        };
+        let completion = Mutex::new(Some(completion));
+        let completion = RcBlock::new(
+            move |_granted: Bool, error: *mut objc2_foundation::NSError| {
+                let Some(completion) = completion
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                else {
+                    return;
+                };
+                // A refusal is a decision, which the next read reports.
+                completion(if error.is_null() {
+                    Ok(())
+                } else {
+                    Err(NotificationAccessError::Rejected)
+                });
+            },
+        );
+        center.requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert,
+            &completion,
+        );
+    }
+
+    fn open_settings(&self) -> Result<(), NotificationAccessError> {
+        super::macos_system_settings::open(&notification_settings_uri(self.identity))
+            .then_some(())
+            .ok_or(NotificationAccessError::Rejected)
+    }
+}
+
+/// The desktop's own entry in System Settings > Notifications.
+fn notification_settings_uri(identity: ApplicationIdentity) -> String {
+    format!(
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={}",
+        identity.application_id()
+    )
 }
 
 /// What the reminder delegate reports clicks to.
@@ -274,6 +345,34 @@ mod tests {
         assert_eq!(adapter.submit(3), Err(AttentionFailure::Unavailable));
         assert_eq!(adapter.clear(), Err(AttentionFailure::Unavailable));
     }
+    #[test]
+    fn unbundled_test_process_reports_notification_access_unavailable() {
+        let access = MacosNotificationAccess::new(ApplicationIdentity::current());
+        let (sender, read) = std::sync::mpsc::channel();
+        access.read(Box::new(move |result| sender.send(result).unwrap()));
+        assert_eq!(
+            read.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            Err(NotificationAccessError::Unavailable)
+        );
+        let (sender, request) = std::sync::mpsc::channel();
+        access.request(Box::new(move |result| sender.send(result).unwrap()));
+        assert_eq!(
+            request
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            Err(NotificationAccessError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn notification_settings_open_the_desktops_own_entry() {
+        assert_eq!(
+            notification_settings_uri(ApplicationIdentity::development()),
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=io.github.sadiksaifi.spaceterm-development"
+        );
+    }
+
     #[test]
     fn native_authorization_values_map_to_closed_portable_facts() {
         assert_eq!(

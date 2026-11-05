@@ -4,6 +4,7 @@ mod document;
 #[cfg(test)]
 mod document_tests;
 pub(crate) mod git;
+pub(crate) mod notifications;
 #[cfg(test)]
 mod schema_tests;
 

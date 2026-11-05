@@ -18,7 +18,8 @@ pub(crate) enum SettingsSectionId {
     Themes,
     /// The Shortcut each Command resolves to.
     Keybindings,
-    /// Clipboard access and system permissions for terminal programs.
+    /// System permissions and clipboard access for terminal programs, and the desktop's own
+    /// notifications.
     Privacy,
     /// Repository Status and Pull Requests, and the tools that provide them.
     Git,
@@ -73,9 +74,9 @@ impl SettingsSectionId {
             Self::Privacy
                 if desktop.has_feature(crate::desktop_profile::HostFeature::SystemPermissions) =>
             {
-                "Clipboard access and system permissions."
+                "System permissions, notifications, and clipboard access."
             }
-            Self::Privacy => "Clipboard access.",
+            Self::Privacy => "Notifications and clipboard access.",
             Self::Git => "Repository Status, Pull Requests, and Worktrees.",
             Self::Machines => "Machines run Workspaces and Terminal Sessions.",
             Self::Updates => "SpaceTerm updates in the background.",
@@ -133,6 +134,10 @@ pub(super) enum SettingsRowId {
     /// The system's Accessibility authorization, which programs in a Terminal Session inherit to
     /// click and type. Its label follows the name System Settings gives it.
     AccessibilityAccess,
+    /// The desktop's own notification authorization, which no Terminal Session inherits.
+    NotificationAccess,
+    /// Whether a bell or finished command in a Pane posts a notification.
+    TerminalAttentionNotifications,
     ClipboardWrites,
     ClipboardReads,
     ShowRepositoryStatus,
@@ -208,6 +213,8 @@ impl SettingsRowId {
             | Self::CameraAccess
             | Self::ScreenRecordingAccess
             | Self::AccessibilityAccess
+            | Self::NotificationAccess
+            | Self::TerminalAttentionNotifications
             | Self::ClipboardWrites
             | Self::ClipboardReads
             | Self::ShowRepositoryStatus
@@ -593,6 +600,43 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "reset",
         ],
         selector: "settings-row-accessibility-access",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::NotificationAccess,
+        section: SettingsSectionId::Privacy,
+        group: "Notifications",
+        label: "Notifications",
+        keywords: &[
+            "notification",
+            "alert",
+            "alerts",
+            "banner",
+            "notification center",
+            "deliver quietly",
+            "permission",
+            "permissions",
+            "privacy",
+            "authorization",
+            "allow",
+            "denied",
+        ],
+        selector: "settings-row-notifications-access",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::TerminalAttentionNotifications,
+        section: SettingsSectionId::Privacy,
+        group: "Notifications",
+        label: "Terminal attention notifications",
+        keywords: &[
+            "notification",
+            "notifications",
+            "bell",
+            "attention",
+            "command finished",
+            "alert",
+            "background",
+        ],
+        selector: "settings-row-terminal-attention-notifications",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ClipboardWrites,
@@ -1073,13 +1117,13 @@ mod tests {
         let desktop = crate::desktop_profile::testing_presentation();
         assert_eq!(
             SettingsSectionId::Privacy.description(&desktop),
-            "Clipboard access and system permissions."
+            "System permissions, notifications, and clipboard access."
         );
         let desktop =
             desktop.without_features(&[crate::desktop_profile::HostFeature::SystemPermissions]);
         assert_eq!(
             SettingsSectionId::Privacy.description(&desktop),
-            "Clipboard access."
+            "Notifications and clipboard access."
         );
     }
 
@@ -1152,6 +1196,8 @@ mod tests {
         CameraAccess,
         ScreenRecordingAccess,
         AccessibilityAccess,
+        NotificationAccess,
+        TerminalAttentionNotifications,
         ClipboardWrites,
         ClipboardReads,
         ShowRepositoryStatus,
@@ -1396,6 +1442,30 @@ mod tests {
             assert!(
                 common_use.contains(&row),
                 "computer use should reach {row:?}"
+            );
+        }
+    }
+
+    /// A person whose notifications never appear searches for the system's words for them, and
+    /// a person tired of them searches for what triggers them.
+    #[test]
+    fn a_notification_query_reaches_its_row() {
+        for (query, row) in [
+            ("notifications", SettingsRowId::NotificationAccess),
+            ("notification center", SettingsRowId::NotificationAccess),
+            ("alerts", SettingsRowId::NotificationAccess),
+            ("banner", SettingsRowId::NotificationAccess),
+            ("bell", SettingsRowId::TerminalAttentionNotifications),
+            (
+                "command finished",
+                SettingsRowId::TerminalAttentionNotifications,
+            ),
+            ("attention", SettingsRowId::TerminalAttentionNotifications),
+        ] {
+            assert_eq!(
+                matching_rows(query).first(),
+                Some(&row),
+                "{query:?} should rank {row:?} first"
             );
         }
     }

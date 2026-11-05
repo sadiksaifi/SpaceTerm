@@ -1294,6 +1294,9 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies,
     /// Reads and requests the microphone and camera grants programs in a Terminal Session inherit.
     pub(crate) capture_access: Option<Rc<dyn crate::platform::capture_access::CaptureAccess>>,
+    /// The desktop's own notification authorization, which the Privacy section presents.
+    pub(crate) notification_access:
+        Option<Rc<dyn crate::platform::notification_access::NotificationAccess>>,
     /// Reads and recovers the System Permissions programs in a Terminal Session inherit.
     pub(crate) permission_access:
         Option<Rc<dyn crate::platform::permission_access::PermissionAccess>>,
@@ -1594,6 +1597,7 @@ pub(crate) fn initialize_application(
         crate::ui::settings_window::PermissionCapabilities {
             capture: host.adapters.capture_access.clone(),
             system_permissions: host.adapters.permission_access.clone(),
+            notifications: host.adapters.notification_access.clone(),
             permission_setup: host.permission_setup.get().cloned(),
         },
         crate::theme_registry::ZedThemeRegistry::new(Arc::clone(&host.adapters.theme_registry)),
@@ -1614,6 +1618,18 @@ pub(crate) fn initialize_application(
         crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
         crate::keybindings::runtime::follow(&settings, cx);
+        let followed = settings.clone();
+        host.adapters.lifecycle.attention.follow_notifications(
+            settings.subscribe(),
+            move || {
+                followed
+                    .snapshot()
+                    .candidate
+                    .notifications
+                    .terminal_attention
+            },
+            cx,
+        );
         crate::ui::settings_file::SettingsFile::install(
             settings.clone(),
             Rc::clone(&host.adapters.settings_file),
@@ -2463,6 +2479,7 @@ mod runtime_tests {
                 native_services: crate::terminal::native_services::testing::adapters(),
                 lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
                 capture_access: None,
+                notification_access: None,
                 permission_access: None,
                 setup_guide: None,
                 theme_registry: Arc::new(crate::theme_registry::testing::MemoryTransport::default()),

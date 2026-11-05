@@ -6,7 +6,7 @@ use objc2_app_kit::NSWorkspace;
 use objc2_foundation::{NSString, NSURL};
 
 /// Whether Launch Services accepted `uri`. It must run on the main thread.
-pub(crate) fn open(uri: &'static str) -> bool {
+pub(crate) fn open(uri: &str) -> bool {
     if MainThreadMarker::new().is_none() {
         return false;
     }
