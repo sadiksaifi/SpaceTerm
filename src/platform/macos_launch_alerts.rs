@@ -28,9 +28,10 @@ impl LaunchAlerts for MacosLaunchAlerts {
                 return;
             };
             let roles: Vec<_> = prompt.buttons.iter().map(|button| button.role).collect();
-            let response = run_modal_alert(alert.get(mtm), AlertActivation::FORCEFUL, move |alert| {
-                bind_keys(alert, &roles);
-            });
+            let response =
+                run_modal_alert(alert.get(mtm), AlertActivation::FORCEFUL, move |alert| {
+                    bind_keys(alert, &roles);
+                });
             let choice = usize::try_from(response - NSAlertFirstButtonReturn)
                 .ok()
                 .and_then(|index| prompt.buttons.get(index))

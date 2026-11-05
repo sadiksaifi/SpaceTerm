@@ -221,9 +221,10 @@ pub(crate) fn launch_prompt(
         // Nothing in the data changes, so Return quits.
         StateCheck::Newer => LaunchPrompt {
             title: "Saved Data From a Newer SpaceTerm",
-            detail: "Install the newest SpaceTerm to open your Workspaces. SpaceTerm hasn\u{2019}t \
+            detail:
+                "Install the newest SpaceTerm to open your Workspaces. SpaceTerm hasn\u{2019}t \
                      changed this data."
-                .to_owned(),
+                    .to_owned(),
             caution: false,
             buttons: vec![quit(LaunchButtonRole::Default)],
         },
@@ -376,7 +377,10 @@ mod tests {
             reason: ResetReason::TooOld,
             kinds: vec![DataKind::SavedConnections],
         });
-        assert_eq!(answer(cx, drawn_alert(&reset), "escape"), Some(LaunchChoice::Quit));
+        assert_eq!(
+            answer(cx, drawn_alert(&reset), "escape"),
+            Some(LaunchChoice::Quit)
+        );
         assert_eq!(
             reset
                 .buttons
@@ -392,7 +396,10 @@ mod tests {
         assert!(reset.caution);
         assert!(reset.detail.contains("install SpaceTerm 1.1.0 first"));
         assert_eq!(
-            launch_prompt(&crate::migration::StateCheck::Ready { reset: Vec::new() }, None),
+            launch_prompt(
+                &crate::migration::StateCheck::Ready { reset: Vec::new() },
+                None
+            ),
             None
         );
     }

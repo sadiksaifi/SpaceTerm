@@ -899,9 +899,12 @@ impl LaunchGate {
 fn open_after_data_check(gate: Rc<LaunchGate>, launch: Rc<dyn Fn(&mut App)>, cx: &mut App) {
     use crate::migration::StateCheck;
     use crate::ui::data_reset::{self, LaunchChoice};
-    let check = gate.store.as_ref().map_or(StateCheck::Unavailable, |store| {
-        crate::migration::check_state(store, gate.identity)
-    });
+    let check = gate
+        .store
+        .as_ref()
+        .map_or(StateCheck::Unavailable, |store| {
+            crate::migration::check_state(store, gate.identity)
+        });
     let Some(prompt) = data_reset::launch_prompt(&check, gate.floor) else {
         if let (StateCheck::Ready { reset }, Some(store)) = (check, gate.store.clone())
             && !reset.is_empty()
@@ -1786,10 +1789,12 @@ impl crate::settings::storage::SettingsStorage for LaunchDefaults {
         document.appearance.mode = crate::appearance::AppearanceMode::Auto;
         let bytes = crate::settings::export_settings(&document)
             .map_err(|_| crate::settings::storage::StorageError::Unavailable)?;
-        Ok(Some(crate::platform::secure_filesystem::PrivateFileSnapshot {
-            bytes: bytes.into_bytes(),
-            identity: crate::platform::secure_filesystem::SecureEntryIdentity::from_opaque(()),
-        }))
+        Ok(Some(
+            crate::platform::secure_filesystem::PrivateFileSnapshot {
+                bytes: bytes.into_bytes(),
+                identity: crate::platform::secure_filesystem::SecureEntryIdentity::from_opaque(()),
+            },
+        ))
     }
     fn write(
         &self,
@@ -3933,8 +3938,14 @@ mod runtime_tests {
             ("0", "SpaceTerm Can\u{2019}t Read Some Saved Data"),
         ] {
             let root = LaunchRoot::new("launch-quit");
-            root.write("generation.json", format!("{{\"generation\":{marker}}}").as_bytes());
-            root.write("core/desktop/client.json", br#"{"format":"account-local-1"}"#);
+            root.write(
+                "generation.json",
+                format!("{{\"generation\":{marker}}}").as_bytes(),
+            );
+            root.write(
+                "core/desktop/client.json",
+                br#"{"format":"account-local-1"}"#,
+            );
             root.write("core/desktop/view.json", br#"{"old":true}"#);
             let before = root.files();
             let alerts = scripted(&[LaunchChoice::Quit], || {});
@@ -3948,7 +3959,11 @@ mod runtime_tests {
     struct ModalHost;
 
     impl gpui::Render for ModalHost {
-        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
             use gpui::Styled as _;
             spaceterm_ui::ModalLayer::new(gpui::div().size_full())
         }
@@ -3963,7 +3978,11 @@ mod runtime_tests {
         root.write("generation.json", br#"{"generation":99}"#);
         let alerts = scripted(&[LaunchChoice::Quit], || {});
         assert_eq!(launch_with(cx, &root, Rc::clone(&alerts)), 0);
-        assert_eq!(alerts.asked.borrow().len(), 1, "no window: the native dialog asks");
+        assert_eq!(
+            alerts.asked.borrow().len(),
+            1,
+            "no window: the native dialog asks"
+        );
 
         cx.update(crate::ui::init).unwrap();
         let window = cx.add_window(|_, _| ModalHost);
@@ -3975,7 +3994,9 @@ mod runtime_tests {
         );
         assert!(
             window
-                .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(window, cx))
+                .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
+                    window, cx
+                ))
                 .unwrap(),
             "SpaceTerm's own alert asks on that window"
         );
@@ -3989,11 +4010,18 @@ mod runtime_tests {
         use std::os::unix::fs::PermissionsExt;
         let root = LaunchRoot::new("launch-reset");
         root.write("generation.json", br#"{"generation":0}"#);
-        root.write("core/desktop/client.json", br#"{"format":"account-local-1"}"#);
+        root.write(
+            "core/desktop/client.json",
+            br#"{"format":"account-local-1"}"#,
+        );
         let alerts = scripted(&[LaunchChoice::Reset], || {});
         assert_eq!(launch_with(cx, &root, Rc::clone(&alerts)), 1);
         assert_eq!(alerts.asked.borrow().len(), 1);
-        assert!(root.0.join("data/reset/gen-0/core/desktop/client.json").exists());
+        assert!(
+            root.0
+                .join("data/reset/gen-0/core/desktop/client.json")
+                .exists()
+        );
 
         let root = LaunchRoot::new("launch-unavailable");
         root.write("generation.json", br#"{"generation":1}"#);
