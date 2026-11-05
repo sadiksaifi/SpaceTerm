@@ -113,7 +113,7 @@ impl DataKind {
             Self::MachineId => "Machine ID",
             Self::Pairings => "pairings",
             Self::SavedConnections => "saved machines",
-            Self::ClientRecords => "unsettled operations",
+            Self::ClientRecords => "unfinished Workspace changes",
             Self::CoreRecords => "SpaceTerm Core records",
         }
     }
@@ -335,8 +335,20 @@ pub fn run(
     credentials: &mut dyn Credentials,
     returned: bool,
 ) -> Result<Outcome, Refusal> {
+    bring(registry, store, credentials, returned)
+}
+
+/// [`run`], recording a refusal's reset in the root for another process to explain, as SpaceTerm
+/// Core's runtime does for the desktop and the CLI that started it. A root whose own reader
+/// presents the refusal derives it again on its next [`run`] and records nothing, so a pending
+/// confirmation changes nothing before the person decides.
+pub fn run_recorded(
+    registry: &Registry,
+    store: &dyn Store,
+    credentials: &mut dyn Credentials,
+    returned: bool,
+) -> Result<Outcome, Refusal> {
     let result = bring(registry, store, credentials, returned);
-    // Clients of any version read the recorded reset to explain a refusal.
     match &result {
         Err(Refusal::Reset { reason, kinds }) => {
             let pending = PendingReset {
@@ -359,7 +371,8 @@ pub fn is_current(registry: &Registry, store: &dyn Store) -> Result<bool, StoreE
     Ok(marker(store, Area::Root)? == current && marker(store, Area::Backup)? != current)
 }
 
-/// The reset the root in `store` waits for, as the last [`run`] that refused it recorded.
+/// The reset the root in `store` waits for, as the last [`run_recorded`] that refused it
+/// recorded.
 pub fn pending(store: &dyn Store) -> Result<Option<PendingReset>, StoreError> {
     Ok(store
         .read(Area::Reset, PENDING)?
@@ -427,6 +440,15 @@ pub fn reset_confirmed(
         }
         set_aside(store, generation, &path)?;
     }
+    // The rebuildable data reset with the rest, so the one-time notice names it.
+    add_notice(
+        store,
+        kinds
+            .iter()
+            .copied()
+            .filter(|kind| kind.automatic())
+            .collect(),
+    )?;
     write_marker(store, Area::Root, registry.generations.current)?;
     store.remove(Area::Reset, PENDING)?;
     Ok(kinds.into_iter().collect())
@@ -637,36 +659,44 @@ fn reset_rebuildable(
     generation: u32,
     reason: ResetReason,
 ) -> Result<Outcome, Refusal> {
+    let members = members(registry, store, Area::Root)?;
+    let waiting: BTreeSet<DataKind> = members
+        .iter()
+        .filter_map(|path| registry.rule(path))
+        .map(|rule| rule.kind)
+        .filter(|kind| !kind.automatic())
+        .collect();
+    // While any data waits for the person, nothing changes, the rebuildable data included.
+    if !waiting.is_empty() {
+        return Err(Refusal::Reset {
+            reason,
+            kinds: waiting.into_iter().collect(),
+        });
+    }
     let mut reset = BTreeSet::new();
-    let mut waiting = BTreeSet::new();
-    for path in members(registry, store, Area::Root)? {
-        let Some(rule) = registry.rule(&path) else {
-            continue;
-        };
-        if rule.kind.automatic() {
+    for path in members {
+        if let Some(rule) = registry.rule(&path) {
             set_aside(store, generation, &path)?;
             reset.insert(rule.kind);
-        } else {
-            waiting.insert(rule.kind);
         }
     }
-    if !reset.is_empty() {
-        let mut notice = store
-            .read(Area::Reset, NOTICE)?
-            .and_then(|bytes| serde_json::from_slice::<Notice>(&bytes).ok())
-            .unwrap_or_default();
-        notice.kinds.extend(reset);
-        let bytes = serde_json::to_vec(&notice).map_err(|_| StoreError::Unavailable)?;
-        store.write(Area::Reset, NOTICE, &bytes)?;
+    add_notice(store, reset)?;
+    write_marker(store, Area::Root, registry.generations.current)?;
+    Ok(Outcome::Reset)
+}
+
+/// Adds `kinds` of rebuildable data to the notice the person has yet to acknowledge.
+fn add_notice(store: &dyn Store, kinds: BTreeSet<DataKind>) -> Result<(), StoreError> {
+    if kinds.is_empty() {
+        return Ok(());
     }
-    if waiting.is_empty() {
-        write_marker(store, Area::Root, registry.generations.current)?;
-        return Ok(Outcome::Reset);
-    }
-    Err(Refusal::Reset {
-        reason,
-        kinds: waiting.into_iter().collect(),
-    })
+    let mut notice = store
+        .read(Area::Reset, NOTICE)?
+        .and_then(|bytes| serde_json::from_slice::<Notice>(&bytes).ok())
+        .unwrap_or_default();
+    notice.kinds.extend(kinds);
+    let bytes = serde_json::to_vec(&notice).map_err(|_| StoreError::Unavailable)?;
+    store.write(Area::Reset, NOTICE, &bytes)
 }
 
 /// Moves `path` to `reset/gen-<generation>/`.

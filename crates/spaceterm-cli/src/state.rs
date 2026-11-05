@@ -1281,18 +1281,21 @@ mod tests {
         assert_eq!(reason, ResetReason::TooOld);
         assert_eq!(kinds, [DataKind::SavedConnections]);
         assert_eq!(
-            preview.notice.map(|notice| notice.details),
-            Some(crate::contract::WarningDetails::Reset {
-                kinds: vec![DataKind::View]
-            }),
-            "the rebuildable view state reset without asking"
+            preview.notice, None,
+            "the rebuildable view state waits for the confirmation too"
         );
         assert!(state.root.join("connections.json").exists());
+        assert!(
+            state
+                .root
+                .join("routes/local/base/last-connected.json")
+                .exists()
+        );
         let done = reset(Some(&token.token)).unwrap();
         assert_eq!(
             done.reset,
             Reset::Done {
-                kinds: vec![DataKind::SavedConnections]
+                kinds: vec![DataKind::View, DataKind::SavedConnections]
             }
         );
         assert!(!state.root.join("connections.json").exists());

@@ -1862,16 +1862,21 @@ impl ModalFocusRing {
         if !window.is_window_active() || super::window_has_owned_popup(window, cx) {
             return;
         }
+        if self.is_active(window, cx) {
+            self.focus_first(window, cx);
+        }
+    }
+
+    /// Whether this ring's presentation is the window's current modal.
+    fn is_active(&self, window: &Window, cx: &App) -> bool {
         let Some(presentation) = self.presentation else {
-            return;
+            return false;
         };
         let expected = super::ModalParentToken {
             window_id: window.window_handle().window_id(),
             presentation,
         };
-        if super::current_modal_parent(window, cx) == Some(expected) {
-            self.focus_first(window, cx);
-        }
+        super::current_modal_parent(window, cx) == Some(expected)
     }
 
     fn reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1882,6 +1887,15 @@ impl ModalFocusRing {
             && focus.is_focused(window)
         {
             self.apply_focus_reveal(&focus, window, cx);
+        }
+        // The active modal owns the window's keyboard. Content behind it can take focus while
+        // the window is inactive, as a window opening at launch does, and no focus-out repair
+        // runs then. The modal takes its initial focus back on its next reconciliation.
+        if self.initialized
+            && !self.scope.contains_focused(window, cx)
+            && self.is_active(window, cx)
+        {
+            self.initialized = false;
         }
         if !self.initialized {
             let requested = match &self.initial {

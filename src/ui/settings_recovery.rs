@@ -112,7 +112,9 @@ fn launch_alert(status: SettingsError, floor: Option<&str>) -> Alert<RecoveryAct
                 ModalActionRole::Affirmative,
                 "settings-recovery-reset",
             )
-            .with_emphasis(ModalActionEmphasis::Prominent),
+            // It replaces retained Settings, so it asks like the Settings window's Reset and
+            // starts on Not Now.
+            .with_intent(ModalActionIntent::Destructive),
             ModalAction::new(
                 RecoveryAction::NotNow,
                 "Not Now",

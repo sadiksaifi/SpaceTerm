@@ -33,6 +33,24 @@ pub(crate) fn menus(application_name: &str) -> Vec<Menu> {
     menus
 }
 
+/// The menu bar while the launch window asks about retained data: the application menu's About,
+/// Hide and Quit, which touch no retained state.
+pub(crate) fn launch_menus(application_name: &str) -> Vec<Menu> {
+    vec![Menu {
+        disabled: false,
+        name: application_name.to_owned().into(),
+        items: vec![
+            MenuItem::action(format!("About {application_name}"), ShowAboutApplication),
+            MenuItem::separator(),
+            MenuItem::action(format!("Hide {application_name}"), HideApplication),
+            MenuItem::action("Hide Others", HideOtherApplications),
+            MenuItem::action("Show All", ShowAllApplications),
+            MenuItem::separator(),
+            MenuItem::action(format!("Quit {application_name}"), DismissApplication),
+        ],
+    }]
+}
+
 pub(crate) fn application_menu(application_name: &str) -> Menu {
     Menu {
         disabled: false,
@@ -437,5 +455,35 @@ mod tests {
             assert!(matches!(&develop.items[1], MenuItem::Action { action, .. }
                 if action.as_any().is::<crate::ui::developer_workbench::ToggleAppearancePreview>()));
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    use gpui::Action as _;
+
+    #[test]
+    fn the_launch_menu_offers_about_hide_and_quit_only() {
+        let menus = launch_menus("SpaceTerm");
+        let names: Vec<_> = menus[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { name, action, .. } => Some((name.to_string(), action.name())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(menus.len(), 1);
+        assert_eq!(
+            names,
+            [
+                ("About SpaceTerm".to_owned(), ShowAboutApplication.name()),
+                ("Hide SpaceTerm".to_owned(), HideApplication.name()),
+                ("Hide Others".to_owned(), HideOtherApplications.name()),
+                ("Show All".to_owned(), ShowAllApplications.name()),
+                ("Quit SpaceTerm".to_owned(), DismissApplication.name()),
+            ]
+        );
     }
 }

@@ -33,6 +33,12 @@ pub(crate) enum ApplicationMenuError {
 pub(crate) trait ApplicationMenuAdapter {
     fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError>;
 
+    /// Installs the launch window's menu bar: About, Hide and Quit. A host without a native
+    /// menu bar installs nothing.
+    fn install_launch(&self, _: &mut App) -> Result<(), ApplicationMenuError> {
+        Ok(())
+    }
+
     fn perform(&self, _: ApplicationMenuCommand, _: &mut App) -> Result<(), ApplicationMenuError> {
         Err(ApplicationMenuError::Unavailable)
     }
@@ -52,11 +58,16 @@ pub(crate) mod testing {
     pub(crate) struct RecordingApplicationMenuAdapter {
         commands: RefCell<Vec<ApplicationMenuCommand>>,
         installs: Cell<usize>,
+        launch_installs: Cell<usize>,
     }
 
     impl RecordingApplicationMenuAdapter {
         pub(crate) fn installs(&self) -> usize {
             self.installs.get()
+        }
+
+        pub(crate) fn launch_installs(&self) -> usize {
+            self.launch_installs.get()
         }
 
         pub(crate) fn commands(&self) -> Vec<ApplicationMenuCommand> {
@@ -67,6 +78,12 @@ pub(crate) mod testing {
     impl ApplicationMenuAdapter for RecordingApplicationMenuAdapter {
         fn install(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
             self.installs.set(self.installs.get() + 1);
+            cx.set_menus(Vec::new());
+            Ok(())
+        }
+
+        fn install_launch(&self, cx: &mut App) -> Result<(), ApplicationMenuError> {
+            self.launch_installs.set(self.launch_installs.get() + 1);
             cx.set_menus(Vec::new());
             Ok(())
         }
