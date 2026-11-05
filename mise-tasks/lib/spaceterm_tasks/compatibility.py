@@ -289,18 +289,18 @@ def update(tag, archive, signature):
         pair_with_self(environment)
         updated = _envelope(
             LAUNCHER,
-            ["core", "update", "--archive", str(archive), "--signature", str(signature)],
+            ["update", "--archive", str(archive), "--signature", str(signature)],
             environment,
         )
         if (updated["data"].get("pending") or {}).get("version") != version:
             raise TaskError(f"the floor release {floor} did not install {tag}")
-        preview = _envelope(LAUNCHER, ["core", "restart"], environment, "confirmation_required")
+        preview = _envelope(LAUNCHER, ["restart"], environment, "confirmation_required")
         token = preview["data"]["confirmation"]["token"]
-        _envelope(LAUNCHER, ["core", "restart", "--confirm", token], environment)
+        _envelope(LAUNCHER, ["restart", "--confirm", token], environment)
         deadline = time.monotonic() + RESTART
         while True:
             try:
-                status = _envelope(LAUNCHER, ["core", "status"], environment)
+                status = _envelope(LAUNCHER, ["status"], environment)
                 if status["data"]["runtime"]["version"] == version and status["data"]["running"]:
                     break
             except TaskError:
@@ -308,7 +308,7 @@ def update(tag, archive, signature):
             if time.monotonic() >= deadline:
                 raise TaskError(f"SpaceTerm Core did not restart into {tag}")
             time.sleep(1)
-        for arguments in (["list"], ["--machine", SAVED_MACHINE, "list"]):
+        for arguments in (["list"], ["list", "--machine", SAVED_MACHINE]):
             listed = _envelope(LAUNCHER, arguments, environment)
             names = [workspace["ref"]["label"] for workspace in listed["data"]["workspaces"]]
             if WORKSPACE not in names:
@@ -319,14 +319,14 @@ def update(tag, archive, signature):
 def pair_with_self(environment, timeout=60):
     """Pair this account's CLI with its own Core over Network Access, as another device would.
 
-    `core pair` needs a terminal, so it runs on a pseudo-terminal. `machine add` reads the
+    `pair` needs a terminal, so it runs on a pseudo-terminal. `machine add` reads the
     Invitation Link from a pipe and reports the Comparison Code as a JSON event, which this
-    types into `core pair`.
+    types into `pair`.
     """
     deadline = time.monotonic() + timeout
     primary, secondary = pty.openpty()
     inviting = subprocess.Popen(
-        [str(LAUNCHER), "core", "pair"],
+        [str(LAUNCHER), "pair"],
         stdin=secondary,
         stdout=secondary,
         stderr=secondary,
@@ -356,11 +356,12 @@ def pair_with_self(environment, timeout=60):
             raise TaskError("machine add reported no Comparison Code")
         _read_until(primary, re.compile(rb"Comparison Code it shows: "), deadline)
         os.write(primary, event["data"]["code"].encode() + b"\n")
-        added = json.loads(stdout.read() or b"{}")
+        lines = stdout.read().splitlines()
+        added = json.loads(lines[-1] if lines else b"{}")
         if joining.wait(timeout=max(deadline - time.monotonic(), 1)) or added.get("status") != "ok":
             raise TaskError("machine add did not pair with the floor Core")
         if inviting.wait(timeout=max(deadline - time.monotonic(), 1)):
-            raise TaskError("core pair did not approve the device")
+            raise TaskError("pair did not approve the device")
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, AttributeError):
         raise TaskError("pairing with the floor Core did not finish") from None
     finally:
@@ -377,14 +378,14 @@ def _read_until(descriptor, pattern, deadline):
     while (found := pattern.search(output)) is None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TaskError("core pair did not show what the pairing waits for")
+            raise TaskError("pair did not show what the pairing waits for")
         if select.select([descriptor], [], [], remaining)[0]:
             try:
                 chunk = os.read(descriptor, 4096)
             except OSError:
                 chunk = b""
             if not chunk:
-                raise TaskError("core pair ended before the pairing finished")
+                raise TaskError("pair ended before the pairing finished")
             output += chunk
     return found.group(0)
 
@@ -401,10 +402,10 @@ def _envelope(client, arguments, environment, status="ok"):
         )
         envelope = json.loads(result.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError):
-        raise TaskError(f"{arguments[-1]} returned no envelope") from None
+        raise TaskError(f"the {arguments[0]} command returned no envelope") from None
     if not isinstance(envelope, dict) or envelope.get("status") != status:
         code = ((envelope if isinstance(envelope, dict) else {}).get("error") or {}).get("code")
-        raise TaskError(f"{' '.join(arguments[:2])} ended in {code}")
+        raise TaskError(f"the {arguments[0]} command ended in {code}")
     return envelope
 
 
