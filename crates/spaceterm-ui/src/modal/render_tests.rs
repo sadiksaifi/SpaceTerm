@@ -8836,3 +8836,65 @@ fn alert_intents_render_bounded_semantic_treatments_without_accessories(cx: &mut
         );
     }
 }
+
+/// An Alert presented while its window is inactive, as at launch, keeps the keyboard when the
+/// window's content focuses something behind it: the Alert takes focus back once the window is
+/// active, so Tab stays inside it and Return reaches its default.
+#[gpui::test]
+fn alert_reclaims_keyboard_focus_that_content_behind_it_took(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    let (root, cx) = cx.add_window_view(|_, cx| AlertFixture {
+        invoker: cx.focus_handle().tab_stop(true),
+        underlay_activations: Rc::new(Cell::new(0)),
+        outcome: Rc::new(RefCell::new(None)),
+        presentation: None,
+    });
+    let invoker = root.read_with(cx, |root, _| root.invoker.clone());
+    let outcome = root.read_with(cx, |root, _| root.outcome.clone());
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            let outcome = root.outcome.clone();
+            root.presentation = Some(
+                Alert::new(
+                    ModalId::new("launch-alert"),
+                    "Launch alert",
+                    "Launch Alert",
+                    "Content behind takes focus after this presents.",
+                    vec![
+                        ModalAction::new(
+                            "again",
+                            "Try Again",
+                            ModalActionRole::Affirmative,
+                            "again",
+                        )
+                        .default_action(true),
+                        ModalAction::new("quit", "Quit", ModalActionRole::Cancel, "quit"),
+                    ],
+                )
+                .present(window, cx, move |result, _| {
+                    *outcome.borrow_mut() = Some(result);
+                })
+                .expect("Alert should present"),
+            );
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| invoker.focus(window, cx));
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("tab shift-tab");
+    cx.run_until_parked();
+    let contained = cx.update(|window, _| !invoker.is_focused(window));
+    press_return(cx);
+    assert!(contained, "Tab stays inside the Alert");
+    assert!(
+        matches!(
+            outcome.borrow().as_ref(),
+            Some(AlertOutcome::Activated {
+                action_id: "again",
+                ..
+            })
+        ),
+        "Return activates the default"
+    );
+}
