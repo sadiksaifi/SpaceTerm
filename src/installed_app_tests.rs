@@ -482,11 +482,36 @@ fn install_tree_elsewhere(scratch: &Scratch, account: &Account) -> PathBuf {
     foreign
 }
 
-/// Runs a copy of `sleep` as `executable` until the returned child is killed.
-fn run_as(executable: &Path) -> std::process::Child {
+/// A copy of `sleep` that runs until dropped.
+struct Running(std::process::Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Runs a copy of `sleep` as `executable` and returns once the process list shows it.
+/// `spawn` can return before the child has executed the copy.
+fn run_as(executable: &Path) -> Running {
     std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
     let _ = std::fs::remove_file(executable);
     std::fs::copy("/bin/sleep", executable).unwrap();
+    let running = Running(spawn(executable));
+    let executable = std::fs::canonicalize(executable).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !super::running_executables().contains(&executable) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the copy of sleep never ran"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    running
+}
+
+fn spawn(executable: &Path) -> std::process::Child {
     // Another test's fork can briefly hold the fresh copy open for writing.
     for _ in 0..50 {
         match std::process::Command::new(executable).arg("30").spawn() {
@@ -497,11 +522,6 @@ fn run_as(executable: &Path) -> std::process::Child {
         }
     }
     panic!("the copy of sleep stayed busy");
-}
-
-fn stop(mut child: std::process::Child) {
-    child.kill().unwrap();
-    child.wait().unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -515,7 +535,7 @@ fn a_tree_runs_while_its_executable_or_a_staged_copy_does() {
 
     let child = run_as(&root.join("bin/spaceterm-desktop"));
     assert!(app.is_running());
-    stop(child);
+    drop(child);
     assert!(!app.is_running());
 
     let staged = run_as(
@@ -524,11 +544,11 @@ fn a_tree_runs_while_its_executable_or_a_staged_copy_does() {
             .join("lib/.spaceterm.update/next/bin/spaceterm-desktop"),
     );
     assert!(app.is_running());
-    stop(staged);
+    drop(staged);
 
     let elsewhere = run_as(&scratch.0.join("other/spaceterm/bin/spaceterm-desktop"));
     assert!(!app.is_running());
-    stop(elsewhere);
+    drop(elsewhere);
 }
 
 #[cfg(target_os = "macos")]
@@ -543,7 +563,7 @@ fn a_bundle_runs_while_its_executable_does() {
 
     let child = run_as(&bundle.join("Contents/MacOS/SpaceTerm"));
     assert!(app.is_running());
-    stop(child);
+    drop(child);
     assert!(!app.is_running());
 
     let elsewhere = run_as(
@@ -552,5 +572,5 @@ fn a_bundle_runs_while_its_executable_does() {
             .join("Other/SpaceTerm.app/Contents/MacOS/SpaceTerm"),
     );
     assert!(!app.is_running());
-    stop(elsewhere);
+    drop(elsewhere);
 }
