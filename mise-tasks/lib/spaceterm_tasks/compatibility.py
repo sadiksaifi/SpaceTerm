@@ -292,28 +292,49 @@ def update(tag, archive, signature):
             ["update", "--archive", str(archive), "--signature", str(signature)],
             environment,
         )
-        if (updated["data"].get("pending") or {}).get("version") != version:
+        # The Core may already have started the release on its own.
+        installed = (updated["data"].get("pending") or {}).get("version")
+        if version not in (installed, updated["data"].get("running")):
             raise TaskError(f"the floor release {floor} did not install {tag}")
-        preview = _envelope(LAUNCHER, ["restart"], environment, "confirmation_required")
-        token = preview["data"]["confirmation"]["token"]
-        _envelope(LAUNCHER, ["restart", "--confirm", token], environment)
-        deadline = time.monotonic() + RESTART
-        while True:
-            try:
-                status = _envelope(LAUNCHER, ["status"], environment)
-                if status["data"]["runtime"]["version"] == version and status["data"]["running"]:
-                    break
-            except TaskError:
-                pass
-            if time.monotonic() >= deadline:
-                raise TaskError(f"SpaceTerm Core did not restart into {tag}")
-            time.sleep(1)
+        restart_into(
+            version,
+            lambda arguments, status="ok": _envelope(LAUNCHER, arguments, environment, status),
+        )
         for arguments in (["list"], ["list", "--machine", SAVED_MACHINE]):
             listed = _envelope(LAUNCHER, arguments, environment)
             names = [workspace["ref"]["label"] for workspace in listed["data"]["workspaces"]]
             if WORKSPACE not in names:
                 raise TaskError(f"the Workspace did not survive the update to {tag}")
     print(f"The Core of {floor} updated to {tag} with its Workspace and pairing intact.")
+
+
+def restart_into(version, cli, deadline=RESTART, *, clock=time.monotonic, sleep=time.sleep):
+    """Bring SpaceTerm Core onto `version`, its Pending Version, and return its status.
+
+    With no live Terminal Session, the Core's update engine may restart into a nonbreaking
+    Pending Version on its own at any moment under ADR 0034, which makes an issued confirmation
+    stale. So this reads `status`, previews and confirms a restart only while `version` still
+    waits and no confirmed restart has run, and repeats until the Core runs `version`. Either
+    transition passes, and the verdict depends only on where the Core ends. `cli(arguments,
+    status)` returns the CLI's envelope or raises TaskError.
+    """
+    end = clock() + deadline
+    restarted = False
+    while True:
+        try:
+            status = cli(["status"])
+            data = status["data"]
+            if data["runtime"]["version"] == version and data["running"]:
+                return status
+            if not restarted and (data.get("pending") or {}).get("version") == version:
+                preview = cli(["restart"], "confirmation_required")
+                cli(["restart", "--confirm", preview["data"]["confirmation"]["token"]])
+                restarted = True
+        except TaskError:
+            pass
+        if clock() >= end:
+            raise TaskError(f"SpaceTerm Core did not restart into {version}")
+        sleep(1)
 
 
 def pair_with_self(environment, timeout=60):
