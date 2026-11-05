@@ -480,6 +480,8 @@ fn core_failure(error: &CoreError) -> ActionFailure {
 fn lane_failure(error: LaneError) -> ActionFailure {
     match error {
         LaneError::Code(code) => failure_of_code(&code),
+        // The Machine's facts changed since the push was offered.
+        LaneError::BelowFloor(_) => ActionFailure::Changed,
         LaneError::Core(error) => core_failure(&error),
         LaneError::Interrupted => ActionFailure::Failed,
     }

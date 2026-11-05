@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use spaceterm_core::service::lane::admin::{self, PushArchive};
 use spaceterm_core::service::lane::client::{LaneError, Session};
 use spaceterm_core::update::facts::{Platform, UpdateFacts, Version};
-use spaceterm_core::update::ordering;
+use spaceterm_core::update::ordering::{self, Candidate};
 
 use super::machines::ActionFailure;
 
@@ -21,7 +21,8 @@ const MAX_ARCHIVE: u64 = spaceterm_core::update::feed::MAX_ARCHIVE;
 /// One embedded Core build, verified for this desktop's identity and its platform.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EmbeddedCore {
-    pub(crate) version: Version,
+    /// The version and Update Floor its signed build document names.
+    pub(crate) candidate: Candidate,
     archive: PathBuf,
     signature: Vec<u8>,
     /// 64 lowercase hex digits.
@@ -69,20 +70,18 @@ impl EmbeddedCores {
     }
 
     /// The version "Update from This Mac" offers a Machine with `facts`: the embedded build for
-    /// its platform, when its Core would install it. It is newer than every version the Core has
-    /// and is not the skipped one.
+    /// its platform, when its Core would install it. It is newer than every version the Core has,
+    /// is not the skipped one, and its Update Floor admits the running version.
     pub(crate) fn offer(&self, facts: &UpdateFacts) -> Option<Version> {
         let build = self.build(facts.platform)?;
-        let mut installed = vec![facts.running.clone()];
-        installed.extend(
-            facts
-                .pending
-                .as_ref()
-                .map(|pending| pending.version.clone()),
-        );
-        ordering::admit(&build.version, &installed, facts.skipped.as_ref())
-            .ok()
-            .map(|()| build.version.clone())
+        ordering::admit(
+            &build.candidate,
+            &facts.running,
+            facts.pending.as_ref().map(|pending| &pending.version),
+            facts.skipped.as_ref(),
+        )
+        .ok()
+        .map(|()| build.candidate.version().clone())
     }
 }
 
@@ -110,7 +109,7 @@ fn verify(directory: &Path, identity: &str, platform: Platform) -> Option<Embedd
     )
     .ok()?;
     Some(EmbeddedCore {
-        version: Version::parse(&metadata.version).ok()?,
+        candidate: metadata.candidate().ok()?,
         archive,
         signature,
         sha256,
@@ -130,7 +129,7 @@ pub(crate) fn push(
     admin::push(
         session,
         &PushArchive {
-            version: &build.version,
+            candidate: &build.candidate,
             length,
             sha256: &build.sha256,
             signature: &build.signature,
@@ -150,6 +149,8 @@ pub(crate) fn failure(error: &LaneError) -> ActionFailure {
             "unreachable" => ActionFailure::Unreachable,
             _ => ActionFailure::Failed,
         },
+        // The Machine's facts changed since the offer, which admitted its running version.
+        LaneError::BelowFloor(_) => ActionFailure::Changed,
         LaneError::Core(spaceterm_core::CoreError::Direct(
             spaceterm_core::direct::DirectError::Transport,
         )) => ActionFailure::Unreachable,
@@ -188,11 +189,17 @@ mod tests {
     }
 
     fn catalog(embedded: &str) -> EmbeddedCores {
+        floored(embedded, "0.0.0")
+    }
+
+    /// A catalog whose embedded build names the Update Floor `floor`.
+    fn floored(embedded: &str, floor: &str) -> EmbeddedCores {
+        let floor = spaceterm_core::update::ordering::Floor::parse(floor).unwrap();
         let cores = EmbeddedCores::new(None, "spaceterm-development");
         cores.verified.lock().unwrap().insert(
             Platform::LinuxX86_64,
             Some(Arc::new(EmbeddedCore {
-                version: version(embedded),
+                candidate: Candidate::new(version(embedded), floor).unwrap(),
                 archive: PathBuf::from("/nonexistent"),
                 signature: vec![0; 64],
                 sha256: "ab".repeat(32),
@@ -217,6 +224,21 @@ mod tests {
         let mut other = facts("0.8.0", None, None);
         other.platform = Platform::MacosArm64;
         assert_eq!(cores.offer(&other), None, "no build for that platform");
+    }
+
+    #[test]
+    fn the_embedded_build_is_not_offered_to_a_core_below_its_floor() {
+        let cores = floored("1.2.2", "1.1.0");
+        assert_eq!(cores.offer(&facts("1.0.0", None, None)), None);
+        assert_eq!(
+            cores.offer(&facts("1.0.0", Some("1.1.0"), None)),
+            None,
+            "the Core restarts from its running version"
+        );
+        assert_eq!(
+            cores.offer(&facts("1.1.0", None, None)),
+            Some(version("1.2.2"))
+        );
     }
 
     #[test]

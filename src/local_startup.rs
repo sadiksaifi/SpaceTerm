@@ -95,6 +95,10 @@ impl Candidate {
     pub fn commit(&self) -> &str {
         &self.metadata.commit
     }
+    /// The version and Update Floor its signed build document names, as a push declares them.
+    pub fn release(&self) -> Result<spaceterm_core::update::ordering::Candidate, CoreError> {
+        self.metadata.candidate()
+    }
     pub fn digest(&self) -> &str {
         &self.digest
     }

@@ -134,7 +134,7 @@ impl MachineLane for ScriptedLane {
     fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure> {
         self.record(build.map_or_else(
             || "install".into(),
-            |build| format!("push {}", build.version),
+            |build| format!("push {}", build.candidate.version()),
         ));
         Ok(())
     }
@@ -734,7 +734,7 @@ impl Catalog {
         let manifest = serde_json::json!({
             "schema": 1, "source_sha256": null, "identity": identity, "target": target,
             "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "version": "0.9.0",
-            "floor": "0.9.0", "protocols": Protocols::CURRENT,
+            "floor": "0.0.0", "protocols": Protocols::CURRENT,
         });
         let mut entries = vec![
             (

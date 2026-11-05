@@ -1,7 +1,7 @@
 use super::*;
 use crate::protocol::version::ProtocolVersion;
 use crate::service::runtime::test_support::{
-    no_floor, with_artifact, with_build, with_fixture_trust,
+    no_floor, with_artifact, with_build, with_fixture_trust, with_floor,
 };
 use crate::service::tests::Fixture;
 use crate::service::{ServiceStartup, Supervisor};
@@ -62,6 +62,11 @@ struct Machine {
 }
 
 const IDENTITY: &str = "spaceterm-development";
+
+/// `text` with a floor every version meets.
+fn candidate(text: &str) -> Candidate {
+    Candidate::new(version(text), no_floor()).unwrap()
+}
 
 fn version(text: &str) -> Version {
     Version::parse(text).unwrap()
@@ -202,7 +207,7 @@ fn a_core_refuses_any_version_not_newer_than_the_newest_it_has() {
         .unwrap();
         for older in ["0.9.9", "1.0.0", "1.1.9", "1.2.0"] {
             assert_eq!(
-                updates.admits(&version(older)),
+                updates.admits(&candidate(older)),
                 Err(InstallError::NotNewer),
                 "{older}"
             );
@@ -217,8 +222,80 @@ fn a_core_refuses_any_version_not_newer_than_the_newest_it_has() {
             ),
             Err(InstallError::NotNewer)
         );
-        assert_eq!(updates.admits(&version("1.10.0")), Ok(()));
+        assert_eq!(updates.admits(&candidate("1.10.0")), Ok(()));
         assert_eq!(installations(&machine), ["1.0.0", "1.2.0"]);
+    });
+}
+
+/// A signed archive of `text` whose build document names `floor`.
+fn floored(machine: &Machine, text: &str, floor: &str) -> (PathBuf, PathBuf, String) {
+    let directory = machine.fixture.root.join(format!("floored-{text}-{floor}"));
+    let floor = Floor::parse(floor).unwrap();
+    with_floor(text, floor, Protocols::CURRENT, || {
+        with_artifact(&directory, IDENTITY, |archive, signature| {
+            let sha = super::super::digest(&std::fs::read(archive).unwrap());
+            (archive.to_owned(), signature.to_owned(), sha)
+        })
+    })
+}
+
+#[test]
+fn every_source_refuses_a_release_whose_floor_is_above_the_running_version() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let floor = Floor::parse("1.1.0").unwrap();
+        let below = Err(InstallError::BelowFloor { floor });
+        // A local archive names its floor in its signed build document.
+        let (archive, signature, sha) = floored(&machine, "1.2.2", "1.1.0");
+        let local = Archive {
+            archive: &archive,
+            signature: &signature,
+            sha256: &sha,
+            source: Source::Local,
+        };
+        assert_eq!(updates.install(local).map(|_| ()), below);
+        // The feed and a push declare it before any byte arrives.
+        let declared = Candidate::new(version("1.2.2"), floor).unwrap();
+        assert_eq!(updates.admits(&declared), below);
+        assert_eq!(
+            updates.begin_install(declared.clone(), 10).map(|_| ()),
+            below
+        );
+        // The floor applies to the running version, whatever waits as the Pending Version.
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Local,
+        )
+        .unwrap();
+        assert_eq!(updates.admits(&declared), below);
+        assert_eq!(installations(&machine), ["1.0.0", "1.1.0"]);
+        assert_eq!(updates.facts().last_failure, None);
+    });
+}
+
+#[test]
+fn an_archive_whose_build_document_names_another_floor_than_declared_fails_verification() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let (archive, signature, sha) = floored(&machine, "1.2.2", "1.1.0");
+        let installing = updates.begin_install(candidate("1.2.2"), 10).unwrap();
+        assert_eq!(
+            installing
+                .install(Archive {
+                    archive: &archive,
+                    signature: &signature,
+                    sha256: &sha,
+                    source: Source::Push,
+                })
+                .map(|_| ()),
+            Err(InstallError::Failed(InstallFailure::Verification))
+        );
+        assert_eq!(installations(&machine), ["1.0.0"]);
     });
 }
 
@@ -287,7 +364,7 @@ fn a_feed_install_that_fails_verification_records_it_and_a_local_one_does_not() 
         bad[0] ^= 1;
         std::fs::write(&signature, bad).unwrap();
         for (source, recorded) in [(Source::Local, false), (Source::Push, true)] {
-            let installing = updates.begin_install(version("1.1.0"), 10).unwrap();
+            let installing = updates.begin_install(candidate("1.1.0"), 10).unwrap();
             assert_eq!(
                 installing.install(Archive {
                     archive: &archive,
@@ -317,8 +394,8 @@ fn installing_reports_its_progress_and_a_broken_off_push_records_nothing() {
     with_fixture_trust(|| {
         let machine = machine("1.0.0");
         let updates = Updates::open(machine.service.clone()).unwrap();
-        let installing = updates.begin_install(version("1.1.0"), 100).unwrap();
-        assert_eq!(updates.admits(&version("1.2.0")), Err(InstallError::Busy));
+        let installing = updates.begin_install(candidate("1.1.0"), 100).unwrap();
+        assert_eq!(updates.admits(&candidate("1.2.0")), Err(InstallError::Busy));
         installing.progress(40);
         assert_eq!(
             updates.facts().operation,
@@ -331,7 +408,7 @@ fn installing_reports_its_progress_and_a_broken_off_push_records_nothing() {
         drop(installing);
         let facts = updates.facts();
         assert_eq!((facts.operation, facts.last_failure), (None, None));
-        let installing = updates.begin_install(version("1.1.0"), 100).unwrap();
+        let installing = updates.begin_install(candidate("1.1.0"), 100).unwrap();
         installing.fail(InstallFailure::Download);
         assert_eq!(
             updates.facts().last_failure.unwrap().kind,
@@ -370,7 +447,7 @@ fn a_version_that_never_became_ready_is_skipped_and_a_transient_failure_stays_pe
         assert_eq!(facts.skipped, Some(version("1.1.0")));
         assert_eq!(facts.last_failure.map(|f| f.id), Some(2));
         assert_eq!(
-            updates.admits(&version("1.1.0")),
+            updates.admits(&candidate("1.1.0")),
             Err(InstallError::Skipped)
         );
         install(
@@ -618,7 +695,7 @@ mod feed_checks {
         with_fixture_trust(|| {
             let machine = machine("1.0.0");
             let updates = Updates::open(machine.service.clone()).unwrap();
-            let installing = updates.begin_install(version("1.5.0"), 10).unwrap();
+            let installing = updates.begin_install(candidate("1.5.0"), 10).unwrap();
             let pushing = Some(Operation::Installing {
                 version: version("1.5.0"),
                 received: 0,
@@ -632,14 +709,14 @@ mod feed_checks {
                 assert_eq!(updates.facts().operation, pushing);
             }
             assert_eq!(
-                updates.begin_install(version("1.6.0"), 10).err(),
+                updates.begin_install(candidate("1.6.0"), 10).err(),
                 Some(InstallError::Busy)
             );
             drop(installing);
             let checking = updates.begin_check().unwrap();
             assert_eq!(updates.begin_check().err(), Some(InstallError::Busy));
             assert_eq!(
-                updates.begin_install(version("1.6.0"), 10).err(),
+                updates.begin_install(candidate("1.6.0"), 10).err(),
                 Some(InstallError::Busy)
             );
             assert_eq!(updates.facts().operation, Some(Operation::Checking));

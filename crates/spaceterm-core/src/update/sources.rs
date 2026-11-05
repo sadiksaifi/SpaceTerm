@@ -7,15 +7,15 @@
 //!   archive only.
 //! - Any Core takes a push of a desktop's embedded build ([`Pushes`]) and a local archive.
 //!
-//! The engine refuses a version that is not newer than every version the Core has, or that it
-//! skipped, from every source ([`super::ordering`]). Sources ask it before they download or
-//! receive anything, so a refused version costs nothing.
+//! The engine refuses a version that is not newer than every version the Core has, that it
+//! skipped, or whose Update Floor is above the running version, from every source
+//! ([`super::ordering`]). Sources ask it before they download or receive anything, so a refused
+//! version costs nothing.
 use super::check;
-use super::facts::{
-    CheckFailure, InstallFailure, PendingVersion, UpdateCheck, UpdateFacts, Version,
-};
+use super::facts::{CheckFailure, InstallFailure, PendingVersion, UpdateCheck, UpdateFacts};
 use super::feed::{self, FeedTarget, MAX_ARCHIVE, SystemVersion};
 use super::fetch::{FeedSource, FetchError, Releases};
+use super::ordering::Candidate;
 use super::proxy::{self, Proxy};
 use super::source::FactsSource;
 use super::trust::{SIGNATURE_BYTES, UpdateTrust};
@@ -43,8 +43,11 @@ pub trait Engine: Send + Sync {
     where
         Self: 'a;
     fn facts(&self) -> UpdateFacts;
-    fn begin_install(&self, version: Version, total: u64)
-    -> Result<Self::Installing, InstallError>;
+    fn begin_install(
+        &self,
+        candidate: Candidate,
+        total: u64,
+    ) -> Result<Self::Installing, InstallError>;
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError>;
     /// Busy while another install, check or restart owns the update operation.
     fn begin_check(&self) -> Result<Self::Checking<'_>, InstallError>;
@@ -61,11 +64,15 @@ pub trait Installing: Send {
 /// it is dropped or becomes the install of the release it found.
 pub trait Checking {
     type Installing;
-    /// Whether the check's own install of `version` would be admitted.
-    fn admits(&self, version: &Version) -> Result<(), InstallError>;
+    /// Whether the check's own install of `candidate` would be admitted.
+    fn admits(&self, candidate: &Candidate) -> Result<(), InstallError>;
     /// Records the check's outcome. The check keeps the operation.
     fn finish(&self, check: UpdateCheck);
-    fn begin_install(self, version: Version, total: u64) -> Result<Self::Installing, InstallError>;
+    fn begin_install(
+        self,
+        candidate: Candidate,
+        total: u64,
+    ) -> Result<Self::Installing, InstallError>;
 }
 
 impl Engine for Updates {
@@ -77,10 +84,10 @@ impl Engine for Updates {
     }
     fn begin_install(
         &self,
-        version: Version,
+        candidate: Candidate,
         total: u64,
     ) -> Result<updates::Installing, InstallError> {
-        Updates::begin_install(self, version, total)
+        Updates::begin_install(self, candidate, total)
     }
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError> {
         Updates::install(self, archive)
@@ -104,18 +111,18 @@ impl Installing for updates::Installing {
 
 impl Checking for updates::Checking<'_> {
     type Installing = updates::Installing;
-    fn admits(&self, version: &Version) -> Result<(), InstallError> {
-        updates::Checking::admits(self, version)
+    fn admits(&self, candidate: &Candidate) -> Result<(), InstallError> {
+        updates::Checking::admits(self, candidate)
     }
     fn finish(&self, check: UpdateCheck) {
         updates::Checking::finish(self, check);
     }
     fn begin_install(
         self,
-        version: Version,
+        candidate: Candidate,
         total: u64,
     ) -> Result<updates::Installing, InstallError> {
-        updates::Checking::begin_install(self, version, total)
+        updates::Checking::begin_install(self, candidate, total)
     }
 }
 
@@ -165,6 +172,7 @@ pub fn install_code(error: &InstallError) -> &'static str {
     match error {
         InstallError::NotNewer => "not_newer",
         InstallError::Skipped => "version_skipped",
+        InstallError::BelowFloor { .. } => "below_floor",
         InstallError::Busy => "service_busy",
         InstallError::Failed(InstallFailure::DiskFull) => "disk_full",
         InstallError::Failed(InstallFailure::Download) => "download_failed",
@@ -237,7 +245,7 @@ impl FeedCheck {
             fn archive(
                 &self,
                 target: FeedTarget,
-                version: &Version,
+                version: &super::facts::Version,
                 size: u64,
                 into: &mut dyn Write,
             ) -> Result<(), FetchError> {
@@ -279,7 +287,7 @@ impl FeedCheck {
         let Some(verified) = verified else {
             return finish(&checking, Err(CheckFailure::Verification)).map(|()| Outcome::Current);
         };
-        match checking.admits(&verified.version) {
+        match checking.admits(&verified.candidate()) {
             Ok(()) => {}
             Err(InstallError::NotNewer | InstallError::Skipped) => {
                 return finish(&checking, Ok(())).map(|()| Outcome::Current);
@@ -293,7 +301,7 @@ impl FeedCheck {
             return finish(&checking, Err(CheckFailure::SystemTooOld)).map(|()| Outcome::Current);
         }
         finish(&checking, Ok(()))?;
-        let installing = checking.begin_install(verified.version.clone(), verified.archive.size)?;
+        let installing = checking.begin_install(verified.candidate(), verified.archive.size)?;
         self.download(source.as_ref(), &verified, installing)
             .map(Outcome::Installed)
     }
@@ -460,14 +468,14 @@ impl Pushes {
         self.slot.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Begins receiving `length` archive bytes of `version` with this digest and signature over
-    /// `connection`. The engine decides first, so a refused version receives nothing. Returns the
-    /// push's random name.
+    /// Begins receiving `length` archive bytes of `candidate` with this digest and signature
+    /// over `connection`. The engine decides first, so a refused version receives nothing.
+    /// Returns the push's random name.
     pub fn begin<E: Engine>(
         &self,
         engine: &E,
         connection: u64,
-        version: Version,
+        candidate: Candidate,
         length: u64,
         sha256: &str,
         signature: &[u8],
@@ -482,7 +490,8 @@ impl Pushes {
         let mut slot = self.slot();
         // A new push replaces an unfinished one, which records nothing.
         *slot = None;
-        let installing: Box<dyn BoxedInstalling> = Box::new(engine.begin_install(version, length)?);
+        let installing: Box<dyn BoxedInstalling> =
+            Box::new(engine.begin_install(candidate, length)?);
         let staging = Staging::create(&self.data)?;
         let file = staging.archive_file()?;
         staging.write_signature(signature)?;

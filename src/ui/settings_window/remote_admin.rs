@@ -148,6 +148,8 @@ impl RemoteFailure {
     pub(crate) fn of_lane(error: LaneError) -> Self {
         match error {
             LaneError::Code(code) => Self::of_code(&code),
+            // The Machine must take an older update first, so this one is not installable.
+            LaneError::BelowFloor(_) => Self::NoUpdate,
             LaneError::Core(error) => Self::of_core(error),
             LaneError::Interrupted => Self::Failed,
         }

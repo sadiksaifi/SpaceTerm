@@ -162,64 +162,83 @@ impl Lane {
 
 /// A running fixture server with one approved signed installation.
 fn with_lane(run: impl FnOnce(Lane)) {
+    with_lane_running(VERSION, run);
+}
+
+/// A running fixture server whose one approved signed installation is `version`.
+fn with_lane_running(version: &str, run: impl FnOnce(Lane)) {
     let fixture = super::super::tests::Fixture::new();
-    with_artifact(
-        &fixture.root.join("source"),
-        &fixture.paths.identity,
-        |archive, signature| {
-            let service = Service::new(
-                fixture.paths.clone(),
-                fixture.paths.identity.clone(),
-                Arc::new(Running),
-            );
-            let approved = service
-                .provision(archive, signature, target(), COMMIT, VERSION)
-                .unwrap();
-            let data = Directory::open(&fixture.paths.data, false).unwrap();
-            let mut state = Service::state(&data).unwrap().unwrap();
-            state.installation = approved
-                .directory
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .into();
-            data.write_json(c"service.json", &state).unwrap();
-            let host = Arc::new(Host::default());
-            let launches = Arc::new(AtomicUsize::new(0));
-            let counted = launches.clone();
-            let hook: Hook = Arc::default();
-            let helper = hook.clone();
-            let unlaunchable = Arc::new(AtomicBool::new(false));
-            let refused = unlaunchable.clone();
-            let lane = LaneCore::new(
-                service.clone(),
-                Updates::open(service.clone()),
-                host.clone(),
-                None,
-                Box::new(move |op| {
-                    counted.fetch_add(1, Ordering::SeqCst);
-                    if refused.load(Ordering::SeqCst) {
-                        return Err(CoreError::Protocol);
-                    }
-                    if let Some(hook) = helper.lock().unwrap().as_ref() {
-                        hook(op);
-                    }
-                    Ok(())
-                }),
-                Arc::new(crate::permissions::Unsupported),
-            )
-            .unwrap();
-            run(Lane {
-                lane,
-                service,
-                host,
-                launches,
-                hook,
-                unlaunchable,
-            });
-        },
+    let protocols = crate::update::facts::Protocols::CURRENT;
+    crate::service::runtime::test_support::with_build(version, protocols, || {
+        with_artifact(
+            &fixture.root.join("source"),
+            &fixture.paths.identity,
+            |archive, signature| {
+                serve(&fixture, version, archive, signature, run);
+            },
+        );
+    });
+}
+
+/// Serves the signed `version` at `archive` as the approved installation of `fixture`.
+fn serve(
+    fixture: &super::super::tests::Fixture,
+    version: &str,
+    archive: &std::path::Path,
+    signature: &std::path::Path,
+    run: impl FnOnce(Lane),
+) {
+    let service = Service::new(
+        fixture.paths.clone(),
+        fixture.paths.identity.clone(),
+        Arc::new(Running),
     );
+    let approved = service
+        .provision(archive, signature, target(), COMMIT, version)
+        .unwrap();
+    let data = Directory::open(&fixture.paths.data, false).unwrap();
+    let mut state = Service::state(&data).unwrap().unwrap();
+    state.installation = approved
+        .directory
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .into();
+    data.write_json(c"service.json", &state).unwrap();
+    let host = Arc::new(Host::default());
+    let launches = Arc::new(AtomicUsize::new(0));
+    let counted = launches.clone();
+    let hook: Hook = Arc::default();
+    let helper = hook.clone();
+    let unlaunchable = Arc::new(AtomicBool::new(false));
+    let refused = unlaunchable.clone();
+    let lane = LaneCore::new(
+        service.clone(),
+        Updates::open(service.clone()),
+        host.clone(),
+        None,
+        Box::new(move |op| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            if refused.load(Ordering::SeqCst) {
+                return Err(CoreError::Protocol);
+            }
+            if let Some(hook) = helper.lock().unwrap().as_ref() {
+                hook(op);
+            }
+            Ok(())
+        }),
+        Arc::new(crate::permissions::Unsupported),
+    )
+    .unwrap();
+    run(Lane {
+        lane,
+        service,
+        host,
+        launches,
+        hook,
+        unlaunchable,
+    });
 }
 
 fn code(reply: LaneReply) -> String {
@@ -1031,6 +1050,7 @@ fn a_push_of_the_running_version_is_refused_before_any_byte() {
             code(lane.lane.answer(
                 LaneRequest::StageUpload {
                     version: VERSION.into(),
+                    floor: "0.0.0".into(),
                     length: 10,
                     sha256: "ab".repeat(32),
                     signature: encode(&[3; 64]),
@@ -1043,6 +1063,34 @@ fn a_push_of_the_running_version_is_refused_before_any_byte() {
 }
 
 #[test]
+fn a_push_whose_floor_is_above_the_running_version_is_refused_with_its_floor() {
+    with_lane_running("1.0.0", |lane| {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let push = |floor: &str| LaneRequest::StageUpload {
+            version: "1.2.2".into(),
+            floor: floor.into(),
+            length: 10,
+            sha256: "ab".repeat(32),
+            signature: encode(&[3; 64]),
+        };
+        let reply = lane.lane.answer(push("1.1.0"), &ACTOR);
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap(),
+            serde_json::json!({ "reply": "below_floor", "floor": "1.1.0" })
+        );
+        assert!(matches!(
+            lane.lane.answer(push("1.0.0"), &ACTOR),
+            LaneReply::UploadProgress { .. }
+        ));
+        assert_eq!(
+            code(lane.lane.answer(push("1.2.3"), &ACTOR)),
+            "protocol_error",
+            "a floor newer than its own release is malformed"
+        );
+    });
+}
+
+#[test]
 fn a_malformed_push_is_refused_before_anything_is_received() {
     with_lane(|lane| {
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -1050,30 +1098,35 @@ fn a_malformed_push_is_refused_before_anything_is_received() {
         for request in [
             LaneRequest::StageUpload {
                 version: "not a version".into(),
+                floor: "0.0.0".into(),
                 length: 10,
                 sha256: sha256.clone(),
                 signature: encode(&[3; 64]),
             },
             LaneRequest::StageUpload {
                 version: VERSION.into(),
+                floor: "0.0.0".into(),
                 length: 10,
                 sha256: sha256.clone(),
                 signature: "not base64".into(),
             },
             LaneRequest::StageUpload {
                 version: VERSION.into(),
+                floor: "0.0.0".into(),
                 length: 0,
                 sha256: sha256.clone(),
                 signature: encode(&[3; 64]),
             },
             LaneRequest::StageUpload {
                 version: VERSION.into(),
+                floor: "0.0.0".into(),
                 length: 10,
                 sha256: sha256.to_uppercase(),
                 signature: encode(&[3; 64]),
             },
             LaneRequest::StageUpload {
                 version: VERSION.into(),
+                floor: "0.0.0".into(),
                 length: 10,
                 sha256,
                 signature: encode(&[3; 63]),
@@ -2133,7 +2186,14 @@ fn a_confirmed_restart_waits_for_an_install_in_progress() {
     with_lane(|lane| {
         let updates = lane.lane.updates().unwrap().clone();
         let installing = updates
-            .begin_install(crate::update::facts::Version::parse("2.0.0").unwrap(), 10)
+            .begin_install(
+                crate::update::ordering::Candidate::new(
+                    crate::update::facts::Version::parse("2.0.0").unwrap(),
+                    crate::update::ordering::Floor::parse("0.0.0").unwrap(),
+                )
+                .unwrap(),
+                10,
+            )
             .unwrap();
         let (token, _) = preview(&lane.lane, LaneAction::Restart);
         assert_eq!(

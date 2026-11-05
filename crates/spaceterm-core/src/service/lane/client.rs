@@ -38,6 +38,9 @@ pub(crate) trait Connector: Send + Sync {
 pub enum LaneError {
     /// The server answered `Error { code }`, a code from the CLI output contract.
     Code(String),
+    /// The server refused a version whose Update Floor is above its running version, and named
+    /// that floor: the CLI output contract's `below_floor`.
+    BelowFloor(crate::update::ordering::Floor),
     /// The connection failed, or the reply was not the one requested.
     Core(CoreError),
     /// The caller was interrupted before `Execute` was sent, so nothing was dispatched.
@@ -138,7 +141,8 @@ impl Session {
         serde_json::from_slice(&reply?).map_err(|_| CoreError::Protocol)
     }
 
-    /// Sends one request and turns a lane `Error` into [`LaneError::Code`].
+    /// Sends one request and turns a lane `Error` into [`LaneError::Code`], and a `BelowFloor`
+    /// refusal into [`LaneError::BelowFloor`].
     pub fn call(
         &mut self,
         request: &LaneRequest,
@@ -146,6 +150,7 @@ impl Session {
     ) -> Result<LaneReply, LaneError> {
         match self.request(request, deadline)? {
             LaneReply::Error { code } => Err(LaneError::Code(code)),
+            LaneReply::BelowFloor { floor } => Err(LaneError::BelowFloor(floor)),
             reply => Ok(reply),
         }
     }

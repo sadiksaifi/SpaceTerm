@@ -1,9 +1,9 @@
 use super::*;
 use crate::protocol::version::ProtocolVersion;
-use crate::update::facts::{Platform, Protocols};
+use crate::update::facts::{Platform, Protocols, Version};
 use crate::update::feed::{Feed, FeedArchive};
 use crate::update::fetch::Signed;
-use crate::update::ordering::Floor;
+use crate::update::ordering::{Candidate, Floor};
 use crate::update::trust::testing::{TestKey, trust};
 
 const NOW: u64 = 1_793_750_400;
@@ -14,6 +14,15 @@ const HOST: SystemVersion = SystemVersion {
 
 fn version(text: &str) -> Version {
     Version::parse(text).unwrap()
+}
+
+fn floor(text: &str) -> Floor {
+    Floor::parse(text).unwrap()
+}
+
+/// `text` with a floor every version meets.
+fn candidate(text: &str) -> Candidate {
+    Candidate::new(version(text), floor("0.0.0")).unwrap()
 }
 
 /// What the fake engine saw, in order.
@@ -147,8 +156,8 @@ impl Drop for FakeInstalling {
 
 impl Checking for FakeChecking {
     type Installing = FakeInstalling;
-    fn admits(&self, version: &Version) -> Result<(), InstallError> {
-        self.fake.ordered(version)
+    fn admits(&self, candidate: &Candidate) -> Result<(), InstallError> {
+        self.fake.ordered(candidate)
     }
     fn finish(&self, check: UpdateCheck) {
         self.finished.set(true);
@@ -157,10 +166,11 @@ impl Checking for FakeChecking {
     }
     fn begin_install(
         mut self,
-        version: Version,
+        candidate: Candidate,
         total: u64,
     ) -> Result<FakeInstalling, InstallError> {
-        self.fake.ordered(&version)?;
+        self.fake.ordered(&candidate)?;
+        let version = candidate.version().clone();
         self.handed_over = true;
         self.fake
             .record(Event::BeginInstall(version.clone(), total));
@@ -184,14 +194,21 @@ impl Drop for FakeChecking {
 }
 
 impl Fake {
-    fn ordered(&self, version: &Version) -> Result<(), InstallError> {
+    fn ordered(&self, candidate: &Candidate) -> Result<(), InstallError> {
         let state = self.state();
-        super::super::ordering::admit(version, &state.installed, state.skipped.as_ref()).map_err(
-            |refusal| match refusal {
-                super::super::ordering::Refusal::NotNewer => InstallError::NotNewer,
-                super::super::ordering::Refusal::Skipped => InstallError::Skipped,
-            },
+        super::super::ordering::admit(
+            candidate,
+            &state.installed[0],
+            state.installed.iter().skip(1).last(),
+            state.skipped.as_ref(),
         )
+        .map_err(|refusal| match refusal {
+            super::super::ordering::Refusal::NotNewer => InstallError::NotNewer,
+            super::super::ordering::Refusal::Skipped => InstallError::Skipped,
+            super::super::ordering::Refusal::BelowFloor { floor } => {
+                InstallError::BelowFloor { floor }
+            }
+        })
     }
 
     /// Takes the update operation, as the engine does, or refuses while another owns it.
@@ -224,11 +241,16 @@ impl Engine for Fake {
         }
     }
 
-    fn begin_install(&self, version: Version, total: u64) -> Result<FakeInstalling, InstallError> {
+    fn begin_install(
+        &self,
+        candidate: Candidate,
+        total: u64,
+    ) -> Result<FakeInstalling, InstallError> {
         if self.state().busy {
             return Err(InstallError::Busy);
         }
-        self.ordered(&version)?;
+        self.ordered(&candidate)?;
+        let version = candidate.version().clone();
         self.take()?;
         self.record(Event::BeginInstall(version.clone(), total));
         Ok(FakeInstalling {
@@ -694,7 +716,14 @@ fn a_push_installs_once_its_last_chunk_arrives() {
     let fake = Fake::with(&["1.4.0"]);
     let archive = vec![9; 10];
     let id = pushes
-        .begin(&fake, 1, version("1.5.0"), 10, &digest(&archive), &[3; 64])
+        .begin(
+            &fake,
+            1,
+            candidate("1.5.0"),
+            10,
+            &digest(&archive),
+            &[3; 64],
+        )
         .unwrap();
     assert_eq!(pushes.chunk(&id, 0, &archive[..4]), Ok(Received::Next(4)));
     assert_eq!(
@@ -740,7 +769,7 @@ fn a_push_of_a_version_the_core_would_not_install_receives_nothing() {
     ] {
         assert_eq!(
             pushes
-                .begin(&fake, 1, version(pushed), 10, &"ab".repeat(32), &[3; 64])
+                .begin(&fake, 1, candidate(pushed), 10, &"ab".repeat(32), &[3; 64])
                 .map_err(|error| error.code()),
             Err(code)
         );
@@ -762,7 +791,7 @@ fn a_malformed_push_is_refused_before_the_engine_is_asked() {
         (10, sha.as_str(), &[3; 63][..]),
     ] {
         assert_eq!(
-            pushes.begin(&fake, 1, version("1.5.0"), length, sha256, signature),
+            pushes.begin(&fake, 1, candidate("1.5.0"), length, sha256, signature),
             Err(SourceError::Protocol)
         );
     }
@@ -775,7 +804,7 @@ fn a_completed_push_whose_digest_differs_records_a_verification_failure() {
     let pushes = Pushes::new(data.0.clone());
     let fake = Fake::with(&["1.4.0"]);
     let id = pushes
-        .begin(&fake, 1, version("1.5.0"), 3, &digest(b"abc"), &[3; 64])
+        .begin(&fake, 1, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
         .unwrap();
     assert_eq!(
         pushes.chunk(&id, 0, b"abd"),
@@ -796,7 +825,7 @@ fn a_push_that_breaks_off_records_nothing() {
     let pushes = Pushes::new(data.0.clone());
     let fake = Fake::with(&["1.4.0"]);
     let first = pushes
-        .begin(&fake, 1, version("1.5.0"), 3, &digest(b"abc"), &[3; 64])
+        .begin(&fake, 1, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
         .unwrap();
     pushes.chunk(&first, 0, b"a").unwrap();
     pushes.closed(2);
@@ -809,10 +838,10 @@ fn a_push_that_breaks_off_records_nothing() {
     assert_eq!(data.staged(), 0);
 
     let replaced = pushes
-        .begin(&fake, 3, version("1.5.0"), 3, &digest(b"abc"), &[3; 64])
+        .begin(&fake, 3, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
         .unwrap();
     let second = pushes
-        .begin(&fake, 4, version("1.5.0"), 3, &digest(b"abc"), &[3; 64])
+        .begin(&fake, 4, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
         .unwrap();
     assert_eq!(
         fake.events().last(),

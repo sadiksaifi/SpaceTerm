@@ -15,6 +15,7 @@ use spaceterm_core::{
     direct::DirectError,
     hierarchy,
     protocol::{Fatal, version::Incompatible},
+    update::ordering::Floor,
     worktree,
 };
 
@@ -424,6 +425,8 @@ pub enum Details {
     /// `incompatible_protocol`, and `desktop_incompatible` when the two share no Desktop
     /// Channel major.
     Incompatible(IncompatibleDetails),
+    /// `below_floor`.
+    Floor(FloorDetails),
 }
 
 impl Serialize for Details {
@@ -442,6 +445,7 @@ impl Serialize for Details {
             Self::Operation(details) => details.serialize(serializer),
             Self::Timeout(details) => details.serialize(serializer),
             Self::Incompatible(details) => details.serialize(serializer),
+            Self::Floor(details) => details.serialize(serializer),
         }
     }
 }
@@ -665,6 +669,14 @@ pub struct IncompatibleDetails {
     pub update: Update,
 }
 
+/// `details` when SpaceTerm Core on the Machine runs a version older than the Update Floor of
+/// the version it was offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct FloorDetails {
+    /// The release that Machine updates to first, `MAJOR.MINOR.PATCH`.
+    pub floor: Floor,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Update {
@@ -846,6 +858,7 @@ codes! {
     NoCandidate = "no_candidate", Target, false, "There is no SpaceTerm Core package to install.";
     // Update sources.
     NotNewer = "not_newer", Target, false, "SpaceTerm Core on that machine already has this version or a newer one.";
+    BelowFloor = "below_floor", Target, false, "SpaceTerm Core on that machine is too old to update to this version directly. Update it to the version in details.floor first.";
     VersionSkipped = "version_skipped", Target, false, "This SpaceTerm Core version failed to start on that machine, so it is skipped until a newer one appears.";
     NoUpdateFeed = "no_update_feed", Unavailable, false, "This SpaceTerm Core build takes updates only from the desktop or a local archive.";
     FeedUnreachable = "feed_unreachable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t reach its update feed. Check the network.";
@@ -1078,6 +1091,11 @@ pub fn from_outcome(outcome: &hierarchy::Outcome) -> Result<(), Failure> {
 /// A service lane `Error { code }`. A code this CLI does not know is a protocol error.
 pub fn from_lane_code(code: &str) -> Failure {
     Failure::new(Code::parse(code).unwrap_or(Code::ProtocolError))
+}
+
+/// `below_floor`, naming the release the Machine updates to first.
+pub fn below_floor(floor: Floor) -> Failure {
+    Failure::with(Code::BelowFloor, Details::Floor(FloorDetails { floor }))
 }
 
 // Warnings

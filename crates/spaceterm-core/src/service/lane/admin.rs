@@ -14,7 +14,8 @@ use super::{
 use crate::CoreError;
 use crate::service::operations::OperationId;
 use crate::storage::Directory;
-use crate::update::facts::{UpdateFacts, Version};
+use crate::update::facts::UpdateFacts;
+use crate::update::ordering::Candidate;
 use base64::Engine;
 use std::io::Read;
 use std::time::{Duration, Instant};
@@ -231,8 +232,8 @@ fn installed(reply: LaneReply) -> Result<(bool, UpdateFacts), LaneError> {
 
 /// A signed SpaceTerm Core archive to push, with what its sender verified about it.
 pub struct PushArchive<'a> {
-    /// The version its build document names.
-    pub version: &'a Version,
+    /// The version and Update Floor its build document names.
+    pub candidate: &'a Candidate,
     pub length: u64,
     /// 64 lowercase hex digits.
     pub sha256: &'a str,
@@ -252,7 +253,8 @@ pub fn push(
     let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
     let reply = session.call(
         &LaneRequest::StageUpload {
-            version: archive.version.to_string(),
+            version: archive.candidate.version().to_string(),
+            floor: archive.candidate.floor().to_string(),
             length: archive.length,
             sha256: archive.sha256.to_owned(),
             signature: encode(archive.signature),

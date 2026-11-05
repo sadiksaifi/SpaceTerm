@@ -93,30 +93,39 @@ pub enum Refusal {
     /// The version failed to start and is skipped until a newer one appears.
     #[error("this SpaceTerm Core version failed to start and is skipped")]
     Skipped,
+    /// The running version is older than the version's Update Floor, so the Core updates to
+    /// `floor` first.
+    #[error("SpaceTerm Core updates to its floor version first")]
+    BelowFloor { floor: Floor },
 }
 
-/// Decides `candidate` against `installed`, the versions the Core runs and has as its Pending
-/// Version, and `skipped`, the version it refuses until a newer one appears.
+/// Decides `candidate` against the version the Core runs, its Pending Version, and `skipped`,
+/// the version it refuses until a newer one appears. The floor applies to the running version
+/// alone: a restart starts from it, whatever waits as the Pending Version.
 pub fn admit(
-    candidate: &Version,
-    installed: &[Version],
+    candidate: &Candidate,
+    running: &Version,
+    pending: Option<&Version>,
     skipped: Option<&Version>,
 ) -> Result<(), Refusal> {
-    if skipped == Some(candidate) {
+    let version = &candidate.version;
+    if skipped == Some(version) {
         return Err(Refusal::Skipped);
     }
-    if installed.contains(candidate) {
+    let mut installed = std::iter::once(running).chain(pending);
+    if installed.clone().any(|have| have == version) {
         return Err(Refusal::NotNewer);
     }
-    let Some(release) = candidate.release() else {
+    let Some(release) = version.release() else {
         return Ok(());
     };
-    if installed
-        .iter()
-        .filter_map(Version::release)
-        .any(|have| have > release)
-    {
+    if installed.any(|have| have.release().is_some_and(|have| have > release)) {
         return Err(Refusal::NotNewer);
+    }
+    if !candidate.floor.admits(running) {
+        return Err(Refusal::BelowFloor {
+            floor: candidate.floor,
+        });
     }
     Ok(())
 }
@@ -129,79 +138,128 @@ mod tests {
         Version::parse(text).unwrap()
     }
 
+    fn floored(text: &str, floor: &str) -> Candidate {
+        Candidate::new(version(text), Floor::parse(floor).unwrap()).unwrap()
+    }
+
+    /// A candidate whose floor every version meets.
+    fn candidate(text: &str) -> Candidate {
+        floored(text, "0.0.0")
+    }
+
     #[test]
     fn release_versions_install_only_when_newer_than_every_installed_one() {
-        let installed = [version("1.4.0"), version("1.5.2")];
-        assert_eq!(admit(&version("1.5.3"), &installed, None), Ok(()));
-        assert_eq!(admit(&version("2.0.0"), &installed, None), Ok(()));
+        let (running, pending) = (version("1.4.0"), version("1.5.2"));
+        let admit = |text: &str| admit(&candidate(text), &running, Some(&pending), None);
+        assert_eq!(admit("1.5.3"), Ok(()));
+        assert_eq!(admit("2.0.0"), Ok(()));
         assert_eq!(
-            admit(&version("1.10.0"), &installed, None),
+            admit("1.10.0"),
             Ok(()),
             "numbers compare as numbers, not text"
         );
         for refused in ["1.5.2", "1.5.1", "1.4.0", "1.4.9", "0.9.9"] {
-            assert_eq!(
-                admit(&version(refused), &installed, None),
-                Err(Refusal::NotNewer),
-                "{refused}"
-            );
+            assert_eq!(admit(refused), Err(Refusal::NotNewer), "{refused}");
         }
-        assert_eq!(admit(&version("1.0.0"), &[], None), Ok(()));
     }
 
     #[test]
     fn a_skipped_version_is_refused_until_a_newer_one_appears() {
-        let skipped = version("1.5.0");
+        let (running, skipped) = (version("1.4.0"), version("1.5.0"));
         assert_eq!(
-            admit(&skipped, &[version("1.4.0")], Some(&skipped)),
+            admit(&candidate("1.5.0"), &running, None, Some(&skipped)),
             Err(Refusal::Skipped)
         );
         assert_eq!(
             admit(
-                &skipped,
-                &[version("1.4.0"), skipped.clone()],
+                &candidate("1.5.0"),
+                &running,
+                Some(&skipped),
                 Some(&skipped)
             ),
             Err(Refusal::Skipped)
         );
         assert_eq!(
-            admit(&version("1.5.1"), &[version("1.4.0")], Some(&skipped)),
+            admit(&candidate("1.5.1"), &running, None, Some(&skipped)),
             Ok(())
         );
+    }
+
+    #[test]
+    fn a_release_is_refused_while_the_running_version_is_below_its_floor() {
+        let floor = Floor::parse("1.1.0").unwrap();
+        let below = Err(Refusal::BelowFloor { floor });
+        let latest = floored("1.2.2", "1.1.0");
+        assert_eq!(admit(&latest, &version("1.0.0"), None, None), below);
+        assert_eq!(
+            admit(&latest, &version("1.0.0"), Some(&version("1.1.0")), None),
+            below,
+            "a restart starts from the running version, not the Pending Version"
+        );
+        for running in ["1.1.0", "1.1.7", "1.2.1"] {
+            assert_eq!(
+                admit(&latest, &version(running), None, None),
+                Ok(()),
+                "{running}"
+            );
+        }
+        assert_eq!(
+            admit(&latest, &version("1.2.2"), None, None),
+            Err(Refusal::NotNewer),
+            "a version that is not newer is refused as such"
+        );
+        assert_eq!(
+            admit(&latest, &version("dev.0123456789ab"), None, None),
+            Ok(()),
+            "a development version has no order, so no floor applies to it"
+        );
+    }
+
+    #[test]
+    fn a_floor_is_never_newer_than_its_release() {
+        let floor = |text: &str| Floor::parse(text).unwrap();
+        assert!(Candidate::new(version("1.4.0"), floor("1.4.1")).is_err());
+        assert!(Candidate::new(version("1.4.0"), floor("1.4.0")).is_ok());
+        assert!(Candidate::new(version("dev.0123456789ab"), floor("9.9.9")).is_ok());
+        assert!(Floor::parse("dev.0123456789ab").is_err());
+        assert!(Floor::parse("1.4").is_err());
+        assert_eq!(floor("1.10.0").to_string(), "1.10.0");
     }
 
     #[test]
     fn development_versions_refuse_only_an_installed_one() {
         let running = version("dev.0123456789ab");
         assert_eq!(
-            admit(
-                &version("dev.ba9876543210"),
-                std::slice::from_ref(&running),
-                None
-            ),
+            admit(&candidate("dev.ba9876543210"), &running, None, None),
             Ok(())
         );
         assert_eq!(
-            admit(
-                &version("dev.0123456789ab.dirty"),
-                std::slice::from_ref(&running),
-                None
-            ),
+            admit(&candidate("dev.0123456789ab.dirty"), &running, None, None),
             Ok(())
         );
         assert_eq!(
-            admit(&running, std::slice::from_ref(&running), None),
+            admit(&candidate("dev.0123456789ab"), &running, None, None),
             Err(Refusal::NotNewer)
         );
         assert_eq!(
-            admit(&running, &[version("dev.ba9876543210")], Some(&running)),
+            admit(
+                &candidate("dev.0123456789ab"),
+                &version("dev.ba9876543210"),
+                None,
+                Some(&running)
+            ),
             Err(Refusal::Skipped)
         );
         assert_eq!(
-            admit(&version("dev.ba9876543210"), &[version("9.9.9")], None),
+            admit(
+                &candidate("dev.ba9876543210"),
+                &version("9.9.9"),
+                None,
+                None
+            ),
             Ok(()),
             "a development version never orders against a release one"
         );
-        assert_eq!(admit(&version("1.0.0"), &[running], None), Ok(()));
+        assert_eq!(admit(&candidate("1.0.0"), &running, None, None), Ok(()));
     }
 }

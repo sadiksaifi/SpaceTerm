@@ -534,6 +534,23 @@ fn update_refusals_have_their_own_codes() {
 }
 
 #[test]
+fn update_below_the_floor_names_the_floor_to_update_to_first() {
+    use spaceterm_core::service::lane::client::LaneError;
+    use spaceterm_core::service::updates::InstallError;
+    use spaceterm_core::update::ordering::Floor;
+    use spaceterm_core::update::sources::SourceError;
+    let floor = Floor::parse("1.1.0").unwrap();
+    // A running Core refuses over its lane; a stopped one refuses in the CLI's own install.
+    let pushed = super::lane_failure(LaneError::BelowFloor(floor));
+    let direct = update::source_failure(&SourceError::Install(InstallError::BelowFloor { floor }));
+    assert_eq!(pushed, direct);
+    assert_eq!(pushed.code, Code::BelowFloor);
+    assert_eq!(pushed.code.exit(), 4);
+    let envelope = Envelope::error("update", Some(core()), pushed, crate::contract::Empty {});
+    assert_golden("update_below_floor", &envelope);
+}
+
+#[test]
 fn unpair_previews_then_revokes_one_exact_device() {
     let device = DeviceRef {
         id: "9c".repeat(32),

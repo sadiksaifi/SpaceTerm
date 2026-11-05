@@ -25,7 +25,7 @@ use crate::machine_connection::service::lane::client::{LaneError, Outcome};
 use crate::machine_connection::service::lane::{LaneAction, LaneOperationState, LaneVersion};
 use crate::machine_connection::service::updates::{Archive, InstallError, Source, Updates};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
-use crate::machine_connection::update::facts::{InstallFailure, StartFailure, Version};
+use crate::machine_connection::update::facts::{InstallFailure, StartFailure};
 use crate::ui::sidebar_window::form::CaptionTone;
 
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
@@ -104,8 +104,8 @@ impl CoreUpdateControl for Service {
             install_stopped(self, &candidate)?;
             return Ok(None);
         };
-        let version =
-            Version::parse(candidate.version()).map_err(|_| CoreError::RuntimeUnavailable)?;
+        let release = candidate.release()?;
+        let version = release.version().clone();
         let signature =
             std::fs::read(candidate.signature()).map_err(|_| CoreError::CandidateMissing)?;
         let length = std::fs::metadata(candidate.archive())
@@ -116,7 +116,7 @@ impl CoreUpdateControl for Service {
         let pushed = admin::push(
             &mut session,
             &admin::PushArchive {
-                version: &version,
+                candidate: &release,
                 length,
                 sha256: candidate.digest(),
                 signature: &signature,
@@ -195,7 +195,9 @@ fn install_stopped(
 
 fn install_error(error: InstallError) -> CoreError {
     match error {
-        InstallError::NotNewer | InstallError::Skipped => CoreError::CandidateMissing,
+        InstallError::NotNewer | InstallError::Skipped | InstallError::BelowFloor { .. } => {
+            CoreError::CandidateMissing
+        }
         InstallError::Busy => CoreError::ServiceBusy,
         InstallError::Failed(InstallFailure::Verification) => CoreError::RuntimeUnavailable,
         InstallError::Failed(_) => CoreError::StorageUnavailable,
@@ -208,6 +210,7 @@ pub(super) fn lane_error(error: LaneError) -> CoreError {
     match error {
         LaneError::Core(error) => error,
         LaneError::Interrupted => CoreError::Changed,
+        LaneError::BelowFloor(_) => CoreError::CandidateMissing,
         LaneError::Code(code) => match code.as_str() {
             "changed" | "candidate_changed" => CoreError::Changed,
             "service_busy" => CoreError::ServiceBusy,
