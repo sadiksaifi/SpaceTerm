@@ -4,7 +4,7 @@ mod provision;
 
 use clap::{CommandFactory, Parser};
 use spaceterm_cli::{
-    args::{self, Cli, Command, InternalCommand},
+    args::{self, Cli, Command, CoreCommand, InternalCommand},
     contract::{self, Code, Details, Empty, Envelope, Failure},
 };
 use spaceterm_core::{CoreError, service::Service};
@@ -31,18 +31,22 @@ fn main() -> ExitCode {
     }
     // The CLI's state reaches this build's generation before any command reads it. SpaceTerm
     // Core's internal commands skip this step. `internal serve` migrates the state at startup.
-    // The command shares the root through this guard until it ends.
+    // `reset` takes the state alone to reset what this step refuses. The command shares the root
+    // through this guard until it ends, and its result reports a reset this step made.
     let mut state = if matches!(
         cli.command,
-        Command::Internal(_) | Command::Completion { .. }
+        Command::Internal(_) | Command::Completion { .. } | Command::Core(CoreCommand::Reset(_))
     ) {
         None
     } else {
         match spaceterm_cli::state::prepare(IDENTITY) {
-            Ok(guard) => Some(guard),
-            Err(error) => {
-                return finish(command, cli.global.json, contract::from_core_error(error));
+            Ok(prepared) => {
+                if let Some(notice) = prepared.notice {
+                    contract::announce(notice);
+                }
+                Some(prepared.share)
             }
+            Err(failure) => return finish(command, cli.global.json, failure),
         }
     };
     if let args::Command::Machine(command) = &cli.command {

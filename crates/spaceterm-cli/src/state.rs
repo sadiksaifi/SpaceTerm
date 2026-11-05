@@ -15,14 +15,18 @@
 //! mutating command holds it from journal open and sequence allocation through acknowledgement,
 //! so the commands of one identity mutate one at a time. The desktop's `clients/desktop` is never
 //! read or written here.
-use crate::contract::{Code, Failure, RecoveredIdentity, from_core_error};
+use crate::contract::{
+    Code, Details, Failure, RecoveredIdentity, StateResetDetails, StateTooOldDetails, Warning,
+    from_core_error,
+};
 use serde::{Deserialize, Serialize};
 use spaceterm_connections::migration::StoreCredentials;
 use spaceterm_core::hierarchy::{ClientJournal, Id};
 use spaceterm_core::migration::{
-    self, DataKind, DirectoryStore, FileRule, Mount, Refusal, Registry, StoreError,
+    self, DataKind, DirectoryStore, FileRule, Mount, Refusal, Registry, ResetReason, StoreError,
 };
 use spaceterm_core::protocol::{AgentName, RunId};
+use spaceterm_core::update::ordering::Floor;
 use spaceterm_core::{CoreError, Directory, Lock, LockWait, MachineConnection};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -166,20 +170,44 @@ fn credentials(identity: &str) -> StoreCredentials {
     })
 }
 
+/// This build's Update Floor: the Stepping Stone release that carries state too old for this
+/// build forward. Development and Preflight builds have none.
+pub fn build_floor() -> Option<Floor> {
+    #[derive(Deserialize)]
+    struct Build {
+        floor: Option<String>,
+    }
+    let build: Build =
+        serde_json::from_slice(include_bytes!(concat!(env!("OUT_DIR"), "/build-info.json")))
+            .ok()?;
+    Floor::parse(&build.floor?).ok()
+}
+
+/// A command's share of its CLI state root, and the rebuildable data the CLI reset since a
+/// command last reported it.
+pub struct Prepared {
+    pub share: StateShare,
+    /// `data_reset`, which the command's result reports once.
+    pub notice: Option<Warning>,
+}
+
 /// Brings this CLI's state to this build's generation before any command reads it. The command
 /// holds the returned shared guard until it ends: every other command shares the root, and only
 /// a migration or a reset takes it alone.
-pub fn prepare(identity: &str) -> Result<StateShare, CoreError> {
+pub fn prepare(identity: &str) -> Result<Prepared, Failure> {
     let returned = || {
         let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
         spaceterm_core::service::Service::for_identity(identity)?.returned_to(&executable)
     };
-    let root = spaceterm_core::cli_state_root(identity)?;
-    let lock = prepare_at(root.clone(), &mut credentials(identity), &returned)?;
-    Ok(StateShare {
-        root: Some(root),
-        lock: Some(lock),
-        registry: &REGISTRY,
+    let root = spaceterm_core::cli_state_root(identity).map_err(from_core_error)?;
+    let held = prepare_at(root.clone(), &mut credentials(identity), &returned)?;
+    Ok(Prepared {
+        share: StateShare {
+            root: Some(root),
+            lock: Some(held.lock),
+            registry: &REGISTRY,
+        },
+        notice: (!held.reset.is_empty()).then(|| Warning::data_reset(held.reset)),
     })
 }
 
@@ -282,25 +310,196 @@ fn prepare_for_core_at(
 /// changing.
 const ATTEMPTS: usize = 4;
 
+/// A shared hold on a current CLI state root.
+struct Held {
+    lock: Lock,
+    /// The rebuildable data a reset replaced since a command last took the notice.
+    reset: Vec<DataKind>,
+}
+
 fn prepare_at(
     root: PathBuf,
     credentials: &mut dyn migration::Credentials,
     returned: &dyn Fn() -> Result<bool, CoreError>,
-) -> Result<Lock, CoreError> {
-    let directory = Directory::open(&root, true)?;
+) -> Result<Held, Failure> {
+    prepare_in(root, &REGISTRY, build_floor(), credentials, returned)
+}
+
+/// [`prepare_at`] for the generations of `registry`, in a build whose Update Floor is `floor`.
+fn prepare_in(
+    root: PathBuf,
+    registry: &Registry,
+    floor: Option<Floor>,
+    credentials: &mut dyn migration::Credentials,
+    returned: &dyn Fn() -> Result<bool, CoreError>,
+) -> Result<Held, Failure> {
+    let directory = Directory::open(&root, true).map_err(from_core_error)?;
     let store = store_at(root);
     for _ in 0..ATTEMPTS {
-        let shared = directory.lock_shared(GENERATION_LOCK)?;
-        if migration::is_current(&REGISTRY, &store).map_err(storage)? {
-            return Ok(shared);
+        let shared = directory
+            .lock_shared(GENERATION_LOCK)
+            .map_err(from_core_error)?;
+        if migration::is_current(registry, &store)
+            .map_err(|error| state_failure(error.into(), floor))?
+        {
+            // A notice that can't be taken stays for the next command.
+            let reset = migration::take_notice(&store).unwrap_or_default();
+            return Ok(Held {
+                lock: shared,
+                reset,
+            });
         }
         drop(shared);
-        let _alone = directory.lock(GENERATION_LOCK, false)?;
+        let _alone = directory
+            .lock(GENERATION_LOCK, false)
+            .map_err(from_core_error)?;
         // An activation that returned to this CLI may leave the state its candidate migrated.
         let returned = returned().unwrap_or(false);
-        migration::run(&REGISTRY, &store, credentials, returned).map_err(refusal)?;
+        migration::run(registry, &store, credentials, returned)
+            .map_err(|refused| state_failure(refused, floor))?;
     }
-    Err(CoreError::StorageUnavailable)
+    Err(Failure::new(Code::StorageUnavailable))
+}
+
+/// Why a command can't read this CLI's state, in a build whose Update Floor is `floor`. State
+/// too old for this build names the Stepping Stone to install first, when the build has one.
+fn state_failure(refused: Refusal, floor: Option<Floor>) -> Failure {
+    match (refused, floor) {
+        (
+            Refusal::Reset {
+                reason: ResetReason::TooOld,
+                kinds,
+            },
+            Some(floor),
+        ) => Failure::with(
+            Code::StateTooOld,
+            Details::StateTooOld(StateTooOldDetails { floor, kinds }),
+        ),
+        (Refusal::Reset { reason, kinds }, _) => Failure::with(
+            Code::StateResetRequired,
+            Details::StateReset(StateResetDetails { reason, kinds }),
+        ),
+        (refused, _) => from_core_error(refusal(refused)),
+    }
+}
+
+/// What `spaceterm reset` found or did to this CLI's state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Reset {
+    /// The state needs no reset.
+    NotNeeded,
+    /// The reset waits for the token that confirms it.
+    Preview {
+        reason: ResetReason,
+        /// The kinds of data the reset replaces.
+        kinds: Vec<DataKind>,
+        token: crate::admin::offline_token::Issued,
+    },
+    /// The files of `kinds` moved aside, and their data starts over.
+    Done { kinds: Vec<DataKind> },
+}
+
+/// What `spaceterm reset` reports: its result, and the rebuildable data reset since a command
+/// last reported it.
+pub struct ResetReport {
+    pub reset: Reset,
+    pub notice: Option<Warning>,
+}
+
+const RESET_PURPOSE: &str = "reset";
+
+/// Previews this CLI's state reset, or with the preview's `token`, performs it. The token binds
+/// the reason and the kinds of data, so a changed reset needs a new preview. Only the CLI state
+/// root changes. SpaceTerm Core's Machine ID and pairings live in its own data root.
+pub fn reset(identity: &str, token: Option<&str>) -> Result<ResetReport, Failure> {
+    let returned = || {
+        let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
+        spaceterm_core::service::Service::for_identity(identity)?.returned_to(&executable)
+    };
+    let root = spaceterm_core::cli_state_root(identity).map_err(from_core_error)?;
+    reset_in(
+        root,
+        &REGISTRY,
+        &mut credentials(identity),
+        &returned,
+        &Interruption {
+            interrupted: &crate::interrupt::interrupted,
+            dispatch: &crate::interrupt::dispatch,
+        },
+        token,
+        std::time::SystemTime::now(),
+    )
+}
+
+/// How [`reset_in`] meets `SIGINT`: it stops waiting for the state root once `interrupted`
+/// reports it, and marks its first effect with `dispatch` only after it holds the root alone.
+struct Interruption<'a> {
+    interrupted: &'a dyn Fn() -> bool,
+    dispatch: &'a dyn Fn() -> Result<(), Failure>,
+}
+
+fn reset_in(
+    root: PathBuf,
+    registry: &Registry,
+    credentials: &mut dyn migration::Credentials,
+    returned: &dyn Fn() -> Result<bool, CoreError>,
+    interruption: &Interruption<'_>,
+    token: Option<&str>,
+    now: std::time::SystemTime,
+) -> Result<ResetReport, Failure> {
+    let directory = Directory::open(&root, true).map_err(from_core_error)?;
+    let store = store_at(root);
+    // Another command may share the root for as long as it runs, so the wait stops on SIGINT.
+    let _alone = loop {
+        match directory
+            .wait_lock(
+                GENERATION_LOCK,
+                crate::interrupt::TICK,
+                Some(interruption.interrupted),
+            )
+            .map_err(from_core_error)?
+        {
+            LockWait::Locked(lock) => break lock,
+            LockWait::Held => {}
+            LockWait::Cancelled => return Err(Failure::new(Code::Interrupted)),
+        }
+    };
+    (interruption.dispatch)()?;
+    let returned = returned().unwrap_or(false);
+    let refused = migration::run(registry, &store, credentials, returned);
+    let notice = || {
+        let reset = migration::take_notice(&store).unwrap_or_default();
+        (!reset.is_empty()).then(|| Warning::data_reset(reset))
+    };
+    let (reason, kinds) = match refused {
+        Ok(_) => {
+            return Ok(ResetReport {
+                reset: Reset::NotNeeded,
+                notice: notice(),
+            });
+        }
+        Err(Refusal::Reset { reason, kinds }) => (reason, kinds),
+        Err(refused) => return Err(state_failure(refused, None)),
+    };
+    let observation = serde_json::to_vec(&(reason, &kinds))
+        .map_err(|_| Failure::new(Code::StorageUnavailable))?;
+    let reset = match token {
+        None => Reset::Preview {
+            reason,
+            kinds,
+            token: crate::admin::offline_token::issue(RESET_PURPOSE, &observation, now),
+        },
+        Some(token) => {
+            crate::admin::offline_token::verify(RESET_PURPOSE, &observation, token, now)?;
+            let kinds = migration::reset_confirmed(registry, &store, credentials)
+                .map_err(|refused| state_failure(refused, None))?;
+            Reset::Done { kinds }
+        }
+    };
+    Ok(ResetReport {
+        reset,
+        notice: notice(),
+    })
 }
 
 fn refusal(refusal: Refusal) -> CoreError {
@@ -592,7 +791,7 @@ mod tests {
         std::fs::write(&marker, br#"{"generation":2}"#).unwrap();
         assert_eq!(
             prepare_at(state.root.clone(), &mut none, &never).err(),
-            Some(CoreError::IncompatibleState)
+            Some(from_core_error(CoreError::IncompatibleState))
         );
         assert_eq!(std::fs::read(&marker).unwrap(), br#"{"generation":2}"#);
         assert_eq!(
@@ -642,7 +841,7 @@ mod tests {
                 false
             ))
             .err(),
-            Some(CoreError::IncompatibleState)
+            Some(from_core_error(CoreError::IncompatibleState))
         );
         drop(
             prepare_at(state.root.clone(), &mut migration::NoCredentials, &|| {
@@ -773,7 +972,9 @@ mod tests {
             registry: &REGISTRY,
             root: Some(state.root.clone()),
             lock: Some(
-                prepare_at(state.root.clone(), &mut migration::NoCredentials, &never).unwrap(),
+                prepare_at(state.root.clone(), &mut migration::NoCredentials, &never)
+                    .unwrap()
+                    .lock,
             ),
         };
         // Nothing migrated while the command waited, so it shares the state again.
@@ -954,6 +1155,233 @@ mod tests {
             Some(br#"{"generation":1}"#.to_vec())
         );
         drop(stalled);
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    /// Writes `bytes` at `path` under `root` with the private modes the state root requires.
+    fn private_file(root: &std::path::Path, path: &str, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt;
+        let file = root.join(path);
+        let mut directory = file.parent().unwrap();
+        std::fs::create_dir_all(directory).unwrap();
+        while directory.starts_with(root) {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            directory = directory.parent().unwrap();
+        }
+        std::fs::write(&file, bytes).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// A CLI state root at generation 1 with a Saved Connections file, which resets only after
+    /// the person confirms, and a last-connected record, which is rebuildable view state.
+    fn generation_one(name: &str) -> CliState {
+        let state = temporary(name);
+        private_file(&state.root, "generation.json", br#"{"generation":1}"#);
+        private_file(&state.root, "connections.json", b"{}");
+        private_file(
+            &state.root,
+            "routes/local/base/last-connected.json",
+            br#"{"at":1}"#,
+        );
+        state
+    }
+
+    #[test]
+    fn state_too_old_for_this_build_names_the_stepping_stone_to_install() {
+        let state = generation_one("too-old");
+        let floor = Floor::parse("1.1.0").unwrap();
+        let refused = prepare_in(
+            state.root.clone(),
+            &AFTER_STONE,
+            Some(floor),
+            &mut migration::NoCredentials,
+            &|| Ok(false),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, Code::StateTooOld);
+        assert_eq!(
+            serde_json::to_value(&refused.details).unwrap(),
+            serde_json::json!({"floor": "1.1.0", "kinds": ["saved_connections"]})
+        );
+        // A build without an Update Floor has no Stepping Stone to name, so only a reset helps.
+        let refused = prepare_in(
+            state.root.clone(),
+            &AFTER_STONE,
+            None,
+            &mut migration::NoCredentials,
+            &|| Ok(false),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refused.code, Code::StateResetRequired);
+        assert_eq!(
+            serde_json::to_value(&refused.details).unwrap(),
+            serde_json::json!({"reason": "too_old", "kinds": ["saved_connections"]})
+        );
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn an_automatic_reset_is_reported_once_by_the_next_command() {
+        let state = temporary("reset-notice");
+        private_file(&state.root, "generation.json", br#"{"generation":1}"#);
+        private_file(
+            &state.root,
+            "routes/local/base/last-connected.json",
+            br#"{"at":1}"#,
+        );
+        let prepare = || {
+            prepare_in(
+                state.root.clone(),
+                &AFTER_STONE,
+                None,
+                &mut migration::NoCredentials,
+                &|| Ok(false),
+            )
+            .unwrap()
+            .reset
+        };
+        assert_eq!(prepare(), [DataKind::View]);
+        assert_eq!(prepare(), []);
+        assert!(
+            state
+                .root
+                .join("reset/gen-1/routes/local/base/last-connected.json")
+                .exists(),
+            "the reset file was kept aside"
+        );
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn reset_previews_the_kinds_of_data_and_moves_them_aside_once_confirmed() {
+        let state = generation_one("reset-confirmed");
+        let now = std::time::SystemTime::now();
+        let reset = |token: Option<&str>| {
+            reset_in(
+                state.root.clone(),
+                &AFTER_STONE,
+                &mut migration::NoCredentials,
+                &|| Ok(false),
+                &UNINTERRUPTED,
+                token,
+                now,
+            )
+        };
+        let preview = reset(None).unwrap();
+        let Reset::Preview {
+            reason,
+            kinds,
+            token,
+        } = preview.reset
+        else {
+            panic!("a reset waits for its confirmation");
+        };
+        assert_eq!(reason, ResetReason::TooOld);
+        assert_eq!(kinds, [DataKind::SavedConnections]);
+        assert_eq!(
+            preview.notice.map(|notice| notice.details),
+            Some(crate::contract::WarningDetails::Reset {
+                kinds: vec![DataKind::View]
+            }),
+            "the rebuildable view state reset without asking"
+        );
+        assert!(state.root.join("connections.json").exists());
+        let done = reset(Some(&token.token)).unwrap();
+        assert_eq!(
+            done.reset,
+            Reset::Done {
+                kinds: vec![DataKind::SavedConnections]
+            }
+        );
+        assert!(!state.root.join("connections.json").exists());
+        assert_eq!(
+            std::fs::read(state.root.join("reset/gen-1/connections.json")).unwrap(),
+            b"{}"
+        );
+        assert_eq!(reset(None).unwrap().reset, Reset::NotNeeded);
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    const UNINTERRUPTED: Interruption<'static> = Interruption {
+        interrupted: &|| false,
+        dispatch: &|| Ok(()),
+    };
+
+    #[test]
+    fn an_interrupt_stops_a_reset_that_waits_for_another_command() {
+        let state = generation_one("reset-interrupted");
+        let directory = Directory::open(&state.root, false).unwrap();
+        let shared = directory.lock_shared(GENERATION_LOCK).unwrap();
+        // The other command ends after two seconds, well past the interrupt.
+        let other = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            drop(shared);
+        });
+        let dispatched = std::cell::Cell::new(false);
+        let started = Instant::now();
+        let refused = reset_in(
+            state.root.clone(),
+            &AFTER_STONE,
+            &mut migration::NoCredentials,
+            &|| Ok(false),
+            &Interruption {
+                interrupted: &|| started.elapsed() >= std::time::Duration::from_millis(200),
+                dispatch: &|| {
+                    dispatched.set(true);
+                    Ok(())
+                },
+            },
+            None,
+            std::time::SystemTime::now(),
+        );
+        assert_eq!(
+            refused.err().map(|failure| failure.code),
+            Some(Code::Interrupted)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(!dispatched.get(), "an interrupted wait marks no effect");
+        assert!(
+            state
+                .root
+                .join("routes/local/base/last-connected.json")
+                .exists(),
+            "an interrupted reset changes nothing"
+        );
+        other.join().unwrap();
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn a_reset_token_confirms_only_the_reset_it_previewed() {
+        let state = generation_one("reset-changed");
+        let now = std::time::SystemTime::now();
+        let reset = |token: Option<&str>| {
+            reset_in(
+                state.root.clone(),
+                &AFTER_STONE,
+                &mut migration::NoCredentials,
+                &|| Ok(false),
+                &UNINTERRUPTED,
+                token,
+                now,
+            )
+        };
+        let Reset::Preview { token, .. } = reset(None).unwrap().reset else {
+            panic!("a reset waits for its confirmation");
+        };
+        // Another client's records appear, so the reset would replace more than the preview named.
+        private_file(
+            &state.root,
+            "routes/local/base/runs.json",
+            br#"{"runs":[]}"#,
+        );
+        assert_eq!(
+            reset(Some(&token.token)).err().map(|failure| failure.code),
+            Some(Code::Changed)
+        );
+        assert!(state.root.join("connections.json").exists());
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 

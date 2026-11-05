@@ -14,10 +14,12 @@ use spaceterm_core::{
     CoreError,
     direct::DirectError,
     hierarchy,
+    migration::{DataKind, ResetReason},
     protocol::{Fatal, version::Incompatible},
     update::ordering::Floor,
     worktree,
 };
+use std::borrow::Cow;
 
 pub const SCHEMA: &str = "spaceterm.cli.v1";
 /// A broken stdout pipe stops output and exits with this status, without a message.
@@ -168,6 +170,16 @@ impl From<&crate::args::Global> for Mode {
     }
 }
 
+thread_local! {
+    static ANNOUNCED: std::cell::RefCell<Vec<Warning>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Adds `warning` to the next result this thread renders, whichever command produces it. The
+/// CLI announces what happened to its state before the command ran.
+pub fn announce(warning: Warning) {
+    ANNOUNCED.with_borrow_mut(|announced| announced.push(warning));
+}
+
 /// Writes a command's one result and returns its exit status. Every command ends here.
 ///
 /// JSON mode prints the envelope and a newline on stdout. Text mode prints `text` on stdout,
@@ -175,6 +187,7 @@ impl From<&crate::args::Global> for Mode {
 /// warning on stderr. `--verbose` adds `diagnostics` on stderr. A broken stdout pipe stops output
 /// and exits 141 with no message. `interrupted` means `SIGINT` arrived after dispatch: the
 /// envelope reports it, so the exit status follows the precedence of section 5.2.
+/// Warnings [`announce`]d on this thread join the envelope's own.
 pub fn render<D: Serialize>(
     envelope: &Envelope<D>,
     text: &str,
@@ -184,6 +197,20 @@ pub fn render<D: Serialize>(
     stdout: &mut dyn std::io::Write,
     stderr: &mut dyn std::io::Write,
 ) -> u8 {
+    let announced = ANNOUNCED.take();
+    if !announced.is_empty() {
+        let mut envelope = envelope.erased();
+        envelope.warnings.extend(announced);
+        return render(
+            &envelope,
+            text,
+            diagnostics,
+            mode,
+            interrupted,
+            stdout,
+            stderr,
+        );
+    }
     if interrupted {
         let mut envelope = envelope.erased();
         envelope.interrupt();
@@ -218,6 +245,9 @@ pub fn render<D: Serialize>(
             }) = &error.details
             {
                 let _ = writeln!(stderr, "argument: {argument}");
+            }
+            if let Details::StateTooOld(StateTooOldDetails { floor, .. }) = &error.details {
+                let _ = writeln!(stderr, "install first: SpaceTerm Core {floor}");
             }
         }
         write_warnings(&envelope.warnings, stderr);
@@ -427,6 +457,10 @@ pub enum Details {
     Incompatible(IncompatibleDetails),
     /// `below_floor`.
     Floor(FloorDetails),
+    /// `state_reset_required`.
+    StateReset(StateResetDetails),
+    /// `state_too_old`.
+    StateTooOld(StateTooOldDetails),
 }
 
 impl Serialize for Details {
@@ -446,6 +480,8 @@ impl Serialize for Details {
             Self::Timeout(details) => details.serialize(serializer),
             Self::Incompatible(details) => details.serialize(serializer),
             Self::Floor(details) => details.serialize(serializer),
+            Self::StateReset(details) => details.serialize(serializer),
+            Self::StateTooOld(details) => details.serialize(serializer),
         }
     }
 }
@@ -677,6 +713,24 @@ pub struct FloorDetails {
     pub floor: Floor,
 }
 
+/// `details` when this CLI's saved state waits for a confirmed reset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StateResetDetails {
+    pub reason: ResetReason,
+    /// The kinds of data `spaceterm reset` replaces.
+    pub kinds: Vec<DataKind>,
+}
+
+/// `details` when this CLI's saved state is older than any generation this build migrates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StateTooOldDetails {
+    /// The Stepping Stone release to install first, this build's Update Floor,
+    /// `MAJOR.MINOR.PATCH`.
+    pub floor: Floor,
+    /// The kinds of data `spaceterm reset` replaces instead.
+    pub kinds: Vec<DataKind>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Update {
@@ -872,6 +926,8 @@ codes! {
     StorageUnavailable = "storage_unavailable", Unavailable, false, "Storage is unavailable.";
     IncompatibleState = "incompatible_state", Unavailable, false, "The saved state is from an incompatible SpaceTerm.";
     DataResetRequired = "data_reset_required", ActionRequired, false, "Saved data on this machine needs a reset before SpaceTerm can read it.";
+    StateResetRequired = "state_reset_required", ActionRequired, false, "This version can\u{2019}t read some of this CLI\u{2019}s saved data. Review its reset with: spaceterm reset.";
+    StateTooOld = "state_too_old", ActionRequired, false, "This CLI\u{2019}s saved data is too old for this version. Install the version in details.floor first, or review its reset with: spaceterm reset.";
     UnsafeStorage = "unsafe_storage", Unavailable, false, "Storage has unsafe permissions.";
     AuthenticationRefused = "authentication_refused", ActionRequired, false, "SpaceTerm couldn\u{2019}t verify the machine or account for this connection.";
     IncompatibleProtocol = "incompatible_protocol", Unavailable, false, "This CLI and SpaceTerm Core on that machine are incompatible. Update the older one.";
@@ -1112,6 +1168,7 @@ pub enum WarningCode {
     CoverageCoalesced,
     ClientMajorDiffers,
     PrivateCredentialFile,
+    DataReset,
 }
 
 impl WarningCode {
@@ -1124,6 +1181,7 @@ impl WarningCode {
         Self::CoverageCoalesced,
         Self::ClientMajorDiffers,
         Self::PrivateCredentialFile,
+        Self::DataReset,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -1136,6 +1194,7 @@ impl WarningCode {
             Self::CoverageCoalesced => "coverage_coalesced",
             Self::ClientMajorDiffers => "client_major_differs",
             Self::PrivateCredentialFile => "private_credential_file",
+            Self::DataReset => "data_reset",
         }
     }
 
@@ -1157,6 +1216,9 @@ impl WarningCode {
             Self::ClientMajorDiffers => {
                 "After this restart, work commands need a CLI with SpaceTerm Core's protocol major."
             }
+            Self::DataReset => {
+                "SpaceTerm reset saved data of this CLI that this version couldn't read. See details.kinds."
+            }
         }
     }
 }
@@ -1170,7 +1232,8 @@ impl Serialize for WarningCode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Warning {
     pub code: WarningCode,
-    pub message: &'static str,
+    /// The code's fixed message, or for `data_reset` one built from fixed names of data kinds.
+    pub message: Cow<'static, str>,
     pub details: WarningDetails,
 }
 
@@ -1178,9 +1241,47 @@ impl Warning {
     pub fn new(code: WarningCode, details: WarningDetails) -> Self {
         Self {
             code,
-            message: code.message(),
+            message: Cow::Borrowed(code.message()),
             details,
         }
+    }
+
+    /// `data_reset`: SpaceTerm moved the rebuildable data of `kinds` aside and started it over.
+    pub fn data_reset(kinds: Vec<DataKind>) -> Self {
+        Self {
+            code: WarningCode::DataReset,
+            message: Cow::Owned(format!(
+                "SpaceTerm reset this CLI's {}, which this version couldn't read. The previous files were set aside.",
+                kind_names(&kinds)
+            )),
+            details: WarningDetails::Reset { kinds },
+        }
+    }
+}
+
+/// The name a person reads for one kind of saved data. It names no path or label.
+pub const fn kind_name(kind: DataKind) -> &'static str {
+    match kind {
+        DataKind::View => "view state",
+        DataKind::WorkspaceOrder => "Workspace order",
+        DataKind::UpdateHistory => "update history",
+        DataKind::Settings => "Settings",
+        DataKind::WorkspaceOrganization => "Workspace organization",
+        DataKind::MachineId => "Machine ID",
+        DataKind::Pairings => "pairings",
+        DataKind::SavedConnections => "saved machines with their credential references",
+        DataKind::ClientRecords => "client records",
+        DataKind::CoreRecords => "SpaceTerm Core records",
+    }
+}
+
+/// `kinds` as one English list, such as `view state and Workspace order`.
+pub fn kind_names(kinds: &[DataKind]) -> String {
+    let names: Vec<_> = kinds.iter().map(|kind| kind_name(*kind)).collect();
+    match names.as_slice() {
+        [] => "saved data".to_owned(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -1195,6 +1296,8 @@ pub enum WarningDetails {
     Gap { missing_rows: u64 },
     /// `client_major_differs`.
     Major { client_major: u16, core_major: u16 },
+    /// `data_reset`.
+    Reset { kinds: Vec<DataKind> },
 }
 
 impl Serialize for WarningDetails {
@@ -1212,11 +1315,15 @@ impl Serialize for WarningDetails {
             client_major: u16,
             core_major: u16,
         }
-        match *self {
+        #[derive(Serialize)]
+        struct Reset<'a> {
+            kinds: &'a [DataKind],
+        }
+        match self {
             Self::None => Empty {}.serialize(serializer),
-            Self::Recovered { count } => Recovered { count }.serialize(serializer),
-            Self::Gap { missing_rows } => Gap { missing_rows }.serialize(serializer),
-            Self::Major {
+            &Self::Recovered { count } => Recovered { count }.serialize(serializer),
+            &Self::Gap { missing_rows } => Gap { missing_rows }.serialize(serializer),
+            &Self::Major {
                 client_major,
                 core_major,
             } => Major {
@@ -1224,6 +1331,7 @@ impl Serialize for WarningDetails {
                 core_major,
             }
             .serialize(serializer),
+            Self::Reset { kinds } => Reset { kinds }.serialize(serializer),
         }
     }
 }
@@ -1244,6 +1352,24 @@ pub struct Confirmation<E: Serialize> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ConfirmationData<E: Serialize> {
     pub confirmation: Confirmation<E>,
+}
+
+/// `effects` of `reset`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ResetEffects {
+    pub reason: ResetReason,
+    /// The kinds of data the reset replaces.
+    pub kinds: Vec<DataKind>,
+    /// For state too old for this build: the Stepping Stone release that carries it forward
+    /// instead. Null otherwise, and in a build without an Update Floor.
+    pub floor: Option<Floor>,
+}
+
+/// `data` of `reset`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ResetData {
+    /// The kinds of data the reset replaced. Empty when nothing needed a reset.
+    pub reset: Vec<DataKind>,
 }
 
 /// `effects` of `stop`, `restart` and `uninstall`.
@@ -2494,6 +2620,77 @@ mod tests {
         assert_eq!(
             ErrorBody::from(mismatch).message,
             "The Pane is not in the given Tab."
+        );
+    }
+
+    #[test]
+    fn an_announced_reset_reaches_the_next_result_once_in_both_forms() {
+        let envelope = Envelope::ok("list", None, Empty {});
+        let write = |json| {
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            let mode = Mode {
+                json,
+                ..Mode::default()
+            };
+            render(&envelope, "", "", mode, false, &mut stdout, &mut stderr);
+            (
+                String::from_utf8(stdout).unwrap(),
+                String::from_utf8(stderr).unwrap(),
+            )
+        };
+        announce(Warning::data_reset(vec![
+            DataKind::View,
+            DataKind::WorkspaceOrder,
+        ]));
+        let (_, stderr) = write(false);
+        assert_eq!(
+            stderr,
+            "warning: SpaceTerm reset this CLI's view state and Workspace order, which this version couldn't read. The previous files were set aside.\n"
+        );
+        assert_eq!(write(false).1, "", "the notice prints once");
+        announce(Warning::data_reset(vec![DataKind::View]));
+        let (stdout, _) = write(true);
+        let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            value["warnings"],
+            serde_json::json!([{
+                "code": "data_reset",
+                "message": "SpaceTerm reset this CLI's view state, which this version couldn't read. The previous files were set aside.",
+                "details": {"kinds": ["view"]},
+            }])
+        );
+    }
+
+    #[test]
+    fn state_too_old_names_the_version_to_install_in_text() {
+        let envelope = Envelope::error(
+            "list",
+            None,
+            Failure::with(
+                Code::StateTooOld,
+                Details::StateTooOld(StateTooOldDetails {
+                    floor: Floor::parse("1.1.0").unwrap(),
+                    kinds: vec![DataKind::SavedConnections],
+                }),
+            ),
+            Empty {},
+        );
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        render(
+            &envelope,
+            "",
+            "",
+            Mode::default(),
+            false,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            format!(
+                "error: {} (state_too_old)\ninstall first: SpaceTerm Core 1.1.0\n",
+                Code::StateTooOld.message()
+            )
         );
     }
 
