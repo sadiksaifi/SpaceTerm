@@ -880,7 +880,11 @@ fn check_desktop_state(host: &HostComposition) -> Option<DesktopStateCheck> {
 /// Opens the Workspaces with `open` once the desktop state root `data` is readable. Data that
 /// waits for a confirmed reset, or that a newer SpaceTerm wrote, is never read or changed, so
 /// the launch ends instead. Telling the person why, and asking before a reset, is not built yet.
-fn open_after_data_check(data: Option<DesktopStateCheck>, open: Rc<dyn Fn(&mut App)>, cx: &mut App) {
+fn open_after_data_check(
+    data: Option<DesktopStateCheck>,
+    open: Rc<dyn Fn(&mut App)>,
+    cx: &mut App,
+) {
     use crate::migration::StateCheck;
     match data.map(|(_, check)| check) {
         // Readers report unavailable storage themselves, as they did before generations.
