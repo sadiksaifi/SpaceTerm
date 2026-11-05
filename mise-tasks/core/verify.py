@@ -18,6 +18,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--source-sha256", help="Signed source digest printed by core:package or core:catalog"
     )
+    parser.add_argument("--floor", help="A release build's Update Floor")
     parser.add_argument(
         "--retain",
         action="store_true",
@@ -31,6 +32,7 @@ if __name__ == "__main__":
         "target": args.target,
         "commit": args.commit,
         "version": args.version,
+        "floor": args.floor,
         "protocols": PROTOCOLS,
     }
     operation = install if args.retain else verify

@@ -28,7 +28,15 @@ import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, macos_codesign, release_feed, sparkle, update_signing
+from spaceterm_tasks import (
+    ROOT,
+    TaskError,
+    macos_codesign,
+    release_feed,
+    release_floor,
+    sparkle,
+    update_signing,
+)
 from spaceterm_tasks.packaging import DIST, STABLE_TAG, checked, release_version
 from spaceterm_tasks.release_feed import (
     APPCAST,
@@ -288,8 +296,9 @@ def appcast(tag):
     print("The disk image and its signed appcast are verified")
 
 
-def verified_core(entry, target, version, directory):
-    """Authenticate one Core build and return its archive and signature."""
+def verified_core(entry, target, version, floor, directory):
+    """Authenticate one Core build of `version` with Update Floor `floor` and return its archive
+    and signature."""
     from spaceterm_tasks.core_package import document, host_target, verified_copy
 
     if (entry / "artifact.sha256").read_text() != sha256(entry / "artifact.tar.gz") + "\n":
@@ -303,8 +312,11 @@ def verified_core(entry, target, version, directory):
         target=target,
         native=target == host_target(),
     )
-    if document((tree / "build.json").read_bytes())["version"] != version:
+    info = document((tree / "build.json").read_bytes())
+    if info["version"] != version:
         raise TaskError("the Core version must match the release tag")
+    if info["floor"] != floor:
+        raise TaskError("the Core build's Update Floor differs from the release's")
     return archive, signature
 
 
@@ -330,6 +342,7 @@ def assemble(
     seed = update_signing.release_seed(environment)
     keys = update_signing.trust(environment)
     protocols = release_feed.protocols()
+    floors = release_floor.floors(version)
     published_at = int(time.time())
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-") as temporary:
         directory = Path(temporary) / "release"
@@ -344,7 +357,7 @@ def assemble(
                 continue
             verified = scratch / target
             verified.mkdir()
-            archive, signature = verified_core(entry, target, version, verified)
+            archive, signature = verified_core(entry, target, version, floors["core"], verified)
             name = archive_name("core", version, platform)
             shutil.copyfile(archive, directory / name)
             shutil.copyfile(signature, directory / f"{name}.sig")
@@ -367,6 +380,7 @@ def assemble(
                 product=product,
                 platform=platform,
                 version=version,
+                floor=floors[product],
                 published_at=published_at,
                 protocols=protocols,
                 archive=archive,

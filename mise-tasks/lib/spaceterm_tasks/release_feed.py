@@ -35,6 +35,7 @@ FEED_KEYS = {
     "product",
     "platform",
     "version",
+    "floor",
     "published_at",
     "protocols",
     "minimum_system",
@@ -106,6 +107,10 @@ def _unique(pairs):
     return result
 
 
+def _order(version):
+    return tuple(int(part) for part in version.split("."))
+
+
 def _u16(value):
     return type(value) is int and 0 <= value <= 65535
 
@@ -129,6 +134,9 @@ def check(data, product, platform):
             or not isinstance(version, str)
             or len(version) > 64
             or not VERSION.fullmatch(version)
+            or not isinstance(document["floor"], str)
+            or not VERSION.fullmatch(document["floor"])
+            or _order(document["floor"]) > _order(version)
             or type(document["published_at"]) is not int
             or document["published_at"] <= 0
             or not isinstance(listed, dict)
@@ -162,8 +170,12 @@ def check(data, product, platform):
     return document
 
 
-def write(seed, keys, directory, *, product, platform, version, published_at, protocols, archive):
+def write(
+    seed, keys, directory, *, product, platform, version, floor, published_at, protocols, archive
+):
     """Write `<feed>.json` and its raw signature for `archive`, whose `.sig` lies beside it.
+
+    `floor` is the product's Update Floor, the oldest version that may update to `version`.
 
     The archive signature must verify under `keys` first. The feed signature is verified after
     signing, so a written feed always verifies under the same trust its readers hold.
@@ -178,6 +190,7 @@ def write(seed, keys, directory, *, product, platform, version, published_at, pr
         "product": product,
         "platform": platform,
         "version": version,
+        "floor": floor,
         "published_at": published_at,
         "protocols": protocols,
         "minimum_system": MINIMUM_SYSTEM[platform],

@@ -38,10 +38,12 @@ from spaceterm_tasks.package_linux import verify_glibc_baseline, write_archive
 from spaceterm_tasks.packaging import (
     DIST,
     NOTICES,
+    RELEASE_FLOOR,
     SHELL_INTEGRATION,
     TERMINFO,
     checked,
     packaged_environment,
+    release_version,
     require_clean_checkout,
 )
 
@@ -101,9 +103,11 @@ BUILD_KEYS = {
     "target",
     "commit",
     "version",
+    "floor",
     "protocols",
     "source_sha256",
 }
+RELEASE_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 def core_identifier(identity):
@@ -260,7 +264,21 @@ def document(data):
         or (value["identity"] == "spaceterm" and value["version"].endswith(".dirty"))
     ):
         raise TaskError("the server version differs from its source commit")
+    if not valid_floor(value["floor"], value["version"]):
+        raise TaskError("the server build names an Update Floor its version cannot have")
     return value
+
+
+def valid_floor(floor, version):
+    """A release build's floor is a release version at or below its own. A build that names a
+    commit has no order, so its floor is null."""
+    release = RELEASE_VERSION.fullmatch(version)
+    if release is None:
+        return floor is None
+    named = RELEASE_VERSION.fullmatch(floor) if isinstance(floor, str) else None
+    return named is not None and tuple(map(int, named.groups())) <= tuple(
+        map(int, release.groups())
+    )
 
 
 def build_info(executable):
@@ -685,6 +703,9 @@ def package(identity, release_tag=None, *, target=None):
     if release_tag:
         require_clean_checkout()
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
+    floor = core_floor(release_tag)
+    if floor:
+        environment[RELEASE_FLOOR] = floor
     if identity == "spaceterm-development":
         environment.pop("SPACETERM_PACKAGED", None)
     if target == TARGETS["darwin"]:
@@ -724,6 +745,7 @@ def package(identity, release_tag=None, *, target=None):
         or expected["commit"] != commit
         or expected["target"] != target
         or expected["source_sha256"] != source
+        or expected["floor"] != floor
         or _source(ROOT)[2] != source
     ):
         raise TaskError("Cargo returned a different server build")
@@ -777,6 +799,15 @@ def package(identity, release_tag=None, *, target=None):
         signature.replace(DIST / signature.name)
     print(f"Created signed server candidate {name}; nothing published")
     return DIST / name, DIST / f"{name}.sig"
+
+
+def core_floor(release_tag):
+    """The Update Floor a release Core build carries; None for a build that names a commit."""
+    if not release_tag:
+        return None
+    from spaceterm_tasks import release_floor
+
+    return release_floor.floor("core", release_version(release_tag))
 
 
 def stage_desktop_artifact(archive, signature, destination, expected=None, *, identity=None):

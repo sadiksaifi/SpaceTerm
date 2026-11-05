@@ -16,6 +16,9 @@ SHELL_INTEGRATION = ROOT / "assets" / "shell-integration"
 PREFLIGHT_VERSION = "0.0.0"
 # Names the git-cliff notes file a release desktop build embeds (build/release_notes.rs).
 RELEASE_NOTES = "SPACETERM_RELEASE_NOTES"
+# The Core's Update Floor, which crates/spaceterm-cli/build.rs writes into a release build's
+# document as `floor`.
+RELEASE_FLOOR = "SPACETERM_RELEASE_FLOOR"
 STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 ASKPASS_HELPER_MODE = "broker-v1"
 
@@ -63,7 +66,7 @@ def packaged_environment(release_tag, removed=()):
     environment = {
         key: value
         for key, value in os.environ.items()
-        if key not in ("SPACETERM_RELEASE_TAG", RELEASE_NOTES, *removed)
+        if key not in ("SPACETERM_RELEASE_TAG", RELEASE_NOTES, RELEASE_FLOOR, *removed)
     }
     # Leaves the SpaceTerm Development identity.
     environment["SPACETERM_PACKAGED"] = "1"

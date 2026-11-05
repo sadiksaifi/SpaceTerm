@@ -133,6 +133,7 @@ class LinuxPrefixTests(unittest.TestCase):
                 "target": target,
                 "commit": "a" * 40,
                 "version": "dev.aaaaaaaaaaaa",
+                "floor": None,
                 "protocols": core_package.PROTOCOLS,
             }
             if target == "x86_64-unknown-linux-gnu":

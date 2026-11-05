@@ -27,8 +27,9 @@ from spaceterm_tasks.core_package import (
     TARGETS,
     artifact_trust,
     compile_terminfo,
+    core_floor,
 )
-from spaceterm_tasks.packaging import SHELL_INTEGRATION, packaged_environment
+from spaceterm_tasks.packaging import RELEASE_FLOOR, SHELL_INTEGRATION, packaged_environment
 
 RELEASES = ROOT / ".github/compatibility.toml"
 TARGET = TARGETS["linux"]
@@ -154,7 +155,7 @@ def build_candidate(tag, destination):
             "spaceterm-cli",
             "--no-default-features",
             binary="spaceterm",
-            env=packaged_environment(tag),
+            env={**packaged_environment(tag), RELEASE_FLOOR: core_floor(tag)},
         )
     finally:
         _checked(["git", "tag", "-d", tag], "untag")

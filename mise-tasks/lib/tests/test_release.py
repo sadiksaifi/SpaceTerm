@@ -196,6 +196,7 @@ class FeedTests(unittest.TestCase):
             version="1.4.0",
             published_at=1793750400,
             protocols=PROTOCOLS,
+            floor="1.2.0",
             archive=archive,
         )
 
@@ -218,6 +219,7 @@ class FeedTests(unittest.TestCase):
                         "product": product,
                         "platform": platform,
                         "version": "1.4.0",
+                        "floor": "1.2.0",
                         "published_at": 1793750400,
                         "protocols": PROTOCOLS,
                         "minimum_system": {"macos-arm64": "26.0", "linux-x86_64": "2.35"}[platform],
@@ -253,6 +255,10 @@ class FeedTests(unittest.TestCase):
             compact({**document, "product": "desktop"}),
             compact({**document, "version": "1.04.0"}),
             compact({**document, "published_at": 0}),
+            compact({key: value for key, value in document.items() if key != "floor"}),
+            compact({**document, "floor": "1.4.1"}),
+            compact({**document, "floor": "1.02.0"}),
+            compact({**document, "floor": None}),
             compact({**document, "minimum_system": "2.35"}),
             compact({**document, "notes": f"{RELEASES}/tag/v1.4.1"}),
             compact({**document, "protocols": {**PROTOCOLS, "work": {"major": 70000, "minor": 0}}}),

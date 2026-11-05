@@ -81,6 +81,7 @@ class CoreArchiveTests(unittest.TestCase):
             "target": "x86_64-unknown-linux-gnu",
             "commit": self.commit,
             "version": "dev.aaaaaaaaaaaa",
+            "floor": None,
         }
 
     def test_linux_cannot_produce_a_mac_cli_without_its_native_frameworks(self):
@@ -103,6 +104,23 @@ class CoreArchiveTests(unittest.TestCase):
                             core_package.document(json.dumps(info))
                     else:
                         self.assertEqual(core_package.document(json.dumps(info)), info)
+
+    def test_only_a_release_build_names_an_update_floor_at_or_below_its_version(self):
+        release = {**self.info, "identity": "spaceterm", "version": "1.4.0"}
+        for floor in ("1.4.0", "1.2.9", "0.9.0"):
+            with self.subTest(floor=floor):
+                info = {**release, "floor": floor}
+                self.assertEqual(core_package.document(json.dumps(info)), info)
+        for info in (
+            {**release, "floor": None},
+            {**release, "floor": "1.4.1"},
+            {**release, "floor": "1.04.0"},
+            {**self.info, "floor": "1.0.0"},
+            {key: value for key, value in self.info.items() if key != "floor"},
+        ):
+            with self.subTest(info=info):
+                with self.assertRaises(TaskError):
+                    core_package.document(json.dumps(info))
 
     def archive_with(self, entries):
         with tarfile.open(self.archive, "w:gz") as archive:
