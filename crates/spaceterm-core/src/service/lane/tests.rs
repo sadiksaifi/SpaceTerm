@@ -986,6 +986,7 @@ impl crate::update::fetch::FeedSource for Unreachable {
     fn feed(
         &self,
         _: crate::update::feed::FeedTarget,
+        _: Option<&crate::update::facts::Version>,
     ) -> Result<crate::update::fetch::Signed, crate::update::fetch::FetchError> {
         Err(crate::update::fetch::FetchError::Network)
     }

@@ -371,11 +371,14 @@ impl Shared {
     fn fetch_feed(&self) -> Result<ReleaseFeed, UpdateError> {
         let feed = self
             .transport
-            .get(&self.target.feed_url(), MAX_FEED_BYTES)
+            .get(&self.target.feed_url(None), MAX_FEED_BYTES)
             .map_err(|_| UpdateError::Check)?;
         let signature = self
             .transport
-            .get(&self.target.feed_signature_url(), MAX_FEED_SIGNATURE_BYTES)
+            .get(
+                &self.target.feed_signature_url(None),
+                MAX_FEED_SIGNATURE_BYTES,
+            )
             .map_err(|_| UpdateError::Check)?;
         ReleaseFeed::verify(
             &self.trust,
@@ -1011,8 +1014,8 @@ mod tests {
         let target = FeedTarget::DESKTOP_LINUX;
         let (feed, signature) = signer.feed(target, version, crate::updates::now() - 60, archive);
         ServedRelease(HashMap::from([
-            (target.feed_url(), feed),
-            (target.feed_signature_url(), signature),
+            (target.feed_url(None), feed),
+            (target.feed_signature_url(None), signature),
             (
                 format!(
                     "https://github.com/sadiksaifi/SpaceTerm/releases/download/v{version}/spaceterm-desktop-{version}-linux-x86_64.tar.gz"

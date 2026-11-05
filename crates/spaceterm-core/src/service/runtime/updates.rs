@@ -138,6 +138,9 @@ struct Record {
     silent: Option<Attempt>,
     /// The activation whose start failure was recorded last, so it is recorded once.
     activation: Option<[u8; 32]>,
+    /// The version a feed check installed as a Stepping Stone. A Core that runs it checks its
+    /// feed at once, and that check clears it.
+    stepping_stone: Option<Version>,
 }
 
 impl Default for Record {
@@ -150,6 +153,7 @@ impl Default for Record {
             check: UpdateCheck::Never,
             silent: None,
             activation: None,
+            stepping_stone: None,
         }
     }
 }
@@ -360,6 +364,8 @@ pub struct Installing {
     updates: Updates,
     candidate: Candidate,
     total: u64,
+    /// A feed check installs the candidate as a Stepping Stone.
+    stepping_stone: bool,
 }
 
 /// A feed check in progress. It owns the Core's one update operation and reports `Checking`
@@ -474,6 +480,7 @@ impl Updates {
             updates: self.clone(),
             candidate,
             total,
+            stepping_stone: false,
         })
     }
 
@@ -493,6 +500,12 @@ impl Updates {
         let installing = self.begin_install(candidate, size)?;
         installing.progress(size);
         installing.install(archive)
+    }
+
+    /// Whether this Core runs a Stepping Stone its feed check installed and has not checked its
+    /// feed since.
+    pub fn stepping_stone(&self) -> bool {
+        self.shared.lock().record.stepping_stone.as_ref() == Some(&self.shared.running)
     }
 
     /// Begin a restart. A restart into a Pending Version goes through a helper from the running
@@ -713,6 +726,7 @@ impl Updates {
         &self,
         candidate: &Candidate,
         archive: Archive<'_>,
+        stepping_stone: bool,
     ) -> Result<Stored, InstallError> {
         let version = candidate.version();
         let service = &self.shared.service;
@@ -787,6 +801,7 @@ impl Updates {
         };
         let record = change(data, |record| {
             record.pending = Some(stored.clone());
+            record.stepping_stone = stepping_stone.then(|| version.clone());
             // A newer version than the skipped one releases it.
             if record
                 .skipped
@@ -887,7 +902,9 @@ impl Installing {
     /// progress.
     pub fn install(self, archive: Archive<'_>) -> Result<PendingVersion, InstallError> {
         self.progress(self.total);
-        let result = self.updates.install_now(&self.candidate, archive);
+        let result = self
+            .updates
+            .install_now(&self.candidate, archive, self.stepping_stone);
         if let Err(InstallError::Failed(failure)) = result
             && (archive.source == Source::Feed
                 || (archive.source == Source::Push && failure == InstallFailure::Verification))
@@ -928,7 +945,8 @@ impl<'a> Checking<'a> {
     }
 
     /// Turns this check into the install of `candidate` of `total` archive bytes, with no
-    /// moment when another install could take the update operation.
+    /// moment when another install could take the update operation. A `stepping_stone` makes
+    /// the Core that restarts into it check its feed at once.
     ///
     /// # Errors
     /// Returns NotNewer, Skipped or BelowFloor.
@@ -936,6 +954,7 @@ impl<'a> Checking<'a> {
         self,
         candidate: Candidate,
         total: u64,
+        stepping_stone: bool,
     ) -> Result<Installing, InstallError> {
         {
             let mut live = self.updates.shared.lock();
@@ -950,6 +969,7 @@ impl<'a> Checking<'a> {
             updates: self.updates.clone(),
             candidate,
             total,
+            stepping_stone,
         };
         // The install owns the operation now, so the check must not end it.
         std::mem::forget(self);
@@ -960,8 +980,12 @@ impl<'a> Checking<'a> {
     /// Record the check's outcome, which survives restarts. The check still owns the update
     /// operation until it is dropped or begins an install.
     pub fn finish(&self, check: UpdateCheck) {
+        let running = &self.updates.shared.running;
         if let Ok(record) = change(&self.updates.shared.data, |record| {
             record.check = check;
+            if record.stepping_stone.as_ref() == Some(running) {
+                record.stepping_stone = None;
+            }
             record.clone()
         }) {
             self.updates.shared.lock().record = record;

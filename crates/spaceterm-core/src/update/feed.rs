@@ -115,19 +115,75 @@ impl FeedTarget {
         format!("{}.sig", self.archive(version))
     }
 
-    /// Where a reader fetches the newest release's feed.
-    pub fn feed_url(self) -> String {
-        format!("{RELEASES}/latest/download/{}", self.feed())
+    /// Where a reader fetches the feed of `release`, or of the newest release for None.
+    pub fn feed_url(self, release: Option<&Version>) -> String {
+        format!("{}/{}", download(release), self.feed())
     }
 
-    /// Where a reader fetches the feed's signature.
-    pub fn feed_signature_url(self) -> String {
-        format!("{RELEASES}/latest/download/{}", self.feed_signature())
+    /// Where a reader fetches the signature of the feed of `release`, or of the newest release
+    /// for None.
+    pub fn feed_signature_url(self, release: Option<&Version>) -> String {
+        format!("{}/{}", download(release), self.feed_signature())
     }
 
     /// Where a reader fetches `version`'s archive.
     pub fn archive_url(self, version: &Version) -> String {
         format!("{RELEASES}/download/v{version}/{}", self.archive(version))
+    }
+}
+
+/// Where the assets of `release` live, or of the newest release for None.
+fn download(release: Option<&Version>) -> String {
+    match release {
+        Some(version) => format!("{RELEASES}/download/v{version}"),
+        None => format!("{RELEASES}/latest/download"),
+    }
+}
+
+/// The most releases an updater steps down through below the newest one in one check.
+pub const MAX_STEPS: usize = 8;
+
+/// The release an updater installs next.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Next {
+    pub feed: Feed,
+    /// The release is the floor of a newer one, which the updater reaches through it.
+    pub stepping_stone: bool,
+}
+
+/// The release an updater running `running` installs next. `read(None)` reads the newest
+/// release's verified feed, and `read(Some(version))` the feed of `version`'s release. While
+/// `running` is below a release's Update Floor, the updater reads the release at that floor, and
+/// it takes the first release whose floor `running` meets.
+///
+/// Ok(None) when the floors lead to no release `running` may install: a release names its own
+/// version as its floor, the release at a floor names another version, or the chain is longer
+/// than [`MAX_STEPS`].
+///
+/// # Errors
+/// Returns what `read` returns.
+pub fn walk<E>(
+    running: &Version,
+    mut read: impl FnMut(Option<&Version>) -> Result<Feed, E>,
+) -> Result<Option<Next>, E> {
+    let mut feed = read(None)?;
+    let mut steps = 0;
+    loop {
+        if feed.floor.admits(running) {
+            return Ok(Some(Next {
+                feed,
+                stepping_stone: steps > 0,
+            }));
+        }
+        let floor = feed.floor.version();
+        if floor == feed.version || steps == MAX_STEPS {
+            return Ok(None);
+        }
+        feed = read(Some(&floor))?;
+        if feed.version != floor {
+            return Ok(None);
+        }
+        steps += 1;
     }
 }
 
@@ -399,6 +455,113 @@ mod tests {
         feed
     }
 
+    /// The releases a host publishes, as `(version, floor)`, newest first. The walk reads them by
+    /// version and records each read.
+    struct Published {
+        releases: Vec<(&'static str, &'static str)>,
+        reads: Vec<Option<Version>>,
+    }
+
+    impl Published {
+        fn new(releases: &[(&'static str, &'static str)]) -> Self {
+            Self {
+                releases: releases.to_vec(),
+                reads: Vec::new(),
+            }
+        }
+
+        fn read(&mut self, release: Option<&Version>) -> Result<Feed, &'static str> {
+            self.reads.push(release.cloned());
+            let (text, floor) = match release {
+                None => self.releases[0],
+                Some(release) => *self
+                    .releases
+                    .iter()
+                    .find(|(text, _)| version(text) == *release)
+                    .ok_or("unpublished")?,
+            };
+            let mut feed = Signer::new()
+                .read(FeedTarget::CORE_LINUX, &example())
+                .unwrap();
+            feed.version = version(text);
+            feed.floor = Floor::parse(floor).unwrap();
+            Ok(feed)
+        }
+
+        fn walk(&mut self, running: &str) -> Result<Option<(String, bool)>, &'static str> {
+            walk(&version(running), |release| self.read(release))
+                .map(|next| next.map(|next| (next.feed.version.to_string(), next.stepping_stone)))
+        }
+    }
+
+    #[test]
+    fn an_updater_below_a_floor_steps_down_to_the_first_release_whose_floor_it_meets() {
+        let chain = [
+            ("1.2.2", "1.2.0"),
+            ("1.2.0", "1.1.0"),
+            ("1.1.0", "1.0.0"),
+            ("1.0.0", "1.0.0"),
+        ];
+        let cases = [
+            ("1.2.1", Some(("1.2.2", false)), vec![None]),
+            ("1.2.0", Some(("1.2.2", false)), vec![None]),
+            ("1.1.5", Some(("1.2.0", true)), vec![None, Some("1.2.0")]),
+            (
+                "1.0.0",
+                Some(("1.1.0", true)),
+                vec![None, Some("1.2.0"), Some("1.1.0")],
+            ),
+            (
+                "0.9.0",
+                None,
+                vec![None, Some("1.2.0"), Some("1.1.0"), Some("1.0.0")],
+            ),
+            ("dev.0123456789ab", Some(("1.2.2", false)), vec![None]),
+        ];
+        for (running, next, reads) in cases {
+            let mut published = Published::new(&chain);
+            assert_eq!(
+                published.walk(running),
+                Ok(next.map(|(text, stone)| (text.to_owned(), stone))),
+                "{running}"
+            );
+            let reads: Vec<_> = reads.into_iter().map(|read| read.map(version)).collect();
+            assert_eq!(published.reads, reads, "{running}");
+        }
+    }
+
+    #[test]
+    fn a_broken_or_endless_chain_of_floors_leads_nowhere() {
+        let mut misnamed = Published::new(&[("1.2.2", "1.2.0"), ("1.2.1", "1.0.0")]);
+        let served = version("1.2.1");
+        // The host serves 1.2.1's feed at the address of 1.2.0's.
+        assert_eq!(
+            walk(&version("1.1.0"), |release| misnamed
+                .read(release.map(|_| &served))),
+            Ok(None)
+        );
+        let mut unpublished = Published::new(&[("1.2.2", "1.2.0")]);
+        assert_eq!(unpublished.walk("1.1.0"), Err("unpublished"));
+        let long: Vec<_> = (0..=MAX_STEPS + 1)
+            .rev()
+            .map(|minor| {
+                let text: &'static str = format!("1.{}.0", minor + 1).leak();
+                let floor: &'static str = format!("1.{minor}.0").leak();
+                (text, floor)
+            })
+            .collect();
+        let mut endless = Published::new(&long);
+        assert_eq!(endless.walk("0.9.0"), Ok(None));
+        assert_eq!(endless.reads.len(), MAX_STEPS + 1);
+        let mut reachable = Published::new(&long);
+        assert_eq!(
+            reachable.walk("1.1.0"),
+            Ok(Some(("1.2.0".to_owned(), true))),
+            "a chain of MAX_STEPS steps is walked to its end"
+        );
+        assert_eq!(reachable.reads.len(), MAX_STEPS + 1);
+    }
+
     #[test]
     fn a_signed_feed_reads_as_its_fields() {
         let feed = Signer::new()
@@ -621,8 +784,14 @@ mod tests {
             assert_eq!(target.archive(&v), archive);
             assert_eq!(target.archive_signature(&v), format!("{archive}.sig"));
             assert_eq!(
-                target.feed_url(),
+                target.feed_url(None),
                 format!("https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/{feed}")
+            );
+            assert_eq!(
+                target.feed_signature_url(Some(&v)),
+                format!(
+                    "https://github.com/sadiksaifi/SpaceTerm/releases/download/v1.4.0/{feed}.sig"
+                )
             );
             assert_eq!(
                 target.archive_url(&v),

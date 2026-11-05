@@ -33,6 +33,8 @@ enum Event {
     /// A check ended without a finished state.
     Unfinished,
     BeginInstall(Version, u64),
+    /// The check's install is a Stepping Stone.
+    SteppingStone(Version),
     Progress(u64),
     Install {
         source: Source,
@@ -54,6 +56,8 @@ struct State {
     refuse: Option<InstallError>,
     /// Another install, check or restart owns the update operation.
     busy: bool,
+    /// The Core runs a Stepping Stone its feed check installed.
+    stepping_stone: bool,
     events: Vec<Event>,
 }
 
@@ -168,10 +172,14 @@ impl Checking for FakeChecking {
         mut self,
         candidate: Candidate,
         total: u64,
+        stepping_stone: bool,
     ) -> Result<FakeInstalling, InstallError> {
         self.fake.ordered(&candidate)?;
         let version = candidate.version().clone();
         self.handed_over = true;
+        if stepping_stone {
+            self.fake.record(Event::SteppingStone(version.clone()));
+        }
         self.fake
             .record(Event::BeginInstall(version.clone(), total));
         Ok(FakeInstalling {
@@ -273,6 +281,10 @@ impl Engine for Fake {
             handed_over: false,
         })
     }
+
+    fn stepping_stone(&self) -> bool {
+        self.state().stepping_stone
+    }
 }
 
 /// A private data directory, removed when the test ends.
@@ -311,6 +323,17 @@ struct Release {
 }
 
 fn release(key: &TestKey, version: &str, minimum: SystemVersion, archive: &[u8]) -> Release {
+    floored_release(key, version, "0.0.0", minimum, archive)
+}
+
+/// A signed release of `version` whose Update Floor is `floor`.
+fn floored_release(
+    key: &TestKey,
+    version: &str,
+    floor: &str,
+    minimum: SystemVersion,
+    archive: &[u8],
+) -> Release {
     let version = Version::parse(version).unwrap();
     let feed = Feed {
         target: FeedTarget::CORE_LINUX,
@@ -324,7 +347,7 @@ fn release(key: &TestKey, version: &str, minimum: SystemVersion, archive: &[u8])
             signature: key.sign(archive).try_into().unwrap(),
         },
         version,
-        floor: Floor::parse("0.0.0").unwrap(),
+        floor: Floor::parse(floor).unwrap(),
         published_at: NOW,
         protocols: Protocols {
             work: ProtocolVersion { major: 1, minor: 0 },
@@ -342,10 +365,12 @@ fn release(key: &TestKey, version: &str, minimum: SystemVersion, archive: &[u8])
 }
 
 /// The release host: answers with `feed` or a failure, and serves `archive` bytes, or fails.
+/// It also publishes the `older` releases at their versions.
 #[derive(Clone)]
 struct Host {
     feed: Result<Signed, FetchError>,
     archive: Result<Vec<u8>, FetchError>,
+    older: Vec<(Version, Release)>,
     downloads: Arc<Mutex<u32>>,
 }
 
@@ -357,6 +382,7 @@ impl Host {
                 signature: release.signature.clone(),
             }),
             archive: Ok(release.archive.clone()),
+            older: Vec::new(),
             downloads: Arc::default(),
         }
     }
@@ -365,8 +391,23 @@ impl Host {
         Self {
             feed: Err(error),
             archive: Err(error),
+            older: Vec::new(),
             downloads: Arc::default(),
         }
+    }
+
+    /// Also publishes `release` at `version`.
+    fn publishing(mut self, version: &str, release: &Release) -> Self {
+        self.older
+            .push((Version::parse(version).unwrap(), release.clone()));
+        self
+    }
+
+    fn older(&self, version: &Version) -> Option<&Release> {
+        self.older
+            .iter()
+            .find(|(published, _)| published == version)
+            .map(|(_, release)| release)
     }
 
     fn downloads(&self) -> u32 {
@@ -375,19 +416,31 @@ impl Host {
 }
 
 impl FeedSource for Host {
-    fn feed(&self, target: FeedTarget) -> Result<Signed, FetchError> {
+    fn feed(&self, target: FeedTarget, release: Option<&Version>) -> Result<Signed, FetchError> {
         assert_eq!(target, FeedTarget::CORE_LINUX);
-        self.feed.clone()
+        match release {
+            None => self.feed.clone(),
+            Some(version) => self
+                .older(version)
+                .map(|release| Signed {
+                    feed: release.feed.clone(),
+                    signature: release.signature.clone(),
+                })
+                .ok_or(FetchError::Network),
+        }
     }
     fn archive(
         &self,
         _: FeedTarget,
-        _: &Version,
+        version: &Version,
         size: u64,
         into: &mut dyn Write,
     ) -> Result<(), FetchError> {
         *self.downloads.lock().unwrap() += 1;
-        let bytes = self.archive.clone()?;
+        let bytes = match self.older(version) {
+            Some(release) => release.archive.clone(),
+            None => self.archive.clone()?,
+        };
         super::super::fetch::copy_exactly(&mut bytes.as_slice(), into, size)
     }
 }
@@ -472,6 +525,83 @@ fn a_newer_release_is_downloaded_and_installed_from_the_feed() {
     assert_eq!(progress.last(), Some(&300_000));
     assert_eq!(*check.proxies.lock().unwrap(), [None]);
     assert_eq!(data.staged(), 0, "the staging files are removed");
+}
+
+#[test]
+fn a_core_below_the_newest_floor_installs_the_release_at_that_floor_as_a_stepping_stone() {
+    let key = TestKey::generate();
+    let newest = floored_release(&key, "1.2.2", "1.2.0", OLD_GLIBC, b"newest");
+    let stone = floored_release(&key, "1.2.0", "1.0.0", OLD_GLIBC, b"stone");
+    for (running, installs, stepping_stone) in [
+        ("1.1.0", ("1.2.0", &stone), true),
+        ("1.2.1", ("1.2.2", &newest), false),
+    ] {
+        let data = Data::new();
+        let host = Host::serving(&newest).publishing("1.2.0", &stone);
+        let check = feed_check(
+            &data,
+            Some(trust(&key, &TestKey::generate())),
+            host.clone(),
+            host_system,
+        );
+        let fake = Fake::with(&[running]);
+        let (installed, release) = installs;
+        let installed = version(installed);
+        assert_eq!(
+            check.check.run(&fake),
+            Ok(Outcome::Installed(Fake::pending(installed.clone())))
+        );
+        let mut expected = vec![
+            Event::BeginCheck,
+            Event::Finish(UpdateCheck::Succeeded { at: NOW }),
+        ];
+        if stepping_stone {
+            expected.push(Event::SteppingStone(installed.clone()));
+        }
+        expected.extend([
+            Event::BeginInstall(installed, release.archive.len() as u64),
+            Event::Install {
+                source: Source::Feed,
+                bytes: release.archive.clone(),
+                signature: key.sign(&release.archive),
+                sha256: hex(ring::digest::digest(&ring::digest::SHA256, &release.archive).as_ref()),
+            },
+        ]);
+        assert_eq!(fake.events(), expected, "{running}");
+    }
+}
+
+#[test]
+fn floors_that_lead_to_no_release_fail_the_check_as_unverified() {
+    let key = TestKey::generate();
+    let newest = floored_release(&key, "1.2.2", "1.2.0", OLD_GLIBC, b"newest");
+    let misnamed = floored_release(&key, "1.2.1", "1.0.0", OLD_GLIBC, b"misnamed");
+    for (host, reason) in [
+        (
+            Host::serving(&newest).publishing("1.2.0", &misnamed),
+            CheckFailure::Verification,
+        ),
+        (Host::serving(&newest), CheckFailure::Network),
+    ] {
+        let data = Data::new();
+        let check = feed_check(
+            &data,
+            Some(trust(&key, &TestKey::generate())),
+            host.clone(),
+            host_system,
+        );
+        let fake = Fake::with(&["1.1.0"]);
+        assert_eq!(check.check.run(&fake), Err(SourceError::Check(reason)));
+        assert_eq!(host.downloads(), 0, "{reason:?}");
+    }
+}
+
+#[test]
+fn a_core_that_runs_its_stepping_stone_checks_at_once() {
+    let fake = Fake::with(&["1.2.0"]);
+    assert_eq!(FeedCheck::first_check(&fake), FIRST_CHECK);
+    fake.state().stepping_stone = true;
+    assert_eq!(FeedCheck::first_check(&fake), Duration::ZERO);
 }
 
 #[test]

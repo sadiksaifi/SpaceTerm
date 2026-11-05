@@ -463,6 +463,54 @@ fn a_version_that_never_became_ready_is_skipped_and_a_transient_failure_stays_pe
 }
 
 #[test]
+fn a_core_restarted_into_a_stepping_stone_reports_it_until_it_checks_its_feed() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let (archive, signature, sha) = archive(&machine, "1.1.0", Protocols::CURRENT);
+        let checking = updates.begin_check().unwrap();
+        checking
+            .begin_install(candidate("1.1.0"), 0, true)
+            .unwrap()
+            .install(Archive {
+                archive: &archive,
+                signature: &signature,
+                sha256: &sha,
+                source: Source::Feed,
+            })
+            .unwrap();
+        assert!(!updates.stepping_stone(), "the Core still runs 1.0.0");
+        updates
+            .begin_check()
+            .unwrap()
+            .finish(UpdateCheck::Succeeded { at: 10 });
+        // The restart into the Pending Version completes.
+        let digest = pending_digest(&data).unwrap().unwrap();
+        record_completed(&data, &digest).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        state.installation = digest;
+        data.write_json(c"service.json", &state).unwrap();
+        let restarted = Updates::open(machine.service.clone()).unwrap();
+        assert_eq!(restarted.facts().running, version("1.1.0"));
+        assert!(
+            restarted.stepping_stone(),
+            "a check before the restart keeps the Stepping Stone"
+        );
+        restarted
+            .begin_check()
+            .unwrap()
+            .finish(UpdateCheck::Succeeded { at: 20 });
+        assert!(!restarted.stepping_stone());
+        assert!(
+            !Updates::open(machine.service.clone())
+                .unwrap()
+                .stepping_stone()
+        );
+    });
+}
+
+#[test]
 fn a_stopped_core_reports_the_facts_it_persisted() {
     with_fixture_trust(|| {
         let machine = machine("1.0.0");
@@ -611,7 +659,7 @@ mod feed_checks {
     }
 
     impl FeedSource for Host {
-        fn feed(&self, _: FeedTarget) -> Result<Signed, FetchError> {
+        fn feed(&self, _: FeedTarget, _: Option<&Version>) -> Result<Signed, FetchError> {
             self.feed.clone().ok_or(FetchError::Network)
         }
         fn archive(

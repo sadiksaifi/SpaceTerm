@@ -3,6 +3,9 @@
 //! Install ends nothing; a later restart moves the Core to the Pending Version.
 //!
 //! - A Release Core checks its own signed feed ([`FeedCheck`]) on a schedule and when asked.
+//!   While the Core is below the newest release's Update Floor, the check steps down to the
+//!   release at that floor ([`feed::walk`]). After a restart into such a Stepping Stone, the
+//!   Core checks again at once.
 //! - Preflight and Development Cores never fetch a feed. They take a desktop push or a local
 //!   archive only.
 //! - Any Core takes a push of a desktop's embedded build ([`Pushes`]) and a local archive.
@@ -51,6 +54,9 @@ pub trait Engine: Send + Sync {
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError>;
     /// Busy while another install, check or restart owns the update operation.
     fn begin_check(&self) -> Result<Self::Checking<'_>, InstallError>;
+    /// Whether the Core runs a Stepping Stone its feed check installed and has not checked
+    /// its feed since.
+    fn stepping_stone(&self) -> bool;
 }
 
 /// An install the engine reports as `Installing` until it ends. Dropping it records nothing.
@@ -68,10 +74,12 @@ pub trait Checking {
     fn admits(&self, candidate: &Candidate) -> Result<(), InstallError>;
     /// Records the check's outcome. The check keeps the operation.
     fn finish(&self, check: UpdateCheck);
+    /// Turns the check into the install of `candidate`, a Stepping Stone when `stepping_stone`.
     fn begin_install(
         self,
         candidate: Candidate,
         total: u64,
+        stepping_stone: bool,
     ) -> Result<Self::Installing, InstallError>;
 }
 
@@ -94,6 +102,9 @@ impl Engine for Updates {
     }
     fn begin_check(&self) -> Result<updates::Checking<'_>, InstallError> {
         Updates::begin_check(self)
+    }
+    fn stepping_stone(&self) -> bool {
+        Updates::stepping_stone(self)
     }
 }
 
@@ -121,8 +132,9 @@ impl Checking for updates::Checking<'_> {
         self,
         candidate: Candidate,
         total: u64,
+        stepping_stone: bool,
     ) -> Result<updates::Installing, InstallError> {
-        updates::Checking::begin_install(self, candidate, total)
+        updates::Checking::begin_install(self, candidate, total, stepping_stone)
     }
 }
 
@@ -239,8 +251,12 @@ impl FeedCheck {
     ) -> Self {
         struct Shared(Arc<dyn FeedSource>);
         impl FeedSource for Shared {
-            fn feed(&self, target: FeedTarget) -> Result<super::fetch::Signed, FetchError> {
-                self.0.feed(target)
+            fn feed(
+                &self,
+                target: FeedTarget,
+                release: Option<&super::facts::Version>,
+            ) -> Result<super::fetch::Signed, FetchError> {
+                self.0.feed(target, release)
             }
             fn archive(
                 &self,
@@ -262,7 +278,8 @@ impl FeedCheck {
         }
     }
 
-    /// Checks the feed once, and installs the release it names when the engine admits it.
+    /// Checks the feed once, and installs the release the floors lead to when the engine admits
+    /// it.
     pub fn run<E: Engine>(&self, engine: &E) -> Result<Outcome, SourceError> {
         // The check owns the engine's update operation from here, so no push or other check can
         // start until it ends or hands over to its own install.
@@ -275,17 +292,21 @@ impl FeedCheck {
         };
         let proxy = proxy::read(&self.data)?;
         let source = (self.sources)(proxy.as_ref());
-        let signed = match source.feed(self.target) {
-            Ok(signed) => signed,
-            Err(error) => {
-                return finish(&checking, Err(check_failure(error))).map(|()| Outcome::Current);
+        let running = engine.facts().running;
+        // A chain of floors that leads to no release is a publishing error, which the Core
+        // treats as a feed that does not verify.
+        let next = feed::walk(&running, |release| {
+            let signed = source.feed(self.target, release).map_err(check_failure)?;
+            let trust = self.trust.as_ref().ok_or(CheckFailure::Verification)?;
+            feed::read(self.target, &signed.feed, &signed.signature, trust, at)
+                .map_err(|_| CheckFailure::Verification)
+        })
+        .and_then(|next| next.ok_or(CheckFailure::Verification));
+        let (verified, stepping_stone) = match next {
+            Ok(next) => (next.feed, next.stepping_stone),
+            Err(failure) => {
+                return finish(&checking, Err(failure)).map(|()| Outcome::Current);
             }
-        };
-        let verified = self.trust.as_ref().and_then(|trust| {
-            feed::read(self.target, &signed.feed, &signed.signature, trust, at).ok()
-        });
-        let Some(verified) = verified else {
-            return finish(&checking, Err(CheckFailure::Verification)).map(|()| Outcome::Current);
         };
         match checking.admits(&verified.candidate()) {
             Ok(()) => {}
@@ -301,7 +322,8 @@ impl FeedCheck {
             return finish(&checking, Err(CheckFailure::SystemTooOld)).map(|()| Outcome::Current);
         }
         finish(&checking, Ok(()))?;
-        let installing = checking.begin_install(verified.candidate(), verified.archive.size)?;
+        let installing =
+            checking.begin_install(verified.candidate(), verified.archive.size, stepping_stone)?;
         self.download(source.as_ref(), &verified, installing)
             .map(Outcome::Installed)
     }
@@ -359,8 +381,18 @@ impl FeedCheck {
         Ok(installing.install(staging.archive(&digest, Source::Feed))?)
     }
 
+    /// How long a Core that starts waits before its first check: none on a Stepping Stone its
+    /// feed check installed, otherwise [`FIRST_CHECK`].
+    pub fn first_check<E: Engine>(engine: &E) -> Duration {
+        if engine.stepping_stone() {
+            Duration::ZERO
+        } else {
+            FIRST_CHECK
+        }
+    }
+
     /// Runs the checks of a running Release Core until `stopping` returns true: first after
-    /// [`FIRST_CHECK`], then every [`CHECK_INTERVAL`].
+    /// [`Self::first_check`], then every [`CHECK_INTERVAL`].
     pub fn spawn<E: Engine + 'static>(
         self: Arc<Self>,
         engine: E,
@@ -369,7 +401,7 @@ impl FeedCheck {
         let _ = std::thread::Builder::new()
             .name("spaceterm-update-check".to_owned())
             .spawn(move || {
-                let mut wait = FIRST_CHECK;
+                let mut wait = Self::first_check(&engine);
                 loop {
                     let until = std::time::Instant::now() + wait;
                     while std::time::Instant::now() < until {
