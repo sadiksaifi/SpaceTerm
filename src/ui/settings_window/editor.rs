@@ -365,9 +365,6 @@ impl SettingsEditor {
     }
 }
 
-/// Why settings from an older SpaceTerm are not in use, and how to keep them.
-pub(crate) const OUTDATED_EXPLANATION: &str = "SpaceTerm is using default settings. To keep yours, install an earlier SpaceTerm release, then update from it.";
-
 impl SaveStatus {
     /// Content-free wording for the footer. No path, no raw native error.
     pub(super) fn message(self) -> &'static str {
@@ -384,7 +381,6 @@ impl SaveStatus {
             }
             Self::Unavailable(SettingsError::Invalid) => "Couldn\u{2019}t read settings",
             Self::Unavailable(SettingsError::Unsupported) => "Newer settings",
-            Self::Unavailable(SettingsError::Outdated) => "Settings from an older SpaceTerm",
             Self::Unavailable(_) => "Settings unavailable",
         }
     }
@@ -398,7 +394,6 @@ impl SaveStatus {
         match self {
             Self::Saved | Self::Saving => None,
             Self::Failed(_) => Some("The change applies until you quit."),
-            Self::Unavailable(SettingsError::Outdated) => Some(OUTDATED_EXPLANATION),
             status if status.recoverable() => Some("SpaceTerm is using default settings."),
             Self::Unavailable(SettingsError::Storage(StorageError::Conflict)) => {
                 Some("Reload to keep editing.")

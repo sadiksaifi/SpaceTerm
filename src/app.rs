@@ -878,73 +878,17 @@ fn check_desktop_state(host: &HostComposition) -> Option<DesktopStateCheck> {
 }
 
 /// Opens the Workspaces with `open` once the desktop state root `data` is readable. Data that
-/// waits for a confirmed reset, or that a newer SpaceTerm wrote, is asked about first in a
-/// temporary window, and Quit leaves it unchanged.
-fn open_after_data_check(
-    data: Option<DesktopStateCheck>,
-    open: Rc<dyn Fn(&mut App)>,
-    cx: &mut App,
-) {
+/// waits for a confirmed reset, or that a newer SpaceTerm wrote, is never read or changed, so
+/// the launch ends instead. Telling the person why, and asking before a reset, is not built yet.
+fn open_after_data_check(data: Option<DesktopStateCheck>, open: Rc<dyn Fn(&mut App)>, cx: &mut App) {
     use crate::migration::StateCheck;
-    use crate::ui::data_reset::{self, DataAction};
-    let Some((store, check)) = data else {
-        open(cx);
-        return;
-    };
-    let alert = match check {
-        StateCheck::Ready { reset } => {
-            open(cx);
-            if !reset.is_empty()
-                && let Some(workspace) = cx
-                    .windows()
-                    .into_iter()
-                    .find_map(|window| window.downcast::<WorkspaceManager>())
-            {
-                cx.defer(move |cx| {
-                    let _ = workspace.update(cx, |_, window, cx| {
-                        let _ = data_reset::notice_alert(&reset).present(window, cx, |_, _| {});
-                    });
-                });
-            }
-            return;
-        }
+    match data.map(|(_, check)| check) {
         // Readers report unavailable storage themselves, as they did before generations.
-        StateCheck::Unavailable => {
-            open(cx);
-            return;
+        None | Some(StateCheck::Ready { .. } | StateCheck::Unavailable) => open(cx),
+        Some(StateCheck::Newer | StateCheck::ResetRequired { .. }) => {
+            eprintln!("SpaceTerm can\u{2019}t read its saved data");
+            cx.quit();
         }
-        StateCheck::Newer => data_reset::newer_alert(),
-        StateCheck::ResetRequired { reason, kinds } => {
-            data_reset::confirmation_alert(reason, &kinds)
-        }
-    };
-    let Ok(host) = open_quit_prompt_host(cx) else {
-        cx.quit();
-        return;
-    };
-    let presented = host.update(cx, |_, window, cx| {
-        alert.present(window, cx, move |outcome, cx| {
-            let reset = matches!(
-                outcome,
-                spaceterm_ui::AlertOutcome::Activated {
-                    action_id: DataAction::Reset,
-                    ..
-                }
-            );
-            let identity =
-                crate::application_identity::ApplicationIdentity::current().directory_name();
-            if reset && crate::migration::reset_state(&store, identity) {
-                // The Workspaces open before the temporary window closes, so its close never
-                // looks like the last window's.
-                open(cx);
-                close_quit_prompt_host(QuitPromptPlace::Host(host), cx);
-            } else {
-                cx.quit();
-            }
-        })
-    });
-    if !matches!(presented, Ok(Ok(_))) {
-        cx.quit();
     }
 }
 

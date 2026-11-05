@@ -202,13 +202,6 @@ impl SettingsWindow {
                     cx,
                 );
             }
-            Ok(Err(SettingsDocumentError::TooOld)) => {
-                return present_import_failure(
-                    "This settings file is from a SpaceTerm too old to import.",
-                    window,
-                    cx,
-                );
-            }
             Ok(Err(_)) => {
                 return present_import_failure("Invalid SpaceTerm settings file.", window, cx);
             }

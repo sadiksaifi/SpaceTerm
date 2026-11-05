@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use spaceterm_connections::migration::StoreCredentials;
 use spaceterm_core::hierarchy::{ClientJournal, Id};
 use spaceterm_core::migration::{
-    self, DataKind, DirectoryStore, FileRule, Mount, PendingReset, Refusal, Registry, StoreError,
+    self, DataKind, DirectoryStore, FileRule, Mount, Refusal, Registry, StoreError,
 };
 use spaceterm_core::protocol::{AgentName, RunId};
 use spaceterm_core::{CoreError, Directory, Lock, LockWait, MachineConnection};
@@ -168,8 +168,8 @@ fn generation_lock(identity: &str) -> Result<Lock, CoreError> {
     Directory::open(&spaceterm_core::cli_state_root(identity)?, true)?.lock(GENERATION_LOCK, false)
 }
 
-/// Brings this CLI's state to this build's generation before any command reads it, and names
-/// the rebuildable data a reset replaced since the last command, once.
+/// Brings this CLI's state to this build's generation before any command reads it, and returns
+/// the rebuildable data a reset replaced since the last call, once.
 pub fn prepare(identity: &str) -> Result<Vec<DataKind>, CoreError> {
     let _lock = generation_lock(identity)?;
     bring(
@@ -185,19 +185,6 @@ fn bring(
     let store = store_at(root);
     migration::run(&REGISTRY, &store, credentials, false).map_err(refusal)?;
     migration::take_notice(&store).map_err(storage)
-}
-
-/// The reset this CLI's state waits for, if any.
-pub fn pending_reset(identity: &str) -> Result<Option<PendingReset>, CoreError> {
-    let _lock = generation_lock(identity)?;
-    migration::pending(&store(identity)?).map_err(storage)
-}
-
-/// Resets this CLI's state that waits for a reset, after the person confirmed it.
-pub fn reset_confirmed(identity: &str) -> Result<Vec<DataKind>, CoreError> {
-    let _lock = generation_lock(identity)?;
-    migration::reset_confirmed(&REGISTRY, &store(identity)?, &mut credentials(identity))
-        .map_err(refusal)
 }
 
 fn refusal(refusal: Refusal) -> CoreError {

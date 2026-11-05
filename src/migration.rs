@@ -101,7 +101,7 @@ pub(crate) fn credentials(identity: &'static str) -> StoreCredentials {
 /// How the desktop state root stands when the desktop launches.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StateCheck {
-    /// Readable. `reset` names the rebuildable data a reset replaced, for a one-time notice.
+    /// Readable. `reset` names the rebuildable data a reset replaced since the last check.
     Ready {
         reset: Vec<DataKind>,
     },
@@ -127,11 +127,6 @@ pub(crate) fn check_state(store: &DirectoryStore, identity: &'static str) -> Sta
         Err(Refusal::Reset { reason, kinds }) => StateCheck::ResetRequired { reason, kinds },
         Err(Refusal::Storage(_)) => StateCheck::Unavailable,
     }
-}
-
-/// Resets the desktop state that waits for a reset, after the person confirmed it.
-pub(crate) fn reset_state(store: &DirectoryStore, identity: &'static str) -> bool {
-    migration::reset_confirmed(&STATE, store, &mut credentials(identity)).is_ok()
 }
 
 /// The desktop state root of this build's identity, or `None` when its directories are unknown.

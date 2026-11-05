@@ -858,7 +858,7 @@ codes! {
     NotRunning = "not_running", Unavailable, true, "SpaceTerm Core is not running.";
     StorageUnavailable = "storage_unavailable", Unavailable, false, "Storage is unavailable.";
     IncompatibleState = "incompatible_state", Unavailable, false, "The saved state is from an incompatible SpaceTerm.";
-    DataResetRequired = "data_reset_required", ActionRequired, false, "Saved data on this machine needs a reset. Review it with: spaceterm reset.";
+    DataResetRequired = "data_reset_required", ActionRequired, false, "Saved data on this machine needs a reset before SpaceTerm can read it.";
     UnsafeStorage = "unsafe_storage", Unavailable, false, "Storage has unsafe permissions.";
     AuthenticationRefused = "authentication_refused", ActionRequired, false, "SpaceTerm couldn\u{2019}t verify the machine or account for this connection.";
     IncompatibleProtocol = "incompatible_protocol", Unavailable, false, "This CLI and SpaceTerm Core on that machine are incompatible. Update the older one.";
@@ -1742,21 +1742,6 @@ pub struct DeviceRef {
 pub struct EndAllSessionsEffects {
     pub ends_sessions: u32,
     pub sessions: Vec<EndedSession>,
-}
-
-/// One data root that waits for a reset, or that a confirmed `reset` replaced.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ResetRoot {
-    /// `core_data` or `cli_state`.
-    pub root: &'static str,
-    pub reason: spaceterm_core::migration::ResetReason,
-    pub kinds: Vec<spaceterm_core::migration::DataKind>,
-}
-
-/// `effects` of `reset`, and `data` after confirmation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ResetEffects {
-    pub reset: Vec<ResetRoot>,
 }
 
 /// `end-all-sessions` after confirmation.

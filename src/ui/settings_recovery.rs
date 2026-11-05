@@ -24,18 +24,18 @@ pub(crate) fn offer_at_launch(workspace: WindowHandle<WorkspaceManager>, cx: &mu
     let Some(runtime) = cx.try_global::<AppearanceRuntime>() else {
         return;
     };
-    let Some(status) = runtime
+    if !runtime
         .settings
         .snapshot()
         .status
-        .filter(|status| status.is_malformed())
-    else {
+        .is_some_and(SettingsError::is_malformed)
+    {
         return;
-    };
+    }
     // The prompt attaches to the window after its first frame, as any other window-modal alert.
     cx.defer(move |cx| {
         let _ = workspace.update(cx, |_, window, cx| {
-            let result = launch_alert(status).present(window, cx, move |outcome, cx| {
+            let result = launch_alert().present(window, cx, move |outcome, cx| {
                 if let AlertOutcome::Activated {
                     action_id: RecoveryAction::Reset,
                     ..
@@ -80,25 +80,12 @@ fn reset(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) {
     });
 }
 
-fn launch_alert(status: SettingsError) -> Alert<RecoveryAction> {
-    let (label, title, detail) = if status == SettingsError::Outdated {
-        (
-            "Settings from an older SpaceTerm",
-            "Settings From an Older SpaceTerm",
-            super::settings_window::OUTDATED_EXPLANATION,
-        )
-    } else {
-        (
-            "Couldn\u{2019}t read settings",
-            "Couldn\u{2019}t Read Settings",
-            "SpaceTerm is using default settings.",
-        )
-    };
+fn launch_alert() -> Alert<RecoveryAction> {
     Alert::new(
         ModalId::new("settings-recovery"),
-        label,
-        title,
-        detail,
+        "Couldn\u{2019}t read settings",
+        "Couldn\u{2019}t Read Settings",
+        "SpaceTerm is using default settings.",
         vec![
             ModalAction::new(
                 RecoveryAction::Reset,
@@ -201,7 +188,7 @@ mod tests {
         let recorded = Rc::clone(&outcome);
         cx.update(|window, cx| {
             root.update(cx, |_, cx| {
-                launch_alert(SettingsError::Invalid)
+                launch_alert()
                     .present(window, cx, move |outcome, _| {
                         if let AlertOutcome::Activated { action_id, .. } = outcome {
                             *recorded.borrow_mut() = Some(action_id);
@@ -231,14 +218,7 @@ mod tests {
     #[test]
     fn every_recovery_prompt_should_satisfy_the_desktop_alert_policy() {
         let policy = spaceterm_ui::ModalDesktopPolicy::mac_os();
-        assert_eq!(
-            launch_alert(SettingsError::Invalid).validate(&policy),
-            Ok(())
-        );
-        assert_eq!(
-            launch_alert(SettingsError::Outdated).validate(&policy),
-            Ok(())
-        );
+        assert_eq!(launch_alert().validate(&policy), Ok(()));
         assert_eq!(failure_alert().validate(&policy), Ok(()));
         assert_eq!(confirmation_alert().validate(&policy), Ok(()));
     }

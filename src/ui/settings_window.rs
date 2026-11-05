@@ -93,7 +93,6 @@ use catalog::SettingsRowId;
 pub(crate) use catalog::SettingsSectionId;
 pub(crate) use command_line_tool::configure_command_line_tool;
 pub(crate) use core_update::update_offered;
-pub(crate) use editor::OUTDATED_EXPLANATION;
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 pub(crate) use machine_selection::configure_core_context;

@@ -131,7 +131,10 @@ fn desktop_state_migration_refuses_newer_data_and_asks_before_resetting_client_r
             .unwrap()
             .is_some()
     );
-    assert!(reset_state(&store, identity));
+    assert_eq!(
+        migration::reset_confirmed(&STATE, &store, &mut migration::NoCredentials),
+        Ok(vec![DataKind::ClientRecords])
+    );
     assert_eq!(
         store.read(Area::Root, "core/desktop/client.json").unwrap(),
         None

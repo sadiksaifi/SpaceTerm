@@ -29,27 +29,14 @@ fn main() -> ExitCode {
     if let Err(error) = resolve_launcher() {
         return finish(command, cli.global.json, contract::from_core_error(error));
     }
-    // The CLI's state reaches this build's generation before any command reads it. `reset`
-    // reads a refusal itself, and SpaceTerm Core's own commands never touch the CLI's state.
+    // The CLI's state reaches this build's generation before any command reads it. SpaceTerm
+    // Core's own commands never touch the CLI's state.
     if !matches!(
         cli.command,
-        Command::Internal(_)
-            | Command::Completion { .. }
-            | Command::Core(args::CoreCommand::Reset(_))
-    ) {
-        match spaceterm_cli::state::prepare(IDENTITY) {
-            Ok(reset) if !reset.is_empty() && !cli.global.json => {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "notice: SpaceTerm couldn\u{2019}t carry this CLI\u{2019}s {} forward from an earlier version, so it started them over.",
-                    spaceterm_core::migration::nouns(&reset)
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                return finish(command, cli.global.json, contract::from_core_error(error));
-            }
-        }
+        Command::Internal(_) | Command::Completion { .. }
+    ) && let Err(error) = spaceterm_cli::state::prepare(IDENTITY)
+    {
+        return finish(command, cli.global.json, contract::from_core_error(error));
     }
     if let args::Command::Machine(command) = &cli.command {
         let result = spaceterm_cli::connection::execute(

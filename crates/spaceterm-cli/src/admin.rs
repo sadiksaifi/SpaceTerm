@@ -12,7 +12,6 @@ pub mod network;
 pub mod offline_token;
 pub mod pair;
 pub mod permissions;
-pub mod reset;
 pub mod setup;
 pub mod status;
 pub mod uninstall;
@@ -179,7 +178,6 @@ pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
             delete_data,
             confirm,
         } => uninstall::run(&context, *delete_data, confirm.as_deref()),
-        CoreCommand::Reset(confirm) => reset::run(&context, confirm.confirm.as_deref()),
     };
     context.credentials.report(&mut reply.envelope);
     reply.notice = notice(&context, command, &reply);
