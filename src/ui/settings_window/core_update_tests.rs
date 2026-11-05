@@ -850,3 +850,26 @@ fn lane_failures_keep_the_rows_classifications() {
         CoreError::Protocol
     );
 }
+
+#[test]
+fn a_core_below_the_included_builds_floor_updates_from_its_own_feed() {
+    use super::{Route, route};
+    use crate::machine_connection::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+    use crate::machine_connection::update::ordering::{Candidate, Floor};
+    let version = |text: &str| Version::parse(text).unwrap();
+    let facts = UpdateFacts {
+        revision: 1,
+        platform: Platform::LinuxX86_64,
+        running: version("1.0.0"),
+        pending: None,
+        sessions: 0,
+        operation: None,
+        check: UpdateCheck::Never,
+        skipped: None,
+        last_failure: None,
+    };
+    let included =
+        |floor: &str| Candidate::new(version("1.2.2"), Some(Floor::parse(floor).unwrap())).unwrap();
+    assert_eq!(route(&included("1.1.0"), &facts), Route::Feed);
+    assert_eq!(route(&included("1.0.0"), &facts), Route::Push);
+}

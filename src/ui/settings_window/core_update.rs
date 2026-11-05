@@ -26,6 +26,7 @@ use crate::machine_connection::service::lane::{LaneAction, LaneOperationState, L
 use crate::machine_connection::service::updates::{Archive, InstallError, Source, Updates};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
 use crate::machine_connection::update::facts::{InstallFailure, StartFailure};
+use crate::machine_connection::update::ordering::{self, Candidate, Refusal};
 use crate::ui::sidebar_window::form::CaptionTone;
 
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
@@ -105,41 +106,56 @@ impl CoreUpdateControl for Service {
             return Ok(None);
         };
         let release = candidate.release()?;
-        let version = release.version().clone();
-        let signature =
-            std::fs::read(candidate.signature()).map_err(|_| CoreError::CandidateMissing)?;
-        let length = std::fs::metadata(candidate.archive())
-            .map_err(|_| CoreError::CandidateMissing)?
-            .len();
-        let mut archive =
-            std::fs::File::open(candidate.archive()).map_err(|_| CoreError::CandidateMissing)?;
-        let pushed = admin::push(
-            &mut session,
-            &admin::PushArchive {
-                candidate: &release,
-                length,
-                sha256: candidate.digest(),
-                signature: &signature,
-            },
-            &mut archive,
-            &mut |_| {},
-        );
-        let facts = match pushed {
-            Ok(facts) => facts,
-            // The Core already has it, as its Pending Version or the running one.
-            Err(LaneError::Code(code)) if code == "not_newer" => {
-                admin::facts(&mut session).map_err(lane_error)?.1
+        let observed = admin::facts(&mut session).map_err(lane_error)?.1;
+        let (facts, expected) = match route(&release, &observed) {
+            Route::Push => {
+                let signature = std::fs::read(candidate.signature())
+                    .map_err(|_| CoreError::CandidateMissing)?;
+                let length = std::fs::metadata(candidate.archive())
+                    .map_err(|_| CoreError::CandidateMissing)?
+                    .len();
+                let mut archive = std::fs::File::open(candidate.archive())
+                    .map_err(|_| CoreError::CandidateMissing)?;
+                let pushed = admin::push(
+                    &mut session,
+                    &admin::PushArchive {
+                        candidate: &release,
+                        length,
+                        sha256: candidate.digest(),
+                        signature: &signature,
+                    },
+                    &mut archive,
+                    &mut |_| {},
+                );
+                let facts = match pushed {
+                    Ok(facts) => facts,
+                    // The Core already has it, as its Pending Version or the running one.
+                    Err(LaneError::Code(code)) if code == "not_newer" => {
+                        admin::facts(&mut session).map_err(lane_error)?.1
+                    }
+                    Err(error) => return Err(lane_error(error)),
+                };
+                (facts, Some(release.version().clone()))
             }
-            Err(error) => return Err(lane_error(error)),
+            // The Core installs the release its own feed leads to, whatever its version.
+            Route::Feed => {
+                let facts = admin::install_from_feed(&mut session)
+                    .map_err(lane_error)?
+                    .1;
+                (facts, None)
+            }
         };
-        if facts.pending.map(|pending| pending.version) != Some(version) {
+        let Some(version) = facts.pending.map(|pending| pending.version) else {
+            return Ok(None);
+        };
+        if expected.is_some_and(|expected| expected != version) {
             return Ok(None);
         }
         let preview = admin::preview(&mut session, LaneAction::Restart).map_err(lane_error)?;
         let (Some(from), Some(to)) = (&preview.effects.from, &preview.effects.to) else {
             return Err(CoreError::Changed);
         };
-        if to.version != candidate.version() {
+        if to.version != version.as_str() {
             return Err(CoreError::Changed);
         }
         let installations = self.installations_directory();
@@ -173,6 +189,32 @@ impl CoreUpdateControl for Service {
 
     fn finish(&self) -> Result<Option<ActivationStatus>, CoreError> {
         self.recover_activation()
+    }
+}
+
+/// How a running Core reaches an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Route {
+    /// It takes the included build over its service lane.
+    Push,
+    /// It runs below the included build's Update Floor, so it updates from its own feed first.
+    Feed,
+}
+
+/// The route for a Core with `facts` to the included `release`, by the order every source
+/// passes through, as "Update from This Mac" decides for a Machine.
+pub(super) fn route(
+    release: &Candidate,
+    facts: &crate::machine_connection::update::facts::UpdateFacts,
+) -> Route {
+    match ordering::admit(
+        release,
+        &facts.running,
+        facts.pending.as_ref().map(|pending| &pending.version),
+        facts.skipped.as_ref(),
+    ) {
+        Err(Refusal::BelowFloor { .. }) => Route::Feed,
+        Ok(()) | Err(Refusal::NotNewer | Refusal::Skipped) => Route::Push,
     }
 }
 
