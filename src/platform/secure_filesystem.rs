@@ -45,7 +45,7 @@ pub(crate) struct PrivateFileSnapshot {
 }
 
 impl SecureEntryIdentity {
-    #[cfg(test)]
+    /// An identity for a document that no file holds, such as the launch window's defaults.
     pub(crate) fn from_opaque(value: impl Any + Eq + Send + Sync) -> Self {
         Self(Arc::new(value))
     }
