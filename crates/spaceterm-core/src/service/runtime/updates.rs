@@ -12,6 +12,7 @@ use crate::update::facts::{
     FailureKind, InstallFailure, OVERDUE_AFTER, Operation, PendingVersion, Platform, Protocols,
     StartFailure, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure, Version,
 };
+use crate::update::ordering::{self, Candidate, Floor};
 use crate::update::source::FactsSource;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -56,6 +57,10 @@ pub enum InstallError {
     /// The version is the one this Core skipped after it failed to start.
     #[error("This SpaceTerm Core version failed to start before.")]
     Skipped,
+    /// The running version is older than the version's Update Floor, so the Core updates to
+    /// `floor` first.
+    #[error("SpaceTerm Core needs an older update first.")]
+    BelowFloor { floor: Floor },
     /// Another install or a restart is in progress.
     #[error("Another SpaceTerm Core update is in progress.")]
     Busy,
@@ -133,6 +138,9 @@ struct Record {
     silent: Option<Attempt>,
     /// The activation whose start failure was recorded last, so it is recorded once.
     activation: Option<[u8; 32]>,
+    /// The version a feed check installed as a Stepping Stone. A Core that runs it checks its
+    /// feed at once, and that check clears it.
+    stepping_stone: Option<Version>,
 }
 
 impl Default for Record {
@@ -145,6 +153,7 @@ impl Default for Record {
             check: UpdateCheck::Never,
             silent: None,
             activation: None,
+            stepping_stone: None,
         }
     }
 }
@@ -353,8 +362,10 @@ const SILENT_RETRY: Duration = Duration::from_secs(300);
 /// breaks off does. It owns its engine handle, so a push can span several lane requests.
 pub struct Installing {
     updates: Updates,
-    version: Version,
+    candidate: Candidate,
     total: u64,
+    /// A feed check installs the candidate as a Stepping Stone.
+    stepping_stone: bool,
 }
 
 /// A feed check in progress. It owns the Core's one update operation and reports `Checking`
@@ -435,26 +446,31 @@ impl Updates {
             .map_err(|_| CoreError::StartupFailed)
     }
 
-    /// Whether an install of `version` would be admitted now. Sources call this before they
+    /// Whether an install of `candidate` would be admitted now. Sources call this before they
     /// download, so a refused version costs nothing.
     ///
     /// # Errors
-    /// Returns NotNewer, Skipped or Busy.
-    pub fn admits(&self, version: &Version) -> Result<(), InstallError> {
+    /// Returns NotNewer, Skipped, BelowFloor or Busy.
+    pub fn admits(&self, candidate: &Candidate) -> Result<(), InstallError> {
         let live = self.shared.lock();
-        self.shared.admits(&live, version)
+        self.shared.admits(&live, candidate)
     }
 
-    /// Begin installing `version` of `total` archive bytes. Facts report `Installing` from now.
+    /// Begin installing `candidate` of `total` archive bytes. Facts report `Installing` from
+    /// now.
     ///
     /// # Errors
     /// Returns what [`Self::admits`] returns.
-    pub fn begin_install(&self, version: Version, total: u64) -> Result<Installing, InstallError> {
+    pub fn begin_install(
+        &self,
+        candidate: Candidate,
+        total: u64,
+    ) -> Result<Installing, InstallError> {
         {
             let mut live = self.shared.lock();
-            self.shared.admits(&live, &version)?;
+            self.shared.admits(&live, &candidate)?;
             live.operation = Some(Operation::Installing {
-                version: version.clone(),
+                version: candidate.version().clone(),
                 received: 0,
                 total,
             });
@@ -462,28 +478,34 @@ impl Updates {
         self.refresh();
         Ok(Installing {
             updates: self.clone(),
-            version,
+            candidate,
             total,
+            stepping_stone: false,
         })
     }
 
     /// Install an archive whose bytes are all present, such as a local file. The declared
-    /// version is the archive's own.
+    /// version and floor are the archive's own.
     ///
     /// # Errors
     /// As [`Installing::install`].
     pub fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError> {
-        let metadata = self
+        let candidate = self
             .shared
             .service
             .inspect_update_candidate(archive.archive, archive.signature, archive.sha256)
+            .and_then(|metadata| metadata.candidate())
             .map_err(|error| verification(archive.archive, error))?;
-        let version = Version::parse(&metadata.version)
-            .map_err(|_| InstallError::Failed(InstallFailure::Verification))?;
         let size = std::fs::metadata(archive.archive).map_or(0, |v| v.len());
-        let installing = self.begin_install(version, size)?;
+        let installing = self.begin_install(candidate, size)?;
         installing.progress(size);
         installing.install(archive)
+    }
+
+    /// Whether this Core runs a Stepping Stone its feed check installed and has not checked its
+    /// feed since.
+    pub fn stepping_stone(&self) -> bool {
+        self.shared.lock().record.stepping_stone.as_ref() == Some(&self.shared.running)
     }
 
     /// Begin a restart. A restart into a Pending Version goes through a helper from the running
@@ -698,12 +720,20 @@ impl Updates {
         }
     }
 
-    fn install_now(&self, version: &Version, archive: Archive<'_>) -> Result<Stored, InstallError> {
+    /// Verifies the archive's signed build document against what its source declared, then
+    /// unpacks it beside the running version.
+    fn install_now(
+        &self,
+        candidate: &Candidate,
+        archive: Archive<'_>,
+        stepping_stone: bool,
+    ) -> Result<Stored, InstallError> {
+        let version = candidate.version();
         let service = &self.shared.service;
         let metadata = service
             .inspect_update_candidate(archive.archive, archive.signature, archive.sha256)
             .map_err(|error| verification(archive.archive, error))?;
-        if metadata.version != version.as_str() {
+        if metadata.version != version.as_str() || metadata.floor != candidate.floor() {
             return Err(InstallError::Failed(InstallFailure::Verification));
         }
         let data = &self.shared.data;
@@ -730,7 +760,7 @@ impl Updates {
             let record = load(data).map_err(InstallError::Core)?;
             let mut live = self.shared.lock();
             live.record = record;
-            self.shared.admits_version(&live, version)?;
+            self.shared.admits_version(&live, candidate)?;
         }
         let size = std::fs::metadata(archive.archive).map_or(0, |v| v.len());
         let installations = service.installations_directory();
@@ -771,6 +801,7 @@ impl Updates {
         };
         let record = change(data, |record| {
             record.pending = Some(stored.clone());
+            record.stepping_stone = stepping_stone.then(|| version.clone());
             // A newer version than the skipped one releases it.
             if record
                 .skipped
@@ -792,23 +823,26 @@ impl Shared {
         self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn admits(&self, live: &Live, version: &Version) -> Result<(), InstallError> {
+    fn admits(&self, live: &Live, candidate: &Candidate) -> Result<(), InstallError> {
         if live.operation.is_some() {
             return Err(InstallError::Busy);
         }
-        self.admits_version(live, version)
+        self.admits_version(live, candidate)
     }
 
     /// Every source passes through the one version order in [`crate::update::ordering`].
-    fn admits_version(&self, live: &Live, version: &Version) -> Result<(), InstallError> {
-        let mut installed = vec![self.running.clone()];
-        installed.extend(live.record.pending.as_ref().map(|p| p.version.clone()));
-        crate::update::ordering::admit(version, &installed, live.record.skipped.as_ref()).map_err(
-            |refusal| match refusal {
-                crate::update::ordering::Refusal::NotNewer => InstallError::NotNewer,
-                crate::update::ordering::Refusal::Skipped => InstallError::Skipped,
-            },
+    fn admits_version(&self, live: &Live, candidate: &Candidate) -> Result<(), InstallError> {
+        ordering::admit(
+            candidate,
+            &self.running,
+            live.record.pending.as_ref().map(|pending| &pending.version),
+            live.record.skipped.as_ref(),
         )
+        .map_err(|refusal| match refusal {
+            ordering::Refusal::NotNewer => InstallError::NotNewer,
+            ordering::Refusal::Skipped => InstallError::Skipped,
+            ordering::Refusal::BelowFloor { floor } => InstallError::BelowFloor { floor },
+        })
     }
 
     fn compose(&self, live: &Live, revision: u64, now: u64) -> UpdateFacts {
@@ -851,7 +885,7 @@ impl Installing {
         {
             let mut live = self.updates.shared.lock();
             live.operation = Some(Operation::Installing {
-                version: self.version.clone(),
+                version: self.candidate.version().clone(),
                 received: received.min(self.total),
                 total: self.total,
             });
@@ -863,16 +897,20 @@ impl Installing {
     /// running version. At most two versions stay on disk: the running one and this one.
     ///
     /// # Errors
-    /// Returns Failed for disk full or a verification failure, NotNewer or Skipped when the
-    /// verified build is a version the Core refuses, and Busy while a restart is in progress.
+    /// Returns Failed for disk full or a verification failure, NotNewer, Skipped or BelowFloor
+    /// when the verified build is a version the Core refuses, and Busy while a restart is in
+    /// progress.
     pub fn install(self, archive: Archive<'_>) -> Result<PendingVersion, InstallError> {
         self.progress(self.total);
-        let result = self.updates.install_now(&self.version, archive);
+        let result = self
+            .updates
+            .install_now(&self.candidate, archive, self.stepping_stone);
         if let Err(InstallError::Failed(failure)) = result
             && (archive.source == Source::Feed
                 || (archive.source == Source::Push && failure == InstallFailure::Verification))
         {
-            self.updates.record_failure(&self.version, failure);
+            self.updates
+                .record_failure(self.candidate.version(), failure);
         }
         self.updates.end_operation(INSTALLING);
         result?;
@@ -884,7 +922,8 @@ impl Installing {
 
     /// The source failed, for example its download broke off. A feed install records it.
     pub fn fail(self, failure: InstallFailure) {
-        self.updates.record_failure(&self.version, failure);
+        self.updates
+            .record_failure(self.candidate.version(), failure);
         self.updates.end_operation(INSTALLING);
     }
 }
@@ -896,34 +935,41 @@ impl Drop for Installing {
 }
 
 impl<'a> Checking<'a> {
-    /// Whether an install of `version` would be admitted once this check hands over to it.
+    /// Whether an install of `candidate` would be admitted once this check hands over to it.
     ///
     /// # Errors
-    /// Returns NotNewer or Skipped.
-    pub fn admits(&self, version: &Version) -> Result<(), InstallError> {
+    /// Returns NotNewer, Skipped or BelowFloor.
+    pub fn admits(&self, candidate: &Candidate) -> Result<(), InstallError> {
         let live = self.updates.shared.lock();
-        self.updates.shared.admits_version(&live, version)
+        self.updates.shared.admits_version(&live, candidate)
     }
 
-    /// Turns this check into the install of `version` of `total` archive bytes, with no moment
-    /// when another install could take the update operation.
+    /// Turns this check into the install of `candidate` of `total` archive bytes, with no
+    /// moment when another install could take the update operation. A `stepping_stone` makes
+    /// the Core that restarts into it check its feed at once.
     ///
     /// # Errors
-    /// Returns NotNewer or Skipped.
-    pub fn begin_install(self, version: Version, total: u64) -> Result<Installing, InstallError> {
+    /// Returns NotNewer, Skipped or BelowFloor.
+    pub fn begin_install(
+        self,
+        candidate: Candidate,
+        total: u64,
+        stepping_stone: bool,
+    ) -> Result<Installing, InstallError> {
         {
             let mut live = self.updates.shared.lock();
-            self.updates.shared.admits_version(&live, &version)?;
+            self.updates.shared.admits_version(&live, &candidate)?;
             live.operation = Some(Operation::Installing {
-                version: version.clone(),
+                version: candidate.version().clone(),
                 received: 0,
                 total,
             });
         }
         let installing = Installing {
             updates: self.updates.clone(),
-            version,
+            candidate,
             total,
+            stepping_stone,
         };
         // The install owns the operation now, so the check must not end it.
         std::mem::forget(self);
@@ -934,8 +980,12 @@ impl<'a> Checking<'a> {
     /// Record the check's outcome, which survives restarts. The check still owns the update
     /// operation until it is dropped or begins an install.
     pub fn finish(&self, check: UpdateCheck) {
+        let running = &self.updates.shared.running;
         if let Ok(record) = change(&self.updates.shared.data, |record| {
             record.check = check;
+            if record.stepping_stone.as_ref() == Some(running) {
+                record.stepping_stone = None;
+            }
             record.clone()
         }) {
             self.updates.shared.lock().record = record;

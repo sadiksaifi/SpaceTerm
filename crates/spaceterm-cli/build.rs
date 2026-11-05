@@ -10,6 +10,7 @@ fn main() {
     for input in [
         "SPACETERM_PACKAGED",
         "SPACETERM_RELEASE_TAG",
+        "SPACETERM_RELEASE_FLOOR",
         "SPACETERM_CLI_SOURCE_STATE",
     ] {
         println!("cargo:rerun-if-env-changed={input}");
@@ -50,12 +51,46 @@ fn main() {
     );
     let source = source.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
     let protocols = protocols(&root);
-    // All strings come from the validated build identity or Cargo's target triple.
+    let floor = floor(release.is_some().then_some(build.version.as_str()));
+    // All strings come from the validated build identity, the validated floor or Cargo's target
+    // triple.
     let document = format!(
-        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"commit\":\"{}\",\"target\":\"{target}\",\"protocols\":{protocols}}}\n",
+        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"floor\":{floor},\"commit\":\"{}\",\"target\":\"{target}\",\"protocols\":{protocols}}}\n",
         build.version, build.commit,
     );
     std::fs::write(output.join("build-info.json"), document).expect("write server build metadata");
+}
+
+/// The build document's `floor` as JSON: the Update Floor the release task computes and passes
+/// as `SPACETERM_RELEASE_FLOOR`, which a release requires and which is never newer than its
+/// `release` version. Development and Preflight builds name a commit and have no order, so their
+/// floor is `null`.
+fn floor(release: Option<&str>) -> String {
+    let floor = std::env::var("SPACETERM_RELEASE_FLOOR").ok();
+    let Some(release) = release else {
+        assert!(floor.is_none(), "only a release takes an Update Floor");
+        return "null".to_owned();
+    };
+    let floor = floor.expect("a release requires SPACETERM_RELEASE_FLOOR");
+    let parts = |text: &str| -> Option<[u64; 3]> {
+        let mut out = [0; 3];
+        let mut parts = text.split('.');
+        for slot in &mut out {
+            let part = parts.next()?;
+            let canonical = part == "0" || !part.starts_with('0');
+            if part.is_empty() || !canonical || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            *slot = part.parse().ok()?;
+        }
+        parts.next().is_none().then_some(out)
+    };
+    let order = parts(&floor).expect("the Update Floor is MAJOR.MINOR.PATCH");
+    assert!(
+        parts(release).is_some_and(|release| order <= release),
+        "the Update Floor is never newer than the release"
+    );
+    format!("\"{floor}\"")
 }
 
 /// The build document's `protocols` object, from the three constants in the Core's

@@ -1,6 +1,7 @@
 //! Signed archive fixtures replace only cryptographic trust and native code-signature observation.
 use super::*;
 use crate::update::facts::Protocols;
+use crate::update::ordering::Floor;
 use ring::signature::KeyPair;
 use std::{
     cell::{Cell, RefCell},
@@ -10,7 +11,16 @@ use std::{
 pub(crate) const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub(crate) const VERSION: &str = "dev.aaaaaaaaaaaa";
 thread_local! { static FIXTURE_TRUST: Cell<bool> = const { Cell::new(false) }; }
-thread_local! { static FIXTURE_BUILD: RefCell<Option<(String, Protocols)>> = const { RefCell::new(None) }; }
+thread_local! { static FIXTURE_BUILD: RefCell<Option<(String, Option<Floor>, Protocols)>> = const { RefCell::new(None) }; }
+
+/// The Update Floor fixtures of `version` declare unless a test names one: one every version
+/// meets for a Release version, and none for a development one.
+pub(crate) fn no_floor(version: &str) -> Option<Floor> {
+    crate::update::facts::Version::parse(version)
+        .ok()?
+        .release()
+        .map(|_| Floor::parse("0.0.0").unwrap())
+}
 
 /// Builds fixtures inside `run` that declare work protocol `major`, as a later release would.
 pub(crate) fn with_major<T>(major: u16, run: impl FnOnce() -> T) -> T {
@@ -22,24 +32,34 @@ pub(crate) fn with_major<T>(major: u16, run: impl FnOnce() -> T) -> T {
 /// Builds fixtures inside `run` that declare `version` and `protocols`. A Release `version`
 /// keeps [`COMMIT`]; a development one must name it.
 pub(crate) fn with_build<T>(version: &str, protocols: Protocols, run: impl FnOnce() -> T) -> T {
-    struct Restore(Option<(String, Protocols)>);
+    with_floor(version, no_floor(version), protocols, run)
+}
+
+/// Builds fixtures inside `run` that declare `version` with the Update Floor `floor`.
+pub(crate) fn with_floor<T>(
+    version: &str,
+    floor: Option<Floor>,
+    protocols: Protocols,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<(String, Option<Floor>, Protocols)>);
     impl Drop for Restore {
         fn drop(&mut self) {
             FIXTURE_BUILD.set(self.0.take());
         }
     }
-    let _restore = Restore(FIXTURE_BUILD.replace(Some((version.to_owned(), protocols))));
+    let _restore = Restore(FIXTURE_BUILD.replace(Some((version.to_owned(), floor, protocols))));
     run()
 }
 
 /// The build document fixtures declare now.
 fn manifest(identity: &str) -> serde_json::Value {
-    let (version, protocols) = FIXTURE_BUILD.with_borrow(|build| {
+    let (version, floor, protocols) = FIXTURE_BUILD.with_borrow(|build| {
         build
             .clone()
-            .unwrap_or((VERSION.to_owned(), Protocols::CURRENT))
+            .unwrap_or((VERSION.to_owned(), None, Protocols::CURRENT))
     });
-    serde_json::json!({"schema":1,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":version,"protocols":protocols})
+    serde_json::json!({"schema":1,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":version,"floor":floor,"protocols":protocols})
 }
 
 pub(super) fn active() -> bool {

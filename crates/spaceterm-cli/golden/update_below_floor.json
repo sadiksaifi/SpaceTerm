@@ -1,0 +1,21 @@
+{
+  "command": "update",
+  "data": {},
+  "error": {
+    "class": "target",
+    "code": "below_floor",
+    "details": {
+      "floor": "1.1.0"
+    },
+    "message": "SpaceTerm Core on that machine is too old to update to this version directly. Update it to the version in details.floor first.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

@@ -1,5 +1,6 @@
 //! Authenticate and retain independent server artifacts without selecting or starting a runtime.
 use super::*;
+use crate::update::ordering::{Candidate, Floor};
 use base64::Engine;
 use std::{
     collections::BTreeSet,
@@ -33,6 +34,22 @@ pub struct CandidateMetadata {
     pub version: String,
     pub commit: String,
     pub protocols: crate::update::facts::Protocols,
+    /// The build's Update Floor, never newer than a Release `version`. None exactly for a
+    /// Preflight or Development build.
+    pub floor: Option<Floor>,
+}
+
+impl CandidateMetadata {
+    /// The build as a source offers it to an update engine: its version and Update Floor.
+    ///
+    /// # Errors
+    /// Returns RuntimeUnavailable for a version the build document cannot hold.
+    pub fn candidate(&self) -> Result<Candidate, CoreError> {
+        crate::update::facts::Version::parse(&self.version)
+            .ok()
+            .and_then(|version| Candidate::new(version, self.floor).ok())
+            .ok_or(CoreError::RuntimeUnavailable)
+    }
 }
 
 /// Authenticate the exact captured archive and signature for one application and target.
@@ -558,6 +575,10 @@ struct Build {
     target: String,
     commit: String,
     version: String,
+    /// Never newer than a Release `version`. Null exactly for a Preflight or Development
+    /// build, whose version names a commit. The key is required.
+    #[serde(deserialize_with = "crate::update::ordering::present")]
+    floor: Option<Floor>,
     protocols: crate::update::facts::Protocols,
     source_sha256: Option<String>,
 }
@@ -567,6 +588,7 @@ impl From<Build> for CandidateMetadata {
             version: info.version,
             commit: info.commit,
             protocols: info.protocols,
+            floor: info.floor,
         }
     }
 }
@@ -623,7 +645,10 @@ impl Build {
                     && (part == "0" || !part.starts_with('0'))
                     && part.bytes().all(|v| v.is_ascii_digit())
             }));
+        let floored = crate::update::facts::Version::parse(&info.version)
+            .is_ok_and(|version| Candidate::new(version, info.floor).is_ok());
         if info.schema != 1
+            || !floored
             || info.identity != identity
             || info.target != target
             || info.version.len() > 64

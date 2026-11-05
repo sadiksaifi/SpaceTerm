@@ -10,7 +10,8 @@ use crate::contract::{self, Code, CoreUpdate, Envelope, Failure, MachineRef};
 use spaceterm_core::service::Service;
 use spaceterm_core::service::lane::Offline;
 use spaceterm_core::service::lane::admin::{self, PushArchive};
-use spaceterm_core::update::facts::{UpdateFacts, Version};
+use spaceterm_core::service::updates::InstallError;
+use spaceterm_core::update::facts::UpdateFacts;
 use spaceterm_core::update::sources::SourceError;
 use std::io::Read;
 use std::path::Path;
@@ -96,8 +97,11 @@ fn stopped(context: &Context<'_>, routed: Routed, files: Option<(&Path, &Path)>)
     }
 }
 
-fn source_failure(error: &SourceError) -> Failure {
-    contract::from_lane_code(error.code())
+pub(crate) fn source_failure(error: &SourceError) -> Failure {
+    match error {
+        SourceError::Install(InstallError::BelowFloor { floor }) => contract::below_floor(*floor),
+        error => contract::from_lane_code(error.code()),
+    }
 }
 
 /// The archive's SHA-256 as 64 lowercase hex digits, and its length.
@@ -150,13 +154,14 @@ fn push(
             .inspect_update_candidate(archive, signature_path, &sha256)
             .map_err(contract::from_core_error)?,
     };
-    let version =
-        Version::parse(&metadata.version).map_err(|_| Failure::new(Code::CandidateUnverified))?;
+    let candidate = metadata
+        .candidate()
+        .map_err(|_| Failure::new(Code::CandidateUnverified))?;
     let mut file = std::fs::File::open(archive).map_err(|_| Failure::new(Code::NoCandidate))?;
     admin::push(
         session,
         &PushArchive {
-            version: &version,
+            candidate: &candidate,
             length,
             sha256: &sha256,
             signature: &signature,

@@ -21,7 +21,7 @@ use super::operations::{
     Action, Actor, Admission, Evidence, HELPER_LOCK, Ledger, OperationId, Record, State,
 };
 use super::tokens::Tokens;
-use super::updates::Updates;
+use super::updates::{InstallError, Updates};
 use super::{RetainedInstallation, Service, runtime};
 use crate::CoreError;
 use crate::diagnostics::TerminalCounterSnapshot;
@@ -34,6 +34,7 @@ use crate::protocol::Preamble;
 use crate::protocol::capability::{Capabilities, Capability, Unavailable};
 use crate::storage::Directory;
 use crate::update::facts::{UpdateFacts, Version};
+use crate::update::ordering::{Candidate, Floor};
 use crate::update::source::FactsSource;
 use crate::update::sources::{FeedCheck, Pushes, Received, SourceError};
 use base64::Engine;
@@ -85,10 +86,13 @@ pub enum LaneRequest {
     Check,
     /// Installs the release the Core's own feed names. Answers `Installed`.
     StageFetch,
-    /// Begins a push of `length` archive bytes of `version`. The Core refuses a version it would
-    /// not install before any byte arrives.
+    /// Begins a push of `length` archive bytes of `version` with the Update Floor `floor`, null
+    /// for a Preflight or Development version. The Core refuses a version it would not install
+    /// before any byte arrives.
     StageUpload {
         version: String,
+        #[serde(deserialize_with = "crate::update::ordering::present")]
+        floor: Option<String>,
         length: u64,
         sha256: String,
         /// Base64.
@@ -211,6 +215,11 @@ pub enum LaneReply {
     /// `code` is a code from the CLI output contract.
     Error {
         code: String,
+    },
+    /// The Core refused a version because its running version is older than the version's
+    /// Update Floor: the CLI output contract's `below_floor`, with the floor it names.
+    BelowFloor {
+        floor: crate::update::ordering::Floor,
     },
 }
 
@@ -621,11 +630,18 @@ impl LaneCore {
             LaneRequest::StageFetch => return (sourced(self.stage_fetch()), None),
             LaneRequest::StageUpload {
                 version,
+                floor,
                 length,
                 sha256,
                 signature,
             } => {
-                let reply = self.stage_upload(connection, &version, length, &sha256, &signature);
+                let reply = self.stage_upload(
+                    connection,
+                    (&version, floor.as_deref()),
+                    length,
+                    &sha256,
+                    &signature,
+                );
                 return (sourced(reply), None);
             }
             LaneRequest::UploadChunk {
@@ -737,16 +753,22 @@ impl LaneCore {
         })
     }
 
+    /// Begins a push of the version and Update Floor `declared`.
     fn stage_upload(
         &self,
         connection: u64,
-        version: &str,
+        (version, floor): (&str, Option<&str>),
         length: u64,
         sha256: &str,
         signature: &str,
     ) -> Result<LaneReply, SourceError> {
-        let (Ok(version), Ok(signature)) = (
-            Version::parse(version),
+        let floor = floor.map(Floor::parse).transpose();
+        let candidate = Version::parse(version)
+            .ok()
+            .zip(floor.ok())
+            .and_then(|(version, floor)| Candidate::new(version, floor).ok());
+        let (Some(candidate), Ok(signature)) = (
+            candidate,
             base64::engine::general_purpose::STANDARD.decode(signature),
         ) else {
             return Err(SourceError::Protocol);
@@ -754,7 +776,7 @@ impl LaneCore {
         let upload = self.pushes.begin(
             self.updates()?,
             connection,
-            version,
+            candidate,
             length,
             sha256,
             &signature,
@@ -1657,8 +1679,13 @@ fn sourced(reply: Result<LaneReply, SourceError>) -> LaneReply {
 }
 
 fn source_error(failure: &SourceError) -> LaneReply {
-    LaneReply::Error {
-        code: failure.code().to_owned(),
+    match failure {
+        SourceError::Install(InstallError::BelowFloor { floor }) => {
+            LaneReply::BelowFloor { floor: *floor }
+        }
+        failure => LaneReply::Error {
+            code: failure.code().to_owned(),
+        },
     }
 }
 

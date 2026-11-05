@@ -364,6 +364,12 @@ install_core() {
     [ "$(json_field identity <"$runtime/build.json")" = spaceterm ] \
         && [ "$(json_field version <"$runtime/build.json")" = "$version" ] \
         || die "$archive does not hold the SpaceTerm Core $version release"
+    # The Update Floor: the oldest version that updates directly to this release.
+    floor="$(json_field floor <"$runtime/build.json")"
+    valid_version "$floor" || die "$archive names no valid Update Floor"
+    if [ -n "$core_running" ] && [ "$(compare_versions "$core_running" "$floor")" = older ]; then
+        die "SpaceTerm Core $core_running is older than $floor, the oldest version that updates directly to SpaceTerm Core $version; install SpaceTerm Core $floor first with --version $floor"
+    fi
     if [ "$platform" = macos-arm64 ]; then
         verify_code "$runtime/SpaceTerm Core.app" "$CORE_IDENTIFIER"
     fi
@@ -410,6 +416,26 @@ locate_installed_core() {
     done
     [ -f "$executable" ] && [ -x "$executable" ] || die "the installed SpaceTerm Core executable is missing"
     core_installed="$executable"
+}
+
+# Sets core_running to the version of the installation the SpaceTerm Core service record approves,
+# the one that runs or starts next, or to "" when no SpaceTerm Core is registered. The launcher
+# is not consulted: an activation that could not replace it leaves it naming another
+# installation, possibly a pruned one. A Pending Version beside the approved one has not run, so
+# it never meets an Update Floor.
+running_core_version() {
+    core_running=""
+    record="$core_data/service.json"
+    [ -e "$record" ] || [ -L "$record" ] || return 0
+    unreadable="the SpaceTerm Core service record could not be read"
+    [ -f "$record" ] && [ ! -L "$record" ] || die "$unreadable"
+    digest="$(json_field installation <"$record")"
+    [ "${#digest}" -eq 64 ] || die "$unreadable"
+    case "$digest" in *[!0-9a-f]*) die "$unreadable" ;; esac
+    approved="$core_data/installations/$digest"
+    [ -f "$approved/build.json" ] || die "the SpaceTerm Core installation the service record approves is missing"
+    core_running="$(json_field version <"$approved/build.json")"
+    valid_version "$core_running" || die "the running SpaceTerm Core version could not be read"
 }
 
 uninstall_core() {
@@ -789,6 +815,7 @@ install() {
 
     # Every refusal that needs no download comes before the first archive download.
     core_before="$(installed_core_version)"
+    running_core_version
     desktop_before=""
     if [ "$desktop" = true ]; then
         if [ "$platform" = macos-arm64 ]; then

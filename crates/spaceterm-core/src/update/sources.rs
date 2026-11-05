@@ -3,19 +3,22 @@
 //! Install ends nothing; a later restart moves the Core to the Pending Version.
 //!
 //! - A Release Core checks its own signed feed ([`FeedCheck`]) on a schedule and when asked.
+//!   While the Core is below the newest release's Update Floor, the check steps down to the
+//!   release at that floor ([`feed::walk`]). After a restart into such a Stepping Stone, the
+//!   Core checks again at once.
 //! - Preflight and Development Cores never fetch a feed. They take a desktop push or a local
 //!   archive only.
 //! - Any Core takes a push of a desktop's embedded build ([`Pushes`]) and a local archive.
 //!
-//! The engine refuses a version that is not newer than every version the Core has, or that it
-//! skipped, from every source ([`super::ordering`]). Sources ask it before they download or
-//! receive anything, so a refused version costs nothing.
+//! The engine refuses a version that is not newer than every version the Core has, that it
+//! skipped, or whose Update Floor is above the running version, from every source
+//! ([`super::ordering`]). Sources ask it before they download or receive anything, so a refused
+//! version costs nothing.
 use super::check;
-use super::facts::{
-    CheckFailure, InstallFailure, PendingVersion, UpdateCheck, UpdateFacts, Version,
-};
+use super::facts::{CheckFailure, InstallFailure, PendingVersion, UpdateCheck, UpdateFacts};
 use super::feed::{self, FeedTarget, MAX_ARCHIVE, SystemVersion};
 use super::fetch::{FeedSource, FetchError, Releases};
+use super::ordering::Candidate;
 use super::proxy::{self, Proxy};
 use super::source::FactsSource;
 use super::trust::{SIGNATURE_BYTES, UpdateTrust};
@@ -43,11 +46,17 @@ pub trait Engine: Send + Sync {
     where
         Self: 'a;
     fn facts(&self) -> UpdateFacts;
-    fn begin_install(&self, version: Version, total: u64)
-    -> Result<Self::Installing, InstallError>;
+    fn begin_install(
+        &self,
+        candidate: Candidate,
+        total: u64,
+    ) -> Result<Self::Installing, InstallError>;
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError>;
     /// Busy while another install, check or restart owns the update operation.
     fn begin_check(&self) -> Result<Self::Checking<'_>, InstallError>;
+    /// Whether the Core runs a Stepping Stone its feed check installed and has not checked
+    /// its feed since.
+    fn stepping_stone(&self) -> bool;
 }
 
 /// An install the engine reports as `Installing` until it ends. Dropping it records nothing.
@@ -61,11 +70,17 @@ pub trait Installing: Send {
 /// it is dropped or becomes the install of the release it found.
 pub trait Checking {
     type Installing;
-    /// Whether the check's own install of `version` would be admitted.
-    fn admits(&self, version: &Version) -> Result<(), InstallError>;
+    /// Whether the check's own install of `candidate` would be admitted.
+    fn admits(&self, candidate: &Candidate) -> Result<(), InstallError>;
     /// Records the check's outcome. The check keeps the operation.
     fn finish(&self, check: UpdateCheck);
-    fn begin_install(self, version: Version, total: u64) -> Result<Self::Installing, InstallError>;
+    /// Turns the check into the install of `candidate`, a Stepping Stone when `stepping_stone`.
+    fn begin_install(
+        self,
+        candidate: Candidate,
+        total: u64,
+        stepping_stone: bool,
+    ) -> Result<Self::Installing, InstallError>;
 }
 
 impl Engine for Updates {
@@ -77,16 +92,19 @@ impl Engine for Updates {
     }
     fn begin_install(
         &self,
-        version: Version,
+        candidate: Candidate,
         total: u64,
     ) -> Result<updates::Installing, InstallError> {
-        Updates::begin_install(self, version, total)
+        Updates::begin_install(self, candidate, total)
     }
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError> {
         Updates::install(self, archive)
     }
     fn begin_check(&self) -> Result<updates::Checking<'_>, InstallError> {
         Updates::begin_check(self)
+    }
+    fn stepping_stone(&self) -> bool {
+        Updates::stepping_stone(self)
     }
 }
 
@@ -104,18 +122,19 @@ impl Installing for updates::Installing {
 
 impl Checking for updates::Checking<'_> {
     type Installing = updates::Installing;
-    fn admits(&self, version: &Version) -> Result<(), InstallError> {
-        updates::Checking::admits(self, version)
+    fn admits(&self, candidate: &Candidate) -> Result<(), InstallError> {
+        updates::Checking::admits(self, candidate)
     }
     fn finish(&self, check: UpdateCheck) {
         updates::Checking::finish(self, check);
     }
     fn begin_install(
         self,
-        version: Version,
+        candidate: Candidate,
         total: u64,
+        stepping_stone: bool,
     ) -> Result<updates::Installing, InstallError> {
-        updates::Checking::begin_install(self, version, total)
+        updates::Checking::begin_install(self, candidate, total, stepping_stone)
     }
 }
 
@@ -165,6 +184,7 @@ pub fn install_code(error: &InstallError) -> &'static str {
     match error {
         InstallError::NotNewer => "not_newer",
         InstallError::Skipped => "version_skipped",
+        InstallError::BelowFloor { .. } => "below_floor",
         InstallError::Busy => "service_busy",
         InstallError::Failed(InstallFailure::DiskFull) => "disk_full",
         InstallError::Failed(InstallFailure::Download) => "download_failed",
@@ -231,13 +251,17 @@ impl FeedCheck {
     ) -> Self {
         struct Shared(Arc<dyn FeedSource>);
         impl FeedSource for Shared {
-            fn feed(&self, target: FeedTarget) -> Result<super::fetch::Signed, FetchError> {
-                self.0.feed(target)
+            fn feed(
+                &self,
+                target: FeedTarget,
+                release: Option<&super::facts::Version>,
+            ) -> Result<super::fetch::Signed, FetchError> {
+                self.0.feed(target, release)
             }
             fn archive(
                 &self,
                 target: FeedTarget,
-                version: &Version,
+                version: &super::facts::Version,
                 size: u64,
                 into: &mut dyn Write,
             ) -> Result<(), FetchError> {
@@ -254,7 +278,8 @@ impl FeedCheck {
         }
     }
 
-    /// Checks the feed once, and installs the release it names when the engine admits it.
+    /// Checks the feed once, and installs the release the floors lead to when the engine admits
+    /// it.
     pub fn run<E: Engine>(&self, engine: &E) -> Result<Outcome, SourceError> {
         // The check owns the engine's update operation from here, so no push or other check can
         // start until it ends or hands over to its own install.
@@ -267,19 +292,23 @@ impl FeedCheck {
         };
         let proxy = proxy::read(&self.data)?;
         let source = (self.sources)(proxy.as_ref());
-        let signed = match source.feed(self.target) {
-            Ok(signed) => signed,
-            Err(error) => {
-                return finish(&checking, Err(check_failure(error))).map(|()| Outcome::Current);
+        let running = engine.facts().running;
+        // A chain of floors that leads to no release is a publishing error, which the Core
+        // treats as a feed that does not verify.
+        let next = feed::walk(&running, |release| {
+            let signed = source.feed(self.target, release).map_err(check_failure)?;
+            let trust = self.trust.as_ref().ok_or(CheckFailure::Verification)?;
+            feed::read(self.target, &signed.feed, &signed.signature, trust, at)
+                .map_err(|_| CheckFailure::Verification)
+        })
+        .and_then(|next| next.ok_or(CheckFailure::Verification));
+        let (verified, stepping_stone) = match next {
+            Ok(next) => (next.feed, next.stepping_stone),
+            Err(failure) => {
+                return finish(&checking, Err(failure)).map(|()| Outcome::Current);
             }
         };
-        let verified = self.trust.as_ref().and_then(|trust| {
-            feed::read(self.target, &signed.feed, &signed.signature, trust, at).ok()
-        });
-        let Some(verified) = verified else {
-            return finish(&checking, Err(CheckFailure::Verification)).map(|()| Outcome::Current);
-        };
-        match checking.admits(&verified.version) {
+        match checking.admits(&verified.candidate()) {
             Ok(()) => {}
             Err(InstallError::NotNewer | InstallError::Skipped) => {
                 return finish(&checking, Ok(())).map(|()| Outcome::Current);
@@ -293,7 +322,8 @@ impl FeedCheck {
             return finish(&checking, Err(CheckFailure::SystemTooOld)).map(|()| Outcome::Current);
         }
         finish(&checking, Ok(()))?;
-        let installing = checking.begin_install(verified.version.clone(), verified.archive.size)?;
+        let installing =
+            checking.begin_install(verified.candidate(), verified.archive.size, stepping_stone)?;
         self.download(source.as_ref(), &verified, installing)
             .map(Outcome::Installed)
     }
@@ -351,8 +381,18 @@ impl FeedCheck {
         Ok(installing.install(staging.archive(&digest, Source::Feed))?)
     }
 
+    /// How long a Core that starts waits before its first check: none on a Stepping Stone its
+    /// feed check installed, otherwise [`FIRST_CHECK`].
+    pub fn first_check<E: Engine>(engine: &E) -> Duration {
+        if engine.stepping_stone() {
+            Duration::ZERO
+        } else {
+            FIRST_CHECK
+        }
+    }
+
     /// Runs the checks of a running Release Core until `stopping` returns true: first after
-    /// [`FIRST_CHECK`], then every [`CHECK_INTERVAL`].
+    /// [`Self::first_check`], then every [`CHECK_INTERVAL`].
     pub fn spawn<E: Engine + 'static>(
         self: Arc<Self>,
         engine: E,
@@ -361,7 +401,7 @@ impl FeedCheck {
         let _ = std::thread::Builder::new()
             .name("spaceterm-update-check".to_owned())
             .spawn(move || {
-                let mut wait = FIRST_CHECK;
+                let mut wait = Self::first_check(&engine);
                 loop {
                     let until = std::time::Instant::now() + wait;
                     while std::time::Instant::now() < until {
@@ -460,14 +500,14 @@ impl Pushes {
         self.slot.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Begins receiving `length` archive bytes of `version` with this digest and signature over
-    /// `connection`. The engine decides first, so a refused version receives nothing. Returns the
-    /// push's random name.
+    /// Begins receiving `length` archive bytes of `candidate` with this digest and signature
+    /// over `connection`. The engine decides first, so a refused version receives nothing.
+    /// Returns the push's random name.
     pub fn begin<E: Engine>(
         &self,
         engine: &E,
         connection: u64,
-        version: Version,
+        candidate: Candidate,
         length: u64,
         sha256: &str,
         signature: &[u8],
@@ -482,7 +522,8 @@ impl Pushes {
         let mut slot = self.slot();
         // A new push replaces an unfinished one, which records nothing.
         *slot = None;
-        let installing: Box<dyn BoxedInstalling> = Box::new(engine.begin_install(version, length)?);
+        let installing: Box<dyn BoxedInstalling> =
+            Box::new(engine.begin_install(candidate, length)?);
         let staging = Staging::create(&self.data)?;
         let file = staging.archive_file()?;
         staging.write_signature(signature)?;

@@ -43,8 +43,9 @@ pub enum FetchError {
 
 /// Where a Release Core's feeds and archives come from.
 pub trait FeedSource: Send + Sync {
-    /// The latest feed for `target` and its signature.
-    fn feed(&self, target: FeedTarget) -> Result<Signed, FetchError>;
+    /// The feed for `target` of `release`, or of the newest release for None, and its
+    /// signature.
+    fn feed(&self, target: FeedTarget, release: Option<&Version>) -> Result<Signed, FetchError>;
     /// Writes exactly `size` bytes of the archive of `version` for `target` into `into`.
     fn archive(
         &self,
@@ -116,11 +117,14 @@ fn classify(error: &ureq::Error, proxied: bool) -> FetchError {
 }
 
 impl FeedSource for Releases {
-    fn feed(&self, target: FeedTarget) -> Result<Signed, FetchError> {
+    fn feed(&self, target: FeedTarget, release: Option<&Version>) -> Result<Signed, FetchError> {
         // One byte over each limit, so the reader refuses an oversized feed or signature as a
         // verification failure instead of a short read.
-        let feed = self.get(&target.feed_url(), MAX_FEED as u64 + 1)?;
-        let signature = self.get(&target.feed_signature_url(), SIGNATURE_BYTES as u64 + 1)?;
+        let feed = self.get(&target.feed_url(release), MAX_FEED as u64 + 1)?;
+        let signature = self.get(
+            &target.feed_signature_url(release),
+            SIGNATURE_BYTES as u64 + 1,
+        )?;
         Ok(Signed { feed, signature })
     }
 
@@ -276,7 +280,7 @@ mod tests {
             &Proxy::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
         ));
         assert_eq!(
-            releases.feed(FeedTarget::CORE_LINUX),
+            releases.feed(FeedTarget::CORE_LINUX, None),
             Err(FetchError::Proxy)
         );
         let request = proxy.join().unwrap();
@@ -343,7 +347,7 @@ mod tests {
         let proxy = configured.agent.config().proxy().unwrap();
         assert_eq!((proxy.host(), proxy.port()), ("127.0.0.1", explicit_port));
         assert_eq!(
-            configured.feed(FeedTarget::CORE_LINUX),
+            configured.feed(FeedTarget::CORE_LINUX, None),
             Err(FetchError::Proxy)
         );
         assert!(

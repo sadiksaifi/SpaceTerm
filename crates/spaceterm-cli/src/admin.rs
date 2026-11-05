@@ -371,6 +371,7 @@ pub fn local_direct(error: spaceterm_core::direct::DirectError) -> Failure {
 pub fn lane_failure(error: LaneError) -> Failure {
     match error {
         LaneError::Code(code) => contract::from_lane_code(&code),
+        LaneError::BelowFloor(floor) => contract::below_floor(floor),
         LaneError::Core(error) => contract::from_core_error(error),
         LaneError::Interrupted => Failure::new(Code::Interrupted),
     }

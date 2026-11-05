@@ -20,11 +20,9 @@ use super::app_paths::AppPaths;
 use super::secure_filesystem::{SecureCommitOutcome, SecureEntryIdentity};
 use crate::application_identity::ApplicationIdentity;
 use crate::updates::policy::UpdateHistory;
-use crate::updates::release_feed::{
-    MAX_ARCHIVE_BYTES, MAX_FEED_BYTES, MAX_FEED_SIGNATURE_BYTES, ReleaseFeed, release_trust,
-};
+use crate::updates::release_feed::{MAX_ARCHIVE_BYTES, ReleaseFeed, release_trust};
 use crate::updates::{UpdateAdapter, UpdateError, UpdateEvent, UpdateTransport};
-use spaceterm_core::update::feed::FeedTarget;
+use spaceterm_core::update::feed::{FeedTarget, SystemVersion};
 use spaceterm_core::update::trust::UpdateTrust;
 
 #[cfg(target_arch = "x86_64")]
@@ -131,6 +129,7 @@ impl UpdateAdapter for LinuxUpdates {
             installation: dependencies.installation.clone(),
             archive_root: dependencies.archive_root,
             current_version: env!("SPACETERM_VERSION"),
+            system: spaceterm_core::update::system::host,
             events,
             cycle: Mutex::new(Cycle::default()),
         });
@@ -295,6 +294,8 @@ struct Shared {
     installation: Installation,
     archive_root: &'static str,
     current_version: &'static str,
+    /// The host's glibc version, which a release must meet.
+    system: fn() -> Option<SystemVersion>,
     events: async_channel::Sender<UpdateEvent>,
     cycle: Mutex<Cycle>,
 }
@@ -344,7 +345,8 @@ impl Shared {
             return;
         }
         match result {
-            Ok(feed) if feed.supersedes(self.current_version) => {
+            // A release that needs a newer system is not offered, as Sparkle skips one on macOS.
+            Ok(feed) if feed.supersedes(self.current_version) && feed.runs_on((self.system)()) => {
                 let (version, published_at) = (feed.version.clone(), feed.published_at);
                 cycle.phase = Phase::Available(feed);
                 drop(cycle);
@@ -369,20 +371,16 @@ impl Shared {
     }
 
     fn fetch_feed(&self) -> Result<ReleaseFeed, UpdateError> {
-        let feed = self
-            .transport
-            .get(&self.target.feed_url(), MAX_FEED_BYTES)
-            .map_err(|_| UpdateError::Check)?;
-        let signature = self
-            .transport
-            .get(&self.target.feed_signature_url(), MAX_FEED_SIGNATURE_BYTES)
-            .map_err(|_| UpdateError::Check)?;
-        ReleaseFeed::verify(
+        ReleaseFeed::next(
             &self.trust,
             self.target,
-            &feed,
-            &signature,
+            self.current_version,
             crate::updates::now(),
+            |url, limit| {
+                self.transport
+                    .get(url, limit)
+                    .map_err(|_| UpdateError::Check)
+            },
         )
     }
 
@@ -768,7 +766,7 @@ impl HistoryFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::updates::release_feed::testing::ReleaseSigner;
+    use crate::updates::release_feed::testing::{MINIMUM, ReleaseSigner};
     use std::collections::HashMap;
 
     const ROOT: &str = "spaceterm";
@@ -1008,18 +1006,41 @@ mod tests {
     }
 
     fn served(signer: &ReleaseSigner, version: &str, archive: &[u8]) -> ServedRelease {
+        published(signer, &[(version, "0.0.0", MINIMUM, archive)])
+    }
+
+    /// Serves `releases`, as `(version, floor, minimum system, archive)` and newest first, at
+    /// their versions, and the first as the newest release.
+    fn published(
+        signer: &ReleaseSigner,
+        releases: &[(&str, &str, SystemVersion, &[u8])],
+    ) -> ServedRelease {
         let target = FeedTarget::DESKTOP_LINUX;
-        let (feed, signature) = signer.feed(target, version, crate::updates::now() - 60, archive);
-        ServedRelease(HashMap::from([
-            (target.feed_url(), feed),
-            (target.feed_signature_url(), signature),
-            (
+        let mut served = HashMap::new();
+        for (index, &(version, floor, minimum, archive)) in releases.iter().enumerate() {
+            let (feed, signature) = signer.floored_feed(
+                target,
+                version,
+                floor,
+                minimum,
+                crate::updates::now() - 60,
+                archive,
+            );
+            let parsed = spaceterm_core::update::facts::Version::parse(version).unwrap();
+            if index == 0 {
+                served.insert(target.feed_url(None), feed.clone());
+                served.insert(target.feed_signature_url(None), signature.clone());
+            }
+            served.insert(target.feed_url(Some(&parsed)), feed);
+            served.insert(target.feed_signature_url(Some(&parsed)), signature);
+            served.insert(
                 format!(
                     "https://github.com/sadiksaifi/SpaceTerm/releases/download/v{version}/spaceterm-desktop-{version}-linux-x86_64.tar.gz"
                 ),
                 archive.to_vec(),
-            ),
-        ]))
+            );
+        }
+        ServedRelease(served)
     }
 
     fn shared(
@@ -1035,6 +1056,7 @@ mod tests {
             installation: fixture.installation.clone(),
             archive_root: ROOT,
             current_version: "1.0.0",
+            system: || Some(MINIMUM),
             events,
             cycle: Mutex::new(Cycle::default()),
         });
@@ -1095,6 +1117,79 @@ mod tests {
             .unwrap();
         shared.check(generation);
         assert_eq!(drained(&receiver), ["UpToDate", "Finished"]);
+    }
+
+    #[test]
+    fn linux_desktop_below_the_newest_floor_should_install_the_release_at_that_floor() {
+        let fixture = installed("old");
+        let signer = ReleaseSigner::new(3);
+        let transport = published(
+            &signer,
+            &[
+                ("1.2.0", "1.1.0", MINIMUM, &release(b"newest")),
+                ("1.1.0", "1.0.0", MINIMUM, &release(b"stone")),
+            ],
+        );
+        let (shared, receiver) = shared(&fixture, transport, signer.trust());
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
+        shared.check(generation);
+        assert_eq!(
+            drained(&receiver),
+            ["ReleaseMetadata", "Available(\"1.1.0\")"]
+        );
+        let Phase::Available(feed) = std::mem::take(&mut shared.lock().phase) else {
+            panic!("the Stepping Stone should be available");
+        };
+        shared.lock().phase = Phase::Downloading;
+        shared.download(&feed, generation);
+        assert_eq!(drained(&receiver), ["Downloading", "Verifying", "Ready"]);
+        fixture.installation.replace().unwrap();
+        assert_eq!(installed_contents(&fixture.installation), "stone");
+    }
+
+    #[test]
+    fn linux_floors_that_lead_to_no_release_should_fail_verification() {
+        let fixture = installed("old");
+        let signer = ReleaseSigner::new(3);
+        let transport = published(
+            &signer,
+            &[
+                ("1.2.0", "1.1.0", MINIMUM, &release(b"newest")),
+                ("1.1.0", "1.1.0", MINIMUM, &release(b"stone")),
+            ],
+        );
+        let (shared, receiver) = shared(&fixture, transport, signer.trust());
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
+        shared.check(generation);
+        assert_eq!(drained(&receiver), ["Failed(Verification)", "Finished"]);
+    }
+
+    #[test]
+    fn linux_stepping_stone_for_a_newer_system_should_not_be_offered() {
+        let fixture = installed("old");
+        let signer = ReleaseSigner::new(3);
+        let newer = SystemVersion {
+            major: 2,
+            minor: 39,
+        };
+        let transport = published(
+            &signer,
+            &[
+                ("1.2.0", "1.1.0", MINIMUM, &release(b"newest")),
+                ("1.1.0", "1.0.0", newer, &release(b"stone")),
+            ],
+        );
+        let (shared, receiver) = shared(&fixture, transport, signer.trust());
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
+        shared.check(generation);
+        assert_eq!(drained(&receiver), ["UpToDate", "Finished"]);
+        assert!(matches!(shared.lock().phase, Phase::Idle));
     }
 
     #[test]
@@ -1350,12 +1445,12 @@ mod tests {
         let trust =
             UpdateTrust::parse(&fs::read(directory.join("update-trust.json")).unwrap()).unwrap();
         let target = FeedTarget::DESKTOP_LINUX;
-        let feed = ReleaseFeed::verify(
+        let feed = ReleaseFeed::next(
             &trust,
             target,
-            &fs::read(directory.join(target.feed())).unwrap(),
-            &fs::read(directory.join(target.feed_signature())).unwrap(),
+            "dev.0123456789ab",
             crate::updates::now(),
+            |url, _| Ok(fs::read(directory.join(url.rsplit('/').next().unwrap())).unwrap()),
         )
         .unwrap();
         let name = feed.archive.url.rsplit('/').next().unwrap();

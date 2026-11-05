@@ -20,12 +20,17 @@ use crate::machine_connection::service::activation::{
     ActivationPhase, ActivationStatus, is_released_downgrade,
 };
 use crate::machine_connection::service::control::{BuildName, UpdateWording, build_labels};
+use crate::machine_connection::service::lane::Offline;
 use crate::machine_connection::service::lane::admin;
 use crate::machine_connection::service::lane::client::{LaneError, Outcome};
 use crate::machine_connection::service::lane::{LaneAction, LaneOperationState, LaneVersion};
 use crate::machine_connection::service::updates::{Archive, InstallError, Source, Updates};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
-use crate::machine_connection::update::facts::{InstallFailure, StartFailure, Version};
+use crate::machine_connection::update::facts::{
+    InstallFailure, StartFailure, UpdateFacts as EngineFacts,
+};
+use crate::machine_connection::update::ordering::{self, Candidate, Refusal};
+use crate::machine_connection::update::sources::SourceError;
 use crate::ui::sidebar_window::form::CaptionTone;
 
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
@@ -98,48 +103,72 @@ impl CoreUpdateControl for Service {
             let (session, _) = admin::open(&lane, &pending).map_err(lane_error)?;
             Ok((lane, pending, session))
         });
+        let release = candidate.release()?;
         let Ok((lane, pending, mut session)) = opened else {
             // A stopped Core installs through its own engine here, and starts into the Pending
             // Version on its next start. Nothing waits for confirmation.
-            install_stopped(self, &candidate)?;
+            install_stopped(
+                self,
+                &release,
+                Archive {
+                    archive: candidate.archive(),
+                    signature: candidate.signature(),
+                    sha256: candidate.digest(),
+                    source: Source::Local,
+                },
+            )?;
             return Ok(None);
         };
-        let version =
-            Version::parse(candidate.version()).map_err(|_| CoreError::RuntimeUnavailable)?;
-        let signature =
-            std::fs::read(candidate.signature()).map_err(|_| CoreError::CandidateMissing)?;
-        let length = std::fs::metadata(candidate.archive())
-            .map_err(|_| CoreError::CandidateMissing)?
-            .len();
-        let mut archive =
-            std::fs::File::open(candidate.archive()).map_err(|_| CoreError::CandidateMissing)?;
-        let pushed = admin::push(
-            &mut session,
-            &admin::PushArchive {
-                version: &version,
-                length,
-                sha256: candidate.digest(),
-                signature: &signature,
-            },
-            &mut archive,
-            &mut |_| {},
-        );
-        let facts = match pushed {
-            Ok(facts) => facts,
-            // The Core already has it, as its Pending Version or the running one.
-            Err(LaneError::Code(code)) if code == "not_newer" => {
-                admin::facts(&mut session).map_err(lane_error)?.1
+        let observed = admin::facts(&mut session).map_err(lane_error)?.1;
+        let (facts, expected) = match route(&release, &observed) {
+            Route::Push => {
+                let signature = std::fs::read(candidate.signature())
+                    .map_err(|_| CoreError::CandidateMissing)?;
+                let length = std::fs::metadata(candidate.archive())
+                    .map_err(|_| CoreError::CandidateMissing)?
+                    .len();
+                let mut archive = std::fs::File::open(candidate.archive())
+                    .map_err(|_| CoreError::CandidateMissing)?;
+                let pushed = admin::push(
+                    &mut session,
+                    &admin::PushArchive {
+                        candidate: &release,
+                        length,
+                        sha256: candidate.digest(),
+                        signature: &signature,
+                    },
+                    &mut archive,
+                    &mut |_| {},
+                );
+                let facts = match pushed {
+                    Ok(facts) => facts,
+                    // The Core already has it, as its Pending Version or the running one.
+                    Err(LaneError::Code(code)) if code == "not_newer" => {
+                        admin::facts(&mut session).map_err(lane_error)?.1
+                    }
+                    Err(error) => return Err(lane_error(error)),
+                };
+                (facts, Some(release.version().clone()))
             }
-            Err(error) => return Err(lane_error(error)),
+            // The Core installs the release its own feed leads to, whatever its version.
+            Route::Feed => {
+                let facts = admin::install_from_feed(&mut session)
+                    .map_err(lane_error)?
+                    .1;
+                (facts, None)
+            }
         };
-        if facts.pending.map(|pending| pending.version) != Some(version) {
+        let Some(version) = facts.pending.map(|pending| pending.version) else {
+            return Ok(None);
+        };
+        if expected.is_some_and(|expected| expected != version) {
             return Ok(None);
         }
         let preview = admin::preview(&mut session, LaneAction::Restart).map_err(lane_error)?;
         let (Some(from), Some(to)) = (&preview.effects.from, &preview.effects.to) else {
             return Err(CoreError::Changed);
         };
-        if to.version != candidate.version() {
+        if to.version != version.as_str() {
             return Err(CoreError::Changed);
         }
         let installations = self.installations_directory();
@@ -176,26 +205,85 @@ impl CoreUpdateControl for Service {
     }
 }
 
-/// Installs the included build into a stopped Core through its update engine.
-fn install_stopped(
-    service: &Service,
-    candidate: &crate::local_startup::Candidate,
+/// How a running Core reaches an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Route {
+    /// It takes the included build over its service lane.
+    Push,
+    /// It runs below the included build's Update Floor, so it updates from its own feed first.
+    Feed,
+}
+
+/// The route for a Core with `facts` to the included `release`, by the order every source
+/// passes through, as "Update from This Mac" decides for a Machine.
+pub(super) fn route(release: &Candidate, facts: &EngineFacts) -> Route {
+    match ordering::admit(
+        release,
+        &facts.running,
+        facts.pending.as_ref().map(|pending| &pending.version),
+        facts.skipped.as_ref(),
+    ) {
+        Err(Refusal::BelowFloor { .. }) => Route::Feed,
+        Ok(()) | Err(Refusal::NotNewer | Refusal::Skipped) => Route::Push,
+    }
+}
+
+/// A stopped Core's own update engine, which installs without its service lane.
+pub(super) trait StoppedCore {
+    /// The engine's persisted facts.
+    fn facts(&self) -> Result<EngineFacts, CoreError>;
+    /// Installs a signed local archive.
+    fn install(&self, archive: Archive<'_>) -> Result<(), InstallError>;
+    /// Installs the release the Core's own feed leads to.
+    fn install_from_feed(&self) -> Result<(), SourceError>;
+}
+
+impl StoppedCore for Service {
+    fn facts(&self) -> Result<EngineFacts, CoreError> {
+        Updates::stored(self)
+    }
+
+    fn install(&self, archive: Archive<'_>) -> Result<(), InstallError> {
+        Updates::open(self.clone())
+            .map_err(InstallError::Core)?
+            .install(archive)
+            .map(drop)
+    }
+
+    fn install_from_feed(&self) -> Result<(), SourceError> {
+        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+        Offline::new(identity)
+            .map_err(|error| SourceError::Install(InstallError::Core(error)))?
+            .install_from_feed()
+            .map(drop)
+    }
+}
+
+/// Installs the included `release` into a stopped Core through its update engine, by the same
+/// route a running Core takes. Below the release's Update Floor, the Core installs from its own
+/// feed and stays stopped.
+pub(super) fn install_stopped(
+    core: &impl StoppedCore,
+    release: &Candidate,
+    archive: Archive<'_>,
 ) -> Result<(), CoreError> {
-    let updates = Updates::open(service.clone())?;
-    match updates.install(Archive {
-        archive: candidate.archive(),
-        signature: candidate.signature(),
-        sha256: candidate.digest(),
-        source: Source::Local,
-    }) {
-        Ok(_) | Err(InstallError::NotNewer) => Ok(()),
-        Err(error) => Err(install_error(error)),
+    match route(release, &core.facts()?) {
+        Route::Push => match core.install(archive) {
+            Ok(()) | Err(InstallError::NotNewer) => Ok(()),
+            Err(error) => Err(install_error(error)),
+        },
+        Route::Feed => core.install_from_feed().map_err(|error| match error {
+            SourceError::Install(error) => install_error(error),
+            error => lane_error(LaneError::Code(error.code().into())),
+        }),
     }
 }
 
 fn install_error(error: InstallError) -> CoreError {
     match error {
-        InstallError::NotNewer | InstallError::Skipped => CoreError::CandidateMissing,
+        InstallError::NotNewer | InstallError::Skipped | InstallError::BelowFloor { .. } => {
+            CoreError::CandidateMissing
+        }
         InstallError::Busy => CoreError::ServiceBusy,
         InstallError::Failed(InstallFailure::Verification) => CoreError::RuntimeUnavailable,
         InstallError::Failed(_) => CoreError::StorageUnavailable,
@@ -208,6 +296,7 @@ pub(super) fn lane_error(error: LaneError) -> CoreError {
     match error {
         LaneError::Core(error) => error,
         LaneError::Interrupted => CoreError::Changed,
+        LaneError::BelowFloor(_) => CoreError::CandidateMissing,
         LaneError::Code(code) => match code.as_str() {
             "changed" | "candidate_changed" => CoreError::Changed,
             "service_busy" => CoreError::ServiceBusy,
