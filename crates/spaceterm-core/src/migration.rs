@@ -326,6 +326,13 @@ pub fn run(
     result
 }
 
+/// Whether the root in `store` is at the registry's current generation with nothing for [`run`]
+/// to finish, read without changing anything.
+pub fn is_current(registry: &Registry, store: &dyn Store) -> Result<bool, StoreError> {
+    let current = Some(registry.generations.current);
+    Ok(marker(store, Area::Root)? == current && marker(store, Area::Backup)? != current)
+}
+
 /// The reset the root in `store` waits for, as the last [`run`] that refused it recorded.
 pub fn pending(store: &dyn Store) -> Result<Option<PendingReset>, StoreError> {
     Ok(store

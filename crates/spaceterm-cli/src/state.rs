@@ -166,27 +166,44 @@ fn credentials(identity: &str) -> StoreCredentials {
     })
 }
 
-fn generation_lock(identity: &str) -> Result<Lock, CoreError> {
-    Directory::open(&spaceterm_core::cli_state_root(identity)?, true)?.lock(GENERATION_LOCK, false)
-}
-
-/// Brings this CLI's state to this build's generation before any command reads it, and returns
-/// the rebuildable data a reset replaced since the last call, once.
-pub fn prepare(identity: &str) -> Result<Vec<DataKind>, CoreError> {
-    let _lock = generation_lock(identity)?;
-    bring(
+/// Brings this CLI's state to this build's generation before any command reads it. The command
+/// holds the returned shared guard until it ends: every other command shares the root, and only
+/// a migration or a reset takes it alone.
+pub fn prepare(identity: &str) -> Result<Lock, CoreError> {
+    let returned = || {
+        let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
+        spaceterm_core::service::Service::for_identity(identity)?.returned_to(&executable)
+    };
+    prepare_at(
         spaceterm_core::cli_state_root(identity)?,
         &mut credentials(identity),
+        &returned,
     )
 }
 
-fn bring(
+/// How many times [`prepare_at`] migrates before it gives up on a root that other CLIs keep
+/// changing.
+const ATTEMPTS: usize = 4;
+
+fn prepare_at(
     root: PathBuf,
     credentials: &mut dyn migration::Credentials,
-) -> Result<Vec<DataKind>, CoreError> {
+    returned: &dyn Fn() -> Result<bool, CoreError>,
+) -> Result<Lock, CoreError> {
+    let directory = Directory::open(&root, true)?;
     let store = store_at(root);
-    migration::run(&REGISTRY, &store, credentials, false).map_err(refusal)?;
-    migration::take_notice(&store).map_err(storage)
+    for _ in 0..ATTEMPTS {
+        let shared = directory.lock_shared(GENERATION_LOCK)?;
+        if migration::is_current(&REGISTRY, &store).map_err(storage)? {
+            return Ok(shared);
+        }
+        drop(shared);
+        let _alone = directory.lock(GENERATION_LOCK, false)?;
+        // An activation that returned to this CLI may leave the state its candidate migrated.
+        let returned = returned().unwrap_or(false);
+        migration::run(&REGISTRY, &store, credentials, returned).map_err(refusal)?;
+    }
+    Err(CoreError::StorageUnavailable)
 }
 
 fn refusal(refusal: Refusal) -> CoreError {
@@ -464,7 +481,8 @@ mod tests {
     fn the_state_root_reaches_this_generation_or_refuses_unchanged() {
         let state = temporary("generation");
         let mut none = migration::NoCredentials;
-        assert_eq!(bring(state.root.clone(), &mut none), Ok(Vec::new()));
+        let never = || Ok(false);
+        drop(prepare_at(state.root.clone(), &mut none, &never).unwrap());
         let marker = state.root.join("generation.json");
         assert_eq!(
             std::fs::read(&marker).unwrap(),
@@ -476,13 +494,68 @@ mod tests {
         std::fs::write(runs.join("runs.json"), br#"{"runs":[]}"#).unwrap();
         std::fs::write(&marker, br#"{"generation":2}"#).unwrap();
         assert_eq!(
-            bring(state.root.clone(), &mut none),
-            Err(CoreError::IncompatibleState)
+            prepare_at(state.root.clone(), &mut none, &never).err(),
+            Some(CoreError::IncompatibleState)
         );
         assert_eq!(std::fs::read(&marker).unwrap(), br#"{"generation":2}"#);
         assert_eq!(
             std::fs::read(runs.join("runs.json")).unwrap(),
             br#"{"runs":[]}"#
+        );
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn a_command_shares_the_state_root_so_no_migration_runs_beneath_it() {
+        let state = temporary("migration-shared");
+        let guard = prepare_at(state.root.clone(), &mut migration::NoCredentials, &|| {
+            Ok(false)
+        })
+        .unwrap();
+        let directory = Directory::open(&state.root, false).unwrap();
+        assert!(directory.try_lock(GENERATION_LOCK).unwrap().is_none());
+        let other = prepare_at(state.root.clone(), &mut migration::NoCredentials, &|| {
+            Ok(false)
+        })
+        .unwrap();
+        drop((guard, other));
+        assert!(directory.try_lock(GENERATION_LOCK).unwrap().is_some());
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn an_activation_return_brings_back_the_state_its_candidate_migrated() {
+        use migration::{Area, Store};
+        let state = temporary("migration-return");
+        drop(
+            prepare_at(state.root.clone(), &mut migration::NoCredentials, &|| {
+                Ok(false)
+            })
+            .unwrap(),
+        );
+        let store = store_at(state.root.clone());
+        store
+            .write(Area::Backup, "generation.json", br#"{"generation":1}"#)
+            .unwrap();
+        store
+            .write(Area::Root, "generation.json", br#"{"generation":2}"#)
+            .unwrap();
+        assert_eq!(
+            prepare_at(state.root.clone(), &mut migration::NoCredentials, &|| Ok(
+                false
+            ))
+            .err(),
+            Some(CoreError::IncompatibleState)
+        );
+        drop(
+            prepare_at(state.root.clone(), &mut migration::NoCredentials, &|| {
+                Ok(true)
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            store.read(Area::Root, "generation.json").unwrap(),
+            Some(br#"{"generation":1}"#.to_vec())
         );
         std::fs::remove_dir_all(&state.root).unwrap();
     }
@@ -502,7 +575,7 @@ mod tests {
         use spaceterm_core::migration::fixtures;
         let root = fixtures::scratch("cli-state");
         let mut none = migration::NoCredentials;
-        bring(root.clone(), &mut none).unwrap();
+        drop(prepare_at(root.clone(), &mut none, &|| Ok(false)).unwrap());
         let directory = |path: &str| Directory::open(&root.join(path), true).unwrap();
         directory("")
             .write_json(

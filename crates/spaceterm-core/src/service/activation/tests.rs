@@ -1376,6 +1376,17 @@ fn a_return_restores_the_data_generation_a_candidate_migrated_from() {
         .unwrap();
         assert_eq!(marker, serde_json::json!({ "generation": 1 }));
         assert!(crate::migration::core_data::prepare(&service.paths).is_ok());
+        // The CLI of the version it returned to may restore its own state the same way.
+        assert!(
+            service
+                .returned_to(&previous.directory.join("bin/spaceterm"))
+                .unwrap()
+        );
+        assert!(
+            !service
+                .returned_to(&candidate.directory.join("bin/spaceterm"))
+                .unwrap()
+        );
     });
 }
 

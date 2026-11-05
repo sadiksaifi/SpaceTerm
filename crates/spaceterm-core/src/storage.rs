@@ -317,6 +317,16 @@ impl Directory {
         }
         Ok(Lock(file))
     }
+    /// Take a shared lock that ends when the returned guard drops. Shared holders exclude only
+    /// an exclusive [`Self::lock`] of the same name.
+    pub fn lock_shared(&self, name: &str) -> Result<Lock, CoreError> {
+        let file = self.file(name, true)?;
+        // SAFETY: flock acts only on the supplied live descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(CoreError::StorageUnavailable);
+        }
+        Ok(Lock(file))
+    }
     /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
     pub fn try_lock(&self, name: &str) -> Result<Option<Lock>, CoreError> {
         let file = self.file(name, true)?;

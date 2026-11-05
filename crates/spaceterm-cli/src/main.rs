@@ -31,13 +31,20 @@ fn main() -> ExitCode {
     }
     // The CLI's state reaches this build's generation before any command reads it. SpaceTerm
     // Core's own commands never touch the CLI's state.
-    if !matches!(
+    // The command shares the root through this guard until it ends.
+    let _state = if matches!(
         cli.command,
         Command::Internal(_) | Command::Completion { .. }
-    ) && let Err(error) = spaceterm_cli::state::prepare(IDENTITY)
-    {
-        return finish(command, cli.global.json, contract::from_core_error(error));
-    }
+    ) {
+        None
+    } else {
+        match spaceterm_cli::state::prepare(IDENTITY) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                return finish(command, cli.global.json, contract::from_core_error(error));
+            }
+        }
+    };
     if let args::Command::Machine(command) = &cli.command {
         let result = spaceterm_cli::connection::execute(
             command,
