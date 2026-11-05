@@ -101,6 +101,9 @@ pub(crate) enum RemoteFailure {
     Capacity,
     /// The server found no newer release for itself.
     NoUpdate,
+    /// The server runs below the release's Update Floor and must install that floor version
+    /// first, which it can't fetch itself.
+    BelowFloor(spaceterm_core::update::ordering::Floor),
     /// The server couldn't verify the release it fetched.
     Unverified,
     /// An earlier update on the server hasn't finished, so it takes no other.
@@ -148,8 +151,7 @@ impl RemoteFailure {
     pub(crate) fn of_lane(error: LaneError) -> Self {
         match error {
             LaneError::Code(code) => Self::of_code(&code),
-            // The Machine must take an older update first, so this one is not installable.
-            LaneError::BelowFloor(_) => Self::NoUpdate,
+            LaneError::BelowFloor(floor) => Self::BelowFloor(floor),
             LaneError::Core(error) => Self::of_core(error),
             LaneError::Interrupted => Self::Failed,
         }
@@ -173,6 +175,10 @@ impl RemoteFailure {
                 format!("{name} holds too many unfinished changes. Try again later.")
             }
             Self::NoUpdate => format!("{name} found no newer release to install."),
+            Self::BelowFloor(floor) => format!(
+                "{name} needs SpaceTerm Core {floor} before it can update. Install {floor} on \
+                 {name}, then try again."
+            ),
             Self::Unverified => {
                 format!("{name} couldn\u{2019}t verify the update, so nothing changed.")
             }
