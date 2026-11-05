@@ -874,11 +874,9 @@ fn open_after_data_check(host: &Rc<HostComposition>, launch: Rc<dyn Fn(&mut App)
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
     let store =
         crate::migration::current_state_store(host.adapters.core_context_paths.directories());
-    let check = store
-        .as_ref()
-        .map_or(StateCheck::Unavailable, |store| {
-            crate::migration::check_state(store, identity)
-        });
+    let check = store.as_ref().map_or(StateCheck::Unavailable, |store| {
+        crate::migration::check_state(store, identity)
+    });
     let alert = match check {
         StateCheck::Ready { reset } => {
             if let Some(store) = store

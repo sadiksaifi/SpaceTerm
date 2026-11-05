@@ -35,16 +35,19 @@ pub(crate) fn offer_at_launch(workspace: WindowHandle<WorkspaceManager>, cx: &mu
     // The prompt attaches to the window after its first frame, as any other window-modal alert.
     cx.defer(move |cx| {
         let _ = workspace.update(cx, |_, window, cx| {
-            let result = launch_alert(status, crate::migration::stepping_stone())
-                .present(window, cx, move |outcome, cx| {
-                if let AlertOutcome::Activated {
-                    action_id: RecoveryAction::Reset,
-                    ..
-                } = outcome
-                {
-                    reset(workspace, cx);
-                }
-            });
+            let result = launch_alert(status, crate::migration::stepping_stone()).present(
+                window,
+                cx,
+                move |outcome, cx| {
+                    if let AlertOutcome::Activated {
+                        action_id: RecoveryAction::Reset,
+                        ..
+                    } = outcome
+                    {
+                        reset(workspace, cx);
+                    }
+                },
+            );
             if result.is_err() {
                 eprintln!("failed to present the SpaceTerm settings recovery prompt");
             }

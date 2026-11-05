@@ -257,8 +257,12 @@ mod tests {
         assert!(outdated_settings(Some("1.1.0")).contains("install SpaceTerm 1.1.0 first"));
         assert!(outdated_settings(None).contains("To keep yours, quit and install an earlier"));
         assert!(
-            !confirmation_detail(ResetReason::Invalid, &[DataKind::ClientRecords], Some("1.1.0"))
-                .contains("1.1.0"),
+            !confirmation_detail(
+                ResetReason::Invalid,
+                &[DataKind::ClientRecords],
+                Some("1.1.0")
+            )
+            .contains("1.1.0"),
             "only data too old to update names a Stepping Stone"
         );
     }

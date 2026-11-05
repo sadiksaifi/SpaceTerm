@@ -22,6 +22,7 @@ mod control_theme;
 )]
 pub(crate) mod core_pane;
 pub(crate) mod core_worktrees;
+pub(crate) mod data_reset;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;
 pub(crate) mod direct_access;
@@ -39,7 +40,6 @@ mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
 pub(crate) mod settings_file;
-pub(crate) mod data_reset;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
 mod sidebar_motion;
