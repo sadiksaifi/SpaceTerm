@@ -10,7 +10,7 @@ use crate::platform::{
     secure_filesystem::{PrivateFileSnapshot, SecureCommitOutcome, SecureFilesystemError},
 };
 
-const FILE: &str = "core-context.json";
+pub(crate) const FILE: &str = "core-context.json";
 const MAX_BYTES: usize = 512 * 1024;
 const MAX_MACHINES: usize = 257;
 const MAX_DEVICES: usize = 256;
@@ -271,6 +271,11 @@ impl Default for Document {
             facts: Vec::new(),
         }
     }
+}
+
+/// Whether `value` is a `core-context.json` this build reads.
+pub(crate) fn readable(value: &serde_json::Value) -> bool {
+    Document::deserialize(value).is_ok_and(|document| document.validate().is_ok())
 }
 
 impl Document {

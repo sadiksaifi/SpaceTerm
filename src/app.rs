@@ -864,6 +864,90 @@ fn present_quit_prompt(
     }
 }
 
+type DesktopStateCheck = (
+    Arc<spaceterm_core::migration::DirectoryStore>,
+    crate::migration::StateCheck,
+);
+
+fn check_desktop_state(host: &HostComposition) -> Option<DesktopStateCheck> {
+    let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+    let store =
+        crate::migration::current_state_store(host.adapters.core_context_paths.directories())?;
+    let check = crate::migration::check_state(&store, identity);
+    Some((store, check))
+}
+
+/// Opens the Workspaces with `open` once the desktop state root `data` is readable. Data that
+/// waits for a confirmed reset, or that a newer SpaceTerm wrote, is asked about first in a
+/// temporary window, and Quit leaves it unchanged.
+fn open_after_data_check(
+    data: Option<DesktopStateCheck>,
+    open: Rc<dyn Fn(&mut App)>,
+    cx: &mut App,
+) {
+    use crate::migration::StateCheck;
+    use crate::ui::data_reset::{self, DataAction};
+    let Some((store, check)) = data else {
+        open(cx);
+        return;
+    };
+    let alert = match check {
+        StateCheck::Ready { reset } => {
+            open(cx);
+            if !reset.is_empty()
+                && let Some(workspace) = cx
+                    .windows()
+                    .into_iter()
+                    .find_map(|window| window.downcast::<WorkspaceManager>())
+            {
+                cx.defer(move |cx| {
+                    let _ = workspace.update(cx, |_, window, cx| {
+                        let _ = data_reset::notice_alert(&reset).present(window, cx, |_, _| {});
+                    });
+                });
+            }
+            return;
+        }
+        // Readers report unavailable storage themselves, as they did before generations.
+        StateCheck::Unavailable => {
+            open(cx);
+            return;
+        }
+        StateCheck::Newer => data_reset::newer_alert(),
+        StateCheck::ResetRequired { reason, kinds } => {
+            data_reset::confirmation_alert(reason, &kinds)
+        }
+    };
+    let Ok(host) = open_quit_prompt_host(cx) else {
+        cx.quit();
+        return;
+    };
+    let presented = host.update(cx, |_, window, cx| {
+        alert.present(window, cx, move |outcome, cx| {
+            let reset = matches!(
+                outcome,
+                spaceterm_ui::AlertOutcome::Activated {
+                    action_id: DataAction::Reset,
+                    ..
+                }
+            );
+            let identity =
+                crate::application_identity::ApplicationIdentity::current().directory_name();
+            if reset && crate::migration::reset_state(&store, identity) {
+                // The Workspaces open before the temporary window closes, so its close never
+                // looks like the last window's.
+                open(cx);
+                close_quit_prompt_host(QuitPromptPlace::Host(host), cx);
+            } else {
+                cx.quit();
+            }
+        })
+    });
+    if !matches!(presented, Ok(Ok(_))) {
+        cx.quit();
+    }
+}
+
 fn close_quit_prompt_host(place: QuitPromptPlace, cx: &mut App) {
     if let QuitPromptPlace::Host(host) = place {
         let _ = host.update(cx, |_, window, _| window.remove_window());
@@ -1475,7 +1559,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
         }
     });
     let pending_invitations = Rc::new(RefCell::new(Some(pending_invitations)));
-    let desktop_channel = RefCell::new(host.adapters.desktop_channel.clone());
+    let desktop_channel = Rc::new(RefCell::new(host.adapters.desktop_channel.clone()));
     application.on_reopen(move |cx| {
         leave_menu_only(cx);
         restore_default_window(cx, &reopened_host);
@@ -1485,6 +1569,8 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             cx.quit();
             return;
         }
+        // The desktop state root reaches this build's generation before anything reads it.
+        let data = check_desktop_state(&host);
         if let Err(error) = initialize_application(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();
@@ -1494,38 +1580,46 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                 install(cx, Rc::clone(&host.window_movement));
             }
             let service = cx.global::<crate::updates::UpdateService>().0.clone();
+            let data = Rc::new(RefCell::new(data));
             service.update(cx, |updates, cx| {
                 updates.begin_launch(
                     Rc::new(move |cx| {
-                        if let Err(error) = open_initial_workspace(cx, &host) {
-                            reported_failure.set(Some(error));
-                            cx.quit();
-                            return;
-                        }
-                        if let Some(endpoint) = desktop_channel.borrow_mut().take() {
-                            crate::ui::serve_desktop_requests(
-                                endpoint,
-                                crate::application_identity::ApplicationIdentity::current()
-                                    .directory_name(),
-                                Arc::clone(&host.adapters.lifecycle.counters),
-                                cx,
-                            );
-                        }
-                        if let Some(receiver) = pending_invitations.borrow_mut().take() {
-                            cx.spawn(async move |cx| {
-                                while let Ok(link) = receiver.recv().await {
-                                    cx.update(|cx| {
-                                        leave_menu_only(cx);
-                                        crate::ui::settings_window::open_add_machine(
-                                            Some(link),
-                                            None,
-                                            cx,
-                                        );
-                                    });
-                                }
-                            })
-                            .detach();
-                        }
+                        let host = Rc::clone(&host);
+                        let reported_failure = Rc::clone(&reported_failure);
+                        let desktop_channel = Rc::clone(&desktop_channel);
+                        let pending_invitations = Rc::clone(&pending_invitations);
+                        let open = Rc::new(move |cx: &mut App| {
+                            if let Err(error) = open_initial_workspace(cx, &host) {
+                                reported_failure.set(Some(error));
+                                cx.quit();
+                                return;
+                            }
+                            if let Some(endpoint) = desktop_channel.borrow_mut().take() {
+                                crate::ui::serve_desktop_requests(
+                                    endpoint,
+                                    crate::application_identity::ApplicationIdentity::current()
+                                        .directory_name(),
+                                    Arc::clone(&host.adapters.lifecycle.counters),
+                                    cx,
+                                );
+                            }
+                            if let Some(receiver) = pending_invitations.borrow_mut().take() {
+                                cx.spawn(async move |cx| {
+                                    while let Ok(link) = receiver.recv().await {
+                                        cx.update(|cx| {
+                                            leave_menu_only(cx);
+                                            crate::ui::settings_window::open_add_machine(
+                                                Some(link),
+                                                None,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                })
+                                .detach();
+                            }
+                        });
+                        open_after_data_check(data.borrow_mut().take(), open, cx);
                     }),
                     cx,
                 );

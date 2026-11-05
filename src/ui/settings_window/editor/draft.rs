@@ -379,6 +379,7 @@ impl SettingsDraft {
         self.status = match error {
             SettingsError::Storage(StorageError::Conflict)
             | SettingsError::Invalid
+            | SettingsError::Outdated
             | SettingsError::Unsupported => SaveStatus::Unavailable(error),
             _ => SaveStatus::Failed(error),
         };

@@ -387,7 +387,13 @@ fn recovery_refuses_settings_repaired_after_the_malformed_read() {
                 .into_bytes();
         {
             let mut files = filesystem.files.lock().unwrap();
-            let entry = files.values.first_entry().unwrap().into_mut();
+            // Load marked the root's generation beside the document.
+            let entry = files
+                .values
+                .iter_mut()
+                .find(|(path, _)| path.ends_with("settings.json"))
+                .unwrap()
+                .1;
             entry.0 = repaired.clone();
             entry.1 += 1;
         }
@@ -398,8 +404,13 @@ fn recovery_refuses_settings_repaired_after_the_malformed_read() {
             ))
         );
         let files = filesystem.files.lock().unwrap();
-        assert_eq!(files.values.len(), 1);
-        assert_eq!(files.values.first_key_value().unwrap().1.0, repaired);
+        let documents: Vec<_> = files
+            .values
+            .iter()
+            .filter(|(path, _)| !path.ends_with("generation.json"))
+            .collect();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].1.0, repaired);
     }
 }
 
@@ -454,4 +465,78 @@ fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
             .0,
         b"malformed"
     );
+}
+
+/// Marks the desktop config root of the document `storage` wrote with `generation`.
+fn mark_generation(filesystem: &RecordingFilesystem, generation: u32) {
+    let mut files = filesystem.files.lock().unwrap();
+    let document = files
+        .values
+        .keys()
+        .find(|path| path.ends_with("settings.json"))
+        .unwrap()
+        .clone();
+    files.values.insert(
+        document.with_file_name("generation.json"),
+        (
+            format!("{{\"generation\":{generation}}}").into_bytes(),
+            1000,
+        ),
+    );
+}
+
+#[test]
+fn settings_of_a_newer_generation_are_unsupported_and_never_replaced() {
+    use crate::settings::{Settings, SettingsError};
+    let (storage, filesystem) = storage();
+    let document = crate::settings::export_settings(&crate::settings::SettingsDocument::default())
+        .unwrap()
+        .into_bytes();
+    storage.write(&document, None).unwrap();
+    mark_generation(&filesystem, 99);
+    let before = filesystem.files.lock().unwrap().values.clone();
+    let settings = Settings::load(Arc::new(storage));
+    assert_eq!(settings.snapshot().status, Some(SettingsError::Unsupported));
+    assert_eq!(
+        settings.recover_by_reset(),
+        Err(crate::settings::recovery::RecoveryError::NotMalformed)
+    );
+    assert_eq!(filesystem.files.lock().unwrap().values, before);
+}
+
+#[test]
+fn settings_older_than_any_migrated_generation_reset_only_through_recovery() {
+    use crate::settings::{Settings, SettingsError};
+    let (storage, filesystem) = storage();
+    let document = crate::settings::export_settings(&crate::settings::SettingsDocument::default())
+        .unwrap()
+        .into_bytes();
+    storage.write(&document, None).unwrap();
+    mark_generation(&filesystem, 0);
+    let settings = Settings::load(Arc::new(storage));
+    assert_eq!(settings.snapshot().status, Some(SettingsError::Outdated));
+    let path = |suffix: &str| {
+        filesystem
+            .files
+            .lock()
+            .unwrap()
+            .values
+            .iter()
+            .find(|(path, _)| path.to_string_lossy().ends_with(suffix))
+            .map(|(_, (bytes, _))| bytes.clone())
+    };
+    assert_eq!(
+        path("spaceterm/settings.json"),
+        Some(document.clone()),
+        "kept until confirmed"
+    );
+    settings.recover_by_reset().unwrap();
+    assert_eq!(path("reset/gen-0/settings.json"), Some(document));
+    assert_eq!(
+        path("generation.json"),
+        Some(br#"{"generation":1}"#.to_vec())
+    );
+    assert!(path("settings.json.bak").is_none());
+    assert!(path("reset/pending.json").is_none());
+    assert_eq!(settings.snapshot().status, None);
 }

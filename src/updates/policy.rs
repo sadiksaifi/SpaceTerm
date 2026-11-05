@@ -48,6 +48,11 @@ pub(crate) enum UpdateStage {
 
 /// Cached observations are never installation authority. Sparkle revalidates the signed feed
 /// and archive. These bounded facts retain the pending version, elapsed time, and reminder cadence.
+/// Whether `value` is an `update-history.json` this build reads.
+pub(crate) fn readable_history(value: &serde_json::Value) -> bool {
+    spaceterm_core::migration::strict::<UpdateHistory>(value)
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct UpdateHistory {

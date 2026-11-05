@@ -10,7 +10,9 @@ use crate::appearance::{
 };
 use crate::keybindings::KeybindingPreferences;
 
-pub(super) const SETTINGS_SCHEMA_VERSION: u32 = 1;
+/// The desktop config root's generation, which every Settings Document repeats.
+pub(super) const SETTINGS_SCHEMA_VERSION: u32 =
+    spaceterm_core::migration::generations::DESKTOP_CONFIG.current;
 pub(super) const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DEPTH: usize = 32;
 
@@ -156,6 +158,26 @@ pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsD
     Ok(document)
 }
 
+/// Parses an exported Settings Document of any generation the desktop config root still
+/// migrates, carrying it through the same steps first.
+pub(crate) fn import_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsDocumentError> {
+    use spaceterm_core::migration::{Refusal, ResetReason, migrate_document};
+    preflight(bytes).map_err(SettingsDocumentError::from_preflight)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| SettingsDocumentError::InvalidJson)?;
+    let value = migrate_document(&crate::migration::CONFIG, crate::migration::SETTINGS, value)
+        .map_err(|refusal| match refusal {
+            Refusal::Newer => SettingsDocumentError::UnsupportedVersion,
+            Refusal::Reset {
+                reason: ResetReason::TooOld,
+                ..
+            } => SettingsDocumentError::TooOld,
+            _ => SettingsDocumentError::InvalidJson,
+        })?;
+    let bytes = serde_json::to_vec(&value).map_err(|_| SettingsDocumentError::InvalidJson)?;
+    parse_settings(&bytes)
+}
+
 pub(crate) fn export_settings(
     document: &SettingsDocument,
 ) -> Result<String, SettingsDocumentError> {
@@ -284,6 +306,8 @@ pub(crate) enum SettingsDocumentError {
     TooDeep,
     #[error("settings document version is unsupported")]
     UnsupportedVersion,
+    #[error("settings document is too old to migrate")]
+    TooOld,
     #[error("appearance preferences are invalid")]
     InvalidAppearance,
     #[error("keybinding preferences are invalid")]

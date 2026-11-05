@@ -36,10 +36,19 @@ impl Settings {
             .ok_or(RecoveryError::RevisionExhausted)?;
         let mut defaults = SettingsDocument::default();
         let bytes = export_settings(&defaults).expect("default Settings document is valid");
+        // A document that waits for a confirmed reset moves to `reset/` and leaves the root at
+        // this build's generation. A merely malformed one moves to the backup.
         let result = self
             .0
             .storage
-            .quarantine()
+            .reset_generation()
+            .and_then(|moved| {
+                if moved {
+                    Ok(())
+                } else {
+                    self.0.storage.quarantine()
+                }
+            })
             .and_then(|()| self.0.storage.write(bytes.as_bytes(), None));
         match result {
             Ok(commit) => {

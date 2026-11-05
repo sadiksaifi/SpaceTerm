@@ -10,7 +10,7 @@ use spaceterm_ui::{
     ModalActionRole, ModalId, TextArea,
 };
 
-use crate::settings::{SettingsDocument, SettingsDocumentError, export_settings, parse_settings};
+use crate::settings::{SettingsDocument, SettingsDocumentError, export_settings, import_settings};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -193,11 +193,18 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let imported = match read.map(|bytes| parse_settings(&bytes)) {
+        let imported = match read.map(|bytes| import_settings(&bytes)) {
             Ok(Ok(document)) => document,
             Ok(Err(SettingsDocumentError::UnsupportedVersion)) => {
                 return present_import_failure(
                     "Update SpaceTerm before importing this settings file.",
+                    window,
+                    cx,
+                );
+            }
+            Ok(Err(SettingsDocumentError::TooOld)) => {
+                return present_import_failure(
+                    "This settings file is from a SpaceTerm too old to import.",
                     window,
                     cx,
                 );
