@@ -1762,11 +1762,7 @@ fn initialize_launch_window(cx: &mut App, host: &HostComposition) -> Result<(), 
             .map_err(|_| RuntimeError::Initialization)?;
     }
     crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
-    install_launch_menu(
-        cx,
-        &host.adapters.application_menu,
-        &host.adapters.launch_alerts,
-    );
+    install_launch_menu(cx, &host.adapters.application_menu);
     Ok(())
 }
 
@@ -1813,11 +1809,7 @@ impl crate::settings::storage::SettingsStorage for LaunchDefaults {
 /// The launch window's About, Hide and Quit. Quit ends SpaceTerm at once: nothing has opened
 /// yet that a quit warning protects. Admission's `init` registers the full handlers later, and
 /// a later handler takes the action first.
-fn install_launch_menu(
-    cx: &mut App,
-    application_menu: &Rc<dyn ApplicationMenuAdapter>,
-    launch_alerts: &Rc<dyn crate::ui::data_reset::LaunchAlerts>,
-) {
+fn install_launch_menu(cx: &mut App, application_menu: &Rc<dyn ApplicationMenuAdapter>) {
     // GPUI's global dispatch runs every listener of an action while no window is active, so
     // these stay registered but answer only until admission retires the launch menu.
     cx.set_global(LaunchMenu);
@@ -1832,13 +1824,8 @@ fn install_launch_menu(
             eprintln!("failed to perform an application menu command: {error}");
         }
     });
-    let alerts = Rc::clone(launch_alerts);
-    cx.on_action(move |_: &DismissApplication, cx| {
-        if !cx.has_global::<LaunchMenu>() {
-            return;
-        }
-        // An open launch question answers Quit, and its answer then ends SpaceTerm.
-        if !alerts.dismiss(cx) {
+    cx.on_action(|_: &DismissApplication, cx| {
+        if cx.has_global::<LaunchMenu>() {
             cx.quit();
         }
     });
@@ -3844,8 +3831,6 @@ mod runtime_tests {
         asked: RefCell<Vec<&'static str>>,
         answers: RefCell<std::collections::VecDeque<crate::ui::data_reset::LaunchChoice>>,
         before: Box<dyn Fn()>,
-        /// How often launch asked it to end an open question.
-        dismissals: std::cell::Cell<usize>,
     }
 
     impl crate::ui::data_reset::LaunchAlerts for ScriptedLaunchAlerts {
@@ -3862,11 +3847,6 @@ mod runtime_tests {
                     .pop_front()
                     .unwrap_or(crate::ui::data_reset::LaunchChoice::Quit),
             )
-        }
-
-        fn dismiss(&self, _: &mut App) -> bool {
-            self.dismissals.set(self.dismissals.get() + 1);
-            true
         }
     }
 
@@ -3947,7 +3927,6 @@ mod runtime_tests {
             asked: RefCell::default(),
             answers: RefCell::new(answers.iter().copied().collect()),
             before: Box::new(before),
-            dismissals: std::cell::Cell::new(0),
         })
     }
 
@@ -4021,21 +4000,6 @@ mod runtime_tests {
                 .unwrap(),
             "SpaceTerm's own alert asks on that window"
         );
-    }
-
-    /// A native launch question runs its own modal loop, which holds back termination, so the
-    /// launch menu's Quit ends the open question first and its Quit answer ends SpaceTerm.
-    #[gpui::test]
-    fn launch_menu_quit_ends_an_open_launch_question(cx: &mut gpui::TestAppContext) {
-        let alerts = scripted(&[], || {});
-        let mut wiring = parts(Rc::default(), Rc::default());
-        wiring.adapters.launch_alerts =
-            Rc::clone(&alerts) as Rc<dyn crate::ui::data_reset::LaunchAlerts>;
-        let host = HostComposition::new(wiring).unwrap();
-        cx.update(|cx| initialize_launch_window(cx, &host).unwrap());
-        cx.update(|cx| cx.dispatch_action(&DismissApplication));
-        cx.run_until_parked();
-        assert_eq!(alerts.dismissals.get(), 1);
     }
 
     #[gpui::test]

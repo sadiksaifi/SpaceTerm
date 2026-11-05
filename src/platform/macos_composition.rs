@@ -172,7 +172,7 @@ fn compose(
             )),
             selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
             file_viewer: Some(Arc::new(super::macos_file_viewer::FinderViewer)),
-            launch_alerts: Rc::new(super::macos_launch_alerts::MacosLaunchAlerts::default()),
+            launch_alerts: Rc::new(super::macos_launch_alerts::MacosLaunchAlerts),
             settings_file,
             application_menu: Rc::new(
                 super::macos_application_menu::MacosApplicationMenuAdapter::new(identity),
