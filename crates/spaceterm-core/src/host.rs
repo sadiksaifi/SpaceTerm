@@ -569,7 +569,7 @@ fn wake_for_signal() {
 /// The owner receives readiness only after this process owns and publishes the endpoint.
 fn serve_runtime_ready(
     paths: &Paths,
-    panes: Option<crate::PaneFactory>,
+    mut panes: Option<crate::PaneFactory>,
     supervised: bool,
     ready: impl FnOnce() -> Result<(), CoreError>,
 ) -> Result<(), CoreError> {
@@ -577,6 +577,9 @@ fn serve_runtime_ready(
     crate::service::check_runtime(paths, supervised)?;
     // The data reaches this runtime's generation before anything here reads it.
     crate::migration::core_data::prepare(paths)?;
+    if let Some(prepare) = panes.as_mut().and_then(|panes| panes.client_data.take()) {
+        prepare()?;
+    }
     let data = Directory::open(&paths.data, false)?;
     // Verify retained identity before changing any runtime state. Never generate a replacement.
     // The identity never changes while this host runs, so admission reuses it.
@@ -2223,6 +2226,29 @@ mod startup_tests {
                 .map(|pending| pending.kinds),
             Some(vec![crate::migration::DataKind::MachineId])
         );
+        fs::remove_dir_all(&fixture.root).unwrap();
+    }
+
+    #[test]
+    fn a_core_brings_client_data_to_its_generation_before_readiness() {
+        let fixture = Fixture::new();
+        let marker = fixture.paths.data.join("generation.json");
+        let panes = crate::panes(Arc::default(), |_| -> Result<NoPanes, CoreError> {
+            panic!("a Core built its Panes before its client data was current")
+        })
+        .with_client_data({
+            let marker = marker.clone();
+            move || {
+                // Core data comes first.
+                assert!(marker.exists());
+                Err(CoreError::DataResetRequired)
+            }
+        });
+        assert_eq!(
+            serve_with_panes(&fixture.paths, Some(panes)),
+            Err(CoreError::DataResetRequired)
+        );
+        assert!(!fixture.paths.socket().exists());
         fs::remove_dir_all(&fixture.root).unwrap();
     }
 

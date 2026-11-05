@@ -30,7 +30,7 @@ fn main() -> ExitCode {
         return finish(command, cli.global.json, contract::from_core_error(error));
     }
     // The CLI's state reaches this build's generation before any command reads it. SpaceTerm
-    // Core's own commands never touch the CLI's state.
+    // Core's internal commands skip this step. `internal serve` migrates the state at startup.
     // The command shares the root through this guard until it ends.
     let _state = if matches!(
         cli.command,
@@ -206,7 +206,9 @@ fn serve(service: bool, owned: bool) -> Result<(), CoreError> {
                 .with_session_context(spaceterm::runtime::CoreSessionContext::current(IDENTITY)?),
         ))
     })
-    .with_version(version);
+    .with_version(version)
+    // The CLI's state ships in this installation, so every Stepping Stone migrates it too.
+    .with_client_data(|| spaceterm_cli::state::prepare_for_core(IDENTITY));
     if service {
         spaceterm_core::service::run(IDENTITY, panes)
     } else if owned {

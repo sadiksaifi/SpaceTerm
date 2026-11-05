@@ -181,6 +181,51 @@ pub fn prepare(identity: &str) -> Result<Lock, CoreError> {
     )
 }
 
+/// Brings this CLI's state to this build's generation for SpaceTerm Core before it reports
+/// readiness, so no update starts while the state waits for this build's steps. The background
+/// updater may restart through a Stepping Stone with no CLI command in between.
+pub fn prepare_for_core(identity: &str) -> Result<(), CoreError> {
+    let returned = || {
+        let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
+        spaceterm_core::service::Service::for_identity(identity)?.returned_to(&executable)
+    };
+    prepare_for_core_at(
+        spaceterm_core::cli_state_root(identity)?,
+        &REGISTRY,
+        &mut credentials(identity),
+        &returned,
+        CORE_LOCK_LIMIT,
+    )
+}
+
+/// How long SpaceTerm Core waits for the commands that share the CLI's state before it
+/// migrates. A command may be waiting for this Core to start while it shares the state.
+const CORE_LOCK_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn prepare_for_core_at(
+    root: PathBuf,
+    registry: &Registry,
+    credentials: &mut dyn migration::Credentials,
+    returned: &dyn Fn() -> Result<bool, CoreError>,
+    limit: std::time::Duration,
+) -> Result<(), CoreError> {
+    let directory = Directory::open(&root, true)?;
+    let store = store_at(root);
+    {
+        let _shared = directory.lock_shared(GENERATION_LOCK)?;
+        if migration::is_current(registry, &store).map_err(storage)? {
+            return Ok(());
+        }
+    }
+    // A command that still shares the state refuses this start, and the Core stays unready.
+    let LockWait::Locked(_alone) = directory.wait_lock(GENERATION_LOCK, limit, None)? else {
+        return Err(CoreError::ServiceBusy);
+    };
+    let returned = returned().unwrap_or(false);
+    migration::run(registry, &store, credentials, returned).map_err(refusal)?;
+    Ok(())
+}
+
 /// How many times [`prepare_at`] migrates before it gives up on a root that other CLIs keep
 /// changing.
 const ATTEMPTS: usize = 4;
@@ -557,6 +602,113 @@ mod tests {
             store.read(Area::Root, "generation.json").unwrap(),
             Some(br#"{"generation":1}"#.to_vec())
         );
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    /// Release 1.1.0 carries the CLI's state from generation 1 to 2. Release 1.2.0 retires
+    /// generation 1, so its floor is 1.1.0.
+    const STEPPING_STONE: Registry = Registry {
+        generations: migration::Generations {
+            oldest: 1,
+            current: 2,
+        },
+        steps: &[&[]],
+        files: REGISTRY.files,
+    };
+    const AFTER_STONE: Registry = Registry {
+        generations: migration::Generations {
+            oldest: 2,
+            current: 3,
+        },
+        steps: &[&[]],
+        files: REGISTRY.files,
+    };
+
+    #[test]
+    fn a_background_update_through_a_stepping_stone_runs_every_cli_state_migration() {
+        use migration::{Area, Store};
+        let state = temporary("migration-two-hop");
+        let never = || Ok(false);
+        drop(prepare_at(state.root.clone(), &mut migration::NoCredentials, &never).unwrap());
+        let runs = state.root.join("routes/local/base/runs.json");
+        std::fs::create_dir_all(runs.parent().unwrap()).unwrap();
+        std::fs::write(&runs, br#"{"runs":[]}"#).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let private = |path: &std::path::Path, mode| {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+            };
+            for directory in ["routes", "routes/local", "routes/local/base"] {
+                private(&state.root.join(directory), 0o700);
+            }
+            private(&runs, 0o600);
+        }
+        // The updater restarts SpaceTerm Core into 1.1.0, then into 1.2.0. No CLI command runs.
+        for release in [&STEPPING_STONE, &AFTER_STONE] {
+            prepare_for_core_at(
+                state.root.clone(),
+                release,
+                &mut migration::NoCredentials,
+                &never,
+                CORE_LOCK_LIMIT,
+            )
+            .unwrap();
+        }
+        // The first CLI command of 1.2.0 finds its state current.
+        let store = store_at(state.root.clone());
+        assert!(migration::is_current(&AFTER_STONE, &store).unwrap());
+        assert_eq!(
+            store.read(Area::Root, "generation.json").unwrap(),
+            Some(br#"{"generation":3}"#.to_vec())
+        );
+        assert_eq!(std::fs::read(&runs).unwrap(), br#"{"runs":[]}"#);
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn a_cli_state_migration_at_core_start_waits_a_bounded_time_for_sharing_commands() {
+        use migration::{Area, Store};
+        let state = temporary("migration-core-busy");
+        let never = || Ok(false);
+        let command =
+            prepare_at(state.root.clone(), &mut migration::NoCredentials, &never).unwrap();
+        // A current root needs no migration, so a sharing command never delays the start.
+        prepare_for_core_at(
+            state.root.clone(),
+            &REGISTRY,
+            &mut migration::NoCredentials,
+            &never,
+            std::time::Duration::from_secs(3600),
+        )
+        .unwrap();
+        let limit = std::time::Duration::from_millis(200);
+        let started = Instant::now();
+        assert_eq!(
+            prepare_for_core_at(
+                state.root.clone(),
+                &STEPPING_STONE,
+                &mut migration::NoCredentials,
+                &never,
+                limit,
+            ),
+            Err(CoreError::ServiceBusy)
+        );
+        assert!(started.elapsed() >= limit);
+        let store = store_at(state.root.clone());
+        assert_eq!(
+            store.read(Area::Root, "generation.json").unwrap(),
+            Some(br#"{"generation":1}"#.to_vec())
+        );
+        drop(command);
+        prepare_for_core_at(
+            state.root.clone(),
+            &STEPPING_STONE,
+            &mut migration::NoCredentials,
+            &never,
+            limit,
+        )
+        .unwrap();
+        assert!(migration::is_current(&STEPPING_STONE, &store).unwrap());
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 

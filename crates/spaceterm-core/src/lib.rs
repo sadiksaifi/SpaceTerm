@@ -151,9 +151,19 @@ pub struct PaneFactory {
     build: BuildPanes,
     counters: std::sync::Arc<diagnostics::TerminalCounters>,
     version: Option<update::facts::Version>,
+    client_data: Option<Box<dyn FnOnce() -> Result<(), CoreError>>>,
 }
 
 impl PaneFactory {
+    /// Brings the data root of a client this run's installation ships to its generation before
+    /// the run reports readiness, after this Core's own data. A refusal ends the start unready.
+    pub fn with_client_data(
+        mut self,
+        prepare: impl FnOnce() -> Result<(), CoreError> + 'static,
+    ) -> Self {
+        self.client_data = Some(Box::new(prepare));
+        self
+    }
     /// Names this run's release version, which admission offers to every client. Without it,
     /// the run offers [`UNVERSIONED`].
     pub fn with_version(mut self, version: update::facts::Version) -> Self {
@@ -182,6 +192,7 @@ pub fn panes<P: connection::service::PaneService + 'static>(
         }),
         counters,
         version: None,
+        client_data: None,
     }
 }
 
