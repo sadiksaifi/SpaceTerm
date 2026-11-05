@@ -866,68 +866,156 @@ fn present_quit_prompt(
     }
 }
 
+/// What launch reads and asks with before any SpaceTerm window opens.
+pub(crate) struct LaunchGate {
+    /// The desktop state root. None when its directories can't be resolved, which reads as
+    /// unavailable storage.
+    pub(crate) store: Option<Arc<spaceterm_core::migration::DirectoryStore>>,
+    pub(crate) identity: &'static str,
+    pub(crate) alerts: Rc<dyn crate::ui::data_reset::LaunchAlerts>,
+    pub(crate) viewer: Option<Arc<dyn crate::command_line_tool::FileViewer>>,
+    /// The Stepping Stone release for data too old to update.
+    pub(crate) floor: Option<&'static str>,
+}
+
+impl LaunchGate {
+    fn for_host(host: &HostComposition) -> Self {
+        Self {
+            store: crate::migration::current_state_store(
+                host.adapters.core_context_paths.directories(),
+            ),
+            identity: crate::application_identity::ApplicationIdentity::current().directory_name(),
+            alerts: Rc::clone(&host.adapters.launch_alerts),
+            viewer: host.adapters.file_viewer.clone(),
+            floor: crate::migration::stepping_stone(),
+        }
+    }
+}
+
 /// Starts `launch` once the desktop state root reaches this build's generation. Data that waits
 /// for a confirmed reset, that a newer SpaceTerm wrote, or storage that is unavailable is asked
-/// about first in a launch window, and nothing reads or changes it until the person decides:
-/// Reset, Try Again or Quit.
-fn open_after_data_check(host: &Rc<HostComposition>, launch: Rc<dyn Fn(&mut App)>, cx: &mut App) {
+/// about first in the platform's own dialog, and nothing reads or changes it until the person
+/// decides: Reset, Try Again or Quit.
+fn open_after_data_check(gate: Rc<LaunchGate>, launch: Rc<dyn Fn(&mut App)>, cx: &mut App) {
     use crate::migration::StateCheck;
-    use crate::ui::data_reset::{self, DataAction};
-    let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-    let store =
-        crate::migration::current_state_store(host.adapters.core_context_paths.directories());
-    let check = store.as_ref().map_or(StateCheck::Unavailable, |store| {
-        crate::migration::check_state(store, identity)
+    use crate::ui::data_reset::{self, LaunchChoice};
+    let check = gate.store.as_ref().map_or(StateCheck::Unavailable, |store| {
+        crate::migration::check_state(store, gate.identity)
     });
-    let alert = match check {
-        StateCheck::Ready { reset } => {
-            if let Some(store) = store
-                && !reset.is_empty()
-            {
-                cx.set_global(data_reset::PendingNotice {
-                    reset,
-                    store,
-                    viewer: host.adapters.file_viewer.clone(),
-                });
-            }
-            launch(cx);
-            return;
+    let Some(prompt) = data_reset::launch_prompt(&check, gate.floor) else {
+        if let (StateCheck::Ready { reset }, Some(store)) = (check, gate.store.clone())
+            && !reset.is_empty()
+        {
+            cx.set_global(data_reset::PendingNotice {
+                reset,
+                store,
+                viewer: gate.viewer.clone(),
+            });
         }
-        StateCheck::Newer => data_reset::newer_alert(),
-        StateCheck::ResetRequired { reason, kinds } => {
-            data_reset::confirmation_alert(reason, &kinds, crate::migration::stepping_stone())
-        }
-        StateCheck::Unavailable => data_reset::unavailable_alert(),
-    };
-    let Ok(window) = open_quit_prompt_host(cx) else {
-        cx.quit();
+        launch(cx);
         return;
     };
-    let host = Rc::clone(host);
-    let presented = window.update(cx, |_, window_ref, cx| {
-        alert.present(window_ref, cx, move |outcome, cx| {
-            let action = match outcome {
-                spaceterm_ui::AlertOutcome::Activated { action_id, .. } => action_id,
-                _ => DataAction::Quit,
-            };
-            let again = match action {
-                DataAction::Reset => store
-                    .as_ref()
-                    .is_some_and(|store| crate::migration::reset_state(store, identity)),
-                DataAction::TryAgain => true,
-                _ => false,
-            };
-            if !again {
-                cx.quit();
-                return;
+    let answer = ask_launch_question(&gate, prompt, cx);
+    cx.spawn(async move |cx| {
+        let choice = answer.await;
+        cx.update(|cx| {
+            match choice {
+                LaunchChoice::Quit => {
+                    cx.quit();
+                    return;
+                }
+                // A reset that fails shows what stands now on the next check.
+                LaunchChoice::Reset => {
+                    if let Some(store) = &gate.store {
+                        crate::migration::reset_state(store, gate.identity);
+                    }
+                }
+                LaunchChoice::TryAgain => {}
             }
-            // The next window opens before this one closes, so its close is never the last.
-            open_after_data_check(&host, launch, cx);
-            close_quit_prompt_host(QuitPromptPlace::Host(window), cx);
+            open_after_data_check(gate, launch, cx);
+        });
+    })
+    .detach();
+}
+
+/// Asks `prompt`, the one place that chooses how: the platform's native dialog while no
+/// SpaceTerm window exists, as before the first Workspace window opens, and otherwise
+/// SpaceTerm's own alert on a window it already shows.
+fn ask_launch_question(
+    gate: &LaunchGate,
+    prompt: crate::ui::data_reset::LaunchPrompt,
+    cx: &mut App,
+) -> gpui::Task<crate::ui::data_reset::LaunchChoice> {
+    use crate::ui::data_reset::LaunchChoice;
+    let Some(window) = cx.windows().into_iter().next() else {
+        return gate.alerts.ask(prompt, cx);
+    };
+    let (answered, answers) = async_channel::bounded(1);
+    let task = cx.spawn(async move |_| answers.recv().await.unwrap_or(LaunchChoice::Quit));
+    let alert = crate::ui::data_reset::drawn_alert(&prompt);
+    let unanswered = answered.clone();
+    let presented = window.update(cx, |_, window, cx| {
+        let question = cx.new(|_| LaunchQuestion);
+        // The answer keeps the alert's owner alive until the person decides.
+        let owner = question.clone();
+        question.update(cx, |_, cx| {
+            alert.present(window, cx, move |outcome, _| {
+                drop(owner);
+                let choice = match outcome {
+                    spaceterm_ui::AlertOutcome::Activated { action_id, .. } => action_id,
+                    _ => LaunchChoice::Quit,
+                };
+                let _ = answered.try_send(choice);
+            })
         })
     });
     if !matches!(presented, Ok(Ok(_))) {
-        cx.quit();
+        let _ = unanswered.try_send(LaunchChoice::Quit);
+    }
+    task
+}
+
+/// Owns a launch question SpaceTerm draws on one of its windows.
+struct LaunchQuestion;
+
+/// Draws a [`crate::ui::data_reset::LaunchPrompt`] in a window of its own, for a desktop whose
+/// toolkit offers no native application-modal dialog. The window follows the system appearance
+/// through the launch window's default Settings.
+#[cfg_attr(
+    all(target_os = "macos", not(test)),
+    allow(dead_code, reason = "macOS asks with native alerts")
+)]
+pub(crate) struct WindowLaunchAlerts;
+
+impl crate::ui::data_reset::LaunchAlerts for WindowLaunchAlerts {
+    fn ask(
+        &self,
+        prompt: crate::ui::data_reset::LaunchPrompt,
+        cx: &mut App,
+    ) -> gpui::Task<crate::ui::data_reset::LaunchChoice> {
+        use crate::ui::data_reset::LaunchChoice;
+        let (answered, answers) = async_channel::bounded(1);
+        let task = cx.spawn(async move |_| answers.recv().await.unwrap_or(LaunchChoice::Quit));
+        let Ok(window) = open_quit_prompt_host(cx) else {
+            let _ = answered.try_send(LaunchChoice::Quit);
+            return task;
+        };
+        let alert = crate::ui::data_reset::drawn_alert(&prompt);
+        let unanswered = answered.clone();
+        let presented = window.update(cx, |_, window_ref, cx| {
+            alert.present(window_ref, cx, move |outcome, cx| {
+                let choice = match outcome {
+                    spaceterm_ui::AlertOutcome::Activated { action_id, .. } => action_id,
+                    _ => LaunchChoice::Quit,
+                };
+                close_quit_prompt_host(QuitPromptPlace::Host(window), cx);
+                let _ = answered.try_send(choice);
+            })
+        });
+        if !matches!(presented, Ok(Ok(_))) {
+            let _ = unanswered.try_send(LaunchChoice::Quit);
+        }
+        task
     }
 }
 
@@ -1354,6 +1442,8 @@ pub(crate) struct ApplicationCapabilities {
     /// Shows a folder in the file manager, such as where a reset put earlier files. None shows
     /// nothing.
     pub(crate) file_viewer: Option<Arc<dyn crate::command_line_tool::FileViewer>>,
+    /// Asks the launch questions about retained data before any SpaceTerm window opens.
+    pub(crate) launch_alerts: Rc<dyn crate::ui::data_reset::LaunchAlerts>,
     /// Opens and watches the settings file the person edits in their own editor.
     pub(crate) settings_file: Rc<dyn crate::platform::settings_file::SettingsFileAccess>,
     pub(crate) local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
@@ -1562,7 +1652,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             cx.quit();
             return;
         }
-        let check = Rc::clone(&host);
+        let gate = Rc::new(LaunchGate::for_host(&host));
         let launch: Rc<dyn Fn(&mut App)> = Rc::new(move |cx: &mut App| {
             let host = Rc::clone(&host);
             let reported_failure = Rc::clone(&reported_failure);
@@ -1625,7 +1715,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                 crate::ui::updates::show_launch(cx);
             }
         });
-        open_after_data_check(&check, launch, cx);
+        open_after_data_check(gate, launch, cx);
     });
     failure.get().map_or(Ok(()), Err)
 }
@@ -1643,6 +1733,8 @@ pub(crate) fn initialize_application(
 /// chrome, the keymap, fonts and controls in the default appearance. It reads no retained data,
 /// Settings included, and installs no application action.
 fn initialize_launch_window(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
+    // A launch question's own window may close before any other opens. Only Quit ends SpaceTerm.
+    cx.set_quit_mode(gpui::QuitMode::Explicit);
     if host.modal_prompts {
         crate::ui::application_prompt::install(cx);
     }
@@ -1676,7 +1768,8 @@ struct LaunchMenu;
 
 impl gpui::Global for LaunchMenu {}
 
-/// The launch window's Settings: the defaults, with nothing read or written.
+/// The launch window's Settings: the defaults in the Auto Appearance Mode, so the window follows
+/// the system appearance, with nothing read or written.
 struct LaunchDefaults;
 
 impl crate::settings::storage::SettingsStorage for LaunchDefaults {
@@ -1689,7 +1782,14 @@ impl crate::settings::storage::SettingsStorage for LaunchDefaults {
         Option<crate::platform::secure_filesystem::PrivateFileSnapshot>,
         crate::settings::storage::StorageError,
     > {
-        Ok(None)
+        let mut document = crate::settings::SettingsDocument::default();
+        document.appearance.mode = crate::appearance::AppearanceMode::Auto;
+        let bytes = crate::settings::export_settings(&document)
+            .map_err(|_| crate::settings::storage::StorageError::Unavailable)?;
+        Ok(Some(crate::platform::secure_filesystem::PrivateFileSnapshot {
+            bytes: bytes.into_bytes(),
+            identity: crate::platform::secure_filesystem::SecureEntryIdentity::from_opaque(()),
+        }))
     }
     fn write(
         &self,
@@ -2662,6 +2762,7 @@ mod runtime_tests {
                 update_reminders: None,
                 selected_files: Arc::new(NoSelectedFiles),
                 file_viewer: None,
+                launch_alerts: Rc::new(WindowLaunchAlerts),
                 settings_file: Rc::new(
                     crate::platform::settings_file::testing::RecordingSettingsFile::default(),
                 ),
@@ -3717,6 +3818,196 @@ mod runtime_tests {
             assert!(cx.update(|cx| cx.windows().is_empty()));
             assert_eq!(quit.confirmations(), 0);
         }
+    }
+
+    /// Answers each launch question from a script and records what it was asked. `before`
+    /// runs before each answer, as the person fixing storage before Try Again does.
+    struct ScriptedLaunchAlerts {
+        asked: RefCell<Vec<&'static str>>,
+        answers: RefCell<std::collections::VecDeque<crate::ui::data_reset::LaunchChoice>>,
+        before: Box<dyn Fn()>,
+    }
+
+    impl crate::ui::data_reset::LaunchAlerts for ScriptedLaunchAlerts {
+        fn ask(
+            &self,
+            prompt: crate::ui::data_reset::LaunchPrompt,
+            _: &mut App,
+        ) -> gpui::Task<crate::ui::data_reset::LaunchChoice> {
+            self.asked.borrow_mut().push(prompt.title);
+            (self.before)();
+            gpui::Task::ready(
+                self.answers
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or(crate::ui::data_reset::LaunchChoice::Quit),
+            )
+        }
+    }
+
+    /// A desktop state root in a scratch directory, and every file under it with its bytes.
+    struct LaunchRoot(std::path::PathBuf);
+
+    impl LaunchRoot {
+        fn new(name: &str) -> Self {
+            Self(spaceterm_core::migration::fixtures::scratch(name))
+        }
+        fn store(&self) -> Arc<spaceterm_core::migration::DirectoryStore> {
+            Arc::new(crate::migration::state_store(
+                self.0.join("data"),
+                self.0.join("state"),
+                self.0.join("core"),
+            ))
+        }
+        fn write(&self, path: &str, bytes: &[u8]) {
+            use spaceterm_core::migration::{Area, Store};
+            self.store().write(Area::Root, path, bytes).unwrap();
+        }
+        fn files(&self) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            let mut found = std::collections::BTreeMap::new();
+            let mut pending = vec![self.0.clone()];
+            while let Some(directory) = pending.pop() {
+                for entry in std::fs::read_dir(&directory).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else {
+                        found.insert(path.clone(), std::fs::read(&path).unwrap());
+                    }
+                }
+            }
+            found
+        }
+    }
+
+    impl Drop for LaunchRoot {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                self.0.join("data"),
+                std::fs::Permissions::from_mode(0o700),
+            );
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Runs the launch check of `root` with `alerts` and returns how often it opened the
+    /// Workspaces.
+    fn launch_with(
+        cx: &mut gpui::TestAppContext,
+        root: &LaunchRoot,
+        alerts: Rc<ScriptedLaunchAlerts>,
+    ) -> usize {
+        let launched = Rc::new(std::cell::Cell::new(0));
+        let counted = Rc::clone(&launched);
+        let gate = Rc::new(LaunchGate {
+            store: Some(root.store()),
+            identity: "spaceterm-development",
+            alerts,
+            viewer: None,
+            floor: Some("1.1.0"),
+        });
+        cx.update(|cx| {
+            open_after_data_check(gate, Rc::new(move |_| counted.set(counted.get() + 1)), cx);
+        });
+        cx.run_until_parked();
+        launched.get()
+    }
+
+    fn scripted(
+        answers: &[crate::ui::data_reset::LaunchChoice],
+        before: impl Fn() + 'static,
+    ) -> Rc<ScriptedLaunchAlerts> {
+        Rc::new(ScriptedLaunchAlerts {
+            asked: RefCell::default(),
+            answers: RefCell::new(answers.iter().copied().collect()),
+            before: Box::new(before),
+        })
+    }
+
+    #[gpui::test]
+    fn a_launch_question_quit_opens_nothing_and_changes_no_file(cx: &mut gpui::TestAppContext) {
+        use crate::ui::data_reset::LaunchChoice;
+        for (marker, title) in [
+            ("99", "Saved Data From a Newer SpaceTerm"),
+            ("0", "SpaceTerm Can\u{2019}t Read Some Saved Data"),
+        ] {
+            let root = LaunchRoot::new("launch-quit");
+            root.write("generation.json", format!("{{\"generation\":{marker}}}").as_bytes());
+            root.write("core/desktop/client.json", br#"{"format":"account-local-1"}"#);
+            root.write("core/desktop/view.json", br#"{"old":true}"#);
+            let before = root.files();
+            let alerts = scripted(&[LaunchChoice::Quit], || {});
+            assert_eq!(launch_with(cx, &root, Rc::clone(&alerts)), 0);
+            assert_eq!(*alerts.asked.borrow(), [title]);
+            assert_eq!(root.files(), before, "Quit leaves the root unchanged");
+        }
+    }
+
+    /// A view that only hosts modals, as any SpaceTerm window can.
+    struct ModalHost;
+
+    impl gpui::Render for ModalHost {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            use gpui::Styled as _;
+            spaceterm_ui::ModalLayer::new(gpui::div().size_full())
+        }
+    }
+
+    #[gpui::test]
+    fn a_launch_question_uses_the_native_dialog_only_while_no_window_exists(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::ui::data_reset::LaunchChoice;
+        let root = LaunchRoot::new("launch-native");
+        root.write("generation.json", br#"{"generation":99}"#);
+        let alerts = scripted(&[LaunchChoice::Quit], || {});
+        assert_eq!(launch_with(cx, &root, Rc::clone(&alerts)), 0);
+        assert_eq!(alerts.asked.borrow().len(), 1, "no window: the native dialog asks");
+
+        cx.update(crate::ui::init).unwrap();
+        let window = cx.add_window(|_, _| ModalHost);
+        let alerts = scripted(&[LaunchChoice::Quit], || {});
+        assert_eq!(launch_with(cx, &root, Rc::clone(&alerts)), 0);
+        assert!(
+            alerts.asked.borrow().is_empty(),
+            "a SpaceTerm window: the native dialog never asks"
+        );
+        assert!(
+            window
+                .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(window, cx))
+                .unwrap(),
+            "SpaceTerm's own alert asks on that window"
+        );
+    }
+
+    #[gpui::test]
+    fn a_confirmed_reset_and_a_successful_try_again_open_the_workspaces(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::ui::data_reset::LaunchChoice;
+        use std::os::unix::fs::PermissionsExt;
+        let root = LaunchRoot::new("launch-reset");
+        root.write("generation.json", br#"{"generation":0}"#);
+        root.write("core/desktop/client.json", br#"{"format":"account-local-1"}"#);
+        let alerts = scripted(&[LaunchChoice::Reset], || {});
+        assert_eq!(launch_with(cx, &root, Rc::clone(&alerts)), 1);
+        assert_eq!(alerts.asked.borrow().len(), 1);
+        assert!(root.0.join("data/reset/gen-0/core/desktop/client.json").exists());
+
+        let root = LaunchRoot::new("launch-unavailable");
+        root.write("generation.json", br#"{"generation":1}"#);
+        std::fs::set_permissions(root.0.join("data"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let data = root.0.join("data");
+        let alerts = scripted(&[LaunchChoice::TryAgain], move || {
+            std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        });
+        assert_eq!(launch_with(cx, &root, Rc::clone(&alerts)), 1);
+        assert_eq!(
+            *alerts.asked.borrow(),
+            ["SpaceTerm Can\u{2019}t Reach Its Saved Data"]
+        );
     }
 
     /// ADR 0049: with the status item showing, Quit from the app menu with no window open leaves

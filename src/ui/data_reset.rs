@@ -64,10 +64,7 @@ pub(crate) fn offer_notice(workspace: WindowHandle<WorkspaceManager>, cx: &mut A
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DataAction {
-    Reset,
-    TryAgain,
     ShowFiles,
-    Quit,
     Dismiss,
 }
 
@@ -164,80 +161,143 @@ pub(crate) fn notice_alert(reset: &[DataKind], can_show: bool) -> Alert<DataActi
     .intent(AlertIntent::Informational)
 }
 
-/// Asks before resetting data the person may not expect to lose. Quit leaves it unchanged.
-pub(crate) fn confirmation_alert(
-    reason: ResetReason,
-    kinds: &[DataKind],
+/// What the person chooses on a launch prompt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LaunchChoice {
+    Reset,
+    TryAgain,
+    Quit,
+}
+
+/// How a launch prompt's button behaves, which each platform maps onto its own dialog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LaunchButtonRole {
+    /// Return chooses it.
+    Default,
+    /// Escape chooses it.
+    Cancel,
+    /// It loses data, so no key chooses it and focus starts elsewhere.
+    Destructive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LaunchButton {
+    pub(crate) label: &'static str,
+    pub(crate) choice: LaunchChoice,
+    pub(crate) role: LaunchButtonRole,
+}
+
+/// One application-modal question asked before any SpaceTerm window opens. It names kinds of
+/// data and versions, never a path or a label. Buttons run from the dialog's primary position
+/// outward, as AppKit adds them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LaunchPrompt {
+    pub(crate) title: &'static str,
+    pub(crate) detail: String,
+    /// Answering can lose data the person may not expect to lose.
+    pub(crate) caution: bool,
+    pub(crate) buttons: Vec<LaunchButton>,
+}
+
+/// Shows a [`LaunchPrompt`] as the platform's own application-modal dialog and answers once.
+pub(crate) trait LaunchAlerts {
+    fn ask(&self, prompt: LaunchPrompt, cx: &mut App) -> gpui::Task<LaunchChoice>;
+}
+
+/// The question launch asks for a desktop state root that `check` refuses, or None when the
+/// Workspaces may open. `floor` is the Stepping Stone release for data too old to update.
+pub(crate) fn launch_prompt(
+    check: &crate::migration::StateCheck,
     floor: Option<&str>,
-) -> Alert<DataAction> {
-    Alert::new(
-        ModalId::new("data-reset-confirm"),
-        "Can\u{2019}t read saved data",
-        "SpaceTerm Can\u{2019}t Read Some Saved Data",
-        confirmation_detail(reason, kinds, floor),
-        vec![
-            ModalAction::new(
-                DataAction::Reset,
-                "Reset",
-                ModalActionRole::Affirmative,
-                "data-reset-confirm-reset",
-            )
-            .with_intent(ModalActionIntent::Destructive),
-            ModalAction::new(
-                DataAction::Quit,
-                "Quit",
-                ModalActionRole::Cancel,
-                "data-reset-confirm-quit",
-            ),
-        ],
-    )
-    .intent(AlertIntent::Warning)
+) -> Option<LaunchPrompt> {
+    use crate::migration::StateCheck;
+    let quit = |role| LaunchButton {
+        label: "Quit",
+        choice: LaunchChoice::Quit,
+        role,
+    };
+    Some(match check {
+        StateCheck::Ready { .. } => return None,
+        // Nothing in the data changes, so Return quits.
+        StateCheck::Newer => LaunchPrompt {
+            title: "Saved Data From a Newer SpaceTerm",
+            detail: "Install the newest SpaceTerm to open your Workspaces. SpaceTerm hasn\u{2019}t \
+                     changed this data."
+                .to_owned(),
+            caution: false,
+            buttons: vec![quit(LaunchButtonRole::Default)],
+        },
+        // Reset loses data, so it takes no key and Quit is the safe choice.
+        StateCheck::ResetRequired { reason, kinds } => LaunchPrompt {
+            title: "SpaceTerm Can\u{2019}t Read Some Saved Data",
+            detail: confirmation_detail(*reason, kinds, floor),
+            caution: true,
+            buttons: vec![
+                LaunchButton {
+                    label: "Reset",
+                    choice: LaunchChoice::Reset,
+                    role: LaunchButtonRole::Destructive,
+                },
+                quit(LaunchButtonRole::Cancel),
+            ],
+        },
+        StateCheck::Unavailable => LaunchPrompt {
+            title: "SpaceTerm Can\u{2019}t Reach Its Saved Data",
+            detail: "Make sure your account can read and change SpaceTerm\u{2019}s folders, then \
+                     try again. SpaceTerm hasn\u{2019}t changed this data."
+                .to_owned(),
+            caution: false,
+            buttons: vec![
+                LaunchButton {
+                    label: "Try Again",
+                    choice: LaunchChoice::TryAgain,
+                    role: LaunchButtonRole::Default,
+                },
+                quit(LaunchButtonRole::Cancel),
+            ],
+        },
+    })
 }
 
-/// Refuses data a newer SpaceTerm wrote. Nothing in it changes.
-pub(crate) fn newer_alert() -> Alert<DataAction> {
+/// `prompt` as SpaceTerm's own alert, for a desktop whose toolkit offers no native
+/// application-modal dialog, or for a question asked while a SpaceTerm window is open.
+pub(crate) fn drawn_alert(prompt: &LaunchPrompt) -> Alert<LaunchChoice> {
+    let actions = prompt
+        .buttons
+        .iter()
+        .enumerate()
+        .map(|(index, button)| {
+            let selector = format!("launch-prompt-{index}");
+            match button.role {
+                LaunchButtonRole::Default => ModalAction::new(
+                    button.choice,
+                    button.label,
+                    ModalActionRole::Affirmative,
+                    selector,
+                )
+                .default_action(true),
+                LaunchButtonRole::Cancel => ModalAction::new(
+                    button.choice,
+                    button.label,
+                    ModalActionRole::Cancel,
+                    selector,
+                ),
+                LaunchButtonRole::Destructive => ModalAction::new(
+                    button.choice,
+                    button.label,
+                    ModalActionRole::Affirmative,
+                    selector,
+                )
+                .with_intent(ModalActionIntent::Destructive),
+            }
+        })
+        .collect();
     Alert::new(
-        ModalId::new("data-newer"),
-        "Saved data from a newer SpaceTerm",
-        "Saved Data From a Newer SpaceTerm",
-        "Install the newest SpaceTerm to open your Workspaces. SpaceTerm hasn\u{2019}t changed \
-         this data.",
-        vec![
-            ModalAction::new(
-                DataAction::Quit,
-                "Quit",
-                ModalActionRole::Affirmative,
-                "data-newer-quit",
-            )
-            .default_action(true),
-        ],
-    )
-    .intent(AlertIntent::Warning)
-}
-
-/// Storage that can't be read is never treated as empty. Try Again checks it again.
-pub(crate) fn unavailable_alert() -> Alert<DataAction> {
-    Alert::new(
-        ModalId::new("data-unavailable"),
-        "Saved data unavailable",
-        "SpaceTerm Can\u{2019}t Reach Its Saved Data",
-        "Make sure your account can read and change SpaceTerm\u{2019}s folders, then try again. \
-         SpaceTerm hasn\u{2019}t changed this data.",
-        vec![
-            ModalAction::new(
-                DataAction::TryAgain,
-                "Try Again",
-                ModalActionRole::Affirmative,
-                "data-unavailable-try-again",
-            )
-            .default_action(true),
-            ModalAction::new(
-                DataAction::Quit,
-                "Quit",
-                ModalActionRole::Cancel,
-                "data-unavailable-quit",
-            ),
-        ],
+        ModalId::new("launch-prompt"),
+        prompt.title,
+        prompt.title,
+        prompt.detail.clone(),
+        actions,
     )
     .intent(AlertIntent::Warning)
 }
@@ -259,7 +319,11 @@ mod tests {
     }
 
     /// Presents `alert`, presses `keys`, and returns the action they chose, if any.
-    fn answer(cx: &mut TestAppContext, alert: Alert<DataAction>, keys: &str) -> Option<DataAction> {
+    fn answer<A: Clone + Eq + 'static>(
+        cx: &mut TestAppContext,
+        alert: Alert<A>,
+        keys: &str,
+    ) -> Option<A> {
         cx.update(crate::ui::init).unwrap();
         let (root, cx) = cx.add_window_view(|window, _| {
             window.activate_window();
@@ -290,11 +354,46 @@ mod tests {
         outcome.take()
     }
 
+    fn prompt(check: crate::migration::StateCheck) -> LaunchPrompt {
+        launch_prompt(&check, Some("1.1.0")).expect("a refused root asks")
+    }
+
     #[gpui::test]
     fn return_tries_again_when_saved_data_is_unavailable(cx: &mut TestAppContext) {
         assert_eq!(
-            answer(cx, unavailable_alert(), "enter"),
-            Some(DataAction::TryAgain)
+            answer(
+                cx,
+                drawn_alert(&prompt(crate::migration::StateCheck::Unavailable)),
+                "enter"
+            ),
+            Some(LaunchChoice::TryAgain)
+        );
+    }
+
+    #[gpui::test]
+    fn escape_quits_and_return_never_resets_the_unreadable_data(cx: &mut TestAppContext) {
+        let reset = prompt(crate::migration::StateCheck::ResetRequired {
+            reason: ResetReason::TooOld,
+            kinds: vec![DataKind::SavedConnections],
+        });
+        assert_eq!(answer(cx, drawn_alert(&reset), "escape"), Some(LaunchChoice::Quit));
+        assert_eq!(
+            reset
+                .buttons
+                .iter()
+                .map(|button| (button.choice, button.role))
+                .collect::<Vec<_>>(),
+            [
+                (LaunchChoice::Reset, LaunchButtonRole::Destructive),
+                (LaunchChoice::Quit, LaunchButtonRole::Cancel),
+            ],
+            "no key chooses Reset"
+        );
+        assert!(reset.caution);
+        assert!(reset.detail.contains("install SpaceTerm 1.1.0 first"));
+        assert_eq!(
+            launch_prompt(&crate::migration::StateCheck::Ready { reset: Vec::new() }, None),
+            None
         );
     }
 
@@ -342,14 +441,23 @@ mod tests {
     #[test]
     fn every_data_prompt_satisfies_the_desktop_alert_policy() {
         let policy = spaceterm_ui::ModalDesktopPolicy::mac_os();
-        for alert in [
-            notice_alert(&[DataKind::View], true),
-            notice_alert(&[DataKind::View], false),
-            confirmation_alert(ResetReason::TooOld, &[DataKind::SavedConnections], None),
-            newer_alert(),
-            unavailable_alert(),
+        assert_eq!(
+            notice_alert(&[DataKind::View], true).validate(&policy),
+            Ok(())
+        );
+        assert_eq!(
+            notice_alert(&[DataKind::View], false).validate(&policy),
+            Ok(())
+        );
+        for check in [
+            crate::migration::StateCheck::Newer,
+            crate::migration::StateCheck::Unavailable,
+            crate::migration::StateCheck::ResetRequired {
+                reason: ResetReason::TooOld,
+                kinds: vec![DataKind::SavedConnections],
+            },
         ] {
-            assert_eq!(alert.validate(&policy), Ok(()));
+            assert_eq!(drawn_alert(&prompt(check)).validate(&policy), Ok(()));
         }
     }
 }

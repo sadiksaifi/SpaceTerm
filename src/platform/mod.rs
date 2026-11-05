@@ -60,6 +60,9 @@ mod macos_quick_look_window;
 mod macos_text_input_focus;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
+mod macos_launch_alerts;
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
 pub(crate) mod macos_updates;
 #[cfg(feature = "desktop")]
 pub(crate) mod notification_access;

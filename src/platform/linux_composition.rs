@@ -279,6 +279,9 @@ fn compose(
             )),
             selected_files: Arc::new(super::unix_selected_file::UnixSelectedFileOpener),
             file_viewer: Some(Arc::new(super::linux_file_viewer::FileManagerViewer::new(bus.clone()))),
+            // GTK or libadwaita would bring a second toolkit and event loop beside GPUI's own,
+            // and no desktop portal offers a message dialog, so the launch questions are drawn.
+            launch_alerts: Rc::new(crate::app::WindowLaunchAlerts),
             settings_file,
             application_menu: Rc::new(
                 super::linux_application_menu::LinuxApplicationMenuAdapter,
