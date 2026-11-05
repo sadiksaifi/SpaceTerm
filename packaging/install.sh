@@ -418,24 +418,22 @@ locate_installed_core() {
     core_installed="$executable"
 }
 
-# Sets core_running to the version of the SpaceTerm Core installation the launcher or the service
-# record names, the one that runs, or to "" when none is installed. A Pending Version beside it
-# has not run yet, so it never meets an Update Floor.
+# Sets core_running to the version of the installation the SpaceTerm Core service record approves,
+# the one that runs or starts next, or to "" when no SpaceTerm Core is registered. The launcher
+# is not consulted: an activation that could not replace it leaves it naming another
+# installation, possibly a pruned one. A Pending Version beside the approved one has not run, so
+# it never meets an Update Floor.
 running_core_version() {
     core_running=""
-    approved=""
-    if [ -L "$bin_dir/spaceterm" ]; then
-        case "$(readlink "$bin_dir/spaceterm")" in
-            "$core_data/installations/"*/"$(core_executable)")
-                approved="$(readlink "$bin_dir/spaceterm")"
-                approved="${approved%/"$(core_executable)"}"
-                ;;
-        esac
-    fi
-    if [ -z "$approved" ] && [ -f "$core_data/service.json" ] && [ ! -L "$core_data/service.json" ]; then
-        approved="$core_data/installations/$(json_field installation <"$core_data/service.json")"
-    fi
-    [ -n "$approved" ] && [ -f "$approved/build.json" ] || return 0
+    record="$core_data/service.json"
+    [ -e "$record" ] || [ -L "$record" ] || return 0
+    unreadable="the SpaceTerm Core service record could not be read"
+    [ -f "$record" ] && [ ! -L "$record" ] || die "$unreadable"
+    digest="$(json_field installation <"$record")"
+    [ "${#digest}" -eq 64 ] || die "$unreadable"
+    case "$digest" in *[!0-9a-f]*) die "$unreadable" ;; esac
+    approved="$core_data/installations/$digest"
+    [ -f "$approved/build.json" ] || die "the SpaceTerm Core installation the service record approves is missing"
     core_running="$(json_field version <"$approved/build.json")"
     valid_version "$core_running" || die "the running SpaceTerm Core version could not be read"
 }

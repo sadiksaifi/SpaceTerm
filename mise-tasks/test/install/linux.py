@@ -250,6 +250,31 @@ class InstallTests(unittest.TestCase):
             for path in directory.iterdir()
         }
 
+    def register(self, version):
+        """Records `version`'s installation as the one the SpaceTerm Core service approves, as
+        setup and each activation do."""
+        core = self.home / ".local/share/spaceterm/core"
+        [digest] = [
+            path.name
+            for path in (core / "installations").iterdir()
+            if json.loads((path / "build.json").read_text())["version"] == version
+        ]
+        record = {
+            "installation": digest,
+            "stopped": True,
+            "automatic_start": True,
+            "installed": True,
+            "removing": False,
+            "run": None,
+        }
+        (core / "service.json").write_text(json.dumps(record, separators=(",", ":")))
+
+    def prune(self, version):
+        """Removes `version`'s installation, as SpaceTerm Core prunes one it no longer keeps."""
+        for path in (self.home / ".local/share/spaceterm/core/installations").iterdir():
+            if json.loads((path / "build.json").read_text())["version"] == version:
+                shutil.rmtree(path)
+
     def launcher(self):
         return self.home / ".local/bin/spaceterm"
 
@@ -449,9 +474,10 @@ class InstallTests(unittest.TestCase):
                 self.assertIn("does not hold the SpaceTerm Core 1.2.0 release", result.stderr)
                 self.assert_nothing_ran()
 
-    def test_a_core_below_the_update_floor_is_refused_before_it_runs(self):
+    def test_a_registered_core_below_the_update_floor_is_refused_before_it_runs(self):
         self.publish("1.1.0", latest=False)
         self.succeed("--version", "1.1.0")
+        self.register("1.1.0")
         self.publish("1.2.0", document=build_document("1.2.0", floor="1.1.5"))
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
@@ -461,12 +487,20 @@ class InstallTests(unittest.TestCase):
             "--version 1.1.5",
             result.stderr,
         )
-        self.assertEqual(list(self.installations().values()), ["1.1.0"])
+        self.assertEqual(sorted(self.installations().values()), ["1.1.0"])
 
-    def test_the_floor_applies_to_the_running_core_not_one_waiting_beside_it(self):
+    def test_a_core_without_a_service_record_meets_every_floor(self):
+        self.publish("1.1.0", latest=False)
+        self.succeed("--version", "1.1.0")
+        self.publish("1.2.0", document=build_document("1.2.0", floor="1.1.5"))
+        self.succeed()
+        self.assertEqual(sorted(self.installations().values()), ["1.1.0", "1.2.0"])
+
+    def test_the_floor_applies_to_the_approved_core_not_one_waiting_beside_it(self):
         for version in ("1.0.0", "1.1.0"):
             self.publish(version, latest=False)
             self.succeed("--version", version)
+        self.register("1.0.0")
         self.publish("1.2.0", document=build_document("1.2.0", floor="1.1.0"))
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
@@ -476,6 +510,49 @@ class InstallTests(unittest.TestCase):
             result.stderr,
         )
         self.assertEqual(sorted(self.installations().values()), ["1.0.0", "1.1.0"])
+
+    def test_a_stale_launcher_does_not_name_the_running_core(self):
+        for version in ("1.0.0", "1.1.0"):
+            self.publish(version, latest=False)
+            self.succeed("--version", version)
+        # The activation into 1.1.0 could not replace the launcher, which still names 1.0.0.
+        self.register("1.1.0")
+        self.publish("1.2.0", document=build_document("1.2.0", floor="1.1.0"))
+        self.succeed()
+        self.assertEqual(sorted(self.installations().values()), ["1.0.0", "1.1.0", "1.2.0"])
+
+    def test_a_dangling_launcher_does_not_lift_the_floor(self):
+        for version in ("1.0.0", "1.1.0"):
+            self.publish(version, latest=False)
+            self.succeed("--version", version)
+        # The launcher still names 1.0.0, which SpaceTerm Core pruned after it moved to 1.1.0.
+        self.register("1.1.0")
+        self.prune("1.0.0")
+        self.publish("1.2.0", latest=False, document=build_document("1.2.0", floor="1.1.0"))
+        self.succeed("--version", "1.2.0")
+        self.publish("1.3.0", document=build_document("1.3.0", floor="1.2.0"))
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "SpaceTerm Core 1.1.0 is older than 1.2.0, the oldest version that updates "
+            "directly to SpaceTerm Core 1.3.0",
+            result.stderr,
+        )
+        self.assertEqual(sorted(self.installations().values()), ["1.1.0", "1.2.0"])
+
+    def test_a_service_record_naming_a_missing_installation_stops_before_downloading(self):
+        self.publish("1.1.0", latest=False)
+        self.succeed("--version", "1.1.0")
+        self.register("1.1.0")
+        self.prune("1.1.0")
+        self.requests.unlink()
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "the SpaceTerm Core installation the service record approves is missing",
+            result.stderr,
+        )
+        self.assertEqual(self.requested(), [])
 
     def test_a_dry_run_accepts_placeholder_keys_and_says_so(self):
         installer = render(self.root, kind="dry-run", team_id="")
