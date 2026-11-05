@@ -56,6 +56,13 @@ jobs:
         id: key
         # A throwaway Ed25519 seed. Nothing it signs verifies under the release trust.
         run: echo "key=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
+      - name: Check the Data Generations, migration fixtures and Update Floors
+        timeout-minutes: 5
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag || steps.dry-run.outputs.tag }}
+          # gh confirms that each floor is a published release.
+          GH_TOKEN: ${{ github.token }}
+        run: mise run release:migrations "$RELEASE_TAG"
 
   validate-macos:
     name: Validate macOS
@@ -103,6 +110,9 @@ jobs:
       - name: Validate
         timeout-minutes: 60
         run: mise run validate:linux
+      - name: Migrate and parse every migration fixture
+        timeout-minutes: 15
+        run: mise run test:migrations
 
   notes:
     name: Write the release notes
@@ -288,9 +298,50 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  update-from-floor:
+    name: Update from the Update Floor
+    needs: [plan, core]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    # install_args selects this job's tools; keep mise run from installing the rest.
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: "python"
+      - name: Skip the pair in a dry run
+        if: github.event_name != 'push'
+        # The floor release's Core trusts only release signatures, and a dry run's Core
+        # archive carries the generated key's.
+        run: echo "Dry run - the update-from-floor pair needs a release-signed Core archive."
+      - name: Authorize boot startup for the floor Core's user service
+        if: github.event_name == 'push'
+        timeout-minutes: 5
+        run: sudo loginctl enable-linger "$USER"
+      - name: Collect the Linux Core build
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@v8
+        with:
+          name: core-x86_64-unknown-linux-gnu
+          path: dist/release-core
+      - name: Update the floor release's Core to this release's
+        if: github.event_name == 'push'
+        timeout-minutes: 30
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          mise run compat:update "$RELEASE_TAG"
+          --archive dist/release-core/x86_64-unknown-linux-gnu/artifact.tar.gz
+          --signature dist/release-core/x86_64-unknown-linux-gnu/artifact.sig
+
   publish:
     name: Sign the feeds and publish the release
-    needs: [plan, notes, core, desktop-macos, desktop-linux]
+    needs: [plan, notes, core, desktop-macos, desktop-linux, update-from-floor]
     environment: ${{ github.event_name == 'push' && 'release' || '' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
