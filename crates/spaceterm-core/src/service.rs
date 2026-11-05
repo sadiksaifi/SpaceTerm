@@ -273,7 +273,12 @@ impl Service {
         }))
     }
     pub fn status(&self) -> Result<ServiceStatus, CoreError> {
-        self.recover_activation()?;
+        self.status_with(Contention::Wait)
+    }
+    /// [`Self::status`], where an activation's recovery takes the service lock as `contention`
+    /// says.
+    pub(crate) fn status_with(&self, contention: Contention) -> Result<ServiceStatus, CoreError> {
+        self.recover_activation_with(contention)?;
         let Some((_, state)) = self.read()? else {
             return Ok(ServiceStatus::default());
         };
@@ -911,6 +916,29 @@ impl Service {
 
 // Retained Stop of an installed service also fences explicit foreground startup. A record whose
 // service is not installed has no server to keep stopped.
+/// What a caller does when another service operation holds the service lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Contention {
+    /// Waits for the operation to end.
+    Wait,
+    /// Refuses with ServiceBusy. A running Core's lane worker refuses, because an activation that
+    /// holds the lock waits for that Core to stop, and the Core's shutdown joins the worker.
+    Refuse,
+}
+
+impl Contention {
+    /// The service lock in `data`, taken as this says.
+    pub(crate) fn operation_lock(
+        self,
+        data: &Directory,
+    ) -> Result<crate::storage::Lock, CoreError> {
+        match self {
+            Self::Wait => data.lock("service.lock", false),
+            Self::Refuse => data.try_lock("service.lock")?.ok_or(CoreError::ServiceBusy),
+        }
+    }
+}
+
 pub(crate) fn check_start(paths: &Paths) -> Result<(), CoreError> {
     let data = match Directory::open(&paths.data, false) {
         Ok(data) => data,

@@ -282,8 +282,17 @@ impl Service {
         &self,
         candidate: &RetainedInstallation,
     ) -> Result<Option<ActivationApproval>, CoreError> {
+        self.prepare_activation_with(candidate, super::Contention::Wait)
+    }
+
+    /// [`Self::prepare_activation`], taking the service lock as `contention` says.
+    pub(crate) fn prepare_activation_with(
+        &self,
+        candidate: &RetainedInstallation,
+        contention: super::Contention,
+    ) -> Result<Option<ActivationApproval>, CoreError> {
         let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
-        let _operation = data.lock("service.lock", false)?;
+        let _operation = contention.operation_lock(&data)?;
         let _intent = data.lock("service-intent.lock", false)?;
         data.verify_path(&self.paths.data)?;
         let state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
@@ -371,13 +380,21 @@ impl Service {
 
     /// Finish an admitted exact target. Never resend destructive Stop or candidate Start dispatch.
     pub fn recover_activation(&self) -> Result<Option<ActivationStatus>, CoreError> {
+        self.recover_activation_with(super::Contention::Wait)
+    }
+
+    /// [`Self::recover_activation`], taking the service lock as `contention` says.
+    pub(crate) fn recover_activation_with(
+        &self,
+        contention: super::Contention,
+    ) -> Result<Option<ActivationStatus>, CoreError> {
         let Some((data, state)) = self.read()? else {
             return Ok(None);
         };
         if state.activation.is_none() {
             return Ok(None);
         }
-        let _operation = data.lock("service.lock", false)?;
+        let _operation = contention.operation_lock(&data)?;
         self.resume_activation(&data)?;
         self.activation_status_locked(&data)
     }
