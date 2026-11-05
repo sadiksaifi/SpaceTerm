@@ -23,6 +23,7 @@ import sys
 import tarfile
 import tempfile
 from contextlib import nullcontext
+from enum import Enum
 from pathlib import Path, PurePosixPath
 
 from spaceterm_tasks import (
@@ -67,6 +68,23 @@ MAX_MEMBERS = 128
 # versions into Core build documents as `protocols`.
 PROTOCOL_SOURCE = "crates/spaceterm-core/src/protocol/version.rs"
 PROTOCOL_NAMES = {"work": "WORK", "service": "SERVICE", "desktop_channel": "DESKTOP_CHANNEL"}
+
+
+class ArtifactCause(Enum):
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+    TIMED_OUT = "timed out"
+    SIGNATURE_MISMATCH = "signature mismatch"
+    DIGEST_MISMATCH = "digest mismatch"
+    OS_ERROR = "operating-system operation failed"
+
+
+class ArtifactVerificationError(TaskError):
+    """A bounded cause, without native error details or artifact contents."""
+
+    def __init__(self, cause: ArtifactCause):
+        self.cause = cause
+        super().__init__(f"SpaceTerm Core artifact verification failed: {cause.value}")
 
 
 def protocol_line(constant):
@@ -315,11 +333,12 @@ def unpack_verified(
     if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
         raise TaskError("the signed server artifact has an invalid size")
     trust_identity = identity or (expected["identity"] if expected is not None else None)
-    update_signing.verify(artifact_trust(trust_identity), archive, signature)
+    try:
+        update_signing.verify(artifact_trust(trust_identity), archive, signature)
+    except update_signing.SignatureMismatch:
+        raise ArtifactVerificationError(ArtifactCause.SIGNATURE_MISMATCH) from None
     if expected_sha256 is not None and update_signing.sha256(archive) != expected_sha256:
-        raise TaskError(
-            "the embedded server archive differs from the client's compiled candidate pin"
-        )
+        raise ArtifactVerificationError(ArtifactCause.DIGEST_MISMATCH) from None
     try:
         with tarfile.open(archive, "r:gz") as source:
             members = []
@@ -897,7 +916,11 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
 def verify_desktop_artifact(destination, identity, release_tag=None, *, executable=None):
     """Verify signed candidate compatibility and the final client's compiled whole-archive pin."""
     try:
-        if {path.name for path in destination.iterdir()} != {"artifact.tar.gz", "artifact.sig"}:
+        entries = {path.name for path in destination.iterdir()}
+        required = {"artifact.tar.gz", "artifact.sig"}
+        if not required <= entries:
+            raise ArtifactVerificationError(ArtifactCause.MISSING) from None
+        if entries != required:
             raise TaskError("the desktop server artifact layout is invalid")
         pin = None
         if executable is not None:
@@ -929,5 +952,11 @@ def verify_desktop_artifact(destination, identity, release_tag=None, *, executab
                 identity=identity,
                 expected_sha256=pin,
             )
-    except (OSError, subprocess.TimeoutExpired):
-        raise TaskError("the desktop server artifact is unavailable") from None
+    except FileNotFoundError:
+        raise ArtifactVerificationError(ArtifactCause.MISSING) from None
+    except PermissionError:
+        raise ArtifactVerificationError(ArtifactCause.UNREADABLE) from None
+    except subprocess.TimeoutExpired:
+        raise ArtifactVerificationError(ArtifactCause.TIMED_OUT) from None
+    except OSError:
+        raise ArtifactVerificationError(ArtifactCause.OS_ERROR) from None

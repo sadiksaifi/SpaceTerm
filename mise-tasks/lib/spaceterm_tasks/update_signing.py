@@ -28,6 +28,10 @@ ED25519_PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 
 
+class SignatureMismatch(TaskError):
+    """The signature does not authenticate the message under the trusted keys."""
+
+
 def dry_run(environment=os.environ):
     """Whether this process runs a release dry run: generated keys, ad hoc code signatures, and
     no notarization or publication."""
@@ -208,4 +212,4 @@ def verifies(public, message, signature):
 def verify(keys, message, signature):
     """Require a signature of the file `message` under one of `keys`."""
     if not any(verifies(public, message, signature) for public in keys):
-        raise TaskError("the update signature does not verify under the trusted keys")
+        raise SignatureMismatch("the update signature does not verify under the trusted keys")
