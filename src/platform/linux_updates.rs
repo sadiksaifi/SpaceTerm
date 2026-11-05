@@ -22,7 +22,7 @@ use crate::application_identity::ApplicationIdentity;
 use crate::updates::policy::UpdateHistory;
 use crate::updates::release_feed::{MAX_ARCHIVE_BYTES, ReleaseFeed, release_trust};
 use crate::updates::{UpdateAdapter, UpdateError, UpdateEvent, UpdateTransport};
-use spaceterm_core::update::feed::FeedTarget;
+use spaceterm_core::update::feed::{FeedTarget, SystemVersion};
 use spaceterm_core::update::trust::UpdateTrust;
 
 #[cfg(target_arch = "x86_64")]
@@ -129,6 +129,7 @@ impl UpdateAdapter for LinuxUpdates {
             installation: dependencies.installation.clone(),
             archive_root: dependencies.archive_root,
             current_version: env!("SPACETERM_VERSION"),
+            system: spaceterm_core::update::system::host,
             events,
             cycle: Mutex::new(Cycle::default()),
         });
@@ -293,6 +294,8 @@ struct Shared {
     installation: Installation,
     archive_root: &'static str,
     current_version: &'static str,
+    /// The host's glibc version, which a release must meet.
+    system: fn() -> Option<SystemVersion>,
     events: async_channel::Sender<UpdateEvent>,
     cycle: Mutex<Cycle>,
 }
@@ -342,7 +345,8 @@ impl Shared {
             return;
         }
         match result {
-            Ok(feed) if feed.supersedes(self.current_version) => {
+            // A release that needs a newer system is not offered, as Sparkle skips one on macOS.
+            Ok(feed) if feed.supersedes(self.current_version) && feed.runs_on((self.system)()) => {
                 let (version, published_at) = (feed.version.clone(), feed.published_at);
                 cycle.phase = Phase::Available(feed);
                 drop(cycle);
@@ -762,7 +766,7 @@ impl HistoryFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::updates::release_feed::testing::ReleaseSigner;
+    use crate::updates::release_feed::testing::{MINIMUM, ReleaseSigner};
     use std::collections::HashMap;
 
     const ROOT: &str = "spaceterm";
@@ -1002,17 +1006,26 @@ mod tests {
     }
 
     fn served(signer: &ReleaseSigner, version: &str, archive: &[u8]) -> ServedRelease {
-        published(signer, &[(version, "0.0.0", archive)])
+        published(signer, &[(version, "0.0.0", MINIMUM, archive)])
     }
 
-    /// Serves `releases`, as `(version, floor, archive)` and newest first, at their versions,
-    /// and the first as the newest release.
-    fn published(signer: &ReleaseSigner, releases: &[(&str, &str, &[u8])]) -> ServedRelease {
+    /// Serves `releases`, as `(version, floor, minimum system, archive)` and newest first, at
+    /// their versions, and the first as the newest release.
+    fn published(
+        signer: &ReleaseSigner,
+        releases: &[(&str, &str, SystemVersion, &[u8])],
+    ) -> ServedRelease {
         let target = FeedTarget::DESKTOP_LINUX;
         let mut served = HashMap::new();
-        for (index, &(version, floor, archive)) in releases.iter().enumerate() {
-            let (feed, signature) =
-                signer.floored_feed(target, version, floor, crate::updates::now() - 60, archive);
+        for (index, &(version, floor, minimum, archive)) in releases.iter().enumerate() {
+            let (feed, signature) = signer.floored_feed(
+                target,
+                version,
+                floor,
+                minimum,
+                crate::updates::now() - 60,
+                archive,
+            );
             let parsed = spaceterm_core::update::facts::Version::parse(version).unwrap();
             if index == 0 {
                 served.insert(target.feed_url(None), feed.clone());
@@ -1043,6 +1056,7 @@ mod tests {
             installation: fixture.installation.clone(),
             archive_root: ROOT,
             current_version: "1.0.0",
+            system: || Some(MINIMUM),
             events,
             cycle: Mutex::new(Cycle::default()),
         });
@@ -1112,8 +1126,8 @@ mod tests {
         let transport = published(
             &signer,
             &[
-                ("1.2.0", "1.1.0", &release(b"newest")),
-                ("1.1.0", "1.0.0", &release(b"stone")),
+                ("1.2.0", "1.1.0", MINIMUM, &release(b"newest")),
+                ("1.1.0", "1.0.0", MINIMUM, &release(b"stone")),
             ],
         );
         let (shared, receiver) = shared(&fixture, transport, signer.trust());
@@ -1142,8 +1156,8 @@ mod tests {
         let transport = published(
             &signer,
             &[
-                ("1.2.0", "1.1.0", &release(b"newest")),
-                ("1.1.0", "1.1.0", &release(b"stone")),
+                ("1.2.0", "1.1.0", MINIMUM, &release(b"newest")),
+                ("1.1.0", "1.1.0", MINIMUM, &release(b"stone")),
             ],
         );
         let (shared, receiver) = shared(&fixture, transport, signer.trust());
@@ -1152,6 +1166,30 @@ mod tests {
             .unwrap();
         shared.check(generation);
         assert_eq!(drained(&receiver), ["Failed(Verification)", "Finished"]);
+    }
+
+    #[test]
+    fn linux_stepping_stone_for_a_newer_system_should_not_be_offered() {
+        let fixture = installed("old");
+        let signer = ReleaseSigner::new(3);
+        let newer = SystemVersion {
+            major: 2,
+            minor: 39,
+        };
+        let transport = published(
+            &signer,
+            &[
+                ("1.2.0", "1.1.0", MINIMUM, &release(b"newest")),
+                ("1.1.0", "1.0.0", newer, &release(b"stone")),
+            ],
+        );
+        let (shared, receiver) = shared(&fixture, transport, signer.trust());
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
+        shared.check(generation);
+        assert_eq!(drained(&receiver), ["UpToDate", "Finished"]);
+        assert!(matches!(shared.lock().phase, Phase::Idle));
     }
 
     #[test]
