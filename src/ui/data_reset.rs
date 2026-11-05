@@ -3,7 +3,6 @@
 //! that needs one, and the launch refusals of data a newer SpaceTerm wrote or storage that is
 //! unavailable. Every text names kinds of data and versions, never a path or a raw error.
 //! [`crate::migration`] owns the reset itself.
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{App, AppContext as _, WindowHandle};
@@ -19,8 +18,9 @@ use crate::command_line_tool::FileViewer;
 /// The notice an automatic reset left for the first Workspace window.
 pub(crate) struct PendingNotice {
     pub(crate) reset: Vec<DataKind>,
-    /// Where the earlier files went. It is shown in the file manager, never named in text.
-    pub(crate) files: PathBuf,
+    /// The desktop state root, which keeps the notice until the person acknowledges it, and
+    /// whose reset directory the file manager shows. Its path is never named in text.
+    pub(crate) store: Arc<migration::DirectoryStore>,
     pub(crate) viewer: Option<Arc<dyn FileViewer>>,
 }
 
@@ -31,9 +31,10 @@ pub(crate) fn offer_notice(workspace: WindowHandle<WorkspaceManager>, cx: &mut A
     if !cx.has_global::<PendingNotice>() {
         return;
     }
+    // The root keeps the notice, so a launch that never presents it shows it next time.
     let PendingNotice {
         reset,
-        files,
+        store,
         viewer,
     } = cx.remove_global::<PendingNotice>();
     // The prompt attaches to the window after its first frame, as any other window-modal alert.
@@ -41,13 +42,14 @@ pub(crate) fn offer_notice(workspace: WindowHandle<WorkspaceManager>, cx: &mut A
         let _ = workspace.update(cx, |_, window, cx| {
             let alert = notice_alert(&reset, viewer.is_some());
             let result = alert.present(window, cx, move |outcome, cx| {
-                if let AlertOutcome::Activated {
-                    action_id: DataAction::ShowFiles,
-                    ..
-                } = outcome
+                let AlertOutcome::Activated { action_id, .. } = outcome else {
+                    return;
+                };
+                acknowledge(&store);
+                if action_id == DataAction::ShowFiles
                     && let Some(viewer) = viewer
                 {
-                    let reveal = viewer.reveal(&files);
+                    let reveal = viewer.reveal(&store.reset_directory());
                     cx.background_spawn(async move {
                         let _ = reveal.await;
                     })
@@ -68,6 +70,11 @@ pub(crate) enum DataAction {
     ShowFiles,
     Quit,
     Dismiss,
+}
+
+/// Forgets the notice the person acknowledged with either action.
+pub(crate) fn acknowledge(store: &migration::DirectoryStore) {
+    let _ = migration::acknowledge_notice(store);
 }
 
 /// How to keep data a SpaceTerm too old to update directly saved: install the Stepping Stone

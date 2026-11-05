@@ -161,6 +161,14 @@ fn desktop_state_migration_refuses_newer_data_and_asks_before_resetting_client_r
             reset: vec![DataKind::View]
         }
     );
+    // The notice stays until the person acknowledges it, across launches that never showed it.
+    assert_eq!(
+        check_state(&store, identity),
+        StateCheck::Ready {
+            reset: vec![DataKind::View]
+        }
+    );
+    crate::ui::data_reset::acknowledge(&store);
     assert_eq!(
         check_state(&store, identity),
         StateCheck::Ready { reset: Vec::new() }

@@ -886,7 +886,7 @@ fn open_after_data_check(host: &Rc<HostComposition>, launch: Rc<dyn Fn(&mut App)
             {
                 cx.set_global(data_reset::PendingNotice {
                     reset,
-                    files: store.reset_directory(),
+                    store,
                     viewer: host.adapters.file_viewer.clone(),
                 });
             }
@@ -921,9 +921,9 @@ fn open_after_data_check(host: &Rc<HostComposition>, launch: Rc<dyn Fn(&mut App)
                 cx.quit();
                 return;
             }
-            // The launch window closes first. Closing it never counts as the last window.
-            close_quit_prompt_host(QuitPromptPlace::Host(window), cx);
+            // The next window opens before this one closes, so its close is never the last.
             open_after_data_check(&host, launch, cx);
+            close_quit_prompt_host(QuitPromptPlace::Host(window), cx);
         })
     });
     if !matches!(presented, Ok(Ok(_))) {
@@ -1557,7 +1557,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
         }
         // Only presentation starts before the desktop state root reaches this build's
         // generation. Nothing reads or changes that state until the person decides.
-        if let Err(error) = initialize_presentation(cx, &host) {
+        if let Err(error) = initialize_launch_window(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();
             return;
@@ -1568,7 +1568,11 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             let reported_failure = Rc::clone(&reported_failure);
             let desktop_channel = Rc::clone(&desktop_channel);
             let pending_invitations = Rc::clone(&pending_invitations);
-            initialize_state(cx, &host);
+            if let Err(error) = initialize_admitted(cx, &host) {
+                reported_failure.set(Some(error));
+                cx.quit();
+                return;
+            }
             install_headless_window_actions(cx, Rc::clone(&host));
             if let Some(install) = host.status_menu {
                 install(cx, Rc::clone(&host.window_movement));
@@ -1631,46 +1635,20 @@ pub(crate) fn initialize_application(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<(), RuntimeError> {
-    initialize_presentation(cx, host)?;
-    initialize_state(cx, host);
-    Ok(())
+    initialize_launch_window(cx, host)?;
+    initialize_admitted(cx, host)
 }
 
-/// Starts what reads and writes the desktop state root: update history, Machine updates, their
-/// reminders and the presentation context. It runs only once that root is readable.
-fn initialize_state(cx: &mut App, host: &HostComposition) {
-    crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
-    if let Some(machines) = &host.adapters.machine_updates {
-        crate::updates::machines::store::MachineUpdates::install(Rc::clone(machines), cx);
-    }
-    if let Some(reminders) = &host.adapters.update_reminders {
-        crate::updates::reminders::UpdateReminders::install(Rc::clone(reminders), cx);
-    }
-    crate::ui::settings_window::configure_core_context(
-        Arc::clone(&host.adapters.core_context_paths),
-        cx,
-    );
-    if let Some(settings) = cx
-        .try_global::<crate::ui::appearance_runtime::AppearanceRuntime>()
-        .map(|runtime| runtime.settings.clone())
-    {
-        let service = cx.global::<crate::updates::UpdateService>().0.clone();
-        service.update(cx, |updates, _| updates.attach_settings(settings));
-    }
-}
-
-/// Starts what presents windows and alerts without reading the desktop state root: window
-/// chrome, controls, the keymap, menus, fonts and Settings, which keep their own root.
-fn initialize_presentation(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
+/// Starts only what the launch window needs before the desktop state root is admitted: window
+/// chrome, the keymap, fonts and controls in the default appearance. It reads no retained data,
+/// Settings included, and installs no application action.
+fn initialize_launch_window(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
     if host.modal_prompts {
         crate::ui::application_prompt::install(cx);
     }
     cx.set_global(host.window_frame);
     cx.set_global(host.window_chrome.clone());
     host.window_chrome.install_controls(cx);
-    cx.set_global(SelectedFileAccess(Arc::clone(
-        &host.adapters.selected_files,
-    )));
     // Native menu construction reads the keymap; install both before Settings I/O and fonts.
     let keymap = host.profile.install(cx);
     crate::keybindings::runtime::install(keymap, cx);
@@ -1680,6 +1658,26 @@ fn initialize_presentation(cx: &mut App, host: &HostComposition) -> Result<(), R
             presentation.refresh(cx);
         },
     );
+    crate::ui::appearance_runtime::register_fonts(cx).map_err(|_| RuntimeError::Initialization)?;
+    crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
+    Ok(())
+}
+
+/// Starts the rest once the desktop state root is admitted: the update services and their
+/// presentation, Machine updates, the presentation context, application actions and menus,
+/// and the retained Settings with the appearance they choose.
+fn initialize_admitted(cx: &mut App, host: &HostComposition) -> Result<(), RuntimeError> {
+    // The update presentation that `init` installs subscribes to these services.
+    crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
+    if let Some(machines) = &host.adapters.machine_updates {
+        crate::updates::machines::store::MachineUpdates::install(Rc::clone(machines), cx);
+    }
+    if let Some(reminders) = &host.adapters.update_reminders {
+        crate::updates::reminders::UpdateReminders::install(Rc::clone(reminders), cx);
+    }
+    cx.set_global(SelectedFileAccess(Arc::clone(
+        &host.adapters.selected_files,
+    )));
     if let Some(services) = &host.services
         && let Err(error) = services.register()
     {
@@ -1688,6 +1686,10 @@ fn initialize_presentation(cx: &mut App, host: &HostComposition) -> Result<(), R
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::about_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
+    crate::ui::settings_window::configure_core_context(
+        Arc::clone(&host.adapters.core_context_paths),
+        cx,
+    );
     if let Some(tool) = &host.adapters.command_line_tool {
         crate::ui::settings_window::configure_command_line_tool(Arc::clone(tool), cx);
     }
@@ -1719,11 +1721,14 @@ fn initialize_presentation(cx: &mut App, host: &HostComposition) -> Result<(), R
         Rc::clone(&host.adapters.application_quit),
     )
     .map_err(|_| RuntimeError::Initialization)?;
-    crate::ui::appearance_runtime::register_fonts(cx).map_err(|_| RuntimeError::Initialization)?;
     if let Some((storage, platform)) = &host.appearance {
         let settings = crate::settings::Settings::load(Arc::clone(storage));
+        let service = cx.global::<crate::updates::UpdateService>().0.clone();
+        service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
         crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
+        // The launch window's controls drew the default appearance. Install the chosen one.
+        crate::ui::appearance_runtime::refresh(cx).map_err(|_| RuntimeError::Initialization)?;
         crate::keybindings::runtime::follow(&settings, cx);
         let followed = settings.clone();
         host.adapters.lifecycle.attention.follow_notifications(
@@ -1749,7 +1754,6 @@ fn initialize_presentation(cx: &mut App, host: &HostComposition) -> Result<(), R
             crate::ui::background_image_runtime::install(settings.clone(), Arc::clone(store), cx);
         }
     }
-    crate::ui::initialize_controls(cx).map_err(|_| RuntimeError::Initialization)?;
     Ok(())
 }
 
@@ -2860,6 +2864,26 @@ mod runtime_tests {
                     crate::platform::appearance::testing::RecordingAppearancePlatform::default(),
                 ),
             )
+    }
+
+    #[test]
+    fn the_launch_window_reads_no_settings_and_admission_presents_updates() {
+        let cx = crate::ui::appearance_runtime::font_catalog_test_app();
+        let host = host_with_settings();
+        cx.update(|cx| {
+            initialize_launch_window(cx, &host).unwrap();
+            assert!(
+                !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>(),
+                "Settings wait for the desktop state's admission"
+            );
+            assert!(!cx.has_global::<crate::updates::UpdateService>());
+            initialize_admitted(cx, &host).unwrap();
+            assert!(cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>());
+            assert!(
+                crate::ui::updates::presenting(cx),
+                "the update presentation subscribes once the services exist"
+            );
+        });
     }
 
     #[test]

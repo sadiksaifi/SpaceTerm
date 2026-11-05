@@ -432,6 +432,21 @@ pub fn reset_confirmed(
     Ok(kinds.into_iter().collect())
 }
 
+/// The rebuildable data a reset replaced since the person last acknowledged it. Reading it
+/// changes nothing, so a notice that never showed shows next time.
+pub fn pending_notice(store: &dyn Store) -> Result<Vec<DataKind>, StoreError> {
+    Ok(store
+        .read(Area::Reset, NOTICE)?
+        .and_then(|bytes| serde_json::from_slice::<Notice>(&bytes).ok())
+        .map(|notice| notice.kinds.into_iter().collect())
+        .unwrap_or_default())
+}
+
+/// Forgets the notice once the person acknowledged it.
+pub fn acknowledge_notice(store: &dyn Store) -> Result<(), StoreError> {
+    store.remove(Area::Reset, NOTICE)
+}
+
 /// The rebuildable data a reset replaced since the last call, once.
 pub fn take_notice(store: &dyn Store) -> Result<Vec<DataKind>, StoreError> {
     let Some(bytes) = store.read(Area::Reset, NOTICE)? else {
