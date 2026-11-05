@@ -277,6 +277,7 @@ impl RemoteMachineControl for LaneControl {
             preview.token,
             wait,
             &pending,
+            &mut admin::Unshared,
             &mut || Ok(()),
             // A window that closes leaves the flow to finish on its own thread; nothing
             // interrupts it.

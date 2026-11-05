@@ -333,6 +333,7 @@ fn execute(
         token,
         context.timeout(kind.wait()),
         pending.operations(),
+        &mut *context.state.borrow_mut(),
         &mut super::dispatch,
         &crate::interrupt::settle_by,
     );

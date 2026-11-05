@@ -176,6 +176,7 @@ fn context_for(global: &crate::args::Global) -> Context<'_> {
     Context {
         credentials: crate::connection::CliCredentials::new("spaceterm-development"),
         facts: Default::default(),
+        state: Default::default(),
         identity: "spaceterm-development",
         global,
     }

@@ -32,7 +32,7 @@ fn main() -> ExitCode {
     // The CLI's state reaches this build's generation before any command reads it. SpaceTerm
     // Core's internal commands skip this step. `internal serve` migrates the state at startup.
     // The command shares the root through this guard until it ends.
-    let _state = if matches!(
+    let mut state = if matches!(
         cli.command,
         Command::Internal(_) | Command::Completion { .. }
     ) {
@@ -133,7 +133,8 @@ fn main() -> ExitCode {
             };
         }
         Command::Core(core) => {
-            let reply = spaceterm_cli::admin::run(IDENTITY, &cli.global, core);
+            let state = state.take().unwrap_or_default();
+            let reply = spaceterm_cli::admin::run(IDENTITY, &cli.global, core, state);
             return ExitCode::from(reply.write(
                 (&cli.global).into(),
                 &mut std::io::stdout().lock(),

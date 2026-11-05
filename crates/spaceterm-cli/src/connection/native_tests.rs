@@ -209,7 +209,7 @@ fn native_client() {
             let crate::args::Command::Core(command) = &cli.command else {
                 unreachable!()
             };
-            let reply = crate::admin::run(IDENTITY, &cli.global, command);
+            let reply = crate::admin::run(IDENTITY, &cli.global, command, Default::default());
             assert_eq!(
                 reply.write(
                     (&cli.global).into(),

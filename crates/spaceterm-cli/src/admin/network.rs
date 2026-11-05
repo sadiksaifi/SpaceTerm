@@ -311,6 +311,7 @@ fn execute(
         token,
         wait,
         pending.operations(),
+        &mut *context.state.borrow_mut(),
         &mut super::dispatch,
         &crate::interrupt::settle_by,
     );

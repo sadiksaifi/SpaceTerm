@@ -169,16 +169,51 @@ fn credentials(identity: &str) -> StoreCredentials {
 /// Brings this CLI's state to this build's generation before any command reads it. The command
 /// holds the returned shared guard until it ends: every other command shares the root, and only
 /// a migration or a reset takes it alone.
-pub fn prepare(identity: &str) -> Result<Lock, CoreError> {
+pub fn prepare(identity: &str) -> Result<StateShare, CoreError> {
     let returned = || {
         let executable = std::env::current_exe().map_err(|_| CoreError::RuntimeUnavailable)?;
         spaceterm_core::service::Service::for_identity(identity)?.returned_to(&executable)
     };
-    prepare_at(
-        spaceterm_core::cli_state_root(identity)?,
-        &mut credentials(identity),
-        &returned,
-    )
+    let root = spaceterm_core::cli_state_root(identity)?;
+    let lock = prepare_at(root.clone(), &mut credentials(identity), &returned)?;
+    Ok(StateShare {
+        root: Some(root),
+        lock: Some(lock),
+    })
+}
+
+/// A command's share of its CLI state root, which [`prepare`] takes. A command that waits for a
+/// SpaceTerm Core to restart lets it go meanwhile, so the Core can migrate the state.
+#[derive(Default)]
+pub struct StateShare {
+    /// None for a command that shares no state root.
+    root: Option<PathBuf>,
+    lock: Option<Lock>,
+}
+
+impl spaceterm_core::service::lane::admin::Share for StateShare {
+    fn release(&mut self) {
+        self.lock = None;
+    }
+    fn resume(&mut self) -> bool {
+        let Some(root) = &self.root else {
+            return true;
+        };
+        if self.lock.is_some() {
+            return true;
+        }
+        let Ok(directory) = Directory::open(root, false) else {
+            return false;
+        };
+        let Ok(lock) = directory.lock_shared(GENERATION_LOCK) else {
+            return false;
+        };
+        if !migration::is_current(&REGISTRY, &store_at(root.clone())).unwrap_or(false) {
+            return false;
+        }
+        self.lock = Some(lock);
+        true
+    }
 }
 
 /// Brings this CLI's state to this build's generation for SpaceTerm Core before it reports
@@ -709,6 +744,35 @@ mod tests {
         )
         .unwrap();
         assert!(migration::is_current(&STEPPING_STONE, &store).unwrap());
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    #[test]
+    fn a_command_waiting_for_a_restart_lets_a_cli_state_migration_run() {
+        use spaceterm_core::service::lane::admin::Share;
+        let state = temporary("migration-released");
+        let never = || Ok(false);
+        let mut share = StateShare {
+            root: Some(state.root.clone()),
+            lock: Some(
+                prepare_at(state.root.clone(), &mut migration::NoCredentials, &never).unwrap(),
+            ),
+        };
+        // Nothing migrated while the command waited, so it shares the state again.
+        share.release();
+        assert!(share.resume());
+        share.release();
+        // The Pending Version the restart started migrates the state before it is ready.
+        prepare_for_core_at(
+            state.root.clone(),
+            &STEPPING_STONE,
+            &mut migration::NoCredentials,
+            &never,
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+        // This build no longer reads the state, so the command leaves it alone.
+        assert!(!share.resume());
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 

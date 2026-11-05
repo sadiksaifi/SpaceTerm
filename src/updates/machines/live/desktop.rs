@@ -457,6 +457,7 @@ impl MachineLane for CoreLane {
             preview.token,
             wait,
             &pending,
+            &mut admin::Unshared,
             &mut || Ok(()),
             // The flow finishes on its own thread whatever the desktop does meanwhile.
             &|| None,

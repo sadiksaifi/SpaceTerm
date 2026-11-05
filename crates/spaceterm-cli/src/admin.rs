@@ -132,12 +132,18 @@ impl Reply {
 
 /// Runs one machine verb for SpaceTerm Core of `identity`, the identity this executable was
 /// built as.
-pub fn run(identity: &str, global: &Global, command: &CoreCommand) -> Reply {
+pub fn run(
+    identity: &str,
+    global: &Global,
+    command: &CoreCommand,
+    state: crate::state::StateShare,
+) -> Reply {
     let context = Context {
         identity,
         global,
         credentials: crate::connection::CliCredentials::new(identity),
         facts: std::cell::RefCell::new(None),
+        state: std::cell::RefCell::new(state),
     };
     let mut reply = match command {
         CoreCommand::Setup {
@@ -210,6 +216,9 @@ pub struct Context<'a> {
     pub credentials: crate::connection::CliCredentials<'a>,
     /// The update facts of the Core this command reached, for its notice.
     pub facts: std::cell::RefCell<Option<spaceterm_core::update::facts::UpdateFacts>>,
+    /// The command's share of its CLI state, which a Stop, Restart or network change lets go
+    /// while it waits.
+    pub state: std::cell::RefCell<crate::state::StateShare>,
 }
 
 impl Context<'_> {
