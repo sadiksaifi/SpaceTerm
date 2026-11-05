@@ -275,6 +275,16 @@ impl MachineConnection {
             None => *base,
         }
     }
+    /// How long admission waits for a service operation, such as a Restart or Update. A CLI
+    /// handle never waits: its command shares the CLI state root, and the Core the operation
+    /// starts may need that root alone to migrate it before it is ready.
+    fn admission_wait(&self) -> std::time::Duration {
+        if self.cli.is_some() {
+            std::time::Duration::ZERO
+        } else {
+            crate::service::OPERATION_LIMIT
+        }
+    }
     /// The identity this handle presents in its Hello: the pairing's on a paired route, else
     /// the retained local one. A CLI agent shares its route's base identity.
     fn base_client_id(&self) -> Result<[u8; 32], CoreError> {
@@ -567,7 +577,7 @@ impl MachineConnection {
                 ),
             ));
         }
-        crate::service::check_admission(&self.paths, crate::service::OPERATION_LIMIT, cancelled)?;
+        crate::service::check_admission(&self.paths, self.admission_wait(), cancelled)?;
         let mut stream = host::connect(&self.paths)?;
         let base = self.base_client_id()?;
         let core = self.machine_id()?;
@@ -752,11 +762,7 @@ impl MachineConnection {
         cancelled: Option<&dyn Fn() -> bool>,
     ) -> Result<AuthenticatedStatus, CoreError> {
         if self.direct.is_none() {
-            crate::service::check_admission(
-                &self.paths,
-                crate::service::OPERATION_LIMIT,
-                cancelled,
-            )?;
+            crate::service::check_admission(&self.paths, self.admission_wait(), cancelled)?;
             self.machine_id()?;
         }
         self.link_with(cancelled)?;
@@ -999,6 +1005,52 @@ fn development_account(name: &str) -> Result<String, CoreError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A CLI command shares its CLI state root while it runs. Admission refuses it at once
+    /// while a service operation holds the service lock, because the Core that operation starts
+    /// may need the root alone.
+    #[test]
+    fn a_cli_handle_refuses_admission_while_a_service_operation_runs() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-cli-busy-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let paths = Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("d"),
+            runtime: root.join("r"),
+        };
+        let data = Directory::open(&paths.data, true).unwrap();
+        data.read_or_create().unwrap();
+        // A stopped service waits at admission for an operation that may start it.
+        data.write_json(
+            c"service.json",
+            &serde_json::json!({
+                "installation": "a".repeat(64),
+                "stopped": true,
+                "automatic_start": true,
+                "installed": true,
+                "removing": false,
+                "run": null,
+            }),
+        )
+        .unwrap();
+        let operation = data.lock("service.lock", false).unwrap();
+        let handle = MachineConnection::with_paths(paths)
+            .unwrap()
+            .into_cli(CliRoute::Local, None)
+            .unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(handle.link().err());
+        });
+        let refused = received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the CLI waited at admission");
+        assert_eq!(refused, Some(CoreError::ServiceBusy));
+        drop(operation);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     /// A CLI agent keeps its state under `clients/cli`, presents its route's base identity, and
     /// is admitted as the identity the server derives from it.
