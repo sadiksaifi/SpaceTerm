@@ -627,6 +627,12 @@ pub(crate) fn service_watch(
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
 mod linux_updates;
+#[cfg(feature = "desktop")]
+#[cfg_attr(
+    not(any(target_os = "linux", spaceterm_sparkle)),
+    allow(dead_code, reason = "only builds with a signed updater keep update history")
+)]
+pub(crate) mod update_history_file;
 
 /// Composes the existing native PTY adapter without opening a graphical session. Its PTYs count
 /// their native reads in `counters`.

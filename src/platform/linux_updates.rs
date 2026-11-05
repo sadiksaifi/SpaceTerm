@@ -33,8 +33,6 @@ const TARGET: Option<FeedTarget> = Some(FeedTarget::DESKTOP_LINUX);
 #[cfg(not(target_arch = "x86_64"))]
 const TARGET: Option<FeedTarget> = None;
 
-const HISTORY_NAME: &str = "update-history.json";
-const MAX_HISTORY_BYTES: usize = 4096;
 const MAX_UNPACKED_BYTES: u64 = 2 * MAX_ARCHIVE_BYTES;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
 const DOWNLOAD_CHUNK: usize = 64 * 1024;
@@ -70,7 +68,7 @@ pub(super) fn relaunch(executable: &Path) -> io::Error {
 pub(super) struct LinuxUpdates {
     dependencies: Option<Dependencies>,
     shared: RefCell<Option<Arc<Shared>>>,
-    history: HistoryFile,
+    history: super::update_history_file::UpdateHistoryFile,
     relaunch: Relaunch,
     request_quit: Box<dyn Fn()>,
 }
@@ -107,7 +105,7 @@ impl LinuxUpdates {
         Self {
             dependencies,
             shared: RefCell::new(None),
-            history: HistoryFile::new(paths),
+            history: super::update_history_file::UpdateHistoryFile::new(paths),
             relaunch,
             request_quit: Box::new(request_quit),
         }
@@ -685,86 +683,6 @@ fn unpack(archive: &[u8], root: &str, destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Update observations in the private state directory. They are never installation authority.
-struct HistoryFile {
-    paths: Option<Arc<AppPaths>>,
-    observed: RefCell<Option<SecureEntryIdentity>>,
-    written: RefCell<Option<Vec<u8>>>,
-}
-
-impl HistoryFile {
-    fn new(paths: Option<Arc<AppPaths>>) -> Self {
-        Self {
-            paths,
-            observed: RefCell::new(None),
-            written: RefCell::new(None),
-        }
-    }
-
-    fn load(&self) -> UpdateHistory {
-        let Some(paths) = &self.paths else {
-            return UpdateHistory::default();
-        };
-        let Ok(Some(directory)) = paths.open_secure_root(AppDirectoryRoot::State) else {
-            return UpdateHistory::default();
-        };
-        let Ok(Some(snapshot)) = paths.filesystem().read_private_file(
-            &directory,
-            OsStr::new(HISTORY_NAME),
-            MAX_HISTORY_BYTES,
-        ) else {
-            return UpdateHistory::default();
-        };
-        *self.observed.borrow_mut() = Some(snapshot.identity);
-        if snapshot.bytes.len() > MAX_HISTORY_BYTES {
-            return UpdateHistory::default();
-        }
-        let history = serde_json::from_slice(&snapshot.bytes).unwrap_or_default();
-        *self.written.borrow_mut() = Some(snapshot.bytes);
-        history
-    }
-
-    /// Each scheduler tick saves the history, so only a changed document reaches the disk.
-    fn save(&self, history: &UpdateHistory) {
-        let Some(paths) = &self.paths else {
-            return;
-        };
-        let Ok(bytes) = serde_json::to_vec(history) else {
-            return;
-        };
-        if bytes.len() > MAX_HISTORY_BYTES || self.written.borrow().as_ref() == Some(&bytes) {
-            return;
-        }
-        let Ok(directory) = paths.ensure_secure_root(AppDirectoryRoot::State) else {
-            return;
-        };
-        let filesystem = paths.filesystem();
-        let name = OsStr::new(HISTORY_NAME);
-        let mut nonce = [0; 16];
-        if getrandom::fill(&mut nonce).is_err() {
-            return;
-        }
-        let Ok(prepared) = filesystem.prepare_private_file(&directory, name, &bytes, nonce) else {
-            return;
-        };
-        let expected = self.observed.borrow().clone();
-        let Ok(commit) = filesystem.commit_private_file(prepared, expected.as_ref()) else {
-            return;
-        };
-        if commit.outcome == SecureCommitOutcome::Conflict {
-            // Another instance wrote meanwhile. Adopt its identity so the next save can replace it.
-            *self.observed.borrow_mut() = filesystem
-                .read_private_file(&directory, name, MAX_HISTORY_BYTES)
-                .ok()
-                .flatten()
-                .map(|snapshot| snapshot.identity);
-            return;
-        }
-        *self.observed.borrow_mut() = commit.published_identity;
-        *self.written.borrow_mut() = Some(bytes);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1223,7 +1141,7 @@ mod tests {
                 archive_root: ROOT,
             }),
             shared: RefCell::new(None),
-            history: HistoryFile::new(None),
+            history: super::update_history_file::UpdateHistoryFile::new(None),
             relaunch: Relaunch::default(),
             request_quit: Box::new(|| {}),
         }

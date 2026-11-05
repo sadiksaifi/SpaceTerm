@@ -864,36 +864,18 @@ fn present_quit_prompt(
     }
 }
 
-type DesktopStateCheck = (
-    Arc<spaceterm_core::migration::DirectoryStore>,
-    crate::migration::StateCheck,
-);
-
-fn check_desktop_state(host: &HostComposition) -> Option<DesktopStateCheck> {
+/// Whether the desktop state root reached this build's generation. Data that is unavailable,
+/// waits for a confirmed reset, or that a newer SpaceTerm wrote is never read or changed, so the
+/// launch ends instead. Telling the person why is not built yet.
+fn desktop_state_ready(host: &HostComposition) -> bool {
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-    let store =
-        crate::migration::current_state_store(host.adapters.core_context_paths.directories())?;
-    let check = crate::migration::check_state(&store, identity);
-    Some((store, check))
-}
-
-/// Opens the Workspaces with `open` once the desktop state root `data` is readable. Data that
-/// waits for a confirmed reset, or that a newer SpaceTerm wrote, is never read or changed, so
-/// the launch ends instead. Telling the person why, and asking before a reset, is not built yet.
-fn open_after_data_check(
-    data: Option<DesktopStateCheck>,
-    open: Rc<dyn Fn(&mut App)>,
-    cx: &mut App,
-) {
-    use crate::migration::StateCheck;
-    match data.map(|(_, check)| check) {
-        // Readers report unavailable storage themselves, as they did before generations.
-        None | Some(StateCheck::Ready { .. } | StateCheck::Unavailable) => open(cx),
-        Some(StateCheck::Newer | StateCheck::ResetRequired { .. }) => {
-            eprintln!("SpaceTerm can\u{2019}t read its saved data");
-            cx.quit();
-        }
-    }
+    crate::migration::current_state_store(host.adapters.core_context_paths.directories())
+        .is_some_and(|store| {
+            matches!(
+                crate::migration::check_state(&store, identity),
+                crate::migration::StateCheck::Ready { .. }
+            )
+        })
 }
 
 fn close_quit_prompt_host(place: QuitPromptPlace, cx: &mut App) {
@@ -1517,8 +1499,13 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             cx.quit();
             return;
         }
-        // The desktop state root reaches this build's generation before anything reads it.
-        let data = check_desktop_state(&host);
+        // The desktop state root reaches this build's generation before initialization or any
+        // reader or writer opens it.
+        if !desktop_state_ready(&host) {
+            eprintln!("SpaceTerm can\u{2019}t read its saved data");
+            cx.quit();
+            return;
+        }
         if let Err(error) = initialize_application(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();
@@ -1528,7 +1515,6 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                 install(cx, Rc::clone(&host.window_movement));
             }
             let service = cx.global::<crate::updates::UpdateService>().0.clone();
-            let data = Rc::new(RefCell::new(data));
             service.update(cx, |updates, cx| {
                 updates.begin_launch(
                     Rc::new(move |cx| {
@@ -1567,7 +1553,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                                 .detach();
                             }
                         });
-                        open_after_data_check(data.borrow_mut().take(), open, cx);
+                        open(cx);
                     }),
                     cx,
                 );

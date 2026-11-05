@@ -65,10 +65,26 @@ fn capture_desktop_state_migration_fixture() {
         "data/core-context.json",
         serde_json::json!({ "schema": 1, "selected": "Local", "facts": [] }),
     );
-    write(
-        "state/update-history.json",
-        serde_json::to_value(crate::updates::policy::UpdateHistory::default()).unwrap(),
-    );
+    // The update history goes through the updaters' own writer.
+    let directories = spaceterm_directories::AppDirectories::resolve_xdg(
+        "state",
+        &spaceterm_directories::AppDirectoryEnvironment {
+            home: Some(root.clone().into()),
+            xdg_state_home: Some(root.clone().into()),
+            xdg_data_home: Some(root.join("unused").into()),
+            xdg_config_home: Some(root.join("unused").into()),
+            xdg_cache_home: Some(root.join("unused").into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let paths = crate::platform::app_paths::AppPaths::from_directories(directories, 103, native())
+        .unwrap();
+    crate::platform::update_history_file::UpdateHistoryFile::new(Some(Arc::new(paths)))
+        .save(&crate::updates::policy::UpdateHistory::default());
+    assert!(root.join("state/update-history.json").is_file());
+    let _ = std::fs::remove_dir_all(root.join("unused"));
     fixtures::write_client_records(&root.join("core/desktop"));
     write(
         &format!("core/desktop-direct-{}/route.json", "09".repeat(32)),

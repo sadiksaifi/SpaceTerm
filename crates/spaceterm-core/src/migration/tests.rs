@@ -368,6 +368,35 @@ fn a_migration_a_newer_build_left_unfinished_is_undone_by_the_build_it_started_f
 }
 
 #[test]
+fn an_interrupted_return_restore_repeats_until_its_marker_is_written() {
+    let older = Registry {
+        generations: Generations {
+            oldest: 1,
+            current: 1,
+        },
+        steps: &[],
+        files: &[RULES],
+    };
+    let store = generation_one();
+    assert_eq!(
+        run_once(&REGISTRY, &store),
+        Ok(Outcome::Migrated { from: 1 })
+    );
+    store.marker_fails.set(true);
+    assert!(run(&older, &store, &mut Recorded(&store), true).is_err());
+    store.marker_fails.set(false);
+    assert_eq!(
+        run(&older, &store, &mut Recorded(&store), true),
+        Ok(Outcome::Restored)
+    );
+    assert_eq!(store.generation(Area::Root), Some(json!(1)));
+    assert_eq!(
+        store.get(Area::Root, "identity.json"),
+        Some(json!({ "name": "core", "organization": "work" }))
+    );
+}
+
+#[test]
 fn a_root_below_oldest_resets_rebuildable_data_and_waits_to_confirm_the_rest() {
     let registry = Registry {
         generations: Generations {
@@ -538,8 +567,8 @@ fn replacement_credentials_come_first_and_old_items_go_only_once_their_backup_is
     );
     assert_eq!(
         *store.events.borrow(),
-        ["copy 1 2", "marker"],
-        "the original stays while its backup can come back"
+        ["marker", "copy 1 2", "marker"],
+        "the unfinished attempt is undone, and the original stays while its backup can come back"
     );
     store.events.borrow_mut().clear();
     assert_eq!(run_once(&registry, &store), Ok(Outcome::Current));

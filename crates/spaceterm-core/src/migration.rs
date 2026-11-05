@@ -359,7 +359,7 @@ fn bring(
     // A backup of the root's own generation belongs to a migration that stopped before its
     // marker, whichever build ran it. Its files may already be rewritten.
     if marker(store, Area::Backup)? == Some(generation) {
-        settle_backup(registry, store)?;
+        settle_backup(registry, store, generation)?;
     }
     if generation == current {
         if marked.is_none() {
@@ -369,8 +369,7 @@ fn bring(
     }
     if generation > current {
         if returned && marker(store, Area::Backup)? == Some(current) {
-            settle_backup(registry, store)?;
-            write_marker(store, Area::Root, current)?;
+            settle_backup(registry, store, current)?;
             return Ok(Outcome::Restored);
         }
         return Err(Refusal::Newer);
@@ -560,10 +559,16 @@ fn migrate(
     Ok(Outcome::Migrated { from })
 }
 
-/// Restores the root's files from the backup and retires the backup, whose replaced
-/// credential items are in use again. The caller then decides the root's marker.
-fn settle_backup(registry: &Registry, store: &dyn Store) -> Result<(), StoreError> {
+/// Restores the root's files from the backup, marks the root with `generation`, the backup's,
+/// and only then retires the backup, whose replaced credential items are in use again. Each
+/// stage repeats safely: until the backup's marker goes, the next run restores again.
+fn settle_backup(
+    registry: &Registry,
+    store: &dyn Store,
+    generation: u32,
+) -> Result<(), StoreError> {
     restore_backup(registry, store)?;
+    write_marker(store, Area::Root, generation)?;
     store.remove(Area::Backup, RETIRE)?;
     store.remove(Area::Backup, MARKER)
 }

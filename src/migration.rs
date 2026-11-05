@@ -47,7 +47,7 @@ const STATE_RULES: &[FileRule] = &[
         stamp: None,
     },
     FileRule {
-        name: "update-history.json",
+        name: crate::platform::update_history_file::HISTORY_NAME,
         kind: DataKind::UpdateHistory,
         read: crate::updates::policy::readable_history,
         stamp: None,
