@@ -140,11 +140,6 @@ fn download(release: Option<&Version>) -> String {
     }
 }
 
-/// The most releases an updater steps down through below the newest one in one check. Each step
-/// lowers the version, so a valid chain ends without it. It only bounds a host that keeps
-/// answering.
-pub const MAX_STEPS: usize = 64;
-
 /// The release an updater installs next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Next {
@@ -159,8 +154,8 @@ pub struct Next {
 /// it takes the first release whose floor `running` meets.
 ///
 /// Ok(None) when the floors lead to no release `running` may install: a release names its own
-/// version as its floor, the release at a floor names another version, or the chain is longer
-/// than [`MAX_STEPS`].
+/// version as its floor, or the release at a floor names another version. Every step reads a
+/// signed release older than the one before, so the walk ends.
 ///
 /// # Errors
 /// Returns what `read` returns.
@@ -169,23 +164,23 @@ pub fn walk<E>(
     mut read: impl FnMut(Option<&Version>) -> Result<Feed, E>,
 ) -> Result<Option<Next>, E> {
     let mut feed = read(None)?;
-    let mut steps = 0;
+    let mut stepped = false;
     loop {
         if feed.floor.admits(running) {
             return Ok(Some(Next {
                 feed,
-                stepping_stone: steps > 0,
+                stepping_stone: stepped,
             }));
         }
         let floor = feed.floor.version();
-        if floor == feed.version || steps == MAX_STEPS {
+        if floor == feed.version {
             return Ok(None);
         }
         feed = read(Some(&floor))?;
         if feed.version != floor {
             return Ok(None);
         }
-        steps += 1;
+        stepped = true;
     }
 }
 
@@ -533,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_or_endless_chain_of_floors_leads_nowhere() {
+    fn a_broken_chain_of_floors_leads_nowhere() {
         let mut misnamed = Published::new(&[("1.2.2", "1.2.0"), ("1.2.1", "1.0.0")]);
         let served = version("1.2.1");
         // The host serves 1.2.1's feed at the address of 1.2.0's.
@@ -544,29 +539,11 @@ mod tests {
         );
         let mut unpublished = Published::new(&[("1.2.2", "1.2.0")]);
         assert_eq!(unpublished.walk("1.1.0"), Err("unpublished"));
-        let long: Vec<_> = (0..=MAX_STEPS + 1)
-            .rev()
-            .map(|minor| {
-                let text: &'static str = format!("1.{}.0", minor + 1).leak();
-                let floor: &'static str = format!("1.{minor}.0").leak();
-                (text, floor)
-            })
-            .collect();
-        let mut endless = Published::new(&long);
-        assert_eq!(endless.walk("0.9.0"), Ok(None));
-        assert_eq!(endless.reads.len(), MAX_STEPS + 1);
-        let mut reachable = Published::new(&long);
-        assert_eq!(
-            reachable.walk("1.1.0"),
-            Ok(Some(("1.2.0".to_owned(), true))),
-            "a chain of MAX_STEPS steps is walked to its end"
-        );
-        assert_eq!(reachable.reads.len(), MAX_STEPS + 1);
     }
 
     #[test]
-    fn a_chain_longer_than_a_few_steps_is_walked_to_its_end() {
-        let chain: Vec<_> = (1..=9)
+    fn a_long_chain_of_floors_is_walked_to_its_end() {
+        let chain: Vec<_> = (1..=65)
             .rev()
             .map(|minor| {
                 let text: &'static str = format!("1.{}.0", minor + 1).leak();
@@ -580,7 +557,7 @@ mod tests {
             published.walk("1.0.0"),
             Ok(Some(("1.1.0".to_owned(), true)))
         );
-        assert_eq!(published.reads.len(), 10, "the newest feed and nine steps");
+        assert_eq!(published.reads.len(), 66, "the newest feed and 65 steps");
     }
 
     #[test]
