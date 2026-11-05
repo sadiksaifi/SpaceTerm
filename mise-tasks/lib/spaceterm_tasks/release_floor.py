@@ -64,20 +64,19 @@ def _order(version):
 
 
 def published_releases():
-    """The versions of every stable release GitHub lists as published, drafts excluded."""
+    """The versions of every stable release GitHub lists as published, drafts excluded.
+
+    The GitHub CLI follows every page of the releases API, so no release is left out however
+    long the history grows.
+    """
     result = subprocess.run(
         [
             "gh",
-            "release",
-            "list",
-            "--exclude-drafts",
-            "--exclude-pre-releases",
-            "--limit",
-            "1000",
-            "--json",
-            "tagName",
+            "api",
+            "--paginate",
+            "repos/{owner}/{repo}/releases?per_page=100",
             "--jq",
-            ".[].tagName",
+            ".[] | select(.draft | not) | select(.prerelease | not) | .tag_name",
         ],
         cwd=ROOT,
         capture_output=True,
