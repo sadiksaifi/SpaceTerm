@@ -1139,7 +1139,7 @@ mod tests {
                 archive_root: ROOT,
             }),
             shared: RefCell::new(None),
-            history: super::update_history_file::UpdateHistoryFile::new(None),
+            history: crate::platform::update_history_file::UpdateHistoryFile::new(None),
             relaunch: Relaunch::default(),
             request_quit: Box::new(|| {}),
         }
