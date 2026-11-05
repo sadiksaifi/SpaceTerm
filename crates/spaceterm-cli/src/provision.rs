@@ -92,7 +92,13 @@ pub fn run(command: &InternalCommand) -> Result<(), Error> {
                 .map_err(Error::Output)?;
         }
         InternalCommand::SshDiscover => {
-            let discovery = spaceterm_core::provisioning::discover(IDENTITY)?;
+            let discovery = spaceterm_core::provisioning::discover(IDENTITY).map_err(|error| {
+                if error == CoreError::ServiceBusy {
+                    Error::Exit(spaceterm_core::provisioning::DISCOVERY_BUSY)
+                } else {
+                    error.into()
+                }
+            })?;
             let mut value = serde_json::to_value(discovery).map_err(|_| CoreError::Protocol)?;
             value["target"] = env!("SPACETERM_CLI_TARGET").into();
             value["version"] = env!("SPACETERM_CLI_VERSION").into();

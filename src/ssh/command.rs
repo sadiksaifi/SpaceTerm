@@ -162,7 +162,8 @@ fn classify_supervised_probe_result(
             SshCapability::Unavailable(SshUnavailableReason::Unrecognized)
         }
         Err(
-            CapturedProcessError::Cancelled
+            CapturedProcessError::ConnectionLost
+            | CapturedProcessError::Cancelled
             | CapturedProcessError::TimedOut
             | CapturedProcessError::Operation(_),
         ) => SshCapability::Unavailable(SshUnavailableReason::ProbeFailed),

@@ -484,6 +484,8 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub(crate) enum CapturedProcessError {
+    #[error("the SSH connection was lost")]
+    ConnectionLost,
     #[error("the SSH process operation was cancelled")]
     Cancelled,
     #[error("the SSH process operation exceeded its deadline")]
@@ -532,6 +534,8 @@ pub(crate) fn run_captured_process<A: SshProcessAdapter>(
 
 #[derive(Debug, Error)]
 pub(crate) enum CapturedEffectError {
+    #[error("the SSH connection was lost after dispatch")]
+    ConnectionLost,
     #[error("the SSH effect was not dispatched")]
     NotAdmitted(#[source] CapturedProcessError),
     #[error("the admitted SSH effect has an unconfirmed outcome")]
@@ -563,7 +567,9 @@ pub(crate) fn run_captured_effect<A: SshProcessAdapter>(
         cancellation,
     )
     .map_err(|error| {
-        if admitted.load(std::sync::atomic::Ordering::Acquire) {
+        if matches!(error, CapturedProcessError::ConnectionLost) {
+            CapturedEffectError::ConnectionLost
+        } else if admitted.load(std::sync::atomic::Ordering::Acquire) {
             CapturedEffectError::Unconfirmed
         } else {
             CapturedEffectError::NotAdmitted(error)
@@ -822,6 +828,7 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
         None => None,
     };
     let mut captured_stdout = None;
+    let mut stdout_error = None;
     let mut captured_stderr = None;
 
     let exit = loop {
@@ -839,7 +846,20 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
             join_unfinished_reader(stderr_reader);
             return Err(CapturedProcessError::TimedOut);
         }
-        collect_finished_reader(&mut stdout_reader, &mut captured_stdout)?;
+        if let Err(error) = collect_finished_reader(&mut stdout_reader, &mut captured_stdout) {
+            // A lost multiplexed channel can end before its ready preamble. Wait for the
+            // exit status so OpenSSH's transport failure wins over that pipe EOF.
+            if has_preamble
+                && matches!(
+                    error,
+                    CapturedProcessError::Operation(SshProcessMechanismError::PipesUnavailable)
+                )
+            {
+                stdout_error = Some(error);
+            } else {
+                return Err(error);
+            }
+        }
         collect_finished_reader(&mut stderr_reader, &mut captured_stderr)?;
         let process = ownership.process_mut()?;
         match adapter.try_status(process) {
@@ -853,7 +873,16 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
         }
     };
     ownership.cleanup_now();
-    if join_writer(writer).is_err() && exit.is_success() {
+    let written = join_writer(writer);
+    if has_preamble && exit.code() == Some(255) {
+        join_unfinished_reader(stdout_reader);
+        join_unfinished_reader(stderr_reader);
+        return Err(CapturedProcessError::ConnectionLost);
+    }
+    if let Some(error) = stdout_error {
+        return Err(error);
+    }
+    if written.is_err() && exit.is_success() {
         return Err(CapturedProcessError::Operation(
             SshProcessMechanismError::PipesUnavailable,
         ));

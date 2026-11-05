@@ -46,6 +46,9 @@ pub const PORT_IN_USE: u8 = 78;
 /// The exit status of an SSH setup install or start step when SpaceTerm Core is off in Login
 /// Items on that Mac. The service started nothing.
 pub const LOGIN_ITEM_OFF: u8 = 79;
+/// SSH discovery raced admitted service work or removal of its approved executable. Retry
+/// discovery, without publishing an installation offer from that transient state.
+pub const DISCOVERY_BUSY: u8 = 80;
 
 /// The oldest macOS release SpaceTerm Core runs on, as (major, minor).
 pub const MINIMUM_MACOS: (u16, u16) = (26, 0);
@@ -255,8 +258,7 @@ pub fn discover(identity: &str) -> Result<AccountDiscovery, CoreError> {
         Err(error) => return Err(error),
     };
     let service = crate::service::Service::for_identity(identity)?;
-    let status = service.passive_status()?;
-    let start_observation = service.setup_start_observation()?;
+    let (status, start_observation) = service.setup_observation()?;
     Ok(AccountDiscovery {
         schema: 1,
         // SAFETY: geteuid has no preconditions.

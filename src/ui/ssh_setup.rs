@@ -268,6 +268,14 @@ pub(crate) fn problem(failure: &SetupFailure, name: &str) -> SetupProblem {
             format!("SpaceTerm Core on {n} is incompatible with this SpaceTerm."),
             false,
         ),
+        SetupFailure::ConnectionLost(operation) => {
+            let mut detail = format!("SpaceTerm lost its SSH connection to {n}, so try again.");
+            if let Some(operation) = operation {
+                detail.push(' ');
+                detail.push_str(&unconfirmed_detail(*operation, n));
+            }
+            SetupProblem::new(detail, true)
+        }
         SetupFailure::Refused(kind) => SetupProblem::new(
             refusal_detail(*kind, n),
             !matches!(
@@ -433,4 +441,21 @@ pub(crate) fn platform_name(os: &str, arch: &str) -> String {
         _ => arch,
     };
     format!("{os} on {arch}")
+}
+
+#[cfg(test)]
+mod connection_loss_tests {
+    use super::*;
+
+    #[test]
+    fn a_lost_install_connection_names_the_loss_and_keeps_the_effect_unconfirmed() {
+        let result = problem(
+            &SetupFailure::ConnectionLost(Some(SetupOperation::Install)),
+            "the Machine",
+        );
+        assert_eq!(
+            result.explanation.as_ref(),
+            "SpaceTerm lost its SSH connection to the Machine, so try again. SpaceTerm couldn’t confirm the installation on the Machine, so try again to check whether it finished."
+        );
+    }
 }

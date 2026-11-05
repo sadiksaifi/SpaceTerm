@@ -302,7 +302,14 @@ mod tests {
         ] {
             let script = adapter.locator(IDENTITY, action, action == "ssh-discover");
             assert!(
-                script.ends_with(&format!("exec \"$path\" internal '{command}'\n")),
+                script.ends_with(&format!(
+                    "{}\"$path\" internal '{command}'\n",
+                    if action == "ssh-discover" {
+                        ""
+                    } else {
+                        "exec "
+                    }
+                )),
                 "{script}"
             );
             assert!(script.contains("Darwin) executable='SpaceTerm Core Development.app/Contents/MacOS/spaceterm';;\n*) executable='bin/spaceterm';;"), "{script}");
@@ -313,6 +320,44 @@ mod tests {
             );
             assert!(script.contains("[ ! -L \"${root%/core}\" ]"), "{script}");
         }
+    }
+
+    #[test]
+    fn discovery_retries_when_uninstall_removed_the_approved_executable() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut random = [0; 8];
+        getrandom::fill(&mut random).unwrap();
+        let home = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "spaceterm-removed-runtime-{:x}",
+            u64::from_be_bytes(random)
+        ));
+        let core = home.join(".local/share/spaceterm-development/core");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&core)
+            .unwrap();
+        let policy = core.join("service.json");
+        fs::write(
+            &policy,
+            format!(r#"{{"installation":"{}"}}"#, "a".repeat(64)),
+        )
+        .unwrap();
+        fs::set_permissions(&policy, fs::Permissions::from_mode(0o600)).unwrap();
+        let script = UnixSshProcessAdapter.locator(IDENTITY, "ssh-discover", true);
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env_clear()
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        fs::remove_dir_all(&home).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(spaceterm_core::provisioning::DISCOVERY_BUSY)),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn shell_request(script: &str) -> SshProcessSpawnRequest {
@@ -876,8 +921,14 @@ exit 0
         } else {
             script.push_str("exit 73\n");
         }
-        script.push_str(r#"fi
-[ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] && [ ! -L "${root%/core}" ] && [ ! -L "$root" ] && [ ! -L "$policy" ] || exit 74
+        script.push_str("fi\n");
+        if missing {
+            // The uninstall helper can remove service.json or its executable after lookup.
+            // Only disappearing approved files turn a failed lookup into retryable discovery.
+            script.push_str(&format!(r#"trap 'code=$?; if [ "$code" -ne 0 ] && {{ [ ! -e "$policy" ] || {{ [ -n "${{path:-}}" ] && [ ! -e "$path" ]; }}; }}; then exit {}; fi' EXIT
+"#, spaceterm_core::provisioning::DISCOVERY_BUSY));
+        }
+        script.push_str(r#"[ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] && [ ! -L "${root%/core}" ] && [ ! -L "$root" ] && [ ! -L "$policy" ] || exit 74
 case "$(uname -s)" in
 Darwin) owner=$(stat -f '%u:%Lp' "$policy"); dir_owner=$(stat -f '%u:%Lp' "$root");;
 Linux) owner=$(stat -c '%u:%a' "$policy"); dir_owner=$(stat -c '%u:%a' "$root");;
@@ -904,7 +955,8 @@ done
 "#,
         );
         script.push_str(&format!(
-            "exec \"$path\" internal {}{}\n",
+            "{}\"$path\" internal {}{}\n",
+            if missing { "" } else { "exec " },
             quote(match action {
                 "setup-start" => "ssh-start",
                 "setup-direct-status" => "ssh-direct-status",

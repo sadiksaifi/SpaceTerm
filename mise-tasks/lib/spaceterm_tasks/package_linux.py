@@ -271,10 +271,13 @@ def install_preflight(archive):
     applications.mkdir(parents=True, exist_ok=True)
     entry = target / "share/applications" / f"{identifier}.desktop"
     contents = entry.read_text(encoding="utf-8")
-    contents = "\n".join(
-        f"Exec={exec_argument(str(executable))} %u" if line.startswith("Exec=") else line
-        for line in contents.splitlines()
-    ) + "\n"
+    contents = (
+        "\n".join(
+            f"Exec={exec_argument(str(executable))} %u" if line.startswith("Exec=") else line
+            for line in contents.splitlines()
+        )
+        + "\n"
+    )
     (applications / entry.name).write_text(contents, encoding="utf-8")
     icons = applications.parent / "icons/hicolor/scalable/apps"
     icons.mkdir(parents=True, exist_ok=True)
