@@ -140,8 +140,10 @@ fn download(release: Option<&Version>) -> String {
     }
 }
 
-/// The most releases an updater steps down through below the newest one in one check.
-pub const MAX_STEPS: usize = 8;
+/// The most releases an updater steps down through below the newest one in one check. Each step
+/// lowers the version, so a valid chain ends without it. It only bounds a host that keeps
+/// answering.
+pub const MAX_STEPS: usize = 64;
 
 /// The release an updater installs next.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -560,6 +562,25 @@ mod tests {
             "a chain of MAX_STEPS steps is walked to its end"
         );
         assert_eq!(reachable.reads.len(), MAX_STEPS + 1);
+    }
+
+    #[test]
+    fn a_chain_longer_than_a_few_steps_is_walked_to_its_end() {
+        let chain: Vec<_> = (1..=9)
+            .rev()
+            .map(|minor| {
+                let text: &'static str = format!("1.{}.0", minor + 1).leak();
+                let floor: &'static str = format!("1.{minor}.0").leak();
+                (text, floor)
+            })
+            .chain([("1.1.0", "1.0.0")])
+            .collect();
+        let mut published = Published::new(&chain);
+        assert_eq!(
+            published.walk("1.0.0"),
+            Ok(Some(("1.1.0".to_owned(), true)))
+        );
+        assert_eq!(published.reads.len(), 10, "the newest feed and nine steps");
     }
 
     #[test]
