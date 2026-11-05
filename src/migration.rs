@@ -8,11 +8,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::platform::app_directories::AppDirectories;
 use spaceterm_connections::migration::StoreCredentials;
 use spaceterm_core::migration::{
     self, DataKind, DirectoryStore, FileRule, Mount, Outcome, Refusal, Registry, generations,
 };
-use spaceterm_directories::AppDirectories;
 
 /// The Settings Document's file.
 pub(crate) const SETTINGS: &str = "settings.json";
