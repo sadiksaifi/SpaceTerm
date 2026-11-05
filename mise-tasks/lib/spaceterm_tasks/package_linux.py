@@ -20,12 +20,14 @@ from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.development_linux import icon_svg
 from spaceterm_tasks.macos_bundle import identity, identity_directory
 from spaceterm_tasks.packaging import (
+    DESKTOP_FLOOR,
     DIST,
     NOTICES,
     RELEASE_NOTES,
     SHELL_INTEGRATION,
     TERMINFO,
     checked,
+    desktop_floor,
     packaged_environment,
     release_notes_file,
     release_version,
@@ -120,6 +122,8 @@ def package(release_tag=None, notes=None):
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
     if notes_file is not None:
         environment[RELEASE_NOTES] = str(notes_file)
+    if release_tag:
+        environment[DESKTOP_FLOOR] = desktop_floor(release_tag)
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
     from spaceterm_tasks.core_package import prepare_desktop_artifact
