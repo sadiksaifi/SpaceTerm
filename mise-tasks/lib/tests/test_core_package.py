@@ -350,10 +350,15 @@ class CoreArchiveTests(unittest.TestCase):
                 )
             verified_queries = len(core_queries)
             client_pin["value"] = "0" * 64
-            with self.assertRaisesRegex(TaskError, "compiled candidate pin"):
+            with self.assertRaises(core_package.ArtifactVerificationError) as failure:
                 core_package.verify_desktop_artifact(
                     baseline, self.info["identity"], executable=client
                 )
+            self.assertEqual(failure.exception.cause, core_package.ArtifactCause.DIGEST_MISMATCH)
+            self.assertEqual(
+                str(failure.exception),
+                "SpaceTerm Core artifact verification failed: digest mismatch",
+            )
             self.assertEqual(len(core_queries), verified_queries)
             destination = self.root / "desktop/wrong-build"
             expected = {**self.info, "commit": "b" * 40, "version": "dev.bbbbbbbbbbbb"}
@@ -393,15 +398,92 @@ class CoreArchiveTests(unittest.TestCase):
                     self.root / "desktop/core-artifact", "spaceterm-preflight"
                 )
 
-    def test_missing_desktop_artifact_is_classified_without_a_native_error(self):
-        with self.assertRaisesRegex(TaskError, "desktop server artifact is unavailable"):
-            core_package.verify_desktop_artifact(self.root / "missing", "spaceterm-preflight")
-
     def test_signed_malformed_build_document_is_refused(self):
         for payload in [b"null", b"[]", b"{}", b"invalid", b'{"schema":1,"schema":2}']:
             self.archive_with([("core/build.json", payload, tarfile.REGTYPE)])
             with self.assertRaises(TaskError):
                 self.unpack()
+
+
+class DesktopArtifactFailureTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.destination = Path(temporary.name) / "private-artifact"
+        self.destination.mkdir()
+        self.archive = self.destination / "artifact.tar.gz"
+        self.signature = self.destination / "artifact.sig"
+        self.archive.write_bytes(b"private archive contents")
+        self.signature.write_bytes(bytes(64))
+
+    def assert_failure(self, cause, message, *, executable=None):
+        with self.assertRaises(core_package.ArtifactVerificationError) as failure:
+            core_package.verify_desktop_artifact(
+                self.destination, "spaceterm-preflight", executable=executable
+            )
+        self.assertEqual(failure.exception.cause, cause)
+        self.assertEqual(str(failure.exception), message)
+        self.assertTrue(failure.exception.__suppress_context__)
+
+    def test_missing_directory_or_artifact_is_classified(self):
+        for name in ("artifact.tar.gz", "artifact.sig"):
+            with self.subTest(name=name):
+                path = self.destination / name
+                contents = path.read_bytes()
+                path.unlink()
+                self.assert_failure(
+                    core_package.ArtifactCause.MISSING,
+                    "SpaceTerm Core artifact verification failed: missing",
+                )
+                path.write_bytes(contents)
+        self.archive.unlink()
+        self.signature.unlink()
+        self.destination.rmdir()
+        self.assert_failure(
+            core_package.ArtifactCause.MISSING,
+            "SpaceTerm Core artifact verification failed: missing",
+        )
+
+    def test_unreadable_artifact_is_classified(self):
+        self.archive.chmod(0)
+        self.addCleanup(self.archive.chmod, 0o600)
+        self.assert_failure(
+            core_package.ArtifactCause.UNREADABLE,
+            "SpaceTerm Core artifact verification failed: unreadable",
+        )
+
+    def test_client_query_timeout_discards_command_and_output(self):
+        with patch.object(
+            subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(
+                ["/private/client", "--build-info"],
+                10,
+                output=b"private stdout",
+                stderr=b"private stderr",
+            ),
+        ):
+            self.assert_failure(
+                core_package.ArtifactCause.TIMED_OUT,
+                "SpaceTerm Core artifact verification failed: timed out",
+                executable=Path("/private/client"),
+            )
+
+    def test_signature_mismatch_is_classified(self):
+        self.assert_failure(
+            core_package.ArtifactCause.SIGNATURE_MISMATCH,
+            "SpaceTerm Core artifact verification failed: signature mismatch",
+        )
+
+    def test_other_os_failure_discards_native_details(self):
+        self.archive.unlink()
+        self.signature.unlink()
+        self.destination.rmdir()
+        self.destination.write_text("private native error path")
+        self.assert_failure(
+            core_package.ArtifactCause.OS_ERROR,
+            "SpaceTerm Core artifact verification failed: operating-system operation failed",
+        )
 
 
 class CrossBuildTests(unittest.TestCase):
