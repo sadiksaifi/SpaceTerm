@@ -422,9 +422,20 @@ pub fn reset(identity: &str, token: Option<&str>) -> Result<ResetReport, Failure
         &REGISTRY,
         &mut credentials(identity),
         &returned,
+        &Interruption {
+            interrupted: &crate::interrupt::interrupted,
+            dispatch: &crate::interrupt::dispatch,
+        },
         token,
         std::time::SystemTime::now(),
     )
+}
+
+/// How [`reset_in`] meets `SIGINT`: it stops waiting for the state root once `interrupted`
+/// reports it, and marks its first effect with `dispatch` only after it holds the root alone.
+struct Interruption<'a> {
+    interrupted: &'a dyn Fn() -> bool,
+    dispatch: &'a dyn Fn() -> Result<(), Failure>,
 }
 
 fn reset_in(
@@ -432,14 +443,28 @@ fn reset_in(
     registry: &Registry,
     credentials: &mut dyn migration::Credentials,
     returned: &dyn Fn() -> Result<bool, CoreError>,
+    interruption: &Interruption<'_>,
     token: Option<&str>,
     now: std::time::SystemTime,
 ) -> Result<ResetReport, Failure> {
     let directory = Directory::open(&root, true).map_err(from_core_error)?;
     let store = store_at(root);
-    let _alone = directory
-        .lock(GENERATION_LOCK, false)
-        .map_err(from_core_error)?;
+    // Another command may share the root for as long as it runs, so the wait stops on SIGINT.
+    let _alone = loop {
+        match directory
+            .wait_lock(
+                GENERATION_LOCK,
+                crate::interrupt::TICK,
+                Some(interruption.interrupted),
+            )
+            .map_err(from_core_error)?
+        {
+            LockWait::Locked(lock) => break lock,
+            LockWait::Held => {}
+            LockWait::Cancelled => return Err(Failure::new(Code::Interrupted)),
+        }
+    };
+    (interruption.dispatch)()?;
     let returned = returned().unwrap_or(false);
     let refused = migration::run(registry, &store, credentials, returned);
     let notice = || {
@@ -1239,6 +1264,7 @@ mod tests {
                 &AFTER_STONE,
                 &mut migration::NoCredentials,
                 &|| Ok(false),
+                &UNINTERRUPTED,
                 token,
                 now,
             )
@@ -1278,6 +1304,55 @@ mod tests {
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 
+    const UNINTERRUPTED: Interruption<'static> = Interruption {
+        interrupted: &|| false,
+        dispatch: &|| Ok(()),
+    };
+
+    #[test]
+    fn an_interrupt_stops_a_reset_that_waits_for_another_command() {
+        let state = generation_one("reset-interrupted");
+        let directory = Directory::open(&state.root, false).unwrap();
+        let shared = directory.lock_shared(GENERATION_LOCK).unwrap();
+        // The other command ends after two seconds, well past the interrupt.
+        let other = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            drop(shared);
+        });
+        let dispatched = std::cell::Cell::new(false);
+        let started = Instant::now();
+        let refused = reset_in(
+            state.root.clone(),
+            &AFTER_STONE,
+            &mut migration::NoCredentials,
+            &|| Ok(false),
+            &Interruption {
+                interrupted: &|| started.elapsed() >= std::time::Duration::from_millis(200),
+                dispatch: &|| {
+                    dispatched.set(true);
+                    Ok(())
+                },
+            },
+            None,
+            std::time::SystemTime::now(),
+        );
+        assert_eq!(
+            refused.err().map(|failure| failure.code),
+            Some(Code::Interrupted)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(!dispatched.get(), "an interrupted wait marks no effect");
+        assert!(
+            state
+                .root
+                .join("routes/local/base/last-connected.json")
+                .exists(),
+            "an interrupted reset changes nothing"
+        );
+        other.join().unwrap();
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
     #[test]
     fn a_reset_token_confirms_only_the_reset_it_previewed() {
         let state = generation_one("reset-changed");
@@ -1288,6 +1363,7 @@ mod tests {
                 &AFTER_STONE,
                 &mut migration::NoCredentials,
                 &|| Ok(false),
+                &UNINTERRUPTED,
                 token,
                 now,
             )

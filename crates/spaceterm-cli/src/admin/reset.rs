@@ -14,9 +14,7 @@ pub fn run(context: &Context<'_>, token: Option<&str>) -> Reply {
     if let Err(failure) = context.require_local() {
         return Reply::failure(COMMAND, None, failure);
     }
-    if let Err(failure) = crate::interrupt::dispatch() {
-        return Reply::failure(COMMAND, None, failure);
-    }
+    // `state::reset` marks its first effect once it holds the state root alone.
     match crate::state::reset(context.identity, token) {
         Ok(report) => reply(report, crate::state::build_floor(), &|token| {
             super::command_line(
