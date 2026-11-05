@@ -148,6 +148,10 @@ pub struct Admissions {
 impl Admissions {
     /// Records one admission on `lane`. An Offer, accepted or refused, also records the Core's
     /// versions. A failure before any Offer leaves the lane `NotConnected`.
+    #[cfg_attr(
+        not(any(test, feature = "client")),
+        expect(dead_code, reason = "only the client library records admissions")
+    )]
     pub(crate) fn record(&mut self, lane: Lane, result: &Result<Negotiated, Refused>) {
         let (outcome, core) = match result {
             Ok(negotiated) => (Ok(negotiated.selected), Some(&negotiated.core)),

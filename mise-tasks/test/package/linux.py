@@ -265,7 +265,7 @@ sys.exit(0 if sys.argv[1:3] == ["api", "--paginate"] else 1)
         self.compile_executable("SpaceTerm Preflight 0.0.0")
         result = self.package(candidate_digest="0" * 64)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("compiled candidate pin", result.stderr)
+        self.assertIn("digest mismatch", result.stderr)
         self.assertFalse((self.root / "dist/spaceterm-preflight-linux-x86_64.tar.gz").exists())
 
     def test_packaging_rejects_development_identity_in_a_preflight_archive(self):

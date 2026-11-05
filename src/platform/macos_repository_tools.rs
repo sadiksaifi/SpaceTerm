@@ -118,6 +118,8 @@ mod tests {
                 std::process::id(),
                 SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
+            // A run that stopped before `Drop` can leave a reused process ID's directory.
+            let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir(&root).unwrap();
             Self(root)
         }

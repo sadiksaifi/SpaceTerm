@@ -288,7 +288,7 @@ int main(int argc, char **argv) {{
         self.compile_executable(self.artifact, "SpaceTerm Preflight")
         result = self.package(candidate_digest="0" * 64)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("compiled candidate pin", result.stderr)
+        self.assertIn("digest mismatch", result.stderr)
         self.assertFalse((self.root / "dist/SpaceTerm Preflight.app").exists())
 
     def test_packaging_rejects_development_identity_in_a_preflight_bundle(self):
@@ -368,7 +368,7 @@ int main(int argc, char **argv) {{
         (catalog / "aarch64-apple-darwin/artifact.sha256").write_text("0" * 64 + "\n")
         verified = self.task("preflight/verify/macos.py")
         self.assertNotEqual(verified.returncode, 0)
-        self.assertIn("compiled candidate pin", verified.stderr)
+        self.assertIn("digest mismatch", verified.stderr)
 
     def test_release_requires_the_team_and_its_signing_secrets_before_building(self):
         self.compile_executable(self.artifact, "SpaceTerm")
