@@ -522,29 +522,53 @@ impl Service {
     pub fn connect(&self) -> Result<ServiceStatus, CoreError> {
         self.start_existing(false)
     }
-    /// Observe the approved installation without recovering or starting a service.
-    pub fn setup_start_observation(&self) -> Result<Option<SetupStartObservation>, CoreError> {
-        let Some((data, _)) = self.read()? else {
-            return Ok(None);
+    /// Read one setup observation only after admitted service work settles.
+    /// The locks also keep uninstall from removing the runtime while it is inspected.
+    pub(crate) fn setup_observation(
+        &self,
+    ) -> Result<(ServiceStatus, Option<SetupStartObservation>), CoreError> {
+        let data = match Directory::open(&self.paths.data, false) {
+            Ok(data) => data,
+            Err(CoreError::NotSetUp) => return Ok((ServiceStatus::default(), None)),
+            Err(error) => return Err(error),
         };
-        let _operation = data.lock("service.lock", false)?;
-        let _intent = data.lock("service-intent.lock", false)?;
-        let state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
+        let _operation = data
+            .try_lock("service.lock")?
+            .ok_or(CoreError::ServiceBusy)?;
+        let _intent = data
+            .try_lock("service-intent.lock")?
+            .ok_or(CoreError::ServiceBusy)?;
+        data.verify_path(&self.paths.data)?;
+        let ledger = operations::Ledger::in_directory(Directory::open(&self.paths.data, false)?);
+        if ledger
+            .records()?
+            .iter()
+            .any(|record| !record.state.terminal())
+        {
+            return Err(CoreError::ServiceBusy);
+        }
+        let Some(state) = Self::state(&data)? else {
+            return Ok((ServiceStatus::default(), None));
+        };
+        let status = self.snapshot(&state)?;
         if !state.installed {
-            return Ok(None);
+            return Ok((status, None));
         }
         self.check_setup_start_state(&state)?;
         let (version, commit) = runtime::describe(&self.runtime(&state), &self.identity)?;
-        Ok(Some(SetupStartObservation {
-            // SAFETY: geteuid has no preconditions.
-            account: unsafe { libc::geteuid() },
-            build: self.identity.clone(),
-            core: data.read()?.core,
-            installation: state.installation,
-            version,
-            commit,
-            stopped: state.stopped,
-        }))
+        Ok((
+            status,
+            Some(SetupStartObservation {
+                // SAFETY: geteuid has no preconditions.
+                account: unsafe { libc::geteuid() },
+                build: self.identity.clone(),
+                core: data.read()?.core,
+                installation: state.installation,
+                version,
+                commit,
+                stopped: state.stopped,
+            }),
+        ))
     }
     /// Start only the installation and server named by this setup approval.
     /// Validation and Stop publication share the service and intent locks.
@@ -1372,6 +1396,52 @@ mod tests {
         }
     }
     #[test]
+    fn immediate_readd_observes_no_installation_until_the_uninstall_helper_finishes() {
+        use operations::{
+            Action, Actor, HELPER_LOCK, Ledger, OperationId, Record, State as OperationState,
+        };
+        let fixture = Fixture::new();
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            std::sync::Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                ..Default::default()
+            }),
+        );
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        let mut ledger = Ledger::in_directory(Directory::open(&fixture.paths.data, false).unwrap());
+        let id = OperationId::random().unwrap();
+        ledger
+            .admit(Record {
+                id,
+                actor: Actor::CORE,
+                core: data.read().unwrap().core,
+                boot: [1; 32],
+                action: Action::Uninstall,
+                observation_digest: [0; 32],
+                candidate: None,
+                state: OperationState::Admitted,
+                updated_at: 0,
+                orphaned: false,
+            })
+            .unwrap();
+        // The lane already ended, but the helper has not acquired its lock yet.
+        assert_eq!(service.setup_observation(), Err(CoreError::ServiceBusy));
+        let helper = data.lock(HELPER_LOCK, false).unwrap();
+        ledger.claim(&id).unwrap();
+        assert_eq!(service.setup_observation(), Err(CoreError::ServiceBusy));
+        // Uninstall removes service.json last. It still owns the helper lock here.
+        data.remove(c"service.json").unwrap();
+        assert_eq!(service.setup_observation(), Err(CoreError::ServiceBusy));
+        ledger.mark(&id, OperationState::Done).unwrap();
+        drop(helper);
+        assert_eq!(
+            service.setup_observation(),
+            Ok((ServiceStatus::default(), None))
+        );
+    }
+    #[test]
     fn an_already_quiescent_stop_is_a_no_op_and_incomplete_cleanup_is_not_success() {
         use std::sync::{
             Arc,
@@ -1443,7 +1513,10 @@ mod tests {
         let service = Service::new(
             fixture.paths.clone(),
             fixture.paths.identity.clone(),
-            std::sync::Arc::new(TestSupervisor::default()),
+            std::sync::Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                ..Default::default()
+            }),
         );
         with_artifact(
             &fixture.root.join("signed"),
@@ -1464,7 +1537,7 @@ mod tests {
                 original.stopped = true;
                 data.write_json(c"service.json", &original).unwrap();
                 let identity = data.read().unwrap();
-                let approved = service.setup_start_observation().unwrap().unwrap();
+                let approved = service.setup_observation().unwrap().1.unwrap();
                 for changed in 0..4 {
                     let mut state = original.clone();
                     let mut current_identity = data.read().unwrap();

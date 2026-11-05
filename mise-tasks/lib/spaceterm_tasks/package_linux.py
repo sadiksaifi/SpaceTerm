@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -237,3 +238,57 @@ def verify_glibc_baseline(executable, label):
         baseline = ".".join(map(str, GLIBC_BASELINE))
         needed = ".".join(map(str, required))
         raise TaskError(f"{label} executable needs glibc {needed}, newer than {baseline}")
+
+
+def install_preflight(archive):
+    """Install the local archive package() verified, beside the release desktop."""
+    from spaceterm_tasks.development_linux import desktop_registry, exec_argument
+
+    home = Path.home()
+    parent = home / ".local/lib"
+    parent.mkdir(parents=True, exist_ok=True)
+    target = parent / DIRECTORIES["preflight"]
+    identifier = application_id("preflight")
+    executable = target / "bin/spaceterm-desktop"
+    # GIO looks up the executable before expanding percent field codes.
+    if "%" in str(executable):
+        raise TaskError("the install path contains characters desktop launchers cannot run")
+    with tempfile.TemporaryDirectory(prefix=".preflight-install-", dir=parent) as temporary:
+        staging = Path(temporary)
+        with tarfile.open(archive, "r:gz") as source:
+            source.extractall(staging, filter="data")
+        candidate = staging / target.name
+        previous = staging / "previous"
+        if target.exists():
+            target.rename(previous)
+        try:
+            candidate.rename(target)
+        except OSError:
+            if previous.exists():
+                previous.rename(target)
+            raise
+    applications = desktop_registry()
+    applications.mkdir(parents=True, exist_ok=True)
+    entry = target / "share/applications" / f"{identifier}.desktop"
+    contents = entry.read_text(encoding="utf-8")
+    contents = (
+        "\n".join(
+            f"Exec={exec_argument(str(executable))} %u" if line.startswith("Exec=") else line
+            for line in contents.splitlines()
+        )
+        + "\n"
+    )
+    (applications / entry.name).write_text(contents, encoding="utf-8")
+    icons = applications.parent / "icons/hicolor/scalable/apps"
+    icons.mkdir(parents=True, exist_ok=True)
+    icon = icons / f"{identifier}.svg"
+    icon.unlink(missing_ok=True)
+    icon.symlink_to(target / "share/icons/hicolor/scalable/apps" / icon.name)
+    launcher = home / ".local/bin/spaceterm-preflight-desktop"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    if launcher.is_symlink() or not launcher.exists():
+        launcher.unlink(missing_ok=True)
+        launcher.symlink_to(executable)
+    if refresh := shutil.which("update-desktop-database"):
+        subprocess.run([refresh, str(applications)], check=False, capture_output=True)
+    print("Installed SpaceTerm Preflight in ~/.local/lib")

@@ -132,6 +132,8 @@ pub(crate) enum UnavailableKind {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SetupFailure {
+    /// The owned SSH transport ended; a dispatched effect may still have completed.
+    ConnectionLost(Option<SetupOperation>),
     Cancelled,
     /// Add Machine refuses this computer. Each refusal reads as one sentence.
     Unsupported(spaceterm_core::provisioning::SetupRefusal),
@@ -422,6 +424,11 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                         {
                             break discovery;
                         }
+                        Err(SetupFailure::ConnectionLost(_)) => {
+                            return Err(SetupFailure::ConnectionLost(Some(
+                                SetupOperation::Install,
+                            )));
+                        }
                         _ => return Err(SetupFailure::Unconfirmed(SetupOperation::Install)),
                     }
                 }
@@ -470,6 +477,9 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                         }) =>
                 {
                     discovery = current;
+                }
+                Err(SetupFailure::ConnectionLost(_)) => {
+                    return Err(SetupFailure::ConnectionLost(Some(SetupOperation::Start)));
                 }
                 _ => return Err(SetupFailure::Unconfirmed(SetupOperation::Start)),
             }
@@ -888,6 +898,9 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         {
             return SetupFailure::Unconfirmed(operation);
         }
+        if matches!(error, CapturedProcessError::ConnectionLost) {
+            return SetupFailure::ConnectionLost(self.completed_effect.get());
+        }
         map_process_error(error)
     }
     fn check_cancelled(&self, cancellation: &CancellationToken) -> Result<(), SetupFailure> {
@@ -913,6 +926,19 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         action: &str,
         cancellation: &CancellationToken,
     ) -> Result<CapturedProcessOutput, SetupFailure> {
+        let output = self.read_output(action, cancellation)?;
+        if !output.exit.is_success() {
+            return Err(SetupFailure::Unavailable(
+                UnavailableKind::ServiceUnavailable,
+            ));
+        }
+        Ok(output)
+    }
+    fn read_output(
+        &self,
+        action: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<CapturedProcessOutput, SetupFailure> {
         let command = self.command(&self.config.bootstrap.locator(
             identity(),
             action,
@@ -928,11 +954,6 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             Instant::now() + OBSERVATION,
         )
         .map_err(|error| self.process_failure(error))?;
-        if !output.exit.is_success() {
-            return Err(SetupFailure::Unavailable(
-                UnavailableKind::ServiceUnavailable,
-            ));
-        }
         Ok(output)
     }
     /// Revokes this setup's pairing, and restores Network Access in the same step when
@@ -989,7 +1010,24 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             .map(|reply| reply.restored)
     }
     fn discover(&self, cancellation: &CancellationToken) -> Result<Discovery, SetupFailure> {
-        parse_discovery(&self.read("ssh-discover", cancellation)?.stdout)
+        // Remove Machine loses its lane at shutdown, before its helper removes the runtime.
+        // Re-enter discovery until that admitted work is settled; never offer the old runtime.
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            self.check_cancelled(cancellation)?;
+            let output = self.read_output("ssh-discover", cancellation)?;
+            if output.exit.is_success() {
+                return parse_discovery(&output.stdout);
+            }
+            if output.exit.code() != Some(i32::from(spaceterm_core::provisioning::DISCOVERY_BUSY))
+                || Instant::now() >= deadline
+            {
+                return Err(SetupFailure::Unavailable(
+                    UnavailableKind::ServiceUnavailable,
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     /// Reads what the computer is, changing nothing.
     fn preflight(&self, cancellation: &CancellationToken) -> Result<Preflight, SetupFailure> {
@@ -1088,6 +1126,7 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         .map_err(|error| match error {
             CapturedEffectError::NotAdmitted(error) => self.process_failure(error),
             CapturedEffectError::Unconfirmed => SetupFailure::Unconfirmed(operation),
+            CapturedEffectError::ConnectionLost => SetupFailure::ConnectionLost(Some(operation)),
         })?;
         if !output.exit.is_success() {
             return Err(step_failure(
@@ -1118,7 +1157,12 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             MAX_DISCOVERY,
             cancellation,
         )
-        .map_err(|_| SetupFailure::Unconfirmed(SetupOperation::Install))?;
+        .map_err(|error| match error {
+            CapturedProcessError::ConnectionLost => {
+                SetupFailure::ConnectionLost(Some(SetupOperation::Install))
+            }
+            _ => SetupFailure::Unconfirmed(SetupOperation::Install),
+        })?;
         if !output.exit.is_success() {
             return Err(step_failure(
                 output.exit.code(),
@@ -1215,6 +1259,7 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<(), SetupFailure>
 fn map_process_error(error: CapturedProcessError) -> SetupFailure {
     match error {
         CapturedProcessError::Cancelled => SetupFailure::Cancelled,
+        CapturedProcessError::ConnectionLost => SetupFailure::ConnectionLost(None),
         _ => SetupFailure::Unavailable(UnavailableKind::HostUnreachable),
     }
 }

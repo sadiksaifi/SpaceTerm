@@ -76,7 +76,9 @@ struct ProcessAdapter {
     active: Arc<AtomicUsize>,
     resolved: Arc<Mutex<Vec<u8>>>,
     effects_succeed: Arc<AtomicBool>,
+    lost_action: Arc<Mutex<Option<(&'static str, bool)>>>,
     installed_discovery: Arc<Mutex<Option<Vec<u8>>>>,
+    busy_discoveries: Arc<AtomicUsize>,
     stall: Arc<(Mutex<StalledObservation>, Condvar)>,
 }
 enum FixtureProcess {
@@ -173,7 +175,33 @@ impl SshProcessAdapter for ProcessAdapter {
                 ),
             ));
         }
+        if self.lost_action.lock().unwrap().is_some_and(|(action, _)| {
+            request
+                .arguments()
+                .last()
+                .is_some_and(|command| command.to_string_lossy().contains(action))
+        }) {
+            self.effects
+                .lock()
+                .unwrap()
+                .push(request.arguments().to_vec());
+            return Ok(SpawnedSshProcess::new(
+                FixtureProcess::Captured(ProcessExit::new(false, Some(255))),
+                SshProcessPipes::new(
+                    Some(Box::new(std::io::sink())),
+                    Some(Box::new(Cursor::new(
+                        if self.lost_action.lock().unwrap().unwrap().1 {
+                            crate::ssh::command::SETUP_READY_PREAMBLE.to_vec()
+                        } else {
+                            vec![]
+                        },
+                    ))),
+                    None,
+                ),
+            ));
+        }
         let mut linger_refused = false;
+        let mut discovery_busy = false;
         let (success, stdout, stderr) = if resolve {
             (true, self.resolved.lock().unwrap().clone(), vec![])
         } else if request.arguments() == [OsString::from("-V")] {
@@ -197,7 +225,17 @@ impl SshProcessAdapter for ProcessAdapter {
             .last()
             .is_some_and(|command| command.to_string_lossy().contains("ssh-discover"))
         {
-            (true, self.discovery.lock().unwrap().clone(), vec![])
+            discovery_busy = self
+                .busy_discoveries
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    count.checked_sub(1)
+                })
+                .is_ok();
+            (
+                !discovery_busy,
+                self.discovery.lock().unwrap().clone(),
+                vec![],
+            )
         } else if request
             .arguments()
             .last()
@@ -242,6 +280,9 @@ impl SshProcessAdapter for ProcessAdapter {
                 Some(match (success, linger_refused) {
                     (true, _) => 0,
                     (false, true) => spaceterm_core::provisioning::preflight::LINGER_REFUSED,
+                    (false, false) if discovery_busy => {
+                        i32::from(spaceterm_core::provisioning::DISCOVERY_BUSY)
+                    }
                     (false, false) => 1,
                 }),
             )),
@@ -328,7 +369,9 @@ impl Fixture {
             filesystem: secure_filesystem,
             authentications: Arc::default(),
             effects_succeed: Arc::default(),
+            lost_action: Arc::default(),
             installed_discovery: Arc::default(),
+            busy_discoveries: Arc::default(),
             stall: Arc::default(),
             active: Arc::default(),
             resolved: Arc::new(Mutex::new(
@@ -1341,4 +1384,64 @@ fn setup_start_times_out_before_the_slave_ready_preamble_as_unconfirmed_and_reap
     let counts = fixture.backend.process_counts();
     assert_eq!(counts.active(), 0);
     assert_eq!(counts.spawned, counts.reaped);
+}
+
+#[test]
+fn a_connection_lost_during_setup_reports_the_transport_and_any_unconfirmed_effect() {
+    for preamble in [true, false] {
+        for (action, initial, operation) in [
+            (
+                "ssh-install",
+                b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec(),
+                Some(SetupOperation::Install),
+            ),
+            (
+                "ssh-start",
+                serde_json::to_vec(&discovery(false)).unwrap(),
+                Some(SetupOperation::Start),
+            ),
+            (
+                "ssh-discover",
+                serde_json::to_vec(&discovery(true)).unwrap(),
+                None,
+            ),
+        ] {
+            let fixture = Fixture::new(initial);
+            write_signed_package(&fixture.catalog, b"authenticated executable");
+            *fixture.adapter.lost_action.lock().unwrap() = Some((action, preamble));
+            let result = fixture.setup(Arc::new(Approvals(|_, _: &CancellationToken| true)));
+            assert_eq!(
+                result,
+                Err(SetupFailure::ConnectionLost(operation)),
+                "action={action}, preamble={preamble}"
+            );
+            assert_eq!(fixture.adapter.effects.lock().unwrap().len(), 1);
+            assert_eq!(fixture.backend.process_counts().active(), 0);
+        }
+    }
+}
+
+#[test]
+fn immediate_readd_waits_for_uninstall_before_offering_the_new_installation() {
+    let fixture = Fixture::new(b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec());
+    write_signed_package(&fixture.catalog, b"authenticated executable");
+    fixture.adapter.busy_discoveries.store(3, Ordering::SeqCst);
+    let remaining = Arc::clone(&fixture.adapter.busy_discoveries);
+    let offered = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&offered);
+    let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
+        assert_eq!(
+            remaining.load(Ordering::SeqCst),
+            0,
+            "offered installation before removal finished"
+        );
+        assert!(matches!(offer, SetupOffer::Installation { .. }));
+        observed.store(true, Ordering::SeqCst);
+        false
+    })));
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(offered.load(Ordering::SeqCst));
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.backend.process_counts().active(), 0);
 }
