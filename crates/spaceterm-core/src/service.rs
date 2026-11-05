@@ -2518,6 +2518,30 @@ mod tests {
             );
         }
 
+        /// An activation can take the service lock right after uninstall's passive check. The
+        /// CLI shares its state root meanwhile, so uninstall refuses instead of waiting.
+        #[test]
+        fn uninstall_refuses_an_operation_that_took_the_service_lock_after_its_check() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let service = AccountSupervisor::new(fixture.paths.clone()).service();
+            let data = Directory::open(&fixture.paths.data, false).unwrap();
+            let activation = data.lock("service.lock", false).unwrap();
+            let (sent, received) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = sent.send(service.uninstall_cli(None, Data::Keep));
+            });
+            let refused = received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("uninstall waited for the service lock");
+            assert!(
+                matches!(refused, Err(CoreError::ServiceBusy)),
+                "{refused:?}"
+            );
+            assert!(!fixture.paths.data.join("uninstall.json").exists());
+            drop(activation);
+        }
+
         /// A setup that waits for the service lock finds the data root already gone, so it
         /// can't publish into a root that is about to be deleted.
         #[test]
