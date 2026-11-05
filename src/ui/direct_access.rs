@@ -42,7 +42,9 @@ pub(crate) struct AccessState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Listener {
     Off,
+    Starting(SocketAddr),
     Listening(SocketAddr),
+    PortInUse,
     /// The chosen address is no longer on the server's machine, such as after a Wi-Fi change.
     AddressGone,
     /// The owner turned access on and the server could not listen at that address.
@@ -214,10 +216,9 @@ fn access_state(status: DirectStatus) -> AccessState {
         configured,
         listener: match status.listener {
             ListenerState::Off => Listener::Off,
-            // Starting binds within seconds, once the previous address's connections end.
-            ListenerState::Listening { addr } | ListenerState::Starting { addr } => {
-                Listener::Listening(addr)
-            }
+            ListenerState::Starting { addr } => Listener::Starting(addr),
+            ListenerState::Listening { addr } => Listener::Listening(addr),
+            ListenerState::Failed(DirectError::PortInUse) => Listener::PortInUse,
             ListenerState::Failed(DirectError::InvalidAddress) => Listener::AddressGone,
             ListenerState::Failed(_) => Listener::Failed,
         },
@@ -449,6 +450,21 @@ mod tests {
         let state = access_state(status(ListenerState::Failed(DirectError::Transport)));
 
         assert_eq!(state.listener, Listener::Failed);
+    }
+
+    #[test]
+    fn a_listener_with_port_in_use_keeps_the_conflict_classification() {
+        let state = access_state(status(ListenerState::Failed(DirectError::PortInUse)));
+
+        assert_eq!(state.listener, Listener::PortInUse);
+    }
+
+    #[test]
+    fn a_listener_waiting_to_bind_is_not_reported_as_listening() {
+        let address = "192.168.1.20:9231".parse().unwrap();
+        let state = access_state(status(ListenerState::Starting { addr: address }));
+
+        assert_eq!(state.listener, Listener::Starting(address));
     }
 
     #[test]

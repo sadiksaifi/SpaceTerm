@@ -702,6 +702,11 @@ fn end_enrollment(
     cleanup: Option<Option<RestoredAccess>>,
     restoring: bool,
 ) -> SetupFailure {
+    // A bind conflict refused the change before Network Access or a pairing was committed.
+    // Cancelling the prepared reservation must not replace that cause with "off again".
+    if !cancelled && error == Some(SetupFailure::Unavailable(UnavailableKind::PortInUse)) {
+        return SetupFailure::Unavailable(UnavailableKind::PortInUse);
+    }
     match cleanup {
         Some(Some(RestoredAccess::Off | RestoredAccess::On)) if restoring && cancelled => {
             SetupFailure::Cancelled
@@ -817,35 +822,32 @@ fn end_admission(
             confirmed: None,
         };
     }
-    let blocked_port =
-        |listening: bool| (admission.ssh_dials_address && listening).then_some(bind.port());
-    // No QUIC packet reached SpaceTerm Core. Network Access that was already on stays, and the
-    // listener read before setup is the evidence.
-    let Some(held) = held else {
-        return Ended {
-            failure: SetupFailure::Unreachable {
-                address: admission.address,
-                network: NetworkAfter::Unchanged,
-                blocked_port: blocked_port(listens(&admission.before.listener, bind)),
-            },
-            confirmed: None,
-        };
-    };
     // Read before the restore changes it.
-    let listening = held
-        .listener()
-        .is_some_and(|listener| listens(&listener, bind));
-    let (network, confirmed) = match held.cancel(restore) {
-        Some(restored) => (NetworkAfter::Restored(restored), true),
-        None => (NetworkAfter::Unconfirmed, false),
+    let listener = held.map_or_else(
+        || Some(admission.before.listener.clone()),
+        HeldSetup::listener,
+    );
+    let (network, confirmed) = match held {
+        Some(held) => match held.cancel(restore) {
+            Some(restored) => (NetworkAfter::Restored(restored), Some(true)),
+            None => (NetworkAfter::Unconfirmed, Some(false)),
+        },
+        None => (NetworkAfter::Unchanged, None),
     };
     Ended {
-        failure: SetupFailure::Unreachable {
-            address: admission.address,
-            network,
-            blocked_port: blocked_port(listening),
+        failure: if listener == Some(ListenerState::Failed(DirectError::PortInUse)) {
+            SetupFailure::Unavailable(UnavailableKind::PortInUse)
+        } else {
+            let listening = listener
+                .as_ref()
+                .is_some_and(|listener| listens(listener, bind));
+            SetupFailure::Unreachable {
+                address: admission.address,
+                network,
+                blocked_port: (admission.ssh_dials_address && listening).then_some(bind.port()),
+            }
         },
-        confirmed: Some(confirmed),
+        confirmed,
     }
 }
 
@@ -1504,6 +1506,45 @@ mod admission_tests {
     use std::cell::RefCell;
 
     const BIND: &str = "10.1.2.3:9231";
+
+    #[test]
+    fn enrollment_cleanup_preserves_port_in_use_in_add_machine() {
+        let failure = step_failure(
+            Some(i32::from(spaceterm_core::provisioning::PORT_IN_USE)),
+            SetupFailure::Unconfirmed(SetupOperation::Enrollment),
+        );
+        for cleanup in [Some(Some(RestoredAccess::Off)), None] {
+            let ended = end_enrollment(Some(failure.clone()), false, cleanup, true);
+            assert_eq!(ended, SetupFailure::Unavailable(UnavailableKind::PortInUse));
+            let problem = crate::ui::ssh_setup::problem(&ended, "penguin");
+            assert_eq!(
+                problem.explanation,
+                "Another app on penguin is using that UDP port, so choose another port and try again."
+            );
+            assert!(problem.footnote.is_none());
+        }
+    }
+
+    #[test]
+    fn admission_reports_port_in_use_when_the_core_reports_a_bind_conflict() {
+        let mut session = Session::new(false, Some(RestoredAccess::Off));
+        session.listener = Some(ListenerState::Failed(DirectError::PortInUse));
+        assert_eq!(
+            end(Some(&session), false, &before(false), true),
+            Ended {
+                failure: SetupFailure::Unavailable(UnavailableKind::PortInUse),
+                confirmed: Some(true),
+            }
+        );
+        assert_eq!(session.cancels.borrow().len(), 1);
+
+        let mut status = before(true);
+        status.listener = ListenerState::Failed(DirectError::PortInUse);
+        assert_eq!(
+            end(None, false, &status, true).failure,
+            SetupFailure::Unavailable(UnavailableKind::PortInUse)
+        );
+    }
 
     /// A held SSH session whose SpaceTerm Core listens at `listener` and answers a cancellation
     /// with `restored`.
