@@ -193,6 +193,12 @@ _Avoid_: Hotkey, key equivalent
 
 **Update Reminder**: A deferrable notice about an outstanding update.
 
+**Update Floor**: The oldest release version allowed to update directly to a release. Every release publishes one for SpaceTerm Core and one for the desktops.
+
+**Stepping Stone**: A release that an updater installs because it is the Update Floor of a newer release.
+
+**Data Generation**: The integer that names the format of every file in one retained data root: Core data, CLI state, desktop config or desktop state.
+
 ## Focus and transient UI
 
 **Active Workspace**: The Workspace presented in an Operating-System Window.
