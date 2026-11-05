@@ -51,6 +51,7 @@ def run():
             product="desktop",
             platform="linux-x86_64",
             version="1.0.1",
+            floor="1.0.0",
             published_at=int(time.time()),
             protocols=release_feed.protocols(),
             archive=archive,

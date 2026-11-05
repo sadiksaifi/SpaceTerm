@@ -25,10 +25,19 @@ import subprocess
 import tempfile
 import time
 import tomllib
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, macos_codesign, release_feed, sparkle, update_signing
+from spaceterm_tasks import (
+    ROOT,
+    TaskError,
+    macos_codesign,
+    release_feed,
+    release_floor,
+    sparkle,
+    update_signing,
+)
 from spaceterm_tasks.packaging import DIST, STABLE_TAG, checked, release_version
 from spaceterm_tasks.release_feed import (
     APPCAST,
@@ -212,19 +221,25 @@ def sparkle_signing(environment, plist):
     return ["--ed-key-file", "-"], update_signing.encoded_seed(seed).encode()
 
 
-def verify_appcast(path, archive, version):
-    root = ET.parse(path).getroot()
-    items = root.findall("./channel/item")
-    if len(items) != 1:
-        raise ValueError("the appcast must contain exactly one complete update")
-    item = items[0]
+def _item_version(item, name):
+    return item.findtext(f"{{{SPARKLE_NS}}}{name}")
+
+
+def _order(version):
+    return tuple(int(part) for part in version.split("."))
+
+
+def _step(item, version):
+    """Check one appcast item of release `version` and return its floor and disk image
+    signature."""
+    floor = _item_version(item, "minimumUpdateVersion")
     if (
-        item.findtext(f"{{{SPARKLE_NS}}}version") != version
-        or item.findtext(f"{{{SPARKLE_NS}}}shortVersionString") != version
+        _item_version(item, "version") != version
+        or _item_version(item, "shortVersionString") != version
     ):
-        raise ValueError("the appcast version must match the Git tag")
-    if item.findtext(f"{{{SPARKLE_NS}}}minimumSystemVersion") != "26.0":
-        raise ValueError("the appcast minimum system version must be 26.0")
+        raise ValueError("an appcast version differs from the release it encloses")
+    if not floor or not release_feed.VERSION.fullmatch(floor) or _order(floor) > _order(version):
+        raise ValueError("each appcast item names an Update Floor at or below its version")
     if item.findtext(f"{{{SPARKLE_NS}}}fullReleaseNotesLink") != notes_url(version):
         raise ValueError("the appcast must link the release notes")
     if item.find(f"{{{SPARKLE_NS}}}channel") is not None:
@@ -232,14 +247,121 @@ def verify_appcast(path, archive, version):
     enclosure = item.find("enclosure")
     if enclosure is None:
         raise ValueError("the release disk image is missing")
+    if enclosure.get("url") != download_url(version, dmg_name(version)):
+        raise ValueError("the release disk image URL does not match")
+    signature = enclosure.get(f"{{{SPARKLE_NS}}}edSignature", "")
+    if len(base64.b64decode(signature, validate=True)) != 64:
+        raise ValueError("the release disk image signature is missing")
+    return floor, signature, enclosure
+
+
+def verify_appcast(path, archive, version, floor):
+    """Require the appcast of release `version` with Update Floor `floor`: one item per step.
+
+    The first item encloses `archive` and names `floor` as `sparkle:minimumUpdateVersion`.
+    Every item whose floor is below its version is followed by its floor release's item, so
+    the chain ends at the first release, which is its own floor. Sparkle installs the newest
+    item whose floor the installed version meets. Returns the disk image's signature.
+    """
+    items = ET.parse(path).getroot().findall("./channel/item")
+    if not items:
+        raise ValueError("the appcast must contain the release")
+    named, signature, enclosure = _step(items[0], version)
+    if named != floor:
+        raise ValueError("the appcast must name the release's Update Floor")
+    if items[0].findtext(f"{{{SPARKLE_NS}}}minimumSystemVersion") != "26.0":
+        raise ValueError("the appcast minimum system version must be 26.0")
     if enclosure.get("url") != download_url(version, archive.name) or enclosure.get(
         "length"
     ) != str(archive.stat().st_size):
         raise ValueError("the release disk image URL or size does not match")
-    signature = enclosure.get(f"{{{SPARKLE_NS}}}edSignature", "")
-    if len(base64.b64decode(signature, validate=True)) != 64:
-        raise ValueError("the release disk image signature is missing")
+    step = named
+    for index, item in enumerate(items[1:], start=1):
+        if step == _item_version(items[index - 1], "version"):
+            raise ValueError("the appcast goes on past a release that is its own floor")
+        step = _step(item, step)[0]
+    if step != _item_version(items[-1], "version"):
+        raise ValueError("the appcast lacks its floor release's items")
     return signature
+
+
+# The signature comment Sparkle's sign_update appends to a feed. It signs the bytes before it.
+SPARKLE_SIGNATURE = re.compile(
+    rb"<!-- sparkle-signatures:\nedSignature: ([A-Za-z0-9+/=]{88})\nlength: ([0-9]+)\n-->\n?\Z"
+)
+MAX_APPCAST = 1024 * 1024
+
+
+def authenticated_appcast(data, keys):
+    """Require a Sparkle feed signature over `data` under one of `keys`."""
+    found = SPARKLE_SIGNATURE.search(data)
+    if found is None:
+        raise TaskError("the floor release's appcast carries no Sparkle signature")
+    with tempfile.TemporaryDirectory(prefix="spaceterm-appcast-") as temporary:
+        message, signature = Path(temporary) / "appcast", Path(temporary) / "appcast.sig"
+        message.write_bytes(data[: found.start()])
+        signature.write_bytes(base64.b64decode(found.group(1), validate=True))
+        update_signing.verify(keys, message, signature)
+    return data
+
+
+def _download(url):
+    with urllib.request.urlopen(url, timeout=60) as response:
+        return response.read(MAX_APPCAST + 1)
+
+
+def floor_appcast(floor, version, trust=update_signing.release_trust, fetch=_download):
+    """The signed appcast of the floor release, which the new appcast continues; None when
+    the release is its own floor. A published release signed it under `trust()`, the release
+    trust, even in a dry run."""
+    if floor == version:
+        return None
+    try:
+        data = fetch(download_url(floor, APPCAST))
+    except OSError:
+        raise TaskError("the floor release's appcast could not be downloaded") from None
+    if len(data) > MAX_APPCAST:
+        raise TaskError("the floor release's appcast is too large")
+    return authenticated_appcast(data, trust())
+
+
+def write_appcast(directory, version, floor, previous, run):
+    """Write and sign the appcast of the disk image of `version` in `directory`.
+
+    `previous` is the floor release's signed appcast, or None when the release is its own
+    floor. generate_appcast adds the new item above every item of `previous` and keeps them
+    all, then sign_update signs the result. `run(tool, *arguments)` runs a Sparkle tool with
+    the update key.
+    """
+    directory = Path(directory)
+    archive = directory / dmg_name(version)
+    feed = directory / APPCAST
+    if previous is not None:
+        feed.write_bytes(previous)
+    run(
+        sparkle.tool("generate_appcast"),
+        "--maximum-deltas",
+        "0",
+        "--maximum-versions",
+        "0",
+        "--minimum-update-version",
+        floor,
+        "--download-url-prefix",
+        f"{RELEASES}/download/v{version}/",
+        "--full-release-notes-url",
+        notes_url(version),
+        "--link",
+        notes_url(version),
+        directory,
+    )
+    try:
+        signature = verify_appcast(feed, archive, version, floor)
+    except (OSError, ValueError, ET.ParseError) as error:
+        raise TaskError(str(error)) from None
+    run(sparkle.tool("sign_update"), feed)
+    run(sparkle.tool("sign_update"), "--verify", archive, signature)
+    run(sparkle.tool("sign_update"), "--verify", feed)
+    return feed
 
 
 def appcast(tag):
@@ -252,44 +374,27 @@ def appcast(tag):
     environment = {
         key: value for key, value in os.environ.items() if key != update_signing.SIGNING_SECRET
     }
+    floor = release_floor.floor("desktop", version)
+    previous = floor_appcast(floor, version)
 
-    def run(*arguments):
-        if subprocess.run(arguments, input=stdin, env=environment, capture_output=True).returncode:
+    def run(tool, *arguments):
+        if subprocess.run(
+            [tool, *options, *arguments], input=stdin, env=environment, capture_output=True
+        ).returncode:
             raise TaskError("Sparkle could not sign or verify the appcast")
 
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-appcast-") as temporary:
         directory = Path(temporary) / "desktop"
         directory.mkdir()
-        archive = directory / dmg_name(version)
-        shutil.copyfile(DIST / "SpaceTerm.dmg", archive)
-        run(
-            sparkle.tool("generate_appcast"),
-            *options,
-            "--maximum-deltas",
-            "0",
-            "--maximum-versions",
-            "1",
-            "--download-url-prefix",
-            f"{RELEASES}/download/v{version}/",
-            "--full-release-notes-url",
-            notes_url(version),
-            "--link",
-            notes_url(version),
-            directory,
-        )
-        feed = directory / APPCAST
-        try:
-            signature = verify_appcast(feed, archive, version)
-        except (OSError, ValueError, ET.ParseError) as error:
-            raise TaskError(str(error)) from None
-        run(sparkle.tool("sign_update"), *options, "--verify", archive, signature)
-        run(sparkle.tool("sign_update"), *options, "--verify", feed)
+        shutil.copyfile(DIST / "SpaceTerm.dmg", directory / dmg_name(version))
+        write_appcast(directory, version, floor, previous, run)
         replace_directory(directory, DESKTOP_MACOS)
-    print("The disk image and its signed appcast are verified")
+    print(f"The disk image and its signed appcast with Update Floor {floor} are verified")
 
 
-def verified_core(entry, target, version, directory):
-    """Authenticate one Core build and return its archive and signature."""
+def verified_core(entry, target, version, floor, directory):
+    """Authenticate one Core build of `version` with Update Floor `floor` and return its archive
+    and signature."""
     from spaceterm_tasks.core_package import document, host_target, verified_copy
 
     if (entry / "artifact.sha256").read_text() != sha256(entry / "artifact.tar.gz") + "\n":
@@ -303,8 +408,11 @@ def verified_core(entry, target, version, directory):
         target=target,
         native=target == host_target(),
     )
-    if document((tree / "build.json").read_bytes())["version"] != version:
+    info = document((tree / "build.json").read_bytes())
+    if info["version"] != version:
         raise TaskError("the Core version must match the release tag")
+    if info["floor"] != floor:
+        raise TaskError("the Core build's Update Floor differs from the release's")
     return archive, signature
 
 
@@ -330,6 +438,7 @@ def assemble(
     seed = update_signing.release_seed(environment)
     keys = update_signing.trust(environment)
     protocols = release_feed.protocols()
+    floors = release_floor.floors(version)
     published_at = int(time.time())
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-") as temporary:
         directory = Path(temporary) / "release"
@@ -344,7 +453,7 @@ def assemble(
                 continue
             verified = scratch / target
             verified.mkdir()
-            archive, signature = verified_core(entry, target, version, verified)
+            archive, signature = verified_core(entry, target, version, floors["core"], verified)
             name = archive_name("core", version, platform)
             shutil.copyfile(archive, directory / name)
             shutil.copyfile(signature, directory / f"{name}.sig")
@@ -367,6 +476,7 @@ def assemble(
                 product=product,
                 platform=platform,
                 version=version,
+                floor=floors[product],
                 published_at=published_at,
                 protocols=protocols,
                 archive=archive,
@@ -376,7 +486,9 @@ def assemble(
             for name in (dmg.name, APPCAST):
                 shutil.copyfile(Path(macos_directory) / name, directory / name)
             try:
-                verify_appcast(directory / APPCAST, directory / dmg.name, version)
+                verify_appcast(
+                    directory / APPCAST, directory / dmg.name, version, floors["desktop"]
+                )
             except (OSError, ValueError, ET.ParseError) as error:
                 raise TaskError(str(error)) from None
         else:

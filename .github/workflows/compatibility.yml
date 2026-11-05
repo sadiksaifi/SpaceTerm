@@ -47,6 +47,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # The candidate's Update Floor reads the published releases' tags.
+          fetch-depth: 0
           submodules: recursive
       - uses: jdx/mise-action@v5
       - name: Install Linux build packages

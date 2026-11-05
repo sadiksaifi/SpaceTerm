@@ -196,6 +196,7 @@ class FeedTests(unittest.TestCase):
             version="1.4.0",
             published_at=1793750400,
             protocols=PROTOCOLS,
+            floor="1.2.0",
             archive=archive,
         )
 
@@ -218,6 +219,7 @@ class FeedTests(unittest.TestCase):
                         "product": product,
                         "platform": platform,
                         "version": "1.4.0",
+                        "floor": "1.2.0",
                         "published_at": 1793750400,
                         "protocols": PROTOCOLS,
                         "minimum_system": {"macos-arm64": "26.0", "linux-x86_64": "2.35"}[platform],
@@ -253,6 +255,10 @@ class FeedTests(unittest.TestCase):
             compact({**document, "product": "desktop"}),
             compact({**document, "version": "1.04.0"}),
             compact({**document, "published_at": 0}),
+            compact({key: value for key, value in document.items() if key != "floor"}),
+            compact({**document, "floor": "1.4.1"}),
+            compact({**document, "floor": "1.02.0"}),
+            compact({**document, "floor": None}),
             compact({**document, "minimum_system": "2.35"}),
             compact({**document, "notes": f"{RELEASES}/tag/v1.4.1"}),
             compact({**document, "protocols": {**PROTOCOLS, "work": {"major": 70000, "minor": 0}}}),
@@ -283,39 +289,145 @@ class FeedTests(unittest.TestCase):
             release_feed.protocols(self.root)
 
 
+def appcast_item(version, floor, length=7):
+    signature = base64.b64encode(bytes(64)).decode()
+    return (
+        "<item>"
+        f"<sparkle:version>{version}</sparkle:version>"
+        f"<sparkle:shortVersionString>{version}</sparkle:shortVersionString>"
+        f"<sparkle:minimumUpdateVersion>{floor}</sparkle:minimumUpdateVersion>"
+        "<sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>"
+        f"<sparkle:fullReleaseNotesLink>{RELEASES}/tag/v{version}</sparkle:fullReleaseNotesLink>"
+        f'<enclosure url="{RELEASES}/download/v{version}/SpaceTerm-{version}-macos-arm64.dmg" '
+        f'length="{length}" sparkle:edSignature="{signature}" /></item>'
+    )
+
+
+def appcast_document(*items):
+    return f'<rss xmlns:sparkle="{SPARKLE_NS}"><channel>{"".join(items)}</channel></rss>'
+
+
 class AppcastTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.feed = self.root / "appcast.xml"
+
+    def archive(self, version):
+        archive = self.root / f"SpaceTerm-{version}-macos-arm64.dmg"
+        archive.write_bytes(b"fixture")
+        return archive
+
     def test_appcast_must_reference_the_exact_disk_image_version_and_notes(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            archive = root / "SpaceTerm-1.0.0-macos-arm64.dmg"
-            archive.write_bytes(b"fixture")
-            signature = base64.b64encode(bytes(64)).decode()
-            xml = (
-                f'<rss xmlns:sparkle="{SPARKLE_NS}"><channel><item>'
-                "<sparkle:version>1.0.0</sparkle:version>"
-                "<sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>"
-                "<sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>"
-                f"<sparkle:fullReleaseNotesLink>{RELEASES}/tag/v1.0.0</sparkle:fullReleaseNotesLink>"
-                f'<enclosure url="{RELEASES}/download/v1.0.0/{archive.name}" length="7" '
-                f'sparkle:edSignature="{signature}" /></item></channel></rss>'
-            )
-            feed = root / "appcast.xml"
-            feed.write_text(xml)
-            self.assertEqual(verify_appcast(feed, archive, "1.0.0"), signature)
-            for invalid in (
-                xml.replace("github.com/", "example.invalid/"),
-                xml.replace("<sparkle:version>1.0.0", "<sparkle:version>1.1.0"),
-                xml.replace(">26.0<", ">15.0<"),
-                xml.replace("tag/v1.0.0", "tag/v0.9.0"),
-                xml.replace('length="7"', 'length="8"'),
-                xml.replace(signature, base64.b64encode(bytes(63)).decode()),
-                xml.replace("<item>", "<item><sparkle:channel>beta</sparkle:channel>"),
-                xml.replace("</channel>", "<item /></channel>"),
-            ):
-                with self.subTest(invalid=invalid):
-                    feed.write_text(invalid)
-                    with self.assertRaises(ValueError):
-                        verify_appcast(feed, archive, "1.0.0")
+        archive = self.archive("1.0.0")
+        signature = base64.b64encode(bytes(64)).decode()
+        xml = appcast_document(appcast_item("1.0.0", "1.0.0"))
+        self.feed.write_text(xml)
+        self.assertEqual(verify_appcast(self.feed, archive, "1.0.0", "1.0.0"), signature)
+        for invalid in (
+            xml.replace("github.com/", "example.invalid/"),
+            xml.replace("<sparkle:version>1.0.0", "<sparkle:version>1.1.0"),
+            xml.replace(">26.0<", ">15.0<"),
+            xml.replace("tag/v1.0.0", "tag/v0.9.0"),
+            xml.replace('length="7"', 'length="8"'),
+            xml.replace(signature, base64.b64encode(bytes(63)).decode()),
+            xml.replace("<item>", "<item><sparkle:channel>beta</sparkle:channel>"),
+            xml.replace("</channel>", "<item /></channel>"),
+            xml.replace("<channel><item>", "<channel><item /><item>"),
+        ):
+            with self.subTest(invalid=invalid):
+                self.feed.write_text(invalid)
+                with self.assertRaises(ValueError):
+                    verify_appcast(self.feed, archive, "1.0.0", "1.0.0")
+
+    def test_the_new_item_names_the_floor_and_each_floor_release_follows_its_step(self):
+        archive = self.archive("1.3.0")
+        chain = [
+            appcast_item("1.3.0", "1.2.0"),
+            appcast_item("1.2.0", "1.0.0", length=99),
+            appcast_item("1.0.0", "1.0.0", length=42),
+        ]
+        self.feed.write_text(appcast_document(*chain))
+        verify_appcast(self.feed, archive, "1.3.0", "1.2.0")
+        broken = [
+            # The floor differs from the release's.
+            ("1.1.0", chain),
+            # The floor release's items are missing, or only some of them follow.
+            ("1.2.0", chain[:1]),
+            ("1.2.0", chain[:2]),
+            # A step names a release other than the previous item's floor.
+            ("1.2.0", [chain[0], appcast_item("1.1.0", "1.0.0"), chain[2]]),
+            # An item names a floor above its own version.
+            ("1.4.0", [appcast_item("1.3.0", "1.4.0"), appcast_item("1.4.0", "1.4.0")]),
+            # An item lacks a floor.
+            ("1.2.0", [*chain[:2], chain[2].replace("minimumUpdateVersion", "other")]),
+            # A step encloses another release's disk image.
+            ("1.2.0", [chain[0], chain[1].replace("v1.2.0/", "v1.1.0/"), chain[2]]),
+            # The chain goes on past a release that is its own floor.
+            ("1.2.0", [*chain, appcast_item("1.0.0", "1.0.0")]),
+        ]
+        for floor, items in broken:
+            with self.subTest(floor=floor, items=len(items)):
+                self.feed.write_text(appcast_document(*items))
+                with self.assertRaises(ValueError):
+                    verify_appcast(self.feed, archive, "1.3.0", floor)
+
+
+def sparkle_signed(seed, text):
+    """`text` with the signature comment Sparkle's sign_update appends to a feed."""
+    with tempfile.TemporaryDirectory() as temporary:
+        message = Path(temporary) / "feed"
+        message.write_bytes(text.encode())
+        signature = Path(temporary) / "feed.sig"
+        update_signing.sign(seed, message, signature)
+        encoded = base64.b64encode(signature.read_bytes()).decode()
+    return (
+        f"{text}<!-- sparkle-signatures:\nedSignature: {encoded}\nlength: {len(text.encode())}\n-->\n"
+    ).encode()
+
+
+class FloorAppcastTests(unittest.TestCase):
+    def setUp(self):
+        self.keys = (
+            update_signing.derived_public_key(CURRENT),
+            update_signing.derived_public_key(BACKUP),
+        )
+        self.fetched = []
+        self.text = appcast_document(appcast_item("1.2.0", "1.2.0")) + "\n"
+
+    def trust(self):
+        return self.keys
+
+    def fetch(self, data):
+        def fetch(url):
+            self.fetched.append(url)
+            return data
+
+        return fetch
+
+    def test_a_release_that_is_its_own_floor_fetches_no_appcast(self):
+        def refuse():
+            raise AssertionError("a release that is its own floor needs no release trust")
+
+        self.assertIsNone(release.floor_appcast("1.2.0", "1.2.0", refuse, self.fetch(b"")))
+        self.assertEqual(self.fetched, [])
+
+    def test_the_floor_release_appcast_is_used_only_with_a_trusted_signature(self):
+        data = sparkle_signed(BACKUP, self.text)
+        self.assertEqual(
+            release.floor_appcast("1.2.0", "1.3.0", self.trust, self.fetch(data)), data
+        )
+        self.assertEqual(self.fetched, [f"{RELEASES}/download/v1.2.0/appcast.xml"])
+        for broken in (
+            sparkle_signed(bytes(32), self.text),
+            data.replace(b"1.2.0</sparkle:version>", b"1.2.1</sparkle:version>"),
+            self.text.encode(),
+            data + b"<!-- trailing -->",
+        ):
+            with self.subTest(broken=broken[-80:]):
+                with self.assertRaises(TaskError):
+                    release.floor_appcast("1.2.0", "1.3.0", self.trust, self.fetch(broken))
 
 
 class DiskImageUrlTests(unittest.TestCase):

@@ -1,14 +1,20 @@
-"""Pair this commit with published SpaceTerm releases across the protocol.
+"""Pair this commit with published SpaceTerm releases across the protocol and the update path.
 
 `.github/compatibility.toml` lists the releases this commit must still talk to. For each one,
 the compatibility workflow runs two pairs on x86_64 Linux: this commit's CLI against that
 release's Core, and that release's CLI against this commit's Core. ADR 0035 owns the rule
 that decides which releases belong in the list.
+
+The release workflow also runs the update-from-floor pair: the Core of the release's Update
+Floor, with Workspace organization and a pairing, updates to the release's own signed Core
+archive and restarts into it. ADR 0064 owns the floor.
 """
 
 import json
 import os
+import pty
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -19,7 +25,7 @@ import tomllib
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
-from spaceterm_tasks import ROOT, TaskError, release_feed, update_signing
+from spaceterm_tasks import ROOT, TaskError, release_feed, release_floor, update_signing
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.core_package import (
     PROTOCOLS,
@@ -27,8 +33,9 @@ from spaceterm_tasks.core_package import (
     TARGETS,
     artifact_trust,
     compile_terminfo,
+    core_floor,
 )
-from spaceterm_tasks.packaging import SHELL_INTEGRATION, packaged_environment
+from spaceterm_tasks.packaging import RELEASE_FLOOR, SHELL_INTEGRATION, packaged_environment
 
 RELEASES = ROOT / ".github/compatibility.toml"
 TARGET = TARGETS["linux"]
@@ -154,7 +161,7 @@ def build_candidate(tag, destination):
             "spaceterm-cli",
             "--no-default-features",
             binary="spaceterm",
-            env=packaged_environment(tag),
+            env={**packaged_environment(tag), RELEASE_FLOOR: core_floor(tag)},
         )
     finally:
         _checked(["git", "tag", "-d", tag], "untag")
@@ -217,14 +224,14 @@ def fetch(tag, destination):
     return tree, protocols
 
 
-def install(tree, environment):
+def install(tree, environment, setup=()):
     """Install and start a release Core through its own installer steps: retain, then setup.
 
     Setup starts the Core as a systemd user service, which needs boot startup already
-    authorized for the account.
+    authorized for the account. `setup` adds options to the setup command.
     """
     _checked([str(tree / "bin/spaceterm"), "internal", "retain", str(tree)], "retain", environment)
-    if (outcome := _outcome(Path.home() / ".local/bin/spaceterm", ["setup"], environment)) != "ok":
+    if (outcome := _outcome(LAUNCHER, ["setup", *setup], environment)) != "ok":
         raise TaskError(f"the release Core's setup failed ({outcome})")
 
 
@@ -250,6 +257,191 @@ def exercise(client, environment, allowed, core=None):
         time.sleep(0.25)
     if (outcome := _outcome(client, ["status"], environment)) != allowed["status"]:
         raise TaskError(f"the client's status ended in {outcome}")
+
+
+# The Command Line Tool that setup links for the release identity.
+LAUNCHER = Path.home() / ".local/bin/spaceterm"
+WORKSPACE = "update-from-floor"
+SAVED_MACHINE = "floor"
+RESTART = 120
+
+
+def update(tag, archive, signature):
+    """Update the Core of release `tag`'s Update Floor to `archive`, that release's signed Linux
+    Core, as a person on the floor release would, and require their work to survive.
+
+    The floor Core gets a Workspace and a pairing with this account's own CLI. It installs the
+    archive, restarts into it, and must then report the release's version in `status`, list the
+    Workspace, and answer over the pairing. A release that is its own floor has no release to
+    update from, so the pair passes without running.
+    """
+    version = tag[1:]
+    floor = release_floor.floor("core", version)
+    if floor == version:
+        print(f"{tag} is its own Update Floor; no published release updates to it.")
+        return
+    with tempfile.TemporaryDirectory(prefix="spaceterm-update-pair-") as temporary:
+        directory = Path(temporary)
+        published, _ = fetch(f"v{floor}", directory / "floor")
+        environment = _environment(directory / "account")
+        install(published, environment, ["--network", "127.0.0.1"])
+        _envelope(LAUNCHER, ["workspace", "create", WORKSPACE], environment)
+        pair_with_self(environment)
+        updated = _envelope(
+            LAUNCHER,
+            ["update", "--archive", str(archive), "--signature", str(signature)],
+            environment,
+        )
+        # The Core may already have started the release on its own.
+        installed = (updated["data"].get("pending") or {}).get("version")
+        if version not in (installed, updated["data"].get("running")):
+            raise TaskError(f"the floor release {floor} did not install {tag}")
+        restart_into(
+            version,
+            lambda arguments, status="ok", timeout=COMMAND: _envelope(
+                LAUNCHER, arguments, environment, status, timeout
+            ),
+        )
+        for arguments in (["list"], ["list", "--machine", SAVED_MACHINE]):
+            listed = _envelope(LAUNCHER, arguments, environment)
+            names = [workspace["ref"]["label"] for workspace in listed["data"]["workspaces"]]
+            if WORKSPACE not in names:
+                raise TaskError(f"the Workspace did not survive the update to {tag}")
+    print(f"The Core of {floor} updated to {tag} with its Workspace and pairing intact.")
+
+
+def restart_into(version, cli, deadline=RESTART, *, clock=time.monotonic, sleep=time.sleep):
+    """Bring SpaceTerm Core onto `version`, its Pending Version, and return its status.
+
+    With no live Terminal Session, the Core's update engine may restart into a nonbreaking
+    Pending Version on its own at any moment under ADR 0034, which makes an issued confirmation
+    stale. So this reads `status`, previews a restart only while `version` still waits and no
+    confirmed restart has run, confirms it only when the preview still moves to `version`, and
+    repeats until the Core runs `version`. Either transition passes, and the verdict depends
+    only on where the Core ends. No command starts after the deadline, and each one's timeout
+    ends by it. `cli(arguments, status, timeout)` returns the CLI's envelope or raises
+    TaskError.
+    """
+    end = clock() + deadline
+
+    def run(arguments, status="ok"):
+        remaining = end - clock()
+        if remaining <= 0:
+            raise TaskError(f"SpaceTerm Core did not restart into {version}")
+        return cli(arguments, status, min(remaining, COMMAND))
+
+    restarted = False
+    while True:
+        try:
+            status = run(["status"])
+            data = status["data"]
+            if data["runtime"]["version"] == version and data["running"]:
+                return status
+            if not restarted and (data.get("pending") or {}).get("version") == version:
+                confirmation = run(["restart"], "confirmation_required")["data"]["confirmation"]
+                # The Core may have started the release since `status`, leaving a preview that
+                # would restart it again.
+                if (confirmation["effects"].get("pending") or {}).get("to") == version:
+                    run(["restart", "--confirm", confirmation["token"]])
+                    restarted = True
+        except TaskError:
+            pass
+        if clock() >= end:
+            raise TaskError(f"SpaceTerm Core did not restart into {version}")
+        sleep(1)
+
+
+def pair_with_self(environment, timeout=60):
+    """Pair this account's CLI with its own Core over Network Access, as another device would.
+
+    `pair` needs a terminal, so it runs on a pseudo-terminal. `machine add` reads the
+    Invitation Link from a pipe and reports the Comparison Code as a JSON event, which this
+    types into `pair`.
+    """
+    deadline = time.monotonic() + timeout
+    primary, secondary = pty.openpty()
+    inviting = subprocess.Popen(
+        [str(LAUNCHER), "pair"],
+        stdin=secondary,
+        stdout=secondary,
+        stderr=secondary,
+        env=environment,
+        start_new_session=True,
+    )
+    os.close(secondary)
+    joining = None
+    try:
+        link = _read_until(
+            primary, re.compile(rb"spaceterm://pair/[^\s\x1b]+(?=[\s\x1b])"), deadline
+        )
+        joining = subprocess.Popen(
+            [str(LAUNCHER), "--json", "machine", "add", SAVED_MACHINE, "--trust"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+        )
+        stdin, stdout = joining.stdin, joining.stdout
+        if stdin is None or stdout is None:
+            raise TaskError("machine add has no pipes")
+        stdin.write(link + b"\n")
+        stdin.close()
+        event = json.loads(stdout.readline())
+        if event.get("event") != "comparison_code":
+            raise TaskError("machine add reported no Comparison Code")
+        _read_until(primary, re.compile(rb"Comparison Code it shows: "), deadline)
+        os.write(primary, event["data"]["code"].encode() + b"\n")
+        lines = stdout.read().splitlines()
+        added = json.loads(lines[-1] if lines else b"{}")
+        if joining.wait(timeout=max(deadline - time.monotonic(), 1)) or added.get("status") != "ok":
+            raise TaskError("machine add did not pair with the floor Core")
+        if inviting.wait(timeout=max(deadline - time.monotonic(), 1)):
+            raise TaskError("pair did not approve the device")
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, AttributeError):
+        raise TaskError("pairing with the floor Core did not finish") from None
+    finally:
+        for process in (inviting, joining):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+        os.close(primary)
+
+
+def _read_until(descriptor, pattern, deadline):
+    """Read a pseudo-terminal until `pattern` appears in its output, and return the match."""
+    output = b""
+    while (found := pattern.search(output)) is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TaskError("pair did not show what the pairing waits for")
+        if select.select([descriptor], [], [], remaining)[0]:
+            try:
+                chunk = os.read(descriptor, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                raise TaskError("pair ended before the pairing finished")
+            output += chunk
+    return found.group(0)
+
+
+def _envelope(client, arguments, environment, status="ok", timeout=COMMAND):
+    """Run `client` with `--json` and return its envelope, which must have `status`."""
+    try:
+        result = subprocess.run(
+            [str(client), "--json", *arguments],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+        )
+        envelope = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
+        raise TaskError(f"the {arguments[0]} command returned no envelope") from None
+    if not isinstance(envelope, dict) or envelope.get("status") != status:
+        code = ((envelope if isinstance(envelope, dict) else {}).get("error") or {}).get("code")
+        raise TaskError(f"the {arguments[0]} command ended in {code}")
+    return envelope
 
 
 def _environment(account):

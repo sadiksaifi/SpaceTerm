@@ -50,6 +50,7 @@ class CoreCatalogTests(unittest.TestCase):
             target=native_target,
             commit="a" * 40,
             version="dev.aaaaaaaaaaaa",
+            floor=None,
             protocols=core_package.PROTOCOLS,
         )
         info.update(changed)

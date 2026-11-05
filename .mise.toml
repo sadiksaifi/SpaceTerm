@@ -265,6 +265,11 @@ description = "Run shared UI component regressions"
 usage = 'arg "[filter]" help="Run only tests whose names contain this filter"'
 run = "cargo test --package spaceterm-ui --lib --all-features --locked {{usage.filter | quote}}"
 
+[tasks."test:migrations"]
+description = "Migrate every Data Generation fixture and parse it with the strict readers"
+# The fixture tests carry `migration` in their module paths. The release workflow runs this.
+run = "cargo test --all-targets --all-features --locked migration"
+
 [tasks."test:rustdoc"]
 description = "Compile and test Rust documentation examples"
 # Explicit --doc selects generated C-header prose even when the sys crate has doctest = false.

@@ -50,6 +50,7 @@ def prepare(
         else "x86_64-unknown-linux-gnu",
         "commit": commit,
         "version": release_tag[1:] if release_tag else "dev." + commit[:12],
+        "floor": release_tag[1:] if release_tag else None,
     }
     directory = root / "target/core-artifact-fixture"
     shutil.rmtree(directory, ignore_errors=True)

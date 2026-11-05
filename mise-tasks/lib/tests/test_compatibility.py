@@ -11,8 +11,133 @@ from spaceterm_tasks.compatibility import (
     expected,
     plan,
     releases,
+    restart_into,
     verdict,
 )
+
+
+class FloorCore:
+    """The CLI of a floor Core with the release waiting as its Pending Version.
+
+    The Core may start the release on its own at call `silent`, as its watcher does with no
+    live Terminal Session. That makes an issued confirmation stale. `busy` calls fail as a
+    Core in the middle of a restart does. `lag` status reads after a confirmed restart still
+    show the versions before it. `activating` status reads come from the middle of a silent
+    restart, with nothing pending and the release not yet running, before it completes. Each
+    command takes `duration` seconds on `clock`, or its timeout when that is shorter.
+    """
+
+    def __init__(self, silent=None, busy=(), lag=0, activating=0, clock=None, duration=0):
+        self.runtime, self.pending = "1.0.0", "1.1.0"
+        self.silent, self.busy, self.lag = silent, set(busy), lag
+        self.activating = activating
+        self.before = (self.runtime, self.pending)
+        self.calls = 0
+        self.restarts = 0
+        self.token = None
+        self.clock, self.duration = clock, duration
+        self.started = []
+
+    def __call__(self, arguments, status="ok", timeout=60.0):
+        if self.clock is not None:
+            self.started.append((self.clock.now, timeout))
+            self.clock.now += min(self.duration, timeout)
+            if self.duration > timeout:
+                raise TaskError(f"the {arguments[0]} command returned no envelope")
+        self.calls += 1
+        if self.calls == self.silent:
+            self.runtime, self.pending, self.token = self.pending, None, None
+        if self.calls in self.busy:
+            raise TaskError("the status command ended in core_busy")
+        if arguments == ["status"] and self.activating:
+            self.activating -= 1
+            if not self.activating:
+                self.runtime, self.pending, self.token = self.pending, None, None
+            return {"data": {"runtime": {"version": "1.0.0"}, "running": True, "pending": None}}
+        if arguments == ["status"]:
+            runtime, pending = self.runtime, self.pending
+            if self.restarts and self.lag:
+                runtime, pending = self.before
+                self.lag -= 1
+            pending = {"version": pending} if pending else None
+            return {"data": {"runtime": {"version": runtime}, "running": True, "pending": pending}}
+        if arguments == ["restart"] and status == "confirmation_required":
+            # With nothing pending, the preview offers a restart into the running version.
+            self.token = f"c1-{self.calls}"
+            target = {"from": self.runtime, "to": self.pending} if self.pending else None
+            effects = {"ends_sessions": 0, "sessions": [], "pending": target}
+            return {"data": {"confirmation": {"token": self.token, "effects": effects}}}
+        if arguments[:2] == ["restart", "--confirm"] and arguments[2] == self.token:
+            # A restart with nothing pending restarts the running version and ends its sessions.
+            self.restarts += 1
+            self.before = (self.runtime, self.pending)
+            self.runtime, self.pending, self.token = self.pending or self.runtime, None, None
+            return {"data": {}}
+        raise TaskError(f"the {arguments[0]} command ended in confirmation_stale")
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class RestartIntoTests(unittest.TestCase):
+    def restart(self, core, clock=None):
+        clock = clock or Clock()
+        return restart_into("1.1.0", core, clock=clock, sleep=clock.sleep)
+
+    def test_a_confirmed_restart_moves_the_core_to_the_release(self):
+        core = FloorCore()
+        self.assertEqual(self.restart(core)["data"]["runtime"]["version"], "1.1.0")
+        self.assertEqual(core.restarts, 1)
+
+    def test_a_confirmed_restart_runs_once_while_status_still_shows_the_version_before_it(self):
+        core = FloorCore(lag=2)
+        self.assertEqual(self.restart(core)["data"]["runtime"]["version"], "1.1.0")
+        self.assertEqual(core.restarts, 1)
+
+    def test_a_silent_restart_before_the_preview_needs_no_confirmed_restart(self):
+        core = FloorCore(silent=1)
+        self.assertEqual(self.restart(core)["data"]["runtime"]["version"], "1.1.0")
+        self.assertEqual(core.restarts, 0)
+
+    def test_a_silent_restart_after_the_preview_leaves_a_stale_confirmation_and_passes(self):
+        for silent, busy in ((2, ()), (2, {3}), (3, ()), (3, {4})):
+            with self.subTest(silent=silent, busy=busy):
+                core = FloorCore(silent=silent, busy=busy)
+                self.assertEqual(self.restart(core)["data"]["runtime"]["version"], "1.1.0")
+                self.assertEqual(core.restarts, 0)
+
+    def test_a_status_during_a_silent_restart_starts_no_restart(self):
+        core = FloorCore(activating=2)
+        self.assertEqual(self.restart(core)["data"]["runtime"]["version"], "1.1.0")
+        self.assertEqual(core.restarts, 0)
+
+    def test_no_command_starts_or_runs_past_the_deadline(self):
+        # A busy Core whose commands take 50 seconds, and one whose status and preview take
+        # the full 60 seconds each, so the preview ends exactly at the deadline.
+        for duration, busy in ((50, range(1, 1000)), (60, ())):
+            with self.subTest(duration=duration):
+                clock = Clock()
+                core = FloorCore(busy=busy, clock=clock, duration=duration)
+                with self.assertRaisesRegex(TaskError, "did not restart into 1.1.0"):
+                    self.restart(core, clock)
+                self.assertTrue(core.started)
+                for started, timeout in core.started:
+                    self.assertLess(started, 120)
+                    self.assertLessEqual(started + timeout, 120)
+                self.assertEqual(core.restarts, 0)
+
+    def test_a_core_that_never_runs_the_release_fails_the_pair(self):
+        core = FloorCore(busy=range(1, 1000))
+        with self.assertRaisesRegex(TaskError, "did not restart into 1.1.0"):
+            self.restart(core)
 
 
 class CompatibilityPlanTests(unittest.TestCase):

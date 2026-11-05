@@ -18,6 +18,7 @@ from spaceterm_tasks import (
     core_package,
     macos_codesign,
     macos_signing,
+    release_floor,
     sparkle,
     update_signing,
 )
@@ -51,6 +52,15 @@ class PackageTests(unittest.TestCase):
         major.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / core_package.PROTOCOL_SOURCE, major)
         configure_trust(self.root)
+        # The appcast's Update Floor comes from the declared Data Generations.
+        generations = self.root / release_floor.SOURCE
+        generations.parent.mkdir(parents=True)
+        generations.write_text(
+            "".join(
+                f"pub const {name}: Generations = Generations {{ oldest: 1, current: 1 }};\n"
+                for name in release_floor.ROOTS
+            )
+        )
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")
         for arguments in (("init", "-q"), ("add", "-A"), ("commit", "-qm", "fixture")):
@@ -101,6 +111,13 @@ print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": binary}},
 sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
+        # GitHub is the other external boundary: it lists no published release, so the
+        # release is its own Update Floor and its appcast continues no earlier one.
+        (self.bin / "gh").write_text(f"""#!{sys.executable}
+import sys
+sys.exit(0 if sys.argv[1:3] == ["api", "--paginate"] else 1)
+""")
+        (self.bin / "gh").chmod(0o755)
         self.record = Path(self.directory.name) / "build.json"
         self.notes = Path(self.directory.name) / "release-notes.md"
         self.notes.write_text("### Features\n\n- Add terminal panes\n")
