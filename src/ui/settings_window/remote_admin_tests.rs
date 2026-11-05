@@ -249,6 +249,19 @@ fn each_settled_change_reads_its_own_way() {
 }
 
 #[test]
+fn an_update_below_the_update_floor_names_the_version_the_machine_needs_first() {
+    let floor = spaceterm_core::update::ordering::Floor::parse("1.1.0").unwrap();
+    let failure = RemoteFailure::of_lane(LaneError::BelowFloor(floor));
+    let (message, tone) = ended_message("penguin", &Ended::Refused(failure));
+    assert_eq!(
+        message,
+        "penguin needs SpaceTerm Core 1.1.0 before it can update. Install 1.1.0 on penguin, \
+         then try again."
+    );
+    assert_eq!(tone, CaptionTone::Error);
+}
+
+#[test]
 fn lane_codes_classify_without_carrying_their_text() {
     for (code, failure) in [
         ("changed", RemoteFailure::Changed),
