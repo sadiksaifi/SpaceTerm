@@ -413,6 +413,40 @@ fn changed_stop_observation_requires_fresh_approval_without_dispatch() {
     });
 }
 
+/// The service lane's Stop preview recovers a recorded activation first, which takes the service
+/// lock. While a later operation holds it, that preview refuses instead of waiting, because the
+/// running Core's shutdown would join the worker that waits.
+#[test]
+fn a_lane_stop_preview_refuses_while_another_operation_holds_the_service_lock() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::Completed,
+            false,
+        );
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let (held, locked) = std::sync::mpsc::channel();
+        let operation = std::thread::spawn(move || {
+            let _operation = data.lock("service.lock", false).unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+        });
+        locked.recv().unwrap();
+        let started = Instant::now();
+        let prepared = super::super::control::Controller::new(service.clone())
+            .prepare_with(super::super::control::Action::Stop, Contention::Refuse);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the preview waited for the service lock"
+        );
+        assert!(matches!(prepared, Err(CoreError::ServiceBusy)));
+        operation.join().unwrap();
+    });
+}
+
 // These fixtures are saved post-fsync states, not claims of a native supervisor interruption.
 fn interrupted(
     service: &Service,

@@ -1313,7 +1313,9 @@ impl Admin<'_> {
         })
     }
 
-    /// Observes the service for `action` without changing it.
+    /// Observes the service for `action` without changing it. It never waits for the service
+    /// lock: an activation that holds it waits for this Core to stop, and this Core's shutdown
+    /// joins the connection worker that runs this.
     fn prepare(&self, action: &LaneAction, core: &Id, boot: &Id) -> Result<Prepared, CoreError> {
         let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
         digest.update(b"spaceterm-service-lane-observation-1\0");
@@ -1341,7 +1343,7 @@ impl Admin<'_> {
                 let candidate = self.installation(&installation)?;
                 let approval = self
                     .service
-                    .prepare_activation(&candidate)?
+                    .prepare_activation_with(&candidate, super::Contention::Refuse)?
                     .ok_or(CoreError::CandidateMissing)?;
                 digest.update(approval.confirmation_token()?.as_bytes());
                 effects.from = Some(version_of(approval.previous()));
@@ -1356,8 +1358,8 @@ impl Admin<'_> {
                 } else {
                     super::control::Action::Stop
                 };
-                let confirmation =
-                    super::control::Controller::new(self.service.clone()).prepare(control)?;
+                let confirmation = super::control::Controller::new(self.service.clone())
+                    .prepare_with(control, super::Contention::Refuse)?;
                 let (_, state) = self.service.read()?.ok_or(CoreError::NotInstalled)?;
                 digest.update(&serde_json::to_vec(&state).map_err(|_| CoreError::Protocol)?);
                 effects.start_requires_machine = *action == LaneAction::Stop;

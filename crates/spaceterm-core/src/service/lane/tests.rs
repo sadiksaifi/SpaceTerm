@@ -1189,6 +1189,47 @@ fn install_pending(lane: &Lane, version: &str) -> String {
     sha256
 }
 
+/// An activation takes the service lock before it stops the running Core, then waits for that
+/// Core to stop. A preview that waited for the lock would hold the connection worker that the
+/// Core's shutdown joins, so it refuses instead.
+#[test]
+fn a_running_core_refuses_a_restart_preview_while_an_activation_holds_the_service_lock() {
+    with_lane(|lane| {
+        install_pending(&lane, "1.0.0");
+        let data = Directory::open(&lane.service.paths.data, false).unwrap();
+        let (held, locked) = std::sync::mpsc::channel();
+        let activation = std::thread::spawn(move || {
+            let _operation = data.lock("service.lock", false).unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        });
+        locked.recv().unwrap();
+        let started = Instant::now();
+        let reply = lane.lane.answer(
+            LaneRequest::Preview {
+                action: LaneAction::Restart,
+            },
+            &ACTOR,
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the preview waited for the service lock"
+        );
+        assert_eq!(
+            reply,
+            LaneReply::Error {
+                code: "service_busy".into()
+            }
+        );
+        activation.join().unwrap();
+        let (_, effects) = preview(&lane.lane, LaneAction::Restart);
+        assert_eq!(
+            effects.to.as_ref().map(|to| to.version.as_str()),
+            Some("1.0.0")
+        );
+    });
+}
+
 #[test]
 fn a_restart_moves_into_the_pending_version_when_one_waits() {
     with_lane(|lane| {

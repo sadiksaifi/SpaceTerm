@@ -208,7 +208,11 @@ impl Service {
             }
             Err(error) => return Err(error.into()),
         };
-        let operation = data.lock("service.lock", false)?;
+        // The CLI shares its state root while it uninstalls. Waiting here could hold off an
+        // activation whose candidate migrates that state before it is ready.
+        let operation = data
+            .try_lock("service.lock")?
+            .ok_or(CoreError::ServiceBusy)?;
         data.verify_path(&self.paths.data)?;
         let state = Self::state(&data)?;
         let status = self.passive_status()?;

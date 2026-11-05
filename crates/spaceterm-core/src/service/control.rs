@@ -331,7 +331,17 @@ impl Controller {
 
     /// Observe the selected service and describe an action without changing it.
     pub fn prepare(&self, action: Action) -> Result<Confirmation, CoreError> {
-        let running = match self.status() {
+        self.prepare_with(action, super::Contention::Wait)
+    }
+
+    /// [`Self::prepare`], where an activation's recovery takes the service lock as
+    /// `contention` says.
+    pub(crate) fn prepare_with(
+        &self,
+        action: Action,
+        contention: super::Contention,
+    ) -> Result<Confirmation, CoreError> {
+        let running = match self.service.status_with(contention) {
             Ok(status) => {
                 if !status.installed {
                     return Err(CoreError::NotInstalled);
