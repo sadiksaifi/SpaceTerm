@@ -124,6 +124,10 @@ fn published_schema_and_runtime_preferences_have_identical_fields() {
         property_keys(&schema["$defs"]["clipboard"])
     );
     assert_eq!(
+        object_keys(&runtime["notifications"]),
+        property_keys(&schema["$defs"]["notifications"])
+    );
+    assert_eq!(
         object_keys(&runtime["git"]),
         property_keys(&schema["$defs"]["git"])
     );

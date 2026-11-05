@@ -1614,6 +1614,12 @@ pub(crate) fn initialize_application(
         crate::ui::appearance_runtime::install(settings.clone(), Rc::clone(platform), cx)
             .map_err(|_| RuntimeError::Initialization)?;
         crate::keybindings::runtime::follow(&settings, cx);
+        let followed = settings.clone();
+        host.adapters.lifecycle.attention.follow_notifications(
+            settings.subscribe(),
+            move || followed.snapshot().candidate.notifications.terminal_attention,
+            cx,
+        );
         crate::ui::settings_file::SettingsFile::install(
             settings.clone(),
             Rc::clone(&host.adapters.settings_file),

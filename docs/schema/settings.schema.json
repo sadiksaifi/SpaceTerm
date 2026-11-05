@@ -37,6 +37,9 @@
     "clipboard": {
       "$ref": "#/$defs/clipboard"
     },
+    "notifications": {
+      "$ref": "#/$defs/notifications"
+    },
     "git": {
       "$ref": "#/$defs/git"
     },
@@ -666,6 +669,16 @@
         "allow_read": {
           "type": "boolean",
           "default": false
+        }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "terminal_attention": {
+          "type": "boolean",
+          "default": true
         }
       }
     },

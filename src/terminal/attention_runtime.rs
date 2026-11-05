@@ -237,6 +237,8 @@ struct NotificationCoordinator<D: NotificationDriver> {
     scheduled: Option<NotificationSchedule>,
     next_schedule_token: u64,
     application_active: bool,
+    /// The person's Client Setting for terminal attention notifications.
+    enabled: bool,
 }
 
 impl<D: NotificationDriver> NotificationCoordinator<D> {
@@ -248,6 +250,19 @@ impl<D: NotificationDriver> NotificationCoordinator<D> {
             scheduled: None,
             next_schedule_token: 0,
             application_active: false,
+            enabled: true,
+        }
+    }
+
+    /// Turning notifications off drops pending demand and removes a delivered notification.
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if enabled {
+            return;
+        }
+        self.cancel_all();
+        if !std::mem::take(&mut self.delivered_by_pane).is_empty() {
+            self.driver.clear();
         }
     }
 
@@ -257,6 +272,9 @@ impl<D: NotificationDriver> NotificationCoordinator<D> {
         application_active: bool,
         now: Instant,
     ) -> Option<NotificationSchedule> {
+        if !self.enabled {
+            return None;
+        }
         if application_active {
             let needs_clear = !self.application_active
                 || !self.pending_by_pane.is_empty()
@@ -530,6 +548,35 @@ impl AttentionRuntime {
         }
         runtime.cancel_invalid_tasks();
         schedules
+    }
+
+    /// Follows the person's Client Setting for terminal attention notifications. `enabled` reads
+    /// it now and again after each signal on `changes`. Bells and dock attention keep their own
+    /// policy.
+    pub(crate) fn follow_notifications(
+        &self,
+        changes: async_channel::Receiver<()>,
+        enabled: impl Fn() -> bool + 'static,
+        cx: &mut App,
+    ) {
+        self.set_notifications(enabled());
+        let weak = Rc::downgrade(&self.0);
+        cx.spawn(async move |_| {
+            while changes.recv().await.is_ok() {
+                while changes.try_recv().is_ok() {}
+                let Some(runtime) = weak.upgrade() else {
+                    break;
+                };
+                AttentionRuntime(runtime).set_notifications(enabled());
+            }
+        })
+        .detach();
+    }
+
+    fn set_notifications(&self, enabled: bool) {
+        let mut runtime = self.0.borrow_mut();
+        runtime.notifications.set_enabled(enabled);
+        runtime.cancel_invalid_tasks();
     }
 
     pub(crate) fn update_application_activation(
@@ -1205,6 +1252,75 @@ mod tests {
             (1, 1, 1)
         );
         assert!(effects.deliveries.is_empty());
+    }
+
+    #[test]
+    fn turned_off_notifications_deliver_nothing_and_clear_what_was_delivered() {
+        let epoch = Instant::now();
+        let (runtime, effects) = recording_runtime();
+        let pane = runtime.register_pane(None);
+        let delivered = runtime.apply(pane, bell_effects(), epoch);
+        let _ = runtime.reconcile_scheduled(
+            AttentionSchedule::Notification(delivered.notification.expect("scheduled")),
+            epoch + NOTIFICATION_AGGREGATION,
+        );
+        let pending = runtime.apply(pane, bell_effects(), epoch + Duration::from_secs(6));
+
+        runtime.set_notifications(false);
+        let refused = runtime.apply(pane, bell_effects(), epoch + Duration::from_secs(7));
+        let _ = runtime.reconcile_scheduled(
+            AttentionSchedule::Notification(pending.notification.expect("scheduled")),
+            epoch + Duration::from_secs(20),
+        );
+
+        assert_eq!(refused.notification, None);
+        let recorded = effects.borrow();
+        assert_eq!(recorded.deliveries, vec![1]);
+        assert_eq!(recorded.notification_clears, 1);
+        // Bells and dock attention keep their own policy.
+        assert_eq!(recorded.bells, 3);
+    }
+
+    #[test]
+    fn notifications_turned_on_again_deliver_new_demand() {
+        let epoch = Instant::now();
+        let (runtime, effects) = recording_runtime();
+        let pane = runtime.register_pane(None);
+        runtime.set_notifications(false);
+        let _ = runtime.apply(pane, bell_effects(), epoch);
+        runtime.set_notifications(true);
+        let schedules = runtime.apply(pane, bell_effects(), epoch + Duration::from_secs(1));
+        let _ = runtime.reconcile_scheduled(
+            AttentionSchedule::Notification(schedules.notification.expect("scheduled")),
+            epoch + Duration::from_secs(10),
+        );
+        assert_eq!(effects.borrow().deliveries, vec![1]);
+    }
+
+    #[gpui::test]
+    fn followed_setting_turns_notifications_off_and_back_on(cx: &mut gpui::TestAppContext) {
+        let epoch = Instant::now();
+        let (runtime, _) = recording_runtime();
+        let enabled = Rc::new(std::cell::Cell::new(false));
+        let (changed, changes) = async_channel::unbounded();
+        let setting = Rc::clone(&enabled);
+        cx.update(|cx| runtime.follow_notifications(changes, move || setting.get(), cx));
+        let pane = runtime.register_pane(None);
+        assert_eq!(
+            runtime.apply(pane, bell_effects(), epoch).notification,
+            None
+        );
+
+        enabled.set(true);
+        changed.try_send(()).unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            runtime
+                .apply(pane, bell_effects(), epoch)
+                .notification
+                .is_some()
+        );
     }
 
     #[test]

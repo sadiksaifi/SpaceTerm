@@ -492,6 +492,7 @@ fn every_settings_section_round_trips_replaces_and_resets_without_changing_ident
     .unwrap();
     source.clipboard.allow_write = false;
     source.clipboard.allow_read = true;
+    source.notifications.terminal_attention = false;
     source.git.show_repository_status = false;
     source.git.show_pull_requests = false;
     source.sidebar.default_state = SidebarState::Collapsed;
@@ -517,6 +518,7 @@ fn every_settings_section_round_trips_replaces_and_resets_without_changing_ident
         updates,
         keybindings,
         clipboard,
+        notifications,
         git,
         sidebar,
         appearance,
@@ -535,6 +537,7 @@ fn every_settings_section_round_trips_replaces_and_resets_without_changing_ident
             updates: *updates,
             keybindings: keybindings.clone(),
             clipboard: *clipboard,
+            notifications: *notifications,
             git: git.clone(),
             sidebar: *sidebar,
             appearance: appearance.clone(),
