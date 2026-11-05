@@ -873,3 +873,66 @@ fn a_core_below_the_included_builds_floor_updates_from_its_own_feed() {
     assert_eq!(route(&included("1.1.0"), &facts), Route::Feed);
     assert_eq!(route(&included("1.0.0"), &facts), Route::Push);
 }
+
+#[test]
+fn a_stopped_core_below_the_included_builds_floor_installs_from_its_own_feed() {
+    use super::{StoppedCore, install_stopped};
+    use crate::machine_connection::service::updates::{Archive, InstallError, Source};
+    use crate::machine_connection::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+    use crate::machine_connection::update::ordering::{Candidate, Floor};
+    use crate::machine_connection::update::sources::SourceError;
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    /// A stopped Core's engine that records which install it was asked for.
+    struct Stopped {
+        running: &'static str,
+        installs: RefCell<Vec<&'static str>>,
+    }
+    impl StoppedCore for Stopped {
+        fn facts(&self) -> Result<UpdateFacts, CoreError> {
+            Ok(UpdateFacts {
+                revision: 1,
+                platform: Platform::MacosArm64,
+                running: Version::parse(self.running).unwrap(),
+                pending: None,
+                sessions: 0,
+                operation: None,
+                check: UpdateCheck::Never,
+                skipped: None,
+                last_failure: None,
+            })
+        }
+        fn install(&self, _: Archive<'_>) -> Result<(), InstallError> {
+            self.installs.borrow_mut().push("archive");
+            Ok(())
+        }
+        fn install_from_feed(&self) -> Result<(), SourceError> {
+            self.installs.borrow_mut().push("feed");
+            Ok(())
+        }
+    }
+    let included = Candidate::new(
+        Version::parse("1.2.2").unwrap(),
+        Some(Floor::parse("1.1.0").unwrap()),
+    )
+    .unwrap();
+    let archive = || Archive {
+        archive: Path::new("core.tar.gz"),
+        signature: Path::new("core.tar.gz.sig"),
+        sha256: "00",
+        source: Source::Local,
+    };
+    for (running, install) in [("1.0.0", "feed"), ("1.1.0", "archive")] {
+        let core = Stopped {
+            running,
+            installs: RefCell::default(),
+        };
+        assert_eq!(
+            install_stopped(&core, &included, archive()),
+            Ok(()),
+            "{running}"
+        );
+        assert_eq!(core.installs.into_inner(), vec![install], "{running}");
+    }
+}
