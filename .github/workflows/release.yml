@@ -23,6 +23,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# GitHub enforces this: only the jobs that build from source restore or save caches. No job
+# that holds a release secret or executes final products can read a cache entry.
+cache-mode: none
+
 env:
   MISE_TASK_RUN_AUTO_INSTALL: 'false'
   MISE_LOCKED: 'true'
@@ -41,6 +45,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    cache-mode: write
     permissions:
       contents: read
       actions: write
@@ -70,6 +75,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: macos-26
     timeout-minutes: 60
+    cache-mode: write
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
@@ -103,6 +109,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    cache-mode: write
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
@@ -157,6 +164,7 @@ jobs:
     if: needs.compatibility-plan.outputs.any == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    cache-mode: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.compatibility-plan.outputs.matrix) }}
@@ -600,7 +608,7 @@ jobs:
           retention-days: 14
       - name: Attest the final archives and disk image
         if: inputs.publish
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/release/*.tar.gz

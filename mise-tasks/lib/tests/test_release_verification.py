@@ -23,6 +23,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
         for name in ("release",):
             text = (ROOT / f".github/workflows/{name}.yml").read_text()
             self.assertIn("MISE_LOCKED: 'true'", text)
+            self.assertIn("\ncache-mode: none\n", text.split("jobs:\n", 1)[0])
             pieces = re.split(r"^  ([a-z][a-z-]*):\n", text.split("jobs:\n", 1)[1], flags=re.M)
             workflows[name] = dict(zip(pieces[1::2], pieces[2::2], strict=True))
             for job, block in workflows[name].items():
@@ -30,6 +31,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
                     continue
                 with self.subTest(workflow=name, job=job):
                     self.assertNotRegex(block, r"uses: (?:actions/cache|Swatinem/rust-cache)")
+                    self.assertNotIn("cache-mode:", block)
                     self.assertNotIn("uses: ./.github/actions/release-build-tools", block)
                     setup = block.split("uses: jdx/mise-action@", 1)[1].split("\n      -", 1)[0]
                     self.assertIn("cache: false", setup)
@@ -41,6 +43,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
                 with self.subTest(job=job):
                     self.assertNotIn("environment:", block)
                     self.assertNotIn("secrets.", block)
+                    self.assertNotIn("cache-mode:", block)
                     self.assertIn(f"release:pipeline verify-{product}", block)
                     self.assertIn(
                         f"needs.{job}.result == 'success'", workflows["release"]["publish"]
