@@ -70,18 +70,20 @@ With all interfaces, add the Machine once per route, for example once by its LAN
 
 The desktop executable is `spaceterm-desktop` on Linux. SpaceTerm Core's `spaceterm` executable runs its account service and controls it. A SpaceTerm Core installation needs no desktop, graphics driver or credential store to run its local commands.
 
+On Linux:
+
 ```sh
 curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
 spaceterm setup --network off
 ```
 
-The installer installs the Release build of SpaceTerm Core beside any version already installed and creates `~/.local/bin/spaceterm`. It does not register or start a service. `--desktop` also installs the desktop app. [The installer](../packaging/install.sh) lists its options and owns its verification. On a computer with the desktop, Settings > Machines > Command Line Tool creates the same launcher, also for Preflight and Development. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
+The installer installs the Release build of SpaceTerm Core beside any version already installed and creates `~/.local/bin/spaceterm`. It does not register or start a service. `--desktop` also installs the desktop app. [The installer](../packaging/install.sh) lists its options and owns its verification. On a Mac, install the desktop app from its disk image or Homebrew cask; there is no macOS installer script. On a computer with the desktop, Settings > Machines > Command Line Tool creates the same launcher, also for Preflight and Development. [ADR 0054](adr/0054-use-one-headless-executable.md) owns launcher selection and replacement.
 
 ```sh
 spaceterm uninstall
 ```
 
-Uninstall previews any Terminal Sessions it would end and changes nothing until you confirm, also while SpaceTerm Core is stopped. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk unless you add `--delete-data`. The preview prints the command that confirms it with `--confirm TOKEN`. `install.sh --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
+Uninstall previews any Terminal Sessions it would end and changes nothing until you confirm, also while SpaceTerm Core is stopped. Workspace organization, Machine Settings, paired devices and the CLI's Saved Connections stay on disk unless you add `--delete-data`. The preview prints the command that confirms it with `--confirm TOKEN`. On Linux, `install.sh --uninstall` runs the same command. [ADR 0054](adr/0054-use-one-headless-executable.md) owns service and launcher removal.
 
 
 ## Cross-target artifact catalogs

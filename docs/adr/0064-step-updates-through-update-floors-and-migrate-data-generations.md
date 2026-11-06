@@ -4,7 +4,7 @@ SpaceTerm Core with its CLI, the macOS desktop and the Linux desktop each update
 
 ## Update Floor
 
-Every release publishes one Update Floor per product: one for SpaceTerm Core with its CLI, one for the desktops. The floor is a release version at or below the release's own version. The first release with this system is its own floor.
+Every release publishes one Update Floor per product: one for SpaceTerm Core with its CLI, one for the desktops. The floor is a release version at or below the release's own version. The first release with this system, 0.10.0, is its own floor.
 
 - The Core feeds and the Linux desktop feed carry it as `floor`. The feed schema lives in [feed.rs](../../crates/spaceterm-core/src/update/feed.rs), and [the feed module](../../mise-tasks/lib/spaceterm_tasks/release_feed.py) writes it.
 - A Core archive's `build.json` carries the Core floor as `floor`, so desktop pushes, local archives and `install.sh` see it without a feed. A Development or Preflight build names a commit and has no order, so its `floor` is null and no floor applies to it.
@@ -41,7 +41,7 @@ The order is: migrate, then stay on the previous version, then reset. Data below
 
 ## Computing the floor
 
-The release computes each product's floor with no manual step: the oldest published release, not withdrawn, whose `current` generation in every root of that product is at least the root's `oldest` today. Core uses Core data and CLI state, and the desktops use desktop config and desktop state. A release is published when GitHub lists it as a published, non-draft release. A tag alone does not count, so a release that failed before publication is never a floor. A release that predates `generations.rs` is not eligible. A release whose roots no eligible release reaches is refused, because no update could reach it. [The floor module](../../mise-tasks/lib/spaceterm_tasks/release_floor.py) lists the published releases with the GitHub CLI and reads their declarations with `git show v<release>:<file>`.
+The release computes each product's floor with no manual step: the oldest published release, not withdrawn, whose `current` generation in every root of that product is at least the root's `oldest` today. Core uses Core data and CLI state, and the desktops use desktop config and desktop state. A release is published when GitHub lists it as a published, non-draft release. A tag alone does not count, so a release that failed before publication is never a floor. A release before 0.10.0 is not eligible, even when it declares `generations.rs`. A release whose roots no eligible release reaches is refused, because no update could reach it. [The floor module](../../mise-tasks/lib/spaceterm_tasks/release_floor.py) lists the published releases with the GitHub CLI and reads their declarations with `git show v<release>:<file>`.
 
 A broken Stepping Stone is replaced in two steps. First, publish a patch release on its line at the same Data Generations, such as 1.1.1 for a broken 1.1.0. Then list the broken release in [the withdrawn release list](../../packaging/withdrawn-releases.toml). The floor computation skips a withdrawn release, so the next floor is the repair. An ordinary patch release changes no floor, so updates gain no step. A withdrawn release stays published, because people still run it and its feed still leads them on, and it still counts as the previous release below.
 
@@ -51,7 +51,7 @@ To retire old steps, delete them and their fixtures and raise `oldest`. The next
 
 - No root's `oldest` or `current` decreases against the previous published release.
 - Every generation from `oldest` to `current` has a fixture under `fixtures/migrations/<root>/gen-<N>/`, and every fixture migrates and parses with the strict readers.
-- The floor release's Core, with Workspace organization and a pairing, installs the release's Core archive, restarts into it and still answers `status`, `list` and the pairing.
+- The floor release's Core, with Workspace organization and a pairing, installs the release's Core archive, restarts into it and still answers `status`, `list` and the pairing. A release that is its own floor installs its Core archive fresh instead, and that Core answers `status` and `list` at the release's version.
 - The macOS updater test installs from below a floor and lands on the Stepping Stone.
 
 The feed format freezes at the first release. A field added later needs a new feed file name.
