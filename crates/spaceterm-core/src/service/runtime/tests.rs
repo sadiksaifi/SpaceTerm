@@ -1756,3 +1756,23 @@ fn release_native_verification_rejects_an_adhoc_bundle_with_the_release_identifi
     std::fs::remove_dir_all(release).unwrap();
     std::fs::remove_dir_all(preflight).unwrap();
 }
+
+#[test]
+fn catalog_digest_refuses_special_files_links_and_oversized_data() {
+    use std::os::unix::fs::symlink;
+    let root = temporary();
+    let path = root.join("artifact.sha256");
+    let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the terminated path belongs to this disposable fixture.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert_eq!(candidate_digest(&path), Err(CoreError::RuntimeUnavailable));
+    std::fs::remove_file(&path).unwrap();
+    symlink("/dev/zero", &path).unwrap();
+    assert_eq!(candidate_digest(&path), Err(CoreError::RuntimeUnavailable));
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, "a".repeat(66)).unwrap();
+    assert_eq!(candidate_digest(&path), Err(CoreError::RuntimeUnavailable));
+    std::fs::write(&path, "a".repeat(64) + "\n").unwrap();
+    assert_eq!(candidate_digest(&path), Ok("a".repeat(64)));
+    std::fs::remove_dir_all(root).unwrap();
+}

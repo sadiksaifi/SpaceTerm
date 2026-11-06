@@ -8,6 +8,7 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt},
 };
 
+mod archive_bounds;
 mod files;
 pub(super) mod launcher;
 mod layout;
@@ -76,6 +77,21 @@ pub fn verify_candidate_bytes(
         Some(required_major),
     )
     .map(Into::into)
+}
+
+/// Read one catalog digest through the same nonblocking, no-follow regular-file policy.
+pub fn candidate_digest(path: &Path) -> Result<String, CoreError> {
+    let bytes = source(path, 65)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| CoreError::RuntimeUnavailable)?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(CoreError::RuntimeUnavailable);
+    }
+    Ok(text.to_owned())
 }
 
 /// Captured candidate resources, bounded and immutable before authentication. Archive bytes
@@ -777,7 +793,8 @@ fn contents_for_target(
     let mut buffer = vec![0; CHUNK];
     let layout = Layout::for_target(target, identity).ok_or(CoreError::RuntimeUnavailable)?;
     let main = layout.executable();
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    archive_bounds::validate(bytes)?;
+    let mut archive = tar::Archive::new(archive_bounds::decoder(bytes));
     let mut names = BTreeSet::new();
     let mut expanded = 0u64;
     let mut manifest = None;

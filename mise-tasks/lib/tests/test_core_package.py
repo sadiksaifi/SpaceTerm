@@ -709,3 +709,64 @@ class CrossBuildTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TarExpansionTests(unittest.TestCase):
+    def test_signed_gnu_and_pax_bodies_are_bounded_before_library_allocation(self):
+        import gzip
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "bomb.tar.gz"
+            signature = root / "bomb.sig"
+            seed = core_package.artifact_signing_seed("spaceterm-preflight")
+            for kind in (tarfile.GNUTYPE_LONGNAME, tarfile.XHDTYPE):
+                header = tarfile.TarInfo("././@LongLink")
+                header.type = kind
+                header.size = 537_919_488
+                with gzip.open(archive, "wb") as output:
+                    output.write(header.tobuf(format=tarfile.GNU_FORMAT))
+                    output.write(bytes(1024))
+                update_signing.sign(seed, archive, signature)
+                original = gzip.GzipFile.read
+                consumed = 0
+
+                def guarded(stream, size=-1):
+                    nonlocal consumed
+                    if size < 0 or size > 64 * 1024 or consumed + size > 64 * 1024:
+                        self.fail("tar metadata triggered unbounded decompression")
+                    block = original(stream, size)
+                    consumed += len(block)
+                    return block
+
+                with patch.object(gzip.GzipFile, "read", guarded):
+                    with self.assertRaisesRegex(TaskError, "extension exceeds"):
+                        core_package.unpack_verified(
+                            archive,
+                            signature,
+                            root / "output",
+                            None,
+                            identity="spaceterm-preflight",
+                        )
+                self.assertLessEqual(consumed, 512)
+
+    def test_total_padding_and_physical_extension_counts_are_bounded(self):
+        import gzip
+
+        from spaceterm_tasks.bounded_tar import open_archive
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "records.tar.gz"
+            header = tarfile.TarInfo("pax")
+            header.type = tarfile.XHDTYPE
+            header.size = 0
+            with gzip.open(archive, "wb") as output:
+                output.write(header.tobuf(format=tarfile.PAX_FORMAT) * 5)
+            with self.assertRaisesRegex(TaskError, "physical records"):
+                with open_archive(archive, maximum=8192, members=2):
+                    self.fail("too many extensions accepted")
+            with gzip.open(archive, "wb") as output:
+                output.write(bytes(8192))
+            with self.assertRaisesRegex(TaskError, "expanded size"):
+                with open_archive(archive, maximum=4096, members=2):
+                    self.fail("excess trailing expansion accepted")

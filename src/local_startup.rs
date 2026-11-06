@@ -296,6 +296,8 @@ mod tests {
             ("device-link", true),
             ("oversized", false),
             ("oversized", true),
+            ("gnu-extension", false),
+            ("pax-extension", false),
         ] {
             let archive = root.0.join("artifact.tar.gz");
             let signature = root.0.join("artifact.sig");
@@ -314,6 +316,36 @@ mod tests {
                     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
                 }
                 "device-link" => symlink("/dev/zero", path).unwrap(),
+                "gnu-extension" | "pax-extension" => {
+                    use std::io::Write;
+                    let mut header = tar::Header::new_gnu();
+                    header.set_path("././@LongLink").unwrap();
+                    header.set_entry_type(tar::EntryType::new(if name == "gnu-extension" {
+                        b'L'
+                    } else {
+                        b'x'
+                    }));
+                    let size = 512 * 1024 * 1024 + 1024;
+                    header.set_size(size);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    let output = std::fs::File::create(path).unwrap();
+                    let mut gzip =
+                        flate2::write::GzEncoder::new(output, flate2::Compression::fast());
+                    gzip.write_all(header.as_bytes()).unwrap();
+                    let zeros = [0; 64 * 1024];
+                    let mut remaining = size;
+                    while remaining != 0 {
+                        let count = remaining.min(zeros.len() as u64) as usize;
+                        gzip.write_all(&zeros[..count]).unwrap();
+                        remaining -= count as u64;
+                    }
+                    gzip.finish().unwrap();
+                    let bytes = std::fs::read(path).unwrap();
+                    let key =
+                        ring::signature::Ed25519KeyPair::from_seed_unchecked(&[0x5a; 32]).unwrap();
+                    std::fs::write(&signature, key.sign(&bytes).as_ref()).unwrap();
+                }
                 "oversized" => {
                     let file = std::fs::File::create(path).unwrap();
                     file.set_len(if signature_resource {

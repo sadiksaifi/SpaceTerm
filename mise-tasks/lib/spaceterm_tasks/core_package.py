@@ -190,7 +190,7 @@ def core_info(identity):
 def artifact_trust(identity):
     """The public keys that authenticate an identity's Core archives."""
     if identity == "spaceterm":
-        return update_signing.trust()
+        return update_signing.release_trust()
     if identity in ("spaceterm-preflight", "spaceterm-development"):
         return (
             json.loads((ROOT / "packaging/core-nonproduction-trust.json").read_text())[
@@ -348,7 +348,9 @@ def unpack_verified(
     if expected_sha256 is not None and update_signing.sha256(archive) != expected_sha256:
         raise ArtifactVerificationError(ArtifactCause.DIGEST_MISMATCH) from None
     try:
-        with tarfile.open(archive, "r:gz") as source:
+        from spaceterm_tasks.bounded_tar import open_archive
+
+        with open_archive(archive, maximum=MAX_EXPANDED, members=MAX_MEMBERS) as source:
             members = []
             names = set()
             expanded = 0
@@ -390,7 +392,7 @@ def unpack_verified(
             tree = destination / "core"
             for directory in [tree, *(path for path in tree.rglob("*") if path.is_dir())]:
                 directory.chmod(0o755)
-    except (OSError, tarfile.TarError, KeyError):
+    except (OSError, EOFError, OverflowError, ValueError, tarfile.TarError, KeyError):
         raise TaskError("the server archive could not be read") from None
     return info
 

@@ -27,6 +27,27 @@ pub(crate) struct EmbeddedCore {
     length: u64,
 }
 
+impl EmbeddedCore {
+    /// Capture and recheck once before the lane starts; the push streams this held snapshot.
+    fn capture_for_push(&self) -> Result<spaceterm_core::service::CandidateFiles, ActionFailure> {
+        use sha2::{Digest, Sha256};
+        let signature = self
+            .archive
+            .parent()
+            .ok_or(ActionFailure::Failed)?
+            .join("artifact.sig");
+        let captured = spaceterm_core::service::CandidateFiles::read(&self.archive, &signature)
+            .map_err(|_| ActionFailure::Failed)?;
+        if captured.signature() != self.signature
+            || captured.archive().len() as u64 != self.length
+            || format!("{:x}", Sha256::digest(captured.archive())) != self.sha256
+        {
+            return Err(ActionFailure::Changed);
+        }
+        Ok(captured)
+    }
+}
+
 /// The embedded builds of the catalog at `root`, verified on first use.
 pub(crate) struct EmbeddedCores {
     root: Option<PathBuf>,
@@ -100,10 +121,7 @@ fn verify(directory: &Path, identity: &str, platform: Platform) -> Option<Embedd
         )
         .ok()?
     } else {
-        std::fs::read_to_string(directory.join("artifact.sha256"))
-            .ok()?
-            .trim()
-            .to_owned()
+        spaceterm_core::service::candidate_digest(&directory.join("artifact.sha256")).ok()?
     };
     let metadata = spaceterm_core::service::verify_candidate_bytes(
         identity,
@@ -130,7 +148,8 @@ pub(crate) fn push(
     build: &EmbeddedCore,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<UpdateFacts, ActionFailure> {
-    let mut file = std::fs::File::open(&build.archive).map_err(|_| ActionFailure::Failed)?;
+    let captured = build.capture_for_push()?;
+    let mut file = std::io::Cursor::new(captured.archive());
     let length = build.length;
     admin::push(
         session,
@@ -261,6 +280,51 @@ mod tests {
         assert_eq!(cores.build(Platform::LinuxX86_64), None);
         assert_eq!(cores.build(Platform::MacosArm64), None);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_push_streams_one_captured_snapshot_and_refuses_a_replaced_cached_archive() {
+        use sha2::{Digest, Sha256};
+        use std::{ffi::CString, io::Read, os::unix::ffi::OsStrExt};
+        let root =
+            std::env::temp_dir().join(format!("spaceterm-push-snapshot-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let archive = root.join("artifact.tar.gz");
+        let bytes = b"previously verified archive";
+        std::fs::write(&archive, bytes).unwrap();
+        std::fs::write(root.join("artifact.sig"), [8; 64]).unwrap();
+        let build = EmbeddedCore {
+            candidate: Candidate::new(
+                version("0.9.0"),
+                Some(spaceterm_core::update::ordering::Floor::parse("0.0.0").unwrap()),
+            )
+            .unwrap(),
+            archive: archive.clone(),
+            signature: vec![8; 64],
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            length: bytes.len() as u64,
+        };
+        let captured = build.capture_for_push().unwrap();
+        std::fs::remove_file(&archive).unwrap();
+        let name = CString::new(archive.as_os_str().as_bytes()).unwrap();
+        // SAFETY: this terminated path belongs to the disposable fixture.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let mut streamed = Vec::new();
+        std::io::Cursor::new(captured.archive())
+            .read_to_end(&mut streamed)
+            .unwrap();
+        assert_eq!(streamed, bytes);
+        assert!(matches!(
+            build.capture_for_push(),
+            Err(ActionFailure::Failed)
+        ));
+        std::fs::remove_file(&archive).unwrap();
+        std::fs::write(&archive, vec![0; bytes.len()]).unwrap();
+        assert!(matches!(
+            build.capture_for_push(),
+            Err(ActionFailure::Changed)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

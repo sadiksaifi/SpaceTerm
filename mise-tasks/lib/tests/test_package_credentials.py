@@ -22,41 +22,28 @@ SIGNING_INPUTS = {
 
 
 class PackageCredentialsTests(unittest.TestCase):
-    def test_linux_package_does_not_pass_signing_inputs_to_cargo(self):
-        environment = {
-            "PATH": os.defpath,
-            **SIGNING_INPUTS,
-            "SPACETERM_LINUX_PACKAGE_TARGET": "x86_64-unknown-linux-gnu.2.35",
-            "SPACETERM_LINUX_PACKAGE_SYSROOT": "/fixture-sysroot",
-        }
-
-        def compiler(arguments, **kwargs):
-            self.assertTrue(arguments[:2] == ["cargo", "zigbuild"])
-            self.assertEqual(
-                set(kwargs["env"]) & set(environment),
-                {"PATH", "SPACETERM_LINUX_PACKAGE_TARGET", "SPACETERM_LINUX_PACKAGE_SYSROOT"},
-                "signing inputs must stay in the packaging process",
-            )
-            raise TaskError("compiler boundary reached")
-
+    def test_linux_package_refuses_product_execution_beside_signing_credentials(self):
+        environment = {"PATH": os.defpath, **SIGNING_INPUTS}
         with (
-            tempfile.TemporaryDirectory() as temporary,
             patch.dict(os.environ, environment, clear=True),
-            patch.object(package_linux, "STAGE", Path(temporary) / "stage"),
             patch(
-                "spaceterm_tasks.core_package.prepare_desktop_artifact",
-                side_effect=AssertionError("Core resources must be prepared after compilation"),
+                "spaceterm_tasks.cargo.subprocess.Popen",
+                side_effect=AssertionError("must not compile or execute products"),
             ),
-            patch(
-                "spaceterm_tasks.desktop_manifest.compile_environment",
-                side_effect=lambda env, _: env,
-            ),
-            patch.object(package_linux.sys, "platform", "linux"),
-            patch.object(package_linux.platform, "machine", return_value="x86_64"),
-            patch("spaceterm_tasks.cargo.subprocess.Popen", side_effect=compiler),
-            self.assertRaisesRegex(TaskError, "compiler boundary reached"),
+            self.assertRaisesRegex(TaskError, "credential-free"),
         ):
             package_linux.package()
+
+    def test_dry_run_core_verification_needs_only_tracked_public_keys(self):
+        import json
+
+        from spaceterm_tasks import ROOT, core_package, update_signing
+
+        tracked = json.loads((ROOT / update_signing.TRUST).read_text())
+        with patch.dict(os.environ, {update_signing.DRY_RUN: "1"}, clear=True):
+            self.assertEqual(
+                core_package.artifact_trust("spaceterm"), (tracked["current"], tracked["backup"])
+            )
 
     def test_the_disk_image_builder_and_its_installer_run_with_the_given_environment(self):
         given = {"PATH": os.defpath, "SPACETERM_PACKAGED": "1"}

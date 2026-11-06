@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, core_package, update_signing
+from spaceterm_tasks.bounded_tar import open_archive
 from spaceterm_tasks.core_builds import _source
 
 
@@ -41,7 +42,9 @@ def _commit(root, description):
 
 def _record(archive, signature, role, target):
     update_signing.verify(core_package.artifact_trust("spaceterm-preflight"), archive, signature)
-    with tarfile.open(archive, "r:gz") as source:
+    with open_archive(
+        archive, maximum=core_package.MAX_EXPANDED, members=core_package.MAX_MEMBERS
+    ) as source:
         stream = source.extractfile("core/build.json")
         if stream is None:
             raise TaskError("the fixture build document is missing")
@@ -109,7 +112,12 @@ def _broken_verification(destination, target, result):
     signature = broken.with_suffix(broken.suffix + ".sig")
     resources = core_package.resource_directory(target, "spaceterm-preflight")
     omitted = f"core/{resources}/shell-integration/VERSION"
-    with tarfile.open(normal, "r:gz") as source, tarfile.open(broken, "w:gz") as output:
+    with (
+        open_archive(
+            normal, maximum=core_package.MAX_EXPANDED, members=core_package.MAX_MEMBERS
+        ) as source,
+        tarfile.open(broken, "w:gz") as output,
+    ):
         for member in source:
             if member.name != omitted:
                 output.addfile(member, source.extractfile(member) if member.isfile() else None)

@@ -145,6 +145,96 @@ class DesktopManifestTests(unittest.TestCase):
                     environment=environment,
                 )
 
+    def test_manifest_signing_with_credentials_never_executes_a_product(self):
+        import os
+        import subprocess
+
+        run = subprocess.run
+
+        def guarded(arguments, **kwargs):
+            if "internal" in arguments or "--build-info" in arguments or "--version" in arguments:
+                self.fail("a secret-bearing manifest step executed a product")
+            return run(arguments, **kwargs)
+
+        with (
+            patch.dict(os.environ, {desktop_manifest.SIGNING_SECRET: "credential-marker"}),
+            patch.object(subprocess, "run", side_effect=guarded),
+        ):
+            manifest = self.stage()
+            self.assertTrue(manifest.is_file())
+            verified = desktop_manifest.verify_embedded_resources(
+                manifest.parent.parent, self.info["identity"], execute=False
+            )
+            self.assertEqual(verified["build"], self.compiled["build"])
+            self.assertEqual(
+                verified["core_sha256"],
+                {
+                    target: update_signing.sha256(directory / "artifact.tar.gz")
+                    for target, directory in self.packages.items()
+                },
+            )
+
+    def test_full_verification_refuses_credentials_before_touching_a_product(self):
+        import os
+
+        with patch.dict(os.environ, {desktop_manifest.SIGNING_SECRET: "credential-marker"}):
+            with self.assertRaisesRegex(TaskError, "credential-free"):
+                desktop_manifest.verify_desktop_release(
+                    self.root / "missing.dmg",
+                    "v0.10.0",
+                    macos=True,
+                    source_sha="a" * 40,
+                    plan_sha256="b" * 64,
+                    core_digests={},
+                )
+
+    def test_final_evidence_binds_the_asset_source_plan_and_both_cores(self):
+        from spaceterm_tasks import package_macos
+
+        asset = self.root / "final.dmg"
+        asset.write_bytes(b"final shipped asset")
+        digests = {
+            target: update_signing.sha256(directory / "artifact.tar.gz")
+            for target, directory in self.packages.items()
+        }
+        result = {"build": self.compiled["build"], "core_sha256": digests}
+        with patch.object(package_macos, "verify", return_value=result) as verify:
+            evidence = desktop_manifest.verify_desktop_release(
+                asset,
+                None,
+                macos=True,
+                source_sha="a" * 40,
+                plan_sha256="c" * 64,
+                core_digests=digests,
+            )
+            verify.assert_called_once_with(dmg=asset, release_tag=None, execute=True)
+        self.assertEqual(
+            evidence,
+            {
+                "schema": 1,
+                "kind": "desktop-verification",
+                "source_sha": "a" * 40,
+                "plan_sha256": "c" * 64,
+                "asset_sha256": update_signing.sha256(asset),
+                "core_sha256": digests,
+            },
+        )
+
+        def changed(**_):
+            asset.write_bytes(b"replaced after verification")
+            return result
+
+        with patch.object(package_macos, "verify", side_effect=changed):
+            with self.assertRaisesRegex(TaskError, "evidence differs"):
+                desktop_manifest.verify_desktop_release(
+                    asset,
+                    None,
+                    macos=True,
+                    source_sha="a" * 40,
+                    plan_sha256="c" * 64,
+                    core_digests=digests,
+                )
+
 
 class PrecompiledMacBundleTests(unittest.TestCase):
     def test_assembly_preserves_executable_resources_and_framework_links_without_cargo(self):

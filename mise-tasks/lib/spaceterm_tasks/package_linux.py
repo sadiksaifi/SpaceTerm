@@ -101,12 +101,18 @@ def write_archive(tree, archive):
         output.add(tree, arcname=tree.name, filter=normalized)
 
 
-def package(release_tag=None, notes=None, *, compiled=None):
+def package(release_tag=None, notes=None, *, compiled=None, execute: bool = True):
     """Build, stage, archive, and verify one identity, then move the archive into dist/.
 
     A release embeds the release notes file `notes`.
     """
+    if execute:
+        from spaceterm_tasks.desktop_manifest import require_no_release_secrets
+
+        require_no_release_secrets()
     require_x86_64_linux()
+    if compiled is None and not execute:
+        raise TaskError("static desktop packaging requires compiled artifacts")
     if release_tag:
         require_clean_checkout()
     notes_file = release_notes_file(release_tag, notes)
@@ -143,18 +149,20 @@ def package(release_tag=None, notes=None, *, compiled=None):
     )
     validate_compiled(compiled_info, release_tag)
     stage(name, executable, STAGE / DIRECTORIES[name])
-    prepare_resources(STAGE / DIRECTORIES[name], compiled_info, release_tag, macos=False)
+    prepare_resources(
+        STAGE / DIRECTORIES[name], compiled_info, release_tag, macos=False, execute=execute
+    )
     DIST.mkdir(exist_ok=True)
     destination = archive_path(name)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
         archive = Path(temporary) / destination.name
         write_archive(STAGE / DIRECTORIES[name], archive)
-        verify(archive, release_tag)
+        verify(archive, release_tag, execute=execute)
         archive.replace(destination)
     print(f"Created {destination.name} in dist")
 
 
-def verify(archive=None, release_tag=None):
+def verify(archive=None, release_tag=None, *, execute: bool = True):
     """Verify the invariants SpaceTerm owns in a Linux archive."""
     require_x86_64_linux()
     name = selected_identity(release_tag)
@@ -162,7 +170,9 @@ def verify(archive=None, release_tag=None):
     directory = DIRECTORIES[name]
     with tempfile.TemporaryDirectory(prefix="spaceterm-verify-") as temporary:
         try:
-            with tarfile.open(archive, "r:gz") as source:
+            from spaceterm_tasks.bounded_tar import open_archive
+
+            with open_archive(archive, maximum=2 * 1024 * 1024 * 1024, members=512) as source:
                 members = source.getmembers()
                 for member in members:
                     path = PurePosixPath(member.name)
@@ -174,13 +184,18 @@ def verify(archive=None, release_tag=None):
                     ):
                         raise TaskError(f"the archive may hold only the {directory} directory")
                 source.extractall(temporary, filter="data")
-        except (OSError, tarfile.TarError):
+        except (OSError, EOFError, tarfile.TarError):
             raise TaskError("the archive could not be read") from None
-        verify_tree(Path(temporary) / directory, name, release_tag)
+        result = verify_tree(Path(temporary) / directory, name, release_tag, execute=execute)
     print(f"Verified {archive.name}")
+    return result
 
 
-def verify_tree(tree, name, release_tag):
+def verify_tree(tree, name, release_tag, *, execute: bool = True):
+    if execute:
+        from spaceterm_tasks.desktop_manifest import require_no_release_secrets
+
+        require_no_release_secrets()
     label = "archive"
     executable = tree / "bin" / "spaceterm-desktop"
     if not os.access(executable, os.X_OK):
@@ -190,21 +205,14 @@ def verify_tree(tree, name, release_tag):
         raise TaskError(f"{label} executable must contain only x86_64 code")
     verify_glibc_baseline(executable, label)
     version = release_version(release_tag) if release_tag else None
-    verify_application_identity(executable, identity(name)["CFBundleName"], label, version)
-    verify_askpass_helper_mode(executable, label)
+    if execute:
+        verify_application_identity(executable, identity(name)["CFBundleName"], label, version)
+        verify_askpass_helper_mode(executable, label)
     verify_resources(tree / "share" / "spaceterm", label)
-    from spaceterm_tasks.core_package import verify_desktop_artifact
+    from spaceterm_tasks.desktop_manifest import verify_embedded_resources
 
-    verify_desktop_artifact(
-        tree / "share/spaceterm/core-artifact",
-        DIRECTORIES[name],
-        release_tag,
-        executable=executable,
-    )
-    from spaceterm_tasks.core_catalog import verify_catalog
-
-    verify_catalog(
-        tree / "share/spaceterm/core-artifacts", DIRECTORIES[name], require_all=bool(release_tag)
+    result = verify_embedded_resources(
+        tree / "share/spaceterm", DIRECTORIES[name], execute=execute, executable=executable
     )
 
     identifier = application_id(name)
@@ -222,6 +230,8 @@ def verify_tree(tree, name, release_tag):
         for path, source in expected.items()
     ):
         raise TaskError(f"{label} icons differ from the brand icons")
+
+    return result
 
 
 def verify_glibc_baseline(executable, label):
@@ -254,7 +264,9 @@ def install_preflight(archive):
         raise TaskError("the install path contains characters desktop launchers cannot run")
     with tempfile.TemporaryDirectory(prefix=".preflight-install-", dir=parent) as temporary:
         staging = Path(temporary)
-        with tarfile.open(archive, "r:gz") as source:
+        from spaceterm_tasks.bounded_tar import open_archive
+
+        with open_archive(archive, maximum=2 * 1024 * 1024 * 1024, members=512) as source:
             source.extractall(staging, filter="data")
         candidate = staging / target.name
         previous = staging / "previous"
