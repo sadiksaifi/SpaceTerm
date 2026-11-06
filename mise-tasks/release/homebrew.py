@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# MISE description="Write the Homebrew cask for the published release's assembled disk image"
+# MISE description="Write the Homebrew cask for the published release's disk image"
 # USAGE arg "<tag>"
 # USAGE arg "<tap>" help="Checkout of sadiksaifi/homebrew-tap"
 import argparse

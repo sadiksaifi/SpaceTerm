@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spaceterm_tasks import TaskError, release_feed, release_homebrew, update_signing
+from spaceterm_tasks import TaskError, release_feed, release_homebrew
 
 
 class CaskTests(unittest.TestCase):
@@ -29,16 +29,27 @@ class CaskTests(unittest.TestCase):
             with self.subTest(version=version, digest=digest), self.assertRaises(TaskError):
                 release_homebrew.cask(version, digest)
 
-    def test_cask_takes_the_digest_of_the_assembled_disk_image(self):
+    def test_cask_takes_the_digest_of_the_published_disk_image(self):
+        # A later attempt rebuilds a disk image with other bytes; users download the published one.
+        name = release_feed.dmg_name("0.10.0")
+        published = {"id": 7, "draft": False, "immutable": True, "tag_name": "v0.10.0"}
+        assets = [{"name": name, "digest": "sha256:" + "b" * 64}, {"name": "SHA256SUMS"}]
+
+        def request(endpoint):
+            if endpoint.endswith("/releases/tags/v0.10.0"):
+                return published
+            if "/releases/7/assets?" in endpoint:
+                return assets
+            raise AssertionError(endpoint)
+
         with tempfile.TemporaryDirectory() as temporary:
-            directory, tap = Path(temporary) / "release", Path(temporary) / "tap"
-            directory.mkdir()
-            with self.assertRaises(TaskError):
-                release_homebrew.write("v0.10.0", tap, directory)
-            image = directory / release_feed.dmg_name("0.10.0")
-            image.write_bytes(b"notarized disk image")
-            release_homebrew.write("v0.10.0", tap, directory)
+            tap = Path(temporary) / "tap"
+            release_homebrew.write("v0.10.0", tap, request=request)
             self.assertEqual(
-                (tap / "Casks/spaceterm.rb").read_text(),
-                release_homebrew.cask("0.10.0", update_signing.sha256(image)),
+                (tap / "Casks/spaceterm.rb").read_text(), release_homebrew.cask("0.10.0", "b" * 64)
             )
+            for changed in ({"draft": True}, {"immutable": False}):
+                with self.subTest(changed=changed), self.assertRaises(TaskError):
+                    published.update(changed)
+                    release_homebrew.write("v0.10.0", tap, request=request)
+                published.update(draft=False, immutable=True)

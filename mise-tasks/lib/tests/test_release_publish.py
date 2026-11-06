@@ -55,7 +55,11 @@ class GitHub:
                 "name": f"SpaceTerm {command[3]}",
             }
         elif command[2] == "upload":
-            for path in command[4:]:
+            paths = [path for path in command[4:] if path != "--clobber"]
+            if "--clobber" in command:
+                names = {path.name for path in paths}
+                self.assets = [asset for asset in self.assets if asset["name"] not in names]
+            for path in paths:
                 self.assets.append(
                     {
                         "name": path.name,
@@ -223,14 +227,28 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.github.mutations, ["upload", "edit"])
         self.assertEqual(len(self.github.assets), 2)
 
-    def test_retry_refuses_a_draft_with_different_bytes(self):
+    def test_retry_replaces_draft_assets_an_earlier_attempt_built_differently(self):
+        # Each attempt repackages, and archives and disk images record their build time.
         self.github.release = self.draft()
         self.github.assets = [
             {"name": self.assets[0].name, "size": 1, "digest": "sha256:" + "f" * 64}
         ]
-        with self.assertRaises(TaskError):
-            self.publish()
+        self.publish()
+        self.assertEqual(self.github.mutations, ["upload", "edit"])
+        self.assertEqual(
+            sorted(asset["digest"] for asset in self.github.assets),
+            sorted("sha256:" + update_signing.sha256(path) for path in self.assets),
+        )
+
+    def test_retry_after_publication_keeps_the_published_release(self):
+        self.publish()
+        published = [dict(asset) for asset in self.github.assets]
+        for path in self.assets:
+            path.write_bytes(path.name.encode() + b" rebuilt by a later attempt")
+        self.github.mutations.clear()
+        self.publish()
         self.assertEqual(self.github.mutations, [])
+        self.assertEqual(self.github.assets, published)
 
     def test_a_tag_move_after_upload_never_publishes_the_draft(self):
         self.github.tag_sha = "b" * 40
@@ -265,7 +283,6 @@ class PublishTests(unittest.TestCase):
             {"name": "changed"},
             {"prerelease": True},
             {"immutable": False},
-            {"digest": "sha256:" + "f" * 64},
             {"tag_sha": "b" * 40},
         ):
             with self.subTest(change=change):

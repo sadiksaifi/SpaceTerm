@@ -641,6 +641,8 @@ jobs:
           persist-credentials: true
       - name: Point the Homebrew cask at the published disk image
         if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mise run release:homebrew "v$RELEASE_VERSION" target/homebrew-tap
           cd target/homebrew-tap

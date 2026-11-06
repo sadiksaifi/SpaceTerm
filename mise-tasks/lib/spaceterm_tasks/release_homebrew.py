@@ -3,8 +3,7 @@
 import re
 from pathlib import Path
 
-from spaceterm_tasks import TaskError, release_feed, release_plan, update_signing
-from spaceterm_tasks.packaging import DIST
+from spaceterm_tasks import TaskError, release_feed, release_plan
 
 
 def cask(version, digest):
@@ -42,12 +41,22 @@ end
 '''
 
 
-def write(tag, tap, directory=DIST / "release"):
-    """Point the tap's cask at the disk image that publication just verified on GitHub."""
+def write(tag, tap, *, request=release_plan.api):
+    """Point the tap's cask at the published disk image, by the digest GitHub records.
+
+    After a rerun, this run's own disk image may differ from the one people download.
+    """
     version = release_plan.greenfield_tag(tag)
-    image = Path(directory) / release_feed.dmg_name(version)
-    if not image.is_file():
-        raise TaskError("the Homebrew cask needs the assembled release disk image")
+    published = request(f"repos/{release_plan.REPOSITORY}/releases/tags/{tag}")
+    if published["draft"] or published.get("immutable") is not True:
+        raise TaskError("the Homebrew cask needs the immutable published release")
+    name = release_feed.dmg_name(version)
+    assets = release_plan.pages(
+        f"repos/{release_plan.REPOSITORY}/releases/{published['id']}/assets", request=request
+    )
+    digests = [asset.get("digest") or "" for asset in assets if asset["name"] == name]
+    if len(digests) != 1 or not digests[0].startswith("sha256:"):
+        raise TaskError("the published release must hold one macOS disk image with its digest")
     destination = Path(tap) / "Casks/spaceterm.rb"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(cask(version, update_signing.sha256(image)))
+    destination.write_text(cask(version, digests[0].removeprefix("sha256:")))
