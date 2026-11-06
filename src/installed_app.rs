@@ -20,7 +20,7 @@ const EXECUTABLE: &str = "spaceterm-desktop";
 pub struct AppIdentity {
     /// The Linux tree's directory name, such as `spaceterm`.
     directory_name: String,
-    /// The bundle identifier and desktop entry ID, such as `io.github.sadiksaifi.spaceterm`.
+    /// The bundle identifier and desktop entry ID, such as `com.peblon.spaceterm`.
     application_id: String,
     /// The macOS bundle's file name, such as `SpaceTerm.app`.
     bundle: String,
@@ -31,7 +31,7 @@ impl AppIdentity {
     pub fn for_identity(identity: &str) -> Self {
         Self {
             directory_name: identity.to_owned(),
-            application_id: format!("io.github.sadiksaifi.{identity}"),
+            application_id: format!("com.peblon.{identity}"),
             bundle: format!(
                 "{}.app",
                 spaceterm_core::service::control::display_name(identity)

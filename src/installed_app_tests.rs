@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::*;
 
-const ID: &str = "io.github.sadiksaifi.spaceterm";
+const ID: &str = "com.peblon.spaceterm";
 
 struct Scratch(PathBuf);
 
@@ -116,10 +116,7 @@ fn write_plist(bundle: &Path, id: &str) {
 #[test]
 fn identity_names_follow_the_build_identity() {
     let preflight = AppIdentity::for_identity("spaceterm-preflight");
-    assert_eq!(
-        preflight.application_id(),
-        "io.github.sadiksaifi.spaceterm-preflight"
-    );
+    assert_eq!(preflight.application_id(), "com.peblon.spaceterm-preflight");
     assert_eq!(preflight.bundle, "SpaceTerm Preflight.app");
     assert_eq!(release().bundle, "SpaceTerm.app");
     for identity in crate::application_identity::testing::all() {
@@ -169,7 +166,7 @@ fn a_bundle_of_another_identity_or_without_a_bundle_identifier_is_not_found() {
     let scratch = Scratch::new();
     let account = scratch.account();
     let preflight = scratch.0.join("Applications/SpaceTerm.app");
-    write_plist(&preflight, "io.github.sadiksaifi.spaceterm-preflight");
+    write_plist(&preflight, "com.peblon.spaceterm-preflight");
     let bare = account.home.join("Applications/SpaceTerm.app");
     touch(&bare.join("Contents/MacOS/SpaceTerm"));
 

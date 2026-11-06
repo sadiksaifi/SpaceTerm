@@ -137,7 +137,7 @@ def main():
                         str(contents / "Frameworks/Sparkle.framework"),
                     )
                     plist = {
-                        "CFBundleIdentifier": f"io.github.sadiksaifi.spaceterm.updater-test.{scenario}",
+                        "CFBundleIdentifier": f"com.peblon.spaceterm.updater-test.{scenario}",
                         "CFBundleName": "SpaceTermUpdateTest",
                         "CFBundleExecutable": "Fixture",
                         "CFBundlePackageType": "APPL",

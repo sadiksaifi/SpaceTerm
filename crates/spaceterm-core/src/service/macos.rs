@@ -19,7 +19,7 @@ impl LaunchAgent {
             .and_then(Path::parent)
             .and_then(Path::parent)
             .ok_or(CoreError::StorageUnavailable)?;
-        let label = format!("io.github.sadiksaifi.{identity}.core");
+        let label = format!("com.peblon.{identity}.core");
         // SAFETY: geteuid has no preconditions.
         let target = format!("gui/{}/{label}", unsafe { libc::geteuid() });
         Ok(Self {
@@ -346,11 +346,8 @@ mod tests {
             runtime: "/private/tmp/spaceterm-preflight-core-501".into(),
         };
         let agent = LaunchAgent::new(&paths, "spaceterm-preflight").unwrap();
-        assert_eq!(agent.label, "io.github.sadiksaifi.spaceterm-preflight.core");
-        assert_eq!(
-            agent.name,
-            "io.github.sadiksaifi.spaceterm-preflight.core.plist"
-        );
+        assert_eq!(agent.label, "com.peblon.spaceterm-preflight.core");
+        assert_eq!(agent.name, "com.peblon.spaceterm-preflight.core.plist");
         assert_eq!(
             agent.directory,
             Path::new("/Users/owner/Library/LaunchAgents")
@@ -422,7 +419,7 @@ mod tests {
             .canonicalize()
             .unwrap()
             .join(format!("spaceterm-launchagent-{suffix:x}"));
-        let label = format!("io.github.sadiksaifi.spaceterm.validation-{suffix:x}");
+        let label = format!("com.peblon.spaceterm.validation-{suffix:x}");
         // SAFETY: geteuid has no preconditions.
         let domain = format!("gui/{}", unsafe { libc::geteuid() });
         let fixture = Fixture {

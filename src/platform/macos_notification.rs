@@ -22,8 +22,8 @@ use crate::terminal::attention_notification::{
 };
 use crate::terminal::attention_runtime::AttentionFailure;
 
-const NOTIFICATION_IDENTIFIER: &str = "io.github.sadiksaifi.spaceterm.terminal-attention";
-const REMINDER_IDENTIFIER: &str = "io.github.sadiksaifi.spaceterm.update-reminder";
+const NOTIFICATION_IDENTIFIER: &str = "com.peblon.spaceterm.terminal-attention";
+const REMINDER_IDENTIFIER: &str = "com.peblon.spaceterm.update-reminder";
 fn process_has_application_bundle_identity() -> bool {
     NSBundle::mainBundle().bundleIdentifier().is_some()
 }
@@ -369,7 +369,7 @@ mod tests {
     fn notification_settings_open_the_desktops_own_entry() {
         assert_eq!(
             notification_settings_uri(ApplicationIdentity::development()),
-            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=io.github.sadiksaifi.spaceterm-development"
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.peblon.spaceterm-development"
         );
     }
 

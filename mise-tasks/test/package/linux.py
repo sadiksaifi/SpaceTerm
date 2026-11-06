@@ -226,7 +226,7 @@ sys.exit(0 if sys.argv[1:3] == ["api", "--paginate"] else 1)
         archive = self.root / "dist/spaceterm-preflight-linux-x86_64.tar.gz"
         members = self.members(archive)
         self.assertTrue(all(name.split("/")[0] == "spaceterm-preflight" for name in members))
-        identifier = "io.github.sadiksaifi.spaceterm-preflight"
+        identifier = "com.peblon.spaceterm-preflight"
         for name in (
             "spaceterm-preflight/bin/spaceterm-desktop",
             "spaceterm-preflight/share/spaceterm/core-artifact/artifact.tar.gz",

@@ -3,7 +3,7 @@
 # binaries directory. SpaceTerm signs the app with Entitlements.plist beside this file, so
 # cargo-packager receives no signing identity. Packaging then builds the disk image with dmgbuild.
 product-name = "SpaceTerm Preflight"
-identifier = "io.github.sadiksaifi.spaceterm-preflight"
+identifier = "com.peblon.spaceterm-preflight"
 formats = ["app"]
 category = "DeveloperTool"
 binaries = [{ path = "SpaceTerm Preflight", main = true }]

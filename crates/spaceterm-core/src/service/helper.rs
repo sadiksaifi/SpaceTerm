@@ -541,8 +541,7 @@ mod tests {
             u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap());
         let parent = std::env::temp_dir().canonicalize().unwrap();
         #[cfg(target_os = "macos")]
-        let name =
-            format!("io.github.sadiksaifi.spaceterm.validation.spaceterm-helper-probe-{suffix:x}");
+        let name = format!("com.peblon.spaceterm.validation.spaceterm-helper-probe-{suffix:x}");
         #[cfg(target_os = "linux")]
         let name = format!("spaceterm-helper-probe-{suffix:x}");
         let probe = Probe(parent.join(name));

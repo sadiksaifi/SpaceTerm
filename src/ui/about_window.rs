@@ -30,9 +30,8 @@ const TEXT_INSET: f32 = 24.0;
 const ICON_SIZE: f32 = 64.0;
 /// The application icon as Linux desktops draw it. macOS shows its own About panel with the
 /// compiled bundle icon, so this window draws the brand's Linux tile.
-const ICON: &[u8] = include_bytes!(
-    "../../assets/brand/linux/hicolor/scalable/apps/io.github.sadiksaifi.spaceterm.svg"
-);
+const ICON: &[u8] =
+    include_bytes!("../../assets/brand/linux/hicolor/scalable/apps/com.peblon.spaceterm.svg");
 /// Vertical rhythm from the top edge to the bottom edge, in content order.
 const TOP_INSET: f32 = 20.0;
 const ICON_TO_NAME: f32 = 8.0;

@@ -24,7 +24,7 @@ from spaceterm_tasks import ROOT, TaskError
 BRAND = Path("assets/brand")
 DOCUMENT = BRAND / "apple" / "SpaceTerm.icon"
 MANIFEST = BRAND / "manifest.json"
-APPLICATION_ID = "io.github.sadiksaifi.spaceterm"
+APPLICATION_ID = "com.peblon.spaceterm"
 # Files people write by hand. Every other file under assets/brand is generated.
 HANDWRITTEN = (BRAND / "README.md", DOCUMENT / "icon.json")
 WORDMARK_FONT = Path("assets/fonts/inter/Inter-SemiBold.otf")

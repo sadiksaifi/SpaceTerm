@@ -45,11 +45,11 @@ class CoreBundleNameTests(unittest.TestCase):
                 for identity in ("spaceterm", "spaceterm-preflight", "spaceterm-development")
             ],
             [
-                ("SpaceTerm Core.app", "io.github.sadiksaifi.spaceterm.core"),
-                ("SpaceTerm Core Preflight.app", "io.github.sadiksaifi.spaceterm-preflight.core"),
+                ("SpaceTerm Core.app", "com.peblon.spaceterm.core"),
+                ("SpaceTerm Core Preflight.app", "com.peblon.spaceterm-preflight.core"),
                 (
                     "SpaceTerm Core Development.app",
-                    "io.github.sadiksaifi.spaceterm-development.core",
+                    "com.peblon.spaceterm-development.core",
                 ),
             ],
         )

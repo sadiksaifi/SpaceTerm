@@ -13,7 +13,7 @@
 	<key>CFBundleIconName</key>
 	<string>SpaceTerm</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.github.sadiksaifi.spaceterm-development</string>
+	<string>com.peblon.spaceterm-development</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

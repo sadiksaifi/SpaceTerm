@@ -17,7 +17,7 @@ from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.development_supervision import development_run, source_environment, supervise
 from spaceterm_tasks.packaging import install_linux_icons, linux_icon_path
 
-APPLICATION_ID = "io.github.sadiksaifi.spaceterm-development"
+APPLICATION_ID = "com.peblon.spaceterm-development"
 DESKTOP_ENTRY = Path("packaging/linux/development") / (APPLICATION_ID + ".desktop")
 TERMINFO = Path("assets/terminfo/xterm-spaceterm.terminfo")
 SHELL_INTEGRATION = Path("assets/shell-integration")

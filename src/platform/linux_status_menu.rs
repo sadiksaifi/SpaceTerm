@@ -478,7 +478,7 @@ mod tests {
     use super::Icons;
     use std::path::Path;
 
-    const APPLICATION_ID: &str = "io.github.sadiksaifi.spaceterm";
+    const APPLICATION_ID: &str = "com.peblon.spaceterm";
 
     /// The tray names the brand's two symbolic icons, which the packaged tree installs under
     /// `share/icons`, and tells hosts to look there.
@@ -495,8 +495,8 @@ mod tests {
         );
         let brand = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/brand/linux/hicolor");
         for (attention, name) in [
-            (false, "io.github.sadiksaifi.spaceterm-symbolic"),
-            (true, "io.github.sadiksaifi.spaceterm-attention-symbolic"),
+            (false, "com.peblon.spaceterm-symbolic"),
+            (true, "com.peblon.spaceterm-attention-symbolic"),
         ] {
             assert_eq!(icons.name(attention), name);
             assert!(brand.join(format!("symbolic/apps/{name}.svg")).is_file());
@@ -519,6 +519,6 @@ mod tests {
     fn a_build_outside_an_installation_names_no_icon_directory() {
         let icons = Icons::under(Some(Path::new("/nonexistent/prefix")), APPLICATION_ID);
         assert_eq!(icons.theme_path, "");
-        assert_eq!(icons.name(false), "io.github.sadiksaifi.spaceterm-symbolic");
+        assert_eq!(icons.name(false), "com.peblon.spaceterm-symbolic");
     }
 }

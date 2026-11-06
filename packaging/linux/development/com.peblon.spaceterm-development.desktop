@@ -6,5 +6,5 @@ MimeType=x-scheme-handler/spaceterm;
 Icon={icon}
 Terminal=false
 StartupNotify=true
-StartupWMClass=io.github.sadiksaifi.spaceterm-development
+StartupWMClass=com.peblon.spaceterm-development
 Categories=System;TerminalEmulator;
