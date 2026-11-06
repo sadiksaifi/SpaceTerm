@@ -35,6 +35,7 @@ from spaceterm_tasks import (
     update_signing,
 )
 from spaceterm_tasks.cargo import build_executable
+from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon
 from spaceterm_tasks.package_linux import verify_glibc_baseline, write_archive
 from spaceterm_tasks.packaging import (
     DIST,
@@ -58,6 +59,8 @@ BUNDLES = {
     "spaceterm-development": "SpaceTerm Core Development",
 }
 CORE_INFO = ROOT / "packaging/macos/core/Info.plist"
+# The compiled brand icon, which the Info.plist template names.
+ICON_RESOURCES = (f"{ICON_NAME}.icns", "Assets.car")
 # The release asset platform of each target.
 PLATFORMS = {TARGETS["darwin"]: "macos-arm64", TARGETS["linux"]: "linux-x86_64"}
 SHARED_RESOURCES = "share/spaceterm"
@@ -155,12 +158,16 @@ def stapled(identity):
 
 
 def bundle_files(target, identity):
-    """The bundle's Info.plist, the seal codesign writes and a stapled ticket; none without a
-    bundle."""
+    """The bundle's Info.plist, its icon, the seal codesign writes and a stapled ticket; none
+    without a bundle."""
     if target != TARGETS["darwin"]:
         return set()
     contents = f"{bundle_directory(identity)}/Contents"
-    files = {f"{contents}/Info.plist", f"{contents}/_CodeSignature/CodeResources"}
+    files = {
+        f"{contents}/Info.plist",
+        f"{contents}/_CodeSignature/CodeResources",
+        *(f"{contents}/Resources/{name}" for name in ICON_RESOURCES),
+    }
     if stapled(identity):
         files.add(f"{contents}/CodeResources")
     return files
@@ -788,6 +795,9 @@ def package(identity, release_tag=None, *, target=None):
             bundle = tree / signed_path(target, identity)
             (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps(core_info(identity)))
             (bundle / "Contents/Info.plist").chmod(0o644)
+            # System Settings shows this icon beside Core's permissions and background item.
+            compile_icon(resources, identifier)
+            (resources / "IconPartialInfo.plist").unlink()
             core = bundle
             # A macOS Core always builds natively; package() refuses a cross-build.
             codesign_identity, team = signer(identity)

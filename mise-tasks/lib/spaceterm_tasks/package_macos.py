@@ -98,7 +98,7 @@ def package_bundle(release_tag=None, notes=None):
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
-    compile_icon(name, STAGE)
+    compile_icon(STAGE, template["CFBundleIdentifier"])
     checked(
         ["tic", "-x", "-o", str(STAGE / "terminfo"), str(TERMINFO)],
         "tic could not compile the SpaceTerm terminfo entry",

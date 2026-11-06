@@ -61,14 +61,17 @@ impl Layout {
             .map(|relative| self.resources().join(relative))
     }
 
-    /// The bundle's own files: its Info.plist and the seal codesign writes. Empty without a
-    /// bundle.
+    /// The bundle's own files: its Info.plist, its compiled icon and the seal codesign writes.
+    /// Empty without a bundle.
     pub fn bundle_files(self) -> Vec<PathBuf> {
         self.bundle
             .map(|bundle| {
+                let contents = Path::new(bundle).join("Contents");
                 vec![
-                    Path::new(bundle).join("Contents/Info.plist"),
-                    Path::new(bundle).join("Contents/_CodeSignature/CodeResources"),
+                    contents.join("Info.plist"),
+                    contents.join("Resources/SpaceTerm.icns"),
+                    contents.join("Resources/Assets.car"),
+                    contents.join("_CodeSignature/CodeResources"),
                 ]
             })
             .unwrap_or_default()
@@ -117,7 +120,7 @@ mod tests {
             ))
         );
         assert_eq!(layout.signed(), Path::new("SpaceTerm Core Preflight.app"));
-        assert_eq!(layout.bundle_files().len(), 2);
+        assert_eq!(layout.bundle_files().len(), 4);
     }
 
     #[test]
