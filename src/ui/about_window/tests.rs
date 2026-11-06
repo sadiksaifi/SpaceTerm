@@ -137,12 +137,6 @@ fn about_stacks_icon_name_version_description_and_copyright_on_one_center_line(
     for line in &lines[1..] {
         assert!(line.left() >= surface.left() + px(TEXT_INSET));
     }
-    assert!(
-        opened
-            .read_with(cx, |about, _| about.icon.is_some())
-            .unwrap(),
-        "the icon must draw"
-    );
 }
 
 #[gpui::test]

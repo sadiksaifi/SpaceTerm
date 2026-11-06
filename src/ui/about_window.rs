@@ -1,7 +1,5 @@
 //! The About Operating-System Window, reproducing AppKit's standard About panel.
 
-mod application_icon;
-
 use std::{rc::Rc, sync::Arc};
 
 use gpui::prelude::*;
@@ -30,6 +28,10 @@ const WINDOW_WIDTH: f32 = 284.0;
 const TEXT_INSET: f32 = 24.0;
 /// The icon's drawn size, which includes the icon grid's own transparent margin.
 const ICON_SIZE: f32 = 64.0;
+/// The application icon as Linux desktops draw it. macOS shows its own About panel with the
+/// compiled bundle icon, so this window draws the brand's Linux tile.
+const ICON: &[u8] =
+    include_bytes!("../../assets/brand/linux/hicolor/scalable/apps/io.github.sadiksaifi.spaceterm.svg");
 /// Vertical rhythm from the top edge to the bottom edge, in content order.
 const TOP_INSET: f32 = 20.0;
 const ICON_TO_NAME: f32 = 8.0;
@@ -180,7 +182,7 @@ fn window_size(about: About, cx: &App) -> Size<Pixels> {
 
 pub(crate) struct AboutWindow {
     about: About,
-    icon: Option<Arc<gpui::Image>>,
+    icon: Arc<gpui::Image>,
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     focus_handle: FocusHandle,
     window_movement: WindowMovement,
@@ -210,16 +212,7 @@ impl AboutWindow {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let window_movement = WindowMovement::new(window_drag, focus_handle.clone(), "About");
-        let icon = match application_icon::svg(about.identity().icon(), ICON_SIZE) {
-            Ok(svg) => Some(Arc::new(gpui::Image::from_bytes(
-                gpui::ImageFormat::Svg,
-                svg.into_bytes(),
-            ))),
-            Err(error) => {
-                eprintln!("failed to draw the application icon: {error}");
-                None
-            }
-        };
+        let icon = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Svg, ICON.to_vec()));
         Self {
             about,
             icon,
@@ -261,7 +254,7 @@ impl AboutWindow {
                     .debug_selector(|| "about-icon".to_owned())
                     .flex_none()
                     .size(px(ICON_SIZE))
-                    .children(self.icon.clone().map(|icon| img(icon).size_full())),
+                    .child(img(self.icon.clone()).size_full()),
             )
             .child(
                 line(

@@ -27,10 +27,6 @@ impl About {
         }
     }
 
-    pub(crate) const fn identity(self) -> ApplicationIdentity {
-        self.identity
-    }
-
     pub(crate) const fn name(self) -> &'static str {
         self.identity.display_name()
     }

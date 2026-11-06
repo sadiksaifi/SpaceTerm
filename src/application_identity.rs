@@ -19,38 +19,12 @@ macro_rules! named {
     };
 }
 
-/// One identity's Icon Composer document and the layer artwork it names.
-///
-/// The macOS bundle compiles the document into the application icon. A surface that draws the icon
-/// itself renders the same document, so every host shows one design per identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ApplicationIcon {
-    /// The document's `icon.json`.
-    pub(crate) document: &'static str,
-    /// Each layer's SVG artwork, keyed by the `image-name` the document gives it.
-    pub(crate) artwork: &'static [(&'static str, &'static str)],
-}
-
-/// Embeds one identity's Icon Composer document from its bundle template directory.
-macro_rules! icon {
-    ($directory:literal, [$($artwork:literal),+ $(,)?]) => {
-        ApplicationIcon {
-            document: include_str!(concat!("../packaging/macos/", $directory, "/icon.json")),
-            artwork: &[$((
-                $artwork,
-                include_str!(concat!("../packaging/macos/", $directory, "/Assets/", $artwork)),
-            )),+],
-        }
-    };
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ApplicationIdentity {
     display_name: &'static str,
     version_label: &'static str,
     directory_name: &'static str,
     application_id: &'static str,
-    icon: ApplicationIcon,
     update_source: UpdateSource,
 }
 
@@ -87,10 +61,6 @@ impl ApplicationIdentity {
         self.application_id
     }
 
-    pub(crate) const fn icon(self) -> ApplicationIcon {
-        self.icon
-    }
-
     pub(crate) const fn update_source(self) -> UpdateSource {
         self.update_source
     }
@@ -102,7 +72,6 @@ impl ApplicationIdentity {
             version_label,
             directory_name: "spaceterm",
             application_id: "io.github.sadiksaifi.spaceterm",
-            icon: icon!("spaceterm/SpaceTerm.icon", ["Glyph.svg"]),
             update_source: UpdateSource::SignedFeed,
         }
     }
@@ -114,10 +83,6 @@ impl ApplicationIdentity {
             version_label,
             directory_name: "spaceterm-preflight",
             application_id: "io.github.sadiksaifi.spaceterm-preflight",
-            icon: icon!(
-                "preflight/SpaceTerm Preflight.icon",
-                ["Channel Mark.svg", "Glyph.svg"]
-            ),
             update_source: UpdateSource::Unavailable,
         }
     }
@@ -129,10 +94,6 @@ impl ApplicationIdentity {
             version_label,
             directory_name: "spaceterm-development",
             application_id: "io.github.sadiksaifi.spaceterm-development",
-            icon: icon!(
-                "development/SpaceTerm Development.icon",
-                ["Channel Mark.svg", "Glyph.svg"]
-            ),
             update_source: UpdateSource::Simulation,
         }
     }
@@ -289,42 +250,6 @@ mod tests {
             assert_eq!(plist_string(plist, "CFBundleIdentifier"), bundle_identifier);
             assert_eq!(identity.application_id(), bundle_identifier);
             assert_eq!(identity.application_id(), bundle_identifier);
-        }
-    }
-
-    /// All icons share the release glyph and rank by distance from a release with one dot per
-    /// step, which survives the Dark, Clear, and Tinted appearances that replace their colors.
-    #[test]
-    fn identity_icons_should_share_the_glyph_and_rank_by_channel_marks() {
-        let icons = [
-            ApplicationIdentity::production(),
-            ApplicationIdentity::preflight(),
-            ApplicationIdentity::development(),
-        ]
-        .map(ApplicationIdentity::icon);
-        let artwork = |icon: ApplicationIcon, name: &str| {
-            icon.artwork
-                .iter()
-                .find_map(|(candidate, artwork)| (*candidate == name).then_some(*artwork))
-        };
-
-        let glyphs = icons.map(|icon| artwork(icon, "Glyph.svg").expect("every icon has a glyph"));
-        assert!(glyphs.iter().all(|glyph| *glyph == glyphs[0]));
-        assert_eq!(
-            icons.map(|icon| artwork(icon, "Channel Mark.svg")
-                .map_or(0, |mark| mark.matches("<circle").count())),
-            [0, 1, 2]
-        );
-        // The embedded artwork is exactly what each document names.
-        for icon in icons {
-            let named = icon.document.matches("\"image-name\"").count();
-            assert_eq!(named, icon.artwork.len());
-            for (name, _) in icon.artwork {
-                assert!(
-                    icon.document
-                        .contains(&format!("\"image-name\" : \"{name}\""))
-                );
-            }
         }
     }
 
