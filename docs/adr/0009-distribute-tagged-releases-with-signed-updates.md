@@ -4,9 +4,9 @@ A release starts when someone runs [the release workflow](../../.github/workflow
 
 ## Order
 
-The plan job runs first. It freezes the source commit, version, release notes and both Update Floors, and every later job checks its inputs against that plan. [The plan module](../../mise-tasks/lib/spaceterm_tasks/release_plan.py) owns the plan. Validation then runs at the same time as compilation, because the release is the only place the commit is tested. Compilation holds no private credential. It compiles Core and both desktops from the public identity, Team ID and update trust alone.
+The plan job runs first. It freezes the source commit, version, release notes and both Update Floors, and every later job checks its inputs against that plan. [The plan module](../../mise-tasks/lib/spaceterm_tasks/release_plan.py) owns the plan. Before a signed run it also requires the dispatch to select main at that exact commit and GitHub immutable releases to be enabled. Validation then runs at the same time as compilation, because the release is the only place the commit is tested. The `release:check` task in [.mise.toml](../../.mise.toml) lists what validation runs. Compilation holds no private credential. It compiles Core and both desktops from the public identity, Team ID and update trust alone.
 
-Signing, notarization and publication wait for validation. The workflow pushes the annotated tag only after validation passes, and only when it publishes. Jobs that hold a signing secret run in the protected `release` environment, which admits only main.
+Signing, notarization and publication wait for validation. Publication also waits for the floor check of [ADR 0064](0064-step-updates-through-update-floors-and-migrate-data-generations.md) and the compatibility pairs of [ADR 0035](0035-negotiate-protocol-versions-per-connection.md). The workflow pushes the annotated tag only after validation passes, and only when it publishes. Jobs that hold a signing secret run in the protected `release` environment, which admits only main.
 
 The workflow runs in one of three modes:
 
@@ -32,7 +32,7 @@ Release jobs import the certificate and its private key from the `release` envir
 
 ## Publication
 
-GitHub immutable releases are enabled for the repository. [The publish module](../../mise-tasks/lib/spaceterm_tasks/release_publish.py) creates a draft, uploads every asset, checks the uploaded inventory and digests against the verified files, and only then publishes. A rerun reuses a draft with the same bytes and fails on different ones. A published release's assets never change and its tag never moves. GitHub artifact attestations record the provenance of the final Core archives, Linux desktop archive and disk image. They authorize no update; the update signatures below do.
+[The publish module](../../mise-tasks/lib/spaceterm_tasks/release_publish.py) creates a draft, uploads every asset, checks the uploaded inventory and digests against the verified files, and only then publishes. A rerun reuses a draft with the same bytes and fails on different ones. A published release's assets never change and its tag never moves. GitHub artifact attestations record the provenance of the final Core archives, Linux desktop archive and disk image. They authorize no update; the update signatures below do.
 
 Every release is published with Latest held. Installed copies, the Homebrew cask and the `latest` download links keep following the previous Latest, while the new release already installs from its own tag. [The promote workflow](../../.github/workflows/promote.yml) later marks the release Latest and updates the `spaceterm` cask in `sadiksaifi/homebrew-tap` to the published disk image's digest. The first release, 0.10.0, uses this hold to keep v0.6.x installs on v0.6.8 for a period before they can see it.
 
