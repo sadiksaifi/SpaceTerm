@@ -83,6 +83,7 @@ class NotarizeTests(unittest.TestCase):
         log_output=None,
         info_status="In Progress",
         returncode=0,
+        submit_returncode=0,
         source_sha="a" * 40,
         plan_sha256="b" * 64,
     ):
@@ -103,10 +104,15 @@ class NotarizeTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired(arguments, kwargs["timeout"])
             if command == "log":
                 output = {
-                    "jobId": SUBMISSION,
+                    # Apple's workflow example uses uppercase UUIDs in downloaded logs.
+                    "jobId": SUBMISSION.upper(),
+                    "logFormatVersion": 1,
+                    "status": "Invalid",
                     "statusCode": 4000,
                     "archiveFilename": "/private/key.p8",
                     "statusSummary": "secret",
+                    "ticketContents": None,
+                    "uploadDate": "2021-04-19T16:56:17Z",
                     "issues": [
                         {
                             "severity": "error",
@@ -118,14 +124,25 @@ class NotarizeTests(unittest.TestCase):
                     ]
                     * 200,
                 }
+            elif command == "submit":
+                # notarytool 1.1.2 without --wait acknowledges upload, with no status.
+                output = {
+                    "id": SUBMISSION,
+                    "message": "Successfully uploaded file",
+                    "path": arguments[3],
+                }
+            elif command == "info":
+                output = {
+                    "id": SUBMISSION,
+                    "createdDate": "2021-04-29T01:38:09.498Z",
+                    "name": "submission.zip",
+                    "status": info_status,
+                }
             else:
                 output = {
                     "id": SUBMISSION,
-                    "status": "In Progress"
-                    if command == "submit"
-                    else info_status
-                    if command == "info"
-                    else status,
+                    "message": "Processing complete",
+                    "status": status,
                 }
             raw = broken if command == "wait" and broken else json.dumps(output).encode()
             if command == "submit" and submit_output is not None:
@@ -133,7 +150,10 @@ class NotarizeTests(unittest.TestCase):
             if command == "log" and log_output is not None:
                 raw = log_output
             kwargs["stdout"].write(raw)
-            return subprocess.CompletedProcess(arguments, returncode if command == "wait" else 0)
+            code = (
+                submit_returncode if command == "submit" else returncode if command == "wait" else 0
+            )
+            return subprocess.CompletedProcess(arguments, code)
 
         def tool(arguments, message, **kwargs):
             self.calls.append(arguments)
@@ -170,6 +190,33 @@ class NotarizeTests(unittest.TestCase):
         self.assertEqual(
             json.loads((self.artifacts / "receipt.json").read_text())["status"], "Accepted"
         )
+
+    def test_upload_acknowledgement_without_status_continues_to_processing_status(self):
+        self.run_notarize(
+            submit_output=json.dumps(
+                {
+                    "id": SUBMISSION,
+                    "message": "Successfully uploaded file",
+                    "path": "/private/submission.zip",
+                }
+            ).encode(),
+            info_status="Accepted",
+        )
+        self.assertEqual(
+            [call[2] for call in self.calls if call[1:2] == ["notarytool"]],
+            ["submit", "info"],
+        )
+        self.assertEqual(self.calls[-1][1:3], ["stapler", "validate"])
+
+    def test_unsuccessful_upload_retains_uuid_and_never_checks_processing_or_staples(self):
+        with self.assertRaisesRegex(TaskError, "tool_failed"):
+            self.run_notarize(submit_returncode=1)
+        receipt = json.loads((self.artifacts / "receipt.json").read_text())
+        self.assertEqual(receipt["id"], SUBMISSION)
+        self.assertEqual(
+            [call[2] for call in self.calls if call[1] == "notarytool"], ["submit", "log"]
+        )
+        self.assertFalse(any(call[1:2] == ["stapler"] for call in self.calls))
 
     def test_a_rejected_submission_fetches_a_bounded_redacted_log_and_staples_nothing(self):
         with self.assertRaisesRegex(TaskError, "not_accepted"):

@@ -235,7 +235,8 @@ def _diagnostic(directory, identifier, failure, notary, environment):
         try:
             code, raw = _tool("log", identifier, notary, environment)
             log = _object(raw)
-            if code or log.get("jobId") != identifier:
+            log_id = log.get("jobId")
+            if code or not isinstance(log_id, str) or log_id.lower() != identifier.lower():
                 raise NotaryError(Failure.MALFORMED)
             # Allowlist typed facts. Apple's messages, filenames, paths, URLs and ticket
             # contents can contain private values and are never copied to the artifact.
@@ -349,12 +350,13 @@ def _submission(path, directory, notary, environment, plan_sha256):
         if identifier is not None:
             receipt["id"] = identifier
             _write_json(receipt_path, receipt)
-        if not _identifier(identifier):
+        if code:
+            raise NotaryError(Failure.TOOL)
+        acknowledgement = _object(raw)
+        if not _identifier(identifier) or acknowledgement.get("id") != identifier:
             raise NotaryError(Failure.MALFORMED)
-        status = _status(code, raw, identifier)
-        _record_status(directory, status)
-        if status not in ("Accepted", "In Progress"):
-            raise NotaryError(Failure.REJECTED)
+        # A no-wait submit acknowledges upload only. Processing status comes from info/wait.
+        _record_status(directory, "uploaded")
     except NotaryError as error:
         _diagnostic(directory, identifier, error.classification, notary, environment)
         raise
