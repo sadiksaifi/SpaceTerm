@@ -23,6 +23,7 @@ concurrency:
 
 env:
   MISE_TASK_RUN_AUTO_INSTALL: 'false'
+  MISE_LOCKED: 'true'
   SPACETERM_RELEASE_PLAN: dist/release-plan.json
   SPACETERM_RELEASE_APPLE_TEAM_ID: ${{ vars.SPACETERM_RELEASE_APPLE_TEAM_ID }}
   SPACETERM_RELEASE_APPLE_IDENTITY: ${{ vars.SPACETERM_RELEASE_APPLE_IDENTITY }}
@@ -49,6 +50,7 @@ jobs:
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: python git-cliff node npm:tagsmith
+          version: 2026.10.4
       - name: Freeze release inputs and local tag
         id: plan
         env:
@@ -177,6 +179,7 @@ jobs:
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: python
+          version: 2026.10.4
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -205,6 +208,7 @@ jobs:
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: python
+          version: 2026.10.4
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -262,6 +266,7 @@ jobs:
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: python
+          version: 2026.10.4
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -312,6 +317,7 @@ jobs:
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: python cargo:cargo-packager github:sparkle-project/Sparkle
+          version: 2026.10.4
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -370,6 +376,9 @@ jobs:
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: python
+          version: 2026.10.4
+      - name: Install package verification dependencies
+        run: mise run release:setup-linux-verification
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -418,6 +427,7 @@ jobs:
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: python
+          version: 2026.10.4
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -457,6 +467,9 @@ jobs:
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: python
+          version: 2026.10.4
+      - name: Install package verification dependencies
+        run: mise run release:setup-linux-verification
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}

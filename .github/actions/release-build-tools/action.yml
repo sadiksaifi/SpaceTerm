@@ -10,6 +10,7 @@ runs:
     - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
       with:
         install_args: ${{ runner.os == 'macOS' && 'python zig github:sparkle-project/Sparkle' || 'python zig cargo:cargo-zigbuild' }}
+        version: 2026.10.4
     - name: Select minimal pinned Rust
       shell: bash
       run: |

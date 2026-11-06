@@ -16,11 +16,10 @@ def notarize(path, notary, environment=None):
     )
     kwargs = {"environment": environment}
     # Local package commands still use the resumable notary module without a workflow plan.
-    plan = release_plan.PLAN
-    if not plan.is_file():
-        if environment is None:
-            return macos_notary.notarize(path, notary)
+    plan_path = os.environ.get("SPACETERM_RELEASE_PLAN")
+    if not plan_path:
         return macos_notary.notarize(path, notary, environment)
+    plan = Path(plan_path)
     release_plan.load()
     directory = DIST / "notarization" / path.name
     if (directory / "receipt.json").is_file():

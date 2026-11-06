@@ -220,7 +220,7 @@ class CoreArchiveTests(unittest.TestCase):
 
         for present in (True, False):
 
-            def notarize(bundle, notary):
+            def notarize(bundle, notary, environment=None):
                 if present:
                     (bundle / "Contents/CodeResources").write_bytes(b"stapled ticket")
 
@@ -321,7 +321,9 @@ class CoreArchiveTests(unittest.TestCase):
                 destination = self.root / identity
                 environment = {"PATH": os.environ["PATH"]}
                 if identity != "spaceterm":
-                    environment["SPACETERM_RELEASE_UPDATE_ED25519_SEED"] = "invalid production credential"
+                    environment["SPACETERM_RELEASE_UPDATE_ED25519_SEED"] = (
+                        "invalid production credential"
+                    )
                 with patch.dict(os.environ, environment, clear=True):
                     signing_seed = (
                         seed

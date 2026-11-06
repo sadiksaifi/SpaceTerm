@@ -140,7 +140,7 @@ def _current(root):
 
 def floor(product, version, root=ROOT, published=published_releases, *, history=None):
     """The Update Floor of `product` for release `version`, built from the tree at `root`."""
-    if history is None and os.environ.get("SPACETERM_RELEASE_PLAN"):
+    if history is None and Path(root) == ROOT and os.environ.get("SPACETERM_RELEASE_PLAN"):
         from spaceterm_tasks.release_plan import load
 
         plan = load(root=root)
@@ -162,7 +162,7 @@ def floor(product, version, root=ROOT, published=published_releases, *, history=
 
 def floors(version, root=ROOT, published=published_releases):
     """Both products' floors for release `version`."""
-    if os.environ.get("SPACETERM_RELEASE_PLAN"):
+    if Path(root) == ROOT and os.environ.get("SPACETERM_RELEASE_PLAN"):
         return {product: floor(product, version, root) for product in PRODUCTS}
     history = releases(version, root, published)
     return {product: floor(product, version, root, history=history) for product in PRODUCTS}

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -10,15 +11,58 @@ from pathlib import Path
 
 from spaceterm_tasks import TaskError, macos_signing, release, release_plan, sparkle
 from spaceterm_tasks.cargo import build_executable
-from spaceterm_tasks.core_package import compile_unsigned, host_target, sign_unsigned
+from spaceterm_tasks.core_package import (
+    compile_unsigned,
+    executable_path,
+    host_target,
+    sign_unsigned,
+)
 from spaceterm_tasks.packaging import (
     DESKTOP_FLOOR,
     DIST,
     RELEASE_FLOOR,
     RELEASE_NOTES,
+    checked,
     packaged_environment,
 )
 from spaceterm_tasks.update_signing import sha256
+
+
+def verify_compiled(executable, target):
+    if target == "aarch64-apple-darwin":
+        if checked(
+            ["lipo", "-archs", str(executable)], "compiled architecture unavailable", text=True
+        ).split() != ["arm64"]:
+            raise TaskError("compiled macOS products require Apple Silicon code")
+        build = checked(
+            ["xcrun", "vtool", "-show-build", str(executable)],
+            "compiled deployment target unavailable",
+            text=True,
+        )
+        if "minos 26.0" not in " ".join(build.split()):
+            raise TaskError("compiled macOS products require deployment target 26.0")
+    else:
+        from spaceterm_tasks.linux_toolchain import MANIFEST, sysroot_path
+        from spaceterm_tasks.package_linux import verify_glibc_baseline
+
+        if b"elf64-x86-64" not in checked(
+            ["objdump", "-f", str(executable)], "compiled architecture unavailable"
+        ):
+            raise TaskError("compiled Linux products require x86_64 code")
+        verify_glibc_baseline(executable, "compiled Linux product")
+        program = checked(["readelf", "-l", str(executable)], "compiled interpreter unavailable")
+        if b"[Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]" not in program:
+            raise TaskError("compiled Linux products require the glibc dynamic loader")
+        dependencies = checked(
+            ["objdump", "-p", str(executable)], "compiled dependencies unavailable"
+        )
+        root = sysroot_path(MANIFEST, Path(os.environ["SPACETERM_LINUX_PACKAGE_SYSROOT"]))
+        allowed = {path.name for path in root.rglob("*.so*") if path.is_file()}
+        if (
+            not set(name.decode() for name in re.findall(rb"\bNEEDED\s+(\S+)", dependencies))
+            <= allowed
+        ):
+            raise TaskError("compiled Linux products require a library outside the pinned sysroot")
 
 
 def compile_products():
@@ -29,6 +73,7 @@ def compile_products():
         tree.mkdir()
         core = compile_unsigned("spaceterm", plan["tag"], destination=tree / "core")
         info = json.loads((core / "build.json").read_bytes())
+        verify_compiled(core / executable_path(target, "spaceterm"), target)
         environment = macos_signing.signing_environment(packaged_environment(plan["tag"]))
         environment.update(
             {
@@ -50,6 +95,7 @@ def compile_products():
             portable_linux=target == "x86_64-unknown-linux-gnu",
             metadata="desktop-build-info.json",
         )
+        verify_compiled(executable, target)
         desktop = tree / "desktop"
         desktop.mkdir()
         shutil.copyfile(executable, desktop / "spaceterm-desktop")
@@ -176,7 +222,10 @@ def write_evidence(plan):
                 )
                 if stream is None:
                     raise TaskError("the Linux desktop lacks a finalized Core archive")
-                actual[core] = hashlib.file_digest(stream, "sha256").hexdigest()
+                digest = hashlib.sha256()
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+                actual[core] = digest.hexdigest()
     if actual != expected:
         raise TaskError("the desktop changed its finalized Core archive bytes")
     (destination / "evidence.json").write_text(
