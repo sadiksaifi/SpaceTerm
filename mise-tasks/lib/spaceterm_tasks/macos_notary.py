@@ -3,8 +3,7 @@
 A release signs with Developer ID and notarizes. A dry run signs ad hoc, which Apple's notary
 service rejects, so it skips notarization with a log line and has no ticket to assess.
 
-The API key reaches notarytool only as a 0600 file in a temporary directory. The cargo-packager
-hook receives that file's path, the key ID and the issuer ID, never the key itself.
+The API key reaches notarytool only as a 0600 file in a temporary directory.
 """
 
 import json
@@ -24,7 +23,6 @@ API_KEY = "APP_STORE_CONNECT_API_KEY"
 KEY_ID = "APP_STORE_CONNECT_KEY_ID"
 ISSUER = "APP_STORE_CONNECT_ISSUER_ID"
 INPUTS = (API_KEY, KEY_ID, ISSUER)
-KEY_FILE = "SPACETERM_NOTARY_KEY_FILE"
 TIMEOUT = "2h"
 
 
@@ -33,17 +31,6 @@ class Notary:
     key_file: str
     key_id: str
     issuer: str
-
-    def environment(self):
-        """The variables `from_environment` reads in the cargo-packager hook."""
-        return {KEY_FILE: self.key_file, KEY_ID: self.key_id, ISSUER: self.issuer}
-
-
-def from_environment(environment):
-    """The hook's notary, or None when the package is not notarized."""
-    if KEY_FILE not in environment:
-        return None
-    return Notary(environment[KEY_FILE], environment[KEY_ID], environment[ISSUER])
 
 
 def required(environment=os.environ):
@@ -96,7 +83,7 @@ def notary(environment=os.environ):
 
 
 def clean_environment(environment):
-    return {key: value for key, value in environment.items() if key not in (*INPUTS, KEY_FILE)}
+    return {key: value for key, value in environment.items() if key not in INPUTS}
 
 
 def notarize(path, notary, environment=os.environ):

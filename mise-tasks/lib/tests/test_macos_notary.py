@@ -57,8 +57,6 @@ class PolicyTests(unittest.TestCase):
             key = Path(notary.key_file)
             self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
             self.assertEqual(key.read_text(), CREDENTIALS[macos_notary.API_KEY])
-            self.assertEqual(macos_notary.from_environment(notary.environment()), notary)
-            self.assertNotIn(macos_notary.API_KEY, notary.environment())
         self.assertFalse(key.exists())
         with macos_notary.notary(signing("-", dry_run=True)) as notary:
             self.assertIsNone(notary)
@@ -117,16 +115,9 @@ class NotarizeTests(unittest.TestCase):
         )
 
 
-class SignAppHookTests(unittest.TestCase):
-    def hook(self, **extra):
+class SignAppTests(unittest.TestCase):
+    def sign(self, release, notary=None):
         calls = []
-        environment = {
-            "CARGO_PACKAGER_FORMAT": "dmg",
-            "SPACETERM_PACKAGER_APP": "/stage/SpaceTerm.app",
-            "SPACETERM_PACKAGER_IDENTITY": NAME,
-            "SPACETERM_PACKAGER_ENTITLEMENTS": "/stage/Entitlements.plist",
-            **extra,
-        }
         with (
             patch.object(package_macos, "checked"),
             patch.object(
@@ -138,16 +129,23 @@ class SignAppHookTests(unittest.TestCase):
                 lambda app, notary, env: calls.append(("notarize", notary)),
             ),
         ):
-            package_macos.sign_app(environment)
+            package_macos.sign_app(
+                Path("/stage/SpaceTerm.app"),
+                NAME,
+                Path("/stage/Entitlements.plist"),
+                team=None,
+                release=release,
+                notary=notary,
+                environment={},
+            )
         return calls
 
     def test_a_release_notarizes_the_app_right_after_signing_it(self):
         notary = macos_notary.Notary("/private/key.p8", "ABCDEF1234", "issuer")
-        calls = self.hook(SPACETERM_PACKAGER_RELEASE="1", **notary.environment())
-        self.assertEqual(calls, ["sign", ("notarize", notary)])
+        self.assertEqual(self.sign(True, notary), ["sign", ("notarize", notary)])
 
     def test_preflight_is_signed_and_never_notarized(self):
-        self.assertEqual(self.hook(), ["sign"])
+        self.assertEqual(self.sign(False), ["sign"])
 
 
 if __name__ == "__main__":
