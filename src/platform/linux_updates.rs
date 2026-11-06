@@ -4,6 +4,8 @@
 //! exchanges the two directories in one rename. The running process keeps its open files, so the
 //! replaced tree stays in the staging directory until the next launch removes it. Relaunch runs
 //! through the application quit policy, then replaces the exited process with the new executable.
+//! A filesystem without that exchange cannot replace the installation in one step, so the update
+//! stops before the download and the install script remains the way to update.
 
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
@@ -181,11 +183,11 @@ impl UpdateAdapter for LinuxUpdates {
             Phase::Ready => {}
             _ => return Err(UpdateError::Installation),
         }
-        if shared.installation.replace().is_err() {
+        if let Err(error) = shared.installation.replace() {
             cycle.reset();
             drop(cycle);
             shared.discard_staging_in_background();
-            shared.fail(UpdateError::Installation);
+            shared.fail(replacement_failure(&error));
             return Ok(());
         }
         cycle.phase = Phase::Installed;
@@ -206,7 +208,7 @@ impl UpdateAdapter for LinuxUpdates {
         shared
             .installation
             .replace()
-            .map_err(|_| UpdateError::Installation)?;
+            .map_err(|error| replacement_failure(&error))?;
         cycle.phase = Phase::Installed;
         Ok(())
     }
@@ -233,6 +235,16 @@ impl UpdateAdapter for LinuxUpdates {
 
     fn save_history(&self, history: &UpdateHistory) {
         self.history.save(history);
+    }
+}
+
+/// A filesystem without exchange support can never replace the installation, so its failure names
+/// the install script remedy instead of offering a retry.
+fn replacement_failure(error: &io::Error) -> UpdateError {
+    if error.kind() == io::ErrorKind::Unsupported {
+        UpdateError::ReadOnly
+    } else {
+        UpdateError::Installation
     }
 }
 
@@ -415,6 +427,9 @@ impl Shared {
         installation
             .create_staging()
             .map_err(|_| UpdateError::Installation)?;
+        installation
+            .confirm_exchange()
+            .map_err(|error| replacement_failure(&error))?;
         let archive = self.fetch_archive(feed, generation)?;
         self.send_current(generation, UpdateEvent::Verifying)?;
         feed.archive.verify(&self.trust, &archive)?;
@@ -499,6 +514,8 @@ struct Installation {
     root: PathBuf,
     staging: PathBuf,
     executable: PathBuf,
+    /// Exchanges two entries of the installation's filesystem in one rename.
+    exchange: fn(&Path, &Path) -> io::Result<()>,
 }
 
 impl Installation {
@@ -518,6 +535,7 @@ impl Installation {
             staging: root.parent()?.join(staging),
             executable: Self::executable_in(root),
             root: root.to_path_buf(),
+            exchange: super::linux_atomic_rename::exchange_paths,
         })
     }
 
@@ -554,8 +572,8 @@ impl Installation {
     }
 
     /// Discards staging no update owns. While another process's update holds the claim, its
-    /// staging stays. Without the installation directory there is nothing to claim, so a tree an
-    /// interrupted replacement could not restore stays in staging too.
+    /// staging stays. Without the installation directory there is nothing to claim, so staging
+    /// stays too.
     fn discard_unclaimed_staging(&self) -> io::Result<()> {
         let _claim = self.claim()?;
         self.discard_staging()
@@ -568,47 +586,29 @@ impl Installation {
         }
     }
 
-    fn replace(&self) -> io::Result<()> {
-        self.replace_with(&SystemRenames)
+    /// Confirms that the filesystem holding the installation exchanges entries in one rename,
+    /// by exchanging two empty directories in the staging directory beside it.
+    fn confirm_exchange(&self) -> io::Result<()> {
+        let (first, second) = (self.staging.join("exchange"), self.staging.join("tree"));
+        for directory in [&first, &second] {
+            fs::DirBuilder::new().mode(0o700).create(directory)?;
+        }
+        let exchanged = (self.exchange)(&first, &second);
+        for directory in [&first, &second] {
+            fs::remove_dir(directory)?;
+        }
+        exchanged
     }
 
-    /// Exchanges the staged tree with the installation in one rename. A filesystem without
-    /// exchange support moves the installation aside first and restores it if the second rename
-    /// fails, so an interrupted replacement leaves the current installation in place.
-    fn replace_with(&self, renames: &dyn Renames) -> io::Result<()> {
-        let staged = self.staged_tree();
-        match renames.exchange(&staged, &self.root) {
-            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                let previous = self.staging.join("previous");
-                renames.rename(&self.root, &previous)?;
-                if let Err(error) = renames.rename(&staged, &self.root) {
-                    renames.rename(&previous, &self.root)?;
-                    return Err(error);
-                }
-            }
-            result => result?,
-        }
+    /// Exchanges the staged tree with the installation in one rename, so an interruption at any
+    /// point leaves a complete installation in place. A filesystem without exchange support
+    /// reports `Unsupported` and keeps the current installation.
+    fn replace(&self) -> io::Result<()> {
+        (self.exchange)(&self.staged_tree(), &self.root)?;
         if let Some(parent) = self.root.parent() {
             let _ = File::open(parent).and_then(|directory| directory.sync_all());
         }
         Ok(())
-    }
-}
-
-trait Renames {
-    fn exchange(&self, first: &Path, second: &Path) -> io::Result<()>;
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
-}
-
-struct SystemRenames;
-
-impl Renames for SystemRenames {
-    fn exchange(&self, first: &Path, second: &Path) -> io::Result<()> {
-        super::linux_atomic_rename::exchange_paths(first, second)
-    }
-
-    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)
     }
 }
 
@@ -857,49 +857,26 @@ mod tests {
         assert!(!installation.staging.exists());
     }
 
-    struct WithoutExchange {
-        fail_install: bool,
-    }
-
-    impl Renames for WithoutExchange {
-        fn exchange(&self, _: &Path, _: &Path) -> io::Result<()> {
-            Err(io::ErrorKind::Unsupported.into())
-        }
-
-        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-            if self.fail_install && from.ends_with("tree") {
-                return Err(io::ErrorKind::PermissionDenied.into());
-            }
-            fs::rename(from, to)
-        }
+    fn without_exchange(_: &Path, _: &Path) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
     }
 
     #[test]
-    fn linux_replace_without_exchange_should_move_the_installation_aside() {
-        let fixture = installed("old");
+    fn linux_replace_without_exchange_should_keep_the_installation() {
+        let mut fixture = installed("old");
+        fixture.installation.exchange = without_exchange;
         let installation = &fixture.installation;
         installation.create_staging().unwrap();
         unpack(&release(b"new"), ROOT, &installation.staged_tree()).unwrap();
-        installation
-            .replace_with(&WithoutExchange {
-                fail_install: false,
-            })
-            .unwrap();
-        assert_eq!(installed_contents(installation), "new");
-    }
-
-    #[test]
-    fn linux_interrupted_replacement_should_restore_the_installation() {
-        let fixture = installed("old");
-        let installation = &fixture.installation;
-        installation.create_staging().unwrap();
-        unpack(&release(b"new"), ROOT, &installation.staged_tree()).unwrap();
-        assert!(
-            installation
-                .replace_with(&WithoutExchange { fail_install: true })
-                .is_err()
+        assert_eq!(
+            installation.replace().unwrap_err().kind(),
+            io::ErrorKind::Unsupported
         );
         assert_eq!(installed_contents(installation), "old");
+        assert_eq!(
+            replacement_failure(&io::ErrorKind::Unsupported.into()),
+            UpdateError::ReadOnly
+        );
     }
 
     /// Serves fixed responses for the feed, its signature, and the archive.
@@ -1017,6 +994,30 @@ mod tests {
         assert_eq!(drained(&receiver), ["Downloading", "Verifying", "Ready"]);
         fixture.installation.replace().unwrap();
         assert_eq!(installed_contents(&fixture.installation), "new");
+    }
+
+    #[test]
+    fn linux_filesystem_without_exchange_should_refuse_the_update_before_downloading() {
+        let mut fixture = installed("old");
+        fixture.installation.exchange = without_exchange;
+        let signer = ReleaseSigner::new(3);
+        let (shared, receiver) =
+            shared(&fixture, served(&signer, "1.1.0", &release(b"new")), signer.trust());
+        let generation = shared
+            .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
+            .unwrap();
+        shared.check(generation);
+        let Phase::Available(feed) = std::mem::take(&mut shared.lock().phase) else {
+            panic!("the signed release should be available");
+        };
+        drained(&receiver);
+        shared.lock().phase = Phase::Downloading;
+        shared.download(&feed, generation);
+        // The failure arrives before any download progress, and the install script is the remedy.
+        assert_eq!(drained(&receiver), ["Failed(ReadOnly)", "Finished"]);
+        assert!(matches!(shared.lock().phase, Phase::Idle));
+        assert!(!fixture.installation.staged_tree().exists());
+        assert_eq!(installed_contents(&fixture.installation), "old");
     }
 
     #[test]
@@ -1318,17 +1319,6 @@ mod tests {
         drop(claim);
         installation.discard_unclaimed_staging().unwrap();
         assert!(!installation.staging.exists());
-    }
-
-    #[test]
-    fn linux_cleanup_should_keep_a_tree_that_rollback_could_not_restore() {
-        let fixture = installed("old");
-        let installation = &fixture.installation;
-        installation.create_staging().unwrap();
-        let previous = installation.staging.join("previous");
-        fs::rename(&installation.root, &previous).unwrap();
-        assert!(installation.discard_unclaimed_staging().is_err());
-        assert!(Installation::executable_in(&previous).is_file());
     }
 
     #[test]
