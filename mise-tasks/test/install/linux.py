@@ -666,6 +666,19 @@ class InstallTests(unittest.TestCase):
         for data in self.retained:
             self.assertEqual(data.read_text(), "user data")
 
+    def test_an_install_path_overlapping_a_retained_data_root_is_refused(self):
+        self.install_dir = self.data_home
+        self.legacy_installation()
+        data = self.desktop_target() / "settings.json"
+        data.write_text("user settings")
+        for arguments in ((), ("--desktop",), ("--uninstall", "--desktop")):
+            with self.subTest(arguments=arguments):
+                result = self.install(*arguments)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("overlaps retained SpaceTerm data", result.stderr)
+                self.assertEqual(data.read_text(), "user settings")
+                self.assertEqual(self.requested(), [])
+
     def test_a_failed_core_retain_restores_the_legacy_launcher(self):
         self.legacy_installation()
         archive, _ = self.core(
