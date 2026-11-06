@@ -1,20 +1,48 @@
 # Distribute tagged releases with signed updates
 
-A `v*` tag publishes one GitHub release. [The release workflow](../../.github/workflows/release.yml) first validates the tagged commit on macOS and Linux. Only after both pass does it build SpaceTerm Core once per target, Apple Silicon macOS and x86_64 Linux, and sign each build once. Each desktop app embeds both Core builds, so a desktop can install SpaceTerm Core on a Machine of either platform. Jobs that hold a signing secret run in the protected `release` environment, which requires a reviewer's approval. [The release module](../../mise-tasks/lib/spaceterm_tasks/release.py) owns the steps and [the feed module](../../mise-tasks/lib/spaceterm_tasks/release_feed.py) the asset names.
+A release starts when someone runs [the release workflow](../../.github/workflows/release.yml) on main with a stable version of at least 0.10.0. No workflow runs on a pull request or a push to main, so the release workflow carries its own validation. It builds SpaceTerm Core once per target, Apple Silicon macOS and x86_64 Linux, and signs each build once. Each desktop app embeds both Core builds, so a desktop can install SpaceTerm Core on a Machine of either platform. [The release module](../../mise-tasks/lib/spaceterm_tasks/release.py) owns the steps and [the feed module](../../mise-tasks/lib/spaceterm_tasks/release_feed.py) the asset names.
+
+## Order
+
+The plan job runs first. It freezes the source commit, version, release notes and both Update Floors, and every later job checks its inputs against that plan. [The plan module](../../mise-tasks/lib/spaceterm_tasks/release_plan.py) owns the plan. Validation then runs at the same time as compilation, because the release is the only place the commit is tested. Compilation holds no private credential. It compiles Core and both desktops from the public identity, Team ID and update trust alone.
+
+Signing, notarization and publication wait for validation. The workflow pushes the annotated tag only after validation passes, and only when it publishes. Jobs that hold a signing secret run in the protected `release` environment, which admits only main.
+
+The workflow runs in one of three modes:
+
+- `unsigned` checks the plan and the release policy's unit tests. It compiles nothing and changes nothing outside the run.
+- `signed` is a rehearsal with the real update trust and the real Developer ID and notary credentials. It submits to Apple and runs every verification, then keeps the final assets as private workflow artifacts. It pushes no tag and publishes nothing. Its assets authenticate as production, so they never become a download.
+- `publish` runs the same jobs as `signed` and then publishes.
+
+## Desktop Core resources
+
+Desktop compilation needs no signed Core archive, so it can run before Core signing. It compiles the exact source commit and snapshot digest, product identity, version, protocol versions, both Update Floors, public update trust and Apple Team ID. Packaging authenticates both finalized native Core packages and signs a release-specific resource manifest with the current update key. The manifest binds those compiled inputs to each target's exact archive digest and raw signature. Both desktops ship the same finalized archive bytes. The macOS app signature seals the manifest after packaging inserts it.
+
+Before a packaged desktop admits an embedded Core for local installation, SSH Setup or an update push, it authenticates the manifest under compiled public trust and checks every compiled build input exactly. It then verifies the selected archive's digest and signature against that manifest. A missing, unsigned, changed or substituted manifest grants no authority. An archive signed by a trusted key but absent from this release's manifest grants no authority. Native Core admission and retained immutable installation verification still apply under ADRs 0040 and 0061. Build-info reports candidate provenance only after this verification succeeds.
+
+[The manifest module](../../mise-tasks/lib/spaceterm_tasks/desktop_manifest.py) owns packaging. [The portable verifier](../../crates/spaceterm-core/src/update/resource_manifest.rs) owns the signed schema. Source Development launches retain their explicit local artifact authority under ADR 0054 and have no Release authority.
 
 ## macOS code signing
 
-macOS releases are signed with a Developer ID Application certificate under the hardened runtime, notarized with an App Store Connect API key, and stapled. The SpaceTerm Core bundle, the app and the disk image are each notarized. The app is stapled before the disk image is built, so an app copied out of the image carries its own ticket. Gatekeeper therefore opens a downloaded release without an exception.
+macOS releases are signed with a Developer ID Application certificate under the hardened runtime, notarized with an App Store Connect API key, and stapled. The SpaceTerm Core bundle, the app and the disk image are each notarized, in that order, because each one contains the stapled bytes of the one before. The app is stapled before the disk image is built, so an app copied out of the image carries its own ticket. Gatekeeper therefore opens a downloaded release without an exception, and no SpaceTerm instruction removes a quarantine attribute.
 
 The designated requirement names Apple's Developer ID anchor and the release Team ID, not one certificate. Every later version from that team satisfies it, including one signed by a renewed certificate, so System Permissions, Login Items and Keychain grants survive updates. [ADR 0061](0061-own-system-permissions-in-the-server-package.md) applies this to the SpaceTerm Core bundle, and [the signing module](../../mise-tasks/lib/spaceterm_tasks/macos_codesign.py) owns the requirement. The release workflow supplies the Team ID and the certificate's name as variables. The Release SpaceTerm Core compiles the Team ID in and accepts a retained runtime only if it satisfies the same requirement.
 
-Release jobs import the certificate and its private key from the `release` environment's secrets into a temporary Keychain and delete it afterward. [The notarization module](../../mise-tasks/lib/spaceterm_tasks/macos_notary.py) writes the API key to a private temporary file for `notarytool` only. Encrypted credentials in the repository are personal recovery backups and do not participate in releases.
+Release jobs import the certificate and its private key from the `release` environment's secrets into a temporary Keychain and delete it afterward. [The notarization module](../../mise-tasks/lib/spaceterm_tasks/macos_notary.py) writes the API key to a private temporary file for `notarytool` only. It records each submission before waiting, so a rerun resumes the wait on the same submitted bytes instead of submitting again. Encrypted credentials in the repository are personal recovery backups and do not participate in releases.
+
+## Publication
+
+GitHub immutable releases are enabled for the repository. [The publish module](../../mise-tasks/lib/spaceterm_tasks/release_publish.py) creates a draft, uploads every asset, checks the uploaded inventory and digests against the verified files, and only then publishes. A rerun reuses a draft with the same bytes and fails on different ones. A published release's assets never change and its tag never moves. GitHub artifact attestations record the provenance of the final Core archives, Linux desktop archive and disk image. They authorize no update; the update signatures below do.
+
+Every release is published with Latest held. Installed copies, the Homebrew cask and the `latest` download links keep following the previous Latest, while the new release already installs from its own tag. [The promote workflow](../../.github/workflows/promote.yml) later marks the release Latest and updates the `spaceterm` cask in `sadiksaifi/homebrew-tap` to the published disk image's digest. The first release, 0.10.0, uses this hold to keep v0.6.x installs on v0.6.8 for a period before they can see it.
+
+## Distribution channels
+
+The macOS desktop ships as the notarized disk image and through the Homebrew cask `sadiksaifi/tap/spaceterm`. Sparkle updates it after that. The Linux desktop and SpaceTerm Core ship as archives and through the Linux installer under [ADR 0017](0017-distribute-linux-releases-as-user-installed-archives-with-signed-self-updates.md). There is no macOS installer script. In-app updates cover both platforms.
 
 ## Update signatures
 
-Ed25519 signatures authenticate every update on macOS and Linux: each Core archive, the Linux desktop archive, each update feed and the Sparkle appcast. [The update trust](../../packaging/update-trust.json) holds two public keys. The `current` key's private key is a `release` secret and signs every release. The `backup` key's private key stays offline and never enters GitHub. SpaceTerm Core, the Linux desktop and [install.sh](../../packaging/install.sh) accept a signature under either key. A release signed with the backup key therefore replaces a lost or exposed current key for them without breaking installed copies. Sparkle trusts one key, so the macOS desktop's `SUPublicEDKey` pins only `current`. A macOS desktop recovers in one of two ways. While the old current key is still held, a release signed with it ships the new `SUPublicEDKey`. After that key is lost, the person reinstalls the desktop with install.sh.
-
-install.sh verifies each download before it runs or installs it: on macOS against the Developer ID requirement, on Linux against the update keys. The release fills in its Team ID when it publishes the script. install.sh and in-app updates are the only distribution channels.
+Ed25519 signatures authenticate every update on macOS and Linux: each Core archive, the Linux desktop archive, each update feed and the Sparkle appcast. [The update trust](../../packaging/update-trust.json) holds two public keys. The `current` key's private key is a `release` secret and signs every release. The `backup` key's private key stays offline and never enters GitHub. SpaceTerm Core, the Linux desktop and [install.sh](../../packaging/install.sh) accept a signature under either key. A release signed with the backup key therefore replaces a lost or exposed current key for them without breaking installed copies. Sparkle trusts one key, so the macOS desktop's `SUPublicEDKey` pins only `current`. A macOS desktop recovers in one of two ways. While the old current key is still held, a release signed with it ships the new `SUPublicEDKey`. After that key is lost, the person reinstalls the desktop from the disk image or the Homebrew cask.
 
 ## Desktop Core resources
 
@@ -26,6 +54,6 @@ Before a packaged desktop admits an embedded Core for local installation, SSH Se
 
 ## Dry runs
 
-Pull requests that touch the release path, and `mise run release:dry-run` on a developer's computer, run the same steps as a dry run. A dry run signs with a generated update key that nothing else trusts, signs code ad hoc, skips notarization with a log line, and publishes nothing. Its install.sh is marked as a dry run, accepts ad hoc signatures, and states this when it runs.
+`mise run release:dry-run` runs on a developer's computer the release steps that host can run. [The dry-run module](../../mise-tasks/lib/spaceterm_tasks/release_dry_run.py) works in a disposable checkout. It generates one update key for the run and commits its public half there as the update trust, before anything compiles. It signs code ad hoc, skips notarization with a log line, and publishes nothing. Its artifacts never verify under production trust. Its install.sh is marked as a dry run, trusts only the generated key, and states this when it runs.
 
 Update admission fails open, so offline terminal access remains available.
