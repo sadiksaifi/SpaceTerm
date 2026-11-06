@@ -25,6 +25,8 @@ zig = "0.16.0"
 "cargo:cargo-zigbuild" = "0.24.0"
 "npm:skills" = "1.7.0"
 "npm:tagsmith" = "1.2.0"
+# Rasterizes the brand assets; see mise-tasks/brand.py.
+"github:linebender/resvg" = { version = "0.49.0", os = ["macos"] }
 # The signed updater framework and its signing tools.
 "github:sparkle-project/Sparkle" = { version = "2.10.0", asset_pattern = "Sparkle-2.10.0.tar.xz", os = ["macos"] }
 
@@ -195,6 +197,7 @@ run = [
   { task = "lint:rust" },
   { task = "lint:python" },
   { task = "lint:shell" },
+  { task = "lint:brand" },
   { task = "lint:diff" },
 ]
 
@@ -223,6 +226,10 @@ run = "shellcheck packaging/install.sh"
 [tasks."lint:plist:macos"]
 description = "Check the application identity property lists"
 run = "plutil -lint packaging/macos/core/Info.plist packaging/macos/core/Entitlements.plist packaging/macos/development/Info.plist packaging/macos/preflight/Info.plist packaging/macos/preflight/Entitlements.plist packaging/macos/spaceterm/Info.plist packaging/macos/spaceterm/Entitlements.plist"
+
+[tasks."lint:brand"]
+description = "Check the committed brand files against their sources"
+run = [{ task = "brand", args = ["--check"] }]
 
 [tasks."lint:diff"]
 description = "Check the diff for whitespace errors"
