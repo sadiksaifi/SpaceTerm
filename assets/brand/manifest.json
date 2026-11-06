@@ -1,7 +1,7 @@
 {
   "sources": {
     "assets/brand/apple/SpaceTerm.icon/icon.json": "c7c811ac1f79715e4525e1d5a5cf4b14790a625e00600be36ae3ae6a6c612b8a",
-    "mise-tasks/lib/spaceterm_tasks/brand.py": "1cd6ae8b5a63b49755e357830a80b356d5a1008121d92cfcd0fd5825a1c39b26",
+    "mise-tasks/lib/spaceterm_tasks/brand.py": "757a370cd1268355b3911813a52c7c62465bf9ff688f19cb60ac1e0a291712ed",
     "assets/fonts/inter/Inter-SemiBold.otf": "029868c162537553aa637ac5aed54644269146ef71f573804ccea023bdcb1a87",
     "assets/fonts/inter/Inter-Regular.otf": "6b4a361c5380bb30eb58e004bfbe65abc033c6c7a7e35df414748b2182db4189"
   },
@@ -60,7 +60,7 @@
     "macos/appearances/Default.png": "8da17c91c99d23358367456445e90e9f9757417307ca92c036851adaba27d022",
     "macos/appearances/TintedDark.png": "4c98c3e4ae6b749d8c9362e2bd1c4b5c0cf1fa2f38958190fe355faee9fe7dc8",
     "macos/appearances/TintedLight.png": "8598e0fc52032d2b7afadbdfa9b5fba1e4dfa506790922fb49166aaea3b2cdca",
-    "macos/dmg/background.tiff": "8b5edddbc68f35f9e0d61048cb5e91a3545bfeafab9f7dee7486ba33fc250afd",
+    "macos/dmg/background.tiff": "db7cb94af5ea033a6fbdce1a3ba716e413e459f0e1cb37d5aac4de92072d443c",
     "macos/menu-bar/SpaceTermAttentionTemplate.svg": "158449cd3d6e650fc4b5561065f03bcb9ba34adb9471f2f84480aabef0e40eeb",
     "macos/menu-bar/SpaceTermTemplate.svg": "24e7eb4abfe24948796f49787e8343b100e08fa3cca8af67bd202d987ffdaaec",
     "tvos/app-icon-layers-400x240/Back.png": "48dd3cc47d90ad73ceb52e4ba307e290e4abe3c0c7073775e21c8378ded98350",

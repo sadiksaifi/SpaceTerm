@@ -480,23 +480,29 @@ def plated(palette, width, height, mark_share):
 # Applications link. Packaging lays the window out with these, so the art lines up with the icons.
 DMG_WINDOW = (600, 400)
 DMG_ICON_SIZE = 128
-DMG_APP = (180, 170)
-DMG_APPLICATIONS = (480, 170)
+DMG_APP = (150, 170)
+DMG_APPLICATIONS = (450, 170)
+# Each orbit encloses its icon and the label Finder draws below it, inside the window.
+DMG_ORBIT_RADIUS = 104
+DMG_ORBIT_DROP = 16
+DMG_ARROW_LENGTH = 56
 
 
 def dmg_background(palette):
-    """Faint orbits around the app's position and an arrow toward Applications."""
+    """One faint orbit around each icon and its label, and an arrow toward Applications."""
     (width, height), app, applications = DMG_WINDOW, DMG_APP, DMG_APPLICATIONS
+    # Finder draws the label below the icon, so each orbit's center sits below the icon's.
     rings = "".join(
-        f'<circle cx="{app[0]}" cy="{app[1]}" r="{radius}" fill="none" '
-        f'stroke="{palette.orbits.bottom}" stroke-width="{ORBIT_STROKE * 1.6}" opacity="0.16"/>'
-        for radius in (118, 186)
+        f'<circle cx="{x}" cy="{y + DMG_ORBIT_DROP}" r="{DMG_ORBIT_RADIUS}" fill="none" '
+        f'stroke="{palette.orbits.bottom}" stroke-width="{ORBIT_STROKE * 1.2}" opacity="0.16"/>'
+        for x, y in (app, applications)
     )
     middle = (app[0] + applications[0]) / 2
+    half = DMG_ARROW_LENGTH / 2
     arrow = (
-        f'<path d="M{middle - 40} {app[1]}h76m-22-22l22 22l-22 22" fill="none" '
-        f'stroke="{palette.orbits.bottom}" stroke-width="8" stroke-linecap="round" '
-        'stroke-linejoin="round"/>'
+        f'<path d="M{middle - half} {app[1]}h{DMG_ARROW_LENGTH}m-18-18l18 18l-18 18" '
+        f'fill="none" stroke="{palette.orbits.bottom}" stroke-width="7" '
+        'stroke-linecap="round" stroke-linejoin="round"/>'
     )
     return svg(
         width,
