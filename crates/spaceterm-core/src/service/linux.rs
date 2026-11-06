@@ -21,7 +21,7 @@ impl UserService {
             .ok_or(CoreError::StorageUnavailable)?;
         Ok(Self {
             directory: home.join(".config/systemd/user"),
-            name: format!("io.github.sadiksaifi.{identity}.core.service"),
+            name: format!("com.peblon.{identity}.core.service"),
             identity: identity.into(),
             // SAFETY: geteuid has no preconditions; Paths rejects root and mismatched accounts.
             uid: unsafe { libc::geteuid() },
@@ -60,10 +60,7 @@ impl UserService {
     }
     /// The recovery entry's unit name, beside the server's.
     fn recovery_name(&self) -> String {
-        format!(
-            "io.github.sadiksaifi.{}.core-recovery.service",
-            self.identity
-        )
+        format!("com.peblon.{}.core-recovery.service", self.identity)
     }
     /// A oneshot unit that runs `runtime`'s recovery helper at the next start of the user
     /// manager. The helper may wait for a readiness deadline and a return, so no start timeout
@@ -500,10 +497,7 @@ mod tests {
             runtime: "/tmp/spaceterm-preflight-core-1000".into(),
         };
         let service = UserService::new(&paths, "spaceterm-preflight").unwrap();
-        assert_eq!(
-            service.name,
-            "io.github.sadiksaifi.spaceterm-preflight.core.service"
-        );
+        assert_eq!(service.name, "com.peblon.spaceterm-preflight.core.service");
         assert_eq!(
             service.directory,
             Path::new("/home/owner/.config/systemd/user")

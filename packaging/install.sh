@@ -37,9 +37,9 @@ readonly RELEASES="https://github.com/sadiksaifi/SpaceTerm/releases"
 readonly MINIMUM_MACOS_MAJOR=26
 readonly MINIMUM_GLIBC_MAJOR=2
 readonly MINIMUM_GLIBC_MINOR=35
-readonly CORE_IDENTIFIER=io.github.sadiksaifi.spaceterm.core
+readonly CORE_IDENTIFIER=com.peblon.spaceterm.core
 # The desktop app's macOS bundle identifier and Linux application ID.
-readonly DESKTOP_ID=io.github.sadiksaifi.spaceterm
+readonly DESKTOP_ID=com.peblon.spaceterm
 readonly PROFILE_COMMENT="# Added by the SpaceTerm installer"
 
 work=""

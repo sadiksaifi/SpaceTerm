@@ -71,7 +71,7 @@ impl ApplicationIdentity {
             display_name,
             version_label,
             directory_name: "spaceterm",
-            application_id: "io.github.sadiksaifi.spaceterm",
+            application_id: "com.peblon.spaceterm",
             update_source: UpdateSource::SignedFeed,
         }
     }
@@ -82,7 +82,7 @@ impl ApplicationIdentity {
             display_name,
             version_label,
             directory_name: "spaceterm-preflight",
-            application_id: "io.github.sadiksaifi.spaceterm-preflight",
+            application_id: "com.peblon.spaceterm-preflight",
             update_source: UpdateSource::Unavailable,
         }
     }
@@ -93,7 +93,7 @@ impl ApplicationIdentity {
             display_name,
             version_label,
             directory_name: "spaceterm-development",
-            application_id: "io.github.sadiksaifi.spaceterm-development",
+            application_id: "com.peblon.spaceterm-development",
             update_source: UpdateSource::Simulation,
         }
     }
@@ -228,17 +228,17 @@ mod tests {
             (
                 ApplicationIdentity::production(),
                 PRODUCTION_INFO_PLIST,
-                "io.github.sadiksaifi.spaceterm",
+                "com.peblon.spaceterm",
             ),
             (
                 ApplicationIdentity::preflight(),
                 PREFLIGHT_INFO_PLIST,
-                "io.github.sadiksaifi.spaceterm-preflight",
+                "com.peblon.spaceterm-preflight",
             ),
             (
                 ApplicationIdentity::development(),
                 include_str!("../packaging/macos/development/Info.plist"),
-                "io.github.sadiksaifi.spaceterm-development",
+                "com.peblon.spaceterm-development",
             ),
         ];
 

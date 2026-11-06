@@ -133,7 +133,7 @@ RELEASE_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
 
 
 def core_identifier(identity):
-    return f"io.github.sadiksaifi.{identity}.core"
+    return f"com.peblon.{identity}.core"
 
 
 def bundle_directory(identity):

@@ -103,7 +103,7 @@ pub fn bundle_name(identity: &str) -> Option<&'static str> {
 
 /// The bundle identifier and code signing identifier of an identity's SpaceTerm Core package.
 pub fn bundle_identifier(identity: &str) -> String {
-    format!("io.github.sadiksaifi.{identity}.core")
+    format!("com.peblon.{identity}.core")
 }
 
 #[cfg(test)]

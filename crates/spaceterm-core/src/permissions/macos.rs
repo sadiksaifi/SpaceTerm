@@ -552,7 +552,7 @@ mod tests {
         std::mem::take(&mut *scripted.effects.lock().unwrap())
     }
 
-    const BUNDLE: &str = "io.github.sadiksaifi.spaceterm-preflight.core";
+    const BUNDLE: &str = "com.peblon.spaceterm-preflight.core";
     const OWN_BUNDLE: &str = "/installations/aa/SpaceTerm Core Preflight.app";
     const REGISTER: &str = "register /installations/aa/SpaceTerm Core Preflight.app";
 

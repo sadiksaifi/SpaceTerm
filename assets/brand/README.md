@@ -33,7 +33,7 @@ Icon Composer does not build visionOS or tvOS icons, so generation draws their l
 
 Outside Apple platforms the mark sits on a tile drawn the way GNOME and Flathub ask: a rounded square on Flathub's 103 of 128 grid, a flat face, a darker profile along the bottom, and no baked shadows or glows. KDE, Xfce and the rest read the same files.
 
-- `linux/hicolor/`: PNGs from 16 to 512 px, the scalable SVG, and the symbolic SVG for small sizes and the status area, named for the app ID `io.github.sadiksaifi.spaceterm`.
+- `linux/hicolor/`: PNGs from 16 to 512 px, the scalable SVG, and the symbolic SVG for small sizes and the status area, named for the app ID `com.peblon.spaceterm`.
 - `windows/`: `SpaceTerm.ico` and the MSIX logos.
 - `android/`: the adaptive launcher icon with its themed monochrome layer, icons for older launchers, and the Google Play icon.
 - `web/`: a favicon that follows the color scheme, `favicon.ico`, the Apple touch icon, and web app icons including a maskable one.

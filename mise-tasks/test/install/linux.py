@@ -27,7 +27,7 @@ from tests.installer_fixture import (
     run_with_tty,
 )
 
-APPLICATION_ID = "io.github.sadiksaifi.spaceterm"
+APPLICATION_ID = "com.peblon.spaceterm"
 PLATFORM = "linux-x86_64"
 # A native executable keeps its own path in /proc/PID/exe, which the installer matches. It
 # answers --build-info as the desktop does, so the installer can read the installed version.

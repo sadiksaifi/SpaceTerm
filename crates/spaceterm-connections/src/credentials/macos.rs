@@ -177,7 +177,7 @@ impl Drop for QuietGuard {
 }
 
 fn service(identity: &str) -> String {
-    format!("io.github.sadiksaifi.{identity}.direct-network")
+    format!("com.peblon.{identity}.direct-network")
 }
 
 fn classify(status: i32) -> Result<(), CredentialError> {

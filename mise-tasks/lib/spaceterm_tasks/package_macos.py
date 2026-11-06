@@ -121,7 +121,7 @@ def package_bundle(release_tag=None, notes=None):
     environment.update(
         prepare_desktop_artifact(
             STAGE / "core-artifact",
-            template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
+            template["CFBundleIdentifier"].removeprefix("com.peblon."),
             release_tag,
             catalog_destination=STAGE / "core-artifacts",
         )
@@ -294,7 +294,7 @@ def verify_bundle(app, name, release_tag, label):
 
     verify_desktop_artifact(
         resources / "core-artifact",
-        template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
+        template["CFBundleIdentifier"].removeprefix("com.peblon."),
         release_tag,
         executable=executable,
     )
@@ -302,7 +302,7 @@ def verify_bundle(app, name, release_tag, label):
 
     verify_catalog(
         resources / "core-artifacts",
-        template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
+        template["CFBundleIdentifier"].removeprefix("com.peblon."),
         require_all=bool(release_tag),
     )
 

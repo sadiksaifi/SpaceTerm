@@ -142,7 +142,7 @@ class InstallTests(unittest.TestCase):
             tree / "SpaceTerm Core.app",
             "core",
             "spaceterm",
-            "io.github.sadiksaifi.spaceterm.core",
+            "com.peblon.spaceterm.core",
             sign=sign,
         )
         if tamper:
@@ -166,7 +166,7 @@ class InstallTests(unittest.TestCase):
             source / "SpaceTerm.app",
             "desktop",
             "SpaceTerm",
-            "io.github.sadiksaifi.spaceterm",
+            "com.peblon.spaceterm",
             version,
             sign,
         )
@@ -196,7 +196,7 @@ class InstallTests(unittest.TestCase):
             self.applications / "SpaceTerm.app",
             "desktop",
             "SpaceTerm",
-            "io.github.sadiksaifi.spaceterm",
+            "com.peblon.spaceterm",
             version,
         )
 
@@ -351,7 +351,7 @@ with open({str(calls)!r}, "a") as log:
                         "--verify",
                         "--deep",
                         "--strict",
-                        "--test-requirement=" + requirement("io.github.sadiksaifi.spaceterm.core"),
+                        "--test-requirement=" + requirement("com.peblon.spaceterm.core"),
                     ],
                     "SpaceTerm Core.app",
                 ),
@@ -360,7 +360,7 @@ with open({str(calls)!r}, "a") as log:
                         "--verify",
                         "--deep",
                         "--strict",
-                        "--test-requirement=" + requirement("io.github.sadiksaifi.spaceterm"),
+                        "--test-requirement=" + requirement("com.peblon.spaceterm"),
                     ],
                     "SpaceTerm.app",
                 ),

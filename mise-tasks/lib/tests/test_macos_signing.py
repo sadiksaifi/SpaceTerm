@@ -154,9 +154,9 @@ class IdentityTests(unittest.TestCase):
     def test_team_requirement_is_the_developer_id_requirement(self):
         self.assertEqual(
             macos_codesign.canonical_requirement(
-                macos_codesign.designated_requirement("io.github.sadiksaifi.spaceterm", TEAM)
+                macos_codesign.designated_requirement("com.peblon.spaceterm", TEAM)
             ),
-            'designated => identifier "io.github.sadiksaifi.spaceterm" and anchor apple generic'
+            'designated => identifier "com.peblon.spaceterm" and anchor apple generic'
             " and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */"
             " and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */"
             f" and certificate leaf[subject.OU] = {TEAM}",
@@ -169,13 +169,13 @@ class AdhocSigningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             executable = Path(temporary) / "core"
             compile_executable(executable)
-            identifier = "io.github.sadiksaifi.spaceterm-preflight.core"
+            identifier = "com.peblon.spaceterm-preflight.core"
             macos_codesign.sign_core(executable, "-", identifier)
             macos_codesign.verify(executable, identifier, CORE_ENTITLEMENTS, label="core")
             # A dry run signs ad hoc and still compiles the team's requirement.
             macos_codesign.verify(executable, identifier, CORE_ENTITLEMENTS, team=TEAM)
             for arguments, keywords in (
-                (("io.github.sadiksaifi.spaceterm.core", CORE_ENTITLEMENTS), {}),
+                (("com.peblon.spaceterm.core", CORE_ENTITLEMENTS), {}),
                 ((identifier, {}), {}),
                 ((identifier, CORE_ENTITLEMENTS), {"team": TEAM, "identity": NAME}),
             ):
@@ -199,7 +199,7 @@ class AdhocSigningTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            identifier = "io.github.sadiksaifi.spaceterm.signing-test"
+            identifier = "com.peblon.spaceterm.signing-test"
             app = fixture_app(root, identifier)
             frameworks = app / "Contents/Frameworks"
             frameworks.mkdir()
@@ -266,7 +266,7 @@ class ReleaseSigningTests(unittest.TestCase):
         clean = signing_environment(environment)
         self.assertNotIn("MACOS_SIGNING_CERTIFICATE_P12", clean)
         self.assertNotIn("MACOS_SIGNING_CERTIFICATE_PASSWORD", clean)
-        identifier = "io.github.sadiksaifi.spaceterm.signing-test"
+        identifier = "com.peblon.spaceterm.signing-test"
         expected = macos_codesign.canonical_requirement(
             macos_codesign.designated_requirement(identifier, TEAM)
         )

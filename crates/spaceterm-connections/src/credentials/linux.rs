@@ -28,7 +28,7 @@ pub(super) struct SecretService {
 impl SecretService {
     pub(super) fn new(identity: &str) -> Self {
         Self {
-            service: format!("io.github.sadiksaifi.{identity}.direct-network"),
+            service: format!("com.peblon.{identity}.direct-network"),
         }
     }
 

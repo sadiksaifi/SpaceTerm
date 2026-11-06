@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=SpaceTerm
+Name=SpaceTerm Preflight
 Comment=Terminal multiplexer
-Exec=spaceterm-desktop %u
+Exec=spaceterm-preflight-desktop %u
 MimeType=x-scheme-handler/spaceterm;
-Icon=io.github.sadiksaifi.spaceterm
+Icon=com.peblon.spaceterm-preflight
 Terminal=false
 StartupNotify=true
-StartupWMClass=io.github.sadiksaifi.spaceterm
+StartupWMClass=com.peblon.spaceterm-preflight
 Categories=System;TerminalEmulator;

@@ -269,12 +269,12 @@ int main(int argc, char **argv) {{
         brand = ROOT / BRAND_HICOLOR
         self.assertEqual(
             icon.read_bytes(),
-            (brand / "scalable/apps/io.github.sadiksaifi.spaceterm.svg").read_bytes(),
+            (brand / "scalable/apps/com.peblon.spaceterm.svg").read_bytes(),
         )
         symbolic = icon.parent.parent.parent / "symbolic/apps" / (APPLICATION_ID + "-symbolic.svg")
         self.assertEqual(
             symbolic.read_bytes(),
-            (brand / "symbolic/apps/io.github.sadiksaifi.spaceterm-symbolic.svg").read_bytes(),
+            (brand / "symbolic/apps/com.peblon.spaceterm-symbolic.svg").read_bytes(),
         )
         parsed = subprocess.run(
             ["desktop-file-validate", str(entry)],

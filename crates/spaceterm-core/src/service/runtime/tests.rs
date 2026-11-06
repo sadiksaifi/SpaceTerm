@@ -1670,7 +1670,7 @@ fn verification_survives_a_truncated_archive_after_authentication() {
 }
 
 #[cfg(target_os = "macos")]
-const RELEASE_REQUIREMENT: &str = "identifier \"io.github.sadiksaifi.spaceterm.core\" and anchor \
+const RELEASE_REQUIREMENT: &str = "identifier \"com.peblon.spaceterm.core\" and anchor \
     apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate \
     leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = \"ABCDE12345\"";
 
@@ -1684,9 +1684,7 @@ fn release_requirement_pins_the_identifier_developer_id_and_build_time_team() {
     for identity in ["spaceterm-preflight", "spaceterm-development"] {
         assert_eq!(
             native_requirement(identity, Some("ABCDE12345")),
-            Some(format!(
-                "identifier \"io.github.sadiksaifi.{identity}.core\""
-            ))
+            Some(format!("identifier \"com.peblon.{identity}.core\""))
         );
     }
 }
@@ -1743,11 +1741,7 @@ fn release_native_verification_rejects_an_adhoc_bundle_with_the_release_identifi
     let release = adhoc_package("spaceterm");
     let bundle = release.join(Layout::host("spaceterm").unwrap().signed());
     // The bundle is valid and carries the Release identifier, so only the Team ID part rejects it.
-    verify_signature(
-        &bundle,
-        "identifier \"io.github.sadiksaifi.spaceterm.core\"",
-    )
-    .unwrap();
+    verify_signature(&bundle, "identifier \"com.peblon.spaceterm.core\"").unwrap();
     assert!(matches!(
         verify_signature(&bundle, RELEASE_REQUIREMENT),
         Err(CoreError::RuntimeUnavailable)

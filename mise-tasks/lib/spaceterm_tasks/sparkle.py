@@ -5,7 +5,7 @@ from pathlib import Path
 
 from spaceterm_tasks import TaskError
 
-ACCOUNT = "io.github.sadiksaifi.spaceterm"
+ACCOUNT = "com.peblon.spaceterm"
 
 
 def directory():
