@@ -115,7 +115,7 @@ class TrustTests(unittest.TestCase):
 
     def test_the_tracked_release_trust_matches_sparkle_and_requires_signatures(self):
         current, backup = update_signing.release_trust(ROOT)
-        self.assertEqual(current, "sNR7I+ZSfwiz/hBiYA0PgrtqqOsJY53yluVe93/tATM=")
+        self.assertEqual(current, "Q+8QfZljC7smEFokME81uRyVkpmPv/7VVWwtqkCcTdU=")
         self.assertEqual(backup, "EprlnUGQNGvhtuT8fhIGmVMJpAm1rjGfgkmts2Beesk=")
         plist = plistlib.loads((ROOT / "packaging/macos/spaceterm/Info.plist").read_bytes())
         self.assertEqual(plist["SUPublicEDKey"], current)

@@ -7,7 +7,8 @@
 //! 1. A root at the current generation is left alone.
 //! 2. A root between `oldest` and `current` is copied to `migration-backup/` with its generation,
 //!    migrated in memory, parsed with every strict reader, written file by file, and marked with
-//!    the new generation last. A crash before that last write restarts from the backup.
+//!    the new generation last. Its artifacts keep their bytes. A crash before that last write
+//!    restarts from the backup.
 //! 3. A root newer than `current` is restored from the backup when an activation returned to
 //!    this build and the backup holds this build's generation. Otherwise it is refused and
 //!    never overwritten.
@@ -167,11 +168,13 @@ pub enum Step {
     Root(fn(&mut Migration<'_>) -> Result<(), Unmigratable>),
 }
 
-/// A retained non-JSON artifact included in reset, without a reader for its old format.
+/// A retained non-JSON artifact included in reset, without a reader for its old format. Steps
+/// never see it.
 pub struct ArtifactRule {
     pub matches: fn(&str) -> bool,
     pub kind: DataKind,
-    /// Whether the artifact may remain in a root already at the current generation.
+    /// Whether the artifact may remain at the current generation: in a root already there, and
+    /// unchanged through a migration to it. Otherwise its root resets.
     pub current: bool,
 }
 
@@ -640,6 +643,12 @@ fn migrate(
     let before = members(registry, store, Area::Root)?;
     let mut files = BTreeMap::new();
     for path in &before {
+        if let Some(artifact) = registry.artifact(path) {
+            if artifact.current {
+                continue;
+            }
+            return reset_rebuildable(registry, store, from, ResetReason::Invalid);
+        }
         let bytes = store.read(Area::Root, path)?.unwrap_or_default();
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
             return reset_rebuildable(registry, store, from, ResetReason::Invalid);
@@ -689,10 +698,9 @@ fn migrate(
             let bytes = serde_json::to_vec(value).map_err(|_| StoreError::Unavailable)?;
             store.write(Area::Root, path, &bytes)?;
         }
-        for path in before
-            .iter()
-            .filter(|path| !migration.files.contains_key(*path))
-        {
+        for path in before.iter().filter(|path| {
+            registry.artifact(path).is_none() && !migration.files.contains_key(*path)
+        }) {
             store.remove(Area::Root, path)?;
         }
         if !migration.retired.is_empty() {
