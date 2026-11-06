@@ -1,8 +1,9 @@
 """Ed25519 update signatures and the release trust that verifies them.
 
 `packaging/update-trust.json` holds the two public keys every Release reader trusts: `current`,
-whose private key `SPACETERM_RELEASE_UPDATE_ED25519_SEED` holds, and `backup`, whose private key stays offline. A
-signature is valid under either key. Every signature is 64 raw bytes over a file's exact bytes.
+whose private key `SPACETERM_RELEASE_UPDATE_ED25519_SEED` holds, and `backup`, whose private key
+stays encrypted in 1Password and never enters GitHub or CI. A signature is valid under either key.
+Every signature is 64 raw bytes over a file's exact bytes.
 
 A release dry run has no access to the release key. It signs with a generated key and trusts
 only that key, so nothing it signs verifies under the release trust.
