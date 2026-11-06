@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo/spaceterm-icon-dark.svg">
+  <img src="assets/brand/logo/spaceterm-icon.svg" width="128" height="128" alt="">
+</picture>
+
 # SpaceTerm
 
 A native desktop terminal multiplexer for macOS and Linux, coming soon for Windows.
