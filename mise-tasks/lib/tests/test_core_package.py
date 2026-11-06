@@ -128,6 +128,31 @@ class CoreArchiveTests(unittest.TestCase):
                             with self.assertRaisesRegex(TaskError, "supported layout"):
                                 core_package.verify(archive, signature, info, native=False)
 
+    def test_static_native_verification_never_executes_the_transferred_core(self):
+        tree = self.root / "core"
+        (tree / "bin").mkdir(parents=True)
+        (tree / "bin/spaceterm").write_bytes(b"transferred executable")
+        (tree / "build.json").write_text(json.dumps(self.info))
+        populate(ROOT, tree, self.info)
+
+        def inspect(arguments, message, **kwargs):
+            if arguments[:2] == ["objdump", "-f"]:
+                return b"elf64-x86-64"
+            return "" if kwargs.get("text") else b""
+
+        def process(arguments, **kwargs):
+            if arguments[0] != "objdump":
+                raise AssertionError("transferred product executed")
+            return subprocess.CompletedProcess(arguments, 0, b"GLIBC_2.35", b"")
+
+        with (
+            patch.object(core_package, "sys", SimpleNamespace(platform="linux")),
+            patch.object(core_package, "host_target", return_value="x86_64-unknown-linux-gnu"),
+            patch.object(core_package, "checked", side_effect=inspect),
+            patch.object(subprocess, "run", side_effect=process),
+        ):
+            core_package.verify_tree(tree, self.info, execute=False)
+
     def test_linux_cannot_produce_a_mac_cli_without_its_native_frameworks(self):
         with patch.object(core_package, "host_target", return_value="x86_64-unknown-linux-gnu"):
             with self.assertRaisesRegex(TaskError, "native macOS build"):

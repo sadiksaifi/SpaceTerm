@@ -129,6 +129,15 @@ int main(int argc, char **argv) {{
             tree, _, _ = core_package.verified_copy(archive, signature, Path(temporary), info)
             self.assertEqual(json.loads((tree / "build.json").read_text()), info)
 
+    def test_static_catalog_staging_and_verification_do_not_run_native_products(self):
+        archive, signature, _ = self.artifact(self.target, check_exit=99)
+        catalog = self.root / "static-catalog"
+        stage_catalog(archive, signature, catalog, self.identity, execute=False)
+        found = verify_catalog(catalog, self.identity, execute=False)
+        self.assertEqual(found[self.target]["sha256"], update_signing.sha256(archive))
+        with self.assertRaisesRegex(TaskError, "installed server headless check failed"):
+            verify_catalog(catalog, self.identity)
+
     def test_native_headless_check_rejects_unexpected_or_failed_responses(self):
         for output, error, status in (
             ("", "", 0),

@@ -109,7 +109,7 @@ def _snapshot(source, destination, *, require_all):
         os.close(descriptor)
 
 
-def _verify_target(source, identity, target, temporary):
+def _verify_target(source, identity, target, temporary, *, execute=True):
     raw = (source / "artifact.sha256").read_bytes()
     if not re.fullmatch(rb"[0-9a-f]{64}\n?", raw):
         raise TaskError("the server catalog digest is malformed")
@@ -124,6 +124,7 @@ def _verify_target(source, identity, target, temporary):
         target=target,
         expected_sha256=digest,
         native=target == host_target(),
+        execute=execute,
     )
     from spaceterm_tasks.core_package import document
 
@@ -134,17 +135,21 @@ def _verify_target(source, identity, target, temporary):
     )
 
 
-def _verified_catalog(source, identity, directory, *, require_all):
+def _verified_catalog(source, identity, directory, *, require_all, execute=True):
     snapshot = directory / "snapshot"
     snapshot.mkdir()
     targets = _snapshot(source, snapshot, require_all=require_all)
     return {
-        target: _verify_target(snapshot / target, identity, target, directory / target)
+        target: _verify_target(
+            snapshot / target, identity, target, directory / target, execute=execute
+        )
         for target in sorted(targets)
     }
 
 
-def stage_catalog(archive, signature, destination, identity, *, source=None, require_all=False):
+def stage_catalog(
+    archive, signature, destination, identity, *, source=None, require_all=False, execute=True
+):
     """Publish only a fully authenticated catalog. Explicit source catalogs must be complete."""
     destination = Path(destination)
     try:
@@ -156,7 +161,9 @@ def stage_catalog(archive, signature, destination, identity, *, source=None, req
         ) as temporary:
             directory = Path(temporary)
             if source is not None:
-                entries = _verified_catalog(source, identity, directory, require_all=True)
+                entries = _verified_catalog(
+                    source, identity, directory, require_all=True, execute=execute
+                )
             else:
                 if require_all:
                     raise TaskError("release packaging requires a complete signed server catalog")
@@ -168,7 +175,11 @@ def stage_catalog(archive, signature, destination, identity, *, source=None, req
                     update_signing.sha256(local / "artifact.tar.gz") + "\n"
                 )
                 target = host_target()
-                entries = {target: _verify_target(local, identity, target, directory / "verified")}
+                entries = {
+                    target: _verify_target(
+                        local, identity, target, directory / "verified", execute=execute
+                    )
+                }
             staged = directory / "catalog"
             staged.mkdir(mode=0o755)
             for target, (info, private, raw) in entries.items():
@@ -185,11 +196,13 @@ def stage_catalog(archive, signature, destination, identity, *, source=None, req
         raise TaskError("the server catalog could not be read or staged safely") from None
 
 
-def verify_catalog(source, identity, *, require_all=False):
+def verify_catalog(source, identity, *, require_all=False, execute=True):
     """Reauthenticate a packaged catalog with native checks only on matching-host entries."""
     try:
         with tempfile.TemporaryDirectory(prefix="spaceterm-catalog-verify-") as temporary:
-            entries = _verified_catalog(source, identity, Path(temporary), require_all=require_all)
+            entries = _verified_catalog(
+                source, identity, Path(temporary), require_all=require_all, execute=execute
+            )
             return {target: info for target, (info, _, _) in entries.items()}
     except OSError:
         raise TaskError("the server catalog could not be read or verified safely") from None
