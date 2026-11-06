@@ -27,6 +27,58 @@ def setUpModule():
 CORE_ENTITLEMENTS = plistlib.loads(macos_codesign.CORE_ENTITLEMENTS.read_bytes())
 
 
+class NestedSignaturePolicyTests(unittest.TestCase):
+    def test_each_helper_requires_runtime_timestamp_and_exact_entitlements(self):
+        valid = f"CodeDirectory v=20500 flags=0x10000(runtime)\nTeamIdentifier={TEAM}\nTimestamp=Nov 6 2026\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "Fixture.app"
+            contents = app / "Contents"
+            (contents / "MacOS").mkdir(parents=True)
+            (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "Fixture"}))
+            main = contents / "MacOS/Fixture"
+            helper = contents / "MacOS/Helper"
+            for binary in (main, helper):
+                binary.write_bytes(bytes.fromhex("feedfacf") + b"fixture")
+            for detail, helper_entitlements, failure in (
+                (valid, {}, None),
+                (valid.replace("0x10000(runtime)", "0x0(none)"), {}, "missing_hardened_runtime"),
+                (
+                    valid.replace("Timestamp=Nov 6 2026", "Signed Time=Nov 6 2026"),
+                    {},
+                    "missing_secure_timestamp",
+                ),
+                (valid, {"com.apple.security.get-task-allow": True}, "unexpected_entitlements"),
+                (valid, CORE_ENTITLEMENTS, "unexpected_entitlements"),
+            ):
+                with (
+                    self.subTest(failure=failure),
+                    patch.object(macos_codesign, "checked", return_value="canonical"),
+                    patch.object(macos_codesign, "canonical_requirement", return_value="canonical"),
+                    patch.object(
+                        macos_codesign,
+                        "details",
+                        side_effect=lambda path: detail if path == helper else valid,
+                    ),
+                    patch.object(
+                        macos_codesign,
+                        "signed_entitlements",
+                        side_effect=lambda path: (
+                            helper_entitlements if path == helper else CORE_ENTITLEMENTS
+                        ),
+                    ),
+                ):
+                    if failure is None:
+                        macos_codesign.verify(
+                            app, "fixture", CORE_ENTITLEMENTS, team=TEAM, identity=NAME
+                        )
+                    else:
+                        with self.assertRaises(macos_codesign.SignatureError) as caught:
+                            macos_codesign.verify(
+                                app, "fixture", CORE_ENTITLEMENTS, team=TEAM, identity=NAME
+                            )
+                        self.assertEqual(caught.exception.classification.value, failure)
+
+
 def compile_executable(path, source=b"int main(){return 0;}"):
     path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
