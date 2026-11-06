@@ -19,7 +19,7 @@ from spaceterm_tasks import ROOT, TaskError, core_package, update_signing
 from spaceterm_tasks.package_linux import write_archive
 from spaceterm_tasks.packaging import NOTICES, SHELL_INTEGRATION, TERMINFO
 
-from tests.core_artifact_fixture import archive_tree, populate
+from tests.core_artifact_fixture import archive_tree, populate, seal_foreign
 
 
 class ResourcePolicyTests(unittest.TestCase):
@@ -75,6 +75,7 @@ class CoreArchiveTests(unittest.TestCase):
         self.commit = "a" * 40
         self.info = {
             "schema": 1,
+            "stapled": False,
             "source_sha256": None,
             "protocols": core_package.PROTOCOLS,
             "identity": "spaceterm-preflight",
@@ -84,10 +85,154 @@ class CoreArchiveTests(unittest.TestCase):
             "floor": None,
         }
 
+    def test_signed_stapled_release_requires_exact_ticket_layout_independent_of_dry_run(self):
+        target = "aarch64-apple-darwin"
+        ticket = "SpaceTerm Core.app/Contents/CodeResources"
+        for stapled, present in ((True, True), (False, False), (True, False), (False, True)):
+            with self.subTest(stapled=stapled, present=present):
+                info = {
+                    **self.info,
+                    "identity": "spaceterm",
+                    "target": target,
+                    "version": "1.0.0",
+                    "floor": "1.0.0",
+                    "stapled": stapled,
+                }
+                tree = self.root / f"{stapled}-{present}" / "core"
+                executable = tree / core_package.executable_path(target, "spaceterm")
+                executable.parent.mkdir(parents=True)
+                executable.write_bytes(
+                    bytes.fromhex("cffaedfe0c0000010000000002000000") + bytes(48)
+                )
+                executable.chmod(0o755)
+                populate(ROOT, tree, info)
+                seal_foreign(tree, info)
+                (tree / ticket).unlink(missing_ok=True)
+                if present:
+                    (tree / ticket).write_bytes(b"stapled ticket")
+                archive, signature = archive_tree(ROOT, tree, info)
+                # A consumer's dry-run setting cannot alter the authenticated archive layout.
+                for dry_run in ("0", "1"):
+                    with patch.dict(
+                        os.environ,
+                        {
+                            update_signing.DRY_RUN: dry_run,
+                            update_signing.SIGNING_SECRET: base64.b64encode(
+                                bytes(range(32))
+                            ).decode(),
+                        },
+                    ):
+                        if stapled == present:
+                            core_package.verify(archive, signature, info, native=False)
+                        else:
+                            with self.assertRaisesRegex(TaskError, "supported layout"):
+                                core_package.verify(archive, signature, info, native=False)
+
     def test_linux_cannot_produce_a_mac_cli_without_its_native_frameworks(self):
         with patch.object(core_package, "host_target", return_value="x86_64-unknown-linux-gnu"):
             with self.assertRaisesRegex(TaskError, "native macOS build"):
                 core_package.package("spaceterm-development", target="aarch64-apple-darwin")
+
+    def test_stapled_flag_is_required_boolean_and_only_valid_for_macos_release(self):
+        for flag in (None, 0, 1, "false", [], True):
+            with self.subTest(flag=flag):
+                with self.assertRaisesRegex(TaskError, "malformed or unsupported"):
+                    core_package.document(json.dumps({**self.info, "stapled": flag}))
+        with self.assertRaisesRegex(TaskError, "malformed or unsupported"):
+            core_package.document(
+                json.dumps({key: value for key, value in self.info.items() if key != "stapled"})
+            )
+        with self.assertRaisesRegex(TaskError, "malformed or unsupported"):
+            core_package.document(
+                json.dumps({**self.info, "identity": "spaceterm", "stapled": True})
+            )
+
+    def test_package_records_the_actual_ticket_after_notarization(self):
+        target = "aarch64-apple-darwin"
+        info = {
+            **self.info,
+            "identity": "spaceterm",
+            "target": target,
+            "version": "1.0.0",
+            "floor": "1.0.0",
+            "source_sha256": "c" * 64,
+        }
+        executable = self.root / "compiled"
+        executable.write_bytes(b"compiled executable")
+
+        def icon(resources, identifier):
+            for name in (*core_package.ICON_RESOURCES, "IconPartialInfo.plist"):
+                (resources / name).write_bytes(b"compiled icon")
+
+        def sign(bundle, *args, **kwargs):
+            seal = bundle / "Contents/_CodeSignature/CodeResources"
+            seal.parent.mkdir()
+            seal.write_bytes(b"bundle seal")
+
+        native_checked = core_package.checked
+
+        def checked(arguments, *args, **kwargs):
+            if arguments[0] == "git":
+                return self.commit
+            if arguments[0] == "lipo":
+                return "arm64"
+            if arguments[:2] == ["xcrun", "vtool"]:
+                return "minos 26.0"
+            if arguments[0] in ("otool", "infocmp"):
+                return ""
+            return native_checked(arguments, *args, **kwargs)
+
+        run = subprocess.run
+
+        def native_run(arguments, **kwargs):
+            if arguments[1:] == ["internal", "build-info"]:
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(info).encode(), b"")
+            if arguments[1:] == ["internal", "check"]:
+                return subprocess.CompletedProcess(
+                    arguments, 0, b"SpaceTerm Core checks passed.\n", b""
+                )
+            return run(arguments, **kwargs)
+
+        for present in (True, False):
+
+            def notarize(bundle, notary):
+                if present:
+                    (bundle / "Contents/CodeResources").write_bytes(b"stapled ticket")
+
+            with (
+                self.subTest(present=present),
+                patch.dict(
+                    os.environ,
+                    {
+                        update_signing.DRY_RUN: "1",
+                        update_signing.SIGNING_SECRET: base64.b64encode(bytes(range(32))).decode(),
+                        core_package.macos_codesign.TEAM_ID: "ABCDE12345",
+                        core_package.macos_codesign.SIGNING_IDENTITY: "-",
+                    },
+                ),
+                patch.object(core_package, "DIST", self.root / "dist"),
+                patch.object(core_package, "host_target", return_value=target),
+                patch.object(core_package, "sys", SimpleNamespace(platform="darwin")),
+                patch.object(core_package, "require_clean_checkout"),
+                patch("spaceterm_tasks.core_builds._source", return_value=(None, None, "c" * 64)),
+                patch.object(
+                    core_package, "build_executable", return_value=(executable, json.dumps(info))
+                ),
+                patch.object(core_package, "compile_icon", side_effect=icon),
+                patch.object(core_package, "checked", side_effect=checked),
+                patch.object(core_package.macos_codesign, "sign_core", side_effect=sign),
+                patch.object(core_package.macos_codesign, "verify"),
+                patch.object(core_package.macos_notary, "assess"),
+                patch.object(core_package.macos_notary, "notarize", side_effect=notarize),
+                patch.object(subprocess, "run", side_effect=native_run),
+            ):
+                archive, signature = core_package.package("spaceterm", "v1.0.0")
+                with tarfile.open(archive) as source:
+                    manifest = source.extractfile("core/build.json")
+                    assert manifest is not None
+                    packaged = json.load(manifest)
+                self.assertEqual(packaged, {**info, "stapled": present})
+                update_signing.verify((self.public,), archive, signature)
 
     def test_dirty_source_manifest_is_bound_to_its_commit_and_nonproduction_identity(self):
         for identity in ("spaceterm-development", "spaceterm-preflight", "spaceterm"):

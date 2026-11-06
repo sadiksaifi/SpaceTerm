@@ -61,18 +61,22 @@ impl Layout {
             .map(|relative| self.resources().join(relative))
     }
 
-    /// The bundle's own files: its Info.plist, its compiled icon and the seal codesign writes.
+    /// The bundle's own files, including a ticket exactly when signed metadata declares one.
     /// Empty without a bundle.
-    pub fn bundle_files(self) -> Vec<PathBuf> {
+    pub fn bundle_files(self, stapled: bool) -> Vec<PathBuf> {
         self.bundle
             .map(|bundle| {
                 let contents = Path::new(bundle).join("Contents");
-                vec![
+                let mut files = vec![
                     contents.join("Info.plist"),
                     contents.join("Resources/SpaceTerm.icns"),
                     contents.join("Resources/Assets.car"),
                     contents.join("_CodeSignature/CodeResources"),
-                ]
+                ];
+                if stapled {
+                    files.push(contents.join("CodeResources"));
+                }
+                files
             })
             .unwrap_or_default()
     }
@@ -120,7 +124,7 @@ mod tests {
             ))
         );
         assert_eq!(layout.signed(), Path::new("SpaceTerm Core Preflight.app"));
-        assert_eq!(layout.bundle_files().len(), 4);
+        assert_eq!(layout.bundle_files(false).len(), 4);
     }
 
     #[test]
@@ -132,7 +136,7 @@ mod tests {
             layout.resource(Path::new("share/spaceterm/THIRD-PARTY-NOTICES.txt")),
             Some(PathBuf::from("share/spaceterm/THIRD-PARTY-NOTICES.txt"))
         );
-        assert!(layout.bundle_files().is_empty());
+        assert!(layout.bundle_files(false).is_empty());
     }
 
     #[test]

@@ -120,6 +120,7 @@ PROTOCOLS = protocols()
 PROTOCOL_MAJOR = PROTOCOLS["work"]["major"]
 BUILD_KEYS = {
     "schema",
+    "stapled",
     "identity",
     "target",
     "commit",
@@ -152,12 +153,7 @@ def resource_directory(target, identity):
     return SHARED_RESOURCES
 
 
-def stapled(identity):
-    """Whether this identity's macOS bundle carries a notarization ticket: Release, not a dry run."""
-    return identity == "spaceterm" and not update_signing.dry_run()
-
-
-def bundle_files(target, identity):
+def bundle_files(target, identity, stapled):
     """The bundle's Info.plist, its icon, the seal codesign writes and a stapled ticket; none
     without a bundle."""
     if target != TARGETS["darwin"]:
@@ -168,7 +164,7 @@ def bundle_files(target, identity):
         f"{contents}/_CodeSignature/CodeResources",
         *(f"{contents}/Resources/{name}" for name in ICON_RESOURCES),
     }
-    if stapled(identity):
+    if stapled:
         files.add(f"{contents}/CodeResources")
     return files
 
@@ -267,6 +263,11 @@ def document(data):
             or set(value) != BUILD_KEYS
             or type(value["schema"]) is not int
             or value["schema"] != 1
+            or type(value["stapled"]) is not bool
+            or (
+                value["stapled"]
+                and (value["identity"] != "spaceterm" or value["target"] != TARGETS["darwin"])
+            )
             or not valid_protocols(value["protocols"])
             or (
                 value["source_sha256"] is not None
@@ -513,7 +514,9 @@ def verify_tree(tree, expected, *, native=True):
         for name in files
         if re.fullmatch(re.escape(directory) + r"/terminfo/(?:78|x)/xterm-spaceterm", name)
     }
-    if not terminfo or files != resources | terminfo | bundle_files(target, identity) | {
+    if not terminfo or files != resources | terminfo | bundle_files(
+        target, identity, expected["stapled"]
+    ) | {
         executable_path(target, identity),
         "build.json",
     }:
@@ -594,7 +597,8 @@ def verify_tree(tree, expected, *, native=True):
     if any(name in dependencies for name in forbidden):
         raise TaskError("the server links a graphical or GPU dependency")
     # Inspect native metadata and signatures before executing the candidate.
-    if build_info(executable) != expected:
+    # Stapling happens after compilation. Every compiled fact must still match exactly.
+    if build_info(executable) != {**expected, "stapled": False}:
         raise TaskError("the executable differs from the authenticated server build")
     # Signed resources belong to this server artifact, independently of client source assets.
     checked(
@@ -772,6 +776,7 @@ def package(identity, release_tag=None, *, target=None):
         or expected["target"] != target
         or expected["source_sha256"] != source
         or expected["floor"] != floor
+        or expected["stapled"]
         or _source(ROOT)[2] != source
     ):
         raise TaskError("Cargo returned a different server build")
@@ -789,7 +794,6 @@ def package(identity, release_tag=None, *, target=None):
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
         shutil.copyfile(NOTICES, resources / NOTICES.name)
         compile_terminfo(resources / "terminfo", target)
-        (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
         if target == TARGETS["darwin"]:
             identifier = core_identifier(identity)
             bundle = tree / signed_path(target, identity)
@@ -813,6 +817,9 @@ def package(identity, release_tag=None, *, target=None):
             if release_tag:
                 with macos_notary.notary() as notary:
                     macos_notary.notarize(core, notary)
+            expected["stapled"] = (bundle / "Contents/CodeResources").is_file()
+        # build.json is outside the native bundle seal, and inside the signed archive.
+        (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
         verify_tree(tree, expected, native=native)
         if not native:
             verify_cross_build(tree, expected)

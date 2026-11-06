@@ -59,7 +59,7 @@ fn manifest(identity: &str) -> serde_json::Value {
             .clone()
             .unwrap_or((VERSION.to_owned(), None, Protocols::CURRENT))
     });
-    serde_json::json!({"schema":1,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":version,"floor":floor,"protocols":protocols})
+    serde_json::json!({"schema":1,"stapled":false,"source_sha256":null,"identity":identity,"target":target(),"commit":COMMIT,"version":version,"floor":floor,"protocols":protocols})
 }
 
 pub(super) fn active() -> bool {
@@ -172,7 +172,7 @@ pub(crate) fn with_artifact<T>(
             0o644,
         ));
     }
-    for name in layout.bundle_files() {
+    for name in layout.bundle_files(false) {
         entries.push((packaged(name), b"signed bundle file".to_vec(), 0o644));
     }
     for (name, bytes, mode) in entries {

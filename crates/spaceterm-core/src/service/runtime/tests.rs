@@ -3,6 +3,120 @@ use std::os::unix::fs::PermissionsExt;
 use test_support::{COMMIT, VERSION, target, with_artifact};
 
 #[test]
+fn a_build_document_requires_a_boolean_stapled_flag_only_for_macos_release() {
+    let mut info = serde_json::json!({
+        "schema": 1, "stapled": false, "source_sha256": null,
+        "identity": "spaceterm", "target": "aarch64-apple-darwin",
+        "commit": COMMIT, "version": "1.0.0", "floor": "1.0.0",
+        "protocols": crate::update::facts::Protocols::CURRENT,
+    });
+    for target in ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] {
+        for identity in ["spaceterm", "spaceterm-preflight", "spaceterm-development"] {
+            for stapled in [false, true] {
+                info["target"] = target.into();
+                info["identity"] = identity.into();
+                info["stapled"] = stapled.into();
+                let parsed =
+                    Build::parse_for_target(&serde_json::to_vec(&info).unwrap(), identity, target);
+                assert_eq!(
+                    parsed.is_ok(),
+                    !stapled || (identity == "spaceterm" && target == "aarch64-apple-darwin")
+                );
+            }
+        }
+    }
+    info["identity"] = "spaceterm".into();
+    info["target"] = "aarch64-apple-darwin".into();
+    for flag in [
+        serde_json::Value::Null,
+        serde_json::json!(0),
+        serde_json::json!(1),
+        serde_json::json!("false"),
+    ] {
+        info["stapled"] = flag;
+        assert!(matches!(
+            Build::parse_for_target(
+                &serde_json::to_vec(&info).unwrap(),
+                "spaceterm",
+                "aarch64-apple-darwin"
+            ),
+            Err(CoreError::RuntimeUnavailable)
+        ));
+    }
+    info.as_object_mut().unwrap().remove("stapled");
+    assert!(matches!(
+        Build::parse_for_target(
+            &serde_json::to_vec(&info).unwrap(),
+            "spaceterm",
+            "aarch64-apple-darwin"
+        ),
+        Err(CoreError::RuntimeUnavailable)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn release_installation_requires_the_ticket_exactly_when_the_signed_build_is_stapled() {
+    let root = temporary();
+    let identity = "spaceterm";
+    let layout = Layout::host(identity).unwrap();
+    let ticket = "core/SpaceTerm Core.app/Contents/CodeResources";
+    for (stapled, present) in [(true, true), (false, false), (true, false), (false, true)] {
+        let case = root.join(format!("{stapled}-{present}"));
+        test_support::with_build("1.0.0", crate::update::facts::Protocols::CURRENT, || {
+            with_artifact(&case.join("source"), identity, |archive, signature| {
+                rewrite(archive, signature, |entries| {
+                    let mut info: serde_json::Value =
+                        serde_json::from_slice(&entries[0].1).unwrap();
+                    // The executable reports compilation facts, before notarization.
+                    info["stapled"] = false.into();
+                    entries
+                        .iter_mut()
+                        .find(|(name, _, _)| {
+                            *name == format!("core/{}", layout.executable().display())
+                        })
+                        .unwrap()
+                        .1 = serde_json::to_vec(&info).unwrap();
+                    info["stapled"] = stapled.into();
+                    entries[0].1 = serde_json::to_vec(&info).unwrap();
+                    if present {
+                        entries.push((ticket.to_owned(), b"stapled ticket".to_vec(), 0o644));
+                    }
+                });
+                test_support::sign_with_production_trust(archive, signature);
+                let service = Service::for_identity(identity).unwrap();
+                let pin = digest(&std::fs::read(archive).unwrap());
+                let inspected =
+                    service.inspect_candidate(archive, signature, &pin, crate::protocol::MAJOR);
+                let installed = provision_candidate(
+                    &case.join("installations"),
+                    identity,
+                    archive,
+                    signature,
+                    &pin,
+                    Some(crate::protocol::MAJOR),
+                );
+                if stapled == present {
+                    assert_eq!(inspected.unwrap().version, "1.0.0");
+                    let installation = installed.unwrap().directory;
+                    assert_eq!(verify(&installation, identity), Ok(()));
+                    assert_eq!(
+                        installation
+                            .join(ticket.strip_prefix("core/").unwrap())
+                            .exists(),
+                        present
+                    );
+                } else {
+                    assert_eq!(inspected, Err(CoreError::RuntimeUnavailable));
+                    assert_eq!(installed, Err(CoreError::RuntimeUnavailable));
+                }
+            });
+        });
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn signed_dirty_source_versions_are_admitted_only_for_matching_nonproduction_builds() {
     let root = temporary();
     for identity in ["spaceterm-development", "spaceterm-preflight", "spaceterm"] {
@@ -802,7 +916,7 @@ fn relayout(entries: &mut Vec<(String, Vec<u8>, u32)>, from: &str, to: &str) {
             .ok()
             .map(|relative| to.resources().join(relative))
     };
-    let bundle = from.bundle_files();
+    let bundle = from.bundle_files(false);
     entries.retain(|(name, _, _)| {
         !bundle
             .iter()
@@ -817,7 +931,7 @@ fn relayout(entries: &mut Vec<(String, Vec<u8>, u32)>, from: &str, to: &str) {
             *name = format!("core/{}", path.display());
         }
     }
-    for file in to.bundle_files() {
+    for file in to.bundle_files(false) {
         entries.push((
             format!("core/{}", file.display()),
             b"signed bundle file".to_vec(),

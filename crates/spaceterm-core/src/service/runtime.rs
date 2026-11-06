@@ -526,7 +526,10 @@ fn verify_executable(path: &Path, expected: &Build) -> Result<(), CoreError> {
     #[cfg(not(test))]
     let bytes = executable_build(path, &expected.identity)?;
     let reported = Build::parse(&bytes, &expected.identity)?;
-    if reported != *expected {
+    // The archive records stapling after compilation. All compiled facts still match exactly.
+    let mut compiled = expected.clone();
+    compiled.stapled = false;
+    if reported != compiled {
         return Err(CoreError::RuntimeUnavailable);
     }
     Ok(())
@@ -567,10 +570,12 @@ pub(super) fn describe(path: &Path, identity: &str) -> Result<(String, String), 
     Ok((info.version, info.commit))
 }
 
-#[derive(Deserialize, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Build {
     schema: u32,
+    /// True only for a macOS Release bundle that acquired a ticket after compilation.
+    stapled: bool,
     identity: String,
     target: String,
     commit: String,
@@ -648,6 +653,8 @@ impl Build {
         let floored = crate::update::facts::Version::parse(&info.version)
             .is_ok_and(|version| Candidate::new(version, info.floor).is_ok());
         if info.schema != 1
+            || (info.stapled
+                && (info.identity != "spaceterm" || info.target != "aarch64-apple-darwin"))
             || !floored
             || info.identity != identity
             || info.target != target
@@ -829,7 +836,8 @@ fn contents_for_target(
     .collect::<Option<_>>()
     .ok_or(CoreError::RuntimeUnavailable)?;
     required.extend([PathBuf::from("build.json"), main]);
-    required.extend(layout.bundle_files());
+    let manifest = manifest.ok_or(CoreError::RuntimeUnavailable)?;
+    required.extend(layout.bundle_files(manifest.stapled));
     let terminfo_entries = ["terminfo/x/xterm-spaceterm", "terminfo/78/xterm-spaceterm"]
         .map(|entry| layout.resources().join(entry));
     let terminfo: Vec<_> = files
@@ -848,7 +856,7 @@ fn contents_for_target(
     if !executable || files != required || !directories.is_subset(&required_directories) {
         return Err(CoreError::RuntimeUnavailable);
     }
-    manifest.ok_or(CoreError::RuntimeUnavailable)
+    Ok(manifest)
 }
 fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<Build, CoreError> {
     let mut expected = BTreeSet::from([

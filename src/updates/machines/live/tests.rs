@@ -732,7 +732,7 @@ impl Catalog {
         let target = "x86_64-unknown-linux-gnu";
         let layout = spaceterm_core::service::Layout::for_target(target, identity).unwrap();
         let manifest = serde_json::json!({
-            "schema": 1, "source_sha256": null, "identity": identity, "target": target,
+            "schema": 1, "stapled": false, "source_sha256": null, "identity": identity, "target": target,
             "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "version": "0.9.0",
             "floor": "0.0.0", "protocols": Protocols::CURRENT,
         });

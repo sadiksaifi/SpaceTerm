@@ -42,6 +42,7 @@ def prepare(
     ).stdout.strip()
     expected = {
         "schema": 1,
+        "stapled": False,
         "source_sha256": _source(root)[2] if include_catalog and not release_tag else None,
         "protocols": core_package.PROTOCOLS,
         "identity": "spaceterm" if release_tag else "spaceterm-preflight",
@@ -151,7 +152,9 @@ def populate(root, tree, expected):
 
 def seal_foreign(tree, expected):
     """Stand in for the seal a foreign target's codesign writes, which catalogs never execute."""
-    for name in core_package.bundle_files(expected["target"], expected["identity"]):
+    for name in core_package.bundle_files(
+        expected["target"], expected["identity"], expected["stapled"]
+    ):
         (tree / name).parent.mkdir(parents=True, exist_ok=True)
         (tree / name).write_bytes(b"foreign bundle seal")
 
