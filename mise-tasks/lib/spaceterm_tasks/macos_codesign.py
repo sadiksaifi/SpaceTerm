@@ -21,6 +21,7 @@ import os
 import plistlib
 import re
 import subprocess
+from enum import StrEnum
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, sparkle
@@ -51,6 +52,43 @@ MACH_O_MAGIC = {
         "bfbafeca",
     )
 }
+
+
+class SignatureFailure(StrEnum):
+    RUNTIME = "missing_hardened_runtime"
+    TIMESTAMP = "missing_secure_timestamp"
+    ENTITLEMENTS = "unexpected_entitlements"
+    MALFORMED = "malformed_signature"
+
+
+class SignatureError(TaskError):
+    def __init__(self, classification):
+        self.classification = classification
+        super().__init__(f"code signature verification failed ({classification.value})")
+
+
+def _verify_policy(path, expected_entitlements, identity):
+    try:
+        detail = details(path)
+    except TaskError:
+        raise SignatureError(SignatureFailure.MALFORMED) from None
+    flags = re.search(r"^CodeDirectory .*flags=0x([0-9a-f]+)", detail, re.MULTILINE)
+    if not flags:
+        raise SignatureError(SignatureFailure.MALFORMED)
+    if not dry_run() and not int(flags.group(1), 16) & HARDENED_RUNTIME:
+        raise SignatureError(SignatureFailure.RUNTIME)
+    try:
+        entitlements = signed_entitlements(path)
+    except (TaskError, ValueError, TypeError, plistlib.InvalidFileException):
+        raise SignatureError(SignatureFailure.MALFORMED) from None
+    if entitlements != expected_entitlements:
+        raise SignatureError(SignatureFailure.ENTITLEMENTS)
+    if identity != ADHOC and not any(
+        line.startswith("Timestamp=") and line.removeprefix("Timestamp=").strip()
+        for line in detail.splitlines()
+    ):
+        raise SignatureError(SignatureFailure.TIMESTAMP)
+    return detail
 
 
 def team_id(environment):
@@ -203,19 +241,13 @@ def verify(path, identifier, expected_entitlements, *, team=None, identity=ADHOC
         ["codesign", "--verify", "--strict", "-R", f'=identifier "{identifier}"', str(path)],
         f"{label} signing identifier differs from {identifier}",
     )
-    detail = details(path)
-    flags = re.search(r"^CodeDirectory .*flags=0x([0-9a-f]+)", detail, re.MULTILINE)
-    if not flags:
-        raise TaskError(f"{label} has no code directory flags")
-    if not dry_run() and not int(flags.group(1), 16) & HARDENED_RUNTIME:
-        raise TaskError(f"{label} is not signed with the hardened runtime")
-    if signed_entitlements(path) != expected_entitlements:
-        raise TaskError(f"{label} entitlements differ from its identity's")
+    detail = _verify_policy(path, expected_entitlements, identity)
     if identity == ADHOC:
         if "Signature=adhoc" not in detail.splitlines():
             raise TaskError(f"{label} is not ad hoc signed")
         if team is not None:
             canonical_requirement(designated_requirement(identifier, team))
+        _verify_nested(path, expected_entitlements, identity, team=None)
         return
     if team is None:
         raise TaskError(f"{label} needs a Team ID to verify a Developer ID signature")
@@ -228,22 +260,37 @@ def verify(path, identifier, expected_entitlements, *, team=None, identity=ADHOC
         raise TaskError(f"{label} designated requirement is not the team's")
     if f"TeamIdentifier={team}" not in detail.splitlines():
         raise TaskError(f"{label} is not signed by team {team}")
-    # Notarization requires a secure timestamp; codesign shows it as Timestamp, not Signed Time.
-    if not any(line.startswith("Timestamp=") for line in detail.splitlines()):
-        raise TaskError(f"{label} has no secure timestamp")
     requirement = f"={team_requirement(team)}"
     checked(
         ["codesign", "--verify", "--strict", "--deep", "-R", requirement, str(path)],
         f"{label} is not signed with the team's Developer ID certificate",
     )
+    _verify_nested(path, expected_entitlements, identity, team)
+
+
+def _verify_nested(path, expected_entitlements, identity, team):
     if path.is_dir():
+        primary = None
+        try:
+            info_path = path / "Contents/Info.plist"
+            if info_path.exists():
+                info = plistlib.loads(info_path.read_bytes())
+                primary = path / "Contents/MacOS" / info["CFBundleExecutable"]
+        except (ValueError, TypeError, KeyError, plistlib.InvalidFileException):
+            raise SignatureError(SignatureFailure.MALFORMED) from None
         for nested in path.rglob("*"):
             if nested.is_symlink() or not nested.is_file():
                 continue
             with nested.open("rb") as binary:
                 native = binary.read(4) in MACH_O_MAGIC
             if native:
+                requirement = ["-R", f"={team_requirement(team)}"] if team else []
                 checked(
-                    ["codesign", "--verify", "--strict", "-R", requirement, str(nested)],
-                    f"{label} contains native code without the team's signature",
+                    ["codesign", "--verify", "--strict", *requirement, str(nested)],
+                    "nested code signature verification failed",
                 )
+                detail = _verify_policy(
+                    nested, expected_entitlements if nested == primary else {}, identity
+                )
+                if team and f"TeamIdentifier={team}" not in detail.splitlines():
+                    raise SignatureError(SignatureFailure.MALFORMED)
