@@ -625,8 +625,8 @@ mod native {
     use objc2_app_kit::{
         NSAboutPanelOptionApplicationIcon, NSAboutPanelOptionApplicationName,
         NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionCredits, NSApplication,
-        NSEventModifierFlags, NSHelpManager, NSImage, NSMenu, NSMenuItem, NSTextAlignment, NSView,
-        NSWorkspace,
+        NSEventModifierFlags, NSHelpManager, NSImage, NSLinkAttributeName, NSMenu, NSMenuItem,
+        NSTextAlignment, NSView, NSWorkspace,
     };
     use objc2_foundation::{
         NSDictionary, NSMutableAttributedString, NSNumber, NSRange, NSString, NSURL, NSUserDefaults,
@@ -637,7 +637,7 @@ mod native {
         NativeMenuShortcut,
     };
 
-    const HELP_URL: &str = "https://github.com/sadiksaifi/SpaceTerm";
+    const HELP_URL: &str = crate::about::REPOSITORY;
 
     /// Keeps AppKit's before-action and after-action observers while the adapter lives.
     pub(crate) struct ChosenCommands {
@@ -850,11 +850,22 @@ mod native {
     ) -> Result<(), ApplicationMenuError> {
         let name = NSString::from_str(application_name);
         let version = NSString::from_str(env!("SPACETERM_VERSION"));
-        let description = NSString::from_str(crate::about::DESCRIPTION);
+        // The credits are the description, then the repository link on its own line.
+        let description = crate::about::DESCRIPTION;
+        let label = crate::about::REPOSITORY_LABEL;
         let credits = NSMutableAttributedString::initWithString(
             NSMutableAttributedString::alloc(),
-            &description,
+            &NSString::from_str(&format!("{description}\n{label}")),
         );
+        let repository = NSURL::URLWithString(&NSString::from_str(crate::about::REPOSITORY))
+            .ok_or(ApplicationMenuError::Unavailable)?;
+        let link = NSRange::new(
+            description.encode_utf16().count() + 1,
+            label.encode_utf16().count(),
+        );
+        // SAFETY: AppKit exports this immutable key, an NSURL is its documented value, and the
+        // range lies inside the credits string.
+        unsafe { credits.addAttribute_value_range(NSLinkAttributeName, &repository, link) };
         // SAFETY: AppKit implements this category method. The range spans this live string.
         let _: () = unsafe {
             msg_send![&*credits, setAlignment: NSTextAlignment::Center,

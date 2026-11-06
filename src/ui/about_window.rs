@@ -38,7 +38,8 @@ const TOP_INSET: f32 = 20.0;
 const ICON_TO_NAME: f32 = 8.0;
 const NAME_TO_VERSION: f32 = 2.0;
 const VERSION_TO_DESCRIPTION: f32 = 12.0;
-const DESCRIPTION_TO_COPYRIGHT: f32 = 12.0;
+const DESCRIPTION_TO_REPOSITORY: f32 = 4.0;
+const REPOSITORY_TO_COPYRIGHT: f32 = 12.0;
 const BOTTOM_INSET: f32 = 20.0;
 
 /// The one About window, so a second request activates it.
@@ -124,11 +125,12 @@ fn window_options(title: SharedString, about: About, cx: &App) -> WindowOptions 
         )
 }
 
-/// The text styles of the panel's four lines.
+/// The text styles of the panel's five lines.
 struct Typography {
     name: ChromeTextStyle,
     version: ChromeTextStyle,
     description: ChromeTextStyle,
+    repository: ChromeTextStyle,
     copyright: ChromeTextStyle,
 }
 
@@ -140,6 +142,7 @@ impl Typography {
             name,
             version: appearance.typography.style(TextRole::Secondary).clone(),
             description: appearance.typography.style(TextRole::Secondary).clone(),
+            repository: appearance.typography.style(TextRole::Secondary).clone(),
             copyright: appearance.typography.style(TextRole::Caption).clone(),
         }
     }
@@ -157,6 +160,7 @@ fn window_size(about: About, cx: &App) -> Size<Pixels> {
         (&typography.name, about.name()),
         (&typography.version, version.as_str()),
         (&typography.description, about.description()),
+        (&typography.repository, about.repository_label()),
         (&typography.copyright, about.copyright()),
     ]
     .into_iter()
@@ -174,7 +178,8 @@ fn window_size(about: About, cx: &App) -> Size<Pixels> {
             + ICON_TO_NAME
             + NAME_TO_VERSION
             + VERSION_TO_DESCRIPTION
-            + DESCRIPTION_TO_COPYRIGHT
+            + DESCRIPTION_TO_REPOSITORY
+            + REPOSITORY_TO_COPYRIGHT
             + BOTTOM_INSET,
     ) + px(ICON_SIZE)
         + text_height;
@@ -289,12 +294,24 @@ impl AboutWindow {
             )
             .child(
                 line(
+                    "about-repository",
+                    &typography.repository,
+                    gpui_color(appearance.colors.link_text),
+                    self.about.repository_label().into(),
+                )
+                .id("about-repository")
+                .cursor_pointer()
+                .on_click(|_, _, cx| cx.open_url(crate::about::REPOSITORY))
+                .mt(appearance.spacing(DESCRIPTION_TO_REPOSITORY)),
+            )
+            .child(
+                line(
                     "about-copyright",
                     &typography.copyright,
                     secondary,
                     self.about.copyright().into(),
                 )
-                .mt(appearance.spacing(DESCRIPTION_TO_COPYRIGHT)),
+                .mt(appearance.spacing(REPOSITORY_TO_COPYRIGHT)),
             );
         let closing = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {

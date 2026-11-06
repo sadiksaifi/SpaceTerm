@@ -97,7 +97,7 @@ fn about_is_titled_by_the_running_build_and_closes_from_its_own_shortcuts(cx: &m
 }
 
 #[gpui::test]
-fn about_stacks_icon_name_version_description_and_copyright_on_one_center_line(
+fn about_stacks_icon_name_version_description_repository_and_copyright_on_one_center_line(
     cx: &mut TestAppContext,
 ) {
     install(cx);
@@ -111,6 +111,7 @@ fn about_stacks_icon_name_version_description_and_copyright_on_one_center_line(
         "about-name",
         "about-version",
         "about-description",
+        "about-repository",
         "about-copyright",
     ]
     .map(|selector| {
@@ -131,7 +132,7 @@ fn about_stacks_icon_name_version_description_and_copyright_on_one_center_line(
     // The window is exactly as tall as its content, which wraps inside the text inset.
     let bottom_inset = cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(BOTTOM_INSET));
     assert!(
-        (surface.bottom() - lines[4].bottom() - bottom_inset).abs() <= px(1.0),
+        (surface.bottom() - lines[5].bottom() - bottom_inset).abs() <= px(1.0),
         "{lines:?} in {surface:?}"
     );
     for line in &lines[1..] {
