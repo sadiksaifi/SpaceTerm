@@ -86,7 +86,7 @@ def notes(root=ROOT):
         ["git", "tag", "--points-at", "HEAD"], cwd=root, capture_output=True, text=True
     ).stdout.split()
     if not any(release_tag.match(tag) for tag in tags):
-        raise TaskError("release notes require a stable release tag from 1.0.0 at HEAD")
+        raise TaskError("release notes require a stable release tag from 0.10.0 at HEAD")
     result = subprocess.run(
         ["git-cliff", "--config", "cliff.toml", "--current", "--offline", "--strip", "all"],
         cwd=root,
@@ -111,15 +111,15 @@ def write_notes(output=NOTES, root=ROOT):
 
 
 def dry_run_version(tags):
-    """A version newer than every stable tag, from 1.0.0, so a dry run never reuses a tag."""
+    """A version newer than every stable tag, from 0.10.0, so a dry run never reuses a tag."""
     versions = [
         tuple(int(part) for part in match.groups())
         for match in (STABLE_TAG.fullmatch(tag) for tag in tags)
         if match
     ]
     newest = max(versions, default=(0, 0, 0))
-    if newest < (1, 0, 0):
-        return "1.0.0"
+    if newest < (0, 10, 0):
+        return "0.10.0"
     return f"{newest[0]}.{newest[1]}.{newest[2] + 1}"
 
 
@@ -408,6 +408,11 @@ def verified_core(entry, target, version, floor, directory):
         native=target == host_target(),
     )
     info = document((tree / "build.json").read_bytes())
+    if os.environ.get("SPACETERM_RELEASE_PLAN"):
+        from spaceterm_tasks.release_plan import load
+
+        if info["commit"] != load()["source"]:
+            raise TaskError("the Core source differs from the release plan")
     if info["version"] != version:
         raise TaskError("the Core version must match the release tag")
     if info["floor"] != floor:
@@ -434,6 +439,10 @@ def assemble(
     version = release_version(tag)
     if not complete and not update_signing.dry_run(environment):
         raise TaskError("only a dry run may assemble a release without every asset")
+    if complete and environment.get("SPACETERM_RELEASE_PLAN"):
+        from spaceterm_tasks.release_inputs import verify_evidence
+
+        verify_evidence()
     seed = update_signing.release_seed(environment)
     keys = update_signing.trust(environment)
     protocols = release_feed.protocols()
@@ -563,23 +572,12 @@ def publish(tag, notes_file=NOTES, directory=RELEASE, environment=os.environ):
     if update_signing.dry_run(environment):
         print(f"Dry run: verified {len(assets)} release assets for {tag}; nothing is published.")
         return
-    # gh uploads the assets to a draft and publishes it only after every upload succeeds, so the
-    # latest/download URLs never point at a partial release.
-    if subprocess.run(
-        [
-            "gh",
-            "release",
-            "create",
-            tag,
-            *assets,
-            "--verify-tag",
-            "--latest",
-            "--title",
-            f"SpaceTerm {tag}",
-            "--notes-file",
-            notes_file,
-        ],
-        cwd=ROOT,
-    ).returncode:
-        raise TaskError("GitHub could not publish the release")
-    print(f"Published SpaceTerm {tag} with {len(assets)} assets.")
+    from spaceterm_tasks import release_plan
+
+    plan = release_plan.load()
+    if plan["tag"] != tag:
+        raise TaskError("publication requires the planned release tag")
+    release_plan.recheck(plan)
+    from spaceterm_tasks.release_publish import publish_draft
+
+    publish_draft(plan, assets, notes_file)

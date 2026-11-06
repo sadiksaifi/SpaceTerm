@@ -61,7 +61,7 @@ class ReleaseNotesTests(unittest.TestCase):
         self.git("tag", "-a", "v0.6.8", "-m", "Release")
         self.git("commit", "-qm", "chore: remove legacy compatibility", "--allow-empty")
         self.git("commit", "-qm", "feat: add terminal panes", "--allow-empty")
-        self.git("tag", "-a", "v1.0.0", "-m", "Release")
+        self.git("tag", "-a", "v0.10.0", "-m", "Release")
         text = notes(self.root)
         self.assertIn("First release of SpaceTerm.", text)
         self.assertNotIn("Old application feature", text)
@@ -84,9 +84,9 @@ class ReleaseNotesTests(unittest.TestCase):
 
 
 class DryRunTagTests(unittest.TestCase):
-    def test_dry_run_versions_are_newer_than_every_stable_tag_and_start_at_one(self):
-        self.assertEqual(release.dry_run_version([]), "1.0.0")
-        self.assertEqual(release.dry_run_version(["v0.6.8", "v0.5.0"]), "1.0.0")
+    def test_dry_run_versions_are_newer_than_every_stable_tag_and_start_at_greenfield(self):
+        self.assertEqual(release.dry_run_version([]), "0.10.0")
+        self.assertEqual(release.dry_run_version(["v0.6.8", "v0.5.0"]), "0.10.0")
         self.assertEqual(release.dry_run_version(["v1.2.3", "v1.10.0", "v0.9.9"]), "1.10.1")
         self.assertEqual(release.dry_run_version(["v2.0.0-beta.1", "v1.0.0", "x"]), "1.0.1")
 

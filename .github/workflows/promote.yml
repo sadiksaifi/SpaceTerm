@@ -1,0 +1,63 @@
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published greenfield tag to mark Latest and release through Homebrew
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote immutable release and update Homebrew
+    if: github.ref == 'refs/heads/main'
+    environment: release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: 'false'
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+      - name: Check out only the Homebrew tap with its token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: sadiksaifi/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_PAT }}
+          path: target/homebrew-tap
+          # This job pushes only this checkout; checkout removes credentials in its post step.
+          persist-credentials: true
+      - name: Verify the published DMG and prepare the cask
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: mise run release:promote "$RELEASE_TAG" target/homebrew-tap
+      - name: Parse the cask and publish its exact change
+        working-directory: target/homebrew-tap
+        run: |
+          ruby -c Casks/spaceterm.rb
+          git config user.name 'SpaceTerm releases'
+          git config user.email 'releases@spaceterm.peblon.com'
+          git add Casks/spaceterm.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: promote SpaceTerm $RELEASE_TAG"
+            git push origin HEAD
+          fi
+      - name: Mark the published release Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$RELEASE_TAG" --repo sadiksaifi/SpaceTerm --latest

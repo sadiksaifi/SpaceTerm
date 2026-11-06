@@ -11,13 +11,12 @@ from unittest.mock import patch
 from spaceterm_tasks import TaskError, disk_image, package_linux, venv
 
 SIGNING_INPUTS = {
-    "SPACETERM_RELEASE_UPDATE_ED25519_SEED": "manifest-seed",
-    "UPDATE_SIGNING_KEY": "fixture-update-key",
-    "MACOS_SIGNING_CERTIFICATE_P12": "fixture-certificate",
-    "MACOS_SIGNING_CERTIFICATE_PASSWORD": "fixture-password",
-    "APP_STORE_CONNECT_API_KEY": "fixture-notary-key",
-    "APP_STORE_CONNECT_KEY_ID": "FIXTURE123",
-    "APP_STORE_CONNECT_ISSUER_ID": "fixture-issuer",
+    "SPACETERM_RELEASE_UPDATE_ED25519_SEED": "fixture-update-key",
+    "SPACETERM_RELEASE_DEVID_P12_BASE64": "fixture-certificate",
+    "SPACETERM_RELEASE_DEVID_P12_PASSWORD": "fixture-password",
+    "SPACETERM_RELEASE_NOTARY_P8": "fixture-notary-key",
+    "SPACETERM_RELEASE_NOTARY_KEY_ID": "FIXTURE123",
+    "SPACETERM_RELEASE_NOTARY_ISSUER_ID": "fixture-issuer",
 }
 
 

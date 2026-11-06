@@ -321,7 +321,7 @@ class CoreArchiveTests(unittest.TestCase):
                 destination = self.root / identity
                 environment = {"PATH": os.environ["PATH"]}
                 if identity != "spaceterm":
-                    environment["UPDATE_SIGNING_KEY"] = "invalid production credential"
+                    environment["SPACETERM_RELEASE_UPDATE_ED25519_SEED"] = "invalid production credential"
                 with patch.dict(os.environ, environment, clear=True):
                     signing_seed = (
                         seed

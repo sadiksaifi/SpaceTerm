@@ -1,0 +1,37 @@
+#!/usr/bin/env python
+# MISE description="Run one release stage against the frozen plan"
+# USAGE arg "<stage>" { choices "restore" "compile" "sign-core" "desktop" "tag" "floor-smoke" "resume" }
+# USAGE arg "[archive]"
+import argparse
+
+from spaceterm_tasks import main, release_inputs, release_plan
+
+
+def run(stage, archive):
+    if stage == "restore":
+        release_plan.restore()
+    elif stage == "tag":
+        release_plan.authorize_tag()
+    elif stage == "compile":
+        release_inputs.compile_products()
+    elif stage == "sign-core":
+        release_inputs.sign_core(archive)
+    elif stage == "desktop":
+        release_inputs.package_desktop(archive)
+    elif stage == "resume":
+        release_plan.resume_artifact(archive)
+    else:
+        from spaceterm_tasks.release_smoke import run
+
+        run()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "stage",
+        choices=("restore", "compile", "sign-core", "desktop", "tag", "floor-smoke", "resume"),
+    )
+    parser.add_argument("archive", nargs="?")
+    args = parser.parse_args()
+    main(lambda: run(args.stage, args.archive))

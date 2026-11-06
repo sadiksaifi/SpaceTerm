@@ -204,12 +204,12 @@ def fetch(tag, destination):
         members = [
             member
             for member in source
-            if PurePosixPath(member.name).parts[:1] == ("server",)
+            if PurePosixPath(member.name).parts[:1] == ("core",)
             and (member.isfile() or member.isdir())
         ]
         source.extractall(destination, members=members, filter="data")
     try:
-        build = json.loads((destination / "server/build.json").read_bytes())
+        build = json.loads((destination / "core/build.json").read_bytes())
     except (OSError, json.JSONDecodeError):
         raise TaskError("the release archive has no build document") from None
     found = tuple(build.get(key) for key in ("identity", "version", "target"))
@@ -220,7 +220,7 @@ def fetch(tag, destination):
         isinstance((protocols.get(lane) or {}).get("major"), int) for lane in LANES.values()
     ):
         raise TaskError("the release archive names no protocol versions")
-    tree = destination / "server"
+    tree = destination / "core"
     shutil.copyfile(archive, tree / "artifact.tar.gz")
     shutil.copyfile(signature, tree / "artifact.sig")
     return tree, protocols

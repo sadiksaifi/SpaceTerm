@@ -420,6 +420,21 @@ run = "cargo clean"
 description = "Validate the Tagsmith release configuration"
 run = "tagsmith targets --json"
 
+[tasks."release:check-tools"]
+description = "Check release planning, signatures, packaging boundaries and Update Floors without compiling"
+run = "python -m unittest tests.test_release tests.test_release_floor tests.test_release_plan tests.test_package_credentials tests.test_macos_notary tests.test_release_promote tests.test_release_publish"
+
+[tasks."release:check"]
+description = "Validate release policy and retained-data behavior alongside release compilation"
+run = [
+  { task = "test:tools" },
+  { task = "fmt:check" },
+  { task = "lint:python" },
+  { task = "lint:shell" },
+  "cargo test --release --package spaceterm-core --package spaceterm-cli --package spaceterm-directories --package spaceterm-connections --no-default-features --locked",
+  "cargo test --release --package spaceterm --lib --no-default-features --locked migration",
+]
+
 [tasks."release:preview"]
 description = "Preview an annotated release tag without creating it"
 usage = 'arg "<version>" help="Stable SemVer to release"'

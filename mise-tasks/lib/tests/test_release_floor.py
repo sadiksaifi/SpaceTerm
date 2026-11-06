@@ -216,6 +216,13 @@ class ReleaseCheckTests(unittest.TestCase):
         self.complete_fixtures()
         self.assertEqual(self.check("1.0.0"), {"core": "1.0.0", "desktop": "1.0.0"})
 
+    def test_greenfield_history_ignores_legacy_generations_and_starts_at_zero_ten(self):
+        self.repository.release("0.6.8", source(CORE_DATA=(70, 99)))
+        self.repository.release("0.9.9", source(DESKTOP_STATE=(8, 12)))
+        self.repository.commit(source())
+        self.complete_fixtures()
+        self.assertEqual(self.check("0.10.0"), {"core": "0.10.0", "desktop": "0.10.0"})
+
     def test_generations_compare_against_the_previous_published_release_only(self):
         self.repository.release("1.0.0", source())
         # 1.0.1 failed before publication with generations no published release ever had.

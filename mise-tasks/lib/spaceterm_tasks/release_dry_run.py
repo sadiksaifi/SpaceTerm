@@ -4,7 +4,7 @@ The checkout lives in target/release-dry-run/source and holds HEAD of this check
 dry-run tag, so no tag ever enters this repository. Each step runs as the release workflow
 runs it, with a generated update key, ad hoc code signatures and no notarization. Nothing is
 published. On a Mac the Release Core still compiles in the Team ID, so the caller supplies
-SPACETERM_APPLE_TEAM_ID.
+SPACETERM_RELEASE_APPLE_TEAM_ID.
 """
 
 import os

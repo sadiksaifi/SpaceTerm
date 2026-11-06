@@ -298,8 +298,8 @@ class ReleaseSigningTests(unittest.TestCase):
         original = self.search_list()
         for credentials, identity in (
             ({}, NAME),
-            ({**self.credentials, "MACOS_SIGNING_CERTIFICATE_P12": "not-base64"}, NAME),
-            ({**self.credentials, "MACOS_SIGNING_CERTIFICATE_PASSWORD": "incorrect"}, NAME),
+            ({**self.credentials, "SPACETERM_RELEASE_DEVID_P12_BASE64": "not-base64"}, NAME),
+            ({**self.credentials, "SPACETERM_RELEASE_DEVID_P12_PASSWORD": "incorrect"}, NAME),
             (self.credentials, "Developer ID Application: Someone Else (ABCDE12345)"),
         ):
             with self.subTest(identity=identity), self.assertRaises(TaskError):
@@ -316,8 +316,8 @@ class ReleaseSigningTests(unittest.TestCase):
         original = self.search_list()
         environment = {**os.environ, **self.credentials}
         clean = signing_environment(environment)
-        self.assertNotIn("MACOS_SIGNING_CERTIFICATE_P12", clean)
-        self.assertNotIn("MACOS_SIGNING_CERTIFICATE_PASSWORD", clean)
+        self.assertNotIn("SPACETERM_RELEASE_DEVID_P12_BASE64", clean)
+        self.assertNotIn("SPACETERM_RELEASE_DEVID_P12_PASSWORD", clean)
         identifier = "com.peblon.spaceterm.signing-test"
         expected = macos_codesign.canonical_requirement(
             macos_codesign.designated_requirement(identifier, TEAM)

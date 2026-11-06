@@ -1,413 +1,505 @@
 name: Release
 
-# A tag push releases. A manual run is a dry run of the same jobs: a generated update key,
-# ad hoc code signatures, no notarization, no protected environment and nothing published.
-# Pull requests and pushes to main run nothing here; these checks run only for a release.
+# Manual releases use main's cache scope. No workflow runs on a push or pull request.
 on:
-  push:
-    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version without v, at least 0.10.0
+        required: true
+        type: string
+      mode:
+        description: Unsigned plan check, protected signed rehearsal, or publication
+        type: choice
+        default: unsigned
+        options: [unsigned, signed, publish]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event_name == 'push' && 'release' || format('release-dry-run-{0}', github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  group: release
+  cancel-in-progress: false
 
-# Only the four release jobs set the release mode: core, desktop-macos, desktop-linux and
-# publish. Validation runs the test suite, which must not inherit it. Each of them sets
-#   SPACETERM_RELEASE_DRY_RUN: 0 on a tag push, otherwise 1.
-#   SPACETERM_APPLE_TEAM_ID: the Developer ID Team ID. The Release Core compiles it into the
-#     requirement it checks retained runtimes against, and signing, verification and
-#     install.sh use it.
-#   SPACETERM_APPLE_SIGNING_IDENTITY: "Developer ID Application: <name> (<Team ID>)" on a tag
-#     push; a dry run signs ad hoc with "-".
+env:
+  MISE_TASK_RUN_AUTO_INSTALL: 'false'
+  SPACETERM_RELEASE_PLAN: dist/release-plan.json
+  SPACETERM_RELEASE_APPLE_TEAM_ID: ${{ vars.SPACETERM_RELEASE_APPLE_TEAM_ID }}
+  SPACETERM_RELEASE_APPLE_IDENTITY: ${{ vars.SPACETERM_RELEASE_APPLE_IDENTITY }}
+  CARGO_INCREMENTAL: '0'
+  RUSTC_WRAPPER: ''
+  TZ: UTC
 
 jobs:
   plan:
-    name: Plan the release
+    name: Plan and notes
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    # install_args selects this job's tools; keep mise run from installing the rest.
-    env:
-      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    timeout-minutes: 10
     outputs:
-      tag: ${{ steps.release.outputs.tag || steps.dry-run.outputs.tag }}
-      dry-run-key: ${{ steps.key.outputs.key }}
+      tag: ${{ steps.plan.outputs.tag }}
+      source: ${{ steps.plan.outputs.source }}
+      mode: ${{ steps.plan.outputs.mode }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: jdx/mise-action@v5
-        with:
-          install_args: "python node npm:tagsmith"
-      - name: Validate annotated release tag
-        if: github.event_name == 'push'
-        id: release
-        timeout-minutes: 5
-        run: mise run release:validate "$GITHUB_REF_NAME"
-      - name: Tag the dry run
-        if: github.event_name != 'push'
-        id: dry-run
-        run: mise run release:dry-run:tag
-      - name: Generate the dry-run update key
-        if: github.event_name != 'push'
-        id: key
-        # A throwaway Ed25519 seed. Nothing it signs verifies under the release trust.
-        run: echo "key=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
-      - name: Check the Data Generations, migration fixtures and Update Floors
-        timeout-minutes: 5
-        env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag || steps.dry-run.outputs.tag }}
-          # gh lists the published releases the Update Floors come from.
-          GH_TOKEN: ${{ github.token }}
-        run: mise run release:migrations "$RELEASE_TAG"
-
-  validate-macos:
-    name: Validate macOS
-    needs: plan
-    runs-on: macos-26
-    timeout-minutes: 75
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-      - uses: jdx/mise-action@v5
-      - name: Install the Xcode Metal toolchain
-        timeout-minutes: 10
-        run: mise run setup:metal:macos
-      - name: Validate
-        timeout-minutes: 60
-        run: mise run validate:macos
-
-  validate-linux:
-    name: Validate Linux
-    needs: plan
-    runs-on: ubuntu-26.04
-    timeout-minutes: 100
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-      - uses: jdx/mise-action@v5
-      - name: Install Linux build and test packages
-        timeout-minutes: 30
-        run: mise bootstrap packages apply --yes --update
-      - name: Check the development environment
-        run: mise doctor project
-      - name: Cache Rust builds
-        uses: actions/cache@v6
-        with:
-          path: |
-            target/debug
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/git/db
-          key: validate-linux-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'mise.lock', 'third_party/libghostty-vt-sys/build.rs', 'third_party/libghostty-vt-sys/patches/*.patch') }}
-      - name: Validate
-        timeout-minutes: 60
-        run: mise run validate:linux
-      - name: Migrate and parse every migration fixture
-        timeout-minutes: 15
-        run: mise run test:migrations
-
-  notes:
-    name: Write the release notes
-    needs: plan
-    runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    env:
-      MISE_TASK_RUN_AUTO_INSTALL: "false"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: jdx/mise-action@v5
-        with:
-          install_args: "python git-cliff"
-      - name: Tag the dry run
-        if: github.event_name != 'push'
-        run: mise run release:dry-run:tag
-      - name: Run git-cliff
-        run: mise run release:notes --output dist/release-notes.md
-      - uses: actions/upload-artifact@v7
-        with:
-          name: release-notes
-          path: dist/release-notes.md
-          if-no-files-found: error
-          retention-days: 7
-
-  core:
-    name: Build and sign SpaceTerm Core (${{ matrix.target }})
-    # Signing starts only after both platforms pass validation.
-    needs: [plan, validate-macos, validate-linux]
-    environment: ${{ github.event_name == 'push' && 'release' || '' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-26
-            target: aarch64-apple-darwin
-          - os: ubuntu-26.04
-            target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
-    env:
-      SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
-      SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-      SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-      - uses: jdx/mise-action@v5
-      - name: Tag the dry run
-        if: github.event_name != 'push'
-        run: mise run release:dry-run:tag
-      - name: Install Linux build packages
-        if: runner.os == 'Linux'
-        timeout-minutes: 10
-        run: mise bootstrap packages apply --yes --update
-      - name: Fetch locked Rust dependencies
-        timeout-minutes: 10
-        run: mise run setup:deps
-      - name: Build, sign, notarize and staple SpaceTerm Core
-        timeout-minutes: 100
-        env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          UPDATE_SIGNING_KEY: ${{ github.event_name == 'push' && secrets.UPDATE_SIGNING_KEY || needs.plan.outputs.dry-run-key }}
-          MACOS_SIGNING_CERTIFICATE_P12: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.MACOS_SIGNING_CERTIFICATE_P12 || '' }}
-          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD || '' }}
-          APP_STORE_CONNECT_API_KEY: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_API_KEY || '' }}
-          APP_STORE_CONNECT_KEY_ID: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_KEY_ID || '' }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ runner.os == 'macOS' && github.event_name == 'push' && secrets.APP_STORE_CONNECT_ISSUER_ID || '' }}
-          # gh lists the published releases the Core's Update Floor comes from.
-          GH_TOKEN: ${{ github.token }}
-        run: mise run release:core "$RELEASE_TAG"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: core-${{ matrix.target }}
-          path: dist/release-core/
-          if-no-files-found: error
-          retention-days: 7
-
-  desktop-macos:
-    name: Package, sign and notarize the macOS desktop
-    needs: [plan, notes, core]
-    environment: ${{ github.event_name == 'push' && 'release' || '' }}
-    runs-on: macos-26
-    timeout-minutes: 150
-    env:
-      SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
-      SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-      SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-      - uses: jdx/mise-action@v5
-      - name: Tag the dry run
-        if: github.event_name != 'push'
-        run: mise run release:dry-run:tag
-      - name: Install the Xcode Metal toolchain
-        timeout-minutes: 10
-        run: mise run setup:metal:macos
-      - name: Fetch locked Rust dependencies
-        timeout-minutes: 10
-        run: mise run setup:deps
-      - name: Collect both signed Core builds
-        uses: actions/download-artifact@v8
-        with:
-          pattern: core-*
-          merge-multiple: true
-          path: dist/release-core
-      - name: Collect the release notes
-        uses: actions/download-artifact@v8
-        with:
-          name: release-notes
-          path: dist
-      - name: Package, sign, notarize and staple the app, disk image and appcast
-        timeout-minutes: 130
-        env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          UPDATE_SIGNING_KEY: ${{ github.event_name == 'push' && secrets.UPDATE_SIGNING_KEY || needs.plan.outputs.dry-run-key }}
-          MACOS_SIGNING_CERTIFICATE_P12: ${{ github.event_name == 'push' && secrets.MACOS_SIGNING_CERTIFICATE_P12 || '' }}
-          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ github.event_name == 'push' && secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD || '' }}
-          APP_STORE_CONNECT_API_KEY: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_API_KEY || '' }}
-          APP_STORE_CONNECT_KEY_ID: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_KEY_ID || '' }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ github.event_name == 'push' && secrets.APP_STORE_CONNECT_ISSUER_ID || '' }}
-          # gh lists the published releases the desktop's Update Floor comes from.
-          GH_TOKEN: ${{ github.token }}
-        run: mise run release:desktop:macos "$RELEASE_TAG" --notes dist/release-notes.md --core dist/release-core
-      - uses: actions/upload-artifact@v7
-        with:
-          name: desktop-macos
-          path: dist/release-desktop-macos/
-          if-no-files-found: error
-          retention-days: 7
-
-  desktop-linux:
-    name: Package the x86_64 Linux desktop
-    # It holds no secret: release:assemble signs its archive.
-    needs: [plan, notes, core]
-    runs-on: ubuntu-26.04
-    # mise pins Zig's glibc target and the Ubuntu 22.04 native-library sysroot.
-    timeout-minutes: 75
-    env:
-      SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
-      SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-      SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-      - uses: jdx/mise-action@v5
-      - name: Tag the dry run
-        if: github.event_name != 'push'
-        run: mise run release:dry-run:tag
-      - name: Install Linux build packages
-        timeout-minutes: 10
-        run: mise bootstrap packages apply --yes --update
-      - name: Fetch locked Rust dependencies
-        timeout-minutes: 10
-        run: mise run setup:deps
-      - name: Collect both signed Core builds
-        uses: actions/download-artifact@v8
-        with:
-          pattern: core-*
-          merge-multiple: true
-          path: dist/release-core
-      - name: Collect the release notes
-        uses: actions/download-artifact@v8
-        with:
-          name: release-notes
-          path: dist
-      - name: Package the Linux desktop
-        timeout-minutes: 50
-        env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          # A dry run trusts its generated key. A release trusts packaging/update-trust.json.
-          UPDATE_SIGNING_KEY: ${{ github.event_name != 'push' && needs.plan.outputs.dry-run-key || '' }}
-        run: mise run release:desktop:linux "$RELEASE_TAG" --notes dist/release-notes.md --core dist/release-core
-      - uses: actions/upload-artifact@v7
-        with:
-          name: desktop-linux
-          path: dist/release-desktop-linux/
-          if-no-files-found: error
-          retention-days: 7
-
-  update-from-floor:
-    name: Update from the Update Floor
-    needs: [plan, core]
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    # install_args selects this job's tools; keep mise run from installing the rest.
-    env:
-      MISE_TASK_RUN_AUTO_INSTALL: "false"
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: jdx/mise-action@v5
-        with:
-          install_args: "python"
-      - name: Skip the pair in a dry run
-        if: github.event_name != 'push'
-        # The floor release's Core trusts only release signatures, and a dry run's Core
-        # archive carries the generated key's.
-        run: echo "Dry run - the update-from-floor pair needs a release-signed Core archive."
-      - name: Authorize boot startup for the floor Core's user service
-        if: github.event_name == 'push'
-        timeout-minutes: 5
-        run: sudo loginctl enable-linger "$USER"
-      - name: Collect the Linux Core build
-        if: github.event_name == 'push'
-        uses: actions/download-artifact@v8
-        with:
-          name: core-x86_64-unknown-linux-gnu
-          path: dist/release-core
-      - name: Update the floor release's Core to this release's
-        if: github.event_name == 'push'
-        timeout-minutes: 30
-        env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          mise run compat:update "$RELEASE_TAG"
-          --archive dist/release-core/x86_64-unknown-linux-gnu/artifact.tar.gz
-          --signature dist/release-core/x86_64-unknown-linux-gnu/artifact.sig
-
-  publish:
-    name: Sign the feeds and publish the release
-    needs: [plan, notes, core, desktop-macos, desktop-linux, update-from-floor]
-    environment: ${{ github.event_name == 'push' && 'release' || '' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    env:
-      SPACETERM_RELEASE_DRY_RUN: ${{ github.event_name == 'push' && '0' || '1' }}
-      SPACETERM_APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-      SPACETERM_APPLE_SIGNING_IDENTITY: ${{ github.event_name == 'push' && vars.APPLE_SIGNING_IDENTITY || '-' }}
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@v5
-      - name: Tag the dry run
-        if: github.event_name != 'push'
-        run: mise run release:dry-run:tag
-      - name: Install Linux packages that verification runs
-        timeout-minutes: 10
-        run: mise bootstrap packages apply --yes --update
-      - name: Collect both signed Core builds
-        uses: actions/download-artifact@v8
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          pattern: core-*
+          install_args: python git-cliff node npm:tagsmith
+      - name: Freeze release inputs and local tag
+        id: plan
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_MODE: ${{ inputs.mode }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'SpaceTerm releases'
+          git config user.email 'releases@spaceterm.peblon.com'
+          mise run release:plan "$RELEASE_VERSION" "$RELEASE_MODE"
+      - name: Check unsigned release policy
+        if: inputs.mode == 'unsigned'
+        run: mise run release:check-tools
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: release-plan-${{ github.run_attempt }}
+          path: |
+            dist/release-plan.json
+            dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  validate:
+    name: Validate release
+    needs: plan
+    if: needs.plan.outputs.mode != 'unsigned'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: ./.github/actions/release-build-tools
+        with:
+          validation: 'true'
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - name: Validate tooling, source and migration fixtures
+        run: mise run release:check
+
+  compile-macos:
+    name: Compile macos
+    needs: plan
+    if: needs.plan.outputs.mode != 'unsigned'
+    runs-on: macos-26
+    timeout-minutes: 60
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: ./.github/actions/release-build-tools
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - name: Compile Core and desktop without private credentials
+        run: mise run release:pipeline compile
+      - name: Save Zig dependencies
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.os == 'macOS' && '~/Library/Caches/zig' || '~/.cache/zig' }}
+          key: release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-${{ github.sha }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: compiled-macos-${{ github.run_attempt }}
+          path: dist/compiled/aarch64-apple-darwin/inputs.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  compile-linux:
+    name: Compile linux
+    needs: plan
+    if: needs.plan.outputs.mode != 'unsigned'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: ./.github/actions/release-build-tools
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - name: Compile Core and desktop without private credentials
+        run: mise run release:pipeline compile
+      - name: Save Zig dependencies
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.os == 'macOS' && '~/Library/Caches/zig' || '~/.cache/zig' }}
+          key: release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-${{ github.sha }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: compiled-linux-${{ github.run_attempt }}
+          path: dist/compiled/x86_64-unknown-linux-gnu/inputs.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  authorize:
+    name: Authorize validated release tag
+    needs: [plan, validate]
+    environment: release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - name: Create remote tag only for publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: mise run release:pipeline tag
+
+  core-macos:
+    name: Sign Core macos
+    needs: [plan, compile-macos, authorize]
+    environment: release
+    runs-on: macos-26
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.compile-macos.outputs.artifact-id }}
+          path: dist/compiled
+      - uses: ./.github/actions/release-resume
+        with:
+          lane: core-macos
+      - name: Sign finalized Core bytes without compiling
+        timeout-minutes: 40
+        env:
+          SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
+          SPACETERM_RELEASE_DEVID_P12_BASE64: ${{ secrets.SPACETERM_RELEASE_DEVID_P12_BASE64 }}
+          SPACETERM_RELEASE_DEVID_P12_PASSWORD: ${{ secrets.SPACETERM_RELEASE_DEVID_P12_PASSWORD }}
+          SPACETERM_RELEASE_NOTARY_P8: ${{ secrets.SPACETERM_RELEASE_NOTARY_P8 }}
+          SPACETERM_RELEASE_NOTARY_KEY_ID: ${{ vars.SPACETERM_RELEASE_NOTARY_KEY_ID }}
+          SPACETERM_RELEASE_NOTARY_ISSUER_ID: ${{ vars.SPACETERM_RELEASE_NOTARY_ISSUER_ID }}
+        run: mise run release:pipeline sign-core dist/compiled/inputs.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: core-aarch64-apple-darwin-${{ github.run_attempt }}
+          path: dist/release-core/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retain bounded notarization evidence
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notary-core-macos-${{ github.run_attempt }}
+          path: dist/notarization/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  core-linux:
+    name: Sign Core linux
+    needs: [plan, compile-linux, authorize]
+    environment: release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.compile-linux.outputs.artifact-id }}
+          path: dist/compiled
+      - uses: ./.github/actions/release-resume
+        with:
+          lane: core-linux
+      - name: Sign finalized Core bytes without compiling
+        env:
+          SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
+        run: mise run release:pipeline sign-core dist/compiled/inputs.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: core-x86_64-unknown-linux-gnu-${{ github.run_attempt }}
+          path: dist/release-core/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retain bounded notarization evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notary-core-linux-${{ github.run_attempt }}
+          path: dist/notarization/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  desktop-macos:
+    name: Package desktop macos
+    needs: [plan, compile-macos, core-macos, core-linux]
+    environment: release
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python cargo:cargo-packager github:sparkle-project/Sparkle
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.compile-macos.outputs.artifact-id }}
+          path: dist/compiled
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
           merge-multiple: true
           path: dist/release-core
-      - name: Collect the macOS desktop
-        uses: actions/download-artifact@v8
+      - uses: ./.github/actions/release-resume
         with:
-          name: desktop-macos
-          path: dist/release-desktop-macos
-      - name: Collect the Linux desktop
-        uses: actions/download-artifact@v8
-        with:
-          name: desktop-linux
-          path: dist/release-desktop-linux
-      - name: Collect the release notes
-        uses: actions/download-artifact@v8
-        with:
-          name: release-notes
-          path: dist
-      - name: Sign the feeds and the Linux desktop archive
-        timeout-minutes: 15
+          lane: desktop
+      - name: Package compiled desktop with both finalized Core archives
+        timeout-minutes: 80
         env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          UPDATE_SIGNING_KEY: ${{ github.event_name == 'push' && secrets.UPDATE_SIGNING_KEY || needs.plan.outputs.dry-run-key }}
-          # gh lists the published releases the feeds' Update Floors come from.
+          SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
+          SPACETERM_RELEASE_DEVID_P12_BASE64: ${{ secrets.SPACETERM_RELEASE_DEVID_P12_BASE64 }}
+          SPACETERM_RELEASE_DEVID_P12_PASSWORD: ${{ secrets.SPACETERM_RELEASE_DEVID_P12_PASSWORD }}
+          SPACETERM_RELEASE_NOTARY_P8: ${{ secrets.SPACETERM_RELEASE_NOTARY_P8 }}
+          SPACETERM_RELEASE_NOTARY_KEY_ID: ${{ vars.SPACETERM_RELEASE_NOTARY_KEY_ID }}
+          SPACETERM_RELEASE_NOTARY_ISSUER_ID: ${{ vars.SPACETERM_RELEASE_NOTARY_ISSUER_ID }}
+        run: mise run release:pipeline desktop dist/compiled/inputs.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: desktop-macos-${{ github.run_attempt }}
+          path: dist/release-desktop-macos/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retain bounded notarization evidence
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notary-desktop-${{ github.run_attempt }}
+          path: dist/notarization/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  desktop-linux:
+    name: Package desktop linux
+    needs: [plan, compile-linux, core-macos, core-linux]
+    environment: release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.compile-linux.outputs.artifact-id }}
+          path: dist/compiled
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist/release-core
+      - name: Package compiled desktop with both finalized Core archives
+        env:
+          SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
+        run: mise run release:pipeline desktop dist/compiled/inputs.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: desktop-linux-${{ github.run_attempt }}
+          path: dist/release-desktop-linux/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retain bounded notarization evidence
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notary-desktop-${{ github.run_attempt }}
+          path: dist/notarization/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  floor-smoke:
+    name: Activate final Linux Core from its floor
+    needs: [plan, core-linux]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.core-linux.outputs.artifact-id }}
+          path: dist/release-core
+      - name: Authorize disposable runner account's user service
+        run: sudo loginctl enable-linger "$USER"
+      - name: Install and activate the first release or update the actual floor
+        env:
           GH_TOKEN: ${{ github.token }}
-        run: mise run release:assemble "$RELEASE_TAG"
-      - name: Publish the GitHub release
-        timeout-minutes: 10
+        run: mise run release:pipeline floor-smoke
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: floor-smoke-${{ github.run_attempt }}
+          path: dist/floor-smoke.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Verify, attest and publish
+    needs: [plan, core-macos, core-linux, desktop-macos, desktop-linux, floor-smoke]
+    environment: release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist/release-core
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.desktop-macos.outputs.artifact-id }}
+          path: dist/release-desktop-macos
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.desktop-linux.outputs.artifact-id }}
+          path: dist/release-desktop-linux
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.floor-smoke.outputs.artifact-id }}
+          path: dist
+      - name: Verify all products and sign updater assets
         env:
           RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          # A dry run gets no token, so gh cannot publish even if the dry-run check broke.
-          GH_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
-        run: mise run release:publish "$RELEASE_TAG" --notes dist/release-notes.md
-      - name: Keep the dry-run assets for inspection
-        if: github.event_name != 'push'
-        uses: actions/upload-artifact@v7
+          SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
+        run: mise run release:assemble "$RELEASE_TAG"
+      - name: Attest final post-stapling archives and disk image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          name: dry-run-release
+          subject-path: |
+            dist/release/*.tar.gz
+            dist/release/*.dmg
+      - name: Publish the complete draft with Latest held
+        if: needs.plan.outputs.mode == 'publish'
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: mise run release:publish "$RELEASE_TAG" --notes dist/release-notes.md
+      - name: Retain signed rehearsal assets without publishing
+        if: needs.plan.outputs.mode == 'signed'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-rehearsal-${{ github.run_attempt }}
           path: dist/release/
           if-no-files-found: error
-          retention-days: 7
+          compression-level: 0
+          retention-days: 14

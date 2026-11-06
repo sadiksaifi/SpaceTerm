@@ -1,7 +1,7 @@
 """Ed25519 update signatures and the release trust that verifies them.
 
 `packaging/update-trust.json` holds the two public keys every Release reader trusts: `current`,
-whose private key `UPDATE_SIGNING_KEY` holds, and `backup`, whose private key stays offline. A
+whose private key `SPACETERM_RELEASE_UPDATE_ED25519_SEED` holds, and `backup`, whose private key stays offline. A
 signature is valid under either key. Every signature is 64 raw bytes over a file's exact bytes.
 
 A release dry run has no access to the release key. It signs with a generated key and trusts
@@ -20,7 +20,7 @@ from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError
 
-SIGNING_SECRET = "UPDATE_SIGNING_KEY"
+SIGNING_SECRET = "SPACETERM_RELEASE_UPDATE_ED25519_SEED"
 DRY_RUN = "SPACETERM_RELEASE_DRY_RUN"
 TRUST = Path("packaging/update-trust.json")
 SIGNATURE_BYTES = 64
