@@ -1,7 +1,7 @@
 {
   "sources": {
     "assets/brand/apple/SpaceTerm.icon/icon.json": "c7c811ac1f79715e4525e1d5a5cf4b14790a625e00600be36ae3ae6a6c612b8a",
-    "mise-tasks/lib/spaceterm_tasks/brand.py": "676a784568af101354fc3bf8d56c53359fa051dd2a758cfe85b5a62e82679a99",
+    "mise-tasks/lib/spaceterm_tasks/brand.py": "e168cf47cb50e359eda587174713a6b5d9a2c57e753dba2fa0d7dc75fa905765",
     "assets/fonts/inter/Inter-SemiBold.otf": "029868c162537553aa637ac5aed54644269146ef71f573804ccea023bdcb1a87",
     "assets/fonts/inter/Inter-Regular.otf": "6b4a361c5380bb30eb58e004bfbe65abc033c6c7a7e35df414748b2182db4189"
   },
@@ -46,6 +46,7 @@
     "linux/hicolor/512x512/apps/io.github.sadiksaifi.spaceterm.png": "ef0ac3524e61d49074c703beb7c4234930b60c808f6cdeefd731ff5f6ade279d",
     "linux/hicolor/64x64/apps/io.github.sadiksaifi.spaceterm.png": "5a164edfc781a420547eda833835a12247b9cbc305f081d7a85a7ad315cd4f10",
     "linux/hicolor/scalable/apps/io.github.sadiksaifi.spaceterm.svg": "922f3b7732d5e303f901f3a94c2a9ce40298155292ca57f124391de4e9f2c1cd",
+    "linux/hicolor/symbolic/apps/io.github.sadiksaifi.spaceterm-attention-symbolic.svg": "67c820c2189eeefc584cb8c7f01cdea8d9a0a7a091e33b1a17343a5a0f73a4d1",
     "linux/hicolor/symbolic/apps/io.github.sadiksaifi.spaceterm-symbolic.svg": "5730777d0a9d0119e0f055f83fadc9ae89865988b02e8ad00338b0dcf33e3d05",
     "logo/spaceterm-glyph.svg": "13d6474f3cfd4fdc64bdb253cdccc0c04015f1d8e1f508076c89e871068241ff",
     "logo/spaceterm-icon-dark.svg": "d32e3737c11f33a37cabb3e9db805ff13cea6bcaf5656b77d342993ae26e98cd",

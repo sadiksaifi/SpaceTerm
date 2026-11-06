@@ -45,7 +45,7 @@ ORBITS = (
     (27.5, (70.436, 31.599), 6.2),
     (43.5, (13.937, 74.325), 7.4),
 )
-# The menu bar's attention badge sits on the outer orbit's upper right.
+# The status item's attention badge sits on the outer orbit's upper right.
 BADGE = ((85.0, 15.0), 8.5)
 BADGE_CLEARANCE = 4.0
 
@@ -701,6 +701,10 @@ def outputs(root, renderers):
     for size in HICOLOR_SIZES:
         png(f"linux/hicolor/{size}x{size}/apps/{APPLICATION_ID}.png", scalable, size)
     text(f"linux/hicolor/symbolic/apps/{APPLICATION_ID}-symbolic.svg", glyph(16, "#2e3436"))
+    text(
+        f"linux/hicolor/symbolic/apps/{APPLICATION_ID}-attention-symbolic.svg",
+        glyph(16, "#2e3436", badge=True),
+    )
 
     # Windows: the application icon, and the MSIX package logos.
     files["windows/SpaceTerm.ico"] = ico(
