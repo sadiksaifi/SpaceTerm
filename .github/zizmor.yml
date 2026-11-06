@@ -2,3 +2,8 @@ rules:
   self-repository:
     # Every job checks out the dispatched commit, which its release plan requires, before using its local actions.
     disable: true
+  unpinned-uses:
+    # Remote actions follow their latest major tag, such as actions/checkout@v7. A missing ref still fails.
+    config:
+      policies:
+        '*': ref-pin

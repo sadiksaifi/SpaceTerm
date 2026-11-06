@@ -50,7 +50,7 @@ jobs:
       contents: read
       actions: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
@@ -79,7 +79,7 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
@@ -91,11 +91,11 @@ jobs:
       - name: Compile Core and desktop without private credentials
         run: mise run release:pipeline compile
       - name: Save Zig dependencies
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/save@v6
         with:
           path: ~/Library/Caches/zig
           key: ${{ steps.tools.outputs.zig-cache-key }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: compiled-macos-${{ github.run_attempt }}
@@ -113,7 +113,7 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
@@ -125,11 +125,11 @@ jobs:
       - name: Compile Core and desktop without private credentials
         run: mise run release:pipeline compile
       - name: Save Zig dependencies
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/zig
           key: ${{ steps.tools.outputs.zig-cache-key }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: compiled-linux-${{ github.run_attempt }}
@@ -147,10 +147,10 @@ jobs:
       matrix: ${{ steps.pairs.outputs.matrix }}
       any: ${{ steps.pairs.outputs.any }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python
           version: 2026.10.4
@@ -169,7 +169,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.compatibility-plan.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
@@ -194,17 +194,17 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python
           version: 2026.10.4
           cache: false
       - uses: ./.github/actions/release-plan
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.compile-macos.outputs.artifact-id }}
           path: dist/compiled
@@ -221,7 +221,7 @@ jobs:
           SPACETERM_RELEASE_NOTARY_KEY_ID: ${{ vars.SPACETERM_RELEASE_NOTARY_KEY_ID }}
           SPACETERM_RELEASE_NOTARY_ISSUER_ID: ${{ vars.SPACETERM_RELEASE_NOTARY_ISSUER_ID }}
         run: mise run release:pipeline sign-core dist/compiled/inputs.tar.gz
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: core-aarch64-apple-darwin-${{ github.run_attempt }}
@@ -231,7 +231,7 @@ jobs:
           retention-days: 14
       - name: Retain bounded notarization evidence
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: notary-core-macos-${{ github.run_attempt }}
           path: dist/notarization/
@@ -247,17 +247,17 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python
           version: 2026.10.4
           cache: false
       - uses: ./.github/actions/release-plan
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.compile-linux.outputs.artifact-id }}
           path: dist/compiled
@@ -269,7 +269,7 @@ jobs:
         env:
           SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
         run: mise run release:pipeline sign-core dist/compiled/inputs.tar.gz
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: core-x86_64-unknown-linux-gnu-${{ github.run_attempt }}
@@ -279,7 +279,7 @@ jobs:
           retention-days: 14
       - name: Retain the finalized Core for a rerun
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: notary-core-linux-${{ github.run_attempt }}
           path: dist/notarization/
@@ -294,22 +294,22 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python
           version: 2026.10.4
           cache: false
       - uses: ./.github/actions/release-plan
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.core-macos.outputs.artifact-id }}
           path: dist/release-core
       - name: Execute only on the credential-free verifier
         run: mise run release:pipeline verify-core
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: core-verification-macos-${{ github.run_attempt }}
@@ -325,16 +325,16 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python
           version: 2026.10.4
           cache: false
       - uses: ./.github/actions/release-plan
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.core-linux.outputs.artifact-id }}
           path: dist/release-core
@@ -346,7 +346,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: mise run release:pipeline floor-smoke
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: core-verification-linux-${{ github.run_attempt }}
@@ -365,11 +365,11 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python github:sparkle-project/Sparkle
           version: 2026.10.4
@@ -377,11 +377,11 @@ jobs:
       - name: Select the compilation SDK for native resource assembly
         run: sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
       - uses: ./.github/actions/release-plan
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.compile-macos.outputs.artifact-id }}
           path: dist/compiled
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
           merge-multiple: true
@@ -399,7 +399,7 @@ jobs:
           SPACETERM_RELEASE_NOTARY_KEY_ID: ${{ vars.SPACETERM_RELEASE_NOTARY_KEY_ID }}
           SPACETERM_RELEASE_NOTARY_ISSUER_ID: ${{ vars.SPACETERM_RELEASE_NOTARY_ISSUER_ID }}
         run: mise run release:pipeline desktop dist/compiled/inputs.tar.gz
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: desktop-macos-${{ github.run_attempt }}
@@ -409,7 +409,7 @@ jobs:
           retention-days: 14
       - name: Retain bounded notarization evidence
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: notary-desktop-${{ github.run_attempt }}
           path: dist/notarization/
@@ -425,11 +425,11 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python
           version: 2026.10.4
@@ -437,11 +437,11 @@ jobs:
       - name: Install package verification dependencies
         run: mise run release:setup-linux-verification
       - uses: ./.github/actions/release-plan
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.compile-linux.outputs.artifact-id }}
           path: dist/compiled
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
           merge-multiple: true
@@ -450,7 +450,7 @@ jobs:
         env:
           SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
         run: mise run release:pipeline desktop dist/compiled/inputs.tar.gz
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: desktop-linux-${{ github.run_attempt }}
@@ -467,27 +467,27 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python github:sparkle-project/Sparkle
           version: 2026.10.4
           cache: false
       - uses: ./.github/actions/release-plan
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.desktop-macos.outputs.artifact-id }}
           path: dist/release-desktop-macos
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
           merge-multiple: true
           path: dist/release-core
       - name: Execute only on the credential-free verifier
         run: mise run release:pipeline verify-desktop
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: desktop-verification-macos-${{ github.run_attempt }}
@@ -503,10 +503,10 @@ jobs:
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python
           version: 2026.10.4
@@ -514,18 +514,18 @@ jobs:
       - name: Install native verification dependencies
         run: mise run release:setup-linux-verification
       - uses: ./.github/actions/release-plan
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.desktop-linux.outputs.artifact-id }}
           path: dist/release-desktop-linux
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
           merge-multiple: true
           path: dist/release-core
       - name: Execute only on the credential-free verifier
         run: mise run release:pipeline verify-desktop
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7
         id: upload
         with:
           name: desktop-verification-linux-${{ github.run_attempt }}
@@ -565,10 +565,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      - uses: jdx/mise-action@v5
         with:
           install_args: python
           version: 2026.10.4
@@ -578,29 +578,29 @@ jobs:
       - uses: ./.github/actions/release-plan
         with:
           notes: 'true'
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
           merge-multiple: true
           path: dist/release-core
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.desktop-macos.outputs.artifact-id }}
           path: dist/release-desktop-macos
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.desktop-linux.outputs.artifact-id }}
           path: dist/release-desktop-linux
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.verify-core-macos.outputs.artifact-id }}
           path: dist/core-verification
       - name: Download the Linux Core verification and floor activation evidence
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.verify-core-linux.outputs.artifact-id }}
           path: dist
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.verify-desktop-macos.outputs.artifact-id }},${{ needs.verify-desktop-linux.outputs.artifact-id }}
           merge-multiple: true
@@ -611,7 +611,7 @@ jobs:
         run: mise run release:assemble "v$RELEASE_VERSION"
       - name: Keep the signed assets of an unpublished run
         if: ${{ !inputs.publish }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: release-assets-${{ github.run_attempt }}
           path: dist/release/
@@ -620,7 +620,7 @@ jobs:
           retention-days: 14
       - name: Attest the final archives and disk image
         if: inputs.publish
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        uses: actions/attest@v4
         with:
           subject-path: |
             dist/release/*.tar.gz
@@ -632,7 +632,7 @@ jobs:
         run: mise run release:publish "v$RELEASE_VERSION" --notes dist/release-notes.md
       - name: Check out the Homebrew tap with its token
         if: inputs.publish
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: sadiksaifi/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_PAT }}
