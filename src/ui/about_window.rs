@@ -28,8 +28,7 @@ const WINDOW_WIDTH: f32 = 284.0;
 const TEXT_INSET: f32 = 24.0;
 /// The icon's drawn size, which includes the icon grid's own transparent margin.
 const ICON_SIZE: f32 = 64.0;
-/// The application icon as Linux desktops draw it. macOS shows its own About panel with the
-/// compiled bundle icon, so this window draws the brand's Linux tile.
+/// The application icon for the client-drawn About window.
 const ICON: &[u8] =
     include_bytes!("../../assets/brand/linux/hicolor/scalable/apps/com.peblon.spaceterm.svg");
 /// Vertical rhythm from the top edge to the bottom edge, in content order.
