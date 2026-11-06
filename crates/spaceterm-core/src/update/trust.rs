@@ -39,10 +39,7 @@ struct Document {
 impl UpdateTrust {
     /// The keys this build embeds from `packaging/update-trust.json`.
     pub fn release() -> Result<Self, InvalidTrust> {
-        Self::parse(match option_env!("SPACETERM_RELEASE_UPDATE_TRUST_JSON") {
-            Some(document) => document.as_bytes(),
-            None => include_bytes!("../../../../packaging/update-trust.json"),
-        })
+        Self::parse(include_bytes!("../../../../packaging/update-trust.json"))
     }
 
     /// Reads a trust document.

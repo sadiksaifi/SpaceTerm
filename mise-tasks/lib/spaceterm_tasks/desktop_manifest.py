@@ -93,8 +93,8 @@ def _seed(compiled_info, environment):
     seed = update_signing.signing_seed(secret)
     if update_signing.derived_public_key(seed) != compiled_info["update_trust"]["current"]:
         raise TaskError("the manifest signing key differs from compiled desktop trust")
-    # Production package verification uses tracked trust; dry runs compile generated public
-    # trust through SPACETERM_RELEASE_UPDATE_TRUST_JSON without dirtying the tagged checkout.
+    # Every build compiles tracked public trust. Dry runs commit generated public keys in
+    # their disposable checkout before tagging and compiling it.
     if (
         not update_signing.dry_run(environment)
         and tuple(compiled_info["update_trust"][name] for name in ("current", "backup"))

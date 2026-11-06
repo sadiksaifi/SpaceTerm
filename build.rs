@@ -15,7 +15,6 @@ fn desktop_provenance(
         "SPACETERM_CLI_SOURCE_STATE",
         "SPACETERM_RELEASE_FLOOR",
         "SPACETERM_RELEASE_APPLE_TEAM_ID",
-        "SPACETERM_RELEASE_UPDATE_TRUST_JSON",
     ] {
         println!("cargo:rerun-if-env-changed={key}");
     }
@@ -55,11 +54,8 @@ fn desktop_provenance(
             .expect("protocol version");
         protocols.insert(key.into(), serde_json::json!({"major":major.parse::<u16>().expect("protocol major"), "minor":minor.parse::<u16>().expect("protocol minor")}));
     }
-    let trust_bytes = env::var("SPACETERM_RELEASE_UPDATE_TRUST_JSON")
-        .map(String::into_bytes)
-        .unwrap_or_else(|_| {
-            std::fs::read(root.join("packaging/update-trust.json")).expect("public update trust")
-        });
+    let trust_bytes =
+        std::fs::read(root.join("packaging/update-trust.json")).expect("public update trust");
     let trust: serde_json::Value =
         serde_json::from_slice(&trust_bytes).expect("public update trust JSON");
     let document = serde_json::json!({
