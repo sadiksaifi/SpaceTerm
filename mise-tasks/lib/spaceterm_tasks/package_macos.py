@@ -179,7 +179,9 @@ def package_bundle(release_tag=None, notes=None):
                 environment=environment,
             )
             print(f"Building {app_name}.dmg with dmgbuild")
-            disk_image.build(app, dmg, app / "Contents" / "Resources" / f"{ICON_NAME}.icns")
+            disk_image.build(
+                app, dmg, app / "Contents" / "Resources" / f"{ICON_NAME}.icns", environment
+            )
             macos_codesign.sign_disk_image(
                 dmg, identity_name, template["CFBundleIdentifier"], environment=environment
             )

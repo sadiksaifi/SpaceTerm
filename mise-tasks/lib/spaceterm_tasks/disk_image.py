@@ -6,7 +6,6 @@ do not have, so no packaging path depends on Finder.
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -19,8 +18,12 @@ BACKGROUND = ROOT / brand.BRAND / "macos" / "dmg" / "background.tiff"
 BACKGROUND_IN_IMAGE = ".background.tiff"
 
 
-def build(app, image, volume_icon):
-    """Write `image` holding `app` and an Applications link, laid out over the background."""
+def build(app, image, volume_icon, environment):
+    """Write `image` holding `app` and an Applications link, laid out over the background.
+
+    dmgbuild and its installer run with `environment` alone, so release credentials that the
+    caller removed never reach them.
+    """
     app = Path(app)
     settings = {
         "format": "ULFO",
@@ -39,9 +42,14 @@ def build(app, image, volume_icon):
     }
     request = {"image": str(image), "volume_name": app.stem, "settings": settings}
     checked(
-        [venv.python(REQUIREMENTS), "-m", "spaceterm_tasks.disk_image", json.dumps(request)],
+        [
+            venv.python(REQUIREMENTS, environment),
+            "-m",
+            "spaceterm_tasks.disk_image",
+            json.dumps(request),
+        ],
         "dmgbuild could not create the disk image",
-        env={**os.environ, "PYTHONPATH": str(ROOT / "mise-tasks" / "lib")},
+        env={**environment, "PYTHONPATH": str(ROOT / "mise-tasks" / "lib")},
     )
     if not Path(image).is_file():
         raise TaskError("dmgbuild did not produce the disk image")

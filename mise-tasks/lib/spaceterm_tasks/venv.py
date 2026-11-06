@@ -14,8 +14,11 @@ from pathlib import Path
 from spaceterm_tasks import ROOT, TaskError
 
 
-def python(requirements):
-    """The Python of a private virtual environment holding `requirements`, created on first use."""
+def python(requirements, env=None):
+    """The Python of a private virtual environment holding `requirements`, created on first use.
+
+    The installer runs with `env` when given, and otherwise inherits this process's environment.
+    """
     requirements = Path(requirements)
     environment = ROOT / "target" / "task-venvs" / requirements.parent.name
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -34,7 +37,8 @@ def python(requirements):
                 "--require-hashes",
                 "-r",
                 requirements,
-            ]
+            ],
+            env=env,
         )
         if installed.returncode:
             raise TaskError("the task requirements could not be installed")
