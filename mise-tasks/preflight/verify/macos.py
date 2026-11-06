@@ -14,4 +14,8 @@ if __name__ == "__main__":
     parser.add_argument("--app")
     parser.add_argument("--dmg")
     args = parser.parse_args()
-    main(lambda: verify(args.app, args.dmg))
+
+    def run():
+        verify(args.app, args.dmg)
+
+    main(run)

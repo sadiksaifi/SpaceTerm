@@ -43,7 +43,7 @@ def prepare(
     expected = {
         "schema": 1,
         "stapled": False,
-        "source_sha256": _source(root)[2] if include_catalog and not release_tag else None,
+        "source_sha256": _source(root)[2] if include_catalog else None,
         "protocols": core_package.PROTOCOLS,
         "identity": "spaceterm" if release_tag else "spaceterm-preflight",
         "target": "aarch64-apple-darwin"
