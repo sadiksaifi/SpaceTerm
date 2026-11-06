@@ -218,6 +218,9 @@ class CoreArchiveTests(unittest.TestCase):
         run = subprocess.run
 
         def native_run(arguments, **kwargs):
+            # GitHub lists no published release, so this first release is its own floor.
+            if arguments[:2] == ["gh", "api"]:
+                return subprocess.CompletedProcess(arguments, 0, "", "")
             if arguments[1:] == ["internal", "build-info"]:
                 return subprocess.CompletedProcess(arguments, 0, json.dumps(info).encode(), b"")
             if arguments[1:] == ["internal", "check"]:

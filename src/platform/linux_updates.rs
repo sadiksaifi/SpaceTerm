@@ -1001,8 +1001,11 @@ mod tests {
         let mut fixture = installed("old");
         fixture.installation.exchange = without_exchange;
         let signer = ReleaseSigner::new(3);
-        let (shared, receiver) =
-            shared(&fixture, served(&signer, "1.1.0", &release(b"new")), signer.trust());
+        let (shared, receiver) = shared(
+            &fixture,
+            served(&signer, "1.1.0", &release(b"new")),
+            signer.trust(),
+        );
         let generation = shared
             .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
             .unwrap();
