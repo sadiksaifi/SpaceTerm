@@ -51,10 +51,10 @@ def linux_icons(application_id, root=ROOT):
     hicolor = root / BRAND_HICOLOR
     icons = {}
     for directory, _, files in sorted(os.walk(hicolor)):
-        folder = Path(directory).relative_to(hicolor).as_posix()
+        folder = Path("icons/hicolor") / Path(directory).relative_to(hicolor)
         for file in sorted(files):
             name = file.replace(BRAND_APPLICATION_ID, application_id, 1)
-            icons[f"icons/hicolor/{folder}/{name}"] = Path(directory) / file
+            icons[(folder / name).as_posix()] = Path(directory) / file
     return icons
 
 
