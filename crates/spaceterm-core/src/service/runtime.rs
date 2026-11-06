@@ -8,6 +8,7 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt},
 };
 
+mod archive_bounds;
 mod files;
 pub(super) mod launcher;
 mod layout;
@@ -76,6 +77,55 @@ pub fn verify_candidate_bytes(
         Some(required_major),
     )
     .map(Into::into)
+}
+
+/// Read one catalog digest through the same nonblocking, no-follow regular-file policy.
+pub fn candidate_digest(path: &Path) -> Result<String, CoreError> {
+    let bytes = source(path, 65)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| CoreError::RuntimeUnavailable)?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(CoreError::RuntimeUnavailable);
+    }
+    Ok(text.to_owned())
+}
+
+/// Captured candidate resources, bounded and immutable before authentication. Archive bytes
+/// share the retained-installation snapshot policy and live outside the heap.
+pub struct CandidateFiles {
+    archive: files::Snapshot,
+    signature: Vec<u8>,
+}
+
+impl CandidateFiles {
+    /// Open without following links or blocking on special files, require single-link regular
+    /// files, and capture their bounded contents. A changed archive length refuses the capture.
+    /// Authentication and native admission remain separate operations.
+    ///
+    /// # Errors
+    /// Returns RuntimeUnavailable for invalid type, length or a changed length, and
+    /// StorageUnavailable when a bounded read or memory reservation fails.
+    pub fn read(archive: &Path, signature: &Path) -> Result<Self, CoreError> {
+        let signature = source(signature, 64)?;
+        if signature.len() != 64 {
+            return Err(CoreError::RuntimeUnavailable);
+        }
+        Ok(Self {
+            archive: self::archive(archive)?,
+            signature,
+        })
+    }
+
+    pub fn archive(&self) -> &[u8] {
+        &self.archive
+    }
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
 }
 
 /// What the command-line launcher path holds. Only [`CliLauncher::Missing`] and SpaceTerm's
@@ -471,8 +521,9 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
     #[cfg(target_os = "macos")]
     {
         let layout = Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
-        let requirement = native_requirement(identity, option_env!("SPACETERM_APPLE_TEAM_ID"))
-            .ok_or(CoreError::RuntimeUnavailable)?;
+        let requirement =
+            native_requirement(identity, option_env!("SPACETERM_RELEASE_APPLE_TEAM_ID"))
+                .ok_or(CoreError::RuntimeUnavailable)?;
         verify_signature(&path.join(layout.signed()), &requirement)?;
     }
     #[cfg(not(target_os = "macos"))]
@@ -481,7 +532,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
 }
 /// The code requirement an installed version's bundle must satisfy. Release adds Apple's
 /// Developer ID requirement for the release Team ID, which release packaging supplies at build
-/// time as `SPACETERM_APPLE_TEAM_ID`, so every Release version from that team satisfies it. A
+/// time as `SPACETERM_RELEASE_APPLE_TEAM_ID`, so every Release version from that team satisfies it. A
 /// Release build without a valid Team ID admits no installed version.
 #[cfg(target_os = "macos")]
 fn native_requirement(identity: &str, team: Option<&str>) -> Option<String> {
@@ -742,7 +793,8 @@ fn contents_for_target(
     let mut buffer = vec![0; CHUNK];
     let layout = Layout::for_target(target, identity).ok_or(CoreError::RuntimeUnavailable)?;
     let main = layout.executable();
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    archive_bounds::validate(bytes)?;
+    let mut archive = tar::Archive::new(archive_bounds::decoder(bytes));
     let mut names = BTreeSet::new();
     let mut expanded = 0u64;
     let mut manifest = None;

@@ -3,47 +3,73 @@ mod identity;
 #[path = "build/release_notes.rs"]
 mod release_notes;
 
-use sha2::{Digest, Sha256};
 use std::{env, path::PathBuf, process::Command};
 
-fn candidate_provenance(packaged: bool) {
-    for key in ["SPACETERM_CLI_ARCHIVE", "SPACETERM_CLI_SIGNATURE"] {
+fn desktop_provenance(
+    root: &std::path::Path,
+    identity: &identity::Identity,
+    release: bool,
+    packaged: bool,
+) {
+    for key in [
+        "SPACETERM_CLI_SOURCE_STATE",
+        "SPACETERM_RELEASE_FLOOR",
+        "SPACETERM_RELEASE_APPLE_TEAM_ID",
+    ] {
         println!("cargo:rerun-if-env-changed={key}");
     }
-    let pair = (
-        env::var_os("SPACETERM_CLI_ARCHIVE"),
-        env::var_os("SPACETERM_CLI_SIGNATURE"),
+    println!("cargo:rerun-if-changed=packaging/update-trust.json");
+    println!("cargo:rerun-if-changed=crates/spaceterm-core/src/protocol/version.rs");
+    let source = env::var("SPACETERM_CLI_SOURCE_STATE").ok();
+    assert!(
+        source.as_ref().is_none_or(|s| s.len() == 64
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+        "valid source snapshot digest"
     );
-    let digest = match pair {
-        (Some(archive), Some(signature)) => {
-            let archive = PathBuf::from(archive);
-            let signature = PathBuf::from(signature);
-            println!("cargo:rerun-if-changed={}", archive.display());
-            println!("cargo:rerun-if-changed={}", signature.display());
-            let bytes = std::fs::read(archive).expect("the selected server archive is unavailable");
-            assert!(
-                bytes.len() <= 256 * 1024 * 1024,
-                "the selected server archive is too large"
-            );
-            assert_eq!(
-                std::fs::metadata(signature)
-                    .expect("the selected server signature is unavailable")
-                    .len(),
-                64,
-                "the selected server signature is invalid"
-            );
-            format!("{:x}", Sha256::digest(bytes))
+    let core_floor = env::var("SPACETERM_RELEASE_FLOOR").ok();
+    let desktop_floor = env::var("SPACETERM_DESKTOP_FLOOR").ok();
+    assert!(
+        !(release && env::var_os("CARGO_FEATURE_DESKTOP").is_some())
+            || (source.is_some() && core_floor.is_some() && desktop_floor.is_some()),
+        "release desktops require source and both Update Floors"
+    );
+    let text = std::fs::read_to_string(root.join("crates/spaceterm-core/src/protocol/version.rs"))
+        .expect("protocol source");
+    let mut protocols = serde_json::Map::new();
+    for (key, constant) in [
+        ("work", "WORK"),
+        ("service", "SERVICE"),
+        ("desktop_channel", "DESKTOP_CHANNEL"),
+    ] {
+        let prefix = format!("pub const {constant}: ProtocolVersion = ProtocolVersion {{ major: ");
+        let rest = text
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("protocol declaration");
+        let (major, minor) = rest
+            .strip_suffix(" };")
+            .expect("protocol declaration")
+            .split_once(", minor: ")
+            .expect("protocol version");
+        protocols.insert(key.into(), serde_json::json!({"major":major.parse::<u16>().expect("protocol major"), "minor":minor.parse::<u16>().expect("protocol minor")}));
+    }
+    let trust_bytes =
+        std::fs::read(root.join("packaging/update-trust.json")).expect("public update trust");
+    let trust: serde_json::Value =
+        serde_json::from_slice(&trust_bytes).expect("public update trust JSON");
+    let document = serde_json::json!({
+        "schema":1, "target":env::var("TARGET").expect("Cargo target"), "update_trust":trust,
+        "build": {
+            "identity":if release {"spaceterm"} else if packaged {"spaceterm-preflight"} else {"spaceterm-development"},
+            "commit":identity.commit, "version":identity.version, "source_sha256":source,
+            "protocols":protocols, "core_floor":core_floor, "desktop_floor":desktop_floor,
+            "apple_team_id":env::var("SPACETERM_RELEASE_APPLE_TEAM_ID").ok(),
         }
-        (None, None) => {
-            assert!(
-                !packaged,
-                "a packaged client requires a selected signed server artifact"
-            );
-            String::new()
-        }
-        _ => panic!("select both server archive and signature before building the client"),
-    };
-    println!("cargo:rustc-env=SPACETERM_CLI_SHA256={digest}");
+    });
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output"));
+    std::fs::write(output.join("desktop-build-info.json"), document.to_string())
+        .expect("write desktop provenance");
 }
 
 fn main() {
@@ -92,7 +118,7 @@ fn main() {
     // The application identity follows these inputs.
     let packaged = env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
     // The headless server depends on this library but does not carry a client candidate.
-    candidate_provenance(packaged && env::var_os("CARGO_FEATURE_DESKTOP").is_some());
+    desktop_provenance(&root, &identity, release_tag.is_some(), packaged);
     if packaged {
         assert!(
             env::var_os("CARGO_FEATURE_DEVELOPER_TOOLS").is_none(),

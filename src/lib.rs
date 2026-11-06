@@ -11,6 +11,13 @@ pub fn run_desktop() {
     let identity = application_identity::ApplicationIdentity::current();
     match arguments.as_slice() {
         [argument] if argument == "--build-info" => {
+            let candidate = local_startup::discover_candidate();
+            if cfg!(spaceterm_packaged)
+                && let Err(error) = candidate
+            {
+                eprintln!("{}", spaceterm_core::CoreError::from(error));
+                std::process::exit(1);
+            }
             println!(
                 "{}",
                 serde_json::json!({
@@ -19,7 +26,8 @@ pub fn run_desktop() {
                     "version": env!("SPACETERM_VERSION"),
                     "commit": env!("SPACETERM_COMMIT"),
                     "target": env!("SPACETERM_TARGET"),
-                    "core_candidate_sha256": env!("SPACETERM_CLI_SHA256"),
+                    "core_candidate_sha256": candidate.as_ref().ok().map(|candidate| candidate.digest()),
+                    "core_provenance": if cfg!(spaceterm_packaged) { core_resource_manifest::compiled_build().ok() } else { None },
                 })
             );
             return;

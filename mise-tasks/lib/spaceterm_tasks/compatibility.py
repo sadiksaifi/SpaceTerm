@@ -18,7 +18,6 @@ import select
 import shutil
 import signal
 import subprocess
-import tarfile
 import tempfile
 import time
 import tomllib
@@ -26,8 +25,11 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from spaceterm_tasks import ROOT, TaskError, release_feed, release_floor, update_signing
+from spaceterm_tasks.bounded_tar import open_archive
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.core_package import (
+    MAX_EXPANDED,
+    MAX_MEMBERS,
     PROTOCOLS,
     SHARED_RESOURCES,
     TARGETS,
@@ -198,7 +200,7 @@ def fetch(tag, destination):
     )
     archive, signature = download / name, download / f"{name}.sig"
     update_signing.verify(artifact_trust("spaceterm"), archive, signature)
-    with tarfile.open(archive, "r:gz") as source:
+    with open_archive(archive, maximum=MAX_EXPANDED, members=MAX_MEMBERS) as source:
         members = [
             member
             for member in source

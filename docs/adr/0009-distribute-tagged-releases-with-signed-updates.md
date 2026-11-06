@@ -16,6 +16,14 @@ Ed25519 signatures authenticate every update on macOS and Linux: each Core archi
 
 install.sh verifies each download before it runs or installs it: on macOS against the Developer ID requirement, on Linux against the update keys. The release fills in its Team ID when it publishes the script. install.sh and in-app updates are the only distribution channels.
 
+## Desktop Core resources
+
+Desktop compilation requires no signed Core archive. It compiles the exact source commit and snapshot digest, product identity, version, protocol versions, both Update Floors, public update trust and Apple Team ID. Packaging authenticates both finalized native Core packages and signs a release-specific resource manifest with the current update key. The manifest binds those compiled inputs to each target's exact archive digest and raw signature. Both desktops ship the same finalized archive bytes. The macOS app signature seals the manifest after packaging inserts it. Signing steps execute no product binaries. Full executable checks run on fresh runners without release credentials and produce evidence bound to the source commit, release plan, final desktop asset and both embedded Core digests. Clearing a child's environment does not isolate it from secrets held by its parent or another process in the same account.
+
+Before a packaged desktop admits an embedded Core for local installation, SSH Setup or an update push, it authenticates the manifest under compiled public trust and checks every compiled build input exactly. It then verifies the selected archive's digest and signature against that manifest. A missing, unsigned, changed or substituted manifest grants no authority. An archive signed by a trusted key but absent from this release's manifest grants no authority. Native Core admission and retained immutable installation verification still apply under ADRs 0040 and 0061. Build-info reports candidate provenance only after this verification succeeds.
+
+[The manifest module](../../mise-tasks/lib/spaceterm_tasks/desktop_manifest.py) owns packaging. [The portable verifier](../../crates/spaceterm-core/src/update/resource_manifest.rs) owns the signed schema. A dry run writes generated public trust into `packaging/update-trust.json` in a disposable checkout and commits it before tagging and compiling Core and desktop, so its manifest and archives authorize nothing in a production build. Source Development launches retain their explicit local artifact authority under ADR 0054 and have no Release authority.
+
 ## Dry runs
 
 Pull requests that touch the release path, and `mise run release:dry-run` on a developer's computer, run the same steps as a dry run. A dry run signs with a generated update key that nothing else trusts, signs code ad hoc, skips notarization with a log line, and publishes nothing. Its install.sh is marked as a dry run, accepts ad hoc signatures, and states this when it runs.

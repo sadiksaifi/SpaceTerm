@@ -45,6 +45,8 @@ mod close_confirmation;
 mod command_line_tool;
 #[cfg(feature = "desktop")]
 mod core_context;
+#[cfg(feature = "desktop")]
+mod core_resource_manifest;
 #[cfg_attr(
     not(feature = "desktop"),
     allow(

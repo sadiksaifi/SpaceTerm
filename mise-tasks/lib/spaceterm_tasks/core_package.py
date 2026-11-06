@@ -190,7 +190,7 @@ def core_info(identity):
 def artifact_trust(identity):
     """The public keys that authenticate an identity's Core archives."""
     if identity == "spaceterm":
-        return update_signing.trust()
+        return update_signing.release_trust()
     if identity in ("spaceterm-preflight", "spaceterm-development"):
         return (
             json.loads((ROOT / "packaging/core-nonproduction-trust.json").read_text())[
@@ -348,7 +348,9 @@ def unpack_verified(
     if expected_sha256 is not None and update_signing.sha256(archive) != expected_sha256:
         raise ArtifactVerificationError(ArtifactCause.DIGEST_MISMATCH) from None
     try:
-        with tarfile.open(archive, "r:gz") as source:
+        from spaceterm_tasks.bounded_tar import open_archive
+
+        with open_archive(archive, maximum=MAX_EXPANDED, members=MAX_MEMBERS) as source:
             members = []
             names = set()
             expanded = 0
@@ -390,7 +392,7 @@ def unpack_verified(
             tree = destination / "core"
             for directory in [tree, *(path for path in tree.rglob("*") if path.is_dir())]:
                 directory.chmod(0o755)
-    except (OSError, tarfile.TarError, KeyError):
+    except (OSError, EOFError, OverflowError, ValueError, tarfile.TarError, KeyError):
         raise TaskError("the server archive could not be read") from None
     return info
 
@@ -496,7 +498,7 @@ def verify_cross_build(tree, expected):
         raise TaskError("the server executable needs glibc newer than 2.35")
 
 
-def verify_tree(tree, expected, *, native=True):
+def verify_tree(tree, expected, *, native=True, execute=True):
     target, identity = expected["target"], expected["identity"]
     files = {str(path.relative_to(tree)) for path in tree.rglob("*") if path.is_file()}
     shell = {
@@ -596,16 +598,18 @@ def verify_tree(tree, expected, *, native=True):
         forbidden = ("libx11", "libxcb", "libwayland", "libvulkan", "libegl", "libgl.", "libgtk")
     if any(name in dependencies for name in forbidden):
         raise TaskError("the server links a graphical or GPU dependency")
-    # Inspect native metadata and signatures before executing the candidate.
-    # Stapling happens after compilation. Every compiled fact must still match exactly.
-    if build_info(executable) != {**expected, "stapled": False}:
-        raise TaskError("the executable differs from the authenticated server build")
     # Signed resources belong to this server artifact, independently of client source assets.
     checked(
         ["infocmp", "-x", "-1", "xterm-spaceterm"],
         "the server terminfo resource is invalid",
         env={**os.environ, "TERMINFO": str(tree / directory / "terminfo")},
     )
+    if not execute:
+        return
+    # Inspect native metadata and signatures before executing the candidate.
+    # Stapling happens after compilation. Every compiled fact must still match exactly.
+    if build_info(executable) != {**expected, "stapled": False}:
+        raise TaskError("the executable differs from the authenticated server build")
     try:
         result = subprocess.run(
             [executable, "internal", "check"],
@@ -630,6 +634,7 @@ def verified_copy(
     target=None,
     expected_sha256=None,
     native=True,
+    execute=True,
 ):
     archive = Path(archive)
     signature = Path(signature)
@@ -649,13 +654,13 @@ def verified_copy(
         expected_sha256=expected_sha256,
     )
     tree = directory / "payload/core"
-    verify_tree(tree, info, native=native)
+    verify_tree(tree, info, native=native, execute=execute)
     return tree, private, raw
 
 
-def verify(archive, signature, expected, *, native=True):
+def verify(archive, signature, expected, *, native=True, execute=True):
     with tempfile.TemporaryDirectory(prefix="spaceterm-core-verify-") as temporary:
-        verified_copy(archive, signature, Path(temporary), expected, native=native)
+        verified_copy(archive, signature, Path(temporary), expected, native=native, execute=execute)
     print(json.dumps(expected, sort_keys=True))
 
 
@@ -930,7 +935,9 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
     return environment
 
 
-def verify_desktop_artifact(destination, identity, release_tag=None, *, executable=None):
+def verify_desktop_artifact(
+    destination, identity, release_tag=None, *, executable=None, execute=True
+):
     """Verify signed candidate compatibility and the final client's compiled whole-archive pin."""
     try:
         entries = {path.name for path in destination.iterdir()}
@@ -940,7 +947,7 @@ def verify_desktop_artifact(destination, identity, release_tag=None, *, executab
         if entries != required:
             raise TaskError("the desktop server artifact layout is invalid")
         pin = None
-        if executable is not None:
+        if executable is not None and execute:
             result = subprocess.run(
                 [executable, "--build-info"], env={}, capture_output=True, timeout=10
             )
@@ -968,6 +975,7 @@ def verify_desktop_artifact(destination, identity, release_tag=None, *, executab
                 None,
                 identity=identity,
                 expected_sha256=pin,
+                execute=execute,
             )
     except FileNotFoundError:
         raise ArtifactVerificationError(ArtifactCause.MISSING) from None

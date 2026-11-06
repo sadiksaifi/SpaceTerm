@@ -16,8 +16,8 @@ pub mod tokens;
 pub use runtime::updates;
 mod uninstall;
 pub use runtime::{
-    CandidateMetadata, CliLauncher, CliLink, Layout, bundle_identifier, bundle_name,
-    verify_candidate_bytes,
+    CandidateFiles, CandidateMetadata, CliLauncher, CliLink, Layout, bundle_identifier,
+    bundle_name, candidate_digest, verify_candidate_bytes,
 };
 pub use uninstall::Data;
 #[cfg(feature = "client")]

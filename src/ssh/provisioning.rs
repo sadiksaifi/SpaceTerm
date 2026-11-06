@@ -1340,16 +1340,43 @@ impl CoreArtifactCatalog {
             64,
             RefusalKind::InvalidArtifact,
         )?;
-        let digest_bytes = read_bounded(
-            filesystem,
-            &directory.join("artifact.sha256"),
-            65,
-            RefusalKind::InvalidArtifact,
-        )?;
-        let digest = std::str::from_utf8(&digest_bytes)
-            .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidArtifact))?
-            .trim()
-            .to_owned();
+        let digest = if cfg!(spaceterm_packaged) {
+            let root = directory
+                .parent()
+                .ok_or(SetupFailure::Refused(RefusalKind::InvalidArtifact))?;
+            let manifest = read_bounded(
+                filesystem,
+                &root.join("manifest.json"),
+                spaceterm_core::update::resource_manifest::MAX_MANIFEST as u64,
+                RefusalKind::MissingArtifact,
+            )?;
+            let manifest_signature = read_bounded(
+                filesystem,
+                &root.join("manifest.sig"),
+                64,
+                RefusalKind::InvalidArtifact,
+            )?;
+            let entry =
+                crate::core_resource_manifest::verify_manifest(&manifest, &manifest_signature)
+                    .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidArtifact))?
+                    .into_iter()
+                    .find(|entry| entry.target() == target)
+                    .ok_or(SetupFailure::Refused(RefusalKind::InvalidArtifact))?;
+            crate::core_resource_manifest::verify_archive(&entry, &bytes, &signature)
+                .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidArtifact))?;
+            entry.sha256().to_owned()
+        } else {
+            let digest_bytes = read_bounded(
+                filesystem,
+                &directory.join("artifact.sha256"),
+                65,
+                RefusalKind::InvalidArtifact,
+            )?;
+            std::str::from_utf8(&digest_bytes)
+                .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidArtifact))?
+                .trim()
+                .to_owned()
+        };
         let metadata = verify_candidate_bytes(
             identity(),
             &bytes,

@@ -136,7 +136,7 @@ impl Candidate {
 /// Bounded classifications for candidate availability and verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateError {
-    /// This build includes no candidate: no pinned digest or no artifact pair to read.
+    /// This build includes no candidate resource or artifact pair to read.
     Unavailable,
     ClientRestartRequired,
     Verification(CoreError),
@@ -156,10 +156,6 @@ impl From<CandidateError> for CoreError {
 /// Read the pinned candidate without staging files or changing service policy.
 /// Run off the UI thread. Native executable verification occurs during explicit staging.
 pub fn discover_candidate() -> Result<Candidate, CandidateError> {
-    let digest = env!("SPACETERM_CLI_SHA256");
-    if digest.is_empty() {
-        return Err(CandidateError::Unavailable);
-    }
     let paths = artifact_paths(
         cfg!(spaceterm_packaged),
         env!("SPACETERM_TARGET") == "aarch64-apple-darwin",
@@ -168,24 +164,47 @@ pub fn discover_candidate() -> Result<Candidate, CandidateError> {
         std::env::var_os("SPACETERM_CLI_SIGNATURE").map(PathBuf::from),
     )?
     .present()?;
+    let captured = spaceterm_core::service::CandidateFiles::read(&paths.archive, &paths.signature)
+        .map_err(CandidateError::Verification)?;
+    let bytes = captured.archive();
+    let signature = captured.signature();
+    let digest = if cfg!(spaceterm_packaged) {
+        let root = paths
+            .archive
+            .parent()
+            .and_then(Path::parent)
+            .ok_or(CandidateError::Unavailable)?
+            .join("core-artifacts");
+        crate::core_resource_manifest::authorize(&root, env!("SPACETERM_TARGET"), bytes, signature)
+            .map_err(|error| match error {
+                spaceterm_core::update::resource_manifest::ManifestError::Missing => {
+                    CandidateError::Unavailable
+                }
+                _ => CandidateError::Verification(CoreError::RuntimeUnavailable),
+            })?
+    } else {
+        // A source Development launch requires an explicit local archive pair. It has no
+        // Release authority and still undergoes Core signature, native and immutable checks.
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(bytes))
+    };
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-    let metadata = Service::for_identity(identity)
-        .and_then(|service| {
-            service.inspect_candidate(
-                &paths.archive,
-                &paths.signature,
-                digest,
-                spaceterm_core::protocol::MAJOR,
-            )
-        })
-        .map_err(|error| match error {
-            CoreError::CandidateChanged => CandidateError::ClientRestartRequired,
-            other => CandidateError::Verification(other),
-        })?;
+    let metadata = spaceterm_core::service::verify_candidate_bytes(
+        identity,
+        bytes,
+        signature,
+        &digest,
+        env!("SPACETERM_TARGET"),
+        spaceterm_core::protocol::MAJOR,
+    )
+    .map_err(|error| match error {
+        CoreError::CandidateChanged => CandidateError::ClientRestartRequired,
+        other => CandidateError::Verification(other),
+    })?;
     Ok(Candidate {
         metadata,
         paths,
-        digest: digest.to_owned(),
+        digest,
     })
 }
 
@@ -237,6 +256,180 @@ fn artifact_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "subprocess probe for candidate resource validation"]
+    fn candidate_discovery_probe() {
+        if std::env::var_os("SPACETERM_TEST_CANDIDATE_PROBE").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return;
+        }
+        assert_eq!(
+            discover_candidate().map(|_| ()),
+            Err(CandidateError::Verification(CoreError::RuntimeUnavailable))
+        );
+    }
+
+    #[test]
+    fn candidate_discovery_rejects_special_files_and_oversized_resources() {
+        use std::{
+            ffi::CString,
+            os::unix::{ffi::OsStrExt, fs::symlink},
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("spaceterm-candidate-reads-{}", std::process::id())),
+        );
+        std::fs::create_dir(&root.0).unwrap();
+        for (name, signature_resource) in [
+            ("fifo", false),
+            ("fifo", true),
+            ("device-link", false),
+            ("device-link", true),
+            ("oversized", false),
+            ("oversized", true),
+            ("gnu-extension", false),
+            ("pax-extension", false),
+        ] {
+            let archive = root.0.join("artifact.tar.gz");
+            let signature = root.0.join("artifact.sig");
+            std::fs::write(&archive, b"archive").unwrap();
+            std::fs::write(&signature, [0; 64]).unwrap();
+            let path = if signature_resource {
+                &signature
+            } else {
+                &archive
+            };
+            std::fs::remove_file(path).unwrap();
+            match name {
+                "fifo" => {
+                    let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+                    // SAFETY: the terminated path points to this test's disposable directory.
+                    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                }
+                "device-link" => symlink("/dev/zero", path).unwrap(),
+                "gnu-extension" | "pax-extension" => {
+                    use std::io::Write;
+                    let mut header = tar::Header::new_gnu();
+                    header.set_path("././@LongLink").unwrap();
+                    header.set_entry_type(tar::EntryType::new(if name == "gnu-extension" {
+                        b'L'
+                    } else {
+                        b'x'
+                    }));
+                    let size = 512 * 1024 * 1024 + 1024;
+                    header.set_size(size);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    let output = std::fs::File::create(path).unwrap();
+                    let mut gzip =
+                        flate2::write::GzEncoder::new(output, flate2::Compression::fast());
+                    gzip.write_all(header.as_bytes()).unwrap();
+                    let zeros = [0; 64 * 1024];
+                    let mut remaining = size;
+                    while remaining != 0 {
+                        let count = remaining.min(zeros.len() as u64) as usize;
+                        gzip.write_all(&zeros[..count]).unwrap();
+                        remaining -= count as u64;
+                    }
+                    gzip.finish().unwrap();
+                    let bytes = std::fs::read(path).unwrap();
+                    let key =
+                        ring::signature::Ed25519KeyPair::from_seed_unchecked(&[0x5a; 32]).unwrap();
+                    std::fs::write(&signature, key.sign(&bytes).as_ref()).unwrap();
+                }
+                "oversized" => {
+                    let file = std::fs::File::create(path).unwrap();
+                    file.set_len(if signature_resource {
+                        65
+                    } else {
+                        spaceterm_core::update::feed::MAX_ARCHIVE + 1
+                    })
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "local_startup::tests::candidate_discovery_probe",
+                    "--ignored",
+                ])
+                .env("SPACETERM_TEST_CANDIDATE_PROBE", "1")
+                .env("SPACETERM_CLI_ARCHIVE", &archive)
+                .env("SPACETERM_CLI_SIGNATURE", &signature)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            // Limit a regressed /dev/zero reader without risking the test host's memory.
+            #[cfg(target_os = "linux")]
+            // SAFETY: only setrlimit runs after fork.
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                command.pre_exec(|| {
+                    let limit = libc::rlimit {
+                        rlim_cur: 256 * 1024 * 1024,
+                        rlim_max: 256 * 1024 * 1024,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_DATA, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    let output = child.wait_with_output().unwrap();
+                    assert!(
+                        status.success(),
+                        "{name}, signature={signature_resource}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    break;
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    // macOS does not support the data limit. Bound the live child's resident
+                    // memory instead. proc_taskinfo is plain integer storage for this syscall.
+                    let mut memory: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+                    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+                    // SAFETY: the buffer holds exactly size writable bytes for this child query.
+                    let read = unsafe {
+                        libc::proc_pidinfo(
+                            child.id() as i32,
+                            libc::PROC_PIDTASKINFO,
+                            0,
+                            (&mut memory as *mut libc::proc_taskinfo).cast(),
+                            size,
+                        )
+                    };
+                    if read == size && memory.pti_resident_size > 512 * 1024 * 1024 {
+                        child.kill().unwrap();
+                        child.wait().unwrap();
+                        panic!("candidate discovery exceeded the memory budget");
+                    }
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("candidate discovery blocked on {name}, signature={signature_resource}");
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::fs::remove_file(&archive).unwrap();
+            std::fs::remove_file(&signature).unwrap();
+        }
+    }
 
     #[test]
     fn packaged_build_ignores_source_artifact_overrides() {

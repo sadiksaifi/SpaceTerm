@@ -93,7 +93,7 @@ harness = false
 required-features = ["native-tests"]
 
 [build-dependencies]
-sha2 = "0.10"
+serde_json = "1.0"
 
 [dependencies]
 spaceterm-connections = { path = "crates/spaceterm-connections", optional = true }
