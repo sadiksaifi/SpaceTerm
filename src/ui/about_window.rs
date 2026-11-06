@@ -293,16 +293,29 @@ impl AboutWindow {
                 .mt(appearance.spacing(VERSION_TO_DESCRIPTION)),
             )
             .child(
-                line(
-                    "about-repository",
-                    &typography.repository,
-                    gpui_color(appearance.colors.link_text),
-                    self.about.repository_label().into(),
-                )
-                .id("about-repository")
-                .cursor_pointer()
-                .on_click(|_, _, cx| cx.open_url(crate::about::REPOSITORY))
-                .mt(appearance.spacing(DESCRIPTION_TO_REPOSITORY)),
+                // Only the word takes the click, so the rest of the row still moves the window.
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .mt(appearance.spacing(DESCRIPTION_TO_REPOSITORY))
+                    .child(
+                        div()
+                            .id("about-repository")
+                            .debug_selector(|| "about-repository".to_owned())
+                            .chrome_text(&typography.repository)
+                            .text_color(gpui_color(appearance.colors.link_text))
+                            .underline()
+                            .cursor_pointer()
+                            // The window is a drag region, which would otherwise take this press
+                            // as a window move.
+                            .block_mouse_except_scroll()
+                            .on_click(|_, _, cx| cx.open_url(crate::about::REPOSITORY))
+                            .child(Text::new(
+                                "about-repository".into(),
+                                self.about.repository_label().into(),
+                            )),
+                    ),
             )
             .child(
                 line(

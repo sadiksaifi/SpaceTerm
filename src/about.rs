@@ -13,8 +13,8 @@ pub(crate) const COPYRIGHT: &str = "Copyright © 2026 Sadik Saifi";
 /// SpaceTerm's source repository, which every About surface links and Help opens.
 pub(crate) const REPOSITORY: &str = "https://github.com/sadiksaifi/SpaceTerm";
 
-/// The repository link's visible text: its address without the scheme.
-pub(crate) const REPOSITORY_LABEL: &str = "github.com/sadiksaifi/SpaceTerm";
+/// The repository link's visible text. The link opens `REPOSITORY`.
+pub(crate) const REPOSITORY_LABEL: &str = "GitHub";
 
 /// The About facts of one build.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

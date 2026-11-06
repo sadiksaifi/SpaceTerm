@@ -9,15 +9,21 @@ use crate::platform::window_movement::{
 };
 use crate::settings::storage::testing::MemoryStorage;
 
-struct RecordingMovement;
+/// Hands every About window the same recording drag platform, so a test can read its counts.
+#[derive(Default)]
+struct RecordingMovement(Rc<RecordingOperatingSystemWindowDragPlatform>);
 
 impl WindowMovementFactory for RecordingMovement {
     fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
-        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+        self.0.clone()
     }
 }
 
 fn install(cx: &mut TestAppContext) {
+    install_with(RecordingMovement::default(), cx);
+}
+
+fn install_with(movement: RecordingMovement, cx: &mut TestAppContext) {
     let settings = crate::settings::Settings::load(MemoryStorage::with_document(
         &crate::settings::SettingsDocument::default(),
     ));
@@ -29,7 +35,7 @@ fn install(cx: &mut TestAppContext) {
         )
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        configure_window_chrome(Rc::new(RecordingMovement), cx);
+        configure_window_chrome(Rc::new(movement), cx);
     });
 }
 
@@ -245,4 +251,30 @@ fn about_focus_reaches_assistive_technology(cx: &mut TestAppContext) {
         .focused()
         .expect("the focused surface publishes a node");
     assert_eq!(focused["aria"]["role"], "Group");
+}
+
+/// Wayland hands a press in the drag region to the compositor at once, which takes the pointer.
+/// A click on the repository link must open the repository instead of moving the window.
+#[gpui::test]
+fn clicking_the_repository_link_opens_it_without_moving_the_window(cx: &mut TestAppContext) {
+    let movement = RecordingMovement::default();
+    movement.0.handoff_on_press();
+    let drag = movement.0.clone();
+    install_with(movement, cx);
+    let opened = open(cx);
+    let cx = &mut VisualTestContext::from_window(opened.into(), cx);
+    cx.run_until_parked();
+
+    let link = cx
+        .debug_bounds("about-repository")
+        .expect("the repository link was not rendered");
+    cx.simulate_mouse_move(link.center(), None, gpui::Modifiers::none());
+    cx.simulate_click(link.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/sadiksaifi/SpaceTerm")
+    );
+    assert_eq!(drag.counts().0, 0, "the click started a window move");
 }
