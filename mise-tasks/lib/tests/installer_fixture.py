@@ -105,6 +105,7 @@ def build_document(version, identity="spaceterm", floor="1.0.0"):
             "identity": identity,
             "protocol_major": 1,
             "schema": 1,
+            "stapled": False,
             "source_sha256": None,
             "target": "fixture",
             "version": version,

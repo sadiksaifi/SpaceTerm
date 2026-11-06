@@ -126,6 +126,7 @@ class LinuxPrefixTests(unittest.TestCase):
             executable.parent.mkdir(parents=True)
             info = {
                 "schema": 1,
+                "stapled": False,
                 "source_sha256": _source(self.root)[2],
                 "identity": "spaceterm-development",
                 "target": target,

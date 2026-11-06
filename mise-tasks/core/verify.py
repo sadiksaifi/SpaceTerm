@@ -20,6 +20,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--floor", help="A release build's Update Floor")
     parser.add_argument(
+        "--stapled", action="store_true", help="Require a stapled macOS Release bundle"
+    )
+    parser.add_argument(
         "--retain",
         action="store_true",
         help="Retain a verified runtime without activating or registering a service",
@@ -27,6 +30,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     expected = {
         "schema": 1,
+        "stapled": args.stapled,
         "source_sha256": args.source_sha256,
         "identity": args.identity,
         "target": args.target,

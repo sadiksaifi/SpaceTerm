@@ -53,9 +53,9 @@ fn main() {
     let protocols = protocols(&root);
     let floor = floor(release.is_some().then_some(build.version.as_str()));
     // All strings come from the validated build identity, the validated floor or Cargo's target
-    // triple.
+    // triple. Stapling happens after compilation, so this document always records false.
     let document = format!(
-        "{{\"schema\":1,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"floor\":{floor},\"commit\":\"{}\",\"target\":\"{target}\",\"protocols\":{protocols}}}\n",
+        "{{\"schema\":1,\"stapled\":false,\"source_sha256\":{source},\"identity\":\"{name}\",\"version\":\"{}\",\"floor\":{floor},\"commit\":\"{}\",\"target\":\"{target}\",\"protocols\":{protocols}}}\n",
         build.version, build.commit,
     );
     std::fs::write(output.join("build-info.json"), document).expect("write server build metadata");

@@ -45,6 +45,7 @@ class CoreCatalogTests(unittest.TestCase):
             header = b"\x7fELF\x02\x01\x01" + bytes(9) + bytes.fromhex("03003e00") + bytes(44)
         info = dict(
             schema=1,
+            stapled=False,
             source_sha256=None,
             identity=self.identity,
             target=native_target,
