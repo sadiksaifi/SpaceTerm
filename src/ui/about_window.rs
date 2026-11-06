@@ -191,6 +191,8 @@ pub(crate) struct AboutWindow {
     icon: Arc<gpui::Image>,
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     focus_handle: FocusHandle,
+    /// The repository link's own focus, the window's only Tab stop.
+    repository_focus: FocusHandle,
     window_movement: WindowMovement,
 }
 
@@ -217,6 +219,7 @@ impl AboutWindow {
             .detach();
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let repository_focus = cx.focus_handle().tab_stop(true);
         let window_movement = WindowMovement::new(window_drag, focus_handle.clone(), "About");
         let icon = Arc::new(gpui::Image::from_bytes(
             gpui::ImageFormat::Svg,
@@ -227,12 +230,67 @@ impl AboutWindow {
             icon,
             window_appearance,
             focus_handle,
+            repository_focus,
             window_movement,
         }
     }
 
     fn close(&mut self, _: &CloseAboutWindow, window: &mut Window, _: &mut Context<Self>) {
         window.remove_window();
+    }
+
+    /// The repository link: a pointer click, Return or Space while it has focus, and the
+    /// accessibility Click action each open the repository.
+    fn render_repository_link(
+        &self,
+        style: &ChromeTextStyle,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        let appearance = &crate::ui::appearance::settings::shared(cx).chrome;
+        let colors = &appearance.colors;
+        let label: SharedString = self.about.repository_label().into();
+        let link = div()
+            .id("about-repository")
+            .debug_selector(|| "about-repository".to_owned())
+            .role(gpui::accesskit::Role::Link)
+            .aria_label(label.clone())
+            .on_a11y_action(gpui::accesskit::Action::Click, |_, _, cx| {
+                open_repository(cx)
+            })
+            .track_focus(&self.repository_focus)
+            .on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
+                let keystroke = &event.keystroke;
+                if keystroke.modifiers.modified()
+                    || event.is_held
+                    || !matches!(keystroke.key.as_str(), "enter" | "space")
+                {
+                    return;
+                }
+                open_repository(cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .chrome_text(style)
+            .text_color(gpui_color(colors.link_text))
+            .hover(|link| link.text_color(gpui_color(colors.link_text_hover)))
+            .active(|link| link.text_color(gpui_color(colors.link_text_pressed)))
+            .underline()
+            .cursor_pointer()
+            // The window is a drag region, which would otherwise take this press as a window
+            // move.
+            .block_mouse_except_scroll()
+            .on_click(|_, _, cx| open_repository(cx))
+            .child(label);
+        let ring = self.repository_focus.is_focused(window).then(|| {
+            spaceterm_ui::focus_ring(
+                "about-repository-focus-ring",
+                gpui_color(colors.focus_ring),
+                px(3.0),
+                px(0.0),
+            )
+        });
+        spaceterm_ui::Ringed::new(link, ring).into_any_element()
     }
 
     fn render_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -299,23 +357,7 @@ impl AboutWindow {
                     .flex()
                     .justify_center()
                     .mt(appearance.spacing(DESCRIPTION_TO_REPOSITORY))
-                    .child(
-                        div()
-                            .id("about-repository")
-                            .debug_selector(|| "about-repository".to_owned())
-                            .chrome_text(&typography.repository)
-                            .text_color(gpui_color(appearance.colors.link_text))
-                            .underline()
-                            .cursor_pointer()
-                            // The window is a drag region, which would otherwise take this press
-                            // as a window move.
-                            .block_mouse_except_scroll()
-                            .on_click(|_, _, cx| cx.open_url(crate::about::REPOSITORY))
-                            .child(Text::new(
-                                "about-repository".into(),
-                                self.about.repository_label().into(),
-                            )),
-                    ),
+                    .child(self.render_repository_link(&typography.repository, window, cx)),
             )
             .child(
                 line(
@@ -369,6 +411,25 @@ impl AboutWindow {
             .key_context(ABOUT_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::close))
+            .on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
+                let keystroke = &event.keystroke;
+                let modifiers = keystroke.modifiers;
+                if keystroke.key != "tab"
+                    || modifiers.control
+                    || modifiers.alt
+                    || modifiers.platform
+                    || modifiers.function
+                {
+                    return;
+                }
+                if modifiers.shift {
+                    window.focus_prev(cx);
+                } else {
+                    window.focus_next(cx);
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            })
             .size_full()
             .bg(gpui_color(
                 surface.surface(SettingsSurfaceRole::Canvas).paint,
@@ -384,6 +445,10 @@ impl Render for AboutWindow {
         let activity = super::appearance::window_activity(window);
         super::sidebar_window::render_scoped(activity, || self.render_surface(window, cx))
     }
+}
+
+fn open_repository(cx: &mut App) {
+    cx.open_url(crate::about::REPOSITORY);
 }
 
 #[cfg(test)]

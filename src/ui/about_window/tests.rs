@@ -278,3 +278,59 @@ fn clicking_the_repository_link_opens_it_without_moving_the_window(cx: &mut Test
     );
     assert_eq!(drag.counts().0, 0, "the click started a window move");
 }
+
+#[gpui::test]
+fn tab_reaches_the_repository_link_and_return_opens_it(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    install(cx);
+    let opened = open(cx);
+    let cx = &mut VisualTestContext::from_window(opened.into(), cx);
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("tab");
+    let tree = A11yTree::read(cx);
+    let focused = tree.focused().expect("Tab should focus a control");
+    assert_eq!(focused["aria"]["role"], "Link");
+    assert_eq!(focused["aria"]["label"], "GitHub");
+
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/sadiksaifi/SpaceTerm")
+    );
+}
+
+#[gpui::test]
+fn assistive_technology_reads_the_repository_as_one_link_and_can_open_it(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
+
+    install(cx);
+    let opened = open(cx);
+    let cx = &mut VisualTestContext::from_window(opened.into(), cx);
+    cx.activate_accessibility();
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(cx);
+    let links = tree.with_role("Link");
+    let [link] = links[..] else {
+        panic!("About should publish one link, found {links:?}");
+    };
+    assert_eq!(link["aria"]["label"], "GitHub");
+    assert!(supports(link, Action::Click));
+    let labels = tree.with_role("Label");
+    assert!(
+        labels
+            .iter()
+            .all(|label| label["aria"]["value"] != "GitHub"),
+        "the link's word must not be read a second time as a label: {labels:?}"
+    );
+
+    perform(cx, link, Action::Click);
+    cx.run_until_parked();
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/sadiksaifi/SpaceTerm")
+    );
+}
