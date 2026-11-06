@@ -476,8 +476,17 @@ def plated(palette, width, height, mark_share):
     )
 
 
-def dmg_background(palette, width=600, height=400, app=(180, 170), applications=(480, 170)):
+# The disk image window in points: its size, the icon size, and the centers of the app and the
+# Applications link. Packaging lays the window out with these, so the art lines up with the icons.
+DMG_WINDOW = (600, 400)
+DMG_ICON_SIZE = 128
+DMG_APP = (180, 170)
+DMG_APPLICATIONS = (480, 170)
+
+
+def dmg_background(palette):
     """Faint orbits around the app's position and an arrow toward Applications."""
+    (width, height), app, applications = DMG_WINDOW, DMG_APP, DMG_APPLICATIONS
     rings = "".join(
         f'<circle cx="{app[0]}" cy="{app[1]}" r="{radius}" fill="none" '
         f'stroke="{palette.orbits.bottom}" stroke-width="{ORBIT_STROKE * 1.6}" opacity="0.16"/>'
@@ -634,6 +643,23 @@ SYSTEM_RENDERERS = Renderers(resvg, ictool, tiffutil, social_preview)
 # ----------------------------------------------------------------------------------------- plan
 APPEARANCES = ("Default", "Dark", "ClearLight", "ClearDark", "TintedLight", "TintedDark")
 HICOLOR_SIZES = (16, 22, 24, 32, 48, 64, 128, 256, 512)
+
+
+def hicolor_index():
+    """The hicolor theme index for exactly the folders generation writes."""
+    sections = [(f"{size}x{size}/apps", f"Size={size}\nType=Fixed") for size in HICOLOR_SIZES] + [
+        ("scalable/apps", "Size=128\nMinSize=8\nMaxSize=512\nType=Scalable"),
+        ("symbolic/apps", "Size=16\nMinSize=8\nMaxSize=512\nType=Scalable"),
+    ]
+    header = (
+        "[Icon Theme]\nName=Hicolor\nComment=Fallback icon theme\nHidden=true\n"
+        f"Directories={','.join(folder for folder, _ in sections)}\n"
+    )
+    return header + "".join(
+        f"\n[{folder}]\n{body}\nContext=Applications\n" for folder, body in sections
+    )
+
+
 ANDROID_DENSITIES = (("mdpi", 1), ("hdpi", 1.5), ("xhdpi", 2), ("xxhdpi", 3), ("xxxhdpi", 4))
 WINDOWS_ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 256)
 FAVICON_SIZES = (16, 32, 48)
@@ -677,8 +703,10 @@ def outputs(root, renderers):
     text("macos/menu-bar/SpaceTermAttentionTemplate.svg", glyph(16, "#000000", badge=True))
     # The disk image window, at 1x and 2x in one TIFF.
     background = dmg_background(light)
+    width, height = DMG_WINDOW
     files["macos/dmg/background.tiff"] = renderers.hidpi_tiff(
-        renderers.rasterize(background, 600, 400), renderers.rasterize(background, 1200, 800)
+        renderers.rasterize(background, width, height),
+        renderers.rasterize(background, width * 2, height * 2),
     )
 
     # visionOS and tvOS: layers Icon Composer cannot build, with the document's light colors.
@@ -695,7 +723,9 @@ def outputs(root, renderers):
         png(f"tvos/top-shelf/{name}@2x.png", drawing, width * 2, 1440)
 
     # Linux: hicolor icons for the application ID, and the symbolic icon for small sizes and the
-    # status area.
+    # status area. The index makes the folder an icon theme, which status-area hosts need to look
+    # up a name inside an installation's own icon directory.
+    text("linux/hicolor/index.theme", hicolor_index())
     scalable = tile(light)
     text(f"linux/hicolor/scalable/apps/{APPLICATION_ID}.svg", scalable)
     for size in HICOLOR_SIZES:

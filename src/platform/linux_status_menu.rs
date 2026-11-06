@@ -501,6 +501,17 @@ mod tests {
             assert_eq!(icons.name(attention), name);
             assert!(brand.join(format!("symbolic/apps/{name}.svg")).is_file());
         }
+        // Hosts resolve the name through an icon theme, which exists only with its index.
+        let index = std::fs::read_to_string(brand.join("index.theme")).unwrap();
+        let directories = index
+            .lines()
+            .find_map(|line| line.strip_prefix("Directories="))
+            .expect("the index lists its directories");
+        assert!(
+            directories
+                .split(',')
+                .any(|folder| folder == "symbolic/apps")
+        );
     }
 
     /// A build outside an installation offers no search path, and hosts fall back to the theme.
