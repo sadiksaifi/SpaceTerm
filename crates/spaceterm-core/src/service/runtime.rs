@@ -78,6 +78,40 @@ pub fn verify_candidate_bytes(
     .map(Into::into)
 }
 
+/// Captured candidate resources, bounded and immutable before authentication. Archive bytes
+/// share the retained-installation snapshot policy and live outside the heap.
+pub struct CandidateFiles {
+    archive: files::Snapshot,
+    signature: Vec<u8>,
+}
+
+impl CandidateFiles {
+    /// Open without following links or blocking on special files, require single-link regular
+    /// files, and capture their bounded contents. A changed archive length refuses the capture.
+    /// Authentication and native admission remain separate operations.
+    ///
+    /// # Errors
+    /// Returns RuntimeUnavailable for invalid type, length or a changed length, and
+    /// StorageUnavailable when a bounded read or memory reservation fails.
+    pub fn read(archive: &Path, signature: &Path) -> Result<Self, CoreError> {
+        let signature = source(signature, 64)?;
+        if signature.len() != 64 {
+            return Err(CoreError::RuntimeUnavailable);
+        }
+        Ok(Self {
+            archive: self::archive(archive)?,
+            signature,
+        })
+    }
+
+    pub fn archive(&self) -> &[u8] {
+        &self.archive
+    }
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+}
+
 /// What the command-line launcher path holds. Only [`CliLauncher::Missing`] and SpaceTerm's
 /// own links are ever replaced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

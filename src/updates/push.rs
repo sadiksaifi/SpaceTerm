@@ -15,9 +15,6 @@ use spaceterm_core::update::ordering::{self, Candidate};
 
 use super::machines::ActionFailure;
 
-/// The largest embedded archive, in bytes, as the Core accepts.
-const MAX_ARCHIVE: u64 = spaceterm_core::update::feed::MAX_ARCHIVE;
-
 /// One embedded Core build, verified for this desktop's identity and its platform.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EmbeddedCore {
@@ -89,18 +86,17 @@ impl EmbeddedCores {
 /// `artifact.sha256`.
 fn verify(directory: &Path, identity: &str, platform: Platform) -> Option<EmbeddedCore> {
     let archive = directory.join("artifact.tar.gz");
-    let length = std::fs::metadata(&archive).ok()?.len();
-    if !(1..=MAX_ARCHIVE).contains(&length) {
-        return None;
-    }
-    let bytes = std::fs::read(&archive).ok()?;
-    let signature = std::fs::read(directory.join("artifact.sig")).ok()?;
+    let captured =
+        spaceterm_core::service::CandidateFiles::read(&archive, &directory.join("artifact.sig"))
+            .ok()?;
+    let bytes = captured.archive();
+    let signature = captured.signature();
     let sha256 = if cfg!(spaceterm_packaged) {
         crate::core_resource_manifest::authorize(
             directory.parent()?,
             target(platform),
-            &bytes,
-            &signature,
+            bytes,
+            signature,
         )
         .ok()?
     } else {
@@ -111,8 +107,8 @@ fn verify(directory: &Path, identity: &str, platform: Platform) -> Option<Embedd
     };
     let metadata = spaceterm_core::service::verify_candidate_bytes(
         identity,
-        &bytes,
-        &signature,
+        bytes,
+        signature,
         &sha256,
         target(platform),
         spaceterm_core::protocol::MAJOR,
@@ -121,7 +117,7 @@ fn verify(directory: &Path, identity: &str, platform: Platform) -> Option<Embedd
     Some(EmbeddedCore {
         candidate: metadata.candidate().ok()?,
         archive,
-        signature,
+        signature: signature.to_vec(),
         sha256,
         length: bytes.len() as u64,
     })
