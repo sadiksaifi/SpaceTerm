@@ -181,20 +181,23 @@ def sign_core(path):
 
 
 def package_desktop(path):
-    """T5b's packaging entry point consumes executable + Cargo metadata, without Cargo."""
+    """Package the compiled desktop, whose notes it already embeds, without Cargo.
+
+    Publication, not packaging, requires the native Core verification evidence, so packaging
+    runs while the Core verifiers run.
+    """
     tree = unpack_products(path)
     plan = release_plan.load()
-    require_core_evidence(plan)
     os.environ["SPACETERM_CLI_ARTIFACTS"] = str(release.core_catalog(release.CORE).resolve())
     if host_target() == "aarch64-apple-darwin":
         from spaceterm_tasks import package_macos
 
-        package_macos.package(plan["tag"], release.NOTES, compiled=tree, execute=False)
+        package_macos.package(plan["tag"], compiled=tree, execute=False)
         release.appcast(plan["tag"])
     else:
         from spaceterm_tasks import package_linux
 
-        package_linux.package(plan["tag"], release.NOTES, compiled=tree, execute=False)
+        package_linux.package(plan["tag"], compiled=tree, execute=False)
         release.DESKTOP_LINUX.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(
             package_linux.archive_path("spaceterm"),

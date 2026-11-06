@@ -104,7 +104,8 @@ def write_archive(tree, archive):
 def package(release_tag=None, notes=None, *, compiled=None, execute: bool = True):
     """Build, stage, archive, and verify one identity, then move the archive into dist/.
 
-    A release embeds the release notes file `notes`.
+    A release compiled here embeds the release notes file `notes`. A `compiled` desktop
+    already embeds its notes.
     """
     if execute:
         from spaceterm_tasks.desktop_manifest import require_no_release_secrets
@@ -115,7 +116,7 @@ def package(release_tag=None, notes=None, *, compiled=None, execute: bool = True
         raise TaskError("static desktop packaging requires compiled artifacts")
     if release_tag:
         require_clean_checkout()
-    notes_file = release_notes_file(release_tag, notes)
+    notes_file = release_notes_file(release_tag, notes) if compiled is None else None
     name = selected_identity(release_tag)
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
     if notes_file is not None:

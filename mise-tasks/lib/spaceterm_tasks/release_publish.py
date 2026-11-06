@@ -1,4 +1,4 @@
-"""Publish complete immutable drafts while holding Latest for explicit promotion."""
+"""Publish a complete, verified draft as the immutable Latest release."""
 
 import subprocess
 from pathlib import Path
@@ -96,7 +96,7 @@ def publish_draft(plan, assets, notes_file, *, request=api, run=subprocess.run):
             "edit",
             tag,
             "--draft=false",
-            "--latest=false",
+            "--latest",
         ],
         cwd=ROOT,
     ).returncode:

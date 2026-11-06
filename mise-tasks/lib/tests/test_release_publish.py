@@ -1,6 +1,7 @@
 """Draft publication never exposes partial assets or overrides an immutable release."""
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -29,8 +30,6 @@ class GitHub:
         self.tag_sha = "a" * 40
 
     def request(self, endpoint):
-        if "immutable-releases" in endpoint:
-            return {"enabled": True}
         if "/git/ref/" in endpoint:
             return {"object": {"type": "tag", "sha": self.tag_sha}}
         if "/assets?" in endpoint:
@@ -65,8 +64,8 @@ class GitHub:
                     }
                 )
         elif command[2] == "edit":
-            if "--latest=false" not in command:
-                raise AssertionError("publication changed Latest")
+            if "--latest" not in command:
+                raise AssertionError("publication did not mark the release Latest")
             assert self.release is not None
             self.release["draft"] = False
             self.release["immutable"] = True
@@ -83,7 +82,7 @@ class PublishTests(unittest.TestCase):
             path.write_bytes(path.name.encode())
         (self.directory / "notes").write_text("First release of SpaceTerm.\n")
         self.github = GitHub()
-        self.plan = {"tag": "v0.10.0", "mode": "publish", "tag_object": self.github.tag_sha}
+        self.plan = {"tag": "v0.10.0", "tag_object": self.github.tag_sha}
 
     def publish(self):
         release_publish.publish_draft(
@@ -94,7 +93,7 @@ class PublishTests(unittest.TestCase):
             run=self.github.run,
         )
 
-    def test_only_complete_verified_assets_become_published_and_latest_stays_held(self):
+    def test_only_complete_verified_assets_become_the_published_latest_release(self):
         self.publish()
         self.assertEqual(self.github.mutations, ["create", "upload", "edit"])
         assert self.github.release is not None
@@ -115,9 +114,9 @@ class PublishTests(unittest.TestCase):
         repository.git("tag", "-a", "v0.10.0", "-m", "Release SpaceTerm 0.10.0")
         dist = self.directory / "dist"
         dist.mkdir()
-        shutil.copyfile(self.directory / "notes", dist / "release-notes.md")
-        self.plan = release_plan.create("v0.10.0", "unsigned", root=self.directory)
-        self.plan.update(mode="publish", published_at=1700000000)
+        with patch.dict(os.environ, {update_signing.DRY_RUN: "1"}):
+            self.plan = release_plan.create("v0.10.0", root=self.directory)
+        self.plan.update(published_at=1700000000)
         self.github.tag_sha = self.plan["tag_object"]
         plan_file = dist / "release-plan.json"
         plan_file.write_text(json.dumps(self.plan))

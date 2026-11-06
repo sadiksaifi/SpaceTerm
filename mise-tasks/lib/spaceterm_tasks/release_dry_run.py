@@ -113,7 +113,7 @@ def run(host):
         if subprocess.run(["mise", "run", *arguments], cwd=CHECKOUT, env=environment).returncode:
             raise TaskError(f"the dry run failed at {arguments[0]}")
 
-    task("release:plan", tag[1:], "unsigned")
+    task("release:plan", tag[1:], "--notes")
     task("release:core", tag)
     if host == DARWIN:
         # A Mac cross-builds the Linux Core so its desktop embeds both builds.
@@ -123,7 +123,7 @@ def run(host):
     else:
         print(
             "Dry run: the macOS Core and both desktops need a Mac; they are skipped. "
-            "The protected signed rehearsal exercises both platforms."
+            "A release workflow run with publish off exercises both platforms."
         )
     task("release:assemble", tag, "--partial")
     print("Dry run finished: the assets are in target/release-dry-run/source/dist/release")

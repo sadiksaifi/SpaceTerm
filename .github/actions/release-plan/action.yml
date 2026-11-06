@@ -1,15 +1,32 @@
-name: Restore release plan
-description: Restore the exact notes, public inputs and local annotated tag from this run
+name: Plan release
+description: Tag the dispatched source and derive this run's release plan, identical in every job
 inputs:
-  artifact-id:
-    description: Immutable plan artifact ID from the plan job
-    required: true
+  notes:
+    description: Also generate the git-cliff release notes, for compilation and publication only
+    default: 'false'
 runs:
   using: composite
   steps:
-    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-      with:
-        artifact-ids: ${{ inputs.artifact-id }}
-        path: dist
-    - shell: bash
-      run: mise run release:pipeline restore
+    - name: Fetch history and tags for floors and notes
+      shell: bash
+      run: |
+        if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+          git fetch --quiet --unshallow --tags origin
+        else
+          git fetch --quiet --tags origin
+        fi
+    - name: Install git-cliff
+      if: inputs.notes == 'true'
+      shell: bash
+      run: mise install git-cliff
+    - name: Tag and plan the release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_NOTES_WANTED: ${{ inputs.notes }}
+      run: |
+        if [ "$RELEASE_NOTES_WANTED" = true ]; then
+          mise run release:plan "$RELEASE_VERSION" --notes
+        else
+          mise run release:plan "$RELEASE_VERSION"
+        fi

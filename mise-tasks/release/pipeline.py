@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-# MISE description="Run one release stage against the frozen plan"
-# USAGE arg "<stage>" { choices "restore" "compile" "sign-core" "verify-core" "desktop" "verify-desktop" "tag" "floor-smoke" "resume" }
+# MISE description="Run one release stage against this job's release plan"
+# USAGE arg "<stage>" { choices "compile" "sign-core" "verify-core" "desktop" "verify-desktop" "floor-smoke" "resume" }
 # USAGE arg "[archive]"
 import argparse
 
@@ -8,11 +8,7 @@ from spaceterm_tasks import main, release_inputs, release_plan
 
 
 def run(stage, archive):
-    if stage == "restore":
-        release_plan.restore()
-    elif stage == "tag":
-        release_plan.authorize_tag()
-    elif stage == "compile":
+    if stage == "compile":
         release_inputs.compile_products()
     elif stage == "sign-core":
         release_inputs.sign_core(archive)
@@ -35,13 +31,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "stage",
         choices=(
-            "restore",
             "compile",
             "sign-core",
             "verify-core",
             "desktop",
             "verify-desktop",
-            "tag",
             "floor-smoke",
             "resume",
         ),

@@ -17,7 +17,10 @@ class WorkflowBoundaryTests(unittest.TestCase):
         # actionlint checks YAML syntax. These assertions guard the security boundary
         # against reintroducing caches or secrets while wiring new release stages.
         workflows = {}
-        for name in ("release", "promote"):
+        self.assertEqual(
+            sorted(path.name for path in (ROOT / ".github/workflows").iterdir()), ["release.yml"]
+        )
+        for name in ("release",):
             text = (ROOT / f".github/workflows/{name}.yml").read_text()
             self.assertIn("MISE_LOCKED: 'true'", text)
             pieces = re.split(r"^  ([a-z][a-z-]*):\n", text.split("jobs:\n", 1)[1], flags=re.M)
@@ -42,6 +45,13 @@ class WorkflowBoundaryTests(unittest.TestCase):
                     self.assertIn(
                         f"needs.{job}.result == 'success'", workflows["release"]["publish"]
                     )
+        # Every job plans for itself, so nothing waits on a planning job, and signing waits
+        # only on its compilation, never on validation.
+        self.assertNotIn("plan", workflows["release"])
+        for job in ("core-macos", "core-linux"):
+            platform = job.split("-")[1]
+            self.assertIn(f"needs: compile-{platform}\n", workflows["release"][job])
+        self.assertIn("needs.validate.result == 'success'", workflows["release"]["publish"])
 
 
 class VerificationTests(unittest.TestCase):

@@ -1,10 +1,10 @@
-"""Package planned release inputs, sign updater feeds and publish complete immutable drafts.
+"""Package planned release inputs, sign updater feeds and publish the release.
 
-The manual release workflow plans notes and floors, validates alongside compilation, signs
-Core, packages the compiled desktops, exercises the final Core and assembles updater assets.
-Publication holds Latest until the separate promotion workflow runs. Local packaging tasks
-retain their compile-and-package interface. A local compiling dry run uses disposable public
-trust, ad hoc signatures and no notarization or publication.
+The manual release workflow validates alongside compilation, signs Core, packages the compiled
+desktops, exercises the final products and assembles updater assets. Publication pushes the
+tag and publishes the release as Latest. Local packaging tasks retain their compile-and-package
+interface. A local compiling dry run uses disposable public trust, ad hoc signatures and no
+notarization or publication.
 """
 
 import base64
@@ -556,8 +556,8 @@ def require_assets(directory, version):
 
 
 def publish(tag, notes_file=NOTES, directory=RELEASE, environment=os.environ):
-    """Publish the assembled release with the notes the desktops embed; a published release is
-    never replaced."""
+    """Publish the assembled release with the notes the desktops embed, after pushing its tag;
+    a published release is never replaced."""
     version = release_version(tag)
     require_assets(directory, version)
     head = checked(["git", "rev-parse", "HEAD"], "Git could not read HEAD", cwd=ROOT).strip()
@@ -579,7 +579,7 @@ def publish(tag, notes_file=NOTES, directory=RELEASE, environment=os.environ):
     plan = release_plan.load()
     if plan["tag"] != tag:
         raise TaskError("publication requires the planned release tag")
-    release_plan.recheck(plan)
+    release_plan.push_tag(plan)
     from spaceterm_tasks.release_publish import publish_draft
 
     publish_draft(plan, assets, notes_file)
