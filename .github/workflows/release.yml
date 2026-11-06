@@ -261,6 +261,10 @@ jobs:
         with:
           artifact-ids: ${{ needs.compile-linux.outputs.artifact-id }}
           path: dist/compiled
+      # A resumed macOS desktop embeds the earlier attempt's Linux archive, so a rerun keeps it.
+      - uses: ./.github/actions/release-resume
+        with:
+          lane: core-linux
       - name: Sign finalized Core bytes without compiling
         env:
           SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
@@ -272,6 +276,14 @@ jobs:
           path: dist/release-core/
           if-no-files-found: error
           compression-level: 0
+          retention-days: 14
+      - name: Retain the finalized Core for a rerun
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notary-core-linux-${{ github.run_attempt }}
+          path: dist/notarization/
+          if-no-files-found: ignore
           retention-days: 14
 
   verify-core-macos:

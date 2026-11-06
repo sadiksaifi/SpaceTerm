@@ -55,6 +55,22 @@ class WorkflowBoundaryTests(unittest.TestCase):
             platform = job.split("-")[1]
             self.assertIn(f"needs: compile-{platform}\n", workflows["release"][job])
         self.assertIn("needs.validate.result == 'success'", workflows["release"]["publish"])
+        # A rerun of a signer must reuse its finalized bytes: a packaged desktop resumed from an
+        # earlier notarization embeds the earlier Core archives, and rebuilt archives differ.
+        for job, lane in (
+            ("core-macos", "core-macos"),
+            ("core-linux", "core-linux"),
+            ("desktop-macos", "desktop"),
+        ):
+            block = workflows["release"][job]
+            with self.subTest(job=job):
+                self.assertIn(
+                    f"uses: ./.github/actions/release-resume\n        with:\n          lane: {lane}\n",
+                    block,
+                )
+                retained = block.split(f"name: notary-{lane}-${{{{ github.run_attempt }}}}", 1)
+                self.assertEqual(len(retained), 2)
+                self.assertIn("if: always()", retained[0].rsplit("\n      - ", 1)[1])
 
 
 class VerificationTests(unittest.TestCase):
