@@ -27,7 +27,7 @@ use crate::appearance::{
     CatalogError, ImportError, TerminalTheme, ThemeCatalog, ThemeId, ZedExtension,
     translate_zed_extension, translate_zed_family,
 };
-use crate::platform::secure_filesystem::SecureEntryIdentity;
+use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
 pub(crate) use document::{
     SettingsDocument, SettingsDocumentError, export_settings, import_settings, parse_settings,
 };
@@ -247,10 +247,7 @@ impl Settings {
             next_preview: 0,
             transaction: Transaction::Idle,
         };
-        match storage
-            .prepare()
-            .and_then(|()| read_document(storage.as_ref()))
-        {
+        match read_document(storage.as_ref()) {
             Ok((document, identity)) => {
                 state.committed = Arc::new(document);
                 state.expected = identity;
@@ -511,7 +508,7 @@ impl Settings {
             return Err(SettingsError::Busy);
         }
         state.require_catalog_revision(state.catalog_revision)?;
-        let snapshot = self.0.storage.read();
+        let snapshot = read_snapshot(self.0.storage.as_ref());
         let unchanged = state.storage_ready
             && state.status.is_none()
             && match &snapshot {
@@ -522,7 +519,7 @@ impl Settings {
         if unchanged {
             return Ok(false);
         }
-        let read = snapshot.map_err(SettingsError::from).and_then(|snapshot| {
+        let read = snapshot.and_then(|snapshot| {
             let Some(snapshot) = snapshot else {
                 return Ok((SettingsDocument::default(), None));
             };
@@ -785,8 +782,15 @@ fn validate_candidate(
 fn read_document(
     storage: &dyn SettingsStorage,
 ) -> Result<(SettingsDocument, Option<SecureEntryIdentity>), SettingsError> {
-    let Some(snapshot) = storage.read()? else {
+    let Some(snapshot) = read_snapshot(storage)? else {
         return Ok((SettingsDocument::default(), None));
     };
     Ok((parse_settings(&snapshot.bytes)?, Some(snapshot.identity)))
+}
+
+fn read_snapshot(
+    storage: &dyn SettingsStorage,
+) -> Result<Option<PrivateFileSnapshot>, SettingsError> {
+    storage.prepare()?;
+    storage.read().map_err(SettingsError::from)
 }

@@ -87,7 +87,7 @@ fn reset(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) {
 /// The launch offer for `status`. Settings a SpaceTerm too old to update directly saved name the
 /// Stepping Stone release `floor` first.
 fn launch_alert(status: SettingsError, floor: Option<&str>) -> Alert<RecoveryAction> {
-    let (label, title, detail) = if status == SettingsError::Outdated {
+    let (label, title, mut detail) = if status == SettingsError::Outdated {
         (
             "Settings from an older SpaceTerm",
             "Settings From an Older SpaceTerm",
@@ -100,6 +100,7 @@ fn launch_alert(status: SettingsError, floor: Option<&str>) -> Alert<RecoveryAct
             "SpaceTerm is using default settings.".to_owned(),
         )
     };
+    detail.push_str(" Reset Settings also moves aside any managed SSH hosts saved by earlier SpaceTerm releases.");
     Alert::new(
         ModalId::new("settings-recovery"),
         label,
@@ -156,7 +157,7 @@ pub(super) fn confirmation_alert() -> Alert<bool> {
         ModalId::new("settings-recovery-confirm"),
         "Reset settings",
         "Reset Settings?",
-        "Replace your unreadable settings with defaults? SpaceTerm saves a backup first.",
+        "Replace your unreadable settings with defaults and move aside any managed SSH hosts saved by earlier SpaceTerm releases? SpaceTerm keeps the earlier files.",
         vec![
             ModalAction::new(
                 true,
@@ -224,7 +225,7 @@ mod tests {
         assert_eq!(alert["aria"]["role"], "AlertDialog");
         assert_eq!(alert["aria"]["modal"], true);
         tree.text("Couldn\u{2019}t Read Settings");
-        tree.text("SpaceTerm is using default settings.");
+        tree.text("SpaceTerm is using default settings. Reset Settings also moves aside any managed SSH hosts saved by earlier SpaceTerm releases.");
         assert_eq!(tree.node("Reset Settings")["aria"]["role"], "Button");
         perform(cx, tree.node("Not Now"), Action::Click);
         cx.run_until_parked();

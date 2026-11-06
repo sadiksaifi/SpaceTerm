@@ -1,0 +1,52 @@
+{
+  "schema_version": 7,
+  "revision": 0,
+  "updates": {
+    "automatic_downloads": true,
+    "check_interval": "daily",
+    "reminder_interval": "two_hours"
+  },
+  "keybindings": {},
+  "clipboard": {
+    "allow_write": true,
+    "allow_read": false
+  },
+  "git": {
+    "show_repository_status": true,
+    "show_pull_requests": true,
+    "worktree_path_template": "~/.worktrees/{repository}/{branch}"
+  },
+  "sidebar": {
+    "default_state": "expanded"
+  },
+  "appearance": {
+    "mode": "dark",
+    "window": {
+      "density": "compact",
+      "opacity": 0.65,
+      "blur": true,
+      "background_image": "68217425f10a7364c5b36f4ba4ea7c4c1669f1ea12b600328d5aef86ba212799"
+    },
+    "terminal": {
+      "themes": {
+        "light": "builtin.spaceterm.light",
+        "dark": "builtin.spaceterm.dark"
+      },
+      "typography": {
+        "family": {
+          "source": "default_monospace"
+        },
+        "base_size": 18.0,
+        "regular_weight": 400,
+        "bold_weight": 700,
+        "line_height": 1.1111112,
+        "italic": true
+      },
+      "rendering": {
+        "bold_as_bright": true
+      },
+      "overrides": {}
+    }
+  },
+  "terminal_themes": []
+}

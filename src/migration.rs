@@ -11,7 +11,8 @@ use std::sync::Arc;
 use crate::platform::app_directories::AppDirectories;
 use spaceterm_connections::migration::StoreCredentials;
 use spaceterm_core::migration::{
-    self, DataKind, DirectoryStore, FileRule, Mount, Outcome, Refusal, Registry, generations,
+    self, Admission, ArtifactRule, DataKind, DirectoryStore, FileRule, Mount, Outcome, Refusal,
+    Registry, generations,
 };
 
 /// The Settings Document's file.
@@ -28,6 +29,13 @@ const CONFIG_RULES: &[FileRule] = &[FileRule {
 
 /// The desktop config root's generations, steps and files.
 pub(crate) const CONFIG: Registry = Registry {
+    admission: Admission::Marked {
+        artifacts: &[ArtifactRule {
+            matches: |path| path == "ssh_config",
+            kind: DataKind::ManagedSshHosts,
+            current: false,
+        }],
+    },
     generations: generations::DESKTOP_CONFIG,
     steps: &[],
     files: &[CONFIG_RULES],
@@ -56,6 +64,21 @@ const STATE_RULES: &[FileRule] = &[
 
 /// The desktop state root's generations, steps and files.
 pub(crate) const STATE: Registry = Registry {
+    admission: Admission::Marked {
+        artifacts: &[ArtifactRule {
+            matches: |path| {
+                path.strip_prefix("data/background-image-")
+                    .is_some_and(|digest| {
+                        digest.len() == 64
+                            && digest
+                                .bytes()
+                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    })
+            },
+            kind: DataKind::BackgroundImages,
+            current: true,
+        }],
+    },
     generations: generations::DESKTOP_STATE,
     steps: &[],
     files: &[STATE_RULES, migration::client_files::RULES],
@@ -67,7 +90,7 @@ pub(crate) fn config_store(
     filesystem: Arc<dyn crate::platform::secure_filesystem::SecureFilesystem>,
     config: PathBuf,
 ) -> secure_store::SecureStore {
-    secure_store::SecureStore::new(filesystem, config, &[SETTINGS])
+    secure_store::SecureStore::new(filesystem, config, &[SETTINGS, "ssh_config"])
 }
 
 /// The desktop state root over the desktop's `data` and `state` directories. Its marker, backup
@@ -84,6 +107,7 @@ pub(crate) fn state_store(data: PathBuf, state: PathBuf, clients: PathBuf) -> Di
                 .only(|name| name == "desktop" || name.starts_with("desktop-")),
         ],
     )
+    .with_maximum_file_bytes(crate::background_image::MAXIMUM_BYTES)
 }
 
 /// The credential stores the desktop's Saved Connections use.

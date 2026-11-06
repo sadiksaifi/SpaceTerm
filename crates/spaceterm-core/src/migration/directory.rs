@@ -47,11 +47,24 @@ impl Mount {
 pub struct DirectoryStore {
     home: PathBuf,
     mounts: Vec<Mount>,
+    maximum_file_bytes: usize,
 }
 
 impl DirectoryStore {
     pub fn new(home: PathBuf, mounts: Vec<Mount>) -> Self {
-        Self { home, mounts }
+        Self {
+            home,
+            mounts,
+            maximum_file_bytes: crate::storage::MAX_RECORD,
+        }
+    }
+
+    /// Bounds file reads and archival writes for roots that own binary artifacts.
+    pub fn with_maximum_file_bytes(self, maximum_file_bytes: usize) -> Self {
+        Self {
+            maximum_file_bytes,
+            ..self
+        }
     }
 
     /// The directory a reset moves files into, for a client to show the person where its data
@@ -134,14 +147,52 @@ impl Store for DirectoryStore {
         let Some(directory) = Self::open(&directory, false)? else {
             return Ok(None);
         };
-        directory.read_bytes(&name).map_err(classify)
+        directory
+            .read_bytes_bounded(&name, self.maximum_file_bytes)
+            .map_err(classify)
     }
 
     fn write(&self, area: Area, path: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let (directory, name) = self.locate(area, path)?;
         let directory = Self::open(&directory, true)?.ok_or(StoreError::Unavailable)?;
+        let _transaction = directory.transaction().map_err(classify)?;
+        if area == Area::Reset
+            && path.starts_with("gen-")
+            && let Some(earlier) = directory
+                .read_bytes_bounded(&name, self.maximum_file_bytes)
+                .map_err(classify)?
+        {
+            return if earlier == bytes {
+                Ok(())
+            } else {
+                Err(StoreError::Conflict)
+            };
+        }
         let name = CString::new(name).map_err(|_| StoreError::Unsafe)?;
-        directory.write_bytes(&name, bytes).map_err(classify)
+        directory
+            .write_bytes_bounded(&name, bytes, self.maximum_file_bytes)
+            .map_err(classify)
+    }
+
+    fn archive_and_remove(
+        &self,
+        path: &str,
+        save: &mut dyn FnMut(&[u8]) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let (directory, name) = self.locate(Area::Root, path)?;
+        let Some(directory) = Self::open(&directory, false)? else {
+            return Ok(());
+        };
+        let _transaction = directory.transaction().map_err(classify)?;
+        let Some(bytes) = directory
+            .read_bytes_bounded(&name, self.maximum_file_bytes)
+            .map_err(classify)?
+        else {
+            return Ok(());
+        };
+        save(&bytes)?;
+        let name = CString::new(name).map_err(|_| StoreError::Unsafe)?;
+        directory.remove_record(&name).map_err(classify)
     }
 
     fn remove(&self, area: Area, path: &str) -> Result<(), StoreError> {
@@ -149,6 +200,7 @@ impl Store for DirectoryStore {
         let Some(directory) = Self::open(&directory, false)? else {
             return Ok(());
         };
+        let _transaction = directory.transaction().map_err(classify)?;
         let name = CString::new(name).map_err(|_| StoreError::Unsafe)?;
         directory.remove_record(&name).map_err(classify)
     }

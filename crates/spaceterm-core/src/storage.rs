@@ -16,7 +16,7 @@ use std::{
 
 // Bound retained hierarchy and edit records independently of live repository snapshots.
 // The authenticated transport also enforces its own 16 MiB frame limit.
-const MAX_RECORD: usize = 12 * 1024 * 1024;
+pub(crate) const MAX_RECORD: usize = 12 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
@@ -126,6 +126,10 @@ impl Directory {
             }
         }
         Ok(Self(dir))
+    }
+    /// Serializes file effects with owning-account writers using the directory's flock.
+    pub(crate) fn transaction(&self) -> Result<Lock, CoreError> {
+        Lock::directory(&self.0)
     }
     pub fn verify_path(&self, path: &Path) -> Result<(), CoreError> {
         let retained = self
@@ -454,6 +458,15 @@ impl Directory {
     }
     /// The durable bytes of the private record `name`, or `None` when it is absent.
     pub(crate) fn read_bytes(&self, name: &str) -> Result<Option<Vec<u8>>, CoreError> {
+        self.read_bytes_bounded(name, MAX_RECORD)
+    }
+
+    /// Reads a retained artifact with its owner's byte bound.
+    pub(crate) fn read_bytes_bounded(
+        &self,
+        name: &str,
+        maximum: usize,
+    ) -> Result<Option<Vec<u8>>, CoreError> {
         let file = match self.file(name, false) {
             Ok(file) => file,
             Err(CoreError::NotSetUp) => return Ok(None),
@@ -461,10 +474,10 @@ impl Directory {
         };
         let mut bytes = Vec::new();
         (&file)
-            .take((MAX_RECORD + 1) as u64)
+            .take((maximum as u64).saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|_| CoreError::StorageUnavailable)?;
-        if bytes.len() > MAX_RECORD {
+        if bytes.len() > maximum {
             return Err(CoreError::UnsafeStorage);
         }
         file.sync_all()
@@ -487,7 +500,17 @@ impl Directory {
         destination: &std::ffi::CStr,
         bytes: &[u8],
     ) -> Result<(), CoreError> {
-        if bytes.len() > MAX_RECORD {
+        self.write_bytes_bounded(destination, bytes, MAX_RECORD)
+    }
+
+    /// Writes a retained artifact with its owner's byte bound.
+    pub(crate) fn write_bytes_bounded(
+        &self,
+        destination: &std::ffi::CStr,
+        bytes: &[u8],
+        maximum: usize,
+    ) -> Result<(), CoreError> {
+        if bytes.len() > maximum {
             return Err(CoreError::StorageUnavailable);
         }
         let name = format!(

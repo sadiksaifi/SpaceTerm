@@ -120,6 +120,7 @@ impl SettingsStorage for ConfigSettingsStorage {
                 ..
             }) => Err(super::SettingsError::Outdated),
             Err(Refusal::Reset { .. }) => Err(super::SettingsError::Invalid),
+            Err(Refusal::Storage(StoreError::Conflict)) => Err(StorageError::Conflict.into()),
             Err(Refusal::Storage(StoreError::Unsafe)) => Err(StorageError::Unsafe.into()),
             Err(Refusal::Storage(StoreError::Unavailable)) => Err(StorageError::Unavailable.into()),
         }
@@ -133,6 +134,9 @@ impl SettingsStorage for ConfigSettingsStorage {
         );
         match reset_confirmed(&crate::migration::CONFIG, &store, &mut NoCredentials) {
             Ok(kinds) => Ok(!kinds.is_empty()),
+            Err(spaceterm_core::migration::Refusal::Storage(StoreError::Conflict)) => {
+                Err(StorageError::Conflict)
+            }
             Err(spaceterm_core::migration::Refusal::Storage(StoreError::Unsafe)) => {
                 Err(StorageError::Unsafe)
             }

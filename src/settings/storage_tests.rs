@@ -209,6 +209,7 @@ mod native {
     fn native_oversized_settings_recovery_preserves_the_original_file() {
         let fixture = Fixture::new();
         let storage = fixture.storage();
+        storage.prepare().unwrap();
         storage.write(b"initial", None).unwrap();
         let bytes = vec![0xff; MAX_DOCUMENT_BYTES + 100];
         let path = fixture.paths.directories().settings_file();
@@ -216,13 +217,18 @@ mod native {
         let settings = crate::settings::Settings::load(Arc::new(storage));
         assert_eq!(
             settings.snapshot().status,
-            Some(crate::settings::SettingsError::Storage(
-                StorageError::TooLarge
-            ))
+            Some(crate::settings::SettingsError::Invalid)
         );
         settings.recover_by_reset().unwrap();
         assert_eq!(
-            fs::read(fixture.paths.directories().settings_backup_file()).unwrap(),
+            fs::read(
+                fixture
+                    .paths
+                    .directories()
+                    .config
+                    .join("reset/gen-1/settings.json")
+            )
+            .unwrap(),
             bytes
         );
         assert_eq!(
@@ -240,6 +246,7 @@ mod native {
             for replace in [false, true] {
                 let fixture = Fixture::new();
                 let storage = fixture.storage();
+                storage.prepare().unwrap();
                 storage.write(b"malformed", None).unwrap();
                 let path = fixture.paths.directories().settings_file();
                 if oversized {
@@ -323,14 +330,21 @@ mod native {
 }
 
 #[test]
-fn oversized_settings_are_recoverable_and_quarantine_preserves_all_bytes() {
+fn oversized_settings_are_recoverable_and_reset_preserves_all_bytes() {
     use crate::settings::Settings;
     let (storage, filesystem) = storage();
+    storage.prepare().unwrap();
     storage.write(b"initial", None).unwrap();
     let bytes = vec![0xff; MAX_DOCUMENT_BYTES + 100];
     {
         let mut files = filesystem.files.lock().unwrap();
-        files.values.first_entry().unwrap().get_mut().0 = bytes.clone();
+        files
+            .values
+            .iter_mut()
+            .find(|(path, _)| path.ends_with("settings.json"))
+            .unwrap()
+            .1
+            .0 = bytes.clone();
     }
     let settings = Settings::load(Arc::new(storage));
     assert!(settings.snapshot().status.unwrap().is_malformed());
@@ -339,7 +353,7 @@ fn oversized_settings_are_recoverable_and_quarantine_preserves_all_bytes() {
     let backup = files
         .values
         .iter()
-        .find(|(path, _)| path.ends_with("settings.json.bak"))
+        .find(|(path, _)| path.ends_with("reset/gen-1/settings.json"))
         .unwrap();
     assert_eq!(backup.1.0, bytes);
     assert_eq!(settings.snapshot().status, None);
@@ -368,6 +382,7 @@ fn quarantine_replaces_backup_without_creating_a_missing_config_directory() {
 fn recovery_refuses_settings_repaired_after_the_malformed_read() {
     for oversized in [false, true] {
         let (storage, filesystem) = storage();
+        storage.prepare().unwrap();
         storage.write(b"malformed", None).unwrap();
         if oversized {
             filesystem
@@ -375,9 +390,10 @@ fn recovery_refuses_settings_repaired_after_the_malformed_read() {
                 .lock()
                 .unwrap()
                 .values
-                .first_entry()
+                .iter_mut()
+                .find(|(path, _)| path.ends_with("settings.json"))
                 .unwrap()
-                .get_mut()
+                .1
                 .0 = vec![0xff; MAX_DOCUMENT_BYTES + 1];
         }
         let settings = crate::settings::Settings::load(Arc::new(storage));
@@ -387,7 +403,7 @@ fn recovery_refuses_settings_repaired_after_the_malformed_read() {
                 .into_bytes();
         {
             let mut files = filesystem.files.lock().unwrap();
-            // Load marked the root's generation beside the document.
+            // The marked document changed after the reset offer.
             let entry = files
                 .values
                 .iter_mut()
@@ -417,12 +433,21 @@ fn recovery_refuses_settings_repaired_after_the_malformed_read() {
 #[test]
 fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
     let (storage, filesystem) = storage();
+    storage.prepare().unwrap();
     storage.write(b"malformed", None).unwrap();
     let settings = crate::settings::Settings::load(Arc::new(storage));
     let successor = crate::settings::export_settings(&crate::settings::SettingsDocument::default())
         .unwrap()
         .into_bytes();
-    filesystem.files.lock().unwrap().successor_after_commit = Some(successor.clone());
+    {
+        let mut files = filesystem.files.lock().unwrap();
+        files.successor_target = files
+            .values
+            .keys()
+            .find(|path| path.ends_with("spaceterm/settings.json"))
+            .cloned();
+        files.successor_after_commit = Some(successor.clone());
+    }
     settings.recover_by_reset().unwrap();
     assert_eq!(
         settings.snapshot().status,
@@ -449,7 +474,7 @@ fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
         files
             .values
             .iter()
-            .find(|(path, _)| path.ends_with("settings.json"))
+            .find(|(path, _)| path.ends_with("spaceterm/settings.json"))
             .unwrap()
             .1
             .0,
@@ -459,7 +484,7 @@ fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
         files
             .values
             .iter()
-            .find(|(path, _)| path.ends_with("settings.json.bak"))
+            .find(|(path, _)| path.ends_with("reset/gen-1/settings.json"))
             .unwrap()
             .1
             .0,
