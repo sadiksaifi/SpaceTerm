@@ -49,6 +49,8 @@ from spaceterm_tasks.packaging import (
 
 STAGE = ROOT / "target" / "package-macos"
 MINIMUM_MACOS = "26.0"
+# The disk image window art, at 1x and 2x, drawn for the Packager.toml window and icon positions.
+DMG_BACKGROUND = ROOT / "assets" / "brand" / "macos" / "dmg" / "background.tiff"
 
 
 def require_apple_silicon():
@@ -142,6 +144,7 @@ def package_bundle(release_tag=None, notes=None):
     info = {**template, "CFBundleShortVersionString": version, "CFBundleVersion": version}
     (STAGE / "Info.plist").write_bytes(plistlib.dumps(info))
     config["macos"]["info-plist-path"] = str(STAGE / "Info.plist")
+    config["dmg"]["background"] = str(DMG_BACKGROUND)
     config["binaries-dir"] = str(binaries)
 
     DIST.mkdir(exist_ok=True)
@@ -229,6 +232,9 @@ def verify(app=None, dmg=None, release_tag=None):
             applications = mount / "Applications"
             if not applications.is_symlink() or os.readlink(applications) != "/Applications":
                 raise TaskError("the disk image must link Applications to /Applications")
+            background = mount / ".background" / DMG_BACKGROUND.name
+            if not background.is_file() or background.read_bytes() != DMG_BACKGROUND.read_bytes():
+                raise TaskError("the disk image window must show the brand background")
             verify_bundle(mount / f"{app_name}.app", name, release_tag, "dmg")
         finally:
             subprocess.run(["hdiutil", "detach", str(mount), "-force"], capture_output=True)

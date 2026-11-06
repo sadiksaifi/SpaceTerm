@@ -1,7 +1,7 @@
 # cargo-packager configuration for the SpaceTerm identity.
-# Packaging adds the tag-derived version, the Info.plist with that version, and the build's
-# binaries directory. SpaceTerm signs the app with Entitlements.plist beside this file,
-# so cargo-packager receives no signing identity.
+# Packaging adds the tag-derived version, the Info.plist with that version, the build's
+# binaries directory, and the brand's disk image background. SpaceTerm signs the app with
+# Entitlements.plist beside this file, so cargo-packager receives no signing identity.
 product-name = "SpaceTerm"
 identifier = "io.github.sadiksaifi.spaceterm"
 formats = ["app", "dmg"]

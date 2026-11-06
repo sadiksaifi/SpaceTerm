@@ -430,6 +430,11 @@ int main(int argc, char **argv) {{
         )
         self.run_command("codesign", "--force", "--sign", "-", "--timestamp=none", str(disk_app))
         (disk_root / "Applications").symlink_to("/Applications")
+        (disk_root / ".background").mkdir()
+        shutil.copyfile(
+            self.root / "assets/brand/macos/dmg/background.tiff",
+            disk_root / ".background/background.tiff",
+        )
         dmg = Path(self.directory.name) / "wrong-identity.dmg"
         self.run_command(
             "hdiutil", "create", "-srcfolder", str(disk_root), "-format", "UDZO", str(dmg)
