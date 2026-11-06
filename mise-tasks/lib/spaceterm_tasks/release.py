@@ -32,7 +32,6 @@ from pathlib import Path
 from spaceterm_tasks import (
     ROOT,
     TaskError,
-    macos_codesign,
     release_feed,
     release_floor,
     sparkle,
@@ -493,7 +492,7 @@ def assemble(
                 raise TaskError(str(error)) from None
         else:
             print("Dry run: no macOS desktop build on this host; its assets are skipped.")
-        installer(directory / INSTALLER, environment)
+        installer(directory / INSTALLER, environment, version=version)
         listed = sorted(path for path in directory.iterdir())
         (directory / CHECKSUMS).write_text(checksums(listed))
         if complete:
@@ -502,15 +501,16 @@ def assemble(
     print(f"Assembled {len(listed) + 1} release assets with checksums")
 
 
-def installer(destination, environment=os.environ, source=INSTALLER_SOURCE, root=ROOT):
-    """Write the published install.sh: the release kind and Team ID filled in once each, and
-    the update keys it pins equal to packaging/update-trust.json.
+def installer(destination, environment=os.environ, source=INSTALLER_SOURCE, root=ROOT, *, version):
+    """Pin the Linux installer to its assembled release and signing trust.
 
-    A release fills the Developer ID Team ID and needs real keys. A dry run's installer accepts
-    ad hoc code signatures and placeholder keys, so it receives no Team ID.
+    Check the source keys against tracked trust first. Dry runs replace them with their
+    generated key, so they exercise signature verification without trusting release keys.
     """
+    if not re.fullmatch(r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})", version):
+        raise TaskError("the installer requires a stable release version")
     text = Path(source).read_text()
-    for token in ("@RELEASE_KIND@", "@TEAM_ID@"):
+    for token in ("@RELEASE_KIND@", "@DEFAULT_VERSION@"):
         if text.count(token) != 1:
             raise TaskError(f"packaging/install.sh must hold {token} exactly once")
     pinned = dict(re.findall(r"^readonly UPDATE_KEY_(CURRENT|BACKUP)='([^'\n]*)'$", text, re.M))
@@ -521,11 +521,16 @@ def installer(destination, environment=os.environ, source=INSTALLER_SOURCE, root
     if pinned != {"CURRENT": trust.get("current"), "BACKUP": trust.get("backup")}:
         raise TaskError("packaging/install.sh must pin the keys in packaging/update-trust.json")
     if update_signing.dry_run(environment):
-        kind, team = "dry-run", ""
+        kind = "dry-run"
+        key = update_signing.trust(environment, root)[0]
+        for pinned_key in pinned.values():
+            text = text.replace(pinned_key, key)
     else:
         update_signing.release_trust(root)
-        kind, team = "release", macos_codesign.team_id(environment)
-    Path(destination).write_text(text.replace("@RELEASE_KIND@", kind).replace("@TEAM_ID@", team))
+        kind = "release"
+    Path(destination).write_text(
+        text.replace("@RELEASE_KIND@", kind).replace("@DEFAULT_VERSION@", version)
+    )
     Path(destination).chmod(0o755)
 
 

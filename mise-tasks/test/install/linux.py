@@ -189,6 +189,13 @@ class InstallTests(unittest.TestCase):
             archive, signature = self.desktop(version)
             assets.update({archive.name: archive, signature.name: signature})
         self.release.publish(version, assets, latest=latest)
+        if latest:
+            self.installer = render(
+                self.root,
+                version=version,
+                current=self.keys["current"][1],
+                backup=self.keys["backup"][1],
+            )
 
     # Running the installer.
 
@@ -316,7 +323,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(
             self.requested(),
             [
-                f"{RELEASES}/latest/download/SHA256SUMS",
+                f"{RELEASES}/download/v1.2.0/SHA256SUMS",
                 f"{RELEASES}/download/v1.2.0/{core_name('1.2.0')}",
                 f"{RELEASES}/download/v1.2.0/{core_name('1.2.0')}.sig",
             ],
@@ -328,6 +335,12 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(self.desktop_target().exists())
         self.assertIn("Run spaceterm setup to start SpaceTerm Core.", result.stdout)
         self.assert_no_leftovers()
+
+    def test_pinned_default_ignores_the_legacy_latest_release(self):
+        self.release.publish("0.6.8", {}, latest=True)
+        self.succeed()
+        self.assertTrue(all("/download/v1.2.0/" in url for url in self.requested()))
+        self.assertEqual(list(self.installations().values()), ["1.2.0"])
 
     def test_version_installs_the_requested_release(self):
         self.publish("1.1.0", latest=False)
@@ -363,7 +376,7 @@ class InstallTests(unittest.TestCase):
         self.requests.unlink()
         result = self.succeed()
         self.assertIn("SpaceTerm Core 1.2.0 is already installed", result.stdout)
-        self.assertEqual(self.requested(), [f"{RELEASES}/latest/download/SHA256SUMS"])
+        self.assertEqual(self.requested(), [f"{RELEASES}/download/v1.2.0/SHA256SUMS"])
         self.assertEqual(len(self.core_calls()), 1)
 
     def test_downgrades_are_refused_before_any_archive_downloads(self):
@@ -393,7 +406,7 @@ class InstallTests(unittest.TestCase):
         result = self.install("--desktop")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SpaceTerm 1.3.0 is installed, which is newer than 1.2.0", result.stderr)
-        self.assertEqual(self.requested(), [f"{RELEASES}/latest/download/SHA256SUMS"])
+        self.assertEqual(self.requested(), [f"{RELEASES}/download/v1.2.0/SHA256SUMS"])
         self.assertEqual(self.desktop_version(), "1.3.0")
 
     def bad_signatures(self, archive):
@@ -554,16 +567,21 @@ class InstallTests(unittest.TestCase):
         )
         self.assertEqual(self.requested(), [])
 
-    def test_a_dry_run_accepts_placeholder_keys_and_says_so(self):
-        installer = render(self.root, kind="dry-run", team_id="")
+    def test_a_dry_run_verifies_with_its_pinned_key_and_says_so(self):
+        installer = render(
+            self.root,
+            kind="dry-run",
+            current=self.keys["current"][1],
+            backup=self.keys["backup"][1],
+        )
         result = self.install(installer=installer)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("comes from a dry run", result.stderr)
-        self.assertIn("skipped the Ed25519 check", result.stderr)
+        self.assertNotIn("skipped", result.stderr)
         self.assertEqual(list(self.installations().values()), ["1.2.0"])
 
     def test_placeholder_keys_refuse_a_release_before_downloading(self):
-        installer = render(self.root)
+        installer = render(self.root, current="PLACEHOLDER", backup="PLACEHOLDER")
         result = self.install(installer=installer)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("placeholder update keys", result.stderr)
@@ -585,6 +603,91 @@ class InstallTests(unittest.TestCase):
                 self.assertEqual(self.requested(), [])
 
     # The desktop app.
+
+    def legacy_installation(self):
+        tree = self.desktop_target()
+        (tree / "bin").mkdir(parents=True)
+        (tree / "bin/spaceterm").write_text("legacy executable, not a Core CLI")
+        packaged = tree / "share/applications/io.github.sadiksaifi.spaceterm.desktop"
+        packaged.parent.mkdir(parents=True)
+        packaged.write_text("[Desktop Entry]\nName=SpaceTerm\n")
+        self.launcher().parent.mkdir(parents=True)
+        self.launcher().symlink_to(tree / "bin/spaceterm")
+        entry = self.data_home / "applications/io.github.sadiksaifi.spaceterm.desktop"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("old launcher")
+        icon = self.data_home / "icons/hicolor/scalable/apps/io.github.sadiksaifi.spaceterm.svg"
+        icon.parent.mkdir(parents=True)
+        icon.symlink_to(tree / "share/icons/hicolor/scalable/apps" / icon.name)
+        (self.install_dir / ".spaceterm.update").mkdir()
+        self.retained = []
+        for root in (".config", ".local/share", ".local/state", ".cache"):
+            data = self.home / root / "spaceterm/keep"
+            data.parent.mkdir(parents=True, exist_ok=True)
+            data.write_text("user data")
+            self.retained.append(data)
+        return entry, icon
+
+    def test_legacy_desktop_and_launcher_residue_are_replaced_without_deleting_data(self):
+        entry, icon = self.legacy_installation()
+        self.publish("1.2.0", desktop=True)
+        self.succeed("--desktop")
+        self.assertEqual(self.desktop_version(), "1.2.0")
+        self.assertFalse((self.desktop_target() / "bin/spaceterm").exists())
+        self.assertFalse(entry.exists())
+        self.assertFalse(icon.is_symlink())
+        self.assertFalse((self.install_dir / ".spaceterm.update").exists())
+        self.assertIn("/core/installations/", os.readlink(self.launcher()))
+        for data in self.retained:
+            self.assertEqual(data.read_text(), "user data")
+
+    def test_signature_failure_preserves_legacy_installation_and_data(self):
+        entry, icon = self.legacy_installation()
+        archive, _ = self.core("1.2.0")
+        signature = self.sign(archive, "rogue")
+        self.release.publish("1.2.0", {archive.name: archive, signature.name: signature})
+        result = self.install("--desktop")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not carry a valid SpaceTerm signature", result.stderr)
+        self.assertEqual(self.core_calls(), [])
+        self.assertTrue(entry.exists())
+        self.assertTrue(icon.is_symlink())
+        self.assertEqual(self.launcher().readlink(), self.desktop_target() / "bin/spaceterm")
+        for data in self.retained:
+            self.assertEqual(data.read_text(), "user data")
+
+    def test_core_only_install_cleans_legacy_desktop_and_keeps_data(self):
+        entry, icon = self.legacy_installation()
+        self.succeed()
+        self.assertFalse(self.desktop_target().exists())
+        self.assertFalse(entry.exists())
+        self.assertFalse(icon.is_symlink())
+        self.assertIn("/core/installations/", os.readlink(self.launcher()))
+        for data in self.retained:
+            self.assertEqual(data.read_text(), "user data")
+
+    def test_a_failed_core_retain_restores_the_legacy_launcher(self):
+        self.legacy_installation()
+        archive, _ = self.core(
+            "1.2.0", extra=[("core/bin/spaceterm", b"#!/bin/sh\nexit 1\n", 0o755)]
+        )
+        signature = self.sign(archive)
+        self.release.publish("1.2.0", {archive.name: archive, signature.name: signature})
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not be installed", result.stderr)
+        self.assertEqual(self.launcher().readlink(), self.desktop_target() / "bin/spaceterm")
+        self.assertTrue(self.launcher().exists())
+
+    def test_legacy_uninstall_removes_only_programs_and_launchers(self):
+        entry, icon = self.legacy_installation()
+        self.succeed("--uninstall", "--desktop")
+        self.assertFalse(os.path.lexists(self.launcher()))
+        self.assertFalse(self.desktop_target().exists())
+        self.assertFalse(entry.exists())
+        self.assertFalse(icon.is_symlink())
+        for data in self.retained:
+            self.assertEqual(data.read_text(), "user data")
 
     def test_desktop_installs_the_verified_desktop_app_and_core(self):
         self.publish("1.2.0", desktop=True)
@@ -648,6 +751,12 @@ class InstallTests(unittest.TestCase):
                 f"{desktop_name(version)}.sig": Path(f"{archive}.sig"),
             },
         )
+        self.installer = render(
+            self.root,
+            version=version,
+            current=self.keys["current"][1],
+            backup=self.keys["backup"][1],
+        )
 
     def test_an_older_signed_desktop_archive_replayed_as_a_newer_release_is_refused(self):
         self.publish("1.2.0", desktop=True)
@@ -705,7 +814,7 @@ class InstallTests(unittest.TestCase):
         result = self.install("--desktop")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("quit SpaceTerm", result.stderr)
-        self.assertEqual(self.requested(), [f"{RELEASES}/latest/download/SHA256SUMS"])
+        self.assertEqual(self.requested(), [f"{RELEASES}/download/v1.2.0/SHA256SUMS"])
         self.assertEqual(list(self.installations().values()), ["1.1.0"])
         self.assertEqual(self.desktop_version(), "1.1.0")
 
