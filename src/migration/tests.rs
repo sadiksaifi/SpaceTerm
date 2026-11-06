@@ -99,52 +99,170 @@ fn reset_preserves_a_save_published_during_archival() {
         }
     }
 
+    use crate::platform::secure_filesystem::{PrivateFileSnapshot, SecureEntryIdentity};
+    use crate::settings::storage::{
+        ConfigSettingsStorage, SettingsStorage, StorageCommit, StorageError,
+    };
+    use crate::settings::{Settings, SettingsError, recovery::RecoveryError};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Interleave the second native writer inside the first reset's archival operation.
+    // Every ordinary read, write and admission uses the real Settings storage adapter.
+    struct RacedStorage {
+        settings: ConfigSettingsStorage,
+        store: secure_store::SecureStore,
+        name: &'static str,
+        successor: Vec<u8>,
+        injected: AtomicBool,
+    }
+    impl SettingsStorage for RacedStorage {
+        fn prepare(&self) -> Result<(), SettingsError> {
+            self.settings.prepare()
+        }
+        fn read(&self) -> Result<Option<PrivateFileSnapshot>, StorageError> {
+            self.settings.read()
+        }
+        fn write(
+            &self,
+            bytes: &[u8],
+            expected: Option<&SecureEntryIdentity>,
+        ) -> Result<StorageCommit, StorageError> {
+            self.settings.write(bytes, expected)
+        }
+        fn quarantine(&self) -> Result<(), StorageError> {
+            self.settings.quarantine()
+        }
+        fn reset_generation(&self) -> Result<bool, StorageError> {
+            if self.injected.swap(true, Ordering::Relaxed) {
+                return self.settings.reset_generation();
+            }
+            let competing = SavingWriter {
+                store: &self.store,
+                name: self.name,
+                successor: &self.successor,
+                saved: Cell::new(false),
+            };
+            let result =
+                migration::reset_confirmed(&CONFIG, &competing, &mut migration::NoCredentials);
+            assert!(competing.saved.get());
+            result
+                .map(|kinds| !kinds.is_empty())
+                .map_err(|error| match error {
+                    Refusal::Storage(StoreError::Conflict) => StorageError::Conflict,
+                    Refusal::Storage(StoreError::Unsafe) => StorageError::Unsafe,
+                    _ => StorageError::Unavailable,
+                })
+        }
+    }
+
     for (name, original) in [(SETTINGS, LEGACY_SETTINGS), ("ssh_config", LEGACY_SSH)] {
-        let root = fixtures::scratch("reset-concurrent-save");
-        let store = config_store(native(), root.clone());
-        let successor = if name == SETTINGS {
-            let mut value: serde_json::Value = serde_json::from_slice(original).unwrap();
-            value["revision"] = 12345.into();
-            serde_json::to_vec(&value).unwrap()
-        } else {
-            String::from_utf8(original.to_vec())
+        for follow in [false, true] {
+            let root = fixtures::scratch("reset-concurrent-save");
+            let directories = AppDirectories::resolve_xdg(
+                "spaceterm",
+                &spaceterm_directories::AppDirectoryEnvironment {
+                    home: Some(root.clone().into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            let store = config_store(native(), directories.config.clone());
+            let successor = if name == SETTINGS {
+                let mut value: serde_json::Value = serde_json::from_slice(original).unwrap();
+                value["revision"] = 12345.into();
+                serde_json::to_vec(&value).unwrap()
+            } else {
+                String::from_utf8(original.to_vec())
+                    .unwrap()
+                    .replace("tester", "successor")
+                    .into_bytes()
+            };
+            store.write(Area::Root, SETTINGS, LEGACY_SETTINGS).unwrap();
+            store.write(Area::Root, "ssh_config", LEGACY_SSH).unwrap();
+            let paths = Arc::new(
+                crate::platform::app_paths::AppPaths::from_directories(directories, 103, native())
+                    .unwrap(),
+            );
+            let storage = Arc::new(RacedStorage {
+                settings: ConfigSettingsStorage::new(paths.clone()),
+                store,
+                name,
+                successor: successor.clone(),
+                injected: AtomicBool::new(false),
+            });
+            let settings = Settings::load(storage.clone());
+            assert_eq!(settings.snapshot().status, Some(SettingsError::Invalid));
+            assert_eq!(
+                settings.recover_by_reset(),
+                Err(RecoveryError::Storage(StorageError::Conflict))
+            );
+            assert_eq!(
+                settings.snapshot().status,
+                Some(SettingsError::Storage(StorageError::Conflict))
+            );
+            assert_eq!(
+                storage.store.read(Area::Root, name).unwrap(),
+                Some(successor.clone())
+            );
+            assert_eq!(
+                storage
+                    .store
+                    .read(Area::Reset, &format!("gen-0/{name}"))
+                    .unwrap(),
+                Some(original.to_vec())
+            );
+            assert_eq!(
+                storage.store.read(Area::Root, "generation.json").unwrap(),
+                None
+            );
+            if name == "ssh_config" {
+                // The host conflict happened after Settings had already been removed.
+                assert_eq!(storage.store.read(Area::Root, SETTINGS).unwrap(), None);
+            }
+            let before = files(&root);
+            let refreshed = if follow {
+                settings.follow_file().map(|_| ())
+            } else {
+                settings.reload()
+            };
+            assert_eq!(refreshed, Err(SettingsError::Invalid));
+            assert_eq!(settings.snapshot().status, Some(SettingsError::Invalid));
+            assert_eq!(files(&root), before);
+            // The same Settings owner can confirm the remaining reset and resume editing.
+            settings.recover_by_reset().unwrap();
+            assert_eq!(settings.snapshot().status, None);
+            assert_eq!(storage.store.read(Area::Root, "ssh_config").unwrap(), None);
+            assert_eq!(
+                storage
+                    .store
+                    .read(Area::Reset, &format!("gen-0-1/{name}"))
+                    .unwrap(),
+                Some(successor)
+            );
+            assert_eq!(
+                storage
+                    .store
+                    .read(Area::Reset, &format!("gen-0/{name}"))
+                    .unwrap(),
+                Some(original.to_vec())
+            );
+            let snapshot = settings.snapshot();
+            let mut candidate = (*snapshot.committed).clone();
+            candidate.appearance.window.opacity = 0.8;
+            settings
+                .update_committed(snapshot.committed.revision, candidate)
                 .unwrap()
-                .replace("tester", "successor")
-                .into_bytes()
-        };
-        store.write(Area::Root, name, original).unwrap();
-        let competing = SavingWriter {
-            store: &store,
-            name,
-            successor: &successor,
-            saved: Cell::new(false),
-        };
-        assert_eq!(
-            migration::reset_confirmed(&CONFIG, &competing, &mut migration::NoCredentials),
-            Err(Refusal::Storage(StoreError::Conflict))
-        );
-        assert!(competing.saved.get());
-        assert_eq!(
-            store.read(Area::Root, name).unwrap(),
-            Some(successor.clone())
-        );
-        assert_eq!(
-            store.read(Area::Reset, &format!("gen-0/{name}")).unwrap(),
-            Some(original.to_vec())
-        );
-        assert_eq!(store.read(Area::Root, "generation.json").unwrap(), None);
-        // Retrying retains both snapshots before completing the reset.
-        migration::reset_confirmed(&CONFIG, &competing, &mut migration::NoCredentials).unwrap();
-        assert_eq!(store.read(Area::Root, name).unwrap(), None);
-        assert_eq!(
-            store.read(Area::Reset, &format!("gen-0-1/{name}")).unwrap(),
-            Some(successor)
-        );
-        assert_eq!(
-            store.read(Area::Reset, &format!("gen-0/{name}")).unwrap(),
-            Some(original.to_vec())
-        );
-        std::fs::remove_dir_all(root).unwrap();
+                .run()
+                .unwrap();
+            let restarted = Settings::load(Arc::new(ConfigSettingsStorage::new(paths)));
+            assert_eq!(restarted.snapshot().status, None);
+            assert_eq!(
+                restarted.snapshot().committed.appearance.window.opacity,
+                0.8
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }
 
