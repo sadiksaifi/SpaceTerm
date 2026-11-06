@@ -3,6 +3,8 @@
 import base64
 import json
 import os
+import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -111,9 +113,15 @@ class TrustTests(unittest.TestCase):
         self.message.write_bytes(b"exact bytes")
         self.signature = self.root / "message.sig"
 
-    def test_the_tracked_placeholders_fail_closed(self):
-        with self.assertRaisesRegex(TaskError, "no release keys"):
-            update_signing.release_trust(ROOT)
+    def test_the_tracked_release_trust_matches_sparkle_and_requires_signatures(self):
+        current, backup = update_signing.release_trust(ROOT)
+        self.assertEqual(current, "sNR7I+ZSfwiz/hBiYA0PgrtqqOsJY53yluVe93/tATM=")
+        self.assertEqual(backup, "EprlnUGQNGvhtuT8fhIGmVMJpAm1rjGfgkmts2Beesk=")
+        plist = plistlib.loads((ROOT / "packaging/macos/spaceterm/Info.plist").read_bytes())
+        self.assertEqual(plist["SUPublicEDKey"], current)
+        self.assertIs(plist["SURequireSignedFeed"], True)
+        self.assertIs(plist["SUVerifyUpdateBeforeExtraction"], True)
+        self.assertEqual(plist["SUSignedFeedFailureExpirationInterval"], 0)
 
     def test_trust_holds_two_distinct_keys_and_nothing_else(self):
         write_trust(self.root)
@@ -168,6 +176,22 @@ class TrustTests(unittest.TestCase):
             update_signing.trust(environment, ROOT), (update_signing.derived_public_key(seed),)
         )
         self.assertEqual(update_signing.release_seed(environment, ROOT), seed)
+
+    def test_sparkle_signing_refuses_a_public_key_mismatch(self):
+        seed = update_signing.generated_seed()
+        environment = {
+            update_signing.DRY_RUN: "1",
+            update_signing.SIGNING_SECRET: update_signing.encoded_seed(seed),
+        }
+        public = update_signing.derived_public_key(seed)
+        self.assertEqual(
+            release.sparkle_signing(environment, {"SUPublicEDKey": public}),
+            (["--ed-key-file", "-"], update_signing.encoded_seed(seed).encode()),
+        )
+        for public in update_signing.release_trust(ROOT):
+            with self.subTest(public=public):
+                with self.assertRaisesRegex(TaskError, "SUPublicEDKey must be the current"):
+                    release.sparkle_signing(environment, {"SUPublicEDKey": public})
 
 
 class FeedTests(unittest.TestCase):
@@ -493,17 +517,19 @@ class InstallerTests(unittest.TestCase):
 
     def pin(self, current, backup):
         text = (ROOT / "packaging/install.sh").read_text()
-        trust = json.loads((ROOT / update_signing.TRUST).read_text())
-        text = text.replace(trust["current"], current).replace(trust["backup"], backup)
+        for name, key in (("CURRENT", current), ("BACKUP", backup)):
+            text = re.sub(
+                rf"^readonly UPDATE_KEY_{name}='[^'\n]*'$",
+                lambda _: f"readonly UPDATE_KEY_{name}='{key}'",
+                text,
+                flags=re.M,
+            )
         self.source.write_text(text)
 
     def test_a_release_installer_fills_its_kind_and_team_and_pins_the_trust(self):
-        write_trust(self.root)
-        keys = update_signing.release_trust(self.root)
+        keys = update_signing.release_trust(ROOT)
         self.pin(*keys)
-        release.installer(
-            self.output, {"SPACETERM_APPLE_TEAM_ID": "ABCDE12345"}, self.source, self.root
-        )
+        release.installer(self.output, {"SPACETERM_APPLE_TEAM_ID": "ABCDE12345"}, self.source)
         text = self.output.read_text()
         self.assertIn("readonly RELEASE_KIND='release'\n", text)
         self.assertIn("readonly TEAM_ID='ABCDE12345'\n", text)
@@ -511,24 +537,21 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("@TEAM_ID@", text)
         self.assertTrue(os.access(self.output, os.X_OK))
         with self.assertRaisesRegex(TaskError, "SPACETERM_APPLE_TEAM_ID"):
-            release.installer(self.output, {}, self.source, self.root)
+            release.installer(self.output, {}, self.source)
 
     def test_the_installer_must_pin_the_tracked_trust(self):
-        write_trust(self.root)
-        keys = update_signing.release_trust(self.root)
+        keys = update_signing.release_trust(ROOT)
         self.pin(keys[1], keys[0])
         with self.assertRaisesRegex(TaskError, "must pin the keys"):
-            release.installer(
-                self.output, {"SPACETERM_APPLE_TEAM_ID": "ABCDE12345"}, self.source, self.root
-            )
+            release.installer(self.output, {"SPACETERM_APPLE_TEAM_ID": "ABCDE12345"}, self.source)
 
-    def test_a_dry_run_installer_accepts_the_tracked_placeholders(self):
-        release.installer(self.output, {update_signing.DRY_RUN: "1"})
+    def test_a_dry_run_installer_uses_the_matching_test_trust(self):
+        write_trust(self.root)
+        self.pin(*update_signing.release_trust(self.root))
+        release.installer(self.output, {update_signing.DRY_RUN: "1"}, self.source, self.root)
         text = self.output.read_text()
         self.assertIn("readonly RELEASE_KIND='dry-run'\n", text)
         self.assertIn("readonly TEAM_ID=''\n", text)
-        with self.assertRaisesRegex(TaskError, "no release keys"):
-            release.installer(self.output, {"SPACETERM_APPLE_TEAM_ID": "ABCDE12345"})
 
 
 if __name__ == "__main__":
