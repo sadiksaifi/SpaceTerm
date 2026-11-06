@@ -20,17 +20,17 @@ runs:
     - name: Install validation tools
       if: inputs.validation == 'true'
       shell: bash
-      run: mise install ruff ty shellcheck
+      run: mise install ruff ty shellcheck git-cliff
     - name: Prepare native Linux compiler prerequisites
       if: runner.os == 'Linux'
       shell: bash
       run: |
         sudo apt-get update
         sudo apt-get install --no-install-recommends -y build-essential pkg-config cmake clang libclang-dev ncurses-bin
-    - name: Prepare native desktop test prerequisites
+    - name: Prepare native validation prerequisites
       if: runner.os == 'Linux' && inputs.validation == 'true'
       shell: bash
-      run: mise run release:setup-linux-desktop-tests
+      run: mise run release:setup-linux-validation
     - name: Select Xcode and Metal
       if: runner.os == 'macOS'
       shell: bash

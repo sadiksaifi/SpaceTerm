@@ -427,9 +427,9 @@ run = [
   "sudo apt-get install --no-install-recommends -y binutils ncurses-bin desktop-file-utils libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libxcb1 libx11-xcb1 libfontconfig1 libfreetype6 libvulkan1",
 ]
 
-[tasks."release:setup-linux-desktop-tests"]
-description = "Install native headers and libraries required to link desktop migration tests"
-run = "sudo apt-get install --no-install-recommends -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev libvulkan1"
+[tasks."release:setup-linux-validation"]
+description = "Install the native packages that Linux release:check links and tests against"
+run = "sudo apt-get install --no-install-recommends -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev libvulkan1 desktop-file-utils python3-gi gir1.2-glib-2.0"
 
 [tasks."release:check"]
 description = "Validate release policy and retained-data behavior alongside release compilation"
