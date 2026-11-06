@@ -29,6 +29,17 @@ from tests.installer_fixture import (
 
 APPLICATION_ID = "com.peblon.spaceterm"
 PLATFORM = "linux-x86_64"
+LEGACY_ENTRY = """[Desktop Entry]
+Type=Application
+Name=SpaceTerm
+Comment=Terminal multiplexer
+Exec=spaceterm
+Icon=io.github.sadiksaifi.spaceterm
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.sadiksaifi.spaceterm
+Categories=System;TerminalEmulator;
+"""
 # A native executable keeps its own path in /proc/PID/exe, which the installer matches. It
 # answers --build-info as the desktop does, so the installer can read the installed version.
 DESKTOP = r"""
@@ -608,14 +619,20 @@ class InstallTests(unittest.TestCase):
         tree = self.desktop_target()
         (tree / "bin").mkdir(parents=True)
         (tree / "bin/spaceterm").write_text("legacy executable, not a Core CLI")
+        (tree / "bin/spaceterm").chmod(0o755)
+        (tree / "share/spaceterm").mkdir(parents=True)
         packaged = tree / "share/applications/io.github.sadiksaifi.spaceterm.desktop"
         packaged.parent.mkdir(parents=True)
-        packaged.write_text("[Desktop Entry]\nName=SpaceTerm\n")
+        packaged.write_text(LEGACY_ENTRY)
         self.launcher().parent.mkdir(parents=True)
         self.launcher().symlink_to(tree / "bin/spaceterm")
         entry = self.data_home / "applications/io.github.sadiksaifi.spaceterm.desktop"
         entry.parent.mkdir(parents=True)
-        entry.write_text("old launcher")
+        executable = str(tree / "bin/spaceterm")
+        for character in ("\\", '"', "`", "$"):
+            executable = executable.replace(character, "\\" + character)
+        quoted = '"' + executable.replace("\\", "\\\\") + '"'
+        entry.write_text(LEGACY_ENTRY.replace("Exec=spaceterm", f"Exec={quoted}"))
         icon = self.data_home / "icons/hicolor/scalable/apps/io.github.sadiksaifi.spaceterm.svg"
         icon.parent.mkdir(parents=True)
         icon.symlink_to(tree / "share/icons/hicolor/scalable/apps" / icon.name)
@@ -716,6 +733,43 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(icon.is_symlink())
         for data in self.retained:
             self.assertEqual(data.read_text(), "user data")
+
+    def assert_symlinked_legacy_member_is_preserved(self, relative):
+        self.legacy_installation()
+        member = self.desktop_target() / relative
+        member.unlink()
+        external = self.root / "unrelated"
+        external.write_text("personal file")
+        external.chmod(0o755)
+        member.symlink_to(external)
+        sentinel = self.desktop_target() / "personal-project"
+        sentinel.write_text("personal project")
+        for arguments in ((), ("--desktop",), ("--uninstall", "--desktop")):
+            result = self.install(*arguments)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not a recognized SpaceTerm installation", result.stderr)
+            self.assertTrue(member.is_symlink())
+            self.assertEqual(sentinel.read_text(), "personal project")
+            self.assertEqual(external.read_text(), "personal file")
+            self.assertEqual(self.requested(), [])
+
+    def test_symlinked_legacy_executable_does_not_authorize_replacement(self):
+        self.assert_symlinked_legacy_member_is_preserved("bin/spaceterm")
+
+    def test_symlinked_legacy_desktop_entry_does_not_authorize_replacement(self):
+        self.assert_symlinked_legacy_member_is_preserved(
+            "share/applications/io.github.sadiksaifi.spaceterm.desktop"
+        )
+
+    def test_an_unrecognized_legacy_desktop_entry_does_not_authorize_replacement(self):
+        self.legacy_installation()
+        marker = self.desktop_target() / "share/applications/io.github.sadiksaifi.spaceterm.desktop"
+        marker.write_text("[Desktop Entry]\nExec=/bin/true\n")
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a recognized SpaceTerm installation", result.stderr)
+        self.assertEqual(marker.read_text(), "[Desktop Entry]\nExec=/bin/true\n")
+        self.assertEqual(self.requested(), [])
 
     def test_desktop_installs_the_verified_desktop_app_and_core(self):
         self.publish("1.2.0", desktop=True)

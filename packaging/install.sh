@@ -630,12 +630,44 @@ uninstall_desktop_linux() {
 
 # Legacy releases installed no Core. Recognize their packaged desktop entry without
 # executing the old desktop as a CLI or reading any retained application data.
+legacy_desktop_entry() {
+    cat <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=SpaceTerm
+Comment=Terminal multiplexer
+Exec=spaceterm
+Icon=io.github.sadiksaifi.spaceterm
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.sadiksaifi.spaceterm
+Categories=System;TerminalEmulator;
+ENTRY
+}
+
 locate_legacy_desktop() {
     legacy_tree=false
-    if [ -f "$target/share/applications/io.github.sadiksaifi.spaceterm.desktop" ] \
-        && [ -f "$target/bin/spaceterm" ] && [ ! -e "$target/bin/spaceterm-desktop" ]; then
-        legacy_tree=true
+    [ -e "$target" ] || [ -L "$target" ] || return 0
+    unrecognized="the existing desktop directory is not a recognized SpaceTerm installation"
+    for directory in "$target" "$target/bin" "$target/share" "$target/share/applications"; do
+        [ -d "$directory" ] && [ ! -L "$directory" ] || die "$unrecognized"
+    done
+    if [ -f "$target/bin/spaceterm-desktop" ] && [ -x "$target/bin/spaceterm-desktop" ] \
+        && [ ! -L "$target/bin/spaceterm-desktop" ]; then
+        return
     fi
+    [ ! -e "$target/bin/spaceterm-desktop" ] && [ ! -L "$target/bin/spaceterm-desktop" ] \
+        || die "$unrecognized"
+    [ -d "$target/share/spaceterm" ] && [ ! -L "$target/share/spaceterm" ] \
+        || die "$unrecognized"
+    for member in "$target/bin/spaceterm" \
+        "$target/share/applications/io.github.sadiksaifi.spaceterm.desktop"; do
+        [ -f "$member" ] && [ ! -L "$member" ] || die "$unrecognized"
+    done
+    [ -x "$target/bin/spaceterm" ] || die "$unrecognized"
+    [ "$(cat "$target/share/applications/io.github.sadiksaifi.spaceterm.desktop")" = "$(legacy_desktop_entry)" ] \
+        || die "$unrecognized"
+    legacy_tree=true
 }
 
 is_legacy_launcher() {
