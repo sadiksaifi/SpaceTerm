@@ -47,6 +47,7 @@ const RULES: &[FileRule] = &[
 
 /// The Core data root's generations, steps and records.
 pub const REGISTRY: Registry = Registry {
+    admission: crate::migration::Admission::GenerationOne,
     generations: generations::CORE_DATA,
     steps: &[],
     files: &[RULES],

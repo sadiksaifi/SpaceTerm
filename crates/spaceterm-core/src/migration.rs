@@ -15,8 +15,8 @@
 //!    Rebuildable data moves to `reset/` at once and leaves a one-time [`take_notice`]. Every
 //!    other kind of data waits for the person to confirm [`reset_confirmed`].
 //!
-//! A root that holds files but no `generation.json` predates its marker and is at generation 1.
-//! An empty root starts at the current generation.
+//! Each registry declares how it admits unmarked files. Desktop roots require a marker and
+//! validate current files before ordinary readers. An empty root starts at the current generation.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,6 +82,8 @@ pub enum DataKind {
     WorkspaceOrder,
     UpdateHistory,
     Settings,
+    ManagedSshHosts,
+    BackgroundImages,
     WorkspaceOrganization,
     MachineId,
     Pairings,
@@ -109,6 +111,8 @@ impl DataKind {
             Self::WorkspaceOrder => "Workspace order",
             Self::UpdateHistory => "update history",
             Self::Settings => "Settings",
+            Self::ManagedSshHosts => "managed SSH hosts",
+            Self::BackgroundImages => "background images",
             Self::WorkspaceOrganization => "Workspace organization",
             Self::MachineId => "Machine ID",
             Self::Pairings => "pairings",
@@ -151,8 +155,36 @@ pub enum Step {
     Root(fn(&mut Migration<'_>) -> Result<(), Unmigratable>),
 }
 
+/// A retained non-JSON artifact included in reset, without a reader for its old format.
+pub struct ArtifactRule {
+    pub matches: fn(&str) -> bool,
+    pub kind: DataKind,
+    /// Whether the artifact may remain in a root already at the current generation.
+    pub current: bool,
+}
+
+/// How a root admits retained files before its ordinary readers run.
+#[derive(Clone, Copy)]
+pub enum Admission {
+    /// Core and CLI roots that predate their markers start at generation 1.
+    GenerationOne,
+    /// Desktop roots require a marker. Unmarked files reset as unreadable, without a Stepping
+    /// Stone, and current JSON files must pass their strict readers. Artifacts join any reset.
+    Marked { artifacts: &'static [ArtifactRule] },
+}
+
+impl Admission {
+    fn unmarked_generation(self) -> u32 {
+        match self {
+            Self::GenerationOne => 1,
+            Self::Marked { .. } => 0,
+        }
+    }
+}
+
 /// A root's generations, steps and file kinds.
 pub struct Registry {
+    pub admission: Admission,
     pub generations: Generations,
     /// `steps[n]` carries generation `oldest + n` to the next. An empty step changes no data
     /// and still raises the generation.
@@ -180,6 +212,34 @@ impl Registry {
     fn rule(&self, path: &str) -> Option<&FileRule> {
         let name = path.rsplit('/').next()?;
         self.rules().find(|rule| rule.name == name)
+    }
+
+    fn artifact(&self, path: &str) -> Option<&ArtifactRule> {
+        let Admission::Marked { artifacts } = self.admission else {
+            return None;
+        };
+        artifacts.iter().find(|rule| (rule.matches)(path))
+    }
+
+    fn kind(&self, path: &str) -> Option<DataKind> {
+        self.rule(path)
+            .map(|rule| rule.kind)
+            .or_else(|| self.artifact(path).map(|rule| rule.kind))
+    }
+
+    fn validate_current(&self, store: &dyn Store) -> Result<bool, StoreError> {
+        for path in members(self, store, Area::Root)? {
+            if let Some(artifact) = self.artifact(&path) {
+                if !artifact.current {
+                    return Ok(false);
+                }
+            } else if let Some(bytes) = store.read(Area::Root, &path)?
+                && !self.readable(&path, &bytes)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Parses `bytes` as `path`'s file with its strict reader.
@@ -393,6 +453,9 @@ fn bring(
             write_marker(store, Area::Root, current)?;
             return Ok(Outcome::Current);
         }
+        None if matches!(registry.admission, Admission::Marked { .. }) => {
+            return reset_rebuildable(registry, store, 0, ResetReason::Invalid);
+        }
         None => 1,
     };
     // A backup of the root's own generation belongs to a migration that stopped before its
@@ -401,6 +464,11 @@ fn bring(
         settle_backup(registry, store, generation)?;
     }
     if generation == current {
+        if matches!(registry.admission, Admission::Marked { .. })
+            && !registry.validate_current(store)?
+        {
+            return reset_rebuildable(registry, store, generation, ResetReason::Invalid);
+        }
         if marked.is_none() {
             write_marker(store, Area::Root, current)?;
         }
@@ -432,11 +500,11 @@ pub fn reset_confirmed(
         Ok(_) => return Ok(Vec::new()),
         Err(refusal) => return Err(refusal),
     }
-    let generation = marker(store, Area::Root)?.unwrap_or(1);
+    let generation = marker(store, Area::Root)?.unwrap_or(registry.admission.unmarked_generation());
     let mut kinds = BTreeSet::new();
     for path in members(registry, store, Area::Root)? {
-        if let Some(rule) = registry.rule(&path) {
-            kinds.insert(rule.kind);
+        if let Some(kind) = registry.kind(&path) {
+            kinds.insert(kind);
         }
         set_aside(store, generation, &path)?;
     }
@@ -662,8 +730,7 @@ fn reset_rebuildable(
     let members = members(registry, store, Area::Root)?;
     let waiting: BTreeSet<DataKind> = members
         .iter()
-        .filter_map(|path| registry.rule(path))
-        .map(|rule| rule.kind)
+        .filter_map(|path| registry.kind(path))
         .filter(|kind| !kind.automatic())
         .collect();
     // While any data waits for the person, nothing changes, the rebuildable data included.
@@ -675,9 +742,9 @@ fn reset_rebuildable(
     }
     let mut reset = BTreeSet::new();
     for path in members {
-        if let Some(rule) = registry.rule(&path) {
+        if let Some(kind) = registry.kind(&path) {
             set_aside(store, generation, &path)?;
-            reset.insert(rule.kind);
+            reset.insert(kind);
         }
     }
     add_notice(store, reset)?;
@@ -702,7 +769,25 @@ fn add_notice(store: &dyn Store, kinds: BTreeSet<DataKind>) -> Result<(), StoreE
 /// Moves `path` to `reset/gen-<generation>/`.
 fn set_aside(store: &dyn Store, generation: u32, path: &str) -> Result<(), StoreError> {
     if let Some(bytes) = store.read(Area::Root, path)? {
-        store.write(Area::Reset, &format!("gen-{generation}/{path}"), &bytes)?;
+        let mut saved = false;
+        for attempt in 0..16 {
+            let prefix = if attempt == 0 {
+                format!("gen-{generation}")
+            } else {
+                format!("gen-{generation}-{attempt}")
+            };
+            let target = format!("{prefix}/{path}");
+            match store.read(Area::Reset, &target)? {
+                Some(earlier) if earlier != bytes => continue,
+                Some(_) => {}
+                None => store.write(Area::Reset, &target, &bytes)?,
+            }
+            saved = true;
+            break;
+        }
+        if !saved {
+            return Err(StoreError::Unavailable);
+        }
     }
     store.remove(Area::Root, path)
 }
@@ -740,7 +825,7 @@ fn members(registry: &Registry, store: &dyn Store, area: Area) -> Result<Vec<Str
     let mut paths: Vec<_> = store
         .list(area)?
         .into_iter()
-        .filter(|path| registry.rule(path).is_some())
+        .filter(|path| registry.kind(path).is_some())
         .collect();
     paths.sort();
     Ok(paths)

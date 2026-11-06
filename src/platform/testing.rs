@@ -36,6 +36,7 @@ pub(crate) struct RecordingFilesystem {
 pub(crate) struct RecordingPrivateFiles {
     pub(crate) values: std::collections::BTreeMap<PathBuf, (Vec<u8>, u64)>,
     pub(crate) successor_after_commit: Option<Vec<u8>>,
+    pub(crate) successor_target: Option<PathBuf>,
     pub(crate) commit_outcome: Option<SecureCommitOutcome>,
     pub(crate) prepare_failures: usize,
     pub(crate) prepare_error: Option<SecureFilesystemError>,
@@ -254,7 +255,12 @@ impl SecureFilesystem for RecordingFilesystem {
         }
         let identity = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         files.values.insert(path.clone(), (bytes, identity));
-        if let Some(bytes) = files.successor_after_commit.take() {
+        if files
+            .successor_target
+            .as_ref()
+            .is_none_or(|target| target == &path)
+            && let Some(bytes) = files.successor_after_commit.take()
+        {
             files.values.insert(path, (bytes, identity + 1));
         }
         Ok(SecureCommitResult::committed(

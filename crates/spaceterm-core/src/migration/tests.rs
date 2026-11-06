@@ -170,6 +170,7 @@ const STEPS: &[&[Step]] = &[
 ];
 
 const REGISTRY: Registry = Registry {
+    admission: crate::migration::Admission::GenerationOne,
     generations: Generations {
         oldest: 1,
         current: 3,
@@ -191,6 +192,42 @@ fn generation_one() -> Memory {
 
 fn run_once(registry: &Registry, store: &Memory) -> Result<Outcome, Refusal> {
     run(registry, store, &mut Recorded(store), false)
+}
+
+#[test]
+fn confirmed_resets_preserve_earlier_files_and_resume_after_a_failed_marker() {
+    let registry = Registry {
+        admission: crate::migration::Admission::GenerationOne,
+        generations: Generations {
+            oldest: 3,
+            current: 3,
+        },
+        steps: &[],
+        ..REGISTRY
+    };
+    let memory = Memory::with(&[
+        (MARKER, json!({ "generation": 1 })),
+        ("identity.json", json!({ "name": "first" })),
+    ]);
+    reset_confirmed(&registry, &memory, &mut NoCredentials).unwrap();
+    memory.put(Area::Root, MARKER, &json!({ "generation": 1 }));
+    memory.put(Area::Root, "identity.json", &json!({ "name": "second" }));
+    memory.marker_fails.set(true);
+    assert_eq!(
+        reset_confirmed(&registry, &memory, &mut NoCredentials),
+        Err(Refusal::Storage(StoreError::Unavailable))
+    );
+    memory.marker_fails.set(false);
+    assert!(run_once(&registry, &memory).is_ok());
+    assert_eq!(
+        memory.get(Area::Reset, "gen-1/identity.json"),
+        Some(json!({ "name": "first" }))
+    );
+    assert_eq!(
+        memory.get(Area::Reset, "gen-1-1/identity.json"),
+        Some(json!({ "name": "second" }))
+    );
+    assert_eq!(memory.generation(Area::Root), Some(json!(3)));
 }
 
 #[test]
@@ -283,6 +320,7 @@ fn a_migration_interrupted_before_its_marker_restarts_from_the_backup() {
 #[test]
 fn a_newer_root_is_refused_unchanged_unless_an_activation_returned_to_its_backup() {
     let older = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 1,
             current: 1,
@@ -345,6 +383,7 @@ fn a_migration_a_newer_build_left_unfinished_is_undone_by_the_build_it_started_f
     newer.put(Area::Root, "clients/a/view.json", &json!({ "count": 9 }));
     newer.put(Area::Root, "organization.json", &json!({ "name": "work" }));
     let older = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 1,
             current: 1,
@@ -370,6 +409,7 @@ fn a_migration_a_newer_build_left_unfinished_is_undone_by_the_build_it_started_f
 #[test]
 fn an_interrupted_return_restore_repeats_until_its_marker_is_written() {
     let older = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 1,
             current: 1,
@@ -399,6 +439,7 @@ fn an_interrupted_return_restore_repeats_until_its_marker_is_written() {
 #[test]
 fn a_root_below_oldest_changes_nothing_until_the_person_confirms_its_reset() {
     let registry = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 2,
             current: 3,
@@ -447,6 +488,7 @@ fn a_root_below_oldest_changes_nothing_until_the_person_confirms_its_reset() {
 #[test]
 fn only_a_recorded_run_records_a_refusal_for_another_process() {
     let registry = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 2,
             current: 3,
@@ -554,6 +596,7 @@ fn replace_then_refuse(migration: &mut Migration<'_>) -> Result<(), Unmigratable
 fn replacement_credentials_come_first_and_old_items_go_only_once_their_backup_is_gone() {
     const REPLACING: &[&[Step]] = &[&[Step::Root(replace)], &[]];
     let registry = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 1,
             current: 2,
@@ -562,6 +605,7 @@ fn replacement_credentials_come_first_and_old_items_go_only_once_their_backup_is
         files: &[RULES],
     };
     let later = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 1,
             current: 3,
@@ -570,6 +614,7 @@ fn replacement_credentials_come_first_and_old_items_go_only_once_their_backup_is
         files: &[RULES],
     };
     let older = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 1,
             current: 1,
@@ -663,6 +708,7 @@ fn a_document_migrates_through_its_file_steps_and_carries_the_new_generation() {
         stamp: Some("schema_version"),
     }];
     let registry = Registry {
+        admission: crate::migration::Admission::GenerationOne,
         generations: Generations {
             oldest: 1,
             current: 2,

@@ -148,6 +148,7 @@ const RULES: &[FileRule] = &[
 
 /// The CLI state root's generations, steps and records.
 pub const REGISTRY: Registry = Registry {
+    admission: spaceterm_core::migration::Admission::GenerationOne,
     generations: migration::generations::CLI_STATE,
     steps: &[],
     files: &[RULES, migration::client_files::RULES],
@@ -859,6 +860,7 @@ mod tests {
     /// Release 1.1.0 carries the CLI's state from generation 1 to 2. Release 1.2.0 retires
     /// generation 1, so its floor is 1.1.0.
     const STEPPING_STONE: Registry = Registry {
+        admission: spaceterm_core::migration::Admission::GenerationOne,
         generations: migration::Generations {
             oldest: 1,
             current: 2,
@@ -867,6 +869,7 @@ mod tests {
         files: REGISTRY.files,
     };
     const AFTER_STONE: Registry = Registry {
+        admission: spaceterm_core::migration::Admission::GenerationOne,
         generations: migration::Generations {
             oldest: 2,
             current: 3,

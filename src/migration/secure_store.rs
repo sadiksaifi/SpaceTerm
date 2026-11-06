@@ -10,7 +10,8 @@ use crate::platform::secure_filesystem::{
     SecureCommitOutcome, SecureDirectory, SecureFilesystem, SecureFilesystemError,
 };
 
-const MAX_BYTES: usize = 4 * 1024 * 1024;
+// Archive oversized Settings without granting them admission to the ordinary reader.
+const MAX_BYTES: usize = 32 * 1024 * 1024;
 const ATTEMPTS: usize = 16;
 
 pub(crate) struct SecureStore {

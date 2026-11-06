@@ -1266,6 +1266,8 @@ pub const fn kind_name(kind: DataKind) -> &'static str {
         DataKind::WorkspaceOrder => "Workspace order",
         DataKind::UpdateHistory => "update history",
         DataKind::Settings => "Settings",
+        DataKind::ManagedSshHosts => "managed SSH hosts",
+        DataKind::BackgroundImages => "background images",
         DataKind::WorkspaceOrganization => "Workspace organization",
         DataKind::MachineId => "Machine ID",
         DataKind::Pairings => "pairings",

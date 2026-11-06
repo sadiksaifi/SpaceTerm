@@ -1,0 +1,11 @@
+# This file is managed by SpaceTerm.
+
+Host example
+  HostName example.com
+  User tester
+  Port 2222
+
+Host *
+  Include ~/.ssh/config
+Host *
+  Include /etc/ssh/ssh_config

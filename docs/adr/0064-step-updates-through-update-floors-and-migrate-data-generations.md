@@ -26,7 +26,9 @@ Each root has an ordered list of steps from `oldest` to `current`. A file step r
 
 One runner migrates a root before anything reads it: under the service lock on the Core, under the CLI's own lock, and before Settings load on the desktop.
 
-1. At `current`, it does nothing.
+The greenfield desktop admits only marked data. An empty root starts at the current generation. Unmarked retained files are unreadable and use the existing reset route without a Stepping Stone. A newer marked generation remains unsupported. The desktop reset registries include managed SSH configuration and background image copies, preserving their bytes without readers for their old formats.
+
+1. At `current`, desktop roots validate their registered files before admitting them. Other roots do nothing.
 2. From `oldest` up to `current`, it copies the files to `migration-backup/` with their generation, applies the steps in memory, parses every file with its strict reader, writes each file atomically and writes `generation.json` last. A crash before that last write restarts from the backup.
 3. Above `current`, it restores the backup when an activation returned to this runtime and the backup holds this runtime's generation. Otherwise it refuses with the existing unsupported-state errors and overwrites nothing. A Core that refuses never becomes ready, so the return of ADR 0034 applies. The first release ships this case, because an older runtime runs it.
 4. Below `oldest`, after a step returns `Unmigratable`, or when a migrated file fails its reader, it resets the data.
