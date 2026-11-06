@@ -13,7 +13,7 @@ Jobs that hold a signing secret execute no product binary and restore no build c
 The workflow runs in one of three modes:
 
 - `unsigned` checks the plan and the release policy's unit tests. It compiles nothing and changes nothing outside the run.
-- `signed` is a rehearsal with the real update trust and the real Developer ID and notary credentials. It submits to Apple and runs every verification, then keeps the final assets as private workflow artifacts. It pushes no tag and publishes nothing. Its assets authenticate as production, so they never become a download.
+- `signed` is a rehearsal with the real update trust and the real Developer ID and notary credentials. It submits to Apple and runs every verification, then keeps the final assets as workflow artifacts. Anyone who can read this public repository can download them from the run for their 14-day retention. They contain no secrets. It pushes no tag, publishes no release and leaves Latest unchanged, so its assets are not a release.
 - `publish` runs the same jobs as `signed` and then publishes.
 
 ## Desktop Core resources
