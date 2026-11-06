@@ -581,6 +581,93 @@ fn a_refusing_step_or_an_unreadable_result_keeps_the_original_files() {
     assert_eq!(invalid.generation(Area::Root), Some(json!(2)));
 }
 
+fn images(path: &str) -> bool {
+    path.starts_with("images/")
+}
+
+/// A marked root whose generation 1 counts in `n`, beside retained image copies that may or may
+/// not remain at the current generation.
+fn marked_with_images(current: bool) -> Registry {
+    const CURRENT: &[ArtifactRule] = &[ArtifactRule {
+        matches: images,
+        kind: DataKind::BackgroundImages,
+        current: true,
+    }];
+    const RETIRED: &[ArtifactRule] = &[ArtifactRule {
+        matches: images,
+        kind: DataKind::BackgroundImages,
+        current: false,
+    }];
+    Registry {
+        admission: Admission::Marked {
+            current_unmarked: |_| false,
+            artifacts: if current { CURRENT } else { RETIRED },
+        },
+        generations: Generations {
+            oldest: 1,
+            current: 2,
+        },
+        steps: &[&[Step::File {
+            name: "view.json",
+            apply: rename,
+        }]],
+        files: &[RULES],
+    }
+}
+
+#[test]
+fn a_migration_carries_current_artifacts_unchanged_and_resets_the_others() {
+    // The bytes of a PNG signature, which no JSON reader accepts.
+    let image: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
+    let root = || {
+        let store = Memory::with(&[
+            (MARKER, json!({ "generation": 1 })),
+            ("view.json", json!({ "n": 4 })),
+        ]);
+        store.write(Area::Root, "images/a", image).unwrap();
+        store
+    };
+
+    let carried = root();
+    let registry = marked_with_images(true);
+    assert_eq!(
+        run_once(&registry, &carried),
+        Ok(Outcome::Migrated { from: 1 })
+    );
+    assert_eq!(
+        carried.get(Area::Root, "view.json"),
+        Some(json!({ "count": 4 }))
+    );
+    assert_eq!(
+        carried.read(Area::Root, "images/a").unwrap().as_deref(),
+        Some(image)
+    );
+    assert_eq!(
+        carried.read(Area::Backup, "images/a").unwrap().as_deref(),
+        Some(image)
+    );
+    assert_eq!(carried.generation(Area::Root), Some(json!(2)));
+    assert_eq!(run_once(&registry, &carried), Ok(Outcome::Current));
+
+    let refused = root();
+    assert_eq!(
+        run_once(&marked_with_images(false), &refused),
+        Err(Refusal::Reset {
+            reason: ResetReason::Invalid,
+            kinds: vec![DataKind::BackgroundImages],
+        })
+    );
+    assert_eq!(
+        refused.read(Area::Root, "images/a").unwrap().as_deref(),
+        Some(image)
+    );
+    assert_eq!(
+        refused.get(Area::Root, "view.json"),
+        Some(json!({ "n": 4 }))
+    );
+    assert_eq!(refused.generation(Area::Root), Some(json!(1)));
+}
+
 #[test]
 fn a_confirmation_never_resets_a_root_that_no_longer_needs_it() {
     let store = generation_one();
