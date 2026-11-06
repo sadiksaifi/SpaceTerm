@@ -23,6 +23,10 @@ fn hidden_build_metadata_is_available_without_environment_or_display() {
     assert!(output.stderr.is_empty());
     let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(info["schema"], 1);
+    assert_eq!(
+        info["stapled"], false,
+        "compiled build metadata precedes archive stapling"
+    );
     assert_eq!(info["identity"], env!("SPACETERM_CLI_IDENTITY"));
     assert_eq!(info["target"], env!("SPACETERM_CLI_TARGET"));
     assert_eq!(info["version"], env!("SPACETERM_CLI_VERSION"));
@@ -36,7 +40,7 @@ fn hidden_build_metadata_is_available_without_environment_or_display() {
         info["protocols"],
         serde_json::to_value(spaceterm_core::update::facts::Protocols::CURRENT).unwrap()
     );
-    assert_eq!(info.as_object().unwrap().len(), 8, "{info}");
+    assert_eq!(info.as_object().unwrap().len(), 9, "{info}");
 }
 
 #[test]
