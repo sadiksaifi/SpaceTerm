@@ -692,6 +692,21 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.launcher().readlink(), self.desktop_target() / "bin/spaceterm")
         self.assertTrue(self.launcher().exists())
 
+    def test_updater_cleanup_refuses_a_retained_root_inside_its_directory(self):
+        self.legacy_installation()
+        updater = self.install_dir / ".spaceterm.update"
+        retained = updater / "spaceterm/keep"
+        retained.parent.mkdir()
+        retained.write_text("retained state")
+        self.publish("1.2.0", desktop=True)
+        for arguments in ((), ("--desktop",), ("--uninstall", "--desktop")):
+            with self.subTest(arguments=arguments):
+                result = self.install(*arguments, XDG_STATE_HOME=str(updater))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("overlaps retained SpaceTerm data", result.stderr)
+                self.assertEqual(retained.read_text(), "retained state")
+                self.assertEqual(self.requested(), [])
+
     def test_legacy_uninstall_removes_only_programs_and_launchers(self):
         entry, icon = self.legacy_installation()
         self.succeed("--uninstall", "--desktop")

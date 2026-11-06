@@ -509,22 +509,24 @@ linux_desktop_locations() {
         target="$install_dir/spaceterm"
     fi
     # A custom parent must not turn program replacement into deletion of retained data.
-    resolved="$(readlink -m "$target")"
     config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
     state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
     cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
     case "$config_home" in /*) ;; *) config_home="$HOME/.config" ;; esac
     case "$state_home" in /*) ;; *) state_home="$HOME/.local/state" ;; esac
     case "$cache_home" in /*) ;; *) cache_home="$HOME/.cache" ;; esac
-    for root in "$config_home/spaceterm" "$state_home/spaceterm" "$cache_home/spaceterm" \
-        "$data_home/spaceterm" "$HOME/.local/share/spaceterm"; do
-        retained="$(readlink -m "$root")"
-        case "$resolved/" in
-            "$retained/"*) die "the install path overlaps retained SpaceTerm data" ;;
-        esac
-        case "$retained/" in
-            "$resolved/"*) die "the install path overlaps retained SpaceTerm data" ;;
-        esac
+    for removed in "$target" "$install_dir/.spaceterm.update"; do
+        resolved="$(readlink -m "$removed")"
+        for root in "$config_home/spaceterm" "$state_home/spaceterm" "$cache_home/spaceterm" \
+            "$data_home/spaceterm" "$HOME/.local/share/spaceterm"; do
+            retained="$(readlink -m "$root")"
+            case "$resolved/" in
+                "$retained/"*) die "the install path overlaps retained SpaceTerm data" ;;
+            esac
+            case "$retained/" in
+                "$resolved/"*) die "the install path overlaps retained SpaceTerm data" ;;
+            esac
+        done
     done
 }
 
