@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -189,6 +190,13 @@ class CoreArchiveTests(unittest.TestCase):
             for name in (*core_package.ICON_RESOURCES, "IconPartialInfo.plist"):
                 (resources / name).write_bytes(b"compiled icon")
 
+        compile_terminfo = core_package.compile_terminfo
+
+        def terminfo(destination, target):
+            # The target is simulated; tic still belongs to the real host.
+            with patch.object(core_package, "sys", sys):
+                compile_terminfo(destination, target)
+
         def sign(bundle, *args, **kwargs):
             seal = bundle / "Contents/_CodeSignature/CodeResources"
             seal.parent.mkdir()
@@ -244,6 +252,7 @@ class CoreArchiveTests(unittest.TestCase):
                     core_package, "build_executable", return_value=(executable, json.dumps(info))
                 ),
                 patch.object(core_package, "compile_icon", side_effect=icon),
+                patch.object(core_package, "compile_terminfo", side_effect=terminfo),
                 patch.object(core_package, "checked", side_effect=checked),
                 patch.object(core_package.macos_codesign, "sign_core", side_effect=sign),
                 patch.object(core_package.macos_codesign, "verify"),
