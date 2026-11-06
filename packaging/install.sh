@@ -672,18 +672,33 @@ locate_legacy_desktop() {
 
 is_legacy_launcher() {
     [ "$legacy_tree" = true ] && [ -L "$bin_dir/spaceterm" ] \
-        && [ "$(readlink -f "$bin_dir/spaceterm")" = "$(readlink -f "$target/bin/spaceterm")" ]
+        && [ "$(readlink "$bin_dir/spaceterm")" = "$target/bin/spaceterm" ]
 }
 
 clean_legacy_launchers() {
-    rm -f "$data_home/applications/io.github.sadiksaifi.spaceterm.desktop"
-    for icon in "$data_home"/icons/hicolor/*/apps/io.github.sadiksaifi.spaceterm.png \
-        "$data_home"/icons/hicolor/*/apps/io.github.sadiksaifi.spaceterm.svg \
-        "$data_home"/icons/hicolor/*/apps/io.github.sadiksaifi.spaceterm-symbolic.svg \
-        "$data_home"/icons/hicolor/*/apps/io.github.sadiksaifi.spaceterm-attention-symbolic.svg; do
-        [ -e "$icon" ] || [ -L "$icon" ] || continue
+    [ "$legacy_tree" = true ] || return 0
+    entry="$data_home/applications/io.github.sadiksaifi.spaceterm.desktop"
+    # Only the old installer's exact registration grants cleanup authority. Preserve custom
+    # entries, regular icons and paths reached through symlinked registry directories.
+    if [ -f "$entry" ] && [ ! -L "$entry" ] \
+        && [ "$(readlink -m "$data_home/applications")" = "$data_home/applications" ]; then
+        legacy_exec="$(exec_value "$target/bin/spaceterm")"
+        expected_entry="$(legacy_desktop_entry | while IFS= read -r line; do
+            case "$line" in
+                Exec=*) printf 'Exec=%s\n' "$legacy_exec" ;;
+                *) printf '%s\n' "$line" ;;
+            esac
+        done)"
+        if [ "$(cat "$entry")" = "$expected_entry" ]; then
+            rm -f "$entry"
+        fi
+    fi
+    icon_parent="$data_home/icons/hicolor/scalable/apps"
+    icon="$icon_parent/io.github.sadiksaifi.spaceterm.svg"
+    if [ -L "$icon" ] && [ "$(readlink -m "$icon_parent")" = "$icon_parent" ] \
+        && [ "$(readlink "$icon")" = "$target/share/icons/hicolor/scalable/apps/io.github.sadiksaifi.spaceterm.svg" ]; then
         rm -f "$icon"
-    done
+    fi
     refresh_desktop_database
 }
 

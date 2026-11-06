@@ -771,6 +771,51 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(marker.read_text(), "[Desktop Entry]\nExec=/bin/true\n")
         self.assertEqual(self.requested(), [])
 
+    def test_fresh_desktop_install_preserves_unrelated_legacy_named_registrations(self):
+        entry = self.data_home / "applications/io.github.sadiksaifi.spaceterm.desktop"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("[Desktop Entry]\nExec=/bin/true\n")
+        external = self.root / "personal-icons"
+        (external / "apps").mkdir(parents=True)
+        icon = external / "apps/io.github.sadiksaifi.spaceterm.svg"
+        icon.write_text("personal icon")
+        hicolor = self.data_home / "icons/hicolor"
+        hicolor.mkdir(parents=True)
+        (hicolor / "scalable").symlink_to(external)
+        self.publish("1.2.0", desktop=True)
+        self.succeed("--desktop")
+        self.assertEqual(entry.read_text(), "[Desktop Entry]\nExec=/bin/true\n")
+        self.assertEqual(icon.read_text(), "personal icon")
+
+    def test_legacy_replacement_preserves_custom_entry_and_regular_icon(self):
+        entry, icon = self.legacy_installation()
+        entry.write_text("[Desktop Entry]\nExec=/bin/true\n")
+        icon.unlink()
+        icon.write_text("personal icon")
+        self.succeed()
+        self.assertFalse(self.desktop_target().exists())
+        self.assertEqual(entry.read_text(), "[Desktop Entry]\nExec=/bin/true\n")
+        self.assertEqual(icon.read_text(), "personal icon")
+
+    def test_legacy_replacement_preserves_an_unrelated_icon_link(self):
+        _, icon = self.legacy_installation()
+        icon.unlink()
+        icon.symlink_to("/personal/icon.svg")
+        self.succeed()
+        self.assertEqual(icon.readlink(), Path("/personal/icon.svg"))
+
+    def test_legacy_replacement_does_not_clean_icons_through_symlinked_parents(self):
+        _, icon = self.legacy_installation()
+        scalable = icon.parent.parent
+        external = self.root / "external-icons"
+        scalable.rename(external)
+        scalable.symlink_to(external)
+        self.succeed()
+        self.assertTrue(icon.is_symlink())
+        self.assertEqual(
+            icon.readlink(), self.desktop_target() / "share/icons/hicolor/scalable/apps" / icon.name
+        )
+
     def test_desktop_installs_the_verified_desktop_app_and_core(self):
         self.publish("1.2.0", desktop=True)
         self.succeed("--desktop")
