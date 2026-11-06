@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from spaceterm_tasks import ROOT, TaskError, core_package, macos_codesign, update_signing
 from spaceterm_tasks.core_catalog import stage_catalog, verify_catalog
@@ -33,6 +34,7 @@ class CoreCatalogTests(unittest.TestCase):
         check_stdout="SpaceTerm Core checks passed.\n",
         check_stderr="",
         check_exit=0,
+        execution_marker=None,
         **changed,
     ):
         directory = Path(tempfile.mkdtemp(dir=self.root))
@@ -60,10 +62,17 @@ class CoreCatalogTests(unittest.TestCase):
         executable = tree / core_package.executable_path(native_target, info["identity"])
         executable.parent.mkdir(parents=True)
         if native_target == self.target:
+            marker = (
+                f'FILE *marker = fopen({json.dumps(str(execution_marker))}, "a"); '
+                'if (marker) { fputs("executed", marker); fclose(marker); }'
+                if execution_marker is not None
+                else ""
+            )
             source = f"""
 #include <stdio.h>
 #include <string.h>
 int main(int argc, char **argv) {{
+    {marker}
     if (argc == 3 && strcmp(argv[1], "internal") == 0 && strcmp(argv[2], "build-info") == 0) {{
         puts({json.dumps(json.dumps(info))});
         return 0;
@@ -137,6 +146,31 @@ int main(int argc, char **argv) {{
         self.assertEqual(found[self.target]["sha256"], update_signing.sha256(archive))
         with self.assertRaisesRegex(TaskError, "installed server headless check failed"):
             verify_catalog(catalog, self.identity)
+
+    def test_core_signing_never_executes_the_native_product(self):
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        source = "b" * 64
+        marker = self.root / "executed"
+        archive, signature, info = self.artifact(
+            self.target,
+            commit=commit,
+            version=f"dev.{commit[:12]}",
+            source_sha256=source,
+            check_exit=99,
+            execution_marker=marker,
+        )
+        inputs = self.root / "unsigned"
+        inputs.mkdir()
+        tree, _, _ = core_package.verified_copy(archive, signature, inputs, info, execute=False)
+        with (
+            patch("spaceterm_tasks.core_builds._source", return_value=(None, None, source)),
+            patch.object(core_package, "DIST", self.root),
+            patch.dict(os.environ, {update_signing.SIGNING_SECRET: "private fixture"}),
+        ):
+            final, raw = core_package.sign_unsigned(tree, identity=self.identity)
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            core_package.verified_copy(final, raw, Path(temporary), info, execute=False)
+        self.assertFalse(marker.exists(), "signing must never execute any product command")
 
     def test_native_headless_check_rejects_unexpected_or_failed_responses(self):
         for output, error, status in (

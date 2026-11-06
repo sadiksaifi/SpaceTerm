@@ -54,6 +54,7 @@ jobs:
         with:
           install_args: python git-cliff node npm:tagsmith
           version: 2026.10.4
+          cache: false
       - name: Freeze release inputs and local tag
         id: plan
         env:
@@ -185,6 +186,7 @@ jobs:
         with:
           install_args: python
           version: 2026.10.4
+          cache: false
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -214,6 +216,7 @@ jobs:
         with:
           install_args: python
           version: 2026.10.4
+          cache: false
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -272,6 +275,7 @@ jobs:
         with:
           install_args: python
           version: 2026.10.4
+          cache: false
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -303,9 +307,77 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  verify-core-macos:
+    name: Verify final Core macos without secrets
+    needs: [plan, core-macos]
+    runs-on: macos-26
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+          version: 2026.10.4
+          cache: false
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.core-macos.outputs.artifact-id }}
+          path: dist/release-core
+      - name: Execute only on the credential-free verifier
+        run: mise run release:pipeline verify-core
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: core-verification-macos-${{ github.run_attempt }}
+          path: dist/core-verification/
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-core-linux:
+    name: Verify final Core linux without secrets
+    needs: [plan, core-linux]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+          version: 2026.10.4
+          cache: false
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.core-linux.outputs.artifact-id }}
+          path: dist/release-core
+      - name: Execute only on the credential-free verifier
+        run: mise run release:pipeline verify-core
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: core-verification-linux-${{ github.run_attempt }}
+          path: dist/core-verification/
+          if-no-files-found: error
+          retention-days: 14
+
   desktop-macos:
     name: Package desktop macos
-    needs: [plan, compile-macos, core-macos, core-linux]
+    needs: [plan, compile-macos, core-macos, core-linux, verify-core-macos, verify-core-linux]
     environment: release
     runs-on: macos-26
     timeout-minutes: 90
@@ -324,6 +396,7 @@ jobs:
         with:
           install_args: python github:sparkle-project/Sparkle
           version: 2026.10.4
+          cache: false
       - name: Select the compilation SDK for native resource assembly
         run: sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
       - uses: ./.github/actions/release-plan
@@ -341,6 +414,11 @@ jobs:
       - uses: ./.github/actions/release-resume
         with:
           lane: desktop
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.verify-core-macos.outputs.artifact-id }},${{ needs.verify-core-linux.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist/core-verification
       - name: Package compiled desktop with both finalized Core archives
         timeout-minutes: 80
         env:
@@ -370,7 +448,7 @@ jobs:
 
   desktop-linux:
     name: Package desktop linux
-    needs: [plan, compile-linux, core-macos, core-linux]
+    needs: [plan, compile-linux, core-macos, core-linux, verify-core-macos, verify-core-linux]
     environment: release
     runs-on: ubuntu-26.04
     timeout-minutes: 90
@@ -386,6 +464,7 @@ jobs:
         with:
           install_args: python
           version: 2026.10.4
+          cache: false
       - name: Install package verification dependencies
         run: mise run release:setup-linux-verification
       - uses: ./.github/actions/release-plan
@@ -400,6 +479,11 @@ jobs:
           artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
           merge-multiple: true
           path: dist/release-core
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.verify-core-macos.outputs.artifact-id }},${{ needs.verify-core-linux.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist/core-verification
       - name: Package compiled desktop with both finalized Core archives
         env:
           SPACETERM_RELEASE_UPDATE_ED25519_SEED: ${{ secrets.SPACETERM_RELEASE_UPDATE_ED25519_SEED }}
@@ -421,6 +505,86 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  verify-desktop-macos:
+    name: Verify final desktop macos without secrets
+    needs: [plan, desktop-macos, core-macos, core-linux]
+    runs-on: macos-26
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python github:sparkle-project/Sparkle
+          version: 2026.10.4
+          cache: false
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.desktop-macos.outputs.artifact-id }}
+          path: dist/release-desktop-macos
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist/release-core
+      - name: Execute only on the credential-free verifier
+        run: mise run release:pipeline verify-desktop
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: desktop-verification-macos-${{ github.run_attempt }}
+          path: dist/desktop-verification/
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-desktop-linux:
+    name: Verify final desktop linux without secrets
+    needs: [plan, desktop-linux, core-macos, core-linux]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          persist-credentials: false
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: python
+          version: 2026.10.4
+          cache: false
+      - name: Install native verification dependencies
+        run: mise run release:setup-linux-verification
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.desktop-linux.outputs.artifact-id }}
+          path: dist/release-desktop-linux
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.core-macos.outputs.artifact-id }},${{ needs.core-linux.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist/release-core
+      - name: Execute only on the credential-free verifier
+        run: mise run release:pipeline verify-desktop
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: desktop-verification-linux-${{ github.run_attempt }}
+          path: dist/desktop-verification/
+          if-no-files-found: error
+          retention-days: 14
+
   floor-smoke:
     name: Activate final Linux Core from its floor
     needs: [plan, core-linux]
@@ -437,6 +601,7 @@ jobs:
         with:
           install_args: python
           version: 2026.10.4
+          cache: false
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -490,12 +655,14 @@ jobs:
 
   publish:
     name: Verify, attest and publish
-    needs: [plan, core-macos, core-linux, desktop-macos, desktop-linux, floor-smoke, compatibility]
+    needs: [plan, core-macos, core-linux, desktop-macos, desktop-linux, verify-core-macos, verify-core-linux, verify-desktop-macos, verify-desktop-linux, floor-smoke, compatibility]
     if: >-
       always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'unsigned' &&
       needs.core-macos.result == 'success' && needs.core-linux.result == 'success' &&
       needs.desktop-macos.result == 'success' && needs.desktop-linux.result == 'success' &&
       needs.floor-smoke.result == 'success' &&
+      needs.verify-core-macos.result == 'success' && needs.verify-core-linux.result == 'success' &&
+      needs.verify-desktop-macos.result == 'success' && needs.verify-desktop-linux.result == 'success' &&
       (needs.compatibility.result == 'success' ||
        (needs.plan.outputs.compatibility-any == 'false' && needs.compatibility.result == 'skipped'))
     environment: release
@@ -514,6 +681,7 @@ jobs:
         with:
           install_args: python
           version: 2026.10.4
+          cache: false
       - name: Install package verification dependencies
         run: mise run release:setup-linux-verification
       - uses: ./.github/actions/release-plan
@@ -536,6 +704,16 @@ jobs:
         with:
           artifact-ids: ${{ needs.floor-smoke.outputs.artifact-id }}
           path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.verify-core-macos.outputs.artifact-id }},${{ needs.verify-core-linux.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist/core-verification
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.verify-desktop-macos.outputs.artifact-id }},${{ needs.verify-desktop-linux.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist/desktop-verification
       - name: Verify all products and sign updater assets
         env:
           RELEASE_TAG: ${{ needs.plan.outputs.tag }}

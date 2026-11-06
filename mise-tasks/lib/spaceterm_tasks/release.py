@@ -381,7 +381,7 @@ def appcast(tag):
     print(f"The disk image and its signed appcast with Update Floor {floor} are verified")
 
 
-def verified_core(entry, target, version, floor, directory):
+def verified_core(entry, target, version, floor, directory, *, execute=True):
     """Authenticate one Core build of `version` with Update Floor `floor` and return its archive
     and signature."""
     from spaceterm_tasks.core_package import document, host_target, verified_copy
@@ -396,6 +396,7 @@ def verified_core(entry, target, version, floor, directory):
         identity="spaceterm",
         target=target,
         native=target == host_target(),
+        execute=execute,
     )
     info = document((tree / "build.json").read_bytes())
     if os.environ.get("SPACETERM_RELEASE_PLAN"):
@@ -438,10 +439,10 @@ def assemble(
         raise TaskError("assembly requires the planned release tag")
     if not complete and not update_signing.dry_run(environment):
         raise TaskError("only a dry run may assemble a release without every asset")
-    if complete and environment.get("SPACETERM_RELEASE_PLAN"):
+    if complete and plan is not None:
         from spaceterm_tasks.release_inputs import verify_evidence
 
-        verify_evidence()
+        verify_evidence(plan)
     seed = update_signing.release_seed(environment)
     keys = update_signing.trust(environment)
     protocols = release_feed.protocols()
@@ -460,7 +461,9 @@ def assemble(
                 continue
             verified = scratch / target
             verified.mkdir()
-            archive, signature = verified_core(entry, target, version, floors["core"], verified)
+            archive, signature = verified_core(
+                entry, target, version, floors["core"], verified, execute=False
+            )
             name = archive_name("core", version, platform)
             shutil.copyfile(archive, directory / name)
             shutil.copyfile(signature, directory / f"{name}.sig")
@@ -469,7 +472,7 @@ def assemble(
         if linux.is_file() or complete:
             from spaceterm_tasks import package_linux
 
-            package_linux.verify(linux, tag)
+            package_linux.verify(linux, tag, execute=False)
             shutil.copyfile(linux, directory / linux.name)
             update_signing.sign(seed, directory / linux.name, directory / f"{linux.name}.sig")
             archives.append(("desktop", "linux-x86_64", directory / linux.name))

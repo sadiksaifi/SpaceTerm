@@ -190,7 +190,7 @@ def core_info(identity):
 def artifact_trust(identity):
     """The public keys that authenticate an identity's Core archives."""
     if identity == "spaceterm":
-        return update_signing.release_trust()
+        return update_signing.release_trust(ROOT)
     if identity in ("spaceterm-preflight", "spaceterm-development"):
         return (
             json.loads((ROOT / "packaging/core-nonproduction-trust.json").read_text())[
@@ -859,7 +859,7 @@ def sign_unsigned(tree, *, identity, release_tag=None, target=None):
         # build.json is outside the native bundle seal, and inside the signed archive.
         (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
 
-        verify_tree(tree, expected, native=native)
+        verify_tree(tree, expected, native=native, execute=False)
         if not native:
             verify_cross_build(tree, expected)
         name = archive_name(identity, expected["version"], target)
@@ -867,7 +867,7 @@ def sign_unsigned(tree, *, identity, release_tag=None, target=None):
         signature = directory / f"{name}.sig"
         write_archive(tree, archive)
         update_signing.sign(seed, archive, signature)
-        verify(archive, signature, expected, native=native)
+        verify(archive, signature, expected, native=native, execute=False)
         if _source(ROOT)[2] != source:
             raise TaskError("source changed during server packaging; retry the command")
         archive.replace(DIST / name)

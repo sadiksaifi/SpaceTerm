@@ -288,3 +288,17 @@ class PublishTests(unittest.TestCase):
                 with self.assertRaises(TaskError):
                     self.publish()
                 self.assertEqual(self.github.mutations, [])
+
+    def test_an_existing_publication_requires_the_complete_asset_inventory(self):
+        self.publish()
+        original = [dict(asset) for asset in self.github.assets]
+        for assets in (
+            original[:1],
+            original + [original[0]],
+            original + [{**original[0], "name": "unexpected"}],
+        ):
+            self.github.assets = assets
+            self.github.mutations.clear()
+            with self.subTest(assets=assets), self.assertRaises(TaskError):
+                self.publish()
+            self.assertEqual(self.github.mutations, [])

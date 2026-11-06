@@ -1,13 +1,15 @@
 """Disposable source trust matches every generated-key dry-run reader."""
 
 import json
+import os
 import re
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, release_dry_run, update_signing
+from spaceterm_tasks import ROOT, core_package, release_dry_run, update_signing
 
 
 class DryRunTrustTests(unittest.TestCase):
@@ -37,3 +39,13 @@ class DryRunTrustTests(unittest.TestCase):
             archive.write_bytes(b"compiled product bytes")
             update_signing.sign(seed, archive, signature)
             update_signing.verify(keys, archive, signature)
+            # Native verifier jobs receive only the tracked public trust, never the seed.
+            with (
+                patch.object(core_package, "ROOT", root),
+                patch.dict(
+                    os.environ,
+                    {update_signing.DRY_RUN: "1", "PATH": os.environ["PATH"]},
+                    clear=True,
+                ),
+            ):
+                update_signing.verify(core_package.artifact_trust("spaceterm"), archive, signature)

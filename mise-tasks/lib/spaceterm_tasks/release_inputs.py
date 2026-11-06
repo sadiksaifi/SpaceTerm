@@ -163,7 +163,12 @@ def sign_core(path):
     if all((retained / name).is_file() for name in release.CORE_FILES):
         with tempfile.TemporaryDirectory(dir=DIST, prefix=".restore-core-") as temporary:
             release.verified_core(
-                retained, target, plan["version"], plan["floors"]["core"], Path(temporary)
+                retained,
+                target,
+                plan["version"],
+                plan["floors"]["core"],
+                Path(temporary),
+                execute=False,
             )
         shutil.copytree(retained, destination, dirs_exist_ok=True)
         return
@@ -179,16 +184,17 @@ def package_desktop(path):
     """T5b's packaging entry point consumes executable + Cargo metadata, without Cargo."""
     tree = unpack_products(path)
     plan = release_plan.load()
+    require_core_evidence(plan)
     os.environ["SPACETERM_CLI_ARTIFACTS"] = str(release.core_catalog(release.CORE).resolve())
     if host_target() == "aarch64-apple-darwin":
         from spaceterm_tasks import package_macos
 
-        package_macos.package(plan["tag"], release.NOTES, compiled=tree)
+        package_macos.package(plan["tag"], release.NOTES, compiled=tree, execute=False)
         release.appcast(plan["tag"])
     else:
         from spaceterm_tasks import package_linux
 
-        package_linux.package(plan["tag"], release.NOTES, compiled=tree)
+        package_linux.package(plan["tag"], release.NOTES, compiled=tree, execute=False)
         release.DESKTOP_LINUX.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(
             package_linux.archive_path("spaceterm"),
@@ -230,14 +236,23 @@ def write_evidence(plan):
         raise TaskError("the desktop changed its finalized Core archive bytes")
     (destination / "evidence.json").write_text(
         json.dumps(
-            {"source": plan["source"], "plan_sha256": sha256(release_plan.PLAN), "core": expected}
+            {
+                "source": plan["source"],
+                "plan_sha256": sha256(release_plan.PLAN),
+                "core": expected,
+                "files": {
+                    path.name: sha256(path)
+                    for path in destination.iterdir()
+                    if path.name != "evidence.json"
+                },
+            }
         )
         + "\n"
     )
 
 
-def verify_evidence():
-    plan = release_plan.load()
+def verify_evidence(plan):
+    require_core_evidence(plan)
     expected = {
         "source": plan["source"],
         "plan_sha256": sha256(release_plan.PLAN),
@@ -247,8 +262,39 @@ def verify_evidence():
         },
     }
     for directory in (release.DESKTOP_MACOS, release.DESKTOP_LINUX):
-        if json.loads((directory / "evidence.json").read_bytes()) != expected:
+        desktop = {
+            **expected,
+            "files": {
+                path.name: sha256(path)
+                for path in directory.iterdir()
+                if path.name != "evidence.json"
+            },
+        }
+        if json.loads((directory / "evidence.json").read_bytes()) != desktop:
             raise TaskError("the desktop evidence differs from the finalized Core archive bytes")
+        target = (
+            "aarch64-apple-darwin"
+            if directory == release.DESKTOP_MACOS
+            else "x86_64-unknown-linux-gnu"
+        )
+        proof = json.loads((DIST / "desktop-verification" / f"{target}.json").read_bytes())
+        name = (
+            release.dmg_name(plan["version"])
+            if directory == release.DESKTOP_MACOS
+            else release.archive_name("desktop", plan["version"], "linux-x86_64")
+        )
+        native = {
+            "schema": 1,
+            "kind": "desktop-verification",
+            "source_sha": plan["source"],
+            "plan_sha256": sha256(release_plan.PLAN),
+            "asset_sha256": sha256(directory / name),
+            "core_sha256": expected["core"],
+        }
+        if proof != native:
+            raise TaskError(
+                "native desktop verification differs from the final signed bytes and plan"
+            )
     smoke = json.loads((DIST / "floor-smoke.json").read_bytes())
     if (
         smoke["source"] != plan["source"]
@@ -256,3 +302,76 @@ def verify_evidence():
         or smoke["sha256"] != expected["core"]["x86_64-unknown-linux-gnu"]
     ):
         raise TaskError("the floor smoke did not exercise these exact final Core bytes")
+
+
+def core_evidence(plan, target):
+    return {
+        "source": plan["source"],
+        "plan_sha256": sha256(release_plan.PLAN),
+        "target": target,
+        "verified": True,
+        "files": {name: sha256(release.CORE / target / name) for name in release.CORE_FILES},
+    }
+
+
+def verify_core():
+    """Execute final Core bytes only on a runner that never receives release secrets."""
+    require_no_credentials()
+    plan = release_plan.load()
+    target = host_target()
+    with tempfile.TemporaryDirectory(dir=DIST, prefix=".verify-core-") as temporary:
+        release.verified_core(
+            release.CORE / target, target, plan["version"], plan["floors"]["core"], Path(temporary)
+        )
+    output = DIST / "core-verification"
+    output.mkdir(exist_ok=True)
+    (output / f"{target}.json").write_text(json.dumps(core_evidence(plan, target)) + "\n")
+
+
+def require_no_credentials():
+    private = (
+        "SPACETERM_RELEASE_UPDATE_ED25519_SEED",
+        "SPACETERM_RELEASE_DEVID_P12_BASE64",
+        "SPACETERM_RELEASE_DEVID_P12_PASSWORD",
+        "SPACETERM_RELEASE_NOTARY_P8",
+        "HOMEBREW_TAP_PAT",
+    )
+    if any(os.environ.get(name) for name in private):
+        raise TaskError("executable verification requires a credential-free job")
+
+
+def verify_desktop():
+    """Call the native desktop verifier only after signing, in a separate no-secret job."""
+    require_no_credentials()
+    from spaceterm_tasks.desktop_manifest import verify_desktop_release
+
+    plan = release_plan.load()
+    macos = host_target() == "aarch64-apple-darwin"
+    directory = release.DESKTOP_MACOS if macos else release.DESKTOP_LINUX
+    name = (
+        release.dmg_name(plan["version"])
+        if macos
+        else release.archive_name("desktop", plan["version"], "linux-x86_64")
+    )
+    core = {
+        target: sha256(release.CORE / target / "artifact.tar.gz")
+        for target in ("aarch64-apple-darwin", "x86_64-unknown-linux-gnu")
+    }
+    proof = verify_desktop_release(
+        directory / name,
+        plan["tag"],
+        macos=macos,
+        source_sha=plan["source"],
+        plan_sha256=sha256(release_plan.PLAN),
+        core_digests=core,
+    )
+    output = DIST / "desktop-verification"
+    output.mkdir(exist_ok=True)
+    (output / f"{host_target()}.json").write_text(json.dumps(proof) + "\n")
+
+
+def require_core_evidence(plan):
+    for target in ("aarch64-apple-darwin", "x86_64-unknown-linux-gnu"):
+        path = DIST / "core-verification" / f"{target}.json"
+        if json.loads(path.read_bytes()) != core_evidence(plan, target):
+            raise TaskError("native Core verification differs from the final signed bytes and plan")

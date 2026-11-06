@@ -26,6 +26,7 @@ jobs:
       contents: write
     env:
       MISE_TASK_RUN_AUTO_INSTALL: 'false'
+      MISE_LOCKED: 'true'
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,6 +36,7 @@ jobs:
         with:
           install_args: python
           version: 2026.10.4
+          cache: false
       - name: Check out only the Homebrew tap with its token
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

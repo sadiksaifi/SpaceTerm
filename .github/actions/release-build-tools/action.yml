@@ -35,6 +35,10 @@ runs:
       run: |
         sudo apt-get update
         sudo apt-get install --no-install-recommends -y build-essential pkg-config cmake clang libclang-dev ncurses-bin
+    - name: Prepare native desktop test prerequisites
+      if: runner.os == 'Linux' && inputs.validation == 'true'
+      shell: bash
+      run: mise run release:setup-linux-desktop-tests
     - name: Select Xcode and Metal
       if: runner.os == 'macOS'
       shell: bash

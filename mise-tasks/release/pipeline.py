@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # MISE description="Run one release stage against the frozen plan"
-# USAGE arg "<stage>" { choices "restore" "compile" "sign-core" "desktop" "tag" "floor-smoke" "resume" }
+# USAGE arg "<stage>" { choices "restore" "compile" "sign-core" "verify-core" "desktop" "verify-desktop" "tag" "floor-smoke" "resume" }
 # USAGE arg "[archive]"
 import argparse
 
@@ -16,8 +16,12 @@ def run(stage, archive):
         release_inputs.compile_products()
     elif stage == "sign-core":
         release_inputs.sign_core(archive)
+    elif stage == "verify-core":
+        release_inputs.verify_core()
     elif stage == "desktop":
         release_inputs.package_desktop(archive)
+    elif stage == "verify-desktop":
+        release_inputs.verify_desktop()
     elif stage == "resume":
         release_plan.resume_artifact(archive)
     else:
@@ -30,7 +34,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "stage",
-        choices=("restore", "compile", "sign-core", "desktop", "tag", "floor-smoke", "resume"),
+        choices=(
+            "restore",
+            "compile",
+            "sign-core",
+            "verify-core",
+            "desktop",
+            "verify-desktop",
+            "tag",
+            "floor-smoke",
+            "resume",
+        ),
     )
     parser.add_argument("archive", nargs="?")
     args = parser.parse_args()
