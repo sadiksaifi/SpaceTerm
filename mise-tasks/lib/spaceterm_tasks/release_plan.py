@@ -1,8 +1,14 @@
-"""Freeze release authority and inputs before compilation or signing starts."""
+"""Derive one release plan, byte for byte, in every job of a release run.
+
+Each job tags the exact source and computes the plan from that tag and the tracked public
+inputs, so no job waits for another to plan. Artifacts carry the plan's digest, and each job
+refuses inputs planned differently.
+"""
 
 import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, release_floor, update_signing
@@ -10,6 +16,11 @@ from spaceterm_tasks.packaging import checked, release_version
 
 REPOSITORY = "sadiksaifi/SpaceTerm"
 PLAN = ROOT / "dist/release-plan.json"
+# Every job writes the same annotated tag object, so the tagger and message are fixed.
+TAGGER = {
+    "GIT_COMMITTER_NAME": "SpaceTerm releases",
+    "GIT_COMMITTER_EMAIL": "releases@spaceterm.peblon.com",
+}
 INPUTS = (
     "mise.lock",
     ".mise.toml",
@@ -34,7 +45,7 @@ def api(endpoint, *, method="GET", fields=None):
         cwd=ROOT,
     )
     if result.returncode:
-        raise TaskError("GitHub could not verify release authority")
+        raise TaskError("a GitHub release request failed")
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 
@@ -56,9 +67,24 @@ def greenfield_tag(tag):
     return version
 
 
-def immutable(request=api):
-    if request(f"repos/{REPOSITORY}/immutable-releases").get("enabled") is not True:
-        raise TaskError("enable repository release immutability before a signed release")
+def check_policy(version, *, root=ROOT):
+    """Check `version` against the Tagsmith release policy.
+
+    A new tag must be the next valid release on main. A rerun after publication pushed the tag
+    validates that tag instead, because Tagsmith refuses to plan a tag that exists.
+    """
+    tag = f"v{greenfield_tag(f'v{version}')}"
+    if subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
+        cwd=root,
+        capture_output=True,
+    ).returncode:
+        command = ["tagsmith", "tag", "--target", "spaceterm", "--channel", "stable"]
+        command += ["--version", version, "--dry-run", "--json"]
+    else:
+        command = ["tagsmith", "validate", "--tag", tag]
+    if subprocess.run(command, cwd=root).returncode:
+        raise TaskError("the release version fails the Tagsmith release policy")
 
 
 def git(*arguments, root=ROOT):
@@ -79,7 +105,52 @@ def publication_time(tag, root=ROOT):
     return int(value)
 
 
-def create(tag, mode, *, root=ROOT, request=api):
+def dispatch_time(request=api):
+    """The creation time of this workflow run, which every job and every attempt shares."""
+    run = request(f"repos/{REPOSITORY}/actions/runs/{int(os.environ['GITHUB_RUN_ID'])}")
+    try:
+        created = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        raise TaskError("GitHub reported no creation time for this release run") from None
+    return int(created.timestamp())
+
+
+def tag(version, *, root=ROOT, request=api):
+    """Create the release tag at HEAD unless it exists, with the run's creation time.
+
+    Every job of one run therefore writes the identical tag object, and a tag already
+    published for this version is kept as it is.
+    """
+    name = f"v{greenfield_tag(f'v{version}')}"
+    if not subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{name}"],
+        cwd=root,
+        capture_output=True,
+    ).returncode:
+        return name
+    if not os.environ.get("GITHUB_RUN_ID"):
+        raise TaskError("outside the release workflow, tag the release before planning it")
+    checked(
+        [
+            "git",
+            "-c",
+            "tag.gpgSign=false",
+            "tag",
+            "--annotate",
+            "--no-sign",
+            name,
+            "--message",
+            f"Release SpaceTerm {version}",
+        ],
+        "Git could not create the release tag",
+        cwd=root,
+        env={**os.environ, **TAGGER, "GIT_COMMITTER_DATE": f"{dispatch_time(request)} +0000"},
+    )
+    return name
+
+
+def create(tag, *, root=ROOT, published=None):
+    """The plan of release `tag` at HEAD. A dry run plans against no published release."""
     version = greenfield_tag(tag)
     source = git("rev-parse", "HEAD", root=root)
     if (
@@ -88,22 +159,21 @@ def create(tag, mode, *, root=ROOT, request=api):
     ):
         raise TaskError("the release requires an annotated tag on the exact checkout")
     tag_object = git("rev-parse", f"refs/tags/{tag}", root=root)
-    if mode != "unsigned":
+    if update_signing.dry_run(os.environ):
+        published = published or (lambda: set())
+    else:
         if os.environ.get("GITHUB_REPOSITORY", "").lower() != REPOSITORY.lower():
-            raise TaskError("signed releases run only in the intended repository")
-        immutable(request)
+            raise TaskError("releases run only in the intended repository")
         if os.environ.get("GITHUB_REF") != "refs/heads/main":
-            raise TaskError("signed release dispatches must select main")
+            raise TaskError("release dispatches must select main")
         if os.environ.get("GITHUB_SHA") != source:
-            raise TaskError("release compilation must use the dispatch's exact source")
+            raise TaskError("a release must build the dispatch's exact source")
         from spaceterm_tasks import macos_notary
 
         if not macos_notary.required(os.environ):
-            raise TaskError("signed release plans require Developer ID signing")
+            raise TaskError("a release requires Developer ID signing")
         update_signing.release_trust(root)
-    floors = release_floor.check(
-        version, root, **({"published": lambda: set()} if mode == "unsigned" else {})
-    )
+    floors = release_floor.check(version, root, **({"published": published} if published else {}))
     from spaceterm_tasks.release_feed import asset_names
 
     return {
@@ -114,15 +184,18 @@ def create(tag, mode, *, root=ROOT, request=api):
         "tag_object": tag_object,
         "published_at": publication_time(tag, root),
         "tag_data": git("cat-file", "tag", tag_object, root=root) + "\n",
-        "mode": mode,
         "floors": floors,
         "first_release_exemption": floors["core"] == version,
         "inputs": input_digests(root),
         "assets": asset_names(version),
         "team": os.environ.get("SPACETERM_RELEASE_APPLE_TEAM_ID", ""),
         "identity": os.environ.get("SPACETERM_RELEASE_APPLE_IDENTITY", ""),
-        "notes_sha256": update_signing.sha256(root / "dist/release-notes.md"),
     }
+
+
+def encode(plan):
+    """The plan file's bytes, which artifacts bind by digest."""
+    return json.dumps(plan, indent=2) + "\n"
 
 
 def load(path=None, *, root=ROOT):
@@ -136,8 +209,6 @@ def load(path=None, *, root=ROOT):
         or value["inputs"] != input_digests(root)
     ):
         raise TaskError("the release plan differs from this exact source and tool configuration")
-    if value["notes_sha256"] != update_signing.sha256(root / "dist/release-notes.md"):
-        raise TaskError("the release notes differ from the compiled release plan")
     if value["team"] != os.environ.get("SPACETERM_RELEASE_APPLE_TEAM_ID", "") or value[
         "identity"
     ] != os.environ.get("SPACETERM_RELEASE_APPLE_IDENTITY", ""):
@@ -152,44 +223,15 @@ def load(path=None, *, root=ROOT):
 
 
 def recheck(plan, request=api):
-    if plan["mode"] != "publish":
-        raise TaskError("an unsigned plan grants no publication authority")
-    immutable(request)
+    """Require GitHub's release tag to be the planned tag object."""
     ref = request(f"repos/{REPOSITORY}/git/ref/tags/{plan['tag']}")
     if ref["object"]["type"] != "tag" or ref["object"]["sha"] != plan["tag_object"]:
         raise TaskError("the release tag moved after planning")
 
 
-def restore(path=PLAN):
-    """Restore the exact local annotated tag in shallow downstream checkouts."""
-    plan = json.loads(Path(path).read_text())
-    if git("rev-parse", "HEAD") != plan["source"]:
-        raise TaskError("the release checkout differs from the planned source")
-    result = checked(
-        ["git", "hash-object", "-t", "tag", "-w", "--stdin"],
-        "Git could not restore the local release tag",
-        cwd=ROOT,
-        input=plan["tag_data"],
-        text=True,
-    ).strip()
-    if result != plan["tag_object"]:
-        raise TaskError("the annotated release tag differs from the plan")
-    checked(
-        ["git", "update-ref", f"refs/tags/{plan['tag']}", result],
-        "Git could not restore the release tag",
-        cwd=ROOT,
-    )
-    return load(path)
-
-
-def authorize_tag():
-    """After validation, publish the planned tag without moving any existing ref."""
-    plan = load()
-    if plan["mode"] != "publish":
-        print("Signed rehearsal: the annotated tag stays local; no remote tag is created.")
-        return
-    immutable()
-    tags = pages(f"repos/{REPOSITORY}/git/matching-refs/tags/{plan['tag']}")
+def push_tag(plan, request=api):
+    """Publish the planned tag without moving an existing one."""
+    tags = pages(f"repos/{REPOSITORY}/git/matching-refs/tags/{plan['tag']}", request=request)
     existing = [ref for ref in tags if ref["ref"] == f"refs/tags/{plan['tag']}"]
     if existing:
         if existing[0]["object"]["sha"] != plan["tag_object"]:
@@ -204,10 +246,10 @@ def authorize_tag():
                 "origin",
                 f"refs/tags/{plan['tag']}",
             ],
-            "GitHub could not create the exact validated tag",
+            "GitHub could not create the planned release tag",
             cwd=ROOT,
         )
-    recheck(plan)
+    recheck(plan, request)
 
 
 def resume_artifact(lane):

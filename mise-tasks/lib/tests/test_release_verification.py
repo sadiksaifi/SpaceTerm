@@ -17,9 +17,13 @@ class WorkflowBoundaryTests(unittest.TestCase):
         # actionlint checks YAML syntax. These assertions guard the security boundary
         # against reintroducing caches or secrets while wiring new release stages.
         workflows = {}
-        for name in ("release", "promote"):
+        self.assertEqual(
+            sorted(path.name for path in (ROOT / ".github/workflows").iterdir()), ["release.yml"]
+        )
+        for name in ("release",):
             text = (ROOT / f".github/workflows/{name}.yml").read_text()
             self.assertIn("MISE_LOCKED: 'true'", text)
+            self.assertIn("\ncache-mode: none\n", text.split("jobs:\n", 1)[0])
             pieces = re.split(r"^  ([a-z][a-z-]*):\n", text.split("jobs:\n", 1)[1], flags=re.M)
             workflows[name] = dict(zip(pieces[1::2], pieces[2::2], strict=True))
             for job, block in workflows[name].items():
@@ -27,6 +31,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
                     continue
                 with self.subTest(workflow=name, job=job):
                     self.assertNotRegex(block, r"uses: (?:actions/cache|Swatinem/rust-cache)")
+                    self.assertNotIn("cache-mode:", block)
                     self.assertNotIn("uses: ./.github/actions/release-build-tools", block)
                     setup = block.split("uses: jdx/mise-action@", 1)[1].split("\n      -", 1)[0]
                     self.assertIn("cache: false", setup)
@@ -38,10 +43,34 @@ class WorkflowBoundaryTests(unittest.TestCase):
                 with self.subTest(job=job):
                     self.assertNotIn("environment:", block)
                     self.assertNotIn("secrets.", block)
+                    self.assertNotIn("cache-mode:", block)
                     self.assertIn(f"release:pipeline verify-{product}", block)
                     self.assertIn(
                         f"needs.{job}.result == 'success'", workflows["release"]["publish"]
                     )
+        # Every job plans for itself, so nothing waits on a planning job, and signing waits
+        # only on its compilation, never on validation.
+        self.assertNotIn("plan", workflows["release"])
+        for job in ("core-macos", "core-linux"):
+            platform = job.split("-")[1]
+            self.assertIn(f"needs: compile-{platform}\n", workflows["release"][job])
+        self.assertIn("needs.validate.result == 'success'", workflows["release"]["publish"])
+        # A rerun of a signer must reuse its finalized bytes: a packaged desktop resumed from an
+        # earlier notarization embeds the earlier Core archives, and rebuilt archives differ.
+        for job, lane in (
+            ("core-macos", "core-macos"),
+            ("core-linux", "core-linux"),
+            ("desktop-macos", "desktop"),
+        ):
+            block = workflows["release"][job]
+            with self.subTest(job=job):
+                self.assertIn(
+                    f"uses: ./.github/actions/release-resume\n        with:\n          lane: {lane}\n",
+                    block,
+                )
+                retained = block.split(f"name: notary-{lane}-${{{{ github.run_attempt }}}}", 1)
+                self.assertEqual(len(retained), 2)
+                self.assertIn("if: always()", retained[0].rsplit("\n      - ", 1)[1])
 
 
 class VerificationTests(unittest.TestCase):

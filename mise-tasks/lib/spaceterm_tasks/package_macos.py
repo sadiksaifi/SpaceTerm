@@ -60,7 +60,8 @@ def require_apple_silicon():
 def package(release_tag=None, notes=None, *, compiled=None, execute: bool = True):
     """Build, bundle, and verify one identity, then move the app and disk image into dist/.
 
-    A release embeds the release notes file `notes`.
+    A release compiled here embeds the release notes file `notes`. A `compiled` desktop
+    already embeds its notes.
     """
     if execute:
         from spaceterm_tasks.desktop_manifest import require_no_release_secrets
@@ -71,7 +72,8 @@ def package(release_tag=None, notes=None, *, compiled=None, execute: bool = True
         raise TaskError("static desktop packaging requires compiled artifacts")
     if release_tag:
         require_clean_checkout()
-        release_notes_file(release_tag, notes)
+        if compiled is None:
+            release_notes_file(release_tag, notes)
         # Refuse missing signing and notarization inputs before the build, not after it.
         if macos_notary.required(os.environ):
             macos_signing.signing_credentials(os.environ)
@@ -123,7 +125,8 @@ def package_bundle(release_tag=None, notes=None, *, compiled=None, execute: bool
     config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
     identity_name, team = signer(release_tag)
     if release_tag:
-        environment[RELEASE_NOTES] = str(release_notes_file(release_tag, notes))
+        if compiled is None:
+            environment[RELEASE_NOTES] = str(release_notes_file(release_tag, notes))
         environment[DESKTOP_FLOOR] = desktop_floor(release_tag)
         updater = sparkle.directory()
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)

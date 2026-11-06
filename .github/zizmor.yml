@@ -1,4 +1,4 @@
 rules:
   self-repository:
-    # Every job checks out the exact planned dispatch SHA before using its local actions.
+    # Every job checks out the dispatched commit, which its release plan requires, before using its local actions.
     disable: true

@@ -1,6 +1,7 @@
 """Draft publication never exposes partial assets or overrides an immutable release."""
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -29,8 +30,6 @@ class GitHub:
         self.tag_sha = "a" * 40
 
     def request(self, endpoint):
-        if "immutable-releases" in endpoint:
-            return {"enabled": True}
         if "/git/ref/" in endpoint:
             return {"object": {"type": "tag", "sha": self.tag_sha}}
         if "/assets?" in endpoint:
@@ -56,7 +55,11 @@ class GitHub:
                 "name": f"SpaceTerm {command[3]}",
             }
         elif command[2] == "upload":
-            for path in command[4:]:
+            paths = [path for path in command[4:] if path != "--clobber"]
+            if "--clobber" in command:
+                names = {path.name for path in paths}
+                self.assets = [asset for asset in self.assets if asset["name"] not in names]
+            for path in paths:
                 self.assets.append(
                     {
                         "name": path.name,
@@ -65,8 +68,8 @@ class GitHub:
                     }
                 )
         elif command[2] == "edit":
-            if "--latest=false" not in command:
-                raise AssertionError("publication changed Latest")
+            if "--latest" not in command:
+                raise AssertionError("publication did not mark the release Latest")
             assert self.release is not None
             self.release["draft"] = False
             self.release["immutable"] = True
@@ -83,7 +86,7 @@ class PublishTests(unittest.TestCase):
             path.write_bytes(path.name.encode())
         (self.directory / "notes").write_text("First release of SpaceTerm.\n")
         self.github = GitHub()
-        self.plan = {"tag": "v0.10.0", "mode": "publish", "tag_object": self.github.tag_sha}
+        self.plan = {"tag": "v0.10.0", "tag_object": self.github.tag_sha}
 
     def publish(self):
         release_publish.publish_draft(
@@ -94,7 +97,7 @@ class PublishTests(unittest.TestCase):
             run=self.github.run,
         )
 
-    def test_only_complete_verified_assets_become_published_and_latest_stays_held(self):
+    def test_only_complete_verified_assets_become_the_published_latest_release(self):
         self.publish()
         self.assertEqual(self.github.mutations, ["create", "upload", "edit"])
         assert self.github.release is not None
@@ -115,9 +118,9 @@ class PublishTests(unittest.TestCase):
         repository.git("tag", "-a", "v0.10.0", "-m", "Release SpaceTerm 0.10.0")
         dist = self.directory / "dist"
         dist.mkdir()
-        shutil.copyfile(self.directory / "notes", dist / "release-notes.md")
-        self.plan = release_plan.create("v0.10.0", "unsigned", root=self.directory)
-        self.plan.update(mode="publish", published_at=1700000000)
+        with patch.dict(os.environ, {update_signing.DRY_RUN: "1"}):
+            self.plan = release_plan.create("v0.10.0", root=self.directory)
+        self.plan.update(published_at=1700000000)
         self.github.tag_sha = self.plan["tag_object"]
         plan_file = dist / "release-plan.json"
         plan_file.write_text(json.dumps(self.plan))
@@ -224,14 +227,28 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.github.mutations, ["upload", "edit"])
         self.assertEqual(len(self.github.assets), 2)
 
-    def test_retry_refuses_a_draft_with_different_bytes(self):
+    def test_retry_replaces_draft_assets_an_earlier_attempt_built_differently(self):
+        # Each attempt repackages, and archives and disk images record their build time.
         self.github.release = self.draft()
         self.github.assets = [
             {"name": self.assets[0].name, "size": 1, "digest": "sha256:" + "f" * 64}
         ]
-        with self.assertRaises(TaskError):
-            self.publish()
+        self.publish()
+        self.assertEqual(self.github.mutations, ["upload", "edit"])
+        self.assertEqual(
+            sorted(asset["digest"] for asset in self.github.assets),
+            sorted("sha256:" + update_signing.sha256(path) for path in self.assets),
+        )
+
+    def test_retry_after_publication_keeps_the_published_release(self):
+        self.publish()
+        published = [dict(asset) for asset in self.github.assets]
+        for path in self.assets:
+            path.write_bytes(path.name.encode() + b" rebuilt by a later attempt")
+        self.github.mutations.clear()
+        self.publish()
         self.assertEqual(self.github.mutations, [])
+        self.assertEqual(self.github.assets, published)
 
     def test_a_tag_move_after_upload_never_publishes_the_draft(self):
         self.github.tag_sha = "b" * 40
@@ -266,7 +283,6 @@ class PublishTests(unittest.TestCase):
             {"name": "changed"},
             {"prerelease": True},
             {"immutable": False},
-            {"digest": "sha256:" + "f" * 64},
             {"tag_sha": "b" * 40},
         ):
             with self.subTest(change=change):

@@ -1,3 +1,7 @@
-# actionlint 1.7.12 predates this generally available GitHub-hosted image label.
+# actionlint 1.7.12 predates the generally available ubuntu-26.04 label and the cache-mode key.
 self-hosted-runner:
   labels: [ubuntu-26.04]
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      - 'unexpected key "cache-mode" for "(workflow|job)" section'

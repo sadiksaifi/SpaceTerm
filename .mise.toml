@@ -420,11 +420,6 @@ run = "cargo clean"
 description = "Validate the Tagsmith release configuration"
 run = "tagsmith targets --json"
 
-[tasks."release:check-tools"]
-description = "Check release planning, signatures, packaging boundaries and Update Floors without compiling"
-env = { SPACETERM_RELEASE_PLAN = "" }
-run = "python -m unittest tests.test_release tests.test_release_floor tests.test_release_plan tests.test_package_credentials tests.test_macos_notary tests.test_release_promote tests.test_release_publish tests.test_release_dry_run tests.test_compatibility tests.test_release_verification"
-
 [tasks."release:setup-linux-verification"]
 description = "Install only the native commands and shared libraries used by package verification"
 run = [
