@@ -35,6 +35,8 @@ enum Message {
 struct Published {
     summary: String,
     rows: Vec<FlatRow>,
+    /// Whether the item shows the attention glyph, as the macOS menu bar extra does.
+    attention: bool,
     revision: u32,
 }
 
@@ -62,7 +64,7 @@ pub(crate) fn install(
                 StatusItem {
                     shared: shared.clone(),
                     identity: identity.directory_name(),
-                    icon: icon(identity.directory_name()),
+                    icons: Icons::installed(identity.application_id()),
                 },
             )
         })
@@ -100,20 +102,45 @@ pub(crate) fn install(
     .detach();
 }
 
-/// The installed icon's absolute path, which hosts load as a file, or the application id as a
-/// theme icon name. An installation directory has no icon theme index for a theme name.
-fn icon(identity: &str) -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|executable| executable.parent()?.parent().map(ToOwned::to_owned))
-        .map(|prefix| {
-            prefix.join(format!(
-                "share/icons/hicolor/scalable/apps/io.github.sadiksaifi.{identity}.svg"
-            ))
-        })
-        .filter(|icon| icon.is_file())
-        .and_then(|icon| icon.to_str().map(str::to_owned))
-        .unwrap_or_else(|| format!("io.github.sadiksaifi.{identity}"))
+/// The status-area glyphs: the brand's symbolic icons, which hosts recolor for their panel, found
+/// through the installation's own icon directory. The installer links nothing into an icon theme.
+#[derive(Debug, PartialEq)]
+struct Icons {
+    /// `<prefix>/share/icons`, or empty without one, for hosts to search before the theme.
+    theme_path: String,
+    name: String,
+    attention_name: String,
+}
+
+impl Icons {
+    /// The icons of the installation that holds the running executable, `<prefix>/bin`.
+    fn installed(application_id: &str) -> Self {
+        let prefix = std::env::current_exe()
+            .ok()
+            .and_then(|executable| executable.parent()?.parent().map(ToOwned::to_owned));
+        Self::under(prefix.as_deref(), application_id)
+    }
+
+    fn under(prefix: Option<&std::path::Path>, application_id: &str) -> Self {
+        let theme_path = prefix
+            .map(|prefix| prefix.join("share/icons"))
+            .filter(|icons| icons.is_dir())
+            .and_then(|icons| icons.to_str().map(str::to_owned))
+            .unwrap_or_default();
+        Self {
+            theme_path,
+            name: format!("{application_id}-symbolic"),
+            attention_name: format!("{application_id}-attention-symbolic"),
+        }
+    }
+
+    fn name(&self, attention: bool) -> &str {
+        if attention {
+            &self.attention_name
+        } else {
+            &self.name
+        }
+    }
 }
 
 struct LinuxStatusItem {
@@ -161,11 +188,15 @@ fn publish(connection: &Connection, shared: &Shared, presentation: &StatusMenuMo
     let rows = presentation.flat();
     let revision = {
         let mut published = lock(shared);
-        if published.rows == rows && published.summary == presentation.summary {
+        if published.rows == rows
+            && published.summary == presentation.summary
+            && published.attention == presentation.attention
+        {
             return;
         }
         published.rows = rows;
         published.summary.clone_from(&presentation.summary);
+        published.attention = presentation.attention;
         published.revision = published.revision.wrapping_add(1);
         published.revision
     };
@@ -187,8 +218,7 @@ type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
 struct StatusItem {
     shared: Shared,
     identity: &'static str,
-    /// The installed icon's absolute path, or the application id as a theme icon name.
-    icon: String,
+    icons: Icons,
 }
 
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
@@ -222,7 +252,12 @@ impl StatusItem {
 
     #[zbus(property)]
     fn icon_name(&self) -> String {
-        self.icon.clone()
+        self.icons.name(lock(&self.shared).attention).to_owned()
+    }
+
+    #[zbus(property)]
+    fn icon_theme_path(&self) -> String {
+        self.icons.theme_path.clone()
     }
 
     #[zbus(property)]
@@ -436,4 +471,43 @@ impl Menu {
         revision: u32,
         parent: i32,
     ) -> zbus::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Icons;
+    use std::path::Path;
+
+    const APPLICATION_ID: &str = "io.github.sadiksaifi.spaceterm";
+
+    /// The tray names the brand's two symbolic icons, which the packaged tree installs under
+    /// `share/icons`, and tells hosts to look there.
+    #[test]
+    fn the_tray_names_the_brand_symbolic_icons_inside_the_installation() {
+        let prefix = std::env::temp_dir().join(format!("spaceterm-tray-{}", std::process::id()));
+        std::fs::create_dir_all(prefix.join("share/icons")).unwrap();
+        let icons = Icons::under(Some(&prefix), APPLICATION_ID);
+        std::fs::remove_dir_all(&prefix).unwrap();
+
+        assert_eq!(
+            Path::new(&icons.theme_path),
+            prefix.join("share/icons").as_path()
+        );
+        let brand = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/brand/linux/hicolor");
+        for (attention, name) in [
+            (false, "io.github.sadiksaifi.spaceterm-symbolic"),
+            (true, "io.github.sadiksaifi.spaceterm-attention-symbolic"),
+        ] {
+            assert_eq!(icons.name(attention), name);
+            assert!(brand.join(format!("symbolic/apps/{name}.svg")).is_file());
+        }
+    }
+
+    /// A build outside an installation offers no search path, and hosts fall back to the theme.
+    #[test]
+    fn a_build_outside_an_installation_names_no_icon_directory() {
+        let icons = Icons::under(Some(Path::new("/nonexistent/prefix")), APPLICATION_ID);
+        assert_eq!(icons.theme_path, "");
+        assert_eq!(icons.name(false), "io.github.sadiksaifi.spaceterm-symbolic");
+    }
 }
