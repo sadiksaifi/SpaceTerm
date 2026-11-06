@@ -15,7 +15,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import tomllib
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -428,6 +427,15 @@ def assemble(
     from spaceterm_tasks.core_package import PLATFORMS
 
     version = release_version(tag)
+    from spaceterm_tasks import release_plan
+
+    plan = (
+        release_plan.load(environment["SPACETERM_RELEASE_PLAN"], root=ROOT)
+        if environment.get("SPACETERM_RELEASE_PLAN")
+        else None
+    )
+    if plan is not None and plan["tag"] != tag:
+        raise TaskError("assembly requires the planned release tag")
     if not complete and not update_signing.dry_run(environment):
         raise TaskError("only a dry run may assemble a release without every asset")
     if complete and environment.get("SPACETERM_RELEASE_PLAN"):
@@ -437,8 +445,8 @@ def assemble(
     seed = update_signing.release_seed(environment)
     keys = update_signing.trust(environment)
     protocols = release_feed.protocols()
-    floors = release_floor.floors(version)
-    published_at = int(time.time())
+    floors = plan["floors"] if plan is not None else release_floor.floors(version)
+    published_at = plan["published_at"] if plan is not None else release_plan.publication_time(tag)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-") as temporary:
         directory = Path(temporary) / "release"
         directory.mkdir()

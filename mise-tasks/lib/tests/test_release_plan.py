@@ -40,6 +40,16 @@ class ReleasePlanTests(unittest.TestCase):
 
     def test_unsigned_plan_has_no_publication_authority_and_freezes_exact_inputs(self):
         plan = self.plan()
+        self.assertEqual(
+            plan["published_at"],
+            int(
+                self.repository.git(
+                    "for-each-ref", "--format=%(taggerdate:unix)", "refs/tags/v0.10.0"
+                ).strip()
+            ),
+        )
+        with patch("time.time", return_value=plan["published_at"] + 3600):
+            self.assertEqual(self.plan()["published_at"], plan["published_at"])
         self.assertEqual(plan["floors"], {"core": "0.10.0", "desktop": "0.10.0"})
         self.assertTrue(plan["first_release_exemption"])
         with self.assertRaises(TaskError):

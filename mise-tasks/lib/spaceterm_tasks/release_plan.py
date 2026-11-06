@@ -71,6 +71,14 @@ def input_digests(root=ROOT):
     return {path: update_signing.sha256(root / path) for path in INPUTS}
 
 
+def publication_time(tag, root=ROOT):
+    """Use the annotated tag's time so even a fresh plan for that tag retains feed bytes."""
+    value = git("for-each-ref", "--format=%(taggerdate:unix)", f"refs/tags/{tag}", root=root)
+    if not value.isdecimal() or int(value) <= 0:
+        raise TaskError("the release tag must record its publication timestamp")
+    return int(value)
+
+
 def create(tag, mode, *, root=ROOT, request=api):
     version = greenfield_tag(tag)
     source = git("rev-parse", "HEAD", root=root)
@@ -104,6 +112,7 @@ def create(tag, mode, *, root=ROOT, request=api):
         "version": version,
         "source": source,
         "tag_object": tag_object,
+        "published_at": publication_time(tag, root),
         "tag_data": git("cat-file", "tag", tag_object, root=root) + "\n",
         "mode": mode,
         "floors": floors,
@@ -121,6 +130,8 @@ def load(path=None, *, root=ROOT):
     value = json.loads(Path(path).read_text())
     if (
         value["schema"] != 1
+        or type(value.get("published_at")) is not int
+        or value["published_at"] <= 0
         or value["source"] != git("rev-parse", "HEAD", root=root)
         or value["inputs"] != input_digests(root)
     ):
