@@ -170,5 +170,36 @@ class ReleasePlanTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), plan["tag_object"])
 
 
+@unittest.skipUnless(shutil.which("tagsmith"), "Tagsmith runs through mise run")
+class TagPolicyTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        origin, self.root = Path(temporary.name) / "origin.git", Path(temporary.name) / "work"
+        self.git(Path(temporary.name), "init", "-q", "--bare", "-b", "main", str(origin))
+        self.git(Path(temporary.name), "clone", "-q", str(origin), str(self.root))
+        shutil.copyfile(ROOT / ".tagsmith.jsonc", self.root / ".tagsmith.jsonc")
+        self.git(self.root, "add", ".tagsmith.jsonc")
+        self.git(self.root, "commit", "-qm", "chore: start")
+        self.git(self.root, "push", "-q", "origin", "main")
+        self.git(self.root, "checkout", "-q", "--detach")
+
+    def git(self, root, *arguments):
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *arguments],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+
+    def test_a_rerun_after_the_tag_was_pushed_still_passes_the_policy(self):
+        release_plan.check_policy("0.10.0", root=self.root)
+        self.git(self.root, "tag", "-a", "v0.10.0", "-m", "Release SpaceTerm 0.10.0")
+        self.git(self.root, "push", "-q", "origin", "v0.10.0")
+        release_plan.check_policy("0.10.0", root=self.root)
+        with self.assertRaises(TaskError):
+            release_plan.check_policy("0.9.0", root=self.root)
+
+
 if __name__ == "__main__":
     unittest.main()

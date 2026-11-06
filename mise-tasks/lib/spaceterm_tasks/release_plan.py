@@ -67,6 +67,26 @@ def greenfield_tag(tag):
     return version
 
 
+def check_policy(version, *, root=ROOT):
+    """Check `version` against the Tagsmith release policy.
+
+    A new tag must be the next valid release on main. A rerun after publication pushed the tag
+    validates that tag instead, because Tagsmith refuses to plan a tag that exists.
+    """
+    tag = f"v{greenfield_tag(f'v{version}')}"
+    if subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
+        cwd=root,
+        capture_output=True,
+    ).returncode:
+        command = ["tagsmith", "tag", "--target", "spaceterm", "--channel", "stable"]
+        command += ["--version", version, "--dry-run", "--json"]
+    else:
+        command = ["tagsmith", "validate", "--tag", tag]
+    if subprocess.run(command, cwd=root).returncode:
+        raise TaskError("the release version fails the Tagsmith release policy")
+
+
 def git(*arguments, root=ROOT):
     return checked(
         ["git", *arguments], "Git could not verify the release source", cwd=root, text=True

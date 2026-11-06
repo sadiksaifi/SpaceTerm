@@ -61,7 +61,7 @@ jobs:
         run: |
           git fetch --quiet --unshallow --tags origin
           mise install node npm:tagsmith
-          mise run release:preview "$RELEASE_VERSION"
+          mise run release:policy "$RELEASE_VERSION"
       - name: Validate tooling, source and migration fixtures
         run: mise run release:check
       - name: Stop the run so no signing or notarization continues
