@@ -24,9 +24,9 @@ from spaceterm_tasks import TaskError, macos_codesign
 from spaceterm_tasks.packaging import DIST, checked
 from spaceterm_tasks.update_signing import DRY_RUN, dry_run
 
-API_KEY = "APP_STORE_CONNECT_API_KEY"
-KEY_ID = "APP_STORE_CONNECT_KEY_ID"
-ISSUER = "APP_STORE_CONNECT_ISSUER_ID"
+API_KEY = "SPACETERM_RELEASE_NOTARY_P8"
+KEY_ID = "SPACETERM_RELEASE_NOTARY_KEY_ID"
+ISSUER = "SPACETERM_RELEASE_NOTARY_ISSUER_ID"
 INPUTS = (API_KEY, KEY_ID, ISSUER)
 # The enclosing step must leave time for upload and cleanup after this bounded wait.
 WAIT_SECONDS = 15 * 60

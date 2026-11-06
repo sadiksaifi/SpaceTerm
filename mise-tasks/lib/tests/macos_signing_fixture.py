@@ -60,6 +60,6 @@ def certificate(directory, *, private=True):
         f"pass:{password}",
     )
     return fingerprint, {
-        "MACOS_SIGNING_CERTIFICATE_P12": base64.b64encode(exported.read_bytes()).decode(),
-        "MACOS_SIGNING_CERTIFICATE_PASSWORD": password,
+        "SPACETERM_RELEASE_DEVID_P12_BASE64": base64.b64encode(exported.read_bytes()).decode(),
+        "SPACETERM_RELEASE_DEVID_P12_PASSWORD": password,
     }

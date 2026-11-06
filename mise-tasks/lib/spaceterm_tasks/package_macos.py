@@ -24,6 +24,7 @@ from spaceterm_tasks import (
     macos_codesign,
     macos_notary,
     macos_signing,
+    release_notary,
     sparkle,
     update_signing,
 )
@@ -208,7 +209,7 @@ def package_bundle(release_tag=None, notes=None, *, compiled=None, execute: bool
                 dmg, identity_name, template["CFBundleIdentifier"], environment=environment
             )
             if release_tag:
-                macos_notary.notarize(dmg, notary, environment)
+                release_notary.notarize(dmg, notary, environment)
         verify(app, dmg, release_tag, execute=execute)
         shutil.rmtree(DIST / app.name, ignore_errors=True)
         (DIST / dmg.name).unlink(missing_ok=True)
@@ -409,4 +410,4 @@ def sign_app(app, identity_name, entitlements, *, team, release, notary, environ
         environment=macos_signing.signing_environment(environment),
     )
     if release:
-        macos_notary.notarize(app, notary, environment)
+        release_notary.notarize(app, notary, environment)

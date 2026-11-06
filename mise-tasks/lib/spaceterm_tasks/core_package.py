@@ -190,7 +190,7 @@ def core_info(identity):
 def artifact_trust(identity):
     """The public keys that authenticate an identity's Core archives."""
     if identity == "spaceterm":
-        return update_signing.release_trust()
+        return update_signing.release_trust(ROOT)
     if identity in ("spaceterm-preflight", "spaceterm-development"):
         return (
             json.loads((ROOT / "packaging/core-nonproduction-trust.json").read_text())[
@@ -722,7 +722,7 @@ def install(archive, signature, expected):
     return destination
 
 
-def package(identity, release_tag=None, *, target=None):
+def compile_unsigned(identity, release_tag=None, *, target=None, destination=None):
     native_target = host_target()
     target = native_target if target is None else target
     if target not in TARGETS.values():
@@ -745,15 +745,10 @@ def package(identity, release_tag=None, *, target=None):
         environment.pop("SPACETERM_PACKAGED", None)
     if target == TARGETS["darwin"]:
         environment["MACOSX_DEPLOYMENT_TARGET"] = "26.0"
-        # Refuse missing signing and notarization inputs before the build, not after it.
-        if release_tag and macos_notary.required(os.environ):
-            macos_signing.signing_credentials(os.environ)
-            macos_notary.credentials(os.environ)
     from spaceterm_tasks.core_builds import _source
 
     source = _source(ROOT)[2]
     environment["SPACETERM_CLI_SOURCE_STATE"] = source
-    seed = artifact_signing_seed(identity)
     executable, metadata = build_executable(
         "--release",
         "--locked",
@@ -788,7 +783,7 @@ def package(identity, release_tag=None, *, target=None):
     if native and build_info(executable) != expected:
         raise TaskError("the executable differs from Cargo's server build metadata")
     DIST.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=DIST, prefix=".server-package-") as temporary:
+    with tempfile.TemporaryDirectory(dir=DIST, prefix=".unsigned-core-") as temporary:
         directory = Path(temporary)
         tree = directory / "core"
         core = tree / executable_path(target, identity)
@@ -807,7 +802,43 @@ def package(identity, release_tag=None, *, target=None):
             # System Settings shows this icon beside Core's permissions and background item.
             compile_icon(resources, identifier)
             (resources / "IconPartialInfo.plist").unlink()
-            core = bundle
+        (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
+        destination = Path(destination) if destination else DIST / "unsigned-core" / target
+        shutil.rmtree(destination, ignore_errors=True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        tree.rename(destination)
+    return destination
+
+
+def sign_unsigned(tree, *, identity, release_tag=None, target=None):
+    """Sign already compiled Core inputs without invoking Cargo or regenerating resources."""
+    from spaceterm_tasks.core_builds import _source
+
+    tree = Path(tree)
+    target = target or host_target()
+    expected = document((tree / "build.json").read_bytes())
+    source = _source(ROOT)[2]
+    if (
+        expected["identity"] != identity
+        or expected["target"] != target
+        or expected["commit"]
+        != checked(["git", "rev-parse", "HEAD"], "Git unavailable", cwd=ROOT, text=True).strip()
+        or expected["source_sha256"] != source
+        or expected["floor"] != core_floor(release_tag)
+        or (release_tag and expected["version"] != release_version(release_tag))
+    ):
+        raise TaskError("the unsigned Core inputs differ from the release source")
+    native = target == host_target()
+    environment = macos_signing.signing_environment(packaged_environment(release_tag))
+    seed = artifact_signing_seed(identity)
+    # Work on a private copy so reruns never mutate retained unsigned inputs.
+    with tempfile.TemporaryDirectory(dir=DIST, prefix=".server-package-") as temporary:
+        directory = Path(temporary)
+        shutil.copytree(tree, directory / "core")
+        tree = directory / "core"
+        if target == TARGETS["darwin"]:
+            core = tree / signed_path(target, identity)
+            identifier = core_identifier(identity)
             # A macOS Core always builds natively; package() refuses a cross-build.
             codesign_identity, team = signer(identity)
             signing = (
@@ -821,11 +852,14 @@ def package(identity, release_tag=None, *, target=None):
                 )
             if release_tag:
                 with macos_notary.notary() as notary:
-                    macos_notary.notarize(core, notary)
-            expected["stapled"] = (bundle / "Contents/CodeResources").is_file()
+                    from spaceterm_tasks import release_notary
+
+                    release_notary.notarize(core, notary)
+            expected["stapled"] = (core / "Contents/CodeResources").is_file()
         # build.json is outside the native bundle seal, and inside the signed archive.
         (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
-        verify_tree(tree, expected, native=native)
+
+        verify_tree(tree, expected, native=native, execute=False)
         if not native:
             verify_cross_build(tree, expected)
         name = archive_name(identity, expected["version"], target)
@@ -833,13 +867,20 @@ def package(identity, release_tag=None, *, target=None):
         signature = directory / f"{name}.sig"
         write_archive(tree, archive)
         update_signing.sign(seed, archive, signature)
-        verify(archive, signature, expected, native=native)
+        verify(archive, signature, expected, native=native, execute=False)
         if _source(ROOT)[2] != source:
             raise TaskError("source changed during server packaging; retry the command")
         archive.replace(DIST / name)
         signature.replace(DIST / signature.name)
     print(f"Created signed server candidate {name}; nothing published")
     return DIST / name, DIST / f"{name}.sig"
+
+
+def package(identity, release_tag=None, *, target=None):
+    """Compile and sign a Core package for local packaging tasks."""
+    target = target or host_target()
+    tree = compile_unsigned(identity, release_tag, target=target)
+    return sign_unsigned(tree, identity=identity, release_tag=release_tag, target=target)
 
 
 def core_floor(release_tag):

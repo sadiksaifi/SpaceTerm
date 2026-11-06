@@ -1,0 +1,91 @@
+name: Prepare release compiler
+description: Install only native compilation tools and restore release-profile dependency caches
+inputs:
+  validation:
+    description: Install formatting and lint tools for the validation lane
+    default: 'false'
+outputs:
+  zig-cache-key:
+    description: Exact native toolchain key restored by this setup
+    value: ${{ steps.zig.outputs.cache-primary-key }}
+runs:
+  using: composite
+  steps:
+    - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+      with:
+        install_args: ${{ runner.os == 'macOS' && 'python zig github:sparkle-project/Sparkle' || 'python zig cargo:cargo-zigbuild' }}
+        version: 2026.10.4
+    - name: Select minimal pinned Rust
+      shell: bash
+      run: |
+        version=$(python -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+        target=${{ runner.os == 'macOS' && 'aarch64-apple-darwin' || 'x86_64-unknown-linux-gnu' }}
+        rustup toolchain install "$version" --profile minimal --target "$target" --component llvm-tools
+        rustup override set "$version"
+    - name: Install validation tools
+      if: inputs.validation == 'true'
+      shell: bash
+      run: |
+        mise install ruff ty shellcheck
+        version=$(python -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+        rustup component add --toolchain "$version" rustfmt
+    - name: Prepare native Linux compiler prerequisites
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends -y build-essential pkg-config cmake clang libclang-dev ncurses-bin
+    - name: Prepare native desktop test prerequisites
+      if: runner.os == 'Linux' && inputs.validation == 'true'
+      shell: bash
+      run: mise run release:setup-linux-desktop-tests
+    - name: Select Xcode and Metal
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+        mise run setup:metal:macos
+    - name: Hash native compiler inputs
+      id: native
+      shell: bash
+      run: |
+        python - <<'PYCODE'
+        import hashlib, os, subprocess
+        digest = hashlib.sha256(subprocess.check_output(['git', 'submodule', 'status', '--recursive']))
+        if os.environ['RUNNER_OS'] == 'macOS':
+            for command in (['xcodebuild', '-version'], ['xcrun', '--show-sdk-version']):
+                digest.update(subprocess.check_output(command))
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('key=' + digest.hexdigest() + '\n')
+        PYCODE
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        prefix-key: release-v1
+        shared-key: ${{ runner.os }}-${{ runner.arch }}-release-${{ inputs.validation }}-${{ steps.native.outputs.key }}-${{ hashFiles('.cargo/config.toml', '**/build.rs', 'third_party/**/patches/*.patch', '.gitmodules', 'packaging/linux/toolchain.json', 'mise.lock', 'rust-toolchain.toml') }}
+        workspaces: '. -> target/release-build'
+        save-if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    - name: Restore pinned Linux sysroot
+      if: runner.os == 'Linux'
+      id: sysroot
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: target/linux-sysroots
+        key: release-sysroot-v1-${{ hashFiles('packaging/linux/toolchain.json', 'mise-tasks/lib/spaceterm_tasks/linux_toolchain.py') }}
+    - name: Prepare pinned Linux sysroot
+      if: runner.os == 'Linux'
+      shell: bash
+      run: mise run setup:linux-toolchain
+    - name: Save pinned Linux sysroot
+      if: runner.os == 'Linux' && steps.sysroot.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: target/linux-sysroots
+        key: ${{ steps.sysroot.outputs.cache-primary-key }}
+    - name: Restore Zig dependencies
+      id: zig
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.os == 'macOS' && '~/Library/Caches/zig' || '~/.cache/zig' }}
+        key: release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native.outputs.key }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-${{ github.sha }}
+        restore-keys: |
+          release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native.outputs.key }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-

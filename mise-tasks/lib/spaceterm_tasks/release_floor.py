@@ -9,6 +9,7 @@ is its own floor, and a release whose roots no eligible release reaches is refus
 owns the rule.
 """
 
+import os
 import re
 import subprocess
 import tomllib
@@ -123,7 +124,7 @@ def releases(version, root=ROOT, published=published_releases):
     skipped = withdrawn(root, listed)
     result = []
     for candidate in sorted(listed, key=_order):
-        if _order(candidate) < _order(version):
+        if (0, 10, 0) <= _order(candidate) < _order(version):
             declared = released(candidate, root)
             if declared is not None:
                 result.append((candidate, declared, candidate in skipped))
@@ -139,6 +140,13 @@ def _current(root):
 
 def floor(product, version, root=ROOT, published=published_releases, *, history=None):
     """The Update Floor of `product` for release `version`, built from the tree at `root`."""
+    if history is None and Path(root) == ROOT and os.environ.get("SPACETERM_RELEASE_PLAN"):
+        from spaceterm_tasks.release_plan import load
+
+        plan = load(root=root)
+        if plan["version"] != version:
+            raise TaskError("the requested floor differs from the release plan")
+        return plan["floors"][product]
     current = _current(root)
     history = releases(version, root, published) if history is None else history
     if not history:
@@ -154,6 +162,8 @@ def floor(product, version, root=ROOT, published=published_releases, *, history=
 
 def floors(version, root=ROOT, published=published_releases):
     """Both products' floors for release `version`."""
+    if Path(root) == ROOT and os.environ.get("SPACETERM_RELEASE_PLAN"):
+        return {product: floor(product, version, root) for product in PRODUCTS}
     history = releases(version, root, published)
     return {product: floor(product, version, root, history=history) for product in PRODUCTS}
 

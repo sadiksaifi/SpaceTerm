@@ -13,14 +13,13 @@ from pathlib import Path
 from spaceterm_tasks import TaskError
 
 SIGNING_INPUTS = (
-    "MACOS_SIGNING_CERTIFICATE_P12",
-    "MACOS_SIGNING_CERTIFICATE_PASSWORD",
+    "SPACETERM_RELEASE_DEVID_P12_BASE64",
+    "SPACETERM_RELEASE_DEVID_P12_PASSWORD",
     "APPLE_CERTIFICATE",
     "APPLE_CERTIFICATE_PASSWORD",
-    "APP_STORE_CONNECT_API_KEY",
-    "APP_STORE_CONNECT_KEY_ID",
-    "APP_STORE_CONNECT_ISSUER_ID",
-    "UPDATE_SIGNING_KEY",
+    "SPACETERM_RELEASE_NOTARY_P8",
+    "SPACETERM_RELEASE_NOTARY_KEY_ID",
+    "SPACETERM_RELEASE_NOTARY_ISSUER_ID",
     "SPACETERM_RELEASE_UPDATE_ED25519_SEED",
 )
 
@@ -44,8 +43,8 @@ def security(arguments, environment):
 
 def signing_credentials(environment):
     """Reject missing or malformed inputs without making a signing key available."""
-    encoded = environment.get("MACOS_SIGNING_CERTIFICATE_P12", "")
-    password = environment.get("MACOS_SIGNING_CERTIFICATE_PASSWORD", "")
+    encoded = environment.get("SPACETERM_RELEASE_DEVID_P12_BASE64", "")
+    password = environment.get("SPACETERM_RELEASE_DEVID_P12_PASSWORD", "")
     if not encoded or not password:
         raise TaskError("release signing certificate and password are required")
     try:

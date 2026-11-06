@@ -420,6 +420,38 @@ run = "cargo clean"
 description = "Validate the Tagsmith release configuration"
 run = "tagsmith targets --json"
 
+[tasks."release:check-tools"]
+description = "Check release planning, signatures, packaging boundaries and Update Floors without compiling"
+env = { SPACETERM_RELEASE_PLAN = "" }
+run = "python -m unittest tests.test_release tests.test_release_floor tests.test_release_plan tests.test_package_credentials tests.test_macos_notary tests.test_release_promote tests.test_release_publish tests.test_release_dry_run tests.test_compatibility tests.test_release_verification"
+
+[tasks."release:setup-linux-verification"]
+description = "Install only the native commands and shared libraries used by package verification"
+run = [
+  "sudo apt-get update",
+  "sudo apt-get install --no-install-recommends -y binutils ncurses-bin desktop-file-utils libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libxcb1 libx11-xcb1 libfontconfig1 libfreetype6 libvulkan1",
+]
+
+[tasks."release:setup-linux-desktop-tests"]
+description = "Install native headers and libraries required to link desktop migration tests"
+run = "sudo apt-get install --no-install-recommends -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libfontconfig-dev libfreetype-dev libvulkan1"
+
+[tasks."release:check"]
+description = "Validate release policy and retained-data behavior alongside release compilation"
+env = { SPACETERM_RELEASE_PLAN = "" }
+run = [
+  { task = "test:tools" },
+  { task = "fmt:check" },
+  { task = "lint:python" },
+  { task = "lint:shell" },
+  "cargo test --release --package spaceterm-core --package spaceterm-cli --package spaceterm-directories --package spaceterm-connections --no-default-features --locked",
+  { task = "release:check-desktop-migrations" },
+]
+
+[tasks."release:check-desktop-migrations"]
+description = "Migrate and strictly read both desktop fixture roots with the desktop test code compiled"
+run = "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked migration::tests::every_desktop_"
+
 [tasks."release:preview"]
 description = "Preview an annotated release tag without creating it"
 usage = 'arg "<version>" help="Stable SemVer to release"'

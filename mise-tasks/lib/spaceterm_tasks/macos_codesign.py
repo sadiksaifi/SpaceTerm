@@ -5,8 +5,8 @@ pipeline supplies. Every later build of the same identifier from that team satis
 privacy grants, Login Items and Keychain item access recorded for one version hold for the next.
 Preflight and Development code is signed ad hoc with the same entitlements and runtime.
 
-The release pipeline fills two variables. `SPACETERM_APPLE_TEAM_ID` is the ten-character Team
-ID. `SPACETERM_APPLE_SIGNING_IDENTITY` is the certificate's name, "Developer ID Application:
+The release pipeline fills two variables. `SPACETERM_RELEASE_APPLE_TEAM_ID` is the ten-character Team
+ID. `SPACETERM_RELEASE_APPLE_IDENTITY` is the certificate's name, "Developer ID Application:
 <name> (<Team ID>)", or "-" for a dry run. codesign rejects code that does not satisfy its
 own designated requirement, and an ad hoc signature cannot satisfy the Team ID requirement. A
 dry run therefore signs ad hoc, checks that the Team ID requirement compiles, and verifies
@@ -28,8 +28,8 @@ from spaceterm_tasks import ROOT, TaskError, sparkle
 from spaceterm_tasks.packaging import checked
 from spaceterm_tasks.update_signing import dry_run
 
-TEAM_ID = "SPACETERM_APPLE_TEAM_ID"
-SIGNING_IDENTITY = "SPACETERM_APPLE_SIGNING_IDENTITY"
+TEAM_ID = "SPACETERM_RELEASE_APPLE_TEAM_ID"
+SIGNING_IDENTITY = "SPACETERM_RELEASE_APPLE_IDENTITY"
 ADHOC = "-"
 CORE_ENTITLEMENTS = ROOT / "packaging/macos/core/Entitlements.plist"
 # Apple's Developer ID markers: the intermediate (6.2.6) and leaf (6.1.13) certificate fields.

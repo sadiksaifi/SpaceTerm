@@ -1,7 +1,7 @@
 """Pair this commit with published SpaceTerm releases across the protocol and the update path.
 
 `.github/compatibility.toml` lists the releases this commit must still talk to. For each one,
-the compatibility workflow runs two pairs on x86_64 Linux: this commit's CLI against that
+the release workflow runs two pairs on x86_64 Linux: this commit's CLI against that
 release's Core, and that release's CLI against this commit's Core. ADR 0035 owns the rule
 that decides which releases belong in the list.
 
@@ -118,14 +118,14 @@ def expected(candidate, release, current=PROTOCOLS):
     return allowed
 
 
-def pair(tag, candidate, path=RELEASES):
+def pair(tag, candidate, path=RELEASES, *, release_tag=None):
     """Run one pair: `candidate` names the side this commit plays against release `tag`."""
     listed = releases(path)
     if tag not in listed or candidate not in SIDES:
         raise TaskError("a pair names a listed release and a candidate side")
     with tempfile.TemporaryDirectory(prefix="spaceterm-compatibility-") as temporary:
         directory = Path(temporary)
-        built = build_candidate(candidate_tag(listed), directory / "candidate")
+        built = build_candidate(release_tag or candidate_tag(listed), directory / "candidate")
         published, protocols = fetch(tag, directory / "release")
         allowed = expected(candidate, protocols)
         environment = _environment(directory / "account")
@@ -143,21 +143,22 @@ def build_candidate(tag, destination):
     """This commit's executable as a SpaceTerm release, in the installed Linux layout.
 
     build.rs gives the release identity only to a build of an annotated tag at HEAD, so this
-    tags HEAD locally for the build and removes the tag after it.
+    uses its planned tag, or creates and removes a local tag for a manual pair.
     """
-    if (
+    exists = (
         subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
             cwd=ROOT,
             capture_output=True,
         ).returncode
         == 0
-    ):
-        raise TaskError("the candidate's release tag already exists")
+    )
     identity = ["-c", "user.name=SpaceTerm compatibility", "-c", "user.email=compatibility@invalid"]
-    _checked(["git", *identity, "tag", "-a", tag, "-m", "Compatibility candidate"], "tag")
+    if not exists:
+        _checked(["git", *identity, "tag", "-a", tag, "-m", "Compatibility candidate"], "tag")
     try:
         executable = build_executable(
+            "--release",
             "--locked",
             "--package",
             "spaceterm-cli",
@@ -166,7 +167,8 @@ def build_candidate(tag, destination):
             env={**packaged_environment(tag), RELEASE_FLOOR: core_floor(tag)},
         )
     finally:
-        _checked(["git", "tag", "-d", tag], "untag")
+        if not exists:
+            _checked(["git", "tag", "-d", tag], "untag")
     binary = destination / "bin/spaceterm"
     binary.parent.mkdir(parents=True)
     shutil.copyfile(executable, binary)
@@ -204,12 +206,12 @@ def fetch(tag, destination):
         members = [
             member
             for member in source
-            if PurePosixPath(member.name).parts[:1] == ("server",)
+            if PurePosixPath(member.name).parts[:1] == ("core",)
             and (member.isfile() or member.isdir())
         ]
         source.extractall(destination, members=members, filter="data")
     try:
-        build = json.loads((destination / "server/build.json").read_bytes())
+        build = json.loads((destination / "core/build.json").read_bytes())
     except (OSError, json.JSONDecodeError):
         raise TaskError("the release archive has no build document") from None
     found = tuple(build.get(key) for key in ("identity", "version", "target"))
@@ -220,7 +222,7 @@ def fetch(tag, destination):
         isinstance((protocols.get(lane) or {}).get("major"), int) for lane in LANES.values()
     ):
         raise TaskError("the release archive names no protocol versions")
-    tree = destination / "server"
+    tree = destination / "core"
     shutil.copyfile(archive, tree / "artifact.tar.gz")
     shutil.copyfile(signature, tree / "artifact.sig")
     return tree, protocols

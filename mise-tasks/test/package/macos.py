@@ -380,8 +380,8 @@ int main(int argc, char **argv) {{
                 {
                     update_signing.DRY_RUN: None,
                     macos_codesign.SIGNING_IDENTITY: NAME,
-                    "MACOS_SIGNING_CERTIFICATE_P12": None,
-                    "MACOS_SIGNING_CERTIFICATE_PASSWORD": None,
+                    "SPACETERM_RELEASE_DEVID_P12_BASE64": None,
+                    "SPACETERM_RELEASE_DEVID_P12_PASSWORD": None,
                 },
                 "release signing certificate and password are required",
             ),

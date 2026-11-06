@@ -1,18 +1,10 @@
-"""Build, sign and publish one SpaceTerm release from an annotated tag at HEAD.
+"""Package planned release inputs, sign updater feeds and publish complete immutable drafts.
 
-The release workflow runs these steps, each on its own runner:
-
-1. `core`: build SpaceTerm Core once for the host target and sign it once: on macOS Developer
-   ID, the hardened runtime, notarization and stapling, then Ed25519 everywhere.
-2. `notes`: render the release notes with git-cliff before any desktop build.
-3. `desktop_macos` and `desktop_linux`: build each desktop app with both Core builds and the
-   notes embedded. macOS signs, notarizes and staples the app and its disk image and writes the
-   Sparkle appcast.
-4. `assemble`: sign the Linux desktop archive and every feed, add install.sh and SHA256SUMS.
-5. `publish`: upload the assembled assets as one GitHub release.
-
-A dry run runs every step with a generated update key and ad hoc code signatures, skips
-notarization, and never publishes.
+The manual release workflow plans notes and floors, validates alongside compilation, signs
+Core, packages the compiled desktops, exercises the final Core and assembles updater assets.
+Publication holds Latest until the separate promotion workflow runs. Local packaging tasks
+retain their compile-and-package interface. A local compiling dry run uses disposable public
+trust, ad hoc signatures and no notarization or publication.
 """
 
 import base64
@@ -23,7 +15,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import tomllib
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -32,6 +23,7 @@ from pathlib import Path
 from spaceterm_tasks import (
     ROOT,
     TaskError,
+    macos_signing,
     release_feed,
     release_floor,
     sparkle,
@@ -86,7 +78,7 @@ def notes(root=ROOT):
         ["git", "tag", "--points-at", "HEAD"], cwd=root, capture_output=True, text=True
     ).stdout.split()
     if not any(release_tag.match(tag) for tag in tags):
-        raise TaskError("release notes require a stable release tag from 1.0.0 at HEAD")
+        raise TaskError("release notes require a stable release tag from 0.10.0 at HEAD")
     result = subprocess.run(
         ["git-cliff", "--config", "cliff.toml", "--current", "--offline", "--strip", "all"],
         cwd=root,
@@ -111,15 +103,15 @@ def write_notes(output=NOTES, root=ROOT):
 
 
 def dry_run_version(tags):
-    """A version newer than every stable tag, from 1.0.0, so a dry run never reuses a tag."""
+    """A version newer than every stable tag, from 0.10.0, so a dry run never reuses a tag."""
     versions = [
         tuple(int(part) for part in match.groups())
         for match in (STABLE_TAG.fullmatch(tag) for tag in tags)
         if match
     ]
     newest = max(versions, default=(0, 0, 0))
-    if newest < (1, 0, 0):
-        return "1.0.0"
+    if newest < (0, 10, 0):
+        return "0.10.0"
     return f"{newest[0]}.{newest[1]}.{newest[2] + 1}"
 
 
@@ -370,9 +362,7 @@ def appcast(tag):
     if plist["CFBundleShortVersionString"] != version or plist["CFBundleVersion"] != version:
         raise TaskError("package the selected Git tag before writing its appcast")
     options, stdin = sparkle_signing(os.environ, plist)
-    environment = {
-        key: value for key, value in os.environ.items() if key != update_signing.SIGNING_SECRET
-    }
+    environment = macos_signing.signing_environment(os.environ)
     floor = release_floor.floor("desktop", version)
     previous = floor_appcast(floor, version)
 
@@ -391,7 +381,7 @@ def appcast(tag):
     print(f"The disk image and its signed appcast with Update Floor {floor} are verified")
 
 
-def verified_core(entry, target, version, floor, directory):
+def verified_core(entry, target, version, floor, directory, *, execute=True):
     """Authenticate one Core build of `version` with Update Floor `floor` and return its archive
     and signature."""
     from spaceterm_tasks.core_package import document, host_target, verified_copy
@@ -406,8 +396,14 @@ def verified_core(entry, target, version, floor, directory):
         identity="spaceterm",
         target=target,
         native=target == host_target(),
+        execute=execute,
     )
     info = document((tree / "build.json").read_bytes())
+    if os.environ.get("SPACETERM_RELEASE_PLAN"):
+        from spaceterm_tasks.release_plan import load
+
+        if info["commit"] != load()["source"]:
+            raise TaskError("the Core source differs from the release plan")
     if info["version"] != version:
         raise TaskError("the Core version must match the release tag")
     if info["floor"] != floor:
@@ -432,13 +428,26 @@ def assemble(
     from spaceterm_tasks.core_package import PLATFORMS
 
     version = release_version(tag)
+    from spaceterm_tasks import release_plan
+
+    plan = (
+        release_plan.load(environment["SPACETERM_RELEASE_PLAN"], root=ROOT)
+        if environment.get("SPACETERM_RELEASE_PLAN")
+        else None
+    )
+    if plan is not None and plan["tag"] != tag:
+        raise TaskError("assembly requires the planned release tag")
     if not complete and not update_signing.dry_run(environment):
         raise TaskError("only a dry run may assemble a release without every asset")
+    if complete and plan is not None:
+        from spaceterm_tasks.release_inputs import verify_evidence
+
+        verify_evidence(plan)
     seed = update_signing.release_seed(environment)
     keys = update_signing.trust(environment)
     protocols = release_feed.protocols()
-    floors = release_floor.floors(version)
-    published_at = int(time.time())
+    floors = plan["floors"] if plan is not None else release_floor.floors(version)
+    published_at = plan["published_at"] if plan is not None else release_plan.publication_time(tag)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".release-") as temporary:
         directory = Path(temporary) / "release"
         directory.mkdir()
@@ -452,7 +461,9 @@ def assemble(
                 continue
             verified = scratch / target
             verified.mkdir()
-            archive, signature = verified_core(entry, target, version, floors["core"], verified)
+            archive, signature = verified_core(
+                entry, target, version, floors["core"], verified, execute=False
+            )
             name = archive_name("core", version, platform)
             shutil.copyfile(archive, directory / name)
             shutil.copyfile(signature, directory / f"{name}.sig")
@@ -461,7 +472,7 @@ def assemble(
         if linux.is_file() or complete:
             from spaceterm_tasks import package_linux
 
-            package_linux.verify(linux, tag)
+            package_linux.verify(linux, tag, execute=False)
             shutil.copyfile(linux, directory / linux.name)
             update_signing.sign(seed, directory / linux.name, directory / f"{linux.name}.sig")
             archives.append(("desktop", "linux-x86_64", directory / linux.name))
@@ -563,23 +574,12 @@ def publish(tag, notes_file=NOTES, directory=RELEASE, environment=os.environ):
     if update_signing.dry_run(environment):
         print(f"Dry run: verified {len(assets)} release assets for {tag}; nothing is published.")
         return
-    # gh uploads the assets to a draft and publishes it only after every upload succeeds, so the
-    # latest/download URLs never point at a partial release.
-    if subprocess.run(
-        [
-            "gh",
-            "release",
-            "create",
-            tag,
-            *assets,
-            "--verify-tag",
-            "--latest",
-            "--title",
-            f"SpaceTerm {tag}",
-            "--notes-file",
-            notes_file,
-        ],
-        cwd=ROOT,
-    ).returncode:
-        raise TaskError("GitHub could not publish the release")
-    print(f"Published SpaceTerm {tag} with {len(assets)} assets.")
+    from spaceterm_tasks import release_plan
+
+    plan = release_plan.load()
+    if plan["tag"] != tag:
+        raise TaskError("publication requires the planned release tag")
+    release_plan.recheck(plan)
+    from spaceterm_tasks.release_publish import publish_draft
+
+    publish_draft(plan, assets, notes_file)

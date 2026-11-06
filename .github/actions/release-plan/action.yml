@@ -1,0 +1,15 @@
+name: Restore release plan
+description: Restore the exact notes, public inputs and local annotated tag from this run
+inputs:
+  artifact-id:
+    description: Immutable plan artifact ID from the plan job
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        artifact-ids: ${{ inputs.artifact-id }}
+        path: dist
+    - shell: bash
+      run: mise run release:pipeline restore
