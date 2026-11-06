@@ -3,6 +3,7 @@
 import filecmp
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,9 @@ TERMINFO = ROOT / "assets" / "terminfo" / "xterm-spaceterm.terminfo"
 TERMINFO_IDENTITY = "xterm-spaceterm|SpaceTerm truthful xterm-compatible terminal"
 NOTICES = ROOT / "assets" / "THIRD-PARTY-NOTICES.txt"
 SHELL_INTEGRATION = ROOT / "assets" / "shell-integration"
+# The generated hicolor icons, named for the release application ID; see assets/brand.
+BRAND_HICOLOR = Path("assets") / "brand" / "linux" / "hicolor"
+BRAND_APPLICATION_ID = "io.github.sadiksaifi.spaceterm"
 PREFLIGHT_VERSION = "0.0.0"
 # Names the git-cliff notes file a release desktop build embeds (build/release_notes.rs).
 RELEASE_NOTES = "SPACETERM_RELEASE_NOTES"
@@ -40,6 +44,30 @@ def release_notes_file(release_tag, notes):
     if notes is None or not Path(notes).is_file():
         raise TaskError("a release desktop embeds its release notes; run release:notes")
     return Path(notes).resolve()
+
+
+def linux_icons(application_id, root=ROOT):
+    """The brand's hicolor icons renamed for `application_id`, as {path under share: source}."""
+    hicolor = root / BRAND_HICOLOR
+    icons = {}
+    for directory, _, files in sorted(os.walk(hicolor)):
+        folder = Path(directory).relative_to(hicolor).as_posix()
+        for file in sorted(files):
+            name = file.replace(BRAND_APPLICATION_ID, application_id, 1)
+            icons[f"icons/hicolor/{folder}/{name}"] = Path(directory) / file
+    return icons
+
+
+def install_linux_icons(application_id, share, root=ROOT):
+    """Copy every hicolor icon for `application_id` into the `share` directory of a tree."""
+    for path, source in linux_icons(application_id, root).items():
+        (share / path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, share / path)
+
+
+def linux_icon_path(application_id):
+    """The scalable icon, relative to share, that desktop entries name by absolute path."""
+    return f"icons/hicolor/scalable/apps/{application_id}.svg"
 
 
 def selected_identity(release_tag):

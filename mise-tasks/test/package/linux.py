@@ -239,6 +239,10 @@ sys.exit(0 if sys.argv[1:3] == ["api", "--paginate"] else 1)
             "spaceterm-preflight/share/spaceterm/terminfo/x/xterm-spaceterm",
             f"spaceterm-preflight/share/applications/{identifier}.desktop",
             f"spaceterm-preflight/share/icons/hicolor/scalable/apps/{identifier}.svg",
+            f"spaceterm-preflight/share/icons/hicolor/symbolic/apps/{identifier}-symbolic.svg",
+            f"spaceterm-preflight/share/icons/hicolor/symbolic/apps/{identifier}-attention-symbolic.svg",
+            f"spaceterm-preflight/share/icons/hicolor/16x16/apps/{identifier}.png",
+            f"spaceterm-preflight/share/icons/hicolor/512x512/apps/{identifier}.png",
         ):
             self.assertIn(name, members)
         self.assertNotIn("spaceterm-preflight/bin/spaceterm", members)

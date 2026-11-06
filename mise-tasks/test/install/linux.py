@@ -602,10 +602,13 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(
             os.readlink(launcher), str(self.desktop_target() / "bin/spaceterm-desktop")
         )
-        icon = self.data_home / f"icons/hicolor/scalable/apps/{APPLICATION_ID}.svg"
-        self.assertTrue(icon.is_symlink() and icon.is_file())
         entry = self.data_home / f"applications/{APPLICATION_ID}.desktop"
         subprocess.run(["desktop-file-validate", str(entry)], check=True)
+        icon = self.desktop_target() / f"share/icons/hicolor/scalable/apps/{APPLICATION_ID}.svg"
+        self.assertTrue(icon.is_file())
+        self.assertIn(f"Icon={icon}\n", entry.read_text())
+        # The entry names the icon inside the installation, so nothing is linked into the theme.
+        self.assertFalse((self.data_home / "icons").exists())
         executable = str(self.desktop_target() / "bin/spaceterm-desktop").replace("$", "\\\\$")
         executable = executable.replace('"', '\\\\"')
         self.assertIn(f'Exec="{executable}" %u\n', entry.read_text())
@@ -880,8 +883,6 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(list(self.install_dir.iterdir()), [])
         self.assertFalse(os.path.lexists(self.home / ".local/bin/spaceterm-desktop"))
         self.assertFalse((self.data_home / f"applications/{APPLICATION_ID}.desktop").exists())
-        icon = self.data_home / f"icons/hicolor/scalable/apps/{APPLICATION_ID}.svg"
-        self.assertFalse(os.path.lexists(icon))
         self.assertEqual(settings.read_text(), "{}")
 
     def test_uninstall_desktop_refuses_while_the_desktop_app_runs(self):
