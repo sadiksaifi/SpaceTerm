@@ -1,49 +1,32 @@
 #!/bin/sh
-# Install SpaceTerm Core, and with --desktop the SpaceTerm desktop app. Each release publishes
-# this script as install.sh:
-#
-#   curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh
-#   curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --desktop
-#
-# SpaceTerm Core installs into ~/.local/share/spaceterm/core with its spaceterm launcher in
-# ~/.local/bin. A new version installs beside the running one, which keeps running.
-#
-# The desktop app installs into /Applications, or ~/Applications when /Applications is not
-# writable, on macOS, and into ~/.local/lib/spaceterm on Linux. SPACETERM_INSTALL_DIR selects
-# another directory for the desktop app.
-#
-# Options:
-#   --desktop          also install the desktop app
-#   --version VERSION  install VERSION, such as 1.4.0, instead of the latest release
-#   --uninstall        run spaceterm uninstall; with --desktop, also remove the desktop app
-#   --no-modify-path   leave shell profiles unchanged
-#   --linger           Linux: keep SpaceTerm Core running after logout without asking
-#
-# The installer never downgrades. It verifies every download before it runs or installs it:
-# on macOS with codesign against the SpaceTerm Developer ID, on Linux with openssl against
-# the Ed25519 update keys below.
+# Install SpaceTerm Core on x86_64 Linux; --desktop also installs the desktop app.
+# Download install.sh from the desired tagged release, then run it with sh.
+# Each published installer pins that release; --version selects another explicit version.
+# Core lives in ~/.local/share/spaceterm/core, the desktop in ~/.local/lib/spaceterm,
+# and their launchers in ~/.local/bin. SPACETERM_INSTALL_DIR overrides the desktop parent.
+# --uninstall retains user data. --no-modify-path leaves shell profiles unchanged.
+# --linger enables systemd linger without prompting. Downloads must pass both their
+# SHA-256 checksum and an Ed25519 signature before extraction or execution.
 
 set -eu
 
-# The release pipeline fills RELEASE_KIND with release or dry-run, and TEAM_ID with the
-# Developer ID Team ID. A dry run accepts ad hoc code signatures and placeholder update keys.
+# release:assemble fills these values for this release, including dry runs.
 readonly RELEASE_KIND='@RELEASE_KIND@'
-readonly TEAM_ID='@TEAM_ID@'
-# packaging/update-trust.json holds the same two keys, and a test checks that they match.
-readonly UPDATE_KEY_CURRENT='PLACEHOLDER: the release issue sets the current Ed25519 public key'
-readonly UPDATE_KEY_BACKUP='PLACEHOLDER: the release issue sets the backup Ed25519 public key'
+readonly DEFAULT_VERSION='@DEFAULT_VERSION@'
+# packaging/update-trust.json owns these keys; assembly checks them before publishing.
+readonly UPDATE_KEY_CURRENT='sNR7I+ZSfwiz/hBiYA0PgrtqqOsJY53yluVe93/tATM='
+readonly UPDATE_KEY_BACKUP='EprlnUGQNGvhtuT8fhIGmVMJpAm1rjGfgkmts2Beesk='
 
 readonly RELEASES="https://github.com/sadiksaifi/SpaceTerm/releases"
-readonly MINIMUM_MACOS_MAJOR=26
 readonly MINIMUM_GLIBC_MAJOR=2
 readonly MINIMUM_GLIBC_MINOR=35
-readonly CORE_IDENTIFIER=com.peblon.spaceterm.core
-# The desktop app's macOS bundle identifier and Linux application ID.
+# Linux application ID.
 readonly DESKTOP_ID=com.peblon.spaceterm
 readonly PROFILE_COMMENT="# Added by the SpaceTerm installer"
 
 work=""
-volume=""
+legacy_launcher=""
+legacy_tree=false
 staging=""
 previous=""
 target=""
@@ -66,8 +49,8 @@ die() {
 }
 
 cleanup() {
-    if [ -n "$volume" ]; then
-        hdiutil detach "$volume" -force >/dev/null 2>&1 || true
+    if [ -n "$legacy_launcher" ] && [ ! -e "$bin_dir/spaceterm" ] && [ ! -L "$bin_dir/spaceterm" ]; then
+        mv "$legacy_launcher" "$bin_dir/spaceterm" || true
     fi
     if [ -n "$staging" ]; then
         # Restore the previous desktop app when the replacement did not finish.
@@ -140,36 +123,25 @@ valid_key() {
     printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$'
 }
 
-valid_team_id() {
-    printf '%s\n' "$1" | grep -Eq '^[A-Z0-9]{10}$'
-}
-
-# A release fills every signing value; only a dry run may leave the keys as placeholders.
 require_prepared() {
     case "$RELEASE_KIND" in
-        release)
-            valid_team_id "$TEAM_ID" || die "this installer has no Developer ID Team ID; download install.sh from $RELEASES"
-            if ! valid_key "$UPDATE_KEY_CURRENT" || ! valid_key "$UPDATE_KEY_BACKUP"; then
-                die "this installer has placeholder update keys; download install.sh from $RELEASES"
-            fi
-            ;;
-        dry-run)
-            warn "this installer comes from a dry run: it accepts ad hoc code signatures and placeholder update keys"
-            ;;
+        release) ;;
+        dry-run) warn "this installer comes from a dry run and trusts only its test signing key" ;;
         *) die "this installer was not prepared by a release; download install.sh from $RELEASES" ;;
     esac
+    valid_version "$DEFAULT_VERSION" || die "this installer has no pinned release version"
+    if ! valid_key "$UPDATE_KEY_CURRENT" || ! valid_key "$UPDATE_KEY_BACKUP"; then
+        die "this installer has placeholder update keys; download install.sh from $RELEASES"
+    fi
+}
+
+require_linux() {
+    [ "$(uname -s)" = Linux ] || die "this installer requires Linux; on macOS use the notarized DMG or Homebrew cask"
+    platform=linux-x86_64
 }
 
 detect_platform() {
     case "$(uname -s)" in
-        Darwin)
-            platform=macos-arm64
-            [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ] \
-                || die "SpaceTerm requires a Mac with Apple silicon"
-            macos_major="$(sw_vers -productVersion | cut -d . -f 1)"
-            [ "$macos_major" -ge "$MINIMUM_MACOS_MAJOR" ] \
-                || die "SpaceTerm requires macOS $MINIMUM_MACOS_MAJOR or newer"
-            ;;
         Linux)
             platform=linux-x86_64
             [ "$(uname -m)" = x86_64 ] || die "SpaceTerm for Linux requires an x86_64 computer"
@@ -187,7 +159,7 @@ detect_platform() {
                 die "SpaceTerm for Linux requires glibc $MINIMUM_GLIBC_MAJOR.$MINIMUM_GLIBC_MINOR or newer"
             fi
             ;;
-        *) die "SpaceTerm requires macOS or Linux" ;;
+        *) die "this installer requires Linux" ;;
     esac
 }
 
@@ -201,11 +173,7 @@ require_home() {
 }
 
 file_sha256() {
-    if [ "$platform" = macos-arm64 ]; then
-        shasum -a 256 "$1" | cut -d ' ' -f 1
-    else
-        sha256sum "$1" | cut -d ' ' -f 1
-    fi
+    sha256sum "$1" | cut -d ' ' -f 1
 }
 
 # Prints the first value of a string field in a JSON document, such as build.json.
@@ -213,29 +181,13 @@ json_field() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
 }
 
-# Sets version and downloads its SHA256SUMS. Latest asks the latest release for its checksums;
-# every archive then comes from the tagged release, so a release published meanwhile cannot mix
-# assets: its archives would not match these checksums.
+# Tagged URLs work while greenfield releases are held with --latest=false.
 find_release() {
     work="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-install.XXXXXX")"
-    if [ -n "$requested_version" ]; then
-        step "Finding SpaceTerm $requested_version"
-        sums="$RELEASES/download/v$requested_version/SHA256SUMS"
-    else
-        step "Finding the latest release"
-        sums="$RELEASES/latest/download/SHA256SUMS"
-    fi
-    download --silent --show-error "$sums" --output "$work/SHA256SUMS" \
+    version="${requested_version:-$DEFAULT_VERSION}"
+    step "Finding SpaceTerm $version"
+    download --silent --show-error "$RELEASES/download/v$version/SHA256SUMS" --output "$work/SHA256SUMS" \
         || die "could not download the release checksums"
-    if [ -n "$requested_version" ]; then
-        version="$requested_version"
-    else
-        entry="$(grep -E "^[0-9a-f]{64}  spaceterm-core-[0-9]+\.[0-9]+\.[0-9]+-$platform\.tar\.gz\$" "$work/SHA256SUMS" | head -n 1)"
-        [ -n "$entry" ] || die "the release checksums do not list SpaceTerm Core for $platform"
-        version="${entry#*  spaceterm-core-}"
-        version="${version%-"$platform".tar.gz}"
-        valid_version "$version" || die "the release checksums name an invalid version"
-    fi
 }
 
 # Downloads release asset $1 into the work directory and checks it against SHA256SUMS.
@@ -257,10 +209,8 @@ fetch() {
 # key. openssl reads the key as DER: the fixed Ed25519 SubjectPublicKeyInfo prefix, then the key.
 verify_signature() {
     [ "$(wc -c <"$2" | tr -d ' ')" = 64 ] || die "$(basename "$1") has a malformed signature"
-    checked=0
     for key in "$UPDATE_KEY_CURRENT" "$UPDATE_KEY_BACKUP"; do
         valid_key "$key" || continue
-        checked=1
         {
             printf '\060\052\060\005\006\003\053\145\160\003\041\000'
             printf '%s\n' "$key" | openssl base64 -d -A
@@ -270,40 +220,12 @@ verify_signature() {
             return
         fi
     done
-    if [ "$checked" = 0 ]; then
-        # require_prepared lets placeholder keys through only in a dry run.
-        warn "dry run: skipped the Ed25519 check of $(basename "$1") because the update keys are placeholders"
-        return
-    fi
     die "$(basename "$1") does not carry a valid SpaceTerm signature"
 }
 
-# Verifies bundle $1 against the SpaceTerm Developer ID with identifier $2.
-verify_code() {
-    if [ "$RELEASE_KIND" = dry-run ]; then
-        codesign --verify --deep --strict "$1" >/dev/null 2>&1 \
-            || die "$(basename "$1") is not code signed"
-        return
-    fi
-    requirement="identifier \"$2\" and anchor apple generic"
-    requirement="$requirement and certificate 1[field.1.2.840.113635.100.6.2.6] exists"
-    requirement="$requirement and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
-    requirement="$requirement and certificate leaf[subject.OU] = \"$TEAM_ID\""
-    codesign --verify --deep --strict --test-requirement="=$requirement" "$1" >/dev/null 2>&1 \
-        || die "$(basename "$1") is not signed by the SpaceTerm Developer ID"
-}
-
-# Every SpaceTerm Core command the installer runs takes --machine local, because it acts on this
-# account's Core whatever SPACETERM_MACHINE the shell selects.
-
-# The SpaceTerm Core executable within an installation, in this machine's layout. A macOS
-# installation is an app-like bundle, so System Permissions follow the bundle.
+# Every Core command takes --machine local regardless of SPACETERM_MACHINE.
 core_executable() {
-    if [ "$platform" = macos-arm64 ]; then
-        printf '%s' 'SpaceTerm Core.app/Contents/MacOS/spaceterm'
-    else
-        printf '%s' bin/spaceterm
-    fi
+    printf '%s' bin/spaceterm
 }
 
 # Prints the newest installed SpaceTerm Core version, or nothing. Each version lives in its own
@@ -343,9 +265,7 @@ install_core() {
     step "Downloading SpaceTerm Core $version"
     fetch "$archive"
     fetch "$archive.sig" quiet
-    if [ "$platform" = linux-x86_64 ]; then
-        verify_signature "$work/$archive" "$work/$archive.sig"
-    fi
+    verify_signature "$work/$archive" "$work/$archive.sig"
     # Refuse links and parent paths before extraction. SpaceTerm Core verifies the complete
     # signed layout again before it retains the installation.
     tar -tzf "$work/$archive" >"$work/members" 2>/dev/null || die "could not read $archive"
@@ -370,15 +290,18 @@ install_core() {
     if [ -n "$core_running" ] && [ "$(compare_versions "$core_running" "$floor")" = older ]; then
         die "SpaceTerm Core $core_running is older than $floor, the oldest version that updates directly to SpaceTerm Core $version; install SpaceTerm Core $floor first with --version $floor"
     fi
-    if [ "$platform" = macos-arm64 ]; then
-        verify_code "$runtime/SpaceTerm Core.app" "$CORE_IDENTIFIER"
-    fi
     executable="$runtime/$(core_executable)"
     [ -f "$executable" ] && [ -x "$executable" ] || die "$archive has no SpaceTerm Core executable"
     cp "$work/$archive" "$runtime/artifact.tar.gz"
     cp "$work/$archive.sig" "$runtime/artifact.sig"
     step "Installing SpaceTerm Core $version"
+    # The legacy desktop occupied the CLI's launcher path. Move only its exact link.
+    if is_legacy_launcher; then
+        legacy_launcher="$work/legacy-launcher"
+        mv "$bin_dir/spaceterm" "$legacy_launcher"
+    fi
     "$executable" --machine local internal retain "$runtime" || die "SpaceTerm Core $version could not be installed"
+    legacy_launcher=""
 }
 
 # Resolves the installed SpaceTerm Core executable through its launcher, or through the service
@@ -510,13 +433,7 @@ modify_path() {
     line='export PATH="$HOME/.local/bin:$PATH"'
     case "$(basename "${SHELL:-}")" in
         zsh) profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
-        bash)
-            if [ "$platform" = macos-arm64 ]; then
-                profile="$HOME/.bash_profile"
-            else
-                profile="$HOME/.bashrc"
-            fi
-            ;;
+        bash) profile="$HOME/.bashrc" ;;
         fish)
             profile="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/spaceterm.fish"
             # shellcheck disable=SC2016 # fish expands $HOME when it starts.
@@ -538,80 +455,6 @@ modify_path() {
     say "Added $bin_dir to PATH in $profile. Open a new terminal to run spaceterm."
 }
 
-# Replacing the bundle of a running application breaks it.
-ensure_not_running_macos() {
-    processes="$(ps -axww -o args=)"
-    # A quoted pattern matches the install path literally, whatever characters it contains.
-    case "$processes" in
-        *"$target/Contents/MacOS/SpaceTerm"*) die "quit SpaceTerm, then run the installer again" ;;
-    esac
-}
-
-macos_desktop_locations() {
-    if [ -n "${SPACETERM_INSTALL_DIR:-}" ]; then
-        install_dir="$SPACETERM_INSTALL_DIR"
-    elif [ -w /Applications ]; then
-        install_dir=/Applications
-    else
-        install_dir="$HOME/Applications"
-    fi
-    target="$install_dir/SpaceTerm.app"
-}
-
-macos_app_version() {
-    plutil -extract CFBundleShortVersionString raw -o - "$1/Contents/Info.plist" 2>/dev/null || true
-}
-
-installed_desktop_version_macos() {
-    [ -e "$target" ] || return 0
-    found="$(macos_app_version "$target")"
-    valid_version "$found" || die "the version of $target could not be read"
-    printf '%s' "$found"
-}
-
-install_desktop_macos() {
-    image="SpaceTerm-$version-macos-arm64.dmg"
-    step "Downloading SpaceTerm $version"
-    fetch "$image"
-    # macOS 27 warns that this hdiutil form is deprecated; its replacement may not exist on
-    # macOS 26. Show hdiutil's diagnostics only when attaching fails.
-    if ! hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$work/volume" \
-        "$work/$image" >/dev/null 2>"$work/attach.log"; then
-        cat "$work/attach.log" >&2
-        die "could not open $image"
-    fi
-    volume="$work/volume"
-    [ -d "$volume/SpaceTerm.app" ] || die "$image does not contain SpaceTerm.app"
-    verify_code "$volume/SpaceTerm.app" "$DESKTOP_ID"
-    [ "$(macos_app_version "$volume/SpaceTerm.app")" = "$version" ] \
-        || die "$image does not hold SpaceTerm $version"
-    step "Installing SpaceTerm $version to $install_dir"
-    mkdir -p "$install_dir" || die "could not create $install_dir"
-    # Stage beside the destination so the final replacement is a rename on one volume.
-    staging="$(mktemp -d "$install_dir/.SpaceTerm.install.XXXXXX")" \
-        || die "could not write to $install_dir"
-    ditto "$volume/SpaceTerm.app" "$staging/SpaceTerm.app"
-    # SpaceTerm may have started during the download.
-    ensure_not_running_macos
-    if [ -e "$target" ]; then
-        previous=previous.app
-        mv "$target" "$staging/$previous" || die "could not move the existing SpaceTerm.app aside"
-    fi
-    mv "$staging/SpaceTerm.app" "$target" || die "could not install SpaceTerm.app"
-    step "Installed SpaceTerm $version to $target"
-}
-
-uninstall_desktop_macos() {
-    macos_desktop_locations
-    ensure_not_running_macos
-    if [ ! -e "$target" ]; then
-        step "SpaceTerm is already removed"
-        return
-    fi
-    rm -rf "$target" || die "could not remove $target"
-    step "Removed SpaceTerm. Settings and other user data remain."
-}
-
 # A running process keeps its executable open, and its name in /proc/PID/exe, so the check
 # matches the installed executable whichever launcher or symlink started it. A process the
 # updater replaced but has not relaunched runs from the updater's staging directory.
@@ -620,7 +463,7 @@ ensure_not_running_linux() {
     replaced="$(dirname "$target")/.$(basename "$target").update/"
     for link in /proc/[0-9]*/exe; do
         case "$(readlink "$link" 2>/dev/null || true)" in
-            "$executable" | "$replaced"*) die "quit SpaceTerm, then run the installer again" ;;
+            "$executable" | "$target/bin/spaceterm" | "$replaced"*) die "quit SpaceTerm, then run the installer again" ;;
         esac
     done
 }
@@ -665,11 +508,32 @@ linux_desktop_locations() {
     else
         target="$install_dir/spaceterm"
     fi
+    # A custom parent must not turn program replacement into deletion of retained data.
+    config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+    state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+    cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
+    case "$config_home" in /*) ;; *) config_home="$HOME/.config" ;; esac
+    case "$state_home" in /*) ;; *) state_home="$HOME/.local/state" ;; esac
+    case "$cache_home" in /*) ;; *) cache_home="$HOME/.cache" ;; esac
+    for removed in "$target" "$install_dir/.spaceterm.update"; do
+        resolved="$(readlink -m "$removed")"
+        for root in "$config_home/spaceterm" "$state_home/spaceterm" "$cache_home/spaceterm" \
+            "$data_home/spaceterm" "$HOME/.local/share/spaceterm"; do
+            retained="$(readlink -m "$root")"
+            case "$resolved/" in
+                "$retained/"*) die "the install path overlaps retained SpaceTerm data" ;;
+            esac
+            case "$retained/" in
+                "$resolved/"*) die "the install path overlaps retained SpaceTerm data" ;;
+            esac
+        done
+    done
 }
 
 # The installed desktop app was verified when it was installed or updated, so it may answer.
 installed_desktop_version_linux() {
     [ -e "$target" ] || return 0
+    [ "$legacy_tree" = false ] || return 0
     found="$("$target/bin/spaceterm-desktop" --build-info 2>/dev/null </dev/null | json_field version)" || true
     valid_version "$found" || die "the version of the SpaceTerm desktop app in $target could not be read"
     printf '%s' "$found"
@@ -764,75 +628,130 @@ uninstall_desktop_linux() {
     step "Removed SpaceTerm. Settings and other user data remain."
 }
 
-uninstall() {
-    case "$(uname -s)" in
-        Darwin) platform=macos-arm64 ;;
-        Linux) platform=linux-x86_64 ;;
-        *) die "SpaceTerm requires macOS or Linux" ;;
-    esac
-    require_home
-    # Desktop checks come first, so a running desktop app stops the uninstall before Core goes.
-    if [ "$desktop" = true ]; then
-        if [ "$platform" = macos-arm64 ]; then
-            macos_desktop_locations
-            ensure_not_running_macos
-        else
-            linux_desktop_locations
-            ensure_not_running_linux
+# Legacy releases installed no Core. Recognize their packaged desktop entry without
+# executing the old desktop as a CLI or reading any retained application data.
+legacy_desktop_entry() {
+    cat <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=SpaceTerm
+Comment=Terminal multiplexer
+Exec=spaceterm
+Icon=io.github.sadiksaifi.spaceterm
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.sadiksaifi.spaceterm
+Categories=System;TerminalEmulator;
+ENTRY
+}
+
+locate_legacy_desktop() {
+    legacy_tree=false
+    [ -e "$target" ] || [ -L "$target" ] || return 0
+    unrecognized="the existing desktop directory is not a recognized SpaceTerm installation"
+    for directory in "$target" "$target/bin" "$target/share" "$target/share/applications"; do
+        [ -d "$directory" ] && [ ! -L "$directory" ] || die "$unrecognized"
+    done
+    if [ -f "$target/bin/spaceterm-desktop" ] && [ -x "$target/bin/spaceterm-desktop" ] \
+        && [ ! -L "$target/bin/spaceterm-desktop" ]; then
+        return
+    fi
+    [ ! -e "$target/bin/spaceterm-desktop" ] && [ ! -L "$target/bin/spaceterm-desktop" ] \
+        || die "$unrecognized"
+    [ -d "$target/share/spaceterm" ] && [ ! -L "$target/share/spaceterm" ] \
+        || die "$unrecognized"
+    for member in "$target/bin/spaceterm" \
+        "$target/share/applications/io.github.sadiksaifi.spaceterm.desktop"; do
+        [ -f "$member" ] && [ ! -L "$member" ] || die "$unrecognized"
+    done
+    [ -x "$target/bin/spaceterm" ] || die "$unrecognized"
+    [ "$(cat "$target/share/applications/io.github.sadiksaifi.spaceterm.desktop")" = "$(legacy_desktop_entry)" ] \
+        || die "$unrecognized"
+    legacy_tree=true
+}
+
+is_legacy_launcher() {
+    [ "$legacy_tree" = true ] && [ -L "$bin_dir/spaceterm" ] \
+        && [ "$(readlink "$bin_dir/spaceterm")" = "$target/bin/spaceterm" ]
+}
+
+clean_legacy_launchers() {
+    [ "$legacy_tree" = true ] || return 0
+    entry="$data_home/applications/io.github.sadiksaifi.spaceterm.desktop"
+    # Only the old installer's exact registration grants cleanup authority. Preserve custom
+    # entries, regular icons and paths reached through symlinked registry directories.
+    if [ -f "$entry" ] && [ ! -L "$entry" ] \
+        && [ "$(readlink -m "$data_home/applications")" = "$data_home/applications" ]; then
+        legacy_exec="$(exec_value "$target/bin/spaceterm")"
+        expected_entry="$(legacy_desktop_entry | while IFS= read -r line; do
+            case "$line" in
+                Exec=*) printf 'Exec=%s\n' "$legacy_exec" ;;
+                *) printf '%s\n' "$line" ;;
+            esac
+        done)"
+        if [ "$(cat "$entry")" = "$expected_entry" ]; then
+            rm -f "$entry"
         fi
+    fi
+    icon_parent="$data_home/icons/hicolor/scalable/apps"
+    icon="$icon_parent/io.github.sadiksaifi.spaceterm.svg"
+    if [ -L "$icon" ] && [ "$(readlink -m "$icon_parent")" = "$icon_parent" ] \
+        && [ "$(readlink "$icon")" = "$target/share/icons/hicolor/scalable/apps/io.github.sadiksaifi.spaceterm.svg" ]; then
+        rm -f "$icon"
+    fi
+    refresh_desktop_database
+}
+
+uninstall() {
+    require_linux
+    require_home
+    if [ "$desktop" = true ]; then
+        linux_desktop_locations
+        locate_legacy_desktop
+        ensure_not_running_linux
     fi
     uninstall_core
     if [ "$desktop" = true ]; then
-        if [ "$platform" = macos-arm64 ]; then
-            uninstall_desktop_macos
-        else
-            uninstall_desktop_linux
+        if is_legacy_launcher; then
+            rm -f "$bin_dir/spaceterm"
         fi
+        uninstall_desktop_linux
+        clean_legacy_launchers
     fi
 }
 
 install() {
+    require_linux
     require_prepared
     detect_platform
     require_home
-    require_commands curl tar gzip sed grep mktemp
-    if [ "$platform" = macos-arm64 ]; then
-        [ "$linger" = false ] || die "--linger applies only to Linux"
-        require_commands shasum codesign
-        if [ "$desktop" = true ]; then
-            require_commands ditto hdiutil plutil ps
-        fi
-    else
-        require_commands sha256sum openssl readlink
-        if [ "$desktop" = true ] && ! has_vulkan; then
-            warn "no Vulkan loader (libvulkan.so.1) was found; install your GPU's Vulkan driver before opening SpaceTerm"
-        fi
+    require_commands curl tar gzip sed grep mktemp sha256sum openssl readlink
+    if [ "$desktop" = true ] && ! has_vulkan; then
+        warn "no Vulkan loader (libvulkan.so.1) was found; install your GPU's Vulkan driver before opening SpaceTerm"
     fi
 
-    # Every refusal that needs no download comes before the first archive download.
     core_before="$(installed_core_version)"
     running_core_version
     desktop_before=""
+    linux_desktop_locations
+    locate_legacy_desktop
+    if [ "$legacy_tree" = true ]; then
+        ensure_not_running_linux
+    fi
     if [ "$desktop" = true ]; then
-        if [ "$platform" = macos-arm64 ]; then
-            macos_desktop_locations
-            desktop_before="$(installed_desktop_version_macos)"
-        else
-            linux_desktop_locations
-            desktop_before="$(installed_desktop_version_linux)"
-        fi
+        desktop_before="$(installed_desktop_version_linux)"
     fi
     find_release
     core_plan="$(plan_product "SpaceTerm Core" "$core_before" "$version")"
+    # Re-admit the verified Core when an obsolete desktop still owns its launcher.
+    if is_legacy_launcher; then
+        core_plan=install
+    fi
     desktop_plan=skip
     if [ "$desktop" = true ]; then
         desktop_plan="$(plan_product SpaceTerm "$desktop_before" "$version")"
         if [ "$desktop_plan" = install ]; then
-            if [ "$platform" = macos-arm64 ]; then
-                ensure_not_running_macos
-            else
-                ensure_not_running_linux
-            fi
+            ensure_not_running_linux
         fi
     fi
 
@@ -844,15 +763,17 @@ install() {
     if [ "$desktop" = true ]; then
         if [ "$desktop_plan" = skip ]; then
             step "SpaceTerm $version is already installed"
-        elif [ "$platform" = macos-arm64 ]; then
-            install_desktop_macos
         else
             install_desktop_linux
         fi
+        clean_legacy_launchers
+    elif [ "$legacy_tree" = true ]; then
+        # A Core-only installation replaces the obsolete desktop with the Core CLI.
+        ensure_not_running_linux
+        rm -rf "$target" "$install_dir/.spaceterm.update"
+        clean_legacy_launchers
     fi
-    if [ "$platform" = linux-x86_64 ]; then
-        offer_linger
-    fi
+    offer_linger
     modify_path
 
     if [ -z "$core_before" ]; then

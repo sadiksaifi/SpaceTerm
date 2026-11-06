@@ -81,10 +81,10 @@ esac
 """.replace("TOKEN", TOKEN)
 
 
-def render(directory, kind="release", team_id=TEAM_ID, current=None, backup=None):
+def render(directory, kind="release", version="1.2.0", current=None, backup=None):
     """Fill install.sh as the release pipeline does, with optional test update keys."""
     text = INSTALLER_SOURCE.read_text()
-    text = text.replace("@RELEASE_KIND@", kind).replace("@TEAM_ID@", team_id)
+    text = text.replace("@RELEASE_KIND@", kind).replace("@DEFAULT_VERSION@", version)
     for name, key in (("current", current), ("backup", backup)):
         if key is not None:
             text = text.replace(TRUST[name], key)

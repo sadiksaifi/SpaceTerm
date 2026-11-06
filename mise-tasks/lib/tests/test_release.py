@@ -526,32 +526,42 @@ class InstallerTests(unittest.TestCase):
             )
         self.source.write_text(text)
 
-    def test_a_release_installer_fills_its_kind_and_team_and_pins_the_trust(self):
+    def test_a_release_installer_pins_its_version_and_trust_without_apple_credentials(self):
         keys = update_signing.release_trust(ROOT)
         self.pin(*keys)
-        release.installer(self.output, {"SPACETERM_APPLE_TEAM_ID": "ABCDE12345"}, self.source)
+        release.installer(self.output, {}, self.source, version="0.10.0")
         text = self.output.read_text()
         self.assertIn("readonly RELEASE_KIND='release'\n", text)
-        self.assertIn("readonly TEAM_ID='ABCDE12345'\n", text)
+        self.assertIn("readonly DEFAULT_VERSION='0.10.0'\n", text)
         self.assertNotIn("@RELEASE_KIND@", text)
-        self.assertNotIn("@TEAM_ID@", text)
+        self.assertNotIn("@DEFAULT_VERSION@", text)
         self.assertTrue(os.access(self.output, os.X_OK))
-        with self.assertRaisesRegex(TaskError, "SPACETERM_APPLE_TEAM_ID"):
-            release.installer(self.output, {}, self.source)
 
     def test_the_installer_must_pin_the_tracked_trust(self):
         keys = update_signing.release_trust(ROOT)
         self.pin(keys[1], keys[0])
         with self.assertRaisesRegex(TaskError, "must pin the keys"):
-            release.installer(self.output, {"SPACETERM_APPLE_TEAM_ID": "ABCDE12345"}, self.source)
+            release.installer(self.output, {}, self.source, version="0.10.0")
 
     def test_a_dry_run_installer_uses_the_matching_test_trust(self):
         write_trust(self.root)
         self.pin(*update_signing.release_trust(self.root))
-        release.installer(self.output, {update_signing.DRY_RUN: "1"}, self.source, self.root)
+        environment = {
+            update_signing.DRY_RUN: "1",
+            update_signing.SIGNING_SECRET: update_signing.encoded_seed(BACKUP),
+        }
+        release.installer(self.output, environment, self.source, self.root, version="0.10.0")
         text = self.output.read_text()
         self.assertIn("readonly RELEASE_KIND='dry-run'\n", text)
-        self.assertIn("readonly TEAM_ID=''\n", text)
+        key = update_signing.derived_public_key(BACKUP)
+        self.assertIn(f"readonly UPDATE_KEY_CURRENT='{key}'\n", text)
+        self.assertIn(f"readonly UPDATE_KEY_BACKUP='{key}'\n", text)
+
+    def test_an_invalid_installer_version_is_refused(self):
+        self.pin(*update_signing.release_trust(ROOT))
+        for version in ("", "v0.10.0", "01.0.0", "0.10.0-beta", "1.2.3'\nexit 0"):
+            with self.subTest(version=version), self.assertRaisesRegex(TaskError, "stable release"):
+                release.installer(self.output, {}, self.source, version=version)
 
 
 if __name__ == "__main__":

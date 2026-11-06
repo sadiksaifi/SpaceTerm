@@ -33,6 +33,7 @@ class InstallerContractTests(unittest.TestCase):
         self.bin.mkdir()
         self.requests = self.root / "requests.log"
         fake(self.bin, "curl", CURL)
+        fake(self.bin, "uname", "#!/bin/sh\necho Linux\n")
 
     def run_installer(self, installer, *arguments):
         return subprocess.run(
@@ -58,10 +59,10 @@ class InstallerContractTests(unittest.TestCase):
 
     def test_the_release_pipeline_fills_each_value_exactly_once(self):
         text = INSTALLER.read_text()
-        for token in ("@RELEASE_KIND@", "@TEAM_ID@"):
+        for token in ("@RELEASE_KIND@", "@DEFAULT_VERSION@"):
             self.assertEqual(text.count(token), 1, token)
         self.assertIn("readonly RELEASE_KIND='@RELEASE_KIND@'\n", text)
-        self.assertIn("readonly TEAM_ID='@TEAM_ID@'\n", text)
+        self.assertIn("readonly DEFAULT_VERSION='@DEFAULT_VERSION@'\n", text)
 
     def test_the_pinned_update_keys_match_update_trust(self):
         text = INSTALLER.read_text()
@@ -77,15 +78,17 @@ class InstallerContractTests(unittest.TestCase):
         result = self.run_installer(INSTALLER)
         self.assert_refused_untouched(result, "this installer was not prepared by a release")
 
-    def test_a_release_without_a_team_id_refuses(self):
-        for team_id in ("", "@TEAM_ID@", "abcde12345", "ABCDE1234"):
-            with self.subTest(team_id=team_id):
-                installer = render(self.root, team_id=team_id)
+    def test_a_release_without_a_pinned_version_refuses(self):
+        for version in ("", "@DEFAULT_VERSION@", "v0.10.0", "0.10"):
+            with self.subTest(version=version):
+                installer = render(self.root, version=version)
                 result = self.run_installer(installer)
-                self.assert_refused_untouched(result, "this installer has no Developer ID Team ID")
+                self.assert_refused_untouched(
+                    result, "this installer has no pinned release version"
+                )
 
     def test_a_release_with_placeholder_update_keys_refuses(self):
-        result = self.run_installer(render(self.root))
+        result = self.run_installer(render(self.root, current="PLACEHOLDER", backup="PLACEHOLDER"))
         self.assert_refused_untouched(result, "this installer has placeholder update keys")
 
     def test_invalid_options_are_refused_before_anything_else(self):
