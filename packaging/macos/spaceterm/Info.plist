@@ -64,7 +64,7 @@
 	<key>SUFeedURL</key>
 	<string>https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>n5rQEtlPsivSl/mVVtDn2vKqbjeV+kSTExbA38FyafI=</string>
+	<string>sNR7I+ZSfwiz/hBiYA0PgrtqqOsJY53yluVe93/tATM=</string>
 	<key>SURequireSignedFeed</key>
 	<true/>
 	<key>SUSignedFeedFailureExpirationInterval</key>
