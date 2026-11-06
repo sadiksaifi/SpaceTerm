@@ -72,8 +72,8 @@ fn exec_value(program: &Path) -> String {
     format!("\"{}\"", quoted.replace('\\', "\\\\"))
 }
 
-/// A tree as `install.sh` lays it out under `install_dir`, with its launcher, icon and desktop
-/// entry. Returns the tree.
+/// A tree as `install.sh` lays it out under `install_dir`, with its launcher and desktop entry.
+/// Returns the tree.
 fn install_tree(install_dir: &Path, account: &Account) -> PathBuf {
     let root = install_dir.join("spaceterm");
     let executable = root.join("bin/spaceterm-desktop");
@@ -84,13 +84,6 @@ fn install_tree(install_dir: &Path, account: &Account) -> PathBuf {
     let launcher = account.home.join(".local/bin/spaceterm-desktop");
     std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
     symlink(&executable, &launcher).unwrap();
-    let icon = icon(&account.data_home, &release());
-    std::fs::create_dir_all(icon.parent().unwrap()).unwrap();
-    symlink(
-        root.join(format!("share/icons/hicolor/scalable/apps/{ID}.svg")),
-        &icon,
-    )
-    .unwrap();
     let entry = desktop_entry(&account.data_home, &release());
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     std::fs::write(
@@ -226,7 +219,7 @@ fn a_symbolic_link_in_place_of_the_bundle_is_refused() {
 }
 
 #[test]
-fn an_installed_tree_is_found_and_removed_with_its_launcher_icon_and_desktop_entry() {
+fn an_installed_tree_is_found_and_removed_with_its_launcher_and_desktop_entry() {
     let scratch = Scratch::new();
     let account = scratch.account();
     let root = install_tree(&account.home.join(".local/lib"), &account);
@@ -246,7 +239,6 @@ fn an_installed_tree_is_found_and_removed_with_its_launcher_icon_and_desktop_ent
     assert!(!account.home.join(".local/lib/.spaceterm.update").exists());
     let launcher = account.home.join(".local/bin/spaceterm-desktop");
     assert!(std::fs::symlink_metadata(launcher).is_err());
-    assert!(std::fs::symlink_metadata(icon(&account.data_home, &release())).is_err());
     assert!(!desktop_entry(&account.data_home, &release()).exists());
     assert!(other_entry.exists(), "other desktop entries stay");
     assert!(account.core_data.join("data").exists());
@@ -448,7 +440,7 @@ fn a_preflight_tree_is_removed_with_its_own_launcher_and_leaves_release_alone() 
 }
 
 #[test]
-fn a_launcher_icon_and_desktop_entry_of_another_installation_stay() {
+fn a_launcher_and_desktop_entry_of_another_installation_stay() {
     let scratch = Scratch::new();
     let account = scratch.account();
     let root = install_tree(&account.home.join(".local/lib"), &account);
@@ -459,21 +451,17 @@ fn a_launcher_icon_and_desktop_entry_of_another_installation_stay() {
     assert!(!root.exists());
     let launcher = account.home.join(".local/bin/spaceterm-desktop");
     assert_eq!(std::fs::read_link(&launcher).unwrap(), foreign);
-    assert!(std::fs::symlink_metadata(icon(&account.data_home, &release())).is_ok());
     assert!(desktop_entry(&account.data_home, &release()).exists());
 }
 
-/// Points the launcher, icon and desktop entry at another program, as a second installation
-/// would. Returns that program.
+/// Points the launcher and desktop entry at another program, as a second installation would.
+/// Returns that program.
 fn install_tree_elsewhere(scratch: &Scratch, account: &Account) -> PathBuf {
     let foreign = scratch.0.join("elsewhere/spaceterm-desktop");
     touch(&foreign);
     let launcher = account.home.join(".local/bin/spaceterm-desktop");
     std::fs::remove_file(&launcher).unwrap();
     symlink(&foreign, &launcher).unwrap();
-    let icon = icon(&account.data_home, &release());
-    std::fs::remove_file(&icon).unwrap();
-    symlink(scratch.0.join("elsewhere/icon.svg"), &icon).unwrap();
     std::fs::write(
         desktop_entry(&account.data_home, &release()),
         format!("[Desktop Entry]\nExec={} %u\n", exec_value(&foreign)),

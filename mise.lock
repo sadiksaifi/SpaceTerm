@@ -97,6 +97,22 @@ checksum = "sha256:6ece2112b3f4af462190ecbea4aeb1315fff6af415629b597f84319073c31
 url = "https://github.com/orhun/git-cliff/releases/download/v2.14.2/git-cliff-2.14.2-x86_64-pc-windows-msvc.zip"
 url_api = "https://api.github.com/repos/orhun/git-cliff/releases/assets/573487227"
 
+[[tools."github:linebender/resvg"]]
+version = "0.49.0"
+backend = "github:linebender/resvg"
+specifiers = ["0.49.0"]
+
+[tools."github:linebender/resvg"."platforms.macos-arm64"]
+checksum = "sha256:847acb5210c7c6244b5e8f07dd62fa1ce596108cce8193628ebfd5750504b259"
+url = "https://github.com/linebender/resvg/releases/download/v0.49.0/resvg-macos-aarch64.zip"
+url_api = "https://api.github.com/repos/linebender/resvg/releases/assets/672460044"
+
+[tools."github:linebender/resvg"."platforms.macos-x64"]
+checksum = "sha256:7c92cba55348f0254707c8d2c61e71651296981f8ccfadf8477782e91db5e171"
+checksum_source = "mise-versions"
+url = "https://github.com/linebender/resvg/releases/download/v0.49.0/resvg-macos-x86_64.zip"
+url_api = "https://api.github.com/repos/linebender/resvg/releases/assets/672463407"
+
 [[tools."github:sparkle-project/Sparkle"]]
 version = "2.10.0"
 backend = "github:sparkle-project/Sparkle"

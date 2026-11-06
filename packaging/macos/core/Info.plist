@@ -6,6 +6,10 @@
 	<string>en</string>
 	<key>CFBundleExecutable</key>
 	<string>spaceterm</string>
+	<key>CFBundleIconFile</key>
+	<string>SpaceTerm</string>
+	<key>CFBundleIconName</key>
+	<string>SpaceTerm</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundlePackageType</key>

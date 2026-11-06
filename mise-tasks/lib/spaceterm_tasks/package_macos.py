@@ -9,7 +9,6 @@ import json
 import os
 import platform
 import plistlib
-import shlex
 import shutil
 import subprocess
 import sys
@@ -21,6 +20,7 @@ from pathlib import Path
 from spaceterm_tasks import (
     ROOT,
     TaskError,
+    disk_image,
     macos_codesign,
     macos_notary,
     macos_signing,
@@ -98,7 +98,7 @@ def package_bundle(release_tag=None, notes=None):
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
-    compile_icon(name, STAGE)
+    compile_icon(STAGE, template["CFBundleIdentifier"])
     checked(
         ["tic", "-x", "-o", str(STAGE / "terminfo"), str(TERMINFO)],
         "tic could not compile the SpaceTerm terminfo entry",
@@ -149,21 +149,15 @@ def package_bundle(release_tag=None, notes=None):
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
         output = Path(temporary) / "output"
         app = output / f"{app_name}.app"
-        dmg = output / f"{app_name}_{version}_aarch64.dmg"
-        # cargo-packager signs every native file with the app's entitlements and never
-        # reseals nested bundles. SpaceTerm signs instead, after the app and before the image.
-        # A release notarizes and staples the app there too, so the image holds a stapled app.
-        config["before-each-package-command"] = (
-            f"{shlex.quote(sys.executable)} -m spaceterm_tasks.package_macos sign-app"
+        dmg = Path(temporary) / f"{app_name}.dmg"
+        print(f"Packaging {app_name}.app with cargo-packager")
+        packaged = subprocess.run(
+            ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
+            cwd=ROOT,
+            env=environment,
         )
-        hook = {
-            "SPACETERM_PACKAGER_APP": str(app),
-            "SPACETERM_PACKAGER_IDENTITY": identity_name,
-            "SPACETERM_PACKAGER_ENTITLEMENTS": str(identity_directory(name) / "Entitlements.plist"),
-            **({"SPACETERM_PACKAGER_TEAM": team} if team else {}),
-            **({"SPACETERM_PACKAGER_RELEASE": "1"} if release_tag else {}),
-        }
-        print(f"Packaging {app_name}.app and {app_name}.dmg with cargo-packager")
+        if packaged.returncode or not app.is_dir():
+            raise TaskError("cargo-packager did not produce the application")
         signing = (
             macos_signing.release_keychain(identity_name, os.environ)
             if identity_name != macos_codesign.ADHOC
@@ -171,27 +165,33 @@ def package_bundle(release_tag=None, notes=None):
         )
         notarizing = macos_notary.notary() if release_tag else nullcontext()
         with signing, notarizing as notary:
-            if notary is not None:
-                hook.update(notary.environment())
-            packaged = subprocess.run(
-                ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
-                cwd=ROOT,
-                env={"CI": "true", **environment, **hook},
+            # cargo-packager signs every native file with the app's entitlements and never
+            # reseals nested bundles, so it receives no identity and SpaceTerm signs instead.
+            # A release notarizes and staples the app before the image, so the image holds a
+            # stapled app.
+            sign_app(
+                app,
+                identity_name,
+                identity_directory(name) / "Entitlements.plist",
+                team=team,
+                release=bool(release_tag),
+                notary=notary,
+                environment=environment,
             )
-            if packaged.returncode or not app.is_dir() or not dmg.is_file():
-                raise TaskError("cargo-packager did not produce the application and disk image")
+            print(f"Building {app_name}.dmg with dmgbuild")
+            disk_image.build(
+                app, dmg, app / "Contents" / "Resources" / f"{ICON_NAME}.icns", environment
+            )
             macos_codesign.sign_disk_image(
                 dmg, identity_name, template["CFBundleIdentifier"], environment=environment
             )
             if release_tag:
                 macos_notary.notarize(dmg, notary, environment)
-        staged_dmg = Path(temporary) / f"{app_name}.dmg"
-        dmg.rename(staged_dmg)
-        verify(app, staged_dmg, release_tag)
+        verify(app, dmg, release_tag)
         shutil.rmtree(DIST / app.name, ignore_errors=True)
-        (DIST / staged_dmg.name).unlink(missing_ok=True)
+        (DIST / dmg.name).unlink(missing_ok=True)
         app.rename(DIST / app.name)
-        staged_dmg.rename(DIST / staged_dmg.name)
+        dmg.rename(DIST / dmg.name)
     print(f"Created {app_name}.app and {app_name}.dmg in dist")
 
 
@@ -229,6 +229,13 @@ def verify(app=None, dmg=None, release_tag=None):
             applications = mount / "Applications"
             if not applications.is_symlink() or os.readlink(applications) != "/Applications":
                 raise TaskError("the disk image must link Applications to /Applications")
+            background = mount / disk_image.BACKGROUND_IN_IMAGE
+            if (
+                not background.is_file()
+                or background.read_bytes() != disk_image.BACKGROUND.read_bytes()
+                or not (mount / ".DS_Store").is_file()
+            ):
+                raise TaskError("the disk image window must show the brand background")
             verify_bundle(mount / f"{app_name}.app", name, release_tag, "dmg")
         finally:
             subprocess.run(["hdiutil", "detach", str(mount), "-force"], capture_output=True)
@@ -327,25 +334,17 @@ def verify_bundle(app, name, release_tag, label):
             )
 
 
-def sign_app(environment):
-    """cargo-packager runs this before each format; sign the finished app before its image."""
-    if environment.get("CARGO_PACKAGER_FORMAT") != "dmg":
-        return
-    app = Path(environment["SPACETERM_PACKAGER_APP"])
+def sign_app(app, identity_name, entitlements, *, team, release, notary, environment):
+    """Sign the finished app. A release then notarizes and staples it; a dry run's `notary` is
+    None, which logs the skipped step."""
     # Extended attributes such as Finder information make codesign refuse a bundle.
     checked(["xattr", "-cr", str(app)], "the app's extended attributes could not be cleared")
     macos_codesign.sign_desktop(
         app,
-        environment["SPACETERM_PACKAGER_IDENTITY"],
-        environment["SPACETERM_PACKAGER_ENTITLEMENTS"],
-        team=environment.get("SPACETERM_PACKAGER_TEAM"),
+        identity_name,
+        entitlements,
+        team=team,
         environment=macos_signing.signing_environment(environment),
     )
-    if environment.get("SPACETERM_PACKAGER_RELEASE") == "1":
-        macos_notary.notarize(app, macos_notary.from_environment(environment), environment)
-
-
-if __name__ == "__main__" and sys.argv[1:] == ["sign-app"]:
-    from spaceterm_tasks import main
-
-    main(lambda: sign_app(os.environ))
+    if release:
+        macos_notary.notarize(app, notary, environment)

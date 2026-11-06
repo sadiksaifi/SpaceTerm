@@ -344,7 +344,7 @@ int main(int argc, char **argv) {{
         self.assertEqual(macos_codesign.signed_entitlements(app), {})
         self.assertIn("Dry run: notarization and stapling skipped for SpaceTerm.app", result.stdout)
         self.assertIn(
-            "Dry run: notarization and stapling skipped for SpaceTerm_0.0.1_aarch64.dmg",
+            "Dry run: notarization and stapling skipped for SpaceTerm.dmg",
             result.stdout,
         )
         self.assertEqual(
@@ -430,6 +430,23 @@ int main(int argc, char **argv) {{
         )
         self.run_command("codesign", "--force", "--sign", "-", "--timestamp=none", str(disk_app))
         (disk_root / "Applications").symlink_to("/Applications")
+        # The window layout comes from the packaged image; hdiutil drops an invalid .DS_Store.
+        packaged = Path(self.directory.name) / "packaged"
+        packaged.mkdir()
+        self.run_command(
+            "hdiutil",
+            "attach",
+            "-nobrowse",
+            "-readonly",
+            "-mountpoint",
+            str(packaged),
+            str(self.root / "dist/SpaceTerm Preflight.dmg"),
+        )
+        try:
+            for name in (".background.tiff", ".DS_Store"):
+                shutil.copyfile(packaged / name, disk_root / name)
+        finally:
+            self.run_command("hdiutil", "detach", str(packaged))
         dmg = Path(self.directory.name) / "wrong-identity.dmg"
         self.run_command(
             "hdiutil", "create", "-srcfolder", str(disk_root), "-format", "UDZO", str(dmg)

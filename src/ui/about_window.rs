@@ -1,7 +1,5 @@
 //! The About Operating-System Window, reproducing AppKit's standard About panel.
 
-mod application_icon;
-
 use std::{rc::Rc, sync::Arc};
 
 use gpui::prelude::*;
@@ -30,12 +28,18 @@ const WINDOW_WIDTH: f32 = 284.0;
 const TEXT_INSET: f32 = 24.0;
 /// The icon's drawn size, which includes the icon grid's own transparent margin.
 const ICON_SIZE: f32 = 64.0;
+/// The application icon as Linux desktops draw it. macOS shows its own About panel with the
+/// compiled bundle icon, so this window draws the brand's Linux tile.
+const ICON: &[u8] = include_bytes!(
+    "../../assets/brand/linux/hicolor/scalable/apps/io.github.sadiksaifi.spaceterm.svg"
+);
 /// Vertical rhythm from the top edge to the bottom edge, in content order.
 const TOP_INSET: f32 = 20.0;
 const ICON_TO_NAME: f32 = 8.0;
 const NAME_TO_VERSION: f32 = 2.0;
 const VERSION_TO_DESCRIPTION: f32 = 12.0;
-const DESCRIPTION_TO_COPYRIGHT: f32 = 12.0;
+const DESCRIPTION_TO_REPOSITORY: f32 = 4.0;
+const REPOSITORY_TO_COPYRIGHT: f32 = 12.0;
 const BOTTOM_INSET: f32 = 20.0;
 
 /// The one About window, so a second request activates it.
@@ -121,11 +125,12 @@ fn window_options(title: SharedString, about: About, cx: &App) -> WindowOptions 
         )
 }
 
-/// The text styles of the panel's four lines.
+/// The text styles of the panel's five lines.
 struct Typography {
     name: ChromeTextStyle,
     version: ChromeTextStyle,
     description: ChromeTextStyle,
+    repository: ChromeTextStyle,
     copyright: ChromeTextStyle,
 }
 
@@ -137,6 +142,7 @@ impl Typography {
             name,
             version: appearance.typography.style(TextRole::Secondary).clone(),
             description: appearance.typography.style(TextRole::Secondary).clone(),
+            repository: appearance.typography.style(TextRole::Secondary).clone(),
             copyright: appearance.typography.style(TextRole::Caption).clone(),
         }
     }
@@ -154,6 +160,7 @@ fn window_size(about: About, cx: &App) -> Size<Pixels> {
         (&typography.name, about.name()),
         (&typography.version, version.as_str()),
         (&typography.description, about.description()),
+        (&typography.repository, about.repository_label()),
         (&typography.copyright, about.copyright()),
     ]
     .into_iter()
@@ -171,7 +178,8 @@ fn window_size(about: About, cx: &App) -> Size<Pixels> {
             + ICON_TO_NAME
             + NAME_TO_VERSION
             + VERSION_TO_DESCRIPTION
-            + DESCRIPTION_TO_COPYRIGHT
+            + DESCRIPTION_TO_REPOSITORY
+            + REPOSITORY_TO_COPYRIGHT
             + BOTTOM_INSET,
     ) + px(ICON_SIZE)
         + text_height;
@@ -180,9 +188,11 @@ fn window_size(about: About, cx: &App) -> Size<Pixels> {
 
 pub(crate) struct AboutWindow {
     about: About,
-    icon: Option<Arc<gpui::Image>>,
+    icon: Arc<gpui::Image>,
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     focus_handle: FocusHandle,
+    /// The repository link's own focus, the window's only Tab stop.
+    repository_focus: FocusHandle,
     window_movement: WindowMovement,
 }
 
@@ -209,28 +219,78 @@ impl AboutWindow {
             .detach();
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let repository_focus = cx.focus_handle().tab_stop(true);
         let window_movement = WindowMovement::new(window_drag, focus_handle.clone(), "About");
-        let icon = match application_icon::svg(about.identity().icon(), ICON_SIZE) {
-            Ok(svg) => Some(Arc::new(gpui::Image::from_bytes(
-                gpui::ImageFormat::Svg,
-                svg.into_bytes(),
-            ))),
-            Err(error) => {
-                eprintln!("failed to draw the application icon: {error}");
-                None
-            }
-        };
+        let icon = Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Svg,
+            ICON.to_vec(),
+        ));
         Self {
             about,
             icon,
             window_appearance,
             focus_handle,
+            repository_focus,
             window_movement,
         }
     }
 
     fn close(&mut self, _: &CloseAboutWindow, window: &mut Window, _: &mut Context<Self>) {
         window.remove_window();
+    }
+
+    /// The repository link: a pointer click, Return or Space while it has focus, and the
+    /// accessibility Click action each open the repository.
+    fn render_repository_link(
+        &self,
+        style: &ChromeTextStyle,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
+        let appearance = &crate::ui::appearance::settings::shared(cx).chrome;
+        let colors = &appearance.colors;
+        let label: SharedString = self.about.repository_label().into();
+        let link = div()
+            .id("about-repository")
+            .debug_selector(|| "about-repository".to_owned())
+            .role(gpui::accesskit::Role::Link)
+            .aria_label(label.clone())
+            .on_a11y_action(gpui::accesskit::Action::Click, |_, _, cx| {
+                open_repository(cx)
+            })
+            .track_focus(&self.repository_focus)
+            .on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
+                let keystroke = &event.keystroke;
+                if keystroke.modifiers.modified()
+                    || event.is_held
+                    || !matches!(keystroke.key.as_str(), "enter" | "space")
+                {
+                    return;
+                }
+                open_repository(cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .chrome_text(style)
+            .text_color(gpui_color(colors.link_text))
+            .hover(|link| link.text_color(gpui_color(colors.link_text_hover)))
+            .active(|link| link.text_color(gpui_color(colors.link_text_pressed)))
+            .underline()
+            .cursor_pointer()
+            // The window is a drag region, which would otherwise take this press as a window
+            // move.
+            .block_mouse_except_scroll()
+            .on_click(|_, _, cx| open_repository(cx))
+            .child(label);
+        let ring = self.repository_focus.is_focused(window).then(|| {
+            spaceterm_ui::focus_ring(
+                "about-repository-focus-ring",
+                gpui_color(colors.focus_ring),
+                px(3.0),
+                px(0.0),
+            )
+        });
+        spaceterm_ui::Ringed::new(link, ring).into_any_element()
     }
 
     fn render_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -261,7 +321,7 @@ impl AboutWindow {
                     .debug_selector(|| "about-icon".to_owned())
                     .flex_none()
                     .size(px(ICON_SIZE))
-                    .children(self.icon.clone().map(|icon| img(icon).size_full())),
+                    .child(img(self.icon.clone()).size_full()),
             )
             .child(
                 line(
@@ -291,13 +351,22 @@ impl AboutWindow {
                 .mt(appearance.spacing(VERSION_TO_DESCRIPTION)),
             )
             .child(
+                // Only the word takes the click, so the rest of the row still moves the window.
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .mt(appearance.spacing(DESCRIPTION_TO_REPOSITORY))
+                    .child(self.render_repository_link(&typography.repository, window, cx)),
+            )
+            .child(
                 line(
                     "about-copyright",
                     &typography.copyright,
                     secondary,
                     self.about.copyright().into(),
                 )
-                .mt(appearance.spacing(DESCRIPTION_TO_COPYRIGHT)),
+                .mt(appearance.spacing(REPOSITORY_TO_COPYRIGHT)),
             );
         let closing = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
@@ -342,6 +411,25 @@ impl AboutWindow {
             .key_context(ABOUT_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::close))
+            .on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
+                let keystroke = &event.keystroke;
+                let modifiers = keystroke.modifiers;
+                if keystroke.key != "tab"
+                    || modifiers.control
+                    || modifiers.alt
+                    || modifiers.platform
+                    || modifiers.function
+                {
+                    return;
+                }
+                if modifiers.shift {
+                    window.focus_prev(cx);
+                } else {
+                    window.focus_next(cx);
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            })
             .size_full()
             .bg(gpui_color(
                 surface.surface(SettingsSurfaceRole::Canvas).paint,
@@ -357,6 +445,10 @@ impl Render for AboutWindow {
         let activity = super::appearance::window_activity(window);
         super::sidebar_window::render_scoped(activity, || self.render_surface(window, cx))
     }
+}
+
+fn open_repository(cx: &mut App) {
+    cx.open_url(crate::about::REPOSITORY);
 }
 
 #[cfg(test)]

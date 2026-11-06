@@ -9,9 +9,11 @@ python-platform = "all"
 extra-paths = ["mise-tasks/lib"]
 
 [analysis]
-# System Python bindings for the Linux accessibility tasks, and fonttools, which the fonts
-# tasks install into a private environment.
-allowed-unresolved-imports = ["dbus", "dbus.**", "gi", "gi.**", "pyatspi", "speechd", "fontTools.**"]
+# System Python bindings for the Linux accessibility tasks, fonttools, which the fonts tasks
+# install into a private environment, and dmgbuild, which macOS packaging installs into one.
+allowed-unresolved-imports = [
+  "dbus", "dbus.**", "gi", "gi.**", "pyatspi", "speechd", "fontTools.**", "dmgbuild",
+]
 
 # The Linux accessibility tasks drive untyped AT-SPI, D-Bus, and Orca objects whose optional
 # attributes their runtime checks guard.

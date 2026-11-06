@@ -10,6 +10,12 @@ pub(crate) const DESCRIPTION: &str = "A native, keyboard-first desktop terminal 
 /// which AppKit's About panel reads from the bundle rather than from the application.
 pub(crate) const COPYRIGHT: &str = "Copyright © 2026 Sadik Saifi";
 
+/// SpaceTerm's source repository, which every About surface links and Help opens.
+pub(crate) const REPOSITORY: &str = "https://github.com/sadiksaifi/SpaceTerm";
+
+/// The repository link's visible text. The link opens `REPOSITORY`.
+pub(crate) const REPOSITORY_LABEL: &str = "GitHub";
+
 /// The About facts of one build.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct About {
@@ -25,10 +31,6 @@ impl About {
             marketing_version: env!("SPACETERM_BUNDLE_VERSION"),
             build_version: env!("SPACETERM_VERSION"),
         }
-    }
-
-    pub(crate) const fn identity(self) -> ApplicationIdentity {
-        self.identity
     }
 
     pub(crate) const fn name(self) -> &'static str {
@@ -54,6 +56,10 @@ impl About {
 
     pub(crate) const fn copyright(self) -> &'static str {
         COPYRIGHT
+    }
+
+    pub(crate) const fn repository_label(self) -> &'static str {
+        REPOSITORY_LABEL
     }
 }
 

@@ -8,10 +8,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from spaceterm_tasks import TaskError
+from spaceterm_tasks import ROOT, TaskError
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.development_supervision import development_run, source_environment, supervise
-from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
+from spaceterm_tasks.macos_bundle import ICON_DOCUMENT, ICON_NAME, compile_icon, identity
 from spaceterm_tasks.packaging import (
     NOTICES,
     SHELL_INTEGRATION,
@@ -33,14 +33,13 @@ def icon_digest(document):
     return digest.hexdigest()[:16]
 
 
-def cached_icon(parent, name):
+def cached_icon(parent, bundle_identifier):
     """Compile each version of the icon document once; actool takes seconds."""
-    document = identity_directory(IDENTITY) / f"{name}.icon"
-    cache = parent / "icons" / icon_digest(document)
+    cache = parent / "icons" / icon_digest(ROOT / ICON_DOCUMENT)
     if not cache.is_dir():
         partial = cache.with_name(cache.name + ".partial")
         shutil.rmtree(partial, ignore_errors=True)
-        compile_icon(IDENTITY, partial)
+        compile_icon(partial, bundle_identifier)
         partial.rename(cache)
     return cache
 
@@ -52,7 +51,7 @@ def stage_bundle(executable, core, *, catalog=None):
         raise TaskError("the Development bundle name and executable name must match")
     parent = executable.parent.parent / "development-apps"
     parent.mkdir(parents=True, exist_ok=True)
-    icon = cached_icon(parent, name)
+    icon = cached_icon(parent, template["CFBundleIdentifier"])
     staging = Path(tempfile.mkdtemp(prefix=".bundle.", dir=parent))
     try:
         contents = staging / f"{name}.app" / "Contents"

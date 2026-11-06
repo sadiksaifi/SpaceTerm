@@ -728,21 +728,21 @@ install_desktop_linux() {
     # The updater's leftovers belong to the replaced installation.
     rm -rf "$install_dir/.spaceterm.update"
 
-    mkdir -p "$bin_dir" "$data_home/applications" "$data_home/icons/hicolor/scalable/apps"
+    mkdir -p "$bin_dir" "$data_home/applications"
     launcher="$bin_dir/spaceterm-desktop"
     if [ -e "$launcher" ] && [ ! -L "$launcher" ]; then
         warn "$launcher exists and is not a link, so it was left in place"
     else
         ln -sfn "$target/bin/spaceterm-desktop" "$launcher"
     fi
-    # The icon follows the installation, which updates replace.
-    ln -sfn "$target/share/icons/hicolor/scalable/apps/$DESKTOP_ID.svg" \
-        "$data_home/icons/hicolor/scalable/apps/$DESKTOP_ID.svg"
     exec="$(exec_value "$target/bin/spaceterm-desktop")"
+    # The entry names the installation's own icon, so it follows every update without links.
+    icon="$target/share/icons/hicolor/scalable/apps/$DESKTOP_ID.svg"
     entry="$data_home/applications/$DESKTOP_ID.desktop"
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             Exec=*) printf 'Exec=%s %%u\n' "$exec" ;;
+            Icon=*) printf 'Icon=%s\n' "$(printf '%s' "$icon" | sed 's/\\/\\\\/g')" ;;
             *) printf '%s\n' "$line" ;;
         esac
     done <"$target/share/applications/$DESKTOP_ID.desktop" >"$staging/entry"
@@ -757,10 +757,6 @@ uninstall_desktop_linux() {
     launcher="$bin_dir/spaceterm-desktop"
     if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$target/bin/spaceterm-desktop" ]; then
         rm -f "$launcher"
-    fi
-    icon="$data_home/icons/hicolor/scalable/apps/$DESKTOP_ID.svg"
-    if [ -L "$icon" ]; then
-        rm -f "$icon"
     fi
     rm -f "$data_home/applications/$DESKTOP_ID.desktop"
     refresh_desktop_database

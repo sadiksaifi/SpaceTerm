@@ -1,15 +1,14 @@
-"""Read application identities and compile their icons."""
+"""Read application identities and compile the brand icon into their bundles."""
 
 import plistlib
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError
 
-# Every identity compiles under the one internal icon name that the bundle templates expect.
-ICON_NAME = "SpaceTerm"
+# Every bundle, Core's included, compiles the brand's one icon document under its own name.
+ICON_DOCUMENT = Path("assets/brand/apple/SpaceTerm.icon")
+ICON_NAME = ICON_DOCUMENT.stem
 ICON_OUTPUTS = (f"{ICON_NAME}.icns", "Assets.car", "IconPartialInfo.plist")
 
 
@@ -22,44 +21,40 @@ def identity(name, root=ROOT):
     return plistlib.loads((identity_directory(name, root) / "Info.plist").read_bytes())
 
 
-def compile_icon(name, output, root=ROOT):
-    """Compile one identity's Icon Composer document into icns, Assets.car, and a partial plist."""
-    template = identity(name, root)
-    source = identity_directory(name, root) / f"{template['CFBundleName']}.icon"
-    if not (source / "icon.json").is_file():
-        raise TaskError(f"the {name} identity has no Icon Composer document")
+def compile_icon(output, bundle_identifier, root=ROOT):
+    """Compile the brand's Icon Composer document into icns, Assets.car, and a partial plist."""
+    document = root / ICON_DOCUMENT
+    if not (document / "icon.json").is_file():
+        raise TaskError("the brand Icon Composer document is missing")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=output, prefix=".icon.") as staging:
-        document = Path(staging) / f"{ICON_NAME}.icon"
-        shutil.copytree(source, document)
-        print(f"Compiling layered {ICON_NAME}.icon for {template['CFBundleName']}")
-        result = subprocess.run(
-            [
-                "xcrun",
-                "actool",
-                str(document),
-                "--compile",
-                str(output),
-                "--platform",
-                "macosx",
-                "--minimum-deployment-target",
-                "26.0",
-                "--app-icon",
-                ICON_NAME,
-                "--output-partial-info-plist",
-                str(output / "IconPartialInfo.plist"),
-                "--enable-on-demand-resources",
-                "NO",
-                "--development-region",
-                "en",
-                "--target-device",
-                "mac",
-                "--bundle-identifier",
-                template["CFBundleIdentifier"],
-            ],
-            stdout=subprocess.DEVNULL,
-        )
+    print(f"Compiling layered {ICON_NAME}.icon for {bundle_identifier}")
+    result = subprocess.run(
+        [
+            "xcrun",
+            "actool",
+            str(document),
+            "--compile",
+            str(output),
+            "--platform",
+            "macosx",
+            "--minimum-deployment-target",
+            "26.0",
+            "--app-icon",
+            ICON_NAME,
+            "--output-partial-info-plist",
+            str(output / "IconPartialInfo.plist"),
+            "--enable-on-demand-resources",
+            "NO",
+            "--development-region",
+            "en",
+            "--target-device",
+            "mac",
+            "--bundle-identifier",
+            bundle_identifier,
+        ],
+        stdout=subprocess.DEVNULL,
+    )
     if result.returncode:
         raise TaskError("actool could not compile the application icon")
     for generated in ICON_OUTPUTS:

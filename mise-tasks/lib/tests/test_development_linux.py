@@ -10,16 +10,14 @@ import sys
 import tempfile
 import time
 import unittest
-import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, core_package
 from spaceterm_tasks.core_builds import _source
-from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
+from spaceterm_tasks.development_linux import APPLICATION_ID
+from spaceterm_tasks.packaging import BRAND_HICOLOR
 
 from tests.core_artifact_fixture import archive_tree, populate, seal_foreign
-
-ICON_DOCUMENT = ROOT / ICON_DOCUMENT
 
 # Cargo is the controlled external boundary. It reports a recording executable as its artifact.
 FAKE_CARGO = """import json, os, pathlib, sys
@@ -89,7 +87,7 @@ class LinuxPrefixTests(unittest.TestCase):
             "packaging/linux",
             "assets/shell-integration",
             "assets/terminfo",
-            ICON_DOCUMENT.relative_to(ROOT),
+            BRAND_HICOLOR,
         ):
             shutil.copytree(
                 ROOT / directory,
@@ -266,23 +264,17 @@ int main(int argc, char **argv) {{
         icon = self.root / "target/development-apps/development/share/icons/hicolor/scalable/apps"
         icon = icon / (APPLICATION_ID + ".svg")
         self.assertIn("Icon=" + str(icon).replace("\\", "\\\\") + "\n", contents)
-        artwork = ElementTree.parse(icon).getroot()
-        self.assertEqual(artwork.tag, "{http://www.w3.org/2000/svg}svg")
-        self.assertEqual(artwork.get("viewBox"), "0 0 1024 1024")
-
-        def shape(element):
-            geometry = {
-                key: value for key, value in element.attrib.items() if key not in ("fill", "stroke")
-            }
-            return element.tag, tuple(sorted(geometry.items()))
-
-        drawn = {shape(element): element for element in artwork.iter()}
-        for layer in (ICON_DOCUMENT / "Assets").iterdir():
-            for element in list(ElementTree.parse(layer).getroot()):
-                self.assertIn(shape(element), drawn, layer.name)
-                for paint in ("fill", "stroke"):
-                    if element.get(paint) not in (None, "none"):
-                        self.assertEqual(drawn[shape(element)].get(paint), "#FFFFFF")
+        # The prefix carries every brand icon, renamed for the Development application ID.
+        brand = ROOT / BRAND_HICOLOR
+        self.assertEqual(
+            icon.read_bytes(),
+            (brand / "scalable/apps/io.github.sadiksaifi.spaceterm.svg").read_bytes(),
+        )
+        symbolic = icon.parent.parent.parent / "symbolic/apps" / (APPLICATION_ID + "-symbolic.svg")
+        self.assertEqual(
+            symbolic.read_bytes(),
+            (brand / "symbolic/apps/io.github.sadiksaifi.spaceterm-symbolic.svg").read_bytes(),
+        )
         parsed = subprocess.run(
             ["desktop-file-validate", str(entry)],
             env=self.environment(),

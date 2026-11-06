@@ -103,8 +103,8 @@ pub struct InstalledApp {
 enum Location {
     /// `<bundle>.app`, removed whole.
     Bundle(PathBuf),
-    /// `<root>/bin/spaceterm-desktop`, with the launcher, icon and desktop entry `install.sh`
-    /// added for it.
+    /// `<root>/bin/spaceterm-desktop`, with the launcher and desktop entry `install.sh` added for
+    /// it.
     Tree(PathBuf),
 }
 
@@ -314,12 +314,6 @@ fn desktop_entry(data_home: &Path, identity: &AppIdentity) -> PathBuf {
         .join(format!("{}.desktop", identity.application_id))
 }
 
-fn icon(data_home: &Path, identity: &AppIdentity) -> PathBuf {
-    data_home
-        .join("icons/hicolor/scalable/apps")
-        .join(format!("{}.svg", identity.application_id))
-}
-
 /// The program a desktop entry's `Exec` key runs.
 fn entry_program(entry: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(entry).ok()?;
@@ -369,16 +363,13 @@ fn exec_program(value: &str) -> Option<String> {
     }
 }
 
-/// Removes the tree and the launcher, icon and desktop entry that point into it.
+/// Removes the tree and the launcher and desktop entry that point into it. The entry names the
+/// tree's own icon, so no icon lives outside it.
 fn remove_tree(root: &Path, identity: &AppIdentity, account: &Account) -> io::Result<()> {
     let executable = root.join("bin").join(EXECUTABLE);
     let launcher = launcher(&account.home, &identity.directory_name);
     if std::fs::read_link(&launcher).is_ok_and(|target| target == executable) {
         std::fs::remove_file(&launcher)?;
-    }
-    let icon = icon(&account.data_home, identity);
-    if std::fs::read_link(&icon).is_ok_and(|target| target.starts_with(root)) {
-        std::fs::remove_file(&icon)?;
     }
     let entry = desktop_entry(&account.data_home, identity);
     if entry_program(&entry).is_some_and(|program| program == executable) {

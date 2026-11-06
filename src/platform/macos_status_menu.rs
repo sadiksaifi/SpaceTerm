@@ -24,7 +24,7 @@ use objc2_app_kit::{
     NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
     NSVariableStatusItemLength,
 };
-use objc2_foundation::{NSMutableAttributedString, NSRange, NSString, ns_string};
+use objc2_foundation::{NSData, NSMutableAttributedString, NSRange, NSString, ns_string};
 use std::{
     cell::{Cell, RefCell},
     ptr::NonNull,
@@ -36,6 +36,12 @@ type Sender = async_channel::Sender<Command>;
 /// The section label over the Machine rows, as Bluetooth labels "Devices".
 const MACHINES_TITLE: &str = "Machines";
 const RECENT_TITLE: &str = "Recent Updates";
+
+/// The brand's 16-point menu bar glyph, and the variant that marks the outer orbit when an item
+/// needs attention. Both are templates, so AppKit tints them for the menu bar's appearance.
+const GLYPH: &[u8] = include_bytes!("../../assets/brand/macos/menu-bar/SpaceTermTemplate.svg");
+const ATTENTION_GLYPH: &[u8] =
+    include_bytes!("../../assets/brand/macos/menu-bar/SpaceTermAttentionTemplate.svg");
 
 thread_local! {
     /// Whether an alert is open. Status updates continue; another alert waits for this one.
@@ -79,6 +85,15 @@ struct StatusItem {
     item: Retained<NSStatusItem>,
     menu: Retained<NSMenu>,
     target: Retained<MenuTarget>,
+    glyph: Option<Retained<NSImage>>,
+    attention_glyph: Option<Retained<NSImage>>,
+}
+
+/// Decodes one embedded SVG glyph as a template image at the size its document declares.
+fn template_image(svg: &[u8]) -> Option<Retained<NSImage>> {
+    let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(svg))?;
+    image.setTemplate(true);
+    Some(image)
 }
 
 impl StatusItem {
@@ -95,6 +110,8 @@ impl StatusItem {
             item,
             menu,
             target,
+            glyph: template_image(GLYPH),
+            attention_glyph: template_image(ATTENTION_GLYPH),
         }
     }
 }
@@ -112,16 +129,14 @@ impl StatusHost for StatusItem {
             return;
         };
         let summary = NSString::from_str(&presentation.summary);
-        let symbol = if presentation.attention {
-            ns_string!("terminal.fill")
+        let glyph = if presentation.attention {
+            &self.attention_glyph
         } else {
-            ns_string!("terminal")
+            &self.glyph
         };
-        if let Some(image) =
-            NSImage::imageWithSystemSymbolName_accessibilityDescription(symbol, Some(&summary))
-        {
-            image.setTemplate(true);
-            button.setImage(Some(&image));
+        if let Some(image) = glyph {
+            image.setAccessibilityDescription(Some(&summary));
+            button.setImage(Some(image));
         }
         button.setToolTip(Some(&summary));
     }
@@ -499,6 +514,18 @@ pub(in crate::platform) mod tests {
     use crate::updates::presentation::{DesktopFacts, Dismissed, Presentation};
     use spaceterm_core::protocol::capability::{Capabilities, Capability};
     use spaceterm_core::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+
+    /// AppKit decodes both embedded glyphs as 16-point templates, which the menu bar tints for
+    /// its appearance. An undecodable glyph would leave the status item without an image.
+    #[test]
+    fn both_menu_bar_glyphs_decode_as_sixteen_point_templates() {
+        for svg in [GLYPH, ATTENTION_GLYPH] {
+            let image = template_image(svg).expect("AppKit decodes the brand glyph");
+            assert!(image.isTemplate());
+            let size = image.size();
+            assert_eq!((size.width, size.height), (16.0, 16.0));
+        }
+    }
 
     /// Every row title at every depth, and the footer rows' commands and keys.
     fn titles(menu: &NSMenu, into: &mut Vec<String>) {

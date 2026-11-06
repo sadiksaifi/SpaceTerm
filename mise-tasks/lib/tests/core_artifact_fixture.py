@@ -145,6 +145,8 @@ def populate(root, tree, expected):
         bundle = tree / core_package.bundle_directory(expected["identity"])
         info = bundle / "Contents/Info.plist"
         info.write_bytes(plistlib.dumps(core_package.core_info(expected["identity"])))
+        for name in core_package.ICON_RESOURCES:
+            (resources / name).write_bytes(b"compiled icon")
 
 
 def seal_foreign(tree, expected):

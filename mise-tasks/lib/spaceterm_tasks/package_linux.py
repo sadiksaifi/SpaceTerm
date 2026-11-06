@@ -13,13 +13,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import xml.etree.ElementTree as ElementTree
 from pathlib import Path, PurePosixPath
 
 from spaceterm_tasks import ROOT, TaskError, macos_signing
 from spaceterm_tasks.cargo import build_executable
-from spaceterm_tasks.development_linux import icon_svg
-from spaceterm_tasks.macos_bundle import identity, identity_directory
+from spaceterm_tasks.macos_bundle import identity
 from spaceterm_tasks.packaging import (
     DESKTOP_FLOOR,
     DIST,
@@ -29,6 +27,9 @@ from spaceterm_tasks.packaging import (
     TERMINFO,
     checked,
     desktop_floor,
+    install_linux_icons,
+    linux_icon_path,
+    linux_icons,
     packaged_environment,
     release_notes_file,
     release_version,
@@ -66,10 +67,6 @@ def desktop_entry(name):
     return ROOT / "packaging" / "linux" / name / f"{application_id(name)}.desktop"
 
 
-def icon_document(name):
-    return identity_directory(name) / f"{identity(name)['CFBundleName']}.icon"
-
-
 def stage(name, executable, tree):
     """Lay out one identity's installed directory at `tree`."""
     (tree / "bin").mkdir(parents=True)
@@ -86,12 +83,7 @@ def stage(name, executable, tree):
     applications = tree / "share" / "applications"
     applications.mkdir()
     shutil.copyfile(desktop_entry(name), applications / f"{identifier}.desktop")
-    icons = tree / "share" / "icons" / "hicolor" / "scalable" / "apps"
-    icons.mkdir(parents=True)
-    try:
-        (icons / f"{identifier}.svg").write_text(icon_svg(icon_document(name)), encoding="utf-8")
-    except ValueError:
-        raise TaskError(f"the {name} icon document could not be flattened") from None
+    install_linux_icons(identifier, tree / "share")
 
 
 def normalized(member):
@@ -216,13 +208,16 @@ def verify_tree(tree, name, release_tag):
     if not entry.is_file() or entry.read_bytes() != desktop_entry(name).read_bytes():
         raise TaskError(f"{label} desktop entry differs from the {name} identity")
     checked(["desktop-file-validate", str(entry)], f"{label} desktop entry is invalid")
-    icon = tree / "share" / "icons" / "hicolor" / "scalable" / "apps" / f"{identifier}.svg"
-    try:
-        root = ElementTree.parse(icon).getroot()
-    except (OSError, ElementTree.ParseError):
-        raise TaskError(f"{label} icon is missing or invalid") from None
-    if root.tag != "{http://www.w3.org/2000/svg}svg":
-        raise TaskError(f"{label} icon is not an SVG document")
+    icons = tree / "share" / "icons"
+    packaged = {
+        f"icons/{path.relative_to(icons).as_posix()}" for path in icons.rglob("*") if path.is_file()
+    }
+    expected = linux_icons(identifier)
+    if packaged != set(expected) or any(
+        (tree / "share" / path).read_bytes() != source.read_bytes()
+        for path, source in expected.items()
+    ):
+        raise TaskError(f"{label} icons differ from the brand icons")
 
 
 def verify_glibc_baseline(executable, label):
@@ -242,7 +237,7 @@ def verify_glibc_baseline(executable, label):
 
 def install_preflight(archive):
     """Install the local archive package() verified, beside the release desktop."""
-    from spaceterm_tasks.development_linux import desktop_registry, exec_argument
+    from spaceterm_tasks.development_linux import desktop_registry, exec_argument, icon_value
 
     home = Path.home()
     parent = home / ".local/lib"
@@ -271,19 +266,20 @@ def install_preflight(archive):
     applications.mkdir(parents=True, exist_ok=True)
     entry = target / "share/applications" / f"{identifier}.desktop"
     contents = entry.read_text(encoding="utf-8")
+    # The entry names the installation's own icon, so it follows every update without links.
+    icon = target / "share" / linux_icon_path(identifier)
     contents = (
         "\n".join(
-            f"Exec={exec_argument(str(executable))} %u" if line.startswith("Exec=") else line
+            f"Exec={exec_argument(str(executable))} %u"
+            if line.startswith("Exec=")
+            else f"Icon={icon_value(icon)}"
+            if line.startswith("Icon=")
+            else line
             for line in contents.splitlines()
         )
         + "\n"
     )
     (applications / entry.name).write_text(contents, encoding="utf-8")
-    icons = applications.parent / "icons/hicolor/scalable/apps"
-    icons.mkdir(parents=True, exist_ok=True)
-    icon = icons / f"{identifier}.svg"
-    icon.unlink(missing_ok=True)
-    icon.symlink_to(target / "share/icons/hicolor/scalable/apps" / icon.name)
     launcher = home / ".local/bin/spaceterm-preflight-desktop"
     launcher.parent.mkdir(parents=True, exist_ok=True)
     if launcher.is_symlink() or not launcher.exists():

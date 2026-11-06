@@ -56,7 +56,6 @@ class PreflightInstallTests(unittest.TestCase):
             )
             registered = data / "applications" / entry.name
             self.assertIn(f'Exec="{target}/bin/spaceterm-desktop" %u\n', registered.read_text())
-            self.assertEqual(
-                (data / "icons/hicolor/scalable/apps" / icon.name).resolve(),
-                (target / icon.relative_to(tree)).resolve(),
-            )
+            # The entry names the installation's own icon instead of linking it into the theme.
+            self.assertIn(f"Icon={target / icon.relative_to(tree)}\n", registered.read_text())
+            self.assertFalse((data / "icons").exists())

@@ -9,15 +9,21 @@ use crate::platform::window_movement::{
 };
 use crate::settings::storage::testing::MemoryStorage;
 
-struct RecordingMovement;
+/// Hands every About window the same recording drag platform, so a test can read its counts.
+#[derive(Default)]
+struct RecordingMovement(Rc<RecordingOperatingSystemWindowDragPlatform>);
 
 impl WindowMovementFactory for RecordingMovement {
     fn create(&self) -> Rc<dyn OperatingSystemWindowDragPlatform> {
-        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+        self.0.clone()
     }
 }
 
 fn install(cx: &mut TestAppContext) {
+    install_with(RecordingMovement::default(), cx);
+}
+
+fn install_with(movement: RecordingMovement, cx: &mut TestAppContext) {
     let settings = crate::settings::Settings::load(MemoryStorage::with_document(
         &crate::settings::SettingsDocument::default(),
     ));
@@ -29,7 +35,7 @@ fn install(cx: &mut TestAppContext) {
         )
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        configure_window_chrome(Rc::new(RecordingMovement), cx);
+        configure_window_chrome(Rc::new(movement), cx);
     });
 }
 
@@ -97,7 +103,7 @@ fn about_is_titled_by_the_running_build_and_closes_from_its_own_shortcuts(cx: &m
 }
 
 #[gpui::test]
-fn about_stacks_icon_name_version_description_and_copyright_on_one_center_line(
+fn about_stacks_icon_name_version_description_repository_and_copyright_on_one_center_line(
     cx: &mut TestAppContext,
 ) {
     install(cx);
@@ -111,6 +117,7 @@ fn about_stacks_icon_name_version_description_and_copyright_on_one_center_line(
         "about-name",
         "about-version",
         "about-description",
+        "about-repository",
         "about-copyright",
     ]
     .map(|selector| {
@@ -131,18 +138,12 @@ fn about_stacks_icon_name_version_description_and_copyright_on_one_center_line(
     // The window is exactly as tall as its content, which wraps inside the text inset.
     let bottom_inset = cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(BOTTOM_INSET));
     assert!(
-        (surface.bottom() - lines[4].bottom() - bottom_inset).abs() <= px(1.0),
+        (surface.bottom() - lines[5].bottom() - bottom_inset).abs() <= px(1.0),
         "{lines:?} in {surface:?}"
     );
     for line in &lines[1..] {
         assert!(line.left() >= surface.left() + px(TEXT_INSET));
     }
-    assert!(
-        opened
-            .read_with(cx, |about, _| about.icon.is_some())
-            .unwrap(),
-        "the icon must draw"
-    );
 }
 
 #[gpui::test]
@@ -250,4 +251,86 @@ fn about_focus_reaches_assistive_technology(cx: &mut TestAppContext) {
         .focused()
         .expect("the focused surface publishes a node");
     assert_eq!(focused["aria"]["role"], "Group");
+}
+
+/// Wayland hands a press in the drag region to the compositor at once, which takes the pointer.
+/// A click on the repository link must open the repository instead of moving the window.
+#[gpui::test]
+fn clicking_the_repository_link_opens_it_without_moving_the_window(cx: &mut TestAppContext) {
+    let movement = RecordingMovement::default();
+    movement.0.handoff_on_press();
+    let drag = movement.0.clone();
+    install_with(movement, cx);
+    let opened = open(cx);
+    let cx = &mut VisualTestContext::from_window(opened.into(), cx);
+    cx.run_until_parked();
+
+    let link = cx
+        .debug_bounds("about-repository")
+        .expect("the repository link was not rendered");
+    cx.simulate_mouse_move(link.center(), None, gpui::Modifiers::none());
+    cx.simulate_click(link.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/sadiksaifi/SpaceTerm")
+    );
+    assert_eq!(drag.counts().0, 0, "the click started a window move");
+}
+
+#[gpui::test]
+fn tab_reaches_the_repository_link_and_return_opens_it(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    install(cx);
+    let opened = open(cx);
+    let cx = &mut VisualTestContext::from_window(opened.into(), cx);
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("tab");
+    let tree = A11yTree::read(cx);
+    let focused = tree.focused().expect("Tab should focus a control");
+    assert_eq!(focused["aria"]["role"], "Link");
+    assert_eq!(focused["aria"]["label"], "GitHub");
+
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/sadiksaifi/SpaceTerm")
+    );
+}
+
+#[gpui::test]
+fn assistive_technology_reads_the_repository_as_one_link_and_can_open_it(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
+
+    install(cx);
+    let opened = open(cx);
+    let cx = &mut VisualTestContext::from_window(opened.into(), cx);
+    cx.activate_accessibility();
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(cx);
+    let links = tree.with_role("Link");
+    let [link] = links[..] else {
+        panic!("About should publish one link, found {links:?}");
+    };
+    assert_eq!(link["aria"]["label"], "GitHub");
+    assert!(supports(link, Action::Click));
+    let labels = tree.with_role("Label");
+    assert!(
+        labels
+            .iter()
+            .all(|label| label["aria"]["value"] != "GitHub"),
+        "the link's word must not be read a second time as a label: {labels:?}"
+    );
+
+    perform(cx, link, Action::Click);
+    cx.run_until_parked();
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/sadiksaifi/SpaceTerm")
+    );
 }
