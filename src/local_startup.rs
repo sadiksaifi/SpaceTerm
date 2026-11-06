@@ -136,7 +136,7 @@ impl Candidate {
 /// Bounded classifications for candidate availability and verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateError {
-    /// This build includes no candidate: no pinned digest or no artifact pair to read.
+    /// This build includes no candidate resource or artifact pair to read.
     Unavailable,
     ClientRestartRequired,
     Verification(CoreError),
@@ -156,10 +156,6 @@ impl From<CandidateError> for CoreError {
 /// Read the pinned candidate without staging files or changing service policy.
 /// Run off the UI thread. Native executable verification occurs during explicit staging.
 pub fn discover_candidate() -> Result<Candidate, CandidateError> {
-    let digest = env!("SPACETERM_CLI_SHA256");
-    if digest.is_empty() {
-        return Err(CandidateError::Unavailable);
-    }
     let paths = artifact_paths(
         cfg!(spaceterm_packaged),
         env!("SPACETERM_TARGET") == "aarch64-apple-darwin",
@@ -168,13 +164,48 @@ pub fn discover_candidate() -> Result<Candidate, CandidateError> {
         std::env::var_os("SPACETERM_CLI_SIGNATURE").map(PathBuf::from),
     )?
     .present()?;
+    if std::fs::metadata(&paths.archive).map_or(true, |metadata| {
+        metadata.len() > spaceterm_core::update::feed::MAX_ARCHIVE
+    }) || std::fs::metadata(&paths.signature).map_or(true, |metadata| metadata.len() != 64)
+    {
+        return Err(CandidateError::Verification(CoreError::RuntimeUnavailable));
+    }
+    let bytes = std::fs::read(&paths.archive)
+        .map_err(|_| CandidateError::Verification(CoreError::RuntimeUnavailable))?;
+    let signature = std::fs::read(&paths.signature)
+        .map_err(|_| CandidateError::Verification(CoreError::RuntimeUnavailable))?;
+    let digest = if cfg!(spaceterm_packaged) {
+        let root = paths
+            .archive
+            .parent()
+            .and_then(Path::parent)
+            .ok_or(CandidateError::Unavailable)?
+            .join("core-artifacts");
+        crate::core_resource_manifest::authorize(
+            &root,
+            env!("SPACETERM_TARGET"),
+            &bytes,
+            &signature,
+        )
+        .map_err(|error| match error {
+            spaceterm_core::update::resource_manifest::ManifestError::Missing => {
+                CandidateError::Unavailable
+            }
+            _ => CandidateError::Verification(CoreError::RuntimeUnavailable),
+        })?
+    } else {
+        // A source Development launch requires an explicit local archive pair. It has no
+        // Release authority and still undergoes Core signature, native and immutable checks.
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(&bytes))
+    };
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
     let metadata = Service::for_identity(identity)
         .and_then(|service| {
             service.inspect_candidate(
                 &paths.archive,
                 &paths.signature,
-                digest,
+                &digest,
                 spaceterm_core::protocol::MAJOR,
             )
         })
@@ -185,7 +216,7 @@ pub fn discover_candidate() -> Result<Candidate, CandidateError> {
     Ok(Candidate {
         metadata,
         paths,
-        digest: digest.to_owned(),
+        digest,
     })
 }
 

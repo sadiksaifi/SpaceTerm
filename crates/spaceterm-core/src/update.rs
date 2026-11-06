@@ -6,6 +6,7 @@ pub mod feed;
 pub mod fetch;
 pub mod ordering;
 pub mod proxy;
+pub mod resource_manifest;
 pub mod source;
 pub mod sources;
 pub mod system;

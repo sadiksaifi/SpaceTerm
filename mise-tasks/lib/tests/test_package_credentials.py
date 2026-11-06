@@ -11,6 +11,7 @@ from unittest.mock import patch
 from spaceterm_tasks import TaskError, disk_image, package_linux, venv
 
 SIGNING_INPUTS = {
+    "SPACETERM_RELEASE_UPDATE_ED25519_SEED": "manifest-seed",
     "UPDATE_SIGNING_KEY": "fixture-update-key",
     "MACOS_SIGNING_CERTIFICATE_P12": "fixture-certificate",
     "MACOS_SIGNING_CERTIFICATE_PASSWORD": "fixture-password",
@@ -44,10 +45,11 @@ class PackageCredentialsTests(unittest.TestCase):
             patch.object(package_linux, "STAGE", Path(temporary) / "stage"),
             patch(
                 "spaceterm_tasks.core_package.prepare_desktop_artifact",
-                return_value={
-                    "SPACETERM_CLI_ARCHIVE": "/verified/artifact.tar.gz",
-                    "SPACETERM_CLI_SIGNATURE": "/verified/artifact.sig",
-                },
+                side_effect=AssertionError("Core resources must be prepared after compilation"),
+            ),
+            patch(
+                "spaceterm_tasks.desktop_manifest.compile_environment",
+                side_effect=lambda env, _: env,
             ),
             patch.object(package_linux.sys, "platform", "linux"),
             patch.object(package_linux.platform, "machine", return_value="x86_64"),

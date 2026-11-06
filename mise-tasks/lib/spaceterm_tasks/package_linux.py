@@ -101,7 +101,7 @@ def write_archive(tree, archive):
         output.add(tree, arcname=tree.name, filter=normalized)
 
 
-def package(release_tag=None, notes=None):
+def package(release_tag=None, notes=None, *, compiled=None):
     """Build, stage, archive, and verify one identity, then move the archive into dist/.
 
     A release embeds the release notes file `notes`.
@@ -111,7 +111,6 @@ def package(release_tag=None, notes=None):
         require_clean_checkout()
     notes_file = release_notes_file(release_tag, notes)
     name = selected_identity(release_tag)
-    display_name = identity(name)["CFBundleName"]
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
     if notes_file is not None:
         environment[RELEASE_NOTES] = str(notes_file)
@@ -119,27 +118,32 @@ def package(release_tag=None, notes=None):
         environment[DESKTOP_FLOOR] = desktop_floor(release_tag)
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
-    from spaceterm_tasks.core_package import prepare_desktop_artifact
+    from spaceterm_tasks.desktop_manifest import (
+        compile_environment,
+        compiled_desktop,
+        prepare_resources,
+        validate_compiled,
+    )
 
-    environment.update(
-        prepare_desktop_artifact(
-            STAGE / DIRECTORIES[name] / "share/spaceterm/core-artifact",
-            DIRECTORIES[name],
-            release_tag,
-            catalog_destination=STAGE / DIRECTORIES[name] / "share/spaceterm/core-artifacts",
-        )
+    if compiled is None:
+        environment = compile_environment(environment, release_tag)
+    executable, compiled_info = compiled_desktop(
+        compiled,
+        environment,
+        lambda env: build_executable(
+            "--release",
+            "--locked",
+            "--no-default-features",
+            "--features",
+            "desktop",
+            env=env,
+            portable_linux=True,
+            metadata="desktop-build-info.json",
+        ),
     )
-    print(f"Building the x86_64 Linux {display_name} executable")
-    executable = build_executable(
-        "--release",
-        "--locked",
-        "--no-default-features",
-        "--features",
-        "desktop",
-        env=environment,
-        portable_linux=True,
-    )
+    validate_compiled(compiled_info, release_tag)
     stage(name, executable, STAGE / DIRECTORIES[name])
+    prepare_resources(STAGE / DIRECTORIES[name], compiled_info, release_tag, macos=False)
     DIST.mkdir(exist_ok=True)
     destination = archive_path(name)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:

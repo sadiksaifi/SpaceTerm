@@ -56,7 +56,7 @@ def require_apple_silicon():
         raise TaskError("SpaceTerm packages only on Apple Silicon Macs")
 
 
-def package(release_tag=None, notes=None):
+def package(release_tag=None, notes=None, *, compiled=None):
     """Build, bundle, and verify one identity, then move the app and disk image into dist/.
 
     A release embeds the release notes file `notes`.
@@ -69,7 +69,7 @@ def package(release_tag=None, notes=None):
         if macos_notary.required(os.environ):
             macos_signing.signing_credentials(os.environ)
             macos_notary.credentials(os.environ)
-    package_bundle(release_tag, notes)
+    package_bundle(release_tag, notes, compiled=compiled)
 
 
 def signer(release_tag):
@@ -92,7 +92,7 @@ def bundle_template(name, release_tag):
     return template
 
 
-def package_bundle(release_tag=None, notes=None):
+def package_bundle(release_tag=None, notes=None, *, compiled=None):
     name = selected_identity(release_tag)
     template = bundle_template(name, release_tag)
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION
@@ -116,26 +116,33 @@ def package_bundle(release_tag=None, notes=None):
         updater = sparkle.directory()
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]
-    from spaceterm_tasks.core_package import prepare_desktop_artifact
+    from spaceterm_tasks.desktop_manifest import (
+        compile_environment,
+        compiled_desktop,
+        prepare_resources,
+        validate_compiled,
+    )
 
-    environment.update(
-        prepare_desktop_artifact(
-            STAGE / "core-artifact",
-            template["CFBundleIdentifier"].removeprefix("com.peblon."),
-            release_tag,
-            catalog_destination=STAGE / "core-artifacts",
-        )
+    if compiled is None:
+        environment = compile_environment(environment, release_tag)
+    executable, compiled_info = compiled_desktop(
+        compiled,
+        environment,
+        lambda env: build_executable(
+            "--release",
+            "--locked",
+            "--no-default-features",
+            "--features",
+            "desktop",
+            env=env,
+            metadata="desktop-build-info.json",
+        ),
     )
-    print(f"Building the Apple Silicon {template['CFBundleName']} executable")
-    executable = build_executable(
-        "--release", "--locked", "--no-default-features", "--features", "desktop", env=environment
-    )
+    validate_compiled(compiled_info, release_tag)
     binaries = STAGE / "binaries"
     binaries.mkdir()
     shutil.copyfile(executable, binaries / template["CFBundleExecutable"])
     (binaries / template["CFBundleExecutable"]).chmod(0o755)
-    config["resources"].append({"src": str(STAGE / "core-artifact"), "target": "core-artifact"})
-    config["resources"].append({"src": str(STAGE / "core-artifacts"), "target": "core-artifacts"})
     config["version"] = version
     # cargo-packager stamps CFBundleVersion with the build time; the identity's Info.plist
     # entries override its generated ones, so add the tag-derived versions to them.
@@ -150,14 +157,18 @@ def package_bundle(release_tag=None, notes=None):
         output = Path(temporary) / "output"
         app = output / f"{app_name}.app"
         dmg = Path(temporary) / f"{app_name}.dmg"
-        print(f"Packaging {app_name}.app with cargo-packager")
-        packaged = subprocess.run(
-            ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
-            cwd=ROOT,
-            env=environment,
-        )
-        if packaged.returncode or not app.is_dir():
-            raise TaskError("cargo-packager did not produce the application")
+        if compiled is not None:
+            assemble_bundle(app, executable, info, config)
+        else:
+            print(f"Packaging {app_name}.app with cargo-packager")
+            packaged = subprocess.run(
+                ["cargo", "packager", "--config", json.dumps(config), "--out-dir", str(output)],
+                cwd=ROOT,
+                env=environment,
+            )
+            if packaged.returncode or not app.is_dir():
+                raise TaskError("cargo-packager did not produce the application")
+        prepare_resources(app, compiled_info, release_tag, macos=True)
         signing = (
             macos_signing.release_keychain(identity_name, os.environ)
             if identity_name != macos_codesign.ADHOC
@@ -193,6 +204,36 @@ def package_bundle(release_tag=None, notes=None):
         app.rename(DIST / app.name)
         dmg.rename(DIST / dmg.name)
     print(f"Created {app_name}.app and {app_name}.dmg in dist")
+
+
+def assemble_bundle(app, executable, info, config):
+    """Assemble an already-compiled unsigned app without invoking Cargo or cargo-packager."""
+    contents = app / "Contents"
+    binaries = contents / "MacOS"
+    resources = contents / "Resources"
+    binaries.mkdir(parents=True)
+    resources.mkdir()
+    shutil.copyfile(executable, binaries / info["CFBundleExecutable"])
+    (binaries / info["CFBundleExecutable"]).chmod(0o755)
+    generated = {
+        "CFBundlePackageType": "APPL",
+        "LSMinimumSystemVersion": MINIMUM_MACOS,
+        "LSApplicationCategoryType": "public.app-category.developer-tools",
+        **info,
+    }
+    (contents / "Info.plist").write_bytes(plistlib.dumps(generated))
+    shutil.copyfile(STAGE / f"{ICON_NAME}.icns", resources / f"{ICON_NAME}.icns")
+    for entry in config["resources"]:
+        source = ROOT / entry["src"]
+        destination = resources / entry["target"]
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copyfile(source, destination)
+    for framework in config["macos"].get("frameworks", []):
+        destination = contents / "Frameworks" / Path(framework).name
+        destination.parent.mkdir(exist_ok=True)
+        shutil.copytree(framework, destination, symlinks=True)
 
 
 def verify(app=None, dmg=None, release_tag=None):

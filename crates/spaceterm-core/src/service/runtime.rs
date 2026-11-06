@@ -471,8 +471,9 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
     #[cfg(target_os = "macos")]
     {
         let layout = Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
-        let requirement = native_requirement(identity, option_env!("SPACETERM_APPLE_TEAM_ID"))
-            .ok_or(CoreError::RuntimeUnavailable)?;
+        let requirement =
+            native_requirement(identity, option_env!("SPACETERM_RELEASE_APPLE_TEAM_ID"))
+                .ok_or(CoreError::RuntimeUnavailable)?;
         verify_signature(&path.join(layout.signed()), &requirement)?;
     }
     #[cfg(not(target_os = "macos"))]
@@ -481,7 +482,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), CoreError> {
 }
 /// The code requirement an installed version's bundle must satisfy. Release adds Apple's
 /// Developer ID requirement for the release Team ID, which release packaging supplies at build
-/// time as `SPACETERM_APPLE_TEAM_ID`, so every Release version from that team satisfies it. A
+/// time as `SPACETERM_RELEASE_APPLE_TEAM_ID`, so every Release version from that team satisfies it. A
 /// Release build without a valid Team ID admits no installed version.
 #[cfg(target_os = "macos")]
 fn native_requirement(identity: &str, team: Option<&str>) -> Option<String> {

@@ -95,10 +95,20 @@ fn verify(directory: &Path, identity: &str, platform: Platform) -> Option<Embedd
     }
     let bytes = std::fs::read(&archive).ok()?;
     let signature = std::fs::read(directory.join("artifact.sig")).ok()?;
-    let sha256 = std::fs::read_to_string(directory.join("artifact.sha256"))
+    let sha256 = if cfg!(spaceterm_packaged) {
+        crate::core_resource_manifest::authorize(
+            directory.parent()?,
+            target(platform),
+            &bytes,
+            &signature,
+        )
         .ok()?
-        .trim()
-        .to_owned();
+    } else {
+        std::fs::read_to_string(directory.join("artifact.sha256"))
+            .ok()?
+            .trim()
+            .to_owned()
+    };
     let metadata = spaceterm_core::service::verify_candidate_bytes(
         identity,
         &bytes,

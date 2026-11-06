@@ -73,6 +73,11 @@ def _snapshot(source, destination, *, require_all):
     try:
         before = os.fstat(descriptor)
         targets = set(os.listdir(descriptor))
+        manifest = {"manifest.json", "manifest.sig"}
+        if targets & manifest:
+            if not manifest <= targets:
+                raise TaskError("the server catalog manifest pair is incomplete")
+            targets -= manifest
         if not targets or not targets <= SUPPORTED or host_target() not in targets:
             raise TaskError("the server catalog has missing or unsupported targets")
         if require_all and targets != SUPPORTED:
