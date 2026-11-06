@@ -14,7 +14,7 @@ set -eu
 readonly RELEASE_KIND='@RELEASE_KIND@'
 readonly DEFAULT_VERSION='@DEFAULT_VERSION@'
 # packaging/update-trust.json owns these keys; assembly checks them before publishing.
-readonly UPDATE_KEY_CURRENT='sNR7I+ZSfwiz/hBiYA0PgrtqqOsJY53yluVe93/tATM='
+readonly UPDATE_KEY_CURRENT='Q+8QfZljC7smEFokME81uRyVkpmPv/7VVWwtqkCcTdU='
 readonly UPDATE_KEY_BACKUP='EprlnUGQNGvhtuT8fhIGmVMJpAm1rjGfgkmts2Beesk='
 
 readonly RELEASES="https://github.com/sadiksaifi/SpaceTerm/releases"
