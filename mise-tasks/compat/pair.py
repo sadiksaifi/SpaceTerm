@@ -17,5 +17,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--candidate", choices=SIDES, required=True, help="The side this commit plays"
     )
+    parser.add_argument("--release-tag", help="The exact planned release tag already at HEAD")
     args = parser.parse_args()
-    main(lambda: pair(args.release, args.candidate))
+    main(lambda: pair(args.release, args.candidate, release_tag=args.release_tag))

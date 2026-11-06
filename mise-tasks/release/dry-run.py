@@ -5,8 +5,7 @@
 
 The steps run in a disposable checkout of HEAD with a dry-run tag, a generated update key,
 ad hoc code signatures and no notarization. Nothing is published. A Mac builds both Core
-targets and the macOS desktop; Linux builds the Linux Core. The release workflow's dry run on
-pull requests runs every step.
+targets and the macOS desktop; Linux builds the Linux Core. The protected signed rehearsal in the release workflow exercises both platforms.
 """
 
 import argparse

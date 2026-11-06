@@ -17,6 +17,8 @@ INPUTS = (
     "packaging/update-trust.json",
     "packaging/linux/toolchain.json",
     "packaging/withdrawn-releases.toml",
+    ".tagsmith.jsonc",
+    "cliff.toml",
 )
 
 
@@ -86,6 +88,10 @@ def create(tag, mode, *, root=ROOT, request=api):
             raise TaskError("signed release dispatches must select main")
         if os.environ.get("GITHUB_SHA") != source:
             raise TaskError("release compilation must use the dispatch's exact source")
+        from spaceterm_tasks import macos_notary
+
+        if not macos_notary.required(os.environ):
+            raise TaskError("signed release plans require Developer ID signing")
         update_signing.release_trust(root)
     floors = release_floor.check(
         version, root, **({"published": lambda: set()} if mode == "unsigned" else {})

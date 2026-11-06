@@ -1,6 +1,7 @@
 """Publish complete immutable drafts while holding Latest for explicit promotion."""
 
 import subprocess
+from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, release_plan, update_signing
 from spaceterm_tasks.release_plan import REPOSITORY, api, pages
@@ -38,6 +39,13 @@ def publish_draft(plan, assets, notes_file, *, request=api, run=subprocess.run):
     ):
         raise TaskError("GitHub could not create the draft release")
     draft = request(f"repos/{REPOSITORY}/releases/tags/{tag}")
+    if (
+        not draft["draft"]
+        or draft.get("prerelease")
+        or draft.get("body") != Path(notes_file).read_text()
+        or draft.get("name") != f"SpaceTerm {tag}"
+    ):
+        raise TaskError("the draft release differs from the planned release notes and identity")
     uploaded = pages(f"repos/{REPOSITORY}/releases/{draft['id']}/assets", request=request)
     known = {item["name"]: item for item in uploaded}
     if set(known) - {path.name for path in assets}:
@@ -74,4 +82,7 @@ def publish_draft(plan, assets, notes_file, *, request=api, run=subprocess.run):
         cwd=ROOT,
     ).returncode:
         raise TaskError("GitHub could not publish the release")
+    published = request(f"repos/{REPOSITORY}/releases/tags/{tag}")
+    if published["draft"] or published.get("immutable") is not True:
+        raise TaskError("GitHub did not publish an immutable release")
     print(f"Published SpaceTerm {tag} with {len(assets)} assets.")

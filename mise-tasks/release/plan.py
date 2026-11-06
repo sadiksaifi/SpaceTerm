@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 
-from spaceterm_tasks import main, release, release_plan
+from spaceterm_tasks import compatibility, main, release, release_plan
 
 
 def run(version, mode):
@@ -35,10 +35,13 @@ def run(version, mode):
         )
     release.write_notes()
     plan = release_plan.create(tag, mode)
+    pairs = compatibility.matrix(compatibility.releases())
     release_plan.PLAN.write_text(json.dumps(plan, indent=2) + "\n")
     if output := os.environ.get("GITHUB_OUTPUT"):
         with open(output, "a") as stream:
             stream.write(f"tag={tag}\nsource={plan['source']}\nmode={mode}\n")
+            stream.write(f"compatibility={json.dumps({'include': pairs})}\n")
+            stream.write(f"compatibility-any={'true' if pairs else 'false'}\n")
     print(f"Planned {tag} at {plan['source']} ({mode})")
 
 

@@ -97,6 +97,7 @@ def run(host):
     tag = prepare_checkout(seed)
     print(f"Dry run of {tag} at HEAD in target/release-dry-run/source")
     environment = macos_signing.signing_environment(os.environ)
+    environment.pop("SPACETERM_RELEASE_UPDATE_TRUST_JSON", None)
     environment.update(
         {
             DRY_RUN: "1",
@@ -122,7 +123,7 @@ def run(host):
     else:
         print(
             "Dry run: the macOS Core and both desktops need a Mac; they are skipped. "
-            "The release workflow's dry run on pull requests runs every step."
+            "The protected signed rehearsal exercises both platforms."
         )
     task("release:assemble", tag, "--partial")
     print("Dry run finished: the assets are in target/release-dry-run/source/dist/release")

@@ -28,6 +28,7 @@ env:
   SPACETERM_RELEASE_APPLE_TEAM_ID: ${{ vars.SPACETERM_RELEASE_APPLE_TEAM_ID }}
   SPACETERM_RELEASE_APPLE_IDENTITY: ${{ vars.SPACETERM_RELEASE_APPLE_IDENTITY }}
   CARGO_INCREMENTAL: '0'
+  CARGO_TARGET_DIR: target/release-build
   RUSTC_WRAPPER: ''
   TZ: UTC
 
@@ -41,6 +42,8 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
       source: ${{ steps.plan.outputs.source }}
       mode: ${{ steps.plan.outputs.mode }}
+      compatibility: ${{ steps.plan.outputs.compatibility }}
+      compatibility-any: ${{ steps.plan.outputs.compatibility-any }}
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,6 +113,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - uses: ./.github/actions/release-build-tools
+        id: tools
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -119,7 +123,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.os == 'macOS' && '~/Library/Caches/zig' || '~/.cache/zig' }}
-          key: release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-${{ github.sha }}
+          key: ${{ steps.tools.outputs.zig-cache-key }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
@@ -144,6 +148,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - uses: ./.github/actions/release-build-tools
+        id: tools
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -153,7 +158,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.os == 'macOS' && '~/Library/Caches/zig' || '~/.cache/zig' }}
-          key: release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-${{ github.sha }}
+          key: ${{ steps.tools.outputs.zig-cache-key }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
@@ -313,11 +318,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.source }}
+          submodules: recursive
           persist-credentials: false
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
-          install_args: python cargo:cargo-packager github:sparkle-project/Sparkle
+          install_args: python github:sparkle-project/Sparkle
           version: 2026.10.4
+      - name: Select the compilation SDK for native resource assembly
+        run: sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
       - uses: ./.github/actions/release-plan
         with:
           artifact-id: ${{ needs.plan.outputs.artifact-id }}
@@ -372,6 +380,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.source }}
+          submodules: recursive
           persist-credentials: false
       - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
@@ -449,9 +458,46 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  compatibility:
+    name: Pair ${{ matrix.candidate }} with ${{ matrix.release }}
+    needs: plan
+    if: needs.plan.outputs.mode != 'unsigned' && needs.plan.outputs.compatibility-any == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.compatibility) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: ./.github/actions/release-build-tools
+      - uses: ./.github/actions/release-plan
+        with:
+          artifact-id: ${{ needs.plan.outputs.artifact-id }}
+      - name: Authorize the disposable floor account's user service
+        if: matrix.candidate == 'client'
+        run: sudo loginctl enable-linger "$USER"
+      - name: Check both protocol lanes against the listed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAIRED_TAG: ${{ matrix.release }}
+          CANDIDATE: ${{ matrix.candidate }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: mise run compat:pair "$PAIRED_TAG" --candidate "$CANDIDATE" --release-tag "$RELEASE_TAG"
+
   publish:
     name: Verify, attest and publish
-    needs: [plan, core-macos, core-linux, desktop-macos, desktop-linux, floor-smoke]
+    needs: [plan, core-macos, core-linux, desktop-macos, desktop-linux, floor-smoke, compatibility]
+    if: >-
+      always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'unsigned' &&
+      needs.core-macos.result == 'success' && needs.core-linux.result == 'success' &&
+      needs.desktop-macos.result == 'success' && needs.desktop-linux.result == 'success' &&
+      needs.floor-smoke.result == 'success' &&
+      (needs.compatibility.result == 'success' ||
+       (needs.plan.outputs.compatibility-any == 'false' && needs.compatibility.result == 'skipped'))
     environment: release
     runs-on: ubuntu-26.04
     timeout-minutes: 20

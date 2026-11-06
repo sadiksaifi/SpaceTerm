@@ -35,7 +35,13 @@ class GitHub:
                 raise AssertionError(
                     "release became visible before its asset inventory was checked"
                 )
-            self.release = {"id": 1, "tag_name": command[3], "draft": True}
+            self.release = {
+                "id": 1,
+                "tag_name": command[3],
+                "draft": True,
+                "body": Path(command[-1]).read_text(),
+                "name": f"SpaceTerm {command[3]}",
+            }
         elif command[2] == "upload":
             for path in command[4:]:
                 self.assets.append(
@@ -48,7 +54,9 @@ class GitHub:
         elif command[2] == "edit":
             if "--latest=false" not in command:
                 raise AssertionError("publication changed Latest")
+            assert self.release is not None
             self.release["draft"] = False
+            self.release["immutable"] = True
         return subprocess.CompletedProcess(command, 0)
 
 
@@ -60,6 +68,7 @@ class PublishTests(unittest.TestCase):
         self.assets = [self.directory / name for name in ("core.tar.gz", "SpaceTerm.dmg")]
         for path in self.assets:
             path.write_bytes(path.name.encode())
+        (self.directory / "notes").write_text("First release of SpaceTerm.\n")
         self.github = GitHub()
         self.plan = {"tag": "v0.10.0", "mode": "publish", "tag_object": self.github.tag_sha}
 
@@ -75,6 +84,7 @@ class PublishTests(unittest.TestCase):
     def test_only_complete_verified_assets_become_published_and_latest_stays_held(self):
         self.publish()
         self.assertEqual(self.github.mutations, ["create", "upload", "edit"])
+        assert self.github.release is not None
         self.assertFalse(self.github.release["draft"])
         self.assertEqual(len(self.github.assets), 2)
         with self.assertRaises(TaskError):
@@ -82,7 +92,7 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.github.mutations, ["create", "upload", "edit"])
 
     def test_retry_reuses_matching_draft_assets_and_uploads_only_missing_assets(self):
-        self.github.release = {"id": 1, "tag_name": "v0.10.0", "draft": True}
+        self.github.release = self.draft()
         path = self.assets[0]
         self.github.assets = [
             {
@@ -96,7 +106,7 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(len(self.github.assets), 2)
 
     def test_retry_refuses_a_draft_with_different_bytes(self):
-        self.github.release = {"id": 1, "tag_name": "v0.10.0", "draft": True}
+        self.github.release = self.draft()
         self.github.assets = [
             {"name": self.assets[0].name, "size": 1, "digest": "sha256:" + "f" * 64}
         ]
@@ -109,4 +119,20 @@ class PublishTests(unittest.TestCase):
         with self.assertRaises(TaskError):
             self.publish()
         self.assertEqual(self.github.mutations, ["create", "upload"])
+        assert self.github.release is not None
         self.assertTrue(self.github.release["draft"])
+
+    def draft(self):
+        return {
+            "id": 1,
+            "tag_name": "v0.10.0",
+            "draft": True,
+            "body": "First release of SpaceTerm.\n",
+            "name": "SpaceTerm v0.10.0",
+        }
+
+    def test_retry_refuses_different_notes_before_uploading_or_publishing(self):
+        self.github.release = {**self.draft(), "body": "Different release notes"}
+        with self.assertRaises(TaskError):
+            self.publish()
+        self.assertEqual(self.github.mutations, [])

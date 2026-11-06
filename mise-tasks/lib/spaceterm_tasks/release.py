@@ -1,18 +1,10 @@
-"""Build, sign and publish one SpaceTerm release from an annotated tag at HEAD.
+"""Package planned release inputs, sign updater feeds and publish complete immutable drafts.
 
-The release workflow runs these steps, each on its own runner:
-
-1. `core`: build SpaceTerm Core once for the host target and sign it once: on macOS Developer
-   ID, the hardened runtime, notarization and stapling, then Ed25519 everywhere.
-2. `notes`: render the release notes with git-cliff before any desktop build.
-3. `desktop_macos` and `desktop_linux`: build each desktop app with both Core builds and the
-   notes embedded. macOS signs, notarizes and staples the app and its disk image and writes the
-   Sparkle appcast.
-4. `assemble`: sign the Linux desktop archive and every feed, add install.sh and SHA256SUMS.
-5. `publish`: upload the assembled assets as one GitHub release.
-
-A dry run runs every step with a generated update key and ad hoc code signatures, skips
-notarization, and never publishes.
+The manual release workflow plans notes and floors, validates alongside compilation, signs
+Core, packages the compiled desktops, exercises the final Core and assembles updater assets.
+Publication holds Latest until the separate promotion workflow runs. Local packaging tasks
+retain their compile-and-package interface. A local compiling dry run uses disposable public
+trust, ad hoc signatures and no notarization or publication.
 """
 
 import base64
@@ -32,6 +24,7 @@ from pathlib import Path
 from spaceterm_tasks import (
     ROOT,
     TaskError,
+    macos_signing,
     release_feed,
     release_floor,
     sparkle,
@@ -370,9 +363,7 @@ def appcast(tag):
     if plist["CFBundleShortVersionString"] != version or plist["CFBundleVersion"] != version:
         raise TaskError("package the selected Git tag before writing its appcast")
     options, stdin = sparkle_signing(os.environ, plist)
-    environment = {
-        key: value for key, value in os.environ.items() if key != update_signing.SIGNING_SECRET
-    }
+    environment = macos_signing.signing_environment(os.environ)
     floor = release_floor.floor("desktop", version)
     previous = floor_appcast(floor, version)
 

@@ -4,6 +4,10 @@ inputs:
   validation:
     description: Install formatting and lint tools for the validation lane
     default: 'false'
+outputs:
+  zig-cache-key:
+    description: Exact native toolchain key restored by this setup
+    value: ${{ steps.zig.outputs.cache-primary-key }}
 runs:
   using: composite
   steps:
@@ -54,7 +58,7 @@ runs:
       with:
         prefix-key: release-v1
         shared-key: ${{ runner.os }}-${{ runner.arch }}-release-${{ inputs.validation }}-${{ steps.native.outputs.key }}-${{ hashFiles('.cargo/config.toml', '**/build.rs', 'third_party/**/patches/*.patch', '.gitmodules', 'packaging/linux/toolchain.json', 'mise.lock', 'rust-toolchain.toml') }}
-        workspaces: '. -> target'
+        workspaces: '. -> target/release-build'
         save-if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     - name: Restore pinned Linux sysroot
       if: runner.os == 'Linux'
@@ -74,9 +78,10 @@ runs:
         path: target/linux-sysroots
         key: ${{ steps.sysroot.outputs.cache-primary-key }}
     - name: Restore Zig dependencies
+      id: zig
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.os == 'macOS' && '~/Library/Caches/zig' || '~/.cache/zig' }}
-        key: release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-${{ github.sha }}
+        key: release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native.outputs.key }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-${{ github.sha }}
         restore-keys: |
-          release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-
+          release-zig-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.native.outputs.key }}-${{ hashFiles('mise.lock', '**/build.rs', '.gitmodules', 'third_party/**/patches/*.patch') }}-
