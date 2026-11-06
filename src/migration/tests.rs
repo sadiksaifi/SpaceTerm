@@ -30,6 +30,125 @@ const LEGACY_SETTINGS: &[u8] =
 const LEGACY_SSH: &[u8] = include_bytes!("../../fixtures/pre-greenfield/v0.6.8/config/ssh_config");
 
 #[test]
+fn reset_archive_publication_preserves_another_resets_snapshot() {
+    use migration::{Area, Store, StoreError};
+    let root = fixtures::scratch("reset-archive-publication");
+    let stores: [Box<dyn Store>; 2] = [
+        Box::new(config_store(native(), root.join("config"))),
+        Box::new(desktop_state(&root)),
+    ];
+    for store in stores {
+        let path = "gen-0/settings.json";
+        store
+            .write(Area::Reset, path, b"other reset's snapshot")
+            .unwrap();
+        assert_eq!(
+            store.write(Area::Reset, path, b"different snapshot"),
+            Err(StoreError::Conflict)
+        );
+        assert_eq!(
+            store.read(Area::Reset, path).unwrap(),
+            Some(b"other reset's snapshot".to_vec())
+        );
+        store
+            .write(Area::Reset, path, b"other reset's snapshot")
+            .unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_preserves_a_save_published_during_archival() {
+    use migration::{Area, Store, StoreError};
+    use std::cell::Cell;
+
+    // A second writer publishes through another real private-filesystem handle as soon as
+    // the archive commits, before the runner removes the source.
+    struct SavingWriter<'a> {
+        store: &'a dyn Store,
+        name: &'a str,
+        successor: &'a [u8],
+        saved: Cell<bool>,
+    }
+    impl Store for SavingWriter<'_> {
+        fn list(&self, area: Area) -> Result<Vec<String>, StoreError> {
+            self.store.list(area)
+        }
+        fn read(&self, area: Area, path: &str) -> Result<Option<Vec<u8>>, StoreError> {
+            self.store.read(area, path)
+        }
+        fn write(&self, area: Area, path: &str, bytes: &[u8]) -> Result<(), StoreError> {
+            self.store.write(area, path, bytes)?;
+            if area == Area::Reset
+                && path == format!("gen-0/{}", self.name)
+                && !self.saved.replace(true)
+            {
+                self.store.write(Area::Root, self.name, self.successor)?;
+            }
+            Ok(())
+        }
+        fn archive_and_remove(
+            &self,
+            path: &str,
+            save: &mut dyn FnMut(&[u8]) -> Result<(), StoreError>,
+        ) -> Result<(), StoreError> {
+            self.store.archive_and_remove(path, save)
+        }
+        fn remove(&self, area: Area, path: &str) -> Result<(), StoreError> {
+            self.store.remove(area, path)
+        }
+    }
+
+    for (name, original) in [(SETTINGS, LEGACY_SETTINGS), ("ssh_config", LEGACY_SSH)] {
+        let root = fixtures::scratch("reset-concurrent-save");
+        let store = config_store(native(), root.clone());
+        let successor = if name == SETTINGS {
+            let mut value: serde_json::Value = serde_json::from_slice(original).unwrap();
+            value["revision"] = 12345.into();
+            serde_json::to_vec(&value).unwrap()
+        } else {
+            String::from_utf8(original.to_vec())
+                .unwrap()
+                .replace("tester", "successor")
+                .into_bytes()
+        };
+        store.write(Area::Root, name, original).unwrap();
+        let competing = SavingWriter {
+            store: &store,
+            name,
+            successor: &successor,
+            saved: Cell::new(false),
+        };
+        assert_eq!(
+            migration::reset_confirmed(&CONFIG, &competing, &mut migration::NoCredentials),
+            Err(Refusal::Storage(StoreError::Conflict))
+        );
+        assert!(competing.saved.get());
+        assert_eq!(
+            store.read(Area::Root, name).unwrap(),
+            Some(successor.clone())
+        );
+        assert_eq!(
+            store.read(Area::Reset, &format!("gen-0/{name}")).unwrap(),
+            Some(original.to_vec())
+        );
+        assert_eq!(store.read(Area::Root, "generation.json").unwrap(), None);
+        // Retrying retains both snapshots before completing the reset.
+        migration::reset_confirmed(&CONFIG, &competing, &mut migration::NoCredentials).unwrap();
+        assert_eq!(store.read(Area::Root, name).unwrap(), None);
+        assert_eq!(
+            store.read(Area::Reset, &format!("gen-0-1/{name}")).unwrap(),
+            Some(successor)
+        );
+        assert_eq!(
+            store.read(Area::Reset, &format!("gen-0/{name}")).unwrap(),
+            Some(original.to_vec())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn pre_greenfield_managed_hosts_alone_offer_settings_recovery() {
     use migration::{Area, Store};
     let root = fixtures::scratch("pre-greenfield-hosts");

@@ -127,6 +127,10 @@ impl Directory {
         }
         Ok(Self(dir))
     }
+    /// Serializes file effects with owning-account writers using the directory's flock.
+    pub(crate) fn transaction(&self) -> Result<Lock, CoreError> {
+        Lock::directory(&self.0)
+    }
     pub fn verify_path(&self, path: &Path) -> Result<(), CoreError> {
         let retained = self
             .0

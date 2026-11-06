@@ -7,7 +7,8 @@ use std::sync::Arc;
 use spaceterm_core::migration::{Area, Store, StoreError};
 
 use crate::platform::secure_filesystem::{
-    SecureCommitOutcome, SecureDirectory, SecureFilesystem, SecureFilesystemError,
+    PrivateFileSnapshot, SecureCommitOutcome, SecureDirectory, SecureFilesystem,
+    SecureFilesystemError,
 };
 
 // Archive oversized Settings without granting them admission to the ordinary reader.
@@ -53,6 +54,24 @@ impl SecureStore {
         Ok((directory, name.to_owned()))
     }
 
+    fn snapshot(
+        &self,
+        directory: &SecureDirectory,
+        name: &str,
+    ) -> Result<Option<PrivateFileSnapshot>, StoreError> {
+        let snapshot = self
+            .filesystem
+            .read_private_file(directory, OsStr::new(name), MAX_BYTES)
+            .map_err(classify)?;
+        if snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.bytes.len() > MAX_BYTES)
+        {
+            return Err(StoreError::Unsafe);
+        }
+        Ok(snapshot)
+    }
+
     fn open(&self, directory: &Path) -> Result<Option<SecureDirectory>, StoreError> {
         self.filesystem
             .open_private_directory(directory)
@@ -86,14 +105,9 @@ impl Store for SecureStore {
         let Some(directory) = self.open(&directory)? else {
             return Ok(None);
         };
-        let snapshot = self
-            .filesystem
-            .read_private_file(&directory, OsStr::new(&name), MAX_BYTES)
-            .map_err(classify)?;
-        match snapshot {
-            Some(snapshot) if snapshot.bytes.len() > MAX_BYTES => Err(StoreError::Unsafe),
-            snapshot => Ok(snapshot.map(|snapshot| snapshot.bytes)),
-        }
+        Ok(self
+            .snapshot(&directory, &name)?
+            .map(|snapshot| snapshot.bytes))
     }
 
     fn write(&self, area: Area, path: &str, bytes: &[u8]) -> Result<(), StoreError> {
@@ -103,11 +117,21 @@ impl Store for SecureStore {
             .ensure_private_directory(&directory)
             .map_err(classify)?;
         for _ in 0..ATTEMPTS {
-            let expected = self
+            let snapshot = self
                 .filesystem
                 .read_private_file(&directory, OsStr::new(&name), MAX_BYTES)
-                .map_err(classify)?
-                .map(|snapshot| snapshot.identity);
+                .map_err(classify)?;
+            if area == Area::Reset
+                && path.starts_with("gen-")
+                && let Some(snapshot) = &snapshot
+            {
+                return if snapshot.bytes == bytes {
+                    Ok(())
+                } else {
+                    Err(StoreError::Conflict)
+                };
+            }
+            let expected = snapshot.map(|snapshot| snapshot.identity);
             let mut nonce = [0; 16];
             getrandom::fill(&mut nonce).map_err(|_| StoreError::Unavailable)?;
             let prepared = match self.filesystem.prepare_private_file(
@@ -126,12 +150,29 @@ impl Store for SecureStore {
                 .map_err(classify)?;
             return match commit.outcome {
                 SecureCommitOutcome::Committed => Ok(()),
-                SecureCommitOutcome::Conflict | SecureCommitOutcome::CommittedButUnsynced => {
-                    Err(StoreError::Unavailable)
-                }
+                SecureCommitOutcome::Conflict => Err(StoreError::Conflict),
+                SecureCommitOutcome::CommittedButUnsynced => Err(StoreError::Unavailable),
             };
         }
         Err(StoreError::Unavailable)
+    }
+
+    fn archive_and_remove(
+        &self,
+        path: &str,
+        save: &mut dyn FnMut(&[u8]) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let (directory, name) = self.locate(Area::Root, path)?;
+        let Some(directory) = self.open(&directory)? else {
+            return Ok(());
+        };
+        let Some(snapshot) = self.snapshot(&directory, &name)? else {
+            return Ok(());
+        };
+        save(&snapshot.bytes)?;
+        self.filesystem
+            .remove_private_file(&directory, OsStr::new(&name), &snapshot.identity)
+            .map_err(classify)
     }
 
     fn remove(&self, area: Area, path: &str) -> Result<(), StoreError> {
@@ -155,6 +196,7 @@ impl Store for SecureStore {
 fn classify(error: SecureFilesystemError) -> StoreError {
     match error {
         SecureFilesystemError::Unsafe => StoreError::Unsafe,
+        SecureFilesystemError::Conflict => StoreError::Conflict,
         _ => StoreError::Unavailable,
     }
 }

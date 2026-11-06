@@ -58,6 +58,16 @@ impl Store for Memory {
         Ok(self.files.borrow().get(&(area(at), path.into())).cloned())
     }
     fn write(&self, at: Area, path: &str, bytes: &[u8]) -> Result<(), StoreError> {
+        if at == Area::Reset
+            && path.starts_with("gen-")
+            && let Some(earlier) = self.read(at, path)?
+        {
+            return if earlier == bytes {
+                Ok(())
+            } else {
+                Err(StoreError::Conflict)
+            };
+        }
         if at == Area::Root && path == MARKER {
             if self.marker_fails.get() {
                 return Err(StoreError::Unavailable);
@@ -69,6 +79,21 @@ impl Store for Memory {
             .insert((area(at), path.into()), bytes.to_vec());
         Ok(())
     }
+    fn archive_and_remove(
+        &self,
+        path: &str,
+        save: &mut dyn FnMut(&[u8]) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let Some(bytes) = self.read(Area::Root, path)? else {
+            return Ok(());
+        };
+        save(&bytes)?;
+        if self.read(Area::Root, path)? != Some(bytes) {
+            return Err(StoreError::Conflict);
+        }
+        self.remove(Area::Root, path)
+    }
+
     fn remove(&self, at: Area, path: &str) -> Result<(), StoreError> {
         self.files.borrow_mut().remove(&(area(at), path.into()));
         Ok(())

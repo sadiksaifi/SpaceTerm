@@ -513,7 +513,7 @@ fn refusal(refusal: Refusal) -> CoreError {
 
 fn storage(error: StoreError) -> CoreError {
     match error {
-        StoreError::Unavailable => CoreError::StorageUnavailable,
+        StoreError::Unavailable | StoreError::Conflict => CoreError::StorageUnavailable,
         StoreError::Unsafe => CoreError::UnsafeStorage,
     }
 }

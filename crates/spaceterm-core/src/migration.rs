@@ -45,6 +45,8 @@ pub struct Unmigratable;
 /// Bounded storage classifications. Paths and native errors never cross this boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum StoreError {
+    #[error("Data storage changed; retry the operation.")]
+    Conflict,
     #[error("Data storage is unavailable.")]
     Unavailable,
     #[error("Data storage has unsafe permissions.")]
@@ -68,9 +70,19 @@ pub trait Store {
     fn list(&self, area: Area) -> Result<Vec<String>, StoreError>;
     fn read(&self, area: Area, path: &str) -> Result<Option<Vec<u8>>, StoreError>;
     /// Replaces `path` whole and durably, creating its directories.
+    /// Reset archives (`Area::Reset`, `gen-*/...`) are immutable: different existing bytes
+    /// return a conflict, including when another reset publishes them during this write.
     fn write(&self, area: Area, path: &str, bytes: &[u8]) -> Result<(), StoreError>;
     /// Removes `path`. An absent file is removed.
     fn remove(&self, area: Area, path: &str) -> Result<(), StoreError>;
+    /// Archives one root-file snapshot through `save`, then removes only that snapshot.
+    /// A competing save must remain in place or be archived too. `save` accesses only the
+    /// reset area, so a store may hold the source directory's writer lock across this call.
+    fn archive_and_remove(
+        &self,
+        path: &str,
+        save: &mut dyn FnMut(&[u8]) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError>;
 }
 
 /// The kinds of data a reset names, without paths or contents.
@@ -768,8 +780,7 @@ fn add_notice(store: &dyn Store, kinds: BTreeSet<DataKind>) -> Result<(), StoreE
 
 /// Moves `path` to `reset/gen-<generation>/`.
 fn set_aside(store: &dyn Store, generation: u32, path: &str) -> Result<(), StoreError> {
-    if let Some(bytes) = store.read(Area::Root, path)? {
-        let mut saved = false;
+    store.archive_and_remove(path, &mut |bytes| {
         for attempt in 0..16 {
             let prefix = if attempt == 0 {
                 format!("gen-{generation}")
@@ -780,16 +791,12 @@ fn set_aside(store: &dyn Store, generation: u32, path: &str) -> Result<(), Store
             match store.read(Area::Reset, &target)? {
                 Some(earlier) if earlier != bytes => continue,
                 Some(_) => {}
-                None => store.write(Area::Reset, &target, &bytes)?,
+                None => store.write(Area::Reset, &target, bytes)?,
             }
-            saved = true;
-            break;
+            return Ok(());
         }
-        if !saved {
-            return Err(StoreError::Unavailable);
-        }
-    }
-    store.remove(Area::Root, path)
+        Err(StoreError::Unavailable)
+    })
 }
 
 fn take_backup(registry: &Registry, store: &dyn Store, generation: u32) -> Result<(), StoreError> {
