@@ -534,6 +534,61 @@ fn desktop_state(root: &std::path::Path) -> DirectoryStore {
 }
 
 #[test]
+fn fresh_desktop_state_admits_current_shared_core_clients_without_reset() {
+    use migration::{Area, Store};
+    let root = fixtures::scratch("fresh-desktop-shared-clients");
+    fixtures::write_client_records(&root.join("core/desktop-first"));
+    let before = files(&root.join("core"));
+    for name in ["first", "second"] {
+        let store = state_store(
+            root.join(name).join("data"),
+            root.join(name).join("state"),
+            root.join("core"),
+        );
+        assert_eq!(store.read(Area::Root, "generation.json").unwrap(), None);
+        assert_eq!(
+            check_state(&store, "spaceterm-development"),
+            StateCheck::Ready { reset: vec![] }
+        );
+        assert!(migration::is_current(&STATE, &store).unwrap());
+        assert_eq!(store.list(Area::Reset).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            migration::reset_confirmed(&STATE, &store, &mut migration::NoCredentials),
+            Ok(vec![])
+        );
+        assert_eq!(files(&root.join("core")), before);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fresh_desktop_state_refuses_legacy_shared_core_client_formats() {
+    use migration::{Area, Store};
+    for format in ["account-local-0", "account-local-2"] {
+        let root = fixtures::scratch("fresh-desktop-legacy-client");
+        let store = desktop_state(&root);
+        let client = [7; 32];
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "format": format, "client": client,
+        }))
+        .unwrap();
+        store
+            .write(Area::Root, "core/desktop/client.json", &bytes)
+            .unwrap();
+        let before = files(&root);
+        assert_eq!(
+            check_state(&store, "spaceterm-development"),
+            StateCheck::ResetRequired {
+                reason: migration::ResetReason::Invalid,
+                kinds: vec![DataKind::ClientRecords],
+            }
+        );
+        assert_eq!(files(&root), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn every_desktop_config_migration_fixture_migrates_and_reads_strictly() {
     fixtures::check(
         &CONFIG,

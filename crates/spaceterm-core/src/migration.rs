@@ -15,8 +15,8 @@
 //!    Rebuildable data moves to `reset/` at once and leaves a one-time [`take_notice`]. Every
 //!    other kind of data waits for the person to confirm [`reset_confirmed`].
 //!
-//! Each registry declares how it admits unmarked files. Desktop roots require a marker and
-//! validate current files before ordinary readers. An empty root starts at the current generation.
+//! Each registry declares how it admits unmarked files. Desktop roots validate current files
+//! before ordinary readers. An empty root starts at the current generation.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -180,9 +180,13 @@ pub struct ArtifactRule {
 pub enum Admission {
     /// Core and CLI roots that predate their markers start at generation 1.
     GenerationOne,
-    /// Desktop roots require a marker. Unmarked files reset as unreadable, without a Stepping
-    /// Stone, and current JSON files must pass their strict readers. Artifacts join any reset.
-    Marked { artifacts: &'static [ArtifactRule] },
+    /// Desktop roots require a marker, except for selected independently versioned files.
+    /// Current JSON files must pass their strict readers. Other unmarked files reset as
+    /// unreadable, without a Stepping Stone. Artifacts join any reset.
+    Marked {
+        artifacts: &'static [ArtifactRule],
+        current_unmarked: fn(&str) -> bool,
+    },
 }
 
 impl Admission {
@@ -227,7 +231,7 @@ impl Registry {
     }
 
     fn artifact(&self, path: &str) -> Option<&ArtifactRule> {
-        let Admission::Marked { artifacts } = self.admission else {
+        let Admission::Marked { artifacts, .. } = self.admission else {
             return None;
         };
         artifacts.iter().find(|rule| (rule.matches)(path))
@@ -465,10 +469,20 @@ fn bring(
             write_marker(store, Area::Root, current)?;
             return Ok(Outcome::Current);
         }
-        None if matches!(registry.admission, Admission::Marked { .. }) => {
-            return reset_rebuildable(registry, store, 0, ResetReason::Invalid);
-        }
-        None => 1,
+        None => match registry.admission {
+            Admission::GenerationOne => 1,
+            Admission::Marked {
+                current_unmarked, ..
+            } => {
+                if !members(registry, store, Area::Root)?
+                    .iter()
+                    .all(|path| current_unmarked(path))
+                {
+                    return reset_rebuildable(registry, store, 0, ResetReason::Invalid);
+                }
+                current
+            }
+        },
     };
     // A backup of the root's own generation belongs to a migration that stopped before its
     // marker, whichever build ran it. Its files may already be rewritten.
@@ -479,7 +493,7 @@ fn bring(
         if matches!(registry.admission, Admission::Marked { .. })
             && !registry.validate_current(store)?
         {
-            return reset_rebuildable(registry, store, generation, ResetReason::Invalid);
+            return reset_rebuildable(registry, store, marked.unwrap_or(0), ResetReason::Invalid);
         }
         if marked.is_none() {
             write_marker(store, Area::Root, current)?;

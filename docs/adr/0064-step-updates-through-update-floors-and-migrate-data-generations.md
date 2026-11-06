@@ -26,7 +26,7 @@ Each root has an ordered list of steps from `oldest` to `current`. A file step r
 
 One runner migrates a root before anything reads it: under the service lock on the Core, under the CLI's own lock, and before Settings load on the desktop.
 
-The greenfield desktop admits only marked data. An empty root starts at the current generation. Unmarked retained files are unreadable and use the existing reset route without a Stepping Stone. A newer marked generation remains unsupported. The desktop reset registries include managed SSH configuration and background image copies, preserving their bytes without readers for their old formats.
+The greenfield desktop admits marked data. An empty root starts at the current generation. Independently versioned Core client records can precede a fresh desktop state root; their strict current-format readers admit them without a desktop marker. Other unmarked retained files use the existing reset route without a Stepping Stone. A newer marked generation remains unsupported. The desktop reset registries include managed SSH configuration and background image copies, preserving their bytes without readers for their old formats.
 
 1. At `current`, desktop roots validate their registered files before admitting them. Other roots do nothing.
 2. From `oldest` up to `current`, it copies the files to `migration-backup/` with their generation, applies the steps in memory, parses every file with its strict reader, writes each file atomically and writes `generation.json` last. A crash before that last write restarts from the backup.

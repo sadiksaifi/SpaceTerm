@@ -30,6 +30,7 @@ const CONFIG_RULES: &[FileRule] = &[FileRule {
 /// The desktop config root's generations, steps and files.
 pub(crate) const CONFIG: Registry = Registry {
     admission: Admission::Marked {
+        current_unmarked: |_| false,
         artifacts: &[ArtifactRule {
             matches: |path| path == "ssh_config",
             kind: DataKind::ManagedSshHosts,
@@ -65,6 +66,9 @@ const STATE_RULES: &[FileRule] = &[
 /// The desktop state root's generations, steps and files.
 pub(crate) const STATE: Registry = Registry {
     admission: Admission::Marked {
+        // Core's account-wide client records can predate a fresh desktop data directory.
+        // Their strict format readers, rather than this desktop's marker, admit them.
+        current_unmarked: |path| path.starts_with("core/"),
         artifacts: &[ArtifactRule {
             matches: |path| {
                 path.strip_prefix("data/background-image-")
