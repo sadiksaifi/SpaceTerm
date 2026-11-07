@@ -35,6 +35,8 @@ class GitHub:
         if "/assets?" in endpoint:
             return self.assets
         if "/releases/tags/" in endpoint:
+            if self.release and self.release["draft"]:
+                raise TaskError("the published release was not found")
             return self.release
         if "/releases?" in endpoint:
             return [self.release] if self.release else []

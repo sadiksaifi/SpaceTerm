@@ -74,7 +74,17 @@ def publish_draft(plan, assets, notes_file, *, request=api, run=subprocess.run):
         ).returncode
     ):
         raise TaskError("GitHub could not create the draft release")
-    draft = request(f"repos/{REPOSITORY}/releases/tags/{tag}")
+    # The tag endpoint returns published releases only. The authenticated listing also
+    # includes drafts; refresh it after creation and reuse it when retrying an existing draft.
+    if not existing:
+        existing = [
+            item
+            for item in pages(f"repos/{REPOSITORY}/releases", request=request)
+            if item["tag_name"] == tag
+        ]
+    if len(existing) != 1:
+        raise TaskError("GitHub did not return exactly one release for the planned tag")
+    draft = existing[0]
     if not draft["draft"]:
         verify_published(draft, plan, assets, notes_file, request, exact=False)
         print(f"SpaceTerm {tag} is already published; this attempt changes nothing.")
