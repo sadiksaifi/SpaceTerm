@@ -1,20 +1,21 @@
-//! The Setup Guide: a panel docked on System Settings' window that names the entry to turn on in a
-//! privacy list. It never activates SpaceTerm or takes keyboard focus.
+//! The Setup Guide: a panel docked beside System Settings' window that names the entry to turn on
+//! in a privacy list. It never activates SpaceTerm or takes keyboard focus.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, DisplayId, FontWeight, HighlightStyle, Pixels, SharedString,
-    StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, accesskit, div, px,
+    AnyElement, App, DisplayId, FontWeight, HighlightStyle, Pixels, SharedString, StyledText,
+    WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions, accesskit, div, px,
 };
 use spaceterm_ui::{
     Button, ButtonActivation, ButtonRole, ButtonSize, ButtonVariant, ControlHost,
     ControlWindowActivity, Icon, IconButton, IconName,
 };
 
+use super::placement::{GuidePlacement, Pointing};
 use super::{GuidePresentation, PermissionSetup, permission_copy};
 use crate::platform::permission_access::SystemPermission;
 use crate::platform::setup_guide_host::SetupGuideHost;
@@ -24,7 +25,7 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 /// The guide's height: the instruction line above one detail row. Its width follows System
-/// Settings' content column.
+/// Settings' window.
 pub(super) const HEIGHT: Pixels = px(92.0);
 
 const PADDING: f32 = 12.0;
@@ -32,11 +33,11 @@ const LINE_HEIGHT: f32 = 20.0;
 /// The detail row's height, close to a row of the System Settings list.
 const ROW_HEIGHT: f32 = 40.0;
 
-/// Opens the guide at `bounds` on `display` without activating SpaceTerm. `holder` names the
+/// Opens the guide at `placement` on `display` without activating SpaceTerm. `holder` names the
 /// entry System Settings lists the grant under.
 pub(super) fn open(
     display: DisplayId,
-    bounds: Bounds<Pixels>,
+    placement: GuidePlacement,
     presentation: GuidePresentation,
     holder: String,
     host: Arc<dyn SetupGuideHost>,
@@ -45,7 +46,7 @@ pub(super) fn open(
 ) -> Option<WindowHandle<SetupGuide>> {
     let opened = cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(WindowBounds::Windowed(placement.bounds)),
             display_id: Some(display),
             titlebar: None,
             focus: false,
@@ -63,6 +64,7 @@ pub(super) fn open(
             let glass = host.configure_window(window, RadiusRole::SurfaceLarge.pixels());
             cx.new(|_| SetupGuide {
                 presentation,
+                pointing: placement.pointing,
                 holder,
                 setup,
                 glass,
@@ -80,6 +82,8 @@ pub(super) fn open(
 
 pub(crate) struct SetupGuide {
     presentation: GuidePresentation,
+    /// Which way the arrow points to reach System Settings' window.
+    pointing: Pointing,
     /// The entry System Settings lists the grant under.
     holder: String,
     setup: WeakEntity<PermissionSetup>,
@@ -92,6 +96,14 @@ impl SetupGuide {
     pub(super) fn present(&mut self, presentation: GuidePresentation, cx: &mut Context<Self>) {
         if self.presentation != presentation {
             self.presentation = presentation;
+            cx.notify();
+        }
+    }
+
+    /// Points the arrow toward System Settings' window from where the guide now docks.
+    pub(super) fn point(&mut self, pointing: Pointing, cx: &mut Context<Self>) {
+        if self.pointing != pointing {
+            self.pointing = pointing;
             cx.notify();
         }
     }
@@ -131,10 +143,15 @@ impl SetupGuide {
         .into_any_element()
     }
 
-    /// The arrow that points at the list.
+    /// The arrow that points toward System Settings' window, which holds the list.
     fn render_arrow(&self, glyph: Pixels, appearance: &ChromeAppearance) -> AnyElement {
+        let name = match self.pointing {
+            Pointing::Up => IconName::ArrowUp,
+            Pointing::Left => IconName::ArrowLeft,
+            Pointing::Right => IconName::ArrowRight,
+        };
         Icon::new(
-            IconName::ArrowUp,
+            name,
             glyph,
             gpui_color(appearance.floating_colors.text_accent),
         )

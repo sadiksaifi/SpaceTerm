@@ -86,7 +86,7 @@ impl Fixture {
     fn show_settings(&self, frame: Bounds<Pixels>, cx: &mut TestAppContext) {
         self.host.set_window(SystemSettingsWindow::Frontmost {
             display: self.display,
-            content: frame,
+            window: frame,
         });
         tick(cx);
     }
@@ -168,7 +168,8 @@ fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppC
     let frame = cx
         .update(|cx| handle.update(cx, |_, window, _| window.bounds()))
         .expect("the guide is open");
-    assert_eq!(frame.bottom(), settings_frame().bottom() - px(12.0));
+    // Below the window, so it covers no row of the privacy list.
+    assert_eq!(frame.top(), settings_frame().bottom() + px(8.0));
     assert_eq!(frame.size.height, super::guide::HEIGHT);
     assert!(frame.left() > settings_frame().left() && frame.right() < settings_frame().right());
     assert_eq!(fixture.host.glass_requests(), 1);
@@ -188,7 +189,7 @@ fn the_guide_follows_system_settings_and_hides_while_it_is_covered(cx: &mut Test
         .window_bounds_requests(handle)
         .last()
         .expect("the guide moved with System Settings");
-    assert_eq!(requested.bottom(), moved.bottom() - px(12.0));
+    assert_eq!(requested.top(), moved.bottom() + px(8.0));
     assert_eq!(display, Some(fixture.display));
     // An unchanged frame asks for no move.
     let requests = cx.window_bounds_requests(handle).len();
@@ -342,14 +343,14 @@ fn a_request_after_a_grant_opens_the_next_list(cx: &mut TestAppContext) {
 }
 
 /// System Settings keeps showing the previous list for a moment after it is asked for another, so
-/// the guide waits before pointing at "the list above".
+/// the guide waits before pointing at it.
 #[gpui::test]
 fn the_guide_waits_for_a_new_list_to_settle(cx: &mut TestAppContext) {
     let fixture = install(NotGranted, NotGranted, cx);
     fixture.start(&[ScreenRecording], cx);
     fixture.host.set_window(SystemSettingsWindow::Frontmost {
         display: fixture.display,
-        content: settings_frame(),
+        window: settings_frame(),
     });
 
     cx.executor().advance_clock(TRACKING_INTERVAL);

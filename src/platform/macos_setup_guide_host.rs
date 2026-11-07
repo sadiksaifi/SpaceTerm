@@ -17,8 +17,6 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use super::setup_guide_host::{SetupGuideHost, SystemSettingsWindow};
 
 const SYSTEM_SETTINGS_BUNDLE_IDENTIFIER: &str = "com.apple.systempreferences";
-/// The width of System Settings' sidebar. The content column beside it holds the privacy list.
-const SIDEBAR_WIDTH: f32 = 232.0;
 /// Windows smaller than this are utility surfaces, such as the window server's own overlays, that
 /// never cover an application.
 const MINIMUM_WINDOW_SIDE: f64 = 40.0;
@@ -48,10 +46,7 @@ impl SetupGuideHost for MacosSetupGuideHost {
                 return SystemSettingsWindow::Covered;
             };
             match display_relative(frame, &active_displays()) {
-                Some((display, window)) => SystemSettingsWindow::Frontmost {
-                    display,
-                    content: content_column(window),
-                },
+                Some((display, window)) => SystemSettingsWindow::Frontmost { display, window },
                 None => SystemSettingsWindow::Covered,
             }
         })
@@ -213,16 +208,6 @@ fn display_relative(
             size(px(frame.size.width as f32), px(frame.size.height as f32)),
         ),
     ))
-}
-
-/// The part of System Settings' window beside its sidebar. A narrow window keeps at least two
-/// thirds of its width for the column.
-fn content_column(window: Bounds<Pixels>) -> Bounds<Pixels> {
-    let sidebar = px(SIDEBAR_WIDTH.min(window.size.width.as_f32() / 3.0));
-    Bounds::new(
-        point(window.left() + sidebar, window.top()),
-        size(window.size.width - sidebar, window.size.height),
-    )
 }
 
 fn area(frame: NSRect) -> f64 {
@@ -407,21 +392,6 @@ pub(in crate::platform) mod tests {
             frontmost_window(&[invisible, tiny, settings], &[SETTINGS]),
             Some(settings.frame)
         );
-    }
-
-    #[test]
-    fn the_content_column_lies_beside_the_sidebar() {
-        let window = Bounds::new(point(px(300.0), px(100.0)), size(px(715.0), px(500.0)));
-        let column = content_column(window);
-        assert_eq!(column.left(), px(532.0));
-        assert_eq!(column.right(), window.right());
-        assert_eq!(
-            (column.top(), column.bottom()),
-            (window.top(), window.bottom())
-        );
-
-        let narrow = Bounds::new(point(px(0.0), px(0.0)), size(px(450.0), px(300.0)));
-        assert_eq!(content_column(narrow).size.width, px(300.0));
     }
 
     #[test]

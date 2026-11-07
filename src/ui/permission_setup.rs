@@ -491,18 +491,18 @@ impl PermissionSetup {
             (SetupStep::Preparing, _) => {}
             // System Settings may still be launching or switching lists.
             (SetupStep::Opening, SystemSettingsWindow::Closed | SystemSettingsWindow::Covered) => {}
-            (SetupStep::Opening, SystemSettingsWindow::Frontmost { display, content }) => {
+            (SetupStep::Opening, SystemSettingsWindow::Frontmost { display, window }) => {
                 if now.saturating_duration_since(run.opened_at) >= OPENING_SETTLE {
                     run.step = SetupStep::Guiding;
                     run._step = None;
                     cx.notify();
-                    self.present_guide(display, content, cx);
+                    self.present_guide(display, window, cx);
                 }
             }
             (_, SystemSettingsWindow::Closed) => self.finish(cx),
             (_, SystemSettingsWindow::Covered) => self.dismiss_guide(cx),
-            (_, SystemSettingsWindow::Frontmost { display, content }) => {
-                self.present_guide(display, content, cx);
+            (_, SystemSettingsWindow::Frontmost { display, window }) => {
+                self.present_guide(display, window, cx);
             }
         }
         next
@@ -558,11 +558,11 @@ impl PermissionSetup {
         }
     }
 
-    /// Docks the guide on System Settings' content column, opening it when it is not open.
+    /// Docks the guide beside System Settings' window, opening it when it is not open.
     fn present_guide(
         &mut self,
         display: DisplayId,
-        content: Bounds<Pixels>,
+        settings: Bounds<Pixels>,
         cx: &mut Context<Self>,
     ) {
         let Some(visible) = cx
@@ -575,7 +575,8 @@ impl PermissionSetup {
         let Some(presentation) = self.presentation() else {
             return;
         };
-        let bounds = placement::place_guide(content, visible, guide::HEIGHT);
+        let placement = placement::place_guide(settings, visible, guide::HEIGHT);
+        let bounds = placement.bounds;
         let holder = holder_name(Some(self.access.holder()));
         let Some(run) = &mut self.run else {
             return;
@@ -586,6 +587,7 @@ impl PermissionSetup {
                 if moved {
                     window.set_bounds(bounds, Some(display));
                 }
+                view.point(placement.pointing, cx);
                 view.present(presentation, cx);
             });
             if presented.is_ok() {
@@ -602,7 +604,7 @@ impl PermissionSetup {
         let setup = cx.weak_entity();
         let host = Arc::clone(&self.host);
         run.guide =
-            guide::open(display, bounds, presentation, holder, host, setup, cx).map(|handle| {
+            guide::open(display, placement, presentation, holder, host, setup, cx).map(|handle| {
                 GuideWindow {
                     handle,
                     display,
