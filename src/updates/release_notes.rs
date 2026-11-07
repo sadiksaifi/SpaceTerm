@@ -9,7 +9,6 @@ use std::sync::LazyLock;
 const VERSION: &str = env!("SPACETERM_VERSION");
 const EMBEDDED: &str = include_str!(concat!(env!("OUT_DIR"), "/release-notes.md"));
 const RELEASED: &str = env!("SPACETERM_RELEASE_NOTES_DATE");
-const RELEASES_URL: &str = "https://github.com/sadiksaifi/SpaceTerm/releases/tag/v";
 const MONTHS: [&str; 12] = [
     "January",
     "February",
@@ -125,7 +124,7 @@ impl ReleaseNotes {
 
     /// This version's release page on GitHub.
     pub(crate) fn github_url(&self) -> String {
-        format!("{RELEASES_URL}{}", self.version)
+        format!("{}/releases/tag/v{}", crate::about::REPOSITORY, self.version)
     }
 }
 
@@ -265,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sheet_names_the_version_its_release_day_and_its_github_page() {
+    fn the_sheet_names_the_version_and_its_release_day() {
         let notes = ReleaseNotes::parse("0.9.0", "2026-11-03", CLIFF).unwrap();
         assert_eq!(notes.title(), "What's new in SpaceTerm 0.9.0");
         assert_eq!(notes.menu_title(), "What's New in SpaceTerm 0.9.0");
@@ -274,12 +273,19 @@ mod tests {
             notes.released(2027).as_deref(),
             Some("Released 3 November 2026")
         );
-        assert_eq!(
-            notes.github_url(),
-            "https://github.com/sadiksaifi/SpaceTerm/releases/tag/v0.9.0"
-        );
         let undated = ReleaseNotes::parse("0.9.0", "2026-13-03", CLIFF).unwrap();
         assert_eq!(undated.released(2026), None);
+    }
+
+    #[test]
+    fn the_github_link_opens_the_release_of_the_version_shown() {
+        for version in ["0.9.0", "0.11.2"] {
+            let notes = ReleaseNotes::parse(version, "", CLIFF).unwrap();
+            assert_eq!(
+                notes.github_url(),
+                format!("https://github.com/sadiksaifi/SpaceTerm/releases/tag/v{version}")
+            );
+        }
     }
 
     #[test]

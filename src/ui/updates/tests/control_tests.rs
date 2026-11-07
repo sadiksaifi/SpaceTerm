@@ -126,7 +126,7 @@ fn the_title_bar_opens_unread_notes_with_and_without_an_application_menu(
 
         let tree = A11yTree::read(visual);
         tree.node(&crate::updates::release_notes::embedded().unwrap().title());
-        tree.node("View on GitHub");
+        tree.node("View release on GitHub");
         assert!(!visual.update(|_, cx| updates.read(cx).release_notes_unread()));
         spaceterm_ui::a11y_testing::perform(
             visual,
@@ -163,7 +163,7 @@ fn closing_the_update_menu_keeps_notes_unread_until_the_sheet_opens(cx: &mut gpu
         .expect("unread notes stay available");
     visual.simulate_click(notes.center(), gpui::Modifiers::none());
     visual.run_until_parked();
-    A11yTree::read(visual).node("View on GitHub");
+    A11yTree::read(visual).node("View release on GitHub");
     assert!(!visual.update(|_, cx| updates.read(cx).release_notes_unread()));
 }
 
