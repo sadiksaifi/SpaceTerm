@@ -239,6 +239,22 @@ mod tests {
         assert_eq!(notes.released(2026), None);
     }
 
+    /// The notes file a release embeds opens with real content: the GitHub release body alone
+    /// carries the download buttons (`release_publish.release_body`).
+    #[test]
+    fn embedded_notes_open_with_the_release_sentence_or_the_first_change_heading() {
+        let first = ReleaseNotes::parse("0.10.0", "2026-11-07", "First release of SpaceTerm.\n");
+        assert_eq!(
+            first.unwrap().blocks().first(),
+            Some(&NotesBlock::Paragraph("First release of SpaceTerm.".into()))
+        );
+        let later = ReleaseNotes::parse("0.11.2", "2026-11-07", CLIFF).unwrap();
+        assert_eq!(
+            later.blocks().first(),
+            Some(&NotesBlock::Heading("Features".into()))
+        );
+    }
+
     #[test]
     fn a_build_without_notes_has_nothing_to_show() {
         assert_eq!(ReleaseNotes::parse("0.9.0", "2026-11-03", ""), None);

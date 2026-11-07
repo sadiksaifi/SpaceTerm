@@ -1,15 +1,14 @@
 [changelog]
 header = ""
-# Every release opens with download buttons for its disk image and Linux desktop archive.
-# They belong in body because the release task strips header and footer.
 # The first release lists no commits.
+# The GitHub release body adds download buttons above these notes (release_publish.py).
 body = """
-{% set v = version | trim_start_matches(pat="v") %}\
-[![Download for macOS](https://img.shields.io/badge/Download-macOS-10B981?style=for-the-badge&labelColor=1F2937&logo=apple&logoColor=white)](https://github.com/sadiksaifi/SpaceTerm/releases/download/{{ version }}/SpaceTerm-{{ v }}-macos-arm64.dmg)&emsp;[![Download for Linux](https://img.shields.io/badge/Download-Linux-10B981?style=for-the-badge&labelColor=1F2937&logo=linux&logoColor=white)](https://github.com/sadiksaifi/SpaceTerm/releases/download/{{ version }}/spaceterm-desktop-{{ v }}-linux-x86_64.tar.gz)
-{% if not previous.version %}
+{% if not previous.version %}\
 First release of SpaceTerm.
 {% else %}\
-{% for group, commits in commits | group_by(attribute="group") %}
+{% for group, commits in commits | group_by(attribute="group") %}\
+{% if not loop.first %}
+{% endif %}\
 ### {{ group }}
 
 {% for commit in commits %}\

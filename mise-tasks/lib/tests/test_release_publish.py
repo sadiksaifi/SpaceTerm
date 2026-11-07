@@ -320,9 +320,24 @@ class PublishTests(unittest.TestCase):
             "id": 1,
             "tag_name": "v0.10.0",
             "draft": True,
-            "body": "First release of SpaceTerm.\n",
+            "body": release_publish.release_body("v0.10.0", self.directory / "notes"),
             "name": "SpaceTerm v0.10.0",
         }
+
+    def test_the_release_body_opens_with_download_buttons_above_the_embedded_notes(self):
+        self.publish()
+        assert self.github.release is not None
+        body = self.github.release["body"]
+        assert isinstance(body, str)
+        buttons, notes = body.split("\n\n", 1)
+        self.assertEqual(buttons, release_publish.download_buttons("0.10.0"))
+        self.assertEqual(notes, "First release of SpaceTerm.\n")
+
+    def test_retry_refuses_a_draft_without_download_buttons(self):
+        self.github.release = {**self.draft(), "body": "First release of SpaceTerm.\n"}
+        with self.assertRaises(TaskError):
+            self.publish()
+        self.assertEqual(self.github.mutations, [])
 
     def test_retry_refuses_different_notes_before_uploading_or_publishing(self):
         self.github.release = {**self.draft(), "body": "Different release notes"}

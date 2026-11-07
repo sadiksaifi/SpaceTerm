@@ -91,7 +91,7 @@ def notes(root=ROOT):
 
 
 def write_notes(output=NOTES, root=ROOT):
-    """Write the notes file that the desktop builds embed and the GitHub release shows."""
+    """Write the notes file that the desktop builds embed and the GitHub release body ends with."""
     text = notes(root)
     if len(text.encode()) > 64 * 1024:
         raise TaskError("the release notes are larger than the 64 KiB a desktop embeds")
