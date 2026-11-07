@@ -53,11 +53,14 @@ impl LaunchAgent {
         )
     }
     /// Registers `runtime`'s bundle with Launch Services before launchd loads an agent that runs
-    /// it, so Login Items can resolve the agent's associated bundle. A failed registration leaves
-    /// the agent running under a fallback name, so it fails no installation or update.
-    fn register_bundle(&self, runtime: &Path) {
-        if let Some(layout) = super::runtime::Layout::host(&self.identity) {
-            let _ = crate::launch_services::register(&runtime.join(layout.signed()));
+    /// it, so Login Items can resolve the agent's associated bundle.
+    fn register_bundle(&self, runtime: &Path) -> Result<(), CoreError> {
+        let layout =
+            super::runtime::Layout::host(&self.identity).ok_or(CoreError::RuntimeUnavailable)?;
+        if crate::launch_services::register(&runtime.join(layout.signed())) {
+            Ok(())
+        } else {
+            Err(CoreError::ServiceUnavailable)
         }
     }
     /// The recovery agent's label, beside the server's.
@@ -181,7 +184,9 @@ impl Supervisor for LaunchAgent {
                 &["bootout".into(), self.target.clone().into()],
             )?;
         }
-        self.register_bundle(candidate);
+        // Login Items attributed the plist's path at installation. Registering the candidate only
+        // keeps Launch Services pointed at the installation that now holds the bundle.
+        let _ = self.register_bundle(candidate);
         self.registration()
             .replace(&self.contents(previous)?, &self.contents(candidate)?)
     }
@@ -191,8 +196,10 @@ impl Supervisor for LaunchAgent {
     fn login_item_off(&self) -> bool {
         login_items::requires_approval(&self.registration().path())
     }
+    /// A failed registration fails the installation before the plist exists, because Login Items
+    /// would otherwise keep the fallback name for the plist's path.
     fn install(&self, runtime: &Path) -> Result<(), CoreError> {
-        self.register_bundle(runtime);
+        self.register_bundle(runtime)?;
         self.registration().install(&self.contents(runtime)?)
     }
     fn check(&self, runtime: &Path, removing: bool) -> Result<(), CoreError> {
@@ -399,6 +406,26 @@ mod tests {
         ] {
             assert!(String::from_utf8(contents).unwrap().contains(association));
         }
+    }
+
+    #[test]
+    fn an_unregistered_bundle_leaves_the_agent_unpublished() {
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-unregistered-{:x}",
+            u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let agent = LaunchAgent {
+            directory: root.join("LaunchAgents"),
+            name: "fixture.plist".into(),
+            label: "fixture".into(),
+            target: "gui/fixture".into(),
+            identity: "spaceterm-development".into(),
+        };
+        let result = agent.install(&root.join("missing-installation"));
+        let published = agent.registration().path().exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result, Err(CoreError::ServiceUnavailable));
+        assert!(!published);
     }
 
     #[test]
