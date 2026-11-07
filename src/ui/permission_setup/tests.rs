@@ -170,8 +170,8 @@ fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppC
         .update(|cx| handle.update(cx, |_, window, _| window.bounds()))
         .expect("the guide is open");
     assert_eq!(frame.bottom(), settings_frame().bottom() - px(12.0));
-    // The instruction, the bundle's row and its caption.
-    assert_eq!(frame.size.height, px(114.0));
+    // The instruction, the bundle's row and its caption line.
+    assert_eq!(frame.size.height, px(122.0));
     assert!(frame.left() > settings_frame().left() && frame.right() < settings_frame().right());
     assert_eq!(fixture.host.glass_requests(), 1);
 }
@@ -286,9 +286,10 @@ fn a_granted_permission_continues_to_the_next_only_when_asked(cx: &mut TestAppCo
     fixture.start(&[Accessibility, ScreenRecording], cx);
     fixture.show_settings(settings_frame(), cx);
     {
-        // While guiding, the drag is the only action besides closing.
+        // While guiding, the drag and its alternative are the only actions besides closing.
         let guide = guide_context(cx);
         assert!(guide.debug_bounds("setup-guide-bundle").is_some());
+        assert!(guide.debug_bounds("setup-guide-list").is_some());
         assert!(guide.debug_bounds("setup-guide-continue").is_none());
     }
 
@@ -669,6 +670,32 @@ fn a_holder_without_a_bundle_is_named_to_turn_on(cx: &mut TestAppContext) {
     assert!(guide.debug_bounds("setup-guide-bundle").is_none());
     let tree = A11yTree::read(guide);
     tree.text("Turn on the app that started SpaceTerm Development to allow Screen Recording.");
+}
+
+/// A person who cannot drag asks the server to list its entry instead, and the guide then names
+/// that entry to turn on. Assistive technology reaches the alternative as a button.
+#[gpui::test]
+fn listing_the_entry_instead_of_dragging_names_it_to_turn_on(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+
+    let guide = guide_context(cx);
+    let tree = A11yTree::read(guide);
+    assert_eq!(tree.node("List Instead")["aria"]["role"], "Button");
+    perform(guide, tree.node("List Instead"), Action::Click);
+    guide.run_until_parked();
+    cx.run_until_parked();
+
+    assert_eq!(*fixture.access.listings.borrow(), [ScreenRecording]);
+    let guide = guide_context(cx);
+    assert!(guide.debug_bounds("setup-guide-list").is_none());
+    let tree = A11yTree::read(guide);
+    tree.text("Turn on SpaceTerm Development to allow Screen Recording.");
+    tree.text("SpaceTerm listed SpaceTerm Development above, turned off.");
 }
 
 /// Dragging the bundle out of the guide hands it to the system, which is what a System Settings

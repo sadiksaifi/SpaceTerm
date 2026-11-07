@@ -82,6 +82,9 @@ pub(crate) enum PermissionSetupReadiness {
     Ready { cleared: bool },
 }
 
+pub(crate) type PermissionListingCompletion =
+    Box<dyn FnOnce(Result<(), PermissionAccessError>) + Send>;
+
 pub(crate) type PermissionSetupCompletion =
     Box<dyn FnOnce(Result<PermissionSetupReadiness, PermissionAccessError>) + Send>;
 
@@ -191,6 +194,15 @@ pub(crate) trait PermissionAccess {
         completion: PermissionSetupCompletion,
     ) -> Result<PermissionSetupPreparation, PermissionAccessError>;
 
+    /// Asks the server for `permission`, so System Settings lists the holder turned off for a
+    /// person who turns the entry on instead of dragging its bundle. The completion may run on
+    /// any thread.
+    fn request_listing(
+        &self,
+        permission: SystemPermission,
+        completion: PermissionListingCompletion,
+    ) -> Result<(), PermissionAccessError>;
+
     fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionAccessError>;
 
     /// What System Settings calls the Accessibility permission, so SpaceTerm sends a person to a
@@ -244,6 +256,7 @@ pub(crate) mod testing {
         /// One signal for each preparation, in order, which tells whether its owner cancelled it.
         pub(crate) preparations: RefCell<Vec<PermissionSetupCancellation>>,
         pub(crate) opened: RefCell<Vec<SystemPermission>>,
+        pub(crate) listings: RefCell<Vec<SystemPermission>>,
         pub(crate) resets: RefCell<Vec<SystemPermission>>,
         pending_resets: RefCell<Vec<PermissionResetCompletion>>,
         /// Reports a change to every observer, as the system does after a grant changes.
@@ -282,6 +295,7 @@ pub(crate) mod testing {
                 prepared: RefCell::default(),
                 preparations: RefCell::default(),
                 opened: RefCell::default(),
+                listings: RefCell::default(),
                 resets: RefCell::default(),
                 pending_resets: RefCell::default(),
                 changes: Rc::default(),
@@ -383,6 +397,16 @@ pub(crate) mod testing {
                     }),
             );
             Ok(preparation)
+        }
+
+        fn request_listing(
+            &self,
+            permission: SystemPermission,
+            completion: PermissionListingCompletion,
+        ) -> Result<(), PermissionAccessError> {
+            self.listings.borrow_mut().push(permission);
+            completion(Ok(()));
+            Ok(())
         }
 
         fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionAccessError> {

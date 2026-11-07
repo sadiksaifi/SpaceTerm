@@ -120,6 +120,9 @@ pub(crate) struct GuidePresentation {
     /// Whether the setup removed the holder's earlier entry, so the guide says why the list no
     /// longer holds it.
     pub(crate) cleared: bool,
+    /// Whether the server listed its entry turned off at the person's request, so the guide names
+    /// the entry to turn on.
+    pub(crate) listed: bool,
     /// The permission set up after this one, when the setup holds another.
     pub(crate) next: Option<SystemPermission>,
     pub(crate) naming: AccessibilityNaming,
@@ -143,6 +146,11 @@ struct SetupRun {
     step: SetupStep,
     /// Whether preparing the current permission removed the holder's earlier entry.
     cleared: bool,
+    /// Whether the server listed the current permission's entry turned off at the person's
+    /// request.
+    listed: bool,
+    /// The current permission's listing request, until the server answers.
+    _listing: Option<Task<()>>,
     guide: Option<GuideWindow>,
     /// The holder's bundle that the guide offers to drag, looked up once for each path the
     /// server reports.
@@ -324,6 +332,8 @@ impl PermissionSetup {
             queued: requested,
             step: SetupStep::Preparing,
             cleared: false,
+            listed: false,
+            _listing: None,
             guide: None,
             bundle: None,
             intervals: 0,
@@ -353,6 +363,43 @@ impl PermissionSetup {
         }
     }
 
+    /// Asks the server to list its entry turned off, for a person who turns it on instead of
+    /// dragging the bundle into the list.
+    pub(crate) fn list_entry(&mut self, cx: &mut Context<Self>) {
+        let Some(run) = &mut self.run else {
+            return;
+        };
+        if run.step != SetupStep::Guiding || run.listed || run._listing.is_some() {
+            return;
+        }
+        let permission = run.permission;
+        let (sender, receiver) = async_channel::bounded(1);
+        let started = self.access.request_listing(
+            permission,
+            Box::new(move |listed| {
+                let _ = sender.try_send(listed);
+            }),
+        );
+        if started.is_err() {
+            return;
+        }
+        run._listing = Some(cx.spawn(async move |setup, cx| {
+            let listed = receiver.recv().await.is_ok_and(|listed| listed.is_ok());
+            let _ = setup.update(cx, |setup, cx| {
+                let Some(run) = &mut setup.run else {
+                    return;
+                };
+                if run.permission != permission {
+                    return;
+                }
+                run._listing = None;
+                run.listed = listed;
+                setup.present(cx);
+                cx.notify();
+            });
+        }));
+    }
+
     /// Moves from a granted permission to the next one.
     pub(crate) fn continue_setup(&mut self, cx: &mut Context<Self>) {
         if self
@@ -369,6 +416,8 @@ impl PermissionSetup {
         };
         run.step = SetupStep::Preparing;
         run.cleared = false;
+        run.listed = false;
+        run._listing = None;
         let permission = run.permission;
         let (sender, receiver) = async_channel::bounded(1);
         let started = self
@@ -534,6 +583,7 @@ impl PermissionSetup {
             permission: run.permission,
             granted: run.step == SetupStep::Granted,
             cleared: run.cleared,
+            listed: run.listed,
             next: run.queued.front().copied(),
             naming: self.naming(),
         })

@@ -30,14 +30,16 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 /// The guide's height while it offers a bundle to drag: the instruction line, the bundle's row,
-/// and one caption line. Its width follows System Settings' content column.
-const DRAGGING_HEIGHT: Pixels = px(114.0);
+/// and the caption line with its alternative to dragging. Its width follows System Settings'
+/// content column.
+const DRAGGING_HEIGHT: Pixels = px(122.0);
 /// The guide's height otherwise: the instruction or result line above one detail row.
 const DETAIL_HEIGHT: Pixels = px(92.0);
 
 const PADDING: f32 = 12.0;
 const LINE_HEIGHT: f32 = 20.0;
-const CAPTION_HEIGHT: f32 = 16.0;
+/// The caption line's height, which holds a small button.
+const CAPTION_HEIGHT: f32 = 24.0;
 /// The space between the bundle's row and the caption line below it.
 const CAPTION_GAP: f32 = 6.0;
 /// The detail and bundle rows' height, close to a row of the System Settings list.
@@ -255,8 +257,8 @@ impl SetupGuide {
         }
     }
 
-    /// The one control besides the drag and Continue. Once every permission is granted it
-    /// finishes the setup; before that it cancels the rest.
+    /// The guide's close control. Once every permission is granted it finishes the setup; before
+    /// that it cancels the rest.
     fn render_close(&self) -> AnyElement {
         let presentation = self.presentation;
         let operation: fn(&mut PermissionSetup, &mut Context<PermissionSetup>) =
@@ -438,7 +440,7 @@ impl SetupGuide {
                 Icon::new(IconName::Check, glyph, gpui_color(colors.success)).into_any_element(),
                 vec![(name, true), (" is allowed.", false)],
             )
-        } else if self.bundle.is_some() {
+        } else if self.bundle.is_some() && !presentation.listed {
             (
                 self.render_arrow(glyph, appearance, cx),
                 vec![
@@ -500,10 +502,7 @@ impl SetupGuide {
                 .role(accesskit::Role::Label)
                 .aria_value(text.clone())
                 .debug_selector(|| "setup-guide-caption".to_owned())
-                .h(px(CAPTION_HEIGHT))
-                .flex()
-                .items_center()
-                .pl(indent)
+                .flex_1()
                 .min_w_0()
                 .truncate()
                 .chrome_text(appearance.typography.style(TextRole::Caption))
@@ -511,17 +510,37 @@ impl SetupGuide {
                 .child(text)
         };
         let body = if let (Some(bundle), false) = (&self.bundle, presentation.granted) {
-            let entry = if presentation.cleared {
+            let entry = if presentation.listed {
+                format!("SpaceTerm listed {holder} above, turned off.")
+            } else if presentation.cleared {
                 format!("SpaceTerm removed an earlier entry for {holder}.")
             } else {
                 format!("If {holder} is listed, turn it on.")
             };
+            // A person who cannot drag asks for the entry instead and turns it on.
+            let list = (!presentation.listed).then(|| {
+                Button::new("setup-guide-list", "List Instead")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Small)
+                    .debug_selector("setup-guide-list")
+                    .on_activate(self.deferred(|setup, cx| setup.list_entry(cx)))
+            });
             div()
                 .flex()
                 .flex_col()
                 .gap(px(CAPTION_GAP))
                 .child(self.render_bundle(bundle, appearance, cx))
-                .child(caption(entry))
+                .child(
+                    div()
+                        .h(px(CAPTION_HEIGHT))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(appearance.spacing(8.0))
+                        .pl(indent)
+                        .child(caption(entry))
+                        .children(list),
+                )
                 .into_any_element()
         } else if presentation.granted {
             let advice = match presentation.permission {

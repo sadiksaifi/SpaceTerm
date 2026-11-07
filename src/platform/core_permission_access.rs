@@ -22,9 +22,9 @@ use super::capture_access::{
 };
 use super::permission_access::{
     AccessibilityNaming, PermissionAccess, PermissionAccessError, PermissionAccessObservation,
-    PermissionAccessSubscription, PermissionAuthorization, PermissionResetCompletion,
-    PermissionSetupCompletion, PermissionSetupPreparation, PermissionSetupReadiness,
-    SystemPermission,
+    PermissionAccessSubscription, PermissionAuthorization, PermissionListingCompletion,
+    PermissionResetCompletion, PermissionSetupCompletion, PermissionSetupPreparation,
+    PermissionSetupReadiness, SystemPermission,
 };
 
 /// A probe answers within three seconds, and the server's own tools within ten each.
@@ -388,6 +388,28 @@ impl PermissionAccess for CorePermissionAccess {
         });
         spawned
             .then_some(preparation)
+            .ok_or(PermissionAccessError::PlatformUnavailable)
+    }
+
+    fn request_listing(
+        &self,
+        permission: SystemPermission,
+        completion: PermissionListingCompletion,
+    ) -> Result<(), PermissionAccessError> {
+        let request = LaneRequest::RequestPermission {
+            permission: core_permission(permission),
+        };
+        let spawned = self.spawn("spaceterm-permission-listing", move |shared| {
+            let reply = shared.call(&request, CHANGE_LIMIT);
+            shared.record(shared.read());
+            completion(match reply {
+                Ok(LaneReply::PermissionRequested(_)) => Ok(()),
+                Ok(_) => Err(PermissionAccessError::PlatformUnavailable),
+                Err(failure) => Err(failure.into()),
+            });
+        });
+        spawned
+            .then_some(())
             .ok_or(PermissionAccessError::PlatformUnavailable)
     }
 
@@ -824,6 +846,34 @@ mod tests {
         assert_eq!(
             decided.recv_timeout(Duration::from_secs(5)).unwrap(),
             CaptureAuthorization::Authorized
+        );
+    }
+
+    /// Listing the entry asks the server for the permission itself, which lists its entry.
+    #[test]
+    fn listing_the_entry_requests_the_permission_from_the_machine() {
+        let lane = Arc::new(ScriptedLane::default());
+        lane.replies
+            .lock()
+            .unwrap()
+            .push(LaneReply::PermissionRequested(RequestOutcome::Requested));
+        let access = access(&lane);
+        settle(&access);
+        let (sender, listed) = std::sync::mpsc::channel();
+        access
+            .request_listing(
+                SystemPermission::Accessibility,
+                Box::new(move |result| sender.send(result).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(listed.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(()));
+        assert!(
+            lane.requests
+                .lock()
+                .unwrap()
+                .contains(&LaneRequest::RequestPermission {
+                    permission: core_permissions::SystemPermission::Accessibility,
+                })
         );
     }
 
