@@ -5,7 +5,7 @@
   "defaults": {
     "tagPattern": "v{version}",
     "tagMessage": "Release SpaceTerm {version}",
-    "initialVersion": "0.0.0"
+    "initialVersion": "0.10.0"
   },
   "targets": {
     "spaceterm": {

@@ -124,7 +124,11 @@ impl ReleaseNotes {
 
     /// This version's release page on GitHub.
     pub(crate) fn github_url(&self) -> String {
-        format!("{}/releases/tag/v{}", crate::about::REPOSITORY, self.version)
+        format!(
+            "{}/releases/tag/v{}",
+            crate::about::REPOSITORY,
+            self.version
+        )
     }
 }
 
