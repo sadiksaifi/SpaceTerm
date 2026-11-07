@@ -193,12 +193,16 @@ class TagPolicyTests(unittest.TestCase):
         )
 
     def test_a_rerun_after_the_tag_was_pushed_still_passes_the_policy(self):
-        release_plan.check_policy("0.10.0", root=self.root)
-        self.git(self.root, "tag", "-a", "v0.10.0", "-m", "Release SpaceTerm 0.10.0")
-        self.git(self.root, "push", "-q", "origin", "v0.10.0")
-        release_plan.check_policy("0.10.0", root=self.root)
+        release_plan.check_policy("0.11.0", root=self.root)
+        self.git(self.root, "tag", "-a", "v0.11.0", "-m", "Release SpaceTerm 0.11.0")
+        self.git(self.root, "push", "-q", "origin", "v0.11.0")
+        release_plan.check_policy("0.11.0", root=self.root)
         with self.assertRaises(TaskError):
             release_plan.check_policy("0.9.0", root=self.root)
+
+    def test_the_deleted_0_10_0_fails_the_policy(self):
+        with self.assertRaises(TaskError):
+            release_plan.check_policy("0.10.0", root=self.root)
 
 
 if __name__ == "__main__":
