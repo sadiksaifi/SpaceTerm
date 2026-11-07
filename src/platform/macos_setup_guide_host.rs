@@ -1,24 +1,37 @@
-//! macOS adapter for the Setup Guide: System Settings' window from the window server's list and
-//! the Liquid Glass material behind the guide.
+//! macOS adapter for the Setup Guide: System Settings' window from the window server's list, the
+//! dragged bundle's icon from AppKit, and the Liquid Glass material behind the guide.
 
 use std::ffi::c_void;
+use std::path::Path;
+use std::sync::Arc;
 
-use gpui::{Bounds, DisplayId, Pixels, point, px, size};
+use gpui::{Bounds, DisplayId, ImageFormat, Pixels, Rgba, point, px, size};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
-use objc2::{MainThreadMarker, MainThreadOnly as _};
+use objc2::{AnyThread as _, MainThreadMarker, MainThreadOnly as _};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSGlassEffectView, NSGlassEffectViewStyle, NSPanel,
-    NSRunningApplication, NSView, NSWindowOrderingMode,
+    NSAttributedStringNSStringDrawing as _, NSAutoresizingMaskOptions, NSBezierPath,
+    NSBitmapImageFileType, NSBitmapImageRep, NSColor, NSDeviceRGBColorSpace, NSFont,
+    NSFontAttributeName, NSFontWeight, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular,
+    NSFontWeightSemibold, NSForegroundColorAttributeName, NSGlassEffectView,
+    NSGlassEffectViewStyle, NSGraphicsContext, NSImage, NSLineBreakMode, NSMutableParagraphStyle,
+    NSPanel, NSParagraphStyleAttributeName, NSRunningApplication, NSView, NSWindowOrderingMode,
+    NSWorkspace,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use super::setup_guide_host::{SetupGuideHost, SystemSettingsWindow};
+use super::setup_guide_host::{
+    ApplicationBundle, ApplicationRowImage, SetupGuideHost, SystemSettingsWindow,
+};
 
 const SYSTEM_SETTINGS_BUNDLE_IDENTIFIER: &str = "com.apple.systempreferences";
 /// The width of System Settings' sidebar. The content column beside it holds the privacy list.
 const SIDEBAR_WIDTH: f32 = 232.0;
+/// The icon's pixel size, enough for the guide's largest presentation on a Retina display.
+const ICON_PIXELS: isize = 128;
 /// Windows smaller than this are utility surfaces, such as the window server's own overlays, that
 /// never cover an application.
 const MINIMUM_WINDOW_SIDE: f64 = 40.0;
@@ -54,6 +67,20 @@ impl SetupGuideHost for MacosSetupGuideHost {
                 },
                 None => SystemSettingsWindow::Covered,
             }
+        })
+    }
+
+    fn application_bundle(&self, path: &Path) -> Option<ApplicationBundle> {
+        autoreleasepool(|_| {
+            if !path.extension().is_some_and(|extension| extension == "app") || !path.is_dir() {
+                return None;
+            }
+            let icon = application_icon(path)?;
+            let png = icon_png(&icon)?;
+            Some(ApplicationBundle {
+                path: path.to_owned(),
+                icon: Arc::new(gpui::Image::from_bytes(ImageFormat::Png, png)),
+            })
         })
     }
 
@@ -94,6 +121,23 @@ impl SetupGuideHost for MacosSetupGuideHost {
         content_view.addSubview_positioned_relativeTo(&glass, NSWindowOrderingMode::Below, None);
         true
     }
+
+    fn draw_application_row(
+        &self,
+        bundle: &Path,
+        row: &ApplicationRowImage,
+    ) -> Option<Arc<gpui::Image>> {
+        autoreleasepool(|_| {
+            let icon = application_icon(bundle)?;
+            let png = row_png(row, &icon)?;
+            Some(Arc::new(gpui::Image::from_bytes(ImageFormat::Png, png)))
+        })
+    }
+}
+
+fn application_icon(path: &Path) -> Option<Retained<NSImage>> {
+    let path = NSString::from_str(path.to_str()?);
+    Some(NSWorkspace::sharedWorkspace().iconForFile(&path))
 }
 
 fn system_settings_processes() -> Vec<i32> {
@@ -238,6 +282,134 @@ fn overlap(first: NSRect, second: NSRect) -> f64 {
 }
 
 /// Draws the icon into a fixed-size bitmap and encodes it as PNG.
+fn icon_png(icon: &NSImage) -> Option<Vec<u8>> {
+    draw_png(ICON_PIXELS, ICON_PIXELS, || {
+        icon.drawInRect(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(ICON_PIXELS as f64, ICON_PIXELS as f64),
+        ));
+    })
+}
+
+/// Draws the row at its device pixel size: a rounded surface with a hairline edge, the icon, and
+/// the name centered on the row's middle and truncated at its end.
+fn row_png(row: &ApplicationRowImage, icon: &NSImage) -> Option<Vec<u8>> {
+    let scale = f64::from(row.scale);
+    let points = |value: Pixels| f64::from(value.as_f32()) * scale;
+    let width = points(row.size.width);
+    let height = points(row.size.height);
+    let icon_size = points(row.icon_size);
+    let name_left = points(row.padding) + icon_size + points(row.gap);
+    let font = NSFont::systemFontOfSize_weight(points(row.font_size), font_weight(row.font_weight));
+    let paragraph = NSMutableParagraphStyle::new();
+    paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    let color = ns_color(row.name_color);
+    // SAFETY: Each attribute key names the type of the value stored beside it.
+    let attributes = unsafe {
+        NSDictionary::<NSString, AnyObject>::from_slices(
+            &[
+                NSFontAttributeName,
+                NSForegroundColorAttributeName,
+                NSParagraphStyleAttributeName,
+            ],
+            &[font.as_ref(), color.as_ref(), paragraph.as_ref()],
+        )
+    };
+    // SAFETY: The attributes hold only the font, color, and paragraph style keys.
+    let name = unsafe {
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &NSString::from_str(&row.name),
+            Some(&attributes),
+        )
+    };
+    let name_height = name.size().height;
+    draw_png(width.ceil() as isize, height.ceil() as isize, || {
+        // Half a pixel in, so the hairline edge lands on whole pixels.
+        let surface = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+            NSRect::new(
+                NSPoint::new(0.5, 0.5),
+                NSSize::new(width - 1.0, height - 1.0),
+            ),
+            points(row.corner_radius),
+            points(row.corner_radius),
+        );
+        ns_color(row.fill).setFill();
+        surface.fill();
+        ns_color(row.border).setStroke();
+        surface.setLineWidth(1.0);
+        surface.stroke();
+        icon.drawInRect(NSRect::new(
+            NSPoint::new(points(row.padding), (height - icon_size) / 2.0),
+            NSSize::new(icon_size, icon_size),
+        ));
+        name.drawInRect(NSRect::new(
+            NSPoint::new(name_left, (height - name_height) / 2.0),
+            NSSize::new(
+                (width - name_left - points(row.padding)).max(0.0),
+                name_height,
+            ),
+        ));
+    })
+}
+
+/// Runs `draw` into a new RGBA bitmap of the given pixel size and encodes the bitmap as PNG.
+fn draw_png(width: isize, height: isize, draw: impl FnOnce()) -> Option<Vec<u8>> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    // SAFETY: Null planes ask AppKit to allocate the bitmap, and every size argument describes the
+    // same 8-bit RGBA layout.
+    let bitmap = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            0,
+            0,
+        )
+    }?;
+    let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&bitmap)?;
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&context));
+    draw();
+    context.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+    // SAFETY: An empty property dictionary asks for the default PNG encoding.
+    let png = unsafe {
+        bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+    }?;
+    Some(png.to_vec())
+}
+
+fn ns_color(color: Rgba) -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from(color.r),
+        f64::from(color.g),
+        f64::from(color.b),
+        f64::from(color.a),
+    )
+}
+
+/// The system font weight nearest a weight from 100 to 900.
+fn font_weight(weight: f32) -> NSFontWeight {
+    // SAFETY: The weight constants are immutable values AppKit exports.
+    unsafe {
+        match weight {
+            weight if weight >= 700.0 => NSFontWeightBold,
+            weight if weight >= 600.0 => NSFontWeightSemibold,
+            weight if weight >= 500.0 => NSFontWeightMedium,
+            _ => NSFontWeightRegular,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(in crate::platform) mod tests {
     use super::*;

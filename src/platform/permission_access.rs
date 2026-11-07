@@ -76,11 +76,14 @@ pub(crate) type PermissionResetCompletion =
 pub(crate) enum PermissionSetupReadiness {
     /// Tools started now already receive the permission, so there is nothing to set up.
     AlreadyGranted,
-    /// System Settings lists the holder for the person to turn on. `cleared` says whether the setup
-    /// removed the holder's earlier entry first. The system does not say whether an entry existed,
-    /// so the removal may have found none.
+    /// System Settings is ready for the person to drag in the holder's bundle or turn on its
+    /// entry. `cleared` says whether the setup removed the holder's earlier entry. The system does
+    /// not say whether an entry existed, so the removal may have found none.
     Ready { cleared: bool },
 }
+
+pub(crate) type PermissionListingCompletion =
+    Box<dyn FnOnce(Result<(), PermissionAccessError>) + Send>;
 
 pub(crate) type PermissionSetupCompletion =
     Box<dyn FnOnce(Result<PermissionSetupReadiness, PermissionAccessError>) + Send>;
@@ -179,9 +182,10 @@ pub(crate) trait PermissionAccess {
     /// Prepares System Settings for a Permission Setup of one permission.
     ///
     /// It verifies the authorization first and reports [`PermissionSetupReadiness::AlreadyGranted`]
-    /// without changing anything when tools already receive the permission. Otherwise it removes
-    /// the holder's entry when it can, because an entry from an earlier build grants nothing, and
-    /// requests the permission again so System Settings lists the holder to turn on. The
+    /// without changing anything when tools already receive the permission. Otherwise the server
+    /// removes its own bundle's entry, which an earlier build may have left, and the person drags
+    /// the bundle into the list. For an application that holds its grants, the server requests
+    /// the permission instead, so System Settings lists that application. The
     /// completion may run on any thread. The caller keeps the returned preparation for as long as
     /// it wants the result.
     fn prepare_setup(
@@ -189,6 +193,15 @@ pub(crate) trait PermissionAccess {
         permission: SystemPermission,
         completion: PermissionSetupCompletion,
     ) -> Result<PermissionSetupPreparation, PermissionAccessError>;
+
+    /// Asks the server for `permission`, so System Settings lists the holder turned off for a
+    /// person who turns the entry on instead of dragging its bundle. The completion may run on
+    /// any thread.
+    fn request_listing(
+        &self,
+        permission: SystemPermission,
+        completion: PermissionListingCompletion,
+    ) -> Result<(), PermissionAccessError>;
 
     fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionAccessError>;
 
@@ -226,6 +239,9 @@ pub(crate) mod testing {
 
     type Authorization = Result<PermissionAuthorization, PermissionAccessError>;
 
+    /// Where the scripted holder's bundle lies.
+    pub(crate) const TEST_BUNDLE: &str = "/data/installations/aa/SpaceTerm Development.app";
+
     /// A capability whose authorization, failures, and pending resets the test controls.
     pub(crate) struct ScriptedPermissionAccess {
         screen_recording: Cell<Authorization>,
@@ -240,6 +256,7 @@ pub(crate) mod testing {
         /// One signal for each preparation, in order, which tells whether its owner cancelled it.
         pub(crate) preparations: RefCell<Vec<PermissionSetupCancellation>>,
         pub(crate) opened: RefCell<Vec<SystemPermission>>,
+        pub(crate) listings: RefCell<Vec<SystemPermission>>,
         pub(crate) resets: RefCell<Vec<SystemPermission>>,
         pending_resets: RefCell<Vec<PermissionResetCompletion>>,
         /// Reports a change to every observer, as the system does after a grant changes.
@@ -278,6 +295,7 @@ pub(crate) mod testing {
                 prepared: RefCell::default(),
                 preparations: RefCell::default(),
                 opened: RefCell::default(),
+                listings: RefCell::default(),
                 resets: RefCell::default(),
                 pending_resets: RefCell::default(),
                 changes: Rc::default(),
@@ -286,6 +304,7 @@ pub(crate) mod testing {
                 naming: Cell::new(AccessibilityNaming::default()),
                 holder: RefCell::new(PermissionHolder::Core {
                     name: "SpaceTerm Development".into(),
+                    bundle: Some(TEST_BUNDLE.into()),
                 }),
             })
         }
@@ -378,6 +397,16 @@ pub(crate) mod testing {
                     }),
             );
             Ok(preparation)
+        }
+
+        fn request_listing(
+            &self,
+            permission: SystemPermission,
+            completion: PermissionListingCompletion,
+        ) -> Result<(), PermissionAccessError> {
+            self.listings.borrow_mut().push(permission);
+            completion(Ok(()));
+            Ok(())
         }
 
         fn open_settings(&self, permission: SystemPermission) -> Result<(), PermissionAccessError> {

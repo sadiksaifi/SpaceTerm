@@ -79,7 +79,10 @@ impl MacosSystemPermissions {
         let name = bundle_name(identity).and_then(|name| name.strip_suffix(".app"));
         let (holder, own) = match (name, bundle) {
             (Some(name), Some(path)) => (
-                PermissionHolder::Core { name: name.into() },
+                PermissionHolder::Core {
+                    name: name.into(),
+                    bundle: Some(path.clone()),
+                },
                 Some(OwnBundle {
                     identifier: bundle_identifier(identity),
                     path,
@@ -173,17 +176,23 @@ impl SystemPermissions for MacosSystemPermissions {
         if cancelled() {
             return Ok(SetupReadiness::Cancelled { cleared: false });
         }
-        // A failed reset leaves an entry the person turns on instead.
-        let cleared = self.own.as_ref().is_some_and(|own| {
-            self.native
-                .reset(tcc_service(permission), &own.identifier)
-                .is_ok()
-        });
-        if self.ask(permission, cancelled)? {
-            Ok(SetupReadiness::Ready { cleared })
-        } else {
-            Ok(SetupReadiness::Cancelled { cleared })
-        }
+        let Some(own) = &self.own else {
+            // An application that holds the grants for its server is listed by a request.
+            return if self.ask(permission, cancelled)? {
+                Ok(SetupReadiness::Ready { cleared: false })
+            } else {
+                Ok(SetupReadiness::Cancelled { cleared: false })
+            };
+        };
+        // The person drags the server's bundle into the list, where it arrives turned on. The
+        // setup removes the earlier entry and requests nothing, as the desktop's own setup did
+        // before the server held the grants: a request lists the bundle turned off and raises the
+        // system's own alert. A failed reset leaves an entry the person turns on instead.
+        let cleared = self
+            .native
+            .reset(tcc_service(permission), &own.identifier)
+            .is_ok();
+        Ok(SetupReadiness::Ready { cleared })
     }
 
     fn reset(&self, permission: SystemPermission) -> Result<(), PermissionError> {
@@ -534,7 +543,8 @@ mod tests {
         assert_eq!(
             report.holder,
             PermissionHolder::Core {
-                name: "SpaceTerm Core Preflight".into()
+                name: "SpaceTerm Core Preflight".into(),
+                bundle: Some(PathBuf::from(OWN_BUNDLE)),
             }
         );
         assert!(report.resettable);
@@ -632,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn a_setup_clears_the_machines_earlier_entry_before_requesting_again() {
+    fn a_setup_clears_the_machines_earlier_entry_and_requests_nothing() {
         let (permissions, scripted) = permissions(
             true,
             &[(SystemPermission::Accessibility, PermissionState::NotGranted)],
@@ -643,12 +653,8 @@ mod tests {
         );
         assert_eq!(
             effects(&scripted),
-            [
-                "probe".to_owned(),
-                format!("reset Accessibility {BUNDLE}"),
-                REGISTER.to_owned(),
-                "request accessibility".to_owned(),
-            ]
+            ["probe".to_owned(), format!("reset Accessibility {BUNDLE}"),],
+            "a request would list the dragged bundle turned off"
         );
 
         scripted
@@ -683,10 +689,9 @@ mod tests {
         assert_eq!(effects(&scripted), ["probe"]);
     }
 
-    /// A setup cancelled while it waited resets nothing, and one cancelled after its reset makes
-    /// no request, so no prompt appears after the person cancelled.
+    /// A setup cancelled while it waited resets nothing.
     #[test]
-    fn a_cancelled_setup_takes_no_further_effect() {
+    fn a_cancelled_setup_takes_no_effect() {
         let (permissions, scripted) = permissions(
             true,
             &[(
@@ -699,58 +704,11 @@ mod tests {
             Ok(SetupReadiness::Cancelled { cleared: false })
         );
         assert_eq!(effects(&scripted), ["probe"]);
-
-        let checks = std::sync::atomic::AtomicUsize::new(0);
-        let cancelled_after_reset =
-            || checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0;
-        assert_eq!(
-            permissions.prepare_setup(SystemPermission::ScreenRecording, &cancelled_after_reset),
-            Ok(SetupReadiness::Cancelled { cleared: true })
-        );
-        assert_eq!(
-            effects(&scripted),
-            [
-                "probe".to_owned(),
-                format!("reset ScreenCapture {BUNDLE}"),
-                REGISTER.to_owned(),
-            ]
-        );
     }
 
-    /// A Cancel the server acknowledges while Launch Services registers the bundle still stops
-    /// the request, because the last check follows the registration.
+    /// Each repeated setup clears the entry an earlier one may have left.
     #[test]
-    fn a_setup_cancelled_during_registration_makes_no_request() {
-        let (permissions, scripted) = permissions(
-            true,
-            &[(SystemPermission::Accessibility, PermissionState::NotGranted)],
-        );
-        let cancelled_by_registration = || {
-            scripted
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|effect| effect.starts_with("register "))
-        };
-        assert_eq!(
-            permissions.prepare_setup(SystemPermission::Accessibility, &cancelled_by_registration),
-            Ok(SetupReadiness::Cancelled { cleared: true })
-        );
-        assert_eq!(
-            effects(&scripted),
-            [
-                "probe".to_owned(),
-                format!("reset Accessibility {BUNDLE}"),
-                REGISTER.to_owned(),
-            ],
-            "the request never follows a registration the person cancelled during"
-        );
-    }
-
-    /// A setup after a reset requests again, so each repeated setup lists the server anew.
-    #[test]
-    fn a_repeated_setup_requests_each_time() {
+    fn a_repeated_setup_clears_each_time() {
         let (permissions, scripted) = permissions(
             true,
             &[(
@@ -764,11 +722,11 @@ mod tests {
                 Ok(SetupReadiness::Ready { cleared: true })
             );
         }
-        let requests = effects(&scripted)
+        let resets = effects(&scripted)
             .into_iter()
-            .filter(|effect| effect == "request screen_recording")
+            .filter(|effect| effect == &format!("reset ScreenCapture {BUNDLE}"))
             .count();
-        assert_eq!(requests, 2);
+        assert_eq!(resets, 2);
     }
 
     #[test]

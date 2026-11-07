@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyWindowHandle, Bounds, DisplayId, Entity, Modifiers, Pixels, TestAppContext,
-    VisualTestContext, WindowHandle, bounds, point, px, size,
+    AnyWindowHandle, Bounds, DisplayId, Entity, ExternalDragPayload, FileDragIcon, Modifiers,
+    MouseButton, Pixels, TestAppContext, VisualTestContext, WindowHandle, bounds, point, px, size,
 };
 
 use super::{
@@ -15,9 +15,10 @@ use super::{
 };
 use crate::appearance::Appearance;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
-use crate::platform::permission_access::testing::ScriptedPermissionAccess;
+use crate::platform::permission_access::testing::{ScriptedPermissionAccess, TEST_BUNDLE};
 use crate::platform::permission_access::{
-    AccessibilityNaming, PermissionAccessError, PermissionAuthorization, SystemPermission,
+    AccessibilityNaming, PermissionAccessError, PermissionAuthorization, PermissionHolder,
+    SystemPermission,
 };
 use crate::platform::setup_guide_host::testing::ScriptedSetupGuideHost;
 use crate::platform::setup_guide_host::{SetupGuideHost as _, SystemSettingsWindow};
@@ -169,7 +170,8 @@ fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppC
         .update(|cx| handle.update(cx, |_, window, _| window.bounds()))
         .expect("the guide is open");
     assert_eq!(frame.bottom(), settings_frame().bottom() - px(12.0));
-    assert_eq!(frame.size.height, super::guide::HEIGHT);
+    // The instruction, the bundle's row and its caption line.
+    assert_eq!(frame.size.height, px(122.0));
     assert!(frame.left() > settings_frame().left() && frame.right() < settings_frame().right());
     assert_eq!(fixture.host.glass_requests(), 1);
 }
@@ -284,9 +286,10 @@ fn a_granted_permission_continues_to_the_next_only_when_asked(cx: &mut TestAppCo
     fixture.start(&[Accessibility, ScreenRecording], cx);
     fixture.show_settings(settings_frame(), cx);
     {
-        // While guiding, closing is the only action.
+        // While guiding, the drag and its alternative are the only actions besides closing.
         let guide = guide_context(cx);
-        assert!(guide.debug_bounds("setup-guide-detail").is_some());
+        assert!(guide.debug_bounds("setup-guide-bundle").is_some());
+        assert!(guide.debug_bounds("setup-guide-list").is_some());
         assert!(guide.debug_bounds("setup-guide-continue").is_none());
     }
 
@@ -626,11 +629,10 @@ fn the_setup_names_accessibility_as_the_system_does(cx: &mut TestAppContext) {
     }
 }
 
-/// The guide never takes focus, so assistive technology reads its instruction, which names the
-/// server's entry to turn on, and its detail as published text, and closes it through the same
-/// button.
+/// The guide never takes focus, so assistive technology reads its instruction, the server's
+/// bundle to drag, and its caption as published text, and closes it through the same button.
 #[gpui::test]
-fn the_guide_publishes_its_instruction_and_the_entry_to_turn_on(cx: &mut TestAppContext) {
+fn the_guide_publishes_its_instruction_and_the_bundle_to_drag(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
@@ -640,15 +642,113 @@ fn the_guide_publishes_its_instruction_and_the_entry_to_turn_on(cx: &mut TestApp
 
     let guide = guide_context(cx);
     let tree = A11yTree::read(guide);
-    tree.text("Turn on SpaceTerm Development to allow Screen Recording.");
-    tree.text(
-        "SpaceTerm removed an earlier entry for SpaceTerm Development and asked the system to list it again.",
-    );
+    tree.text("Drag SpaceTerm Development to the list above to allow Screen Recording.");
+    let row = tree.node("SpaceTerm Development");
+    assert_eq!(row["aria"]["role"], "Group");
+    assert_eq!(row["aria"]["description"], "Drag to the list above");
+    tree.text("SpaceTerm removed an earlier entry for SpaceTerm Development.");
 
     perform(guide, tree.node("Close"), Action::Click);
     guide.run_until_parked();
     assert_eq!(fixture.current(cx), None);
     assert!(self::guide(cx).is_none());
+}
+
+/// An application that holds the grants for its server has no bundle to offer, so the guide names
+/// the entry to turn on instead.
+#[gpui::test]
+fn a_holder_without_a_bundle_is_named_to_turn_on(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let fixture = install(NotGranted, NotGranted, cx);
+    *fixture.access.holder.borrow_mut() = PermissionHolder::Launcher;
+    fixture.access.resettable.set(false);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+
+    let guide = guide_context(cx);
+    assert!(guide.debug_bounds("setup-guide-bundle").is_none());
+    let tree = A11yTree::read(guide);
+    tree.text("Turn on the app that started SpaceTerm Development to allow Screen Recording.");
+}
+
+/// A person who cannot drag asks the server to list its entry instead, and the guide then names
+/// that entry to turn on. Assistive technology reaches the alternative as a button.
+#[gpui::test]
+fn listing_the_entry_instead_of_dragging_names_it_to_turn_on(cx: &mut TestAppContext) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+
+    let guide = guide_context(cx);
+    let tree = A11yTree::read(guide);
+    assert_eq!(tree.node("List Instead")["aria"]["role"], "Button");
+    perform(guide, tree.node("List Instead"), Action::Click);
+    guide.run_until_parked();
+    cx.run_until_parked();
+
+    assert_eq!(*fixture.access.listings.borrow(), [ScreenRecording]);
+    let guide = guide_context(cx);
+    assert!(guide.debug_bounds("setup-guide-list").is_none());
+    let tree = A11yTree::read(guide);
+    tree.text("Turn on SpaceTerm Development to allow Screen Recording.");
+    tree.text("SpaceTerm listed SpaceTerm Development above, turned off.");
+}
+
+/// Dragging the bundle out of the guide hands it to the system, which is what a System Settings
+/// list accepts, drawn as a copy of the row held where the pointer took it.
+#[gpui::test]
+fn dragging_the_bundle_out_of_the_guide_offers_it_to_the_list(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[ScreenRecording], cx);
+    fixture.show_settings(settings_frame(), cx);
+    let handle: AnyWindowHandle = guide(cx).expect("the guide is open").into();
+    let row = {
+        let guide = guide_context(cx);
+        let row = guide
+            .debug_bounds("setup-guide-bundle")
+            .expect("the bundle is offered");
+        let start = row.center();
+        guide.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        guide.simulate_mouse_move(
+            start + point(px(10.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        guide.simulate_mouse_move(
+            point(px(-1.0), start.y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        row
+    };
+
+    let drawn = fixture.host.drawn_rows();
+    assert_eq!(drawn.len(), 1);
+    assert_eq!(drawn[0].0, std::path::Path::new(TEST_BUNDLE));
+    assert_eq!(drawn[0].1.size, row.size);
+    assert_eq!(drawn[0].1.name, "SpaceTerm Development");
+    let payloads = cx.external_drag_payloads(handle);
+    let [ExternalDragPayload::Files(files)] = payloads.as_slice() else {
+        panic!("one file drag");
+    };
+    assert_eq!(files.entries(), [(TEST_BUNDLE.into(), true)]);
+    let FileDragIcon::Image {
+        size,
+        cursor_offset,
+        ..
+    } = files.icon()
+    else {
+        panic!("the drag shows the row");
+    };
+    assert_eq!(*size, row.size);
+    assert!(
+        Bounds::new(point(px(0.0), px(0.0)), row.size).contains(cursor_offset),
+        "the pointer holds the row"
+    );
 }
 
 #[gpui::test]
