@@ -263,6 +263,7 @@ fn expected_holder(identity: &str) -> PermissionHolder {
         .and_then(|name| name.strip_suffix(".app"))
         .map_or(PermissionHolder::Launcher, |name| PermissionHolder::Core {
             name: name.to_owned(),
+            bundle: None,
         })
 }
 
@@ -576,6 +577,7 @@ mod tests {
             accessibility_naming: core_permissions::AccessibilityNaming::Accessibility,
             holder: PermissionHolder::Core {
                 name: "SpaceTerm".into(),
+                bundle: None,
             },
             resettable: true,
         }
@@ -634,7 +636,8 @@ mod tests {
         assert_eq!(
             PermissionAccess::holder(&access),
             PermissionHolder::Core {
-                name: "SpaceTerm".into()
+                name: "SpaceTerm".into(),
+                bundle: None,
             }
         );
     }
@@ -657,7 +660,8 @@ mod tests {
         assert_eq!(
             PermissionAccess::holder(&access),
             PermissionHolder::Core {
-                name: "SpaceTerm Core".into()
+                name: "SpaceTerm Core".into(),
+                bundle: None,
             },
             "the holder System Settings is expected to list"
         );

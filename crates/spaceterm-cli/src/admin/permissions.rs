@@ -284,14 +284,14 @@ fn state(state: PermissionState) -> &'static str {
 
 fn holder_name(holder: &PermissionHolder) -> &str {
     match holder {
-        PermissionHolder::Core { name } => name,
+        PermissionHolder::Core { name, .. } => name,
         PermissionHolder::Launcher => "the app that started SpaceTerm",
     }
 }
 
 fn holder_sentence(holder: &PermissionHolder) -> String {
     match holder {
-        PermissionHolder::Core { name } => {
+        PermissionHolder::Core { name, .. } => {
             format!("System Settings lists these permissions under {name}.")
         }
         PermissionHolder::Launcher => {
@@ -358,6 +358,7 @@ mod tests {
             core(),
             &report(PermissionHolder::Core {
                 name: "SpaceTerm".into(),
+                bundle: None,
             }),
         );
         crate::contract::golden::assert_golden("permissions", &envelope);
@@ -385,6 +386,7 @@ mod tests {
         };
         let held = report(PermissionHolder::Core {
             name: "SpaceTerm".into(),
+            bundle: None,
         });
         let text =
             |permission, outcome| requested(&context, core(), permission, outcome, Some(&held)).1;

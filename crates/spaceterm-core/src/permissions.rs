@@ -10,6 +10,7 @@
 //! screen or sends input to test a grant. [ADR 0061](../../../docs/adr/0061-own-system-permissions-in-the-server-package.md)
 //! records the decisions.
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(target_os = "macos")]
@@ -90,7 +91,13 @@ pub enum AccessibilityNaming {
 #[serde(tag = "holder", rename_all = "snake_case")]
 pub enum PermissionHolder {
     /// The server's own bundle, which launchd started. `name` is how System Settings lists it.
-    Core { name: String },
+    /// `bundle` is where that bundle lies, which a person drags into a System Settings list to
+    /// grant a permission. It is absent until the server reports it.
+    Core {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bundle: Option<PathBuf>,
+    },
     /// The application that started this server holds them, as a terminal holds the grants of a
     /// Development server it runs.
     Launcher,
@@ -138,8 +145,10 @@ pub enum RequestOutcome {
 pub enum SetupReadiness {
     /// Programs started now already receive the permission, so nothing changed.
     AlreadyGranted,
-    /// System Settings lists the holder for the person to turn on. `cleared` says whether the
-    /// setup first removed the holder's earlier entry, which an earlier build may have left.
+    /// System Settings is ready for the person to grant the permission: the server's own bundle
+    /// is dragged into the list, and an application that holds the grants for its server is listed
+    /// to turn on. `cleared` says whether the setup removed the holder's earlier entry, which an
+    /// earlier build may have left.
     Ready { cleared: bool },
     /// The person cancelled the setup before its next effect, so it made no request. `cleared`
     /// says whether it had already removed the holder's earlier entry.
@@ -200,10 +209,11 @@ pub trait SystemPermissions: Send + Sync {
     /// otherwise an entry in System Settings that the person turns on.
     fn request(&self, permission: SystemPermission) -> Result<RequestOutcome, PermissionError>;
 
-    /// Prepares System Settings for a Permission Setup: when programs do not receive the
-    /// permission, removes the holder's earlier entry if it can, then requests it again so
-    /// System Settings lists the holder. `cancelled` is read again immediately before the reset
-    /// and before the request, and a cancelled setup takes neither.
+    /// Prepares System Settings for a Permission Setup when programs do not receive the
+    /// permission. The server's own bundle has its earlier entry removed, so the bundle the person
+    /// drags into the list arrives turned on. An application that holds the grants is asked for the
+    /// permission instead, so System Settings lists it. `cancelled` is read again immediately
+    /// before the reset or the request, and a cancelled setup takes neither.
     fn prepare_setup(
         &self,
         permission: SystemPermission,
@@ -298,6 +308,7 @@ pub(crate) mod testing {
                     accessibility_naming: AccessibilityNaming::DeviceControl,
                     holder: PermissionHolder::Core {
                         name: "SpaceTerm Development".into(),
+                        bundle: None,
                     },
                     resettable: true,
                 })),

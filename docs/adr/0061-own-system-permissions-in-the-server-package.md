@@ -23,7 +23,7 @@ Every SpaceTerm Core bundle runs under the hardened runtime. The hardened runtim
 - **Opening System Settings.** The client the person uses opens the privacy list: the desktop through `NSWorkspace`, and the CLI through `/usr/bin/open`. macOS brings an application forward only at the request of the active application, and a background SpaceTerm Core is never active. Opening a list changes no grant, so [the permissions module](../../crates/spaceterm-core/src/permissions.rs) only names the list in `settings_uri`.
 - **Resets.** A reset runs `/usr/bin/tccutil reset <service> <bundle identifier>`. It runs only while launchd runs SpaceTerm Core from its own bundle, so it never reaches another application's grant.
 
-A Permission Setup asks SpaceTerm Core to clear its stale entry and request the permission again, opens System Settings at its list, and names the entry to turn on.
+A Permission Setup asks SpaceTerm Core to clear its stale entry and opens System Settings at its list. The Setup Guide offers SpaceTerm Core's bundle as a row to drag into that list, as the desktop offered its own bundle before SpaceTerm Core held the grants. A request would list SpaceTerm Core turned off, among rows System Settings sorts by name, and raise the system's own alert. The bundle lies in a hidden directory, so the list's + button cannot reach it. SpaceTerm Core reports the bundle's path with its holder. The guide docks outside System Settings' window unless the window leaves no room beside it. An application that holds the grants for a Development server has no bundle to offer, so that setup requests the permission and names the entry to turn on.
 
 ## Only on the Machine itself
 

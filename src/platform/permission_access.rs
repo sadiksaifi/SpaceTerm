@@ -76,9 +76,9 @@ pub(crate) type PermissionResetCompletion =
 pub(crate) enum PermissionSetupReadiness {
     /// Tools started now already receive the permission, so there is nothing to set up.
     AlreadyGranted,
-    /// System Settings lists the holder for the person to turn on. `cleared` says whether the setup
-    /// removed the holder's earlier entry first. The system does not say whether an entry existed,
-    /// so the removal may have found none.
+    /// System Settings is ready for the person to drag in the holder's bundle or turn on its
+    /// entry. `cleared` says whether the setup removed the holder's earlier entry. The system does
+    /// not say whether an entry existed, so the removal may have found none.
     Ready { cleared: bool },
 }
 
@@ -179,9 +179,10 @@ pub(crate) trait PermissionAccess {
     /// Prepares System Settings for a Permission Setup of one permission.
     ///
     /// It verifies the authorization first and reports [`PermissionSetupReadiness::AlreadyGranted`]
-    /// without changing anything when tools already receive the permission. Otherwise it removes
-    /// the holder's entry when it can, because an entry from an earlier build grants nothing, and
-    /// requests the permission again so System Settings lists the holder to turn on. The
+    /// without changing anything when tools already receive the permission. Otherwise the server
+    /// removes its own bundle's entry, which an earlier build may have left, and the person drags
+    /// the bundle into the list. For an application that holds its grants, the server requests
+    /// the permission instead, so System Settings lists that application. The
     /// completion may run on any thread. The caller keeps the returned preparation for as long as
     /// it wants the result.
     fn prepare_setup(
@@ -225,6 +226,9 @@ pub(crate) mod testing {
     use super::*;
 
     type Authorization = Result<PermissionAuthorization, PermissionAccessError>;
+
+    /// Where the scripted holder's bundle lies.
+    pub(crate) const TEST_BUNDLE: &str = "/data/installations/aa/SpaceTerm Development.app";
 
     /// A capability whose authorization, failures, and pending resets the test controls.
     pub(crate) struct ScriptedPermissionAccess {
@@ -286,6 +290,7 @@ pub(crate) mod testing {
                 naming: Cell::new(AccessibilityNaming::default()),
                 holder: RefCell::new(PermissionHolder::Core {
                     name: "SpaceTerm Development".into(),
+                    bundle: Some(TEST_BUNDLE.into()),
                 }),
             })
         }

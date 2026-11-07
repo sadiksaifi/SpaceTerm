@@ -7,6 +7,7 @@ mod placement;
 mod tests;
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +18,7 @@ use crate::platform::permission_access::{
     AccessibilityNaming, PermissionAccess, PermissionAccessSubscription, PermissionAuthorization,
     PermissionHolder, PermissionSetupPreparation, PermissionSetupReadiness, SystemPermission,
 };
-use crate::platform::setup_guide_host::{SetupGuideHost, SystemSettingsWindow};
+use crate::platform::setup_guide_host::{ApplicationBundle, SetupGuideHost, SystemSettingsWindow};
 
 pub(crate) use guide::SetupGuide;
 
@@ -71,7 +72,7 @@ pub(crate) const fn permission_copy(
 /// The entry System Settings lists a server's grants under, as running text names it.
 pub(crate) fn holder_name(holder: Option<PermissionHolder>) -> String {
     match holder {
-        Some(PermissionHolder::Core { name }) => name,
+        Some(PermissionHolder::Core { name, .. }) => name,
         Some(PermissionHolder::Launcher) | None => format!(
             "the app that started {}",
             crate::application_identity::ApplicationIdentity::current().display_name()
@@ -105,7 +106,7 @@ pub(crate) enum SetupStep {
     Preparing,
     /// System Settings was asked for the permission's list and has not come forward yet.
     Opening,
-    /// The guide waits on System Settings for the person to add SpaceTerm.
+    /// The guide waits on System Settings for the person to drag in or turn on the entry.
     Guiding,
     /// Tools started now receive the permission.
     Granted,
@@ -116,8 +117,8 @@ pub(crate) enum SetupStep {
 pub(crate) struct GuidePresentation {
     pub(crate) permission: SystemPermission,
     pub(crate) granted: bool,
-    /// Whether the setup removed any earlier entry for SpaceTerm, so the guide says why the list
-    /// no longer holds it.
+    /// Whether the setup removed the holder's earlier entry, so the guide says why the list no
+    /// longer holds it.
     pub(crate) cleared: bool,
     /// The permission set up after this one, when the setup holds another.
     pub(crate) next: Option<SystemPermission>,
@@ -140,9 +141,12 @@ struct SetupRun {
     permission: SystemPermission,
     queued: VecDeque<SystemPermission>,
     step: SetupStep,
-    /// Whether preparing the current permission removed any earlier entry for SpaceTerm.
+    /// Whether preparing the current permission removed the holder's earlier entry.
     cleared: bool,
     guide: Option<GuideWindow>,
+    /// The holder's bundle that the guide offers to drag, looked up once for each path the
+    /// server reports.
+    bundle: Option<(PathBuf, Option<ApplicationBundle>)>,
     /// Tracking intervals with System Settings in front.
     intervals: u32,
     /// When System Settings was last asked for a list.
@@ -321,6 +325,7 @@ impl PermissionSetup {
             step: SetupStep::Preparing,
             cleared: false,
             guide: None,
+            bundle: None,
             intervals: 0,
             opened_at: cx.background_executor().now(),
             _preparation: None,
@@ -575,12 +580,29 @@ impl PermissionSetup {
         let Some(presentation) = self.presentation() else {
             return;
         };
-        let placement = placement::place_guide(settings, visible, guide::HEIGHT);
-        let bounds = placement.bounds;
-        let holder = holder_name(Some(self.access.holder()));
+        let holder = self.access.holder();
         let Some(run) = &mut self.run else {
             return;
         };
+        let bundle = match &holder {
+            PermissionHolder::Core {
+                bundle: Some(path), ..
+            } => {
+                if run
+                    .bundle
+                    .as_ref()
+                    .is_none_or(|(looked_up, _)| looked_up != path)
+                {
+                    run.bundle = Some((path.clone(), self.host.application_bundle(path)));
+                }
+                run.bundle.as_ref().and_then(|(_, bundle)| bundle.clone())
+            }
+            _ => None,
+        };
+        let holder = holder_name(Some(holder));
+        let height = guide::height(presentation, bundle.is_some());
+        let placement = placement::place_guide(settings, visible, height);
+        let bounds = placement.bounds;
         if let Some(guide) = &mut run.guide {
             let moved = guide.display != display || guide.bounds != bounds;
             let presented = guide.handle.update(cx, |view, window, cx| {
@@ -588,6 +610,7 @@ impl PermissionSetup {
                     window.set_bounds(bounds, Some(display));
                 }
                 view.point(placement.pointing, cx);
+                view.offer(holder.clone(), bundle.clone(), cx);
                 view.present(presentation, cx);
             });
             if presented.is_ok() {
@@ -603,14 +626,21 @@ impl PermissionSetup {
         }
         let setup = cx.weak_entity();
         let host = Arc::clone(&self.host);
-        run.guide =
-            guide::open(display, placement, presentation, holder, host, setup, cx).map(|handle| {
-                GuideWindow {
-                    handle,
-                    display,
-                    bounds,
-                }
-            });
+        run.guide = guide::open(
+            display,
+            placement,
+            presentation,
+            holder,
+            bundle,
+            host,
+            setup,
+            cx,
+        )
+        .map(|handle| GuideWindow {
+            handle,
+            display,
+            bounds,
+        });
     }
 
     /// Closes the guide. A guide busy with an event closes once the event ends, so no guide
