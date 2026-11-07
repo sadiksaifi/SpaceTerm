@@ -1,5 +1,5 @@
-//! The Setup Guide: a panel docked beside System Settings' window that offers the bundle holding
-//! the server's grants to drag into a privacy list. It never activates SpaceTerm or takes keyboard
+//! The Setup Guide: a panel docked on System Settings' window that offers the bundle holding the
+//! server's grants to drag into a privacy list. It never activates SpaceTerm or takes keyboard
 //! focus.
 
 use std::cell::{Cell, RefCell};
@@ -21,7 +21,6 @@ use spaceterm_ui::{
     ControlWindowActivity, Icon, IconButton, IconName,
 };
 
-use super::placement::{GuidePlacement, Pointing};
 use super::{GuidePresentation, PermissionSetup, permission_copy};
 use crate::platform::permission_access::SystemPermission;
 use crate::platform::setup_guide_host::{ApplicationBundle, ApplicationRowImage, SetupGuideHost};
@@ -31,7 +30,7 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 
 /// The guide's height while it offers a bundle to drag: the instruction line, the bundle's row,
-/// and one caption line. Its width follows System Settings' window.
+/// and one caption line. Its width follows System Settings' content column.
 const DRAGGING_HEIGHT: Pixels = px(114.0);
 /// The guide's height otherwise: the instruction or result line above one detail row.
 const DETAIL_HEIGHT: Pixels = px(92.0);
@@ -53,7 +52,7 @@ const DRAG_ICON_SIZE: f32 = 32.0;
 const DRAG_ROW_OPACITY: u8 = 0xD9;
 /// How long the arrow takes to point at the list again after a click that did not drag.
 const NUDGE_DURATION: Duration = Duration::from_millis(450);
-/// How far the arrow moves toward the list while it points.
+/// How far the arrow rises while it points.
 const NUDGE_DISTANCE: f32 = 4.0;
 
 /// The guide's height for what it shows. `dragging` says whether it offers a bundle to drag.
@@ -65,7 +64,7 @@ pub(super) fn height(presentation: GuidePresentation, dragging: bool) -> Pixels 
     }
 }
 
-/// Opens the guide at `placement` on `display` without activating SpaceTerm. `holder` names the
+/// Opens the guide at `bounds` on `display` without activating SpaceTerm. `holder` names the
 /// entry System Settings lists the grant under, and `bundle` is that entry's bundle to drag, when
 /// the guide can offer it.
 #[allow(
@@ -74,7 +73,7 @@ pub(super) fn height(presentation: GuidePresentation, dragging: bool) -> Pixels 
 )]
 pub(super) fn open(
     display: DisplayId,
-    placement: GuidePlacement,
+    bounds: Bounds<Pixels>,
     presentation: GuidePresentation,
     holder: String,
     bundle: Option<ApplicationBundle>,
@@ -84,7 +83,7 @@ pub(super) fn open(
 ) -> Option<WindowHandle<SetupGuide>> {
     let opened = cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(placement.bounds)),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
             display_id: Some(display),
             titlebar: None,
             focus: false,
@@ -102,7 +101,6 @@ pub(super) fn open(
             let glass = host.configure_window(window, RadiusRole::SurfaceLarge.pixels());
             cx.new(|_| SetupGuide {
                 presentation,
-                pointing: placement.pointing,
                 holder,
                 bundle,
                 setup,
@@ -124,8 +122,6 @@ pub(super) fn open(
 
 pub(crate) struct SetupGuide {
     presentation: GuidePresentation,
-    /// Which way the arrow points to reach System Settings' window.
-    pointing: Pointing,
     /// The entry System Settings lists the grant under.
     holder: String,
     /// The entry's bundle to drag into the list, when the guide can offer it.
@@ -245,14 +241,6 @@ impl SetupGuide {
         }
     }
 
-    /// Points the arrow toward System Settings' window from where the guide now docks.
-    pub(super) fn point(&mut self, pointing: Pointing, cx: &mut Context<Self>) {
-        if self.pointing != pointing {
-            self.pointing = pointing;
-            cx.notify();
-        }
-    }
-
     /// Runs a setup operation after the current event, so the setup may close this window.
     fn deferred(
         &self,
@@ -288,17 +276,11 @@ impl SetupGuide {
         .into_any_element()
     }
 
-    /// The arrow that points toward System Settings' window, which holds the list. A click on the
-    /// bundle's row that does not drag it moves the arrow toward the list once, unless motion is
-    /// reduced.
+    /// The arrow that points at the list. A click on the bundle's row that does not drag it
+    /// raises the arrow once, unless motion is reduced.
     fn render_arrow(&self, glyph: Pixels, appearance: &ChromeAppearance, cx: &App) -> AnyElement {
-        let name = match self.pointing {
-            Pointing::Up => IconName::ArrowUp,
-            Pointing::Left => IconName::ArrowLeft,
-            Pointing::Right => IconName::ArrowRight,
-        };
         let arrow = Icon::new(
-            name,
+            IconName::ArrowUp,
             glyph,
             gpui_color(appearance.floating_colors.text_accent),
         );
@@ -306,20 +288,15 @@ impl SetupGuide {
         if self.nudges == 0 || reduced {
             return arrow.into_any_element();
         }
-        let pointing = self.pointing;
         div()
             .relative()
             .child(arrow)
             .with_animation(
                 ("setup-guide-nudge", self.nudges),
                 Animation::new(NUDGE_DURATION),
-                move |arrow, delta| {
-                    let shift = px((delta * std::f32::consts::PI).sin() * NUDGE_DISTANCE);
-                    match pointing {
-                        Pointing::Up => arrow.top(-shift),
-                        Pointing::Left => arrow.left(-shift),
-                        Pointing::Right => arrow.left(shift),
-                    }
+                |arrow, delta| {
+                    let lift = (delta * std::f32::consts::PI).sin() * NUDGE_DISTANCE;
+                    arrow.top(px(-lift))
                 },
             )
             .into_any_element()
@@ -342,7 +319,7 @@ impl SetupGuide {
             // A click only nudges the arrow, so the row publishes a group rather than a control.
             .role(accesskit::Role::Group)
             .aria_label(name.clone())
-            .aria_description("Drag to the list")
+            .aria_description("Drag to the list above")
             .h(px(ROW_HEIGHT))
             .flex_none()
             .flex()
@@ -467,7 +444,7 @@ impl SetupGuide {
                 vec![
                     ("Drag ", false),
                     (holder, true),
-                    (" to the list to allow ", false),
+                    (" to the list above to allow ", false),
                     (name, true),
                     (".", false),
                 ],

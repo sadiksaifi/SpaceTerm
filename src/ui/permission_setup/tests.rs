@@ -87,7 +87,7 @@ impl Fixture {
     fn show_settings(&self, frame: Bounds<Pixels>, cx: &mut TestAppContext) {
         self.host.set_window(SystemSettingsWindow::Frontmost {
             display: self.display,
-            window: frame,
+            content: frame,
         });
         tick(cx);
     }
@@ -169,8 +169,7 @@ fn a_setup_opens_system_settings_and_docks_the_guide_inside_it(cx: &mut TestAppC
     let frame = cx
         .update(|cx| handle.update(cx, |_, window, _| window.bounds()))
         .expect("the guide is open");
-    // Below the window, so it covers no row of the privacy list.
-    assert_eq!(frame.top(), settings_frame().bottom() + px(8.0));
+    assert_eq!(frame.bottom(), settings_frame().bottom() - px(12.0));
     // The instruction, the bundle's row and its caption.
     assert_eq!(frame.size.height, px(114.0));
     assert!(frame.left() > settings_frame().left() && frame.right() < settings_frame().right());
@@ -191,7 +190,7 @@ fn the_guide_follows_system_settings_and_hides_while_it_is_covered(cx: &mut Test
         .window_bounds_requests(handle)
         .last()
         .expect("the guide moved with System Settings");
-    assert_eq!(requested.top(), moved.bottom() + px(8.0));
+    assert_eq!(requested.bottom(), moved.bottom() - px(12.0));
     assert_eq!(display, Some(fixture.display));
     // An unchanged frame asks for no move.
     let requests = cx.window_bounds_requests(handle).len();
@@ -345,14 +344,14 @@ fn a_request_after_a_grant_opens_the_next_list(cx: &mut TestAppContext) {
 }
 
 /// System Settings keeps showing the previous list for a moment after it is asked for another, so
-/// the guide waits before pointing at it.
+/// the guide waits before pointing at "the list above".
 #[gpui::test]
 fn the_guide_waits_for_a_new_list_to_settle(cx: &mut TestAppContext) {
     let fixture = install(NotGranted, NotGranted, cx);
     fixture.start(&[ScreenRecording], cx);
     fixture.host.set_window(SystemSettingsWindow::Frontmost {
         display: fixture.display,
-        window: settings_frame(),
+        content: settings_frame(),
     });
 
     cx.executor().advance_clock(TRACKING_INTERVAL);
@@ -642,10 +641,10 @@ fn the_guide_publishes_its_instruction_and_the_bundle_to_drag(cx: &mut TestAppCo
 
     let guide = guide_context(cx);
     let tree = A11yTree::read(guide);
-    tree.text("Drag SpaceTerm Development to the list to allow Screen Recording.");
+    tree.text("Drag SpaceTerm Development to the list above to allow Screen Recording.");
     let row = tree.node("SpaceTerm Development");
     assert_eq!(row["aria"]["role"], "Group");
-    assert_eq!(row["aria"]["description"], "Drag to the list");
+    assert_eq!(row["aria"]["description"], "Drag to the list above");
     tree.text("SpaceTerm removed an earlier entry for SpaceTerm Development.");
 
     perform(guide, tree.node("Close"), Action::Click);

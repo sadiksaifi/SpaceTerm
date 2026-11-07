@@ -25,8 +25,9 @@ pub(crate) enum SystemSettingsWindow {
     /// System Settings' window is in front of every other application's window.
     Frontmost {
         display: DisplayId,
-        /// The window's frame, relative to the top-left corner of `display`.
-        window: Bounds<Pixels>,
+        /// The frame of the window's content column, which holds the privacy list, relative to
+        /// the top-left corner of `display`.
+        content: Bounds<Pixels>,
     },
 }
 
