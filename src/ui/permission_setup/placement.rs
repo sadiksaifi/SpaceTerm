@@ -52,7 +52,9 @@ pub(super) fn place_guide(
         visible.bottom(),
     );
     let centered = |top: Pixels, pointing: Pointing| {
-        let width = (window.size.width - px(SIDE_INSET) * 2.0).clamp(px(MIN_WIDTH), px(MAX_WIDTH));
+        let width = (window.size.width - px(SIDE_INSET) * 2.0)
+            .clamp(px(MIN_WIDTH), px(MAX_WIDTH))
+            .min(visible.size.width);
         let left = window.left() + (window.size.width - width) / 2.0;
         GuidePlacement {
             bounds: Bounds::new(
@@ -192,6 +194,17 @@ mod tests {
         assert_eq!(placed.pointing, Pointing::Up);
         assert_eq!(placed.bounds.bottom(), px(945.0 - 12.0));
         assert!(contains(visible(), placed.bounds));
+    }
+
+    #[test]
+    fn a_display_narrower_than_the_guide_narrows_it_to_the_visible_width() {
+        let narrow = bounds(point(px(80.0), px(25.0)), size(px(520.0), px(975.0)));
+        let window = bounds(point(px(0.0), px(100.0)), size(px(715.0), px(500.0)));
+
+        let placed = place_guide(window, narrow, HEIGHT);
+
+        assert_eq!(placed.bounds.size.width, px(520.0));
+        assert!(contains(narrow, placed.bounds));
     }
 
     #[test]
