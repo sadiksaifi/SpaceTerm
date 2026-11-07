@@ -233,19 +233,8 @@ unsafe extern "C" {
     static kAXTrustedCheckOptionPrompt: CFTypeRef;
 }
 
-#[link(name = "CoreServices", kind = "framework")]
-unsafe extern "C" {
-    fn LSRegisterURL(url: CFTypeRef, update: u8) -> i32;
-}
-
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn CFURLCreateFromFileSystemRepresentation(
-        allocator: CFTypeRef,
-        buffer: *const u8,
-        length: isize,
-        directory: u8,
-    ) -> CFTypeRef;
     static kCFBooleanTrue: CFTypeRef;
     static kCFTypeDictionaryKeyCallBacks: u8;
     static kCFTypeDictionaryValueCallBacks: u8;
@@ -340,7 +329,11 @@ impl Native for System {
     }
 
     fn register(&self, bundle: &std::path::Path) -> Result<(), PermissionError> {
-        register_bundle(bundle)
+        if crate::launch_services::register(bundle) {
+            Ok(())
+        } else {
+            Err(PermissionError::Rejected)
+        }
     }
 
     fn reset(&self, service: &'static str, bundle: &str) -> Result<(), PermissionError> {
@@ -437,28 +430,6 @@ fn request_accessibility() -> Result<(), PermissionError> {
         CFRelease(options);
     }
     Ok(())
-}
-
-fn register_bundle(bundle: &Path) -> Result<(), PermissionError> {
-    use std::os::unix::ffi::OsStrExt as _;
-    let bytes = bundle.as_os_str().as_bytes();
-    let length = isize::try_from(bytes.len()).map_err(|_| PermissionError::Unavailable)?;
-    // SAFETY: The buffer and length describe the path's bytes for the call. The URL is released
-    // after Launch Services, which retains what it keeps, reads it.
-    unsafe {
-        let url =
-            CFURLCreateFromFileSystemRepresentation(std::ptr::null(), bytes.as_ptr(), length, 1);
-        if url.is_null() {
-            return Err(PermissionError::Unavailable);
-        }
-        let status = LSRegisterURL(url, 0);
-        CFRelease(url);
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(PermissionError::Rejected)
-        }
-    }
 }
 
 fn run_tool(command: &mut Command) -> Result<(), PermissionError> {

@@ -11,6 +11,8 @@ pub mod direct;
 pub mod hierarchy;
 mod host;
 pub mod labels;
+#[cfg(target_os = "macos")]
+mod launch_services;
 pub mod migration;
 pub mod organization;
 #[cfg(feature = "client")]

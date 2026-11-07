@@ -41,6 +41,25 @@ impl LaunchAgent {
             .replace('"', "&quot;")
             .replace('\'', "&apos;"))
     }
+    /// The plist key that attributes an agent to this identity's SpaceTerm Core bundle. Login
+    /// Items & Extensions names the background item for that bundle. Without the key it falls back
+    /// to the signing certificate's organization name. It attributes a plist path once, when it
+    /// first registers that path, and keeps that attribution, so the key is there from the first
+    /// write.
+    fn association(&self) -> String {
+        format!(
+            "<key>AssociatedBundleIdentifiers</key><array><string>{}</string></array>",
+            bundle_identifier(&self.identity)
+        )
+    }
+    /// Registers `runtime`'s bundle with Launch Services before launchd loads an agent that runs
+    /// it, so Login Items can resolve the agent's associated bundle. A failed registration leaves
+    /// the agent running under a fallback name, so it fails no installation or update.
+    fn register_bundle(&self, runtime: &Path) {
+        if let Some(layout) = super::runtime::Layout::host(&self.identity) {
+            let _ = crate::launch_services::register(&runtime.join(layout.signed()));
+        }
+    }
     /// The recovery agent's label, beside the server's.
     fn recovery_label(&self) -> String {
         format!("{}.recovery", self.label)
@@ -54,12 +73,13 @@ impl LaunchAgent {
 <plist version="1.0"><dict>
 <key>Label</key><string>{}</string>
 <key>ProgramArguments</key><array><string>{executable}</string><string>internal</string><string>helper</string><string>--identity</string><string>{}</string></array>
+{}
 <key>RunAtLoad</key><true/>
 <key>ProcessType</key><string>Interactive</string>
 <key>LimitLoadToSessionType</key><string>Aqua</string>
 <key>Umask</key><integer>63</integer>
 </dict></plist>
-"#, self.recovery_label(), self.identity).into_bytes())
+"#, self.recovery_label(), self.identity, self.association()).into_bytes())
     }
     fn contents(&self, runtime: &Path) -> Result<Vec<u8>, CoreError> {
         let executable = self.escaped(runtime)?;
@@ -68,6 +88,7 @@ impl LaunchAgent {
 <plist version="1.0"><dict>
 <key>Label</key><string>{}</string>
 <key>ProgramArguments</key><array><string>{executable}</string><string>internal</string><string>serve</string><string>--service</string><string>--identity</string><string>{}</string></array>
+{}
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ProcessType</key><string>Interactive</string>
@@ -75,7 +96,7 @@ impl LaunchAgent {
 <key>ExitTimeOut</key><integer>{EXIT_TIMEOUT}</integer>
 <key>Umask</key><integer>63</integer>
 </dict></plist>
-"#, self.label, self.identity).into_bytes())
+"#, self.label, self.identity, self.association()).into_bytes())
     }
     /// The executable the agent runs, relative to its runtime.
     fn executable(&self) -> Result<PathBuf, CoreError> {
@@ -160,6 +181,7 @@ impl Supervisor for LaunchAgent {
                 &["bootout".into(), self.target.clone().into()],
             )?;
         }
+        self.register_bundle(candidate);
         self.registration()
             .replace(&self.contents(previous)?, &self.contents(candidate)?)
     }
@@ -170,6 +192,7 @@ impl Supervisor for LaunchAgent {
         login_items::requires_approval(&self.registration().path())
     }
     fn install(&self, runtime: &Path) -> Result<(), CoreError> {
+        self.register_bundle(runtime);
         self.registration().install(&self.contents(runtime)?)
     }
     fn check(&self, runtime: &Path, removing: bool) -> Result<(), CoreError> {
@@ -358,6 +381,24 @@ mod tests {
              <string>internal</string><string>serve</string><string>--service</string>\
              <string>--identity</string><string>spaceterm-preflight</string>"
         ));
+    }
+
+    #[test]
+    fn both_agents_name_the_identity_core_bundle_for_login_items() {
+        let paths = Paths {
+            identity: "spaceterm-preflight".into(),
+            data: "/Users/owner/.local/share/spaceterm-preflight/core".into(),
+            runtime: "/private/tmp/spaceterm-preflight-core-501".into(),
+        };
+        let agent = LaunchAgent::new(&paths, "spaceterm-preflight").unwrap();
+        let association = "<key>AssociatedBundleIdentifiers</key>\
+            <array><string>com.peblon.spaceterm-preflight.core</string></array>";
+        for contents in [
+            agent.contents(Path::new("/runtime")).unwrap(),
+            agent.recovery_contents(Path::new("/runtime")).unwrap(),
+        ] {
+            assert!(String::from_utf8(contents).unwrap().contains(association));
+        }
     }
 
     #[test]
