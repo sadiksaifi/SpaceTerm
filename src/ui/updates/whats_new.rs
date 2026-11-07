@@ -206,12 +206,7 @@ impl Render for NotesBody {
             .tab_stop(true)
             .debug_selector(RELEASE_LINK_SELECTOR)
             .on_activate(move |_, _, cx| cx.open_url(&url));
-        column.child(
-            div()
-                .flex()
-                .pt(appearance.spacing(8.0))
-                .child(link),
-        )
+        column.child(div().flex().pt(appearance.spacing(8.0)).child(link))
     }
 }
 
