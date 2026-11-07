@@ -68,6 +68,28 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertNotIn("Remove legacy compatibility", text)
         self.assertNotIn("Add terminal panes", text)
 
+    def assert_download_buttons(self, text, version):
+        line = text.splitlines()[0]
+        macos = release_feed.download_url(version, release_feed.dmg_name(version))
+        platform = release_feed.PLATFORMS["x86_64-unknown-linux-gnu"]
+        linux = release_feed.download_url(
+            version, release_feed.archive_name("desktop", version, platform)
+        )
+        self.assertIn("[![Download for macOS](", line)
+        self.assertIn(f"]({macos})", line)
+        self.assertIn("[![Download for Linux](", line)
+        self.assertIn(f"]({linux})", line)
+
+    def test_first_release_notes_open_with_download_buttons_for_the_release(self):
+        self.git("tag", "-a", "v0.10.0", "-m", "Release")
+        self.assert_download_buttons(notes(self.root), "0.10.0")
+
+    def test_later_release_notes_open_with_download_buttons_for_the_release(self):
+        self.git("tag", "-a", "v0.10.0", "-m", "Release")
+        self.git("commit", "-qm", "feat: add terminal panes", "--allow-empty")
+        self.git("tag", "-a", "v0.11.2", "-m", "Release")
+        self.assert_download_buttons(notes(self.root), "0.11.2")
+
     def test_notes_require_a_stable_release_tag_at_head(self):
         self.git("tag", "-a", "v1.0.0", "-m", "Release")
         self.git("commit", "-qm", "feat: unreleased", "--allow-empty")
