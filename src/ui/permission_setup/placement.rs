@@ -7,7 +7,7 @@ use gpui::{Bounds, Pixels, point, px, size};
 const SIDE_INSET: f32 = 20.0;
 /// The space between the guide and the window it docks against.
 const GAP: f32 = 8.0;
-/// The space between the guide and the bottom of the window when the guide lies inside it.
+/// How far the guide's bottom edge sits above the window's when the guide is level with it.
 const BOTTOM_INSET: f32 = 12.0;
 /// The guide's width limits. Past the widest, the instruction gains nothing; below the narrowest,
 /// it truncates.
@@ -16,7 +16,7 @@ const MAX_WIDTH: f32 = 560.0;
 
 /// Which way the guide's arrow points to reach System Settings' window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Pointing {
+pub(super) enum Pointing {
     Up,
     Left,
     Right,
@@ -44,7 +44,8 @@ pub(super) fn place_guide(
     let clamp = |start: Pixels, length: Pixels, low: Pixels, high: Pixels| {
         start.min(high - length).max(low)
     };
-    let beside_top = clamp(
+    // Level with the bottom of the window, where the list ends.
+    let level_top = clamp(
         window.bottom() - px(BOTTOM_INSET) - height,
         height,
         visible.top(),
@@ -70,7 +71,7 @@ pub(super) fn place_guide(
     let right_room = visible.right() - right;
     if right_room >= px(MIN_WIDTH) {
         return GuidePlacement {
-            bounds: Bounds::new(point(right, beside_top), size(fitted(right_room), height)),
+            bounds: Bounds::new(point(right, level_top), size(fitted(right_room), height)),
             pointing: Pointing::Left,
         };
     }
@@ -79,19 +80,13 @@ pub(super) fn place_guide(
         let width = fitted(left_room);
         return GuidePlacement {
             bounds: Bounds::new(
-                point(window.left() - gap - width, beside_top),
+                point(window.left() - gap - width, level_top),
                 size(width, height),
             ),
             pointing: Pointing::Right,
         };
     }
-    let inside = clamp(
-        window.bottom() - px(BOTTOM_INSET) - height,
-        height,
-        visible.top(),
-        visible.bottom(),
-    );
-    centered(inside, Pointing::Up)
+    centered(level_top, Pointing::Up)
 }
 
 #[cfg(test)]
