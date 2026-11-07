@@ -11,7 +11,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, release, release_feed, update_signing
+from spaceterm_tasks import (
+    ROOT,
+    TaskError,
+    release,
+    release_feed,
+    release_publish,
+    update_signing,
+)
 from spaceterm_tasks.release import RELEASES, SPARKLE_NS, notes, verify_appcast
 
 CURRENT = bytes(range(32))
@@ -68,27 +75,49 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertNotIn("Remove legacy compatibility", text)
         self.assertNotIn("Add terminal panes", text)
 
-    def assert_download_buttons(self, text, version):
-        line = text.splitlines()[0]
-        macos = release_feed.download_url(version, release_feed.dmg_name(version))
-        platform = release_feed.PLATFORMS["x86_64-unknown-linux-gnu"]
-        linux = release_feed.download_url(
-            version, release_feed.archive_name("desktop", version, platform)
+    def assert_embedded_notes(self, text, first_line):
+        """The notes a desktop embeds open with real content and carry no button markup."""
+        self.assertEqual(text.splitlines()[0], first_line)
+        for markup in ("![", "shields.io", "&emsp;", "/releases/download/"):
+            self.assertNotIn(markup, text)
+
+    def assert_release_body(self, text, tag):
+        """The GitHub release body opens with both download buttons for `tag`, then the notes."""
+        version = tag[1:]
+        notes_file = self.root / "release-notes.md"
+        notes_file.write_text(text)
+        body = release_publish.release_body(tag, notes_file)
+        buttons, rest = body.split("\n\n", 1)
+        self.assertEqual(rest, text)
+        macos, linux = buttons.split("&emsp;")
+        linux_archive = release_feed.archive_name(
+            "desktop", version, release_feed.PLATFORMS["x86_64-unknown-linux-gnu"]
         )
-        self.assertIn("[![Download for macOS](", line)
-        self.assertIn(f"]({macos})", line)
-        self.assertIn("[![Download for Linux](", line)
-        self.assertIn(f"]({linux})", line)
+        for button, system, name in (
+            (macos, "macOS", f"SpaceTerm-{version}-macos-arm64.dmg"),
+            (linux, "Linux", linux_archive),
+        ):
+            self.assertTrue(button.startswith(f"[![Download for {system}](https://img.shields.io/"))
+            self.assertTrue(
+                button.endswith(
+                    f")](https://github.com/sadiksaifi/SpaceTerm/releases/download/{tag}/{name})"
+                )
+            )
+        self.assertEqual(linux_archive, f"spaceterm-desktop-{version}-linux-x86_64.tar.gz")
 
-    def test_first_release_notes_open_with_download_buttons_for_the_release(self):
+    def test_first_release_notes_embed_the_release_sentence_and_publish_with_buttons(self):
         self.git("tag", "-a", "v0.10.0", "-m", "Release")
-        self.assert_download_buttons(notes(self.root), "0.10.0")
+        text = notes(self.root)
+        self.assert_embedded_notes(text, "First release of SpaceTerm.")
+        self.assert_release_body(text, "v0.10.0")
 
-    def test_later_release_notes_open_with_download_buttons_for_the_release(self):
+    def test_later_release_notes_embed_the_first_change_heading_and_publish_with_buttons(self):
         self.git("tag", "-a", "v0.10.0", "-m", "Release")
         self.git("commit", "-qm", "feat: add terminal panes", "--allow-empty")
         self.git("tag", "-a", "v0.11.2", "-m", "Release")
-        self.assert_download_buttons(notes(self.root), "0.11.2")
+        text = notes(self.root)
+        self.assert_embedded_notes(text, "### Features")
+        self.assert_release_body(text, "v0.11.2")
 
     def test_notes_require_a_stable_release_tag_at_head(self):
         self.git("tag", "-a", "v1.0.0", "-m", "Release")

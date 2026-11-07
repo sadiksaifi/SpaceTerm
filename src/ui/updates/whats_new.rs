@@ -1,6 +1,6 @@
-//! The What's new sheet: this build's release notes, embedded at build time, with a link to the
-//! release on GitHub. The notes count as read once the sheet opens, not while it waits behind
-//! another modal.
+//! The What's new sheet: this build's release notes, embedded at build time, ending with a link
+//! to the release on GitHub. The notes count as read once the sheet opens, not while it waits
+//! behind another modal.
 //!
 //! The title-bar update control and the menu-bar menu offer the sheet while
 //! [`release_notes_unread`] holds, and open it with [`open_whats_new`]. Both read the
@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui::prelude::*;
 use gpui::{App, Context, Global, SharedString, Window, accesskit, actions, div};
 use spaceterm_ui::{
-    Dialog, DialogActionRequest, DialogCloseDecision, DialogInitialFocus, DialogOutcome,
-    DialogPendingCompletion, DialogSize, ModalAction, ModalActionEmphasis, ModalActionRole,
-    ModalId, ModalLifecycleEvent,
+    Button, ButtonSize, ButtonVariant, Dialog, DialogActionRequest, DialogCloseDecision,
+    DialogInitialFocus, DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction,
+    ModalActionEmphasis, ModalActionRole, ModalId, ModalLifecycleEvent,
 };
 
 use super::{front_workspace_window, service};
@@ -30,10 +30,12 @@ actions!(spaceterm, [OpenWhatsNew]);
 )]
 pub(crate) const WHATS_NEW_TITLE: &str = "What's New in SpaceTerm";
 const MODAL_ID: &str = "whats-new";
+/// The link below the notes that opens this version's release on GitHub.
+const RELEASE_LINK: &str = "View release on GitHub";
+const RELEASE_LINK_SELECTOR: &str = "whats-new-view-release-on-github";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SheetAction {
-    ViewOnGitHub,
     Done,
 }
 
@@ -92,12 +94,6 @@ fn sheet(
         title,
         vec![
             ModalAction::new(
-                SheetAction::ViewOnGitHub,
-                "View on GitHub",
-                ModalActionRole::Auxiliary,
-                "whats-new-view-on-github",
-            ),
-            ModalAction::new(
                 SheetAction::Done,
                 "Done",
                 ModalActionRole::Cancel,
@@ -125,19 +121,12 @@ fn present<T: 'static>(
 ) -> bool {
     let body = cx.new(|_| NotesBody {
         blocks: notes.blocks().to_vec(),
+        release_url: notes.github_url(),
     });
-    let url = notes.github_url();
-    let on_action = move |request: DialogActionRequest<SheetAction>,
-                          _: DialogPendingCompletion,
-                          cx: &mut App| match request.action_id() {
+    let on_action = |request: DialogActionRequest<SheetAction>,
+                     _: DialogPendingCompletion,
+                     _: &mut App| match request.action_id() {
         SheetAction::Done => DialogCloseDecision::Allow,
-        // The sheet stays, so the person can come back to it from the browser.
-        SheetAction::ViewOnGitHub => {
-            cx.open_url(&url);
-            DialogCloseDecision::Deny {
-                first_invalid: None,
-            }
-        }
     };
     let on_result = |_: DialogOutcome<SheetAction>, cx: &mut App| {
         cx.remove_global::<OpenSheet>();
@@ -161,9 +150,10 @@ fn present<T: 'static>(
     presented
 }
 
-/// The notes as groups of bulleted changes.
+/// The notes as groups of bulleted changes, then the link to the release on GitHub.
 struct NotesBody {
     blocks: Vec<NotesBlock>,
+    release_url: String,
 }
 
 impl Render for NotesBody {
@@ -208,7 +198,20 @@ impl Render for NotesBody {
                     .child(SharedString::from(text.clone())),
             });
         }
-        column
+        // Opening the release leaves the sheet open, so the person can come back to it.
+        let url = self.release_url.clone();
+        let link = Button::new(RELEASE_LINK_SELECTOR, RELEASE_LINK)
+            .variant(ButtonVariant::Link)
+            .size(ButtonSize::Regular)
+            .tab_stop(true)
+            .debug_selector(RELEASE_LINK_SELECTOR)
+            .on_activate(move |_, _, cx| cx.open_url(&url));
+        column.child(
+            div()
+                .flex()
+                .pt(appearance.spacing(8.0))
+                .child(link),
+        )
     }
 }
 
@@ -271,14 +274,17 @@ mod tests {
 
         let tree = A11yTree::read(visual);
         tree.node(&release_notes::embedded().unwrap().title());
-        tree.node("View on GitHub");
+        tree.node("View release on GitHub");
         tree.node("Done");
     }
 
     #[gpui::test]
     fn the_sheet_satisfies_the_desktop_dialog_policy(cx: &mut gpui::TestAppContext) {
         let notes = ReleaseNotes::parse("0.9.0", "2026-11-03", NOTES).unwrap();
-        let body = cx.new(|_| NotesBody { blocks: Vec::new() });
+        let body = cx.new(|_| NotesBody {
+            blocks: Vec::new(),
+            release_url: notes.github_url(),
+        });
         assert_eq!(
             sheet(&notes, 2026, body).validate(&spaceterm_ui::ModalDesktopPolicy::mac_os()),
             Ok(())
@@ -311,8 +317,21 @@ mod tests {
             .map(|heading| heading["aria"]["label"].clone())
             .collect::<Vec<_>>();
         assert_eq!(headings, ["Features", "Fixes"]);
-        tree.node("View on GitHub");
+        let link = tree.node(RELEASE_LINK);
         assert!(cx.update(|_, cx| cx.has_global::<OpenSheet>()));
+
+        a11y_testing::perform(cx, link, accesskit::Action::Click);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/sadiksaifi/SpaceTerm/releases/tag/v0.9.0")
+        );
+        let tree = A11yTree::read(cx);
+        tree.text("Released 3 November");
+        assert!(
+            cx.update(|_, cx| cx.has_global::<OpenSheet>()),
+            "the sheet stays open after the link opens the browser"
+        );
 
         a11y_testing::perform(cx, tree.node("Done"), accesskit::Action::Click);
         cx.run_until_parked();

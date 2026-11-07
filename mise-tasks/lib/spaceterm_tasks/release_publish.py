@@ -16,10 +16,37 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-from spaceterm_tasks import ROOT, TaskError, release_plan, update_signing
+from spaceterm_tasks import ROOT, TaskError, release_feed, release_plan, update_signing
+from spaceterm_tasks.packaging import release_version
 from spaceterm_tasks.release_plan import REPOSITORY, api, pages
 
 RELEASES = f"repos/{REPOSITORY}/releases"
+BADGE = (
+    "https://img.shields.io/badge/Download-{system}-10B981"
+    "?style=for-the-badge&labelColor=1F2937&logo={logo}&logoColor=white"
+)
+
+
+def download_buttons(version):
+    """The Markdown line of download buttons for this version's disk image and Linux desktop."""
+    linux = release_feed.archive_name(
+        "desktop", version, release_feed.PLATFORMS["x86_64-unknown-linux-gnu"]
+    )
+    buttons = (
+        ("macOS", "apple", release_feed.dmg_name(version)),
+        ("Linux", "linux", linux),
+    )
+    return "&emsp;".join(
+        f"[![Download for {system}]({BADGE.format(system=system, logo=logo)})]"
+        f"({release_feed.download_url(version, name)})"
+        for system, logo, name in buttons
+    )
+
+
+def release_body(tag, notes_file):
+    """The GitHub release body: the download buttons, then the notes the desktops embed.
+    The buttons belong to the release page only, so the embedded notes never carry them."""
+    return f"{download_buttons(release_version(tag))}\n\n{Path(notes_file).read_text()}"
 
 
 def upload_asset(release, path):
@@ -49,7 +76,7 @@ def verify_identity(record, tag, notes_file):
     if (
         record.get("tag_name") != tag
         or record.get("prerelease")
-        or record.get("body") != Path(notes_file).read_text()
+        or record.get("body") != release_body(tag, notes_file)
         or record.get("name") != f"SpaceTerm {tag}"
     ):
         raise TaskError("the release differs from the planned release notes and identity")
@@ -94,7 +121,7 @@ def stage_draft(plan, assets, notes_file, *, request=api, upload=upload_asset):
             fields={
                 "tag_name": tag,
                 "name": f"SpaceTerm {tag}",
-                "body": Path(notes_file).read_text(),
+                "body": release_body(tag, notes_file),
                 "draft": True,
                 "prerelease": False,
                 "make_latest": "false",
