@@ -1,83 +1,81 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo/spaceterm-icon-dark.svg">
-  <img src="assets/brand/logo/spaceterm-icon.svg" width="128" height="128" alt="">
-</picture>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo/spaceterm-icon-dark.svg">
+    <img src="assets/brand/logo/spaceterm-icon.svg" width="128" height="128" alt="">
+  </picture>
+</p>
 
-# SpaceTerm
+<h1 align="center">SpaceTerm</h1>
 
-A native desktop terminal multiplexer for macOS and Linux, coming soon for Windows.
+<p align="center">A fast native terminal multiplexer for macOS and Linux. Quit the app, and your terminals keep running.</p>
 
-![SpaceTerm Screenshot](https://github.com/user-attachments/assets/5e1d29d7-0450-4984-b485-3c9f45fef473)
+<p align="center">
+  <a href="https://github.com/sadiksaifi/SpaceTerm/releases/latest"><img alt="Download for macOS" src="https://img.shields.io/badge/Download-macOS-10B981?style=for-the-badge&labelColor=1F2937&logo=apple&logoColor=white"></a>&emsp;<a href="https://github.com/sadiksaifi/SpaceTerm/releases/latest"><img alt="Download for Linux" src="https://img.shields.io/badge/Download-Linux-10B981?style=for-the-badge&labelColor=1F2937&logo=linux&logoColor=white"></a>
+</p>
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/5e1d29d7-0450-4984-b485-3c9f45fef473" width="90%" alt="SpaceTerm Screenshot">
+</p>
 
 ## Highlights
 
-- **Workspaces** for local and remote terminal work
-- **Tabs and Panes** with recursive splits, focus, resize, and zoom
-- **Remote terminals** over paired, encrypted QUIC connections on UDP port 9231
-- **Keyboard-first navigation** through the Command Palette and Workspace Switcher
+- **Persistent terminals**: SpaceTerm Core runs your terminals in the background, separate from the app.
+  - Quit the app, and they keep running.
+  - Lose Wi-Fi, and they are still there when you reconnect.
+  - Open SpaceTerm on another device, and you see the same terminals.
+- **Remote Machines**: Machines far away feel local.
+  - QUIC with TLS 1.3 keeps connections fast and encrypted.
+  - Messages are encoded with postcard, a compact binary format.
+  - Predictive Echo shows what you type before the remote Machine answers.
+  - You add a Machine over SSH, an Invitation Link or a QR code.
+- **Multiplexer**: Workspaces, Tabs and Panes keep your work organized.
+  - Workspaces give each project its own space.
+  - Tabs hold separate tasks inside a Workspace.
+  - Panes split a Tab as many ways as you like, and you can zoom into one when you need to focus.
+- **Keyboard control**: Everything works from the keyboard, and you can change any key binding in Settings.
+- **Handoff**: Choose Take Over on another device to continue a live Pane right where you left it.
+- **Kitty graphics protocol**: We support the Kitty graphics protocol for both local and remote Machines.
+- **Accessibility**: We support VoiceOver on macOS and Orca on Linux.
+- **Git worktrees**: We support Git worktrees right inside the app.
+- **CLI**: `spaceterm` ships with SpaceTerm Core and can do almost everything the app can. Run `spaceterm --help` to see what it offers.
 
 ## Install
 
-### On a Mac
+SpaceTerm runs on Apple silicon Macs with macOS 26 or later, and on x86_64 Linux with glibc 2.35 or newer.
 
-SpaceTerm runs on Apple silicon Macs with macOS 26 or later. Download the disk image from the [latest release](https://github.com/sadiksaifi/SpaceTerm/releases/latest), open it, and drag SpaceTerm into Applications. If you use Homebrew, one command does the same:
+- On a Mac, download the app from the [latest release](https://github.com/sadiksaifi/SpaceTerm/releases/latest), or install it with Homebrew:
 
-```sh
-brew install --cask sadiksaifi/tap/spaceterm
-```
+  ```sh
+  brew install --cask sadiksaifi/tap/spaceterm
+  ```
 
-Every Mac build is signed with a Developer ID and notarized by Apple, so macOS opens it without any workarounds. From then on, SpaceTerm keeps itself up to date.
+- On Linux, download the `.tar.gz` from the [latest release](https://github.com/sadiksaifi/SpaceTerm/releases/latest), or install it with curl:
 
-### On Linux
+  ```sh
+  curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --desktop
+  ```
 
-SpaceTerm runs on x86_64 Linux with glibc 2.35 or newer, such as Ubuntu 22.04 and later. This command installs the app and SpaceTerm Core into your home directory:
+## Architecture
 
-```sh
-curl -fsSL https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/install.sh | sh -s -- --desktop
-```
+SpaceTerm has two parts:
 
-The installer checks the checksum and signature of everything it downloads before it unpacks or runs any of it. On a machine you only connect to from elsewhere, leave out `--desktop`. You get SpaceTerm Core on its own, and `spaceterm setup` starts it.
+- **SpaceTerm Core**: The service that runs in the background on each Machine.
+  - It owns that Machine's Workspaces, Tabs, Panes and terminals.
+  - It keeps them running while no client is connected.
+  - It includes `spaceterm`, the CLI that controls Core from your shell.
+- **SpaceTerm Client**: Desktop app that connects to your local and remote Machines and manages them.
 
-If you would rather not pipe a script into your shell, each release also carries the Linux desktop as a `.tar.gz`. Unpack it and start `bin/spaceterm-desktop`. You can check that a downloaded archive or disk image came from this repository's release workflow with `gh attestation verify FILE --repo sadiksaifi/SpaceTerm`.
+How they connect:
 
-## Workspace hierarchy
+- On the same Machine, a client talks to Core over a Unix domain socket that only your account can open.
+- A remote Machine is reached over QUIC on UDP port 9231, so that port must be open.
+- Add Machine in Settings > Machines sets up a new Machine. It uses SSH only for that first setup.
 
-```mermaid
-flowchart TB
-    SpaceTerm["SpaceTerm"]
+## More
 
-    SpaceTerm --> W1["Workspace 1"]
-    SpaceTerm --> W2["Workspace 2"]
-    SpaceTerm --> W3["Workspace 3"]
+- **Clipboard**: Programs on local and remote Machines can use your clipboard. See [terminal clipboard setup](docs/terminal-clipboard.md).
+- **Permissions**: A program in a local Pane can ask SpaceTerm to set up macOS permissions. See [Permission Requests](docs/permission-request.md).
 
-    W1 --> W1T1["Tab 1"]
-    W1 --> W1T2["Tab 2"]
-    W2 --> W2T1["Tab 1"]
-    W2 --> W2T2["Tab 2"]
-    W3 --> W3T1["Tab 1"]
-    W3 --> W3T2["Tab 2"]
+## License
 
-    W1T1 --> W1T1P1["Pane"]
-    W1T1 --> W1T1P2["Pane"]
-    W1T2 --> W1T2P1["Pane"]
-    W2T1 --> W2T1P1["Pane"]
-    W2T2 --> W2T2P1["Pane"]
-    W2T2 --> W2T2P2["Pane"]
-    W3T1 --> W3T1P1["Pane"]
-    W3T1 --> W3T1P2["Pane"]
-    W3T2 --> W3T2P1["Pane"]
-```
-
-## Add a remote Machine
-
-Open Settings > Machines > Add Machine… and use your existing OpenSSH configuration or an Invitation Link. SSH installs and starts SpaceTerm Core on that computer, pairs it, then closes. SpaceTerm uses the saved QUIC connection, on UDP port 9231 by default, for remote work, so that UDP port must be reachable from your computer. Create Workspaces and browse directories on your added Machines from either sidebar creation menu.
-
-## Copy and paste over SSH and tmux
-
-Programs can copy to your clipboard even when they run on another machine.
-Neovim and tmux each need a setting first. See [terminal clipboard setup](docs/terminal-clipboard.md).
-
-## For program authors
-
-A program running in SpaceTerm can offer macOS permission setup with a
-[Permission Request](docs/permission-request.md).
+SpaceTerm is open source under the [GNU GPL v3](LICENSE).

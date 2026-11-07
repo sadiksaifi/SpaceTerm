@@ -2687,11 +2687,11 @@ impl SettingsWindow {
             SettingsRowId::TerminalAttentionNotifications => Some(
                 "Notify when a bell rings or a command finishes in a Pane while SpaceTerm is in the background.",
             ),
-            SettingsRowId::ClipboardWrites => {
-                Some("Programs in the Focused Pane can replace clipboard text, including over SSH.")
-            }
+            SettingsRowId::ClipboardWrites => Some(
+                "Programs in the Focused Pane can replace clipboard text, including on remote Machines.",
+            ),
             SettingsRowId::ClipboardReads => Some(
-                "Programs in the Focused Pane can retrieve clipboard text, including remotely.",
+                "Programs in the Focused Pane can retrieve clipboard text, including on remote Machines.",
             ),
             SettingsRowId::ShowRepositoryStatus => {
                 Some("Show branch and changes in Pane Captions, and branch in sidebar rows.")
