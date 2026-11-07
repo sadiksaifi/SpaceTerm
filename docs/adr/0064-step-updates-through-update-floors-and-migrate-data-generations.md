@@ -4,7 +4,7 @@ SpaceTerm Core with its CLI, the macOS desktop and the Linux desktop each update
 
 ## Update Floor
 
-Every release publishes one Update Floor per product: one for SpaceTerm Core with its CLI, one for the desktops. The floor is a release version at or below the release's own version. The first release with this system, 0.10.0, is its own floor.
+Every release publishes one Update Floor per product: one for SpaceTerm Core with its CLI, one for the desktops. The floor is a release version at or below the release's own version. The first release with this system, 0.11.0, is its own floor.
 
 - The Core feeds and the Linux desktop feed carry it as `floor`. The feed schema lives in [feed.rs](../../crates/spaceterm-core/src/update/feed.rs), and [the feed module](../../mise-tasks/lib/spaceterm_tasks/release_feed.py) writes it.
 - A Core archive's `build.json` carries the Core floor as `floor`, so desktop pushes, local archives and `install.sh` see it without a feed. A Development or Preflight build names a commit and has no order, so its `floor` is null and no floor applies to it.
