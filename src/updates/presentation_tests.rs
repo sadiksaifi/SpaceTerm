@@ -758,6 +758,14 @@ fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
         NOW,
     );
     assert_eq!(single(&shown).label.as_ref(), "Relaunch failed");
+    let Some(Command::Explain(explanation)) = single(&shown).command.clone() else {
+        panic!("Relaunch failed explains");
+    };
+    assert_eq!(
+        explanation.message.as_ref(),
+        "SpaceTerm 0.11.1 is downloaded, but SpaceTerm couldn't quit to install it. Your \
+         Terminal Sessions are still running. Choose Relaunch to try again."
+    );
 }
 
 /// After the person acknowledges a failed relaunch whose installer the updater still holds,

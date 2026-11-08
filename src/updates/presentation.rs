@@ -1442,7 +1442,19 @@ impl DesktopState {
                     None => "Couldn't install the SpaceTerm update".to_owned(),
                 }
                 .into(),
-                message: format!("{} SpaceTerm tries again later.", self.sentence()).into(),
+                // A failed relaunch waits for the person: nothing retries it by itself.
+                message: if matches!(
+                    self,
+                    Self::InstallFailed {
+                        error: UpdateError::Relaunch,
+                        ..
+                    }
+                ) {
+                    format!("{} Choose Relaunch to try again.", self.sentence())
+                } else {
+                    format!("{} SpaceTerm tries again later.", self.sentence())
+                }
+                .into(),
                 then: Some(Box::new(Command::Desktop(DesktopAction::DismissFailure))),
             }),
             Self::Current | Self::Downloading { .. } | Self::Relaunching { .. } => return None,
