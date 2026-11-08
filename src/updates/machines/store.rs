@@ -4,15 +4,23 @@
 //! actions. Observers of [`MachineUpdatesService`] hear every change. [`MachineUpdatesNotice`]
 //! reports how each action a surface performed finished, so that surface, and only it, can
 //! explain a failure.
+//!
+//! It installs the Core build bundled in this desktop on every Machine it offers one to, with
+//! no click: once per Machine and offered version in each run, while the Machine's lane answers
+//! and its Core runs no update operation. An install ends no Terminal Session. A failed one is
+//! not retried automatically and raises no notice. It stays in the Machine's `failed_push`,
+//! because a push that breaks off or runs out of disk space records nothing in the Core's
+//! facts, so every surface explains it and offers Try Again.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
 use spaceterm_core::update::facts::Version;
 
 use super::{
-    ActionFailure, MachineAction, MachineId, MachinePreview, MachineUpdate, MachineUpdatesAdapter,
-    MachineUpdatesEvent,
+    ActionFailure, FailedPush, MachineAction, MachineId, MachineLink, MachinePreview,
+    MachineUpdate, MachineUpdatesAdapter, MachineUpdatesEvent,
 };
 use crate::updates::presentation::{self, Approval, Confirmation, Dismissed};
 
@@ -23,6 +31,8 @@ pub(crate) enum Surface {
     Window,
     /// The menu bar extra or the Linux status item.
     StatusMenu,
+    /// The Settings window owns its confirmation and failure alerts.
+    Settings,
 }
 
 /// How an action a surface performed finished.
@@ -125,6 +135,11 @@ pub(crate) struct MachineUpdates {
     dismissed: Dismissed,
     /// Actions performed that have not finished, oldest first.
     performed: Vec<(MachineId, MachineAction, Surface)>,
+    /// Each bundled Core version installed automatically in this run, by Machine.
+    offered: HashSet<(MachineId, Version)>,
+    /// Machines whose automatic install has not finished, and the version it pushes. Its
+    /// finish reaches no surface, and a failure stays in the Machine's `failed_push`.
+    installing: Vec<(MachineId, Version)>,
     _events: Task<()>,
 }
 
@@ -155,6 +170,8 @@ impl MachineUpdates {
                 machines: Vec::new(),
                 dismissed: Dismissed::new(),
                 performed: Vec::new(),
+                offered: HashSet::new(),
+                installing: Vec::new(),
                 _events: events,
             }
         });
@@ -278,7 +295,15 @@ impl MachineUpdates {
 
     fn receive(&mut self, event: MachineUpdatesEvent, cx: &mut Context<Self>) {
         match event {
-            MachineUpdatesEvent::Machines(machines) => self.machines = machines,
+            MachineUpdatesEvent::Machines(machines) => {
+                let previous = std::mem::replace(&mut self.machines, machines);
+                for update in &mut self.machines {
+                    update.failed_push = previous
+                        .iter()
+                        .find(|known| known.machine == update.machine)
+                        .and_then(|known| carried_failure(known, update));
+                }
+            }
             MachineUpdatesEvent::Changed(update) => {
                 let update = *update;
                 match self
@@ -288,7 +313,9 @@ impl MachineUpdates {
                 {
                     Some(known) => {
                         let finished = finished_update(known, &update);
+                        let failed_push = carried_failure(known, &update);
                         *known = update;
+                        known.failed_push = failed_push;
                         if let Some(text) = finished {
                             crate::updates::record_recent(text, cx);
                         }
@@ -301,22 +328,109 @@ impl MachineUpdates {
                 action,
                 outcome,
             } => {
-                let Some(index) = self
-                    .performed
-                    .iter()
-                    .position(|(id, performed, _)| *id == machine && *performed == action)
-                else {
-                    return;
-                };
-                let (_, _, surface) = self.performed.remove(index);
-                if let MachineAction::DismissFailure(_) = action {
-                    return;
+                let automatic = (action == MachineAction::Install)
+                    .then(|| self.installing.iter().position(|(id, _)| *id == machine))
+                    .flatten()
+                    .map(|index| self.installing.remove(index).1);
+                if action == MachineAction::Install {
+                    self.record_push(machine, automatic.clone(), &outcome);
                 }
-                self.notify_outcome(machine, action, surface, outcome, cx);
+                if automatic.is_none() {
+                    self.finish_performed(machine, action, outcome, cx);
+                }
             }
         }
+        self.install_bundled();
         cx.notify();
     }
+
+    /// Reports `outcome` to the surface that performed `action` on `machine`. An action no
+    /// surface performed reports to none.
+    fn finish_performed(
+        &mut self,
+        machine: MachineId,
+        action: MachineAction,
+        outcome: Result<(), ActionFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .performed
+            .iter()
+            .position(|(id, performed, _)| *id == machine && *performed == action)
+        else {
+            return;
+        };
+        let (_, _, surface) = self.performed.remove(index);
+        if let MachineAction::DismissFailure(_) = action {
+            return;
+        }
+        self.notify_outcome(machine, action, surface, outcome, cx);
+    }
+
+    /// Keeps the outcome of an Install that pushed the bundled Core: an automatic one of
+    /// `automatic`, or one a surface performed while the Machine is offered a push. A finished
+    /// Install clears the failure; an Install from the Core's feed records its own.
+    fn record_push(
+        &mut self,
+        machine: MachineId,
+        automatic: Option<Version>,
+        outcome: &Result<(), ActionFailure>,
+    ) {
+        let Some(update) = self
+            .machines
+            .iter_mut()
+            .find(|known| known.machine == machine)
+        else {
+            return;
+        };
+        match outcome {
+            Ok(()) => update.failed_push = None,
+            Err(failure) => {
+                let Some(version) = automatic.or_else(|| update.push.clone()) else {
+                    return;
+                };
+                if update.push.as_ref() == Some(&version) {
+                    update.failed_push = Some(FailedPush {
+                        version,
+                        failure: *failure,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Installs the bundled Core on each Machine offered one that answers and runs no update
+    /// operation, once per Machine and offered version.
+    fn install_bundled(&mut self) {
+        let due: Vec<(MachineId, Version)> = self
+            .machines
+            .iter()
+            .filter(|update| {
+                matches!(
+                    update.link,
+                    MachineLink::Connected | MachineLink::Incompatible(_)
+                ) && update
+                    .facts
+                    .as_ref()
+                    .is_some_and(|facts| facts.operation.is_none())
+            })
+            .filter_map(|update| Some((update.machine, update.push.clone()?)))
+            .collect();
+        for (machine, version) in due {
+            if self.offered.insert((machine, version.clone())) {
+                self.installing.push((machine, version));
+                self.adapter.perform(machine, MachineAction::Install);
+            }
+        }
+    }
+}
+
+/// The failed push `previous` recorded, while `next` still offers its version.
+fn carried_failure(previous: &MachineUpdate, next: &MachineUpdate) -> Option<FailedPush> {
+    previous
+        .failed_push
+        .clone()
+        .filter(|failed| next.push.as_ref() == Some(&failed.version))
 }
 
 /// What Recent says when `next` finishes an update `previous` was waiting for.
@@ -343,9 +457,10 @@ fn is_newer(next: &Version, previous: &Version) -> bool {
 mod tests {
     use super::super::testing::ScriptedMachines;
     use super::*;
+    use crate::updates::presentation::Command;
     use spaceterm_core::protocol::capability::{Capabilities, Capability};
     use spaceterm_core::update::facts::{
-        PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts,
+        Operation, PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts,
     };
 
     fn update(running: &str, pending: Option<&str>) -> MachineUpdate {
@@ -374,7 +489,247 @@ mod tests {
             }),
             capabilities: Capabilities::fake(&Capability::ALL),
             push: None,
+            bundled: None,
+            failed_push: None,
         }
+    }
+
+    fn offered(update: MachineUpdate, push: &str) -> MachineUpdate {
+        MachineUpdate {
+            push: Some(Version::parse(push).unwrap()),
+            ..update
+        }
+    }
+
+    /// The bundled Core installs with no click on each Machine offered it, once per Machine and
+    /// version, only while the Machine answers and runs no update operation, and a failure
+    /// reaches no surface and is not retried.
+    #[gpui::test]
+    fn the_bundled_core_installs_once_per_machine_and_version(cx: &mut gpui::TestAppContext) {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
+        let notices = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let notices = notices.clone();
+            cx.subscribe(&store, move |_, notice: &MachineUpdatesNotice, _| {
+                notices.borrow_mut().push(notice.clone());
+            })
+        });
+        let local = MachineUpdate {
+            machine: [1; 32],
+            name: "This Mac".into(),
+            local: true,
+            ..update("0.8.0", None)
+        };
+        let offline = MachineUpdate {
+            link: super::super::MachineLink::Offline { since: 1 },
+            ..offered(update("0.8.0", None), "0.9.0")
+        };
+        let mut checking = offered(local.clone(), "0.9.0");
+        checking.facts.as_mut().unwrap().operation = Some(Operation::Checking);
+        adapter.emit(MachineUpdatesEvent::Machines(vec![checking, offline]));
+        cx.run_until_parked();
+        assert!(
+            adapter.performed().is_empty(),
+            "busy or offline Machines wait"
+        );
+
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            local.clone(),
+            "0.9.0",
+        ))));
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            update("0.8.0", None),
+            "0.9.0",
+        ))));
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            local.clone(),
+            "0.9.0",
+        ))));
+        cx.run_until_parked();
+        let install = MachineAction::Install;
+        assert_eq!(
+            adapter.performed(),
+            [([1; 32], install.clone()), ([2; 32], install.clone())]
+        );
+
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine: [2; 32],
+            action: install.clone(),
+            outcome: Err(ActionFailure::Failed),
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            update("0.8.0", None),
+            "0.9.0",
+        ))));
+        cx.run_until_parked();
+        assert!(
+            notices.borrow().is_empty(),
+            "an automatic install has no surface"
+        );
+        assert_eq!(
+            adapter.performed().len(),
+            2,
+            "a failed install is not retried"
+        );
+
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            update("0.8.0", None),
+            "0.9.1",
+        ))));
+        cx.run_until_parked();
+        assert_eq!(adapter.performed()[2], ([2; 32], install));
+    }
+
+    /// A push that breaks off or runs out of disk space records nothing in the Core's facts.
+    /// The failed automatic install still shows on every surface with Try Again, which installs
+    /// again, and nothing retries it automatically.
+    #[gpui::test]
+    fn a_failed_automatic_install_offers_try_again_without_retrying(cx: &mut gpui::TestAppContext) {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
+        let penguin = [2; 32];
+        let install = MachineAction::Install;
+        let idle = || offered(update("0.8.0", None), "0.9.0");
+        adapter.emit(MachineUpdatesEvent::Machines(vec![idle()]));
+        cx.run_until_parked();
+        assert_eq!(adapter.performed(), [(penguin, install.clone())]);
+
+        for (failure, sentence) in [
+            (
+                ActionFailure::Unreachable,
+                "SpaceTerm Core 0.9.0 couldn't install on penguin because penguin stopped \
+                 answering. penguin still runs SpaceTerm Core 0.8.0, and its Terminal Sessions \
+                 keep running. Choose Try Again to install it.",
+            ),
+            (
+                ActionFailure::DiskFull,
+                "SpaceTerm Core 0.9.0 couldn't install on penguin because penguin is out of disk \
+                 space. penguin still runs SpaceTerm Core 0.8.0, and its Terminal Sessions keep \
+                 running. Free some space, then choose Try Again.",
+            ),
+        ] {
+            adapter.emit(MachineUpdatesEvent::Finished {
+                machine: penguin,
+                action: install.clone(),
+                outcome: Err(failure),
+            });
+            adapter.emit(MachineUpdatesEvent::Changed(Box::new(idle())));
+            cx.run_until_parked();
+            let shown = cx.update(|cx| presentation::current(cx));
+            let view = shown.machine(penguin).unwrap();
+            assert_eq!(view.control_label(), "penguin install failed");
+            assert_eq!(view.sentence().as_ref(), sentence);
+            let row = view.settings_row();
+            assert_eq!(row.status.as_ref(), "Install failed");
+            let button = row.button.expect("Settings offers Try Again");
+            assert_eq!(button.label.as_ref(), "Try Again");
+            assert_eq!(button.command, Command::Machine(penguin, install.clone()));
+            let items = view.extra_row().items.unwrap();
+            assert!(items.iter().any(|item| matches!(
+                item,
+                presentation::ExtraItem::Action { title, command, .. }
+                    if title.as_ref() == "Try Again"
+                        && *command == Command::Machine(penguin, install.clone())
+            )));
+            assert!(
+                shown
+                    .items()
+                    .iter()
+                    .any(|item| item.command == Some(Command::Machine(penguin, install.clone()))),
+                "the title bar offers it too"
+            );
+            assert_eq!(
+                adapter.performed().len(),
+                if failure == ActionFailure::Unreachable {
+                    1
+                } else {
+                    2
+                },
+                "nothing retries a failed install automatically"
+            );
+
+            // Try Again installs again.
+            cx.update(|cx| {
+                store.update(cx, |store, cx| {
+                    store.perform(penguin, install.clone(), Surface::Settings, cx);
+                });
+            });
+        }
+        assert_eq!(adapter.performed().len(), 3);
+
+        // A finished install clears the failure.
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine: penguin,
+            action: install.clone(),
+            outcome: Ok(()),
+        });
+        cx.run_until_parked();
+        let shown = cx.update(|cx| presentation::current(cx));
+        assert_eq!(
+            shown.machine(penguin).unwrap().state,
+            presentation::MachineState::Available {
+                to: Version::parse("0.9.0").unwrap()
+            }
+        );
+    }
+
+    /// A Core too old for this desktop's work major keeps its failed automatic install on every
+    /// surface, with the remedy, the incompatibility and Try Again, instead of a generic Update.
+    #[gpui::test]
+    fn an_incompatible_core_shows_its_failed_automatic_install(cx: &mut gpui::TestAppContext) {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        let penguin = [2; 32];
+        let install = MachineAction::Install;
+        let incompatible = || MachineUpdate {
+            link: super::super::MachineLink::Incompatible(
+                spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+            ),
+            ..offered(update("0.8.0", None), "0.9.0")
+        };
+        adapter.emit(MachineUpdatesEvent::Machines(vec![incompatible()]));
+        cx.run_until_parked();
+        assert_eq!(adapter.performed(), [(penguin, install.clone())]);
+
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine: penguin,
+            action: install.clone(),
+            outcome: Err(ActionFailure::DiskFull),
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(incompatible())));
+        cx.run_until_parked();
+        let shown = cx.update(|cx| presentation::current(cx));
+        let view = shown.machine(penguin).unwrap();
+        assert_eq!(view.control_label(), "penguin install failed");
+        assert_eq!(
+            view.sentence().as_ref(),
+            "SpaceTerm Core 0.9.0 couldn't install on penguin because penguin is out of disk \
+             space. penguin still runs SpaceTerm Core 0.8.0, which is too old for this \
+             SpaceTerm. Its Terminal Sessions keep running. Free some space, then choose Try \
+             Again."
+        );
+        let row = view.settings_row();
+        assert_eq!(row.status.as_ref(), "Install failed");
+        let button = row.button.expect("Settings offers Try Again");
+        assert_eq!(button.label.as_ref(), "Try Again");
+        assert_eq!(button.command, Command::Machine(penguin, install.clone()));
+        let items = view.extra_row().items.unwrap();
+        assert!(items.iter().any(|item| matches!(
+            item,
+            presentation::ExtraItem::Action { title, command, .. }
+                if title.as_ref() == "Try Again"
+                    && *command == Command::Machine(penguin, install.clone())
+        )));
+        assert_eq!(adapter.performed().len(), 1, "nothing retries it");
     }
 
     #[gpui::test]

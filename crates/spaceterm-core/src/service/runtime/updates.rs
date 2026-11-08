@@ -5,7 +5,7 @@
 //! The update record, `updates.json` in the account's Core data, holds what survives a restart:
 //! the Pending Version, the skipped version, the last failure and the last feed check. The
 //! running server's [`Updates`] owns it; the activation records how a restart ended.
-use super::super::{Service, State, boot};
+use super::super::{RetainedInstallation, Service, State, boot};
 use crate::CoreError;
 use crate::storage::Directory;
 use crate::update::facts::{
@@ -327,6 +327,9 @@ struct Shared {
     service: Service,
     data: Directory,
     running: Version,
+    /// The approved runtime this server started from: the build a restart without a Pending
+    /// Version starts again.
+    build: RetainedInstallation,
     protocols: Protocols,
     live: Mutex<Live>,
     changed: Condvar,
@@ -342,6 +345,8 @@ struct Live {
     /// A silent restart that settled while this server kept running waits until then before
     /// the next one, so a helper that keeps failing does not fence the server every second.
     silent_after: Option<Instant>,
+    /// The server is shutting down, so no caller waits for the facts to change.
+    stopped: bool,
 }
 
 /// A change a client confirmed over the service lane, which the engine owns while it runs.
@@ -383,7 +388,8 @@ impl Updates {
     /// verifies.
     pub fn open(service: Service) -> Result<Self, CoreError> {
         let (data, state) = service.read()?.ok_or(CoreError::NotInstalled)?;
-        let (running, protocols) = approved(&service, &state)?;
+        let (build, protocols) = approved(&service, &state)?;
+        let running = Version::parse(&build.version).map_err(|_| CoreError::RuntimeUnavailable)?;
         reconcile(&data, &state)?;
         let record = load(&data)?;
         let shared = Shared {
@@ -395,8 +401,10 @@ impl Updates {
                 operation: None,
                 facts: placeholder(&running),
                 silent_after: None,
+                stopped: false,
             }),
             running,
+            build,
             protocols,
             changed: Condvar::new(),
             restarter: OnceLock::new(),
@@ -500,6 +508,12 @@ impl Updates {
         let installing = self.begin_install(candidate, size)?;
         installing.progress(size);
         installing.install(archive)
+    }
+
+    /// The approved runtime this server started from, whose version its facts report as
+    /// running.
+    pub fn running(&self) -> &RetainedInstallation {
+        &self.shared.build
     }
 
     /// Whether this Core runs a Stepping Stone its feed check installed and has not checked its
@@ -680,6 +694,14 @@ impl Updates {
         if sessions == 0 {
             let _ = self.restart(Restart::Silent);
         }
+    }
+
+    /// The server is shutting down. Every caller waiting for the facts to change returns now,
+    /// and later waits return at once, so connection threads finish without the long poll and
+    /// facts followers end.
+    pub(crate) fn stop(&self) {
+        self.shared.lock().stopped = true;
+        self.shared.changed.notify_all();
     }
 
     fn refresh(&self) {
@@ -1010,10 +1032,10 @@ impl FactsSource for Updates {
         self.shared.lock().facts.clone()
     }
 
-    fn wait(&self, revision: u64, timeout: Duration) -> UpdateFacts {
+    fn wait(&self, revision: u64, timeout: Duration) -> Option<UpdateFacts> {
         let deadline = Instant::now() + timeout;
         let mut live = self.shared.lock();
-        while live.facts.revision == revision {
+        while live.facts.revision == revision && !live.stopped {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -1025,16 +1047,25 @@ impl FactsSource for Updates {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
-        live.facts.clone()
+        (!live.stopped).then(|| live.facts.clone())
     }
 }
 
 /// The approved runtime's version and protocols, from its verified build document.
-fn approved(service: &Service, state: &State) -> Result<(Version, Protocols), CoreError> {
+fn approved(
+    service: &Service,
+    state: &State,
+) -> Result<(RetainedInstallation, Protocols), CoreError> {
     let directory = service.runtime(state);
     let metadata = super::build(&directory, &service.identity)?;
-    let version = Version::parse(&metadata.version).map_err(|_| CoreError::RuntimeUnavailable)?;
-    Ok((version, metadata.protocols))
+    Ok((
+        RetainedInstallation {
+            directory,
+            version: metadata.version,
+            commit: metadata.commit,
+        },
+        metadata.protocols,
+    ))
 }
 
 fn placeholder(running: &Version) -> UpdateFacts {

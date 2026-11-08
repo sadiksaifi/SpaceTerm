@@ -15,11 +15,10 @@ use super::{
     AUTHORIZE_START_SELECTOR, AuthorizationPrompt, AuthorizedRequest, CoreServiceControl,
     INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice, LocalCoreControl,
     LocalCorePresentation, LocalCoreStatus, OPEN_LOGIN_ITEMS_SELECTOR, OfferedLocalMachine,
-    OfferedMachine, RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR,
-    SERVICE_CHECK_SELECTOR, START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR,
-    STOP_SELECTOR, ServiceAction, ServiceConfirmation, ServicePresentation, ServiceStartup,
-    ServiceState, UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR, UNINSTALL_SELECTOR,
-    present, present_service,
+    OfferedMachine, SERVICE_CHECK_SELECTOR, START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR,
+    STOP_CONFIRM_SELECTOR, STOP_SELECTOR, ServiceAction, ServiceConfirmation, ServicePresentation,
+    ServiceStartup, ServiceState, UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR,
+    UNINSTALL_SELECTOR, present, present_service,
 };
 use crate::appearance::Appearance;
 use crate::machine_connection::CoreError;
@@ -1277,22 +1276,6 @@ fn a_stopped_core_off_in_login_items_offers_login_items(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn restart_asks_first_then_restarts(cx: &mut TestAppContext) {
-    let (window, _core, service, cx) = open_machines_with_service(Ok(running()), cx);
-
-    choose(RESTART_SELECTOR, cx);
-    assert!(alert_open(RESTART_CONFIRM_SELECTOR, cx));
-    click_modal(RESTART_CANCEL_SELECTOR, cx);
-    assert!(service.changes().is_empty());
-
-    choose(RESTART_SELECTOR, cx);
-    click_modal(RESTART_CONFIRM_SELECTOR, cx);
-
-    assert_eq!(service.changes(), vec![ServiceCall::Restart]);
-    assert_eq!(service_presentation(&window, cx).state, "Running");
-}
-
-#[gpui::test]
 fn uninstall_asks_first_then_offers_install_again(cx: &mut TestAppContext) {
     let (window, _core, service, cx) = open_machines_with_service(Ok(stopped()), cx);
 
@@ -1523,7 +1506,7 @@ fn the_status_menu_offers_stopping_only_a_running_machine(cx: &mut TestAppContex
         true
     );
     assert_eq!(
-        tree.node("Restart SpaceTerm Core\u{2026}")["aria"]["disabled"],
+        tree.node("Restart SpaceTerm Core on This Computer…")["aria"]["disabled"],
         true
     );
     assert_ne!(
@@ -1750,43 +1733,6 @@ fn a_stopped_boot_service_reinstalls_stopped_and_only_start_asks_for_authorizati
         vec![
             ServiceCall::Install(build),
             ServiceCall::Start,
-            ServiceCall::AuthorizeStartup,
-            ServiceCall::Start,
-        ]
-    );
-    assert_eq!(service_presentation(&window, cx).state, "Running");
-}
-
-#[gpui::test]
-fn a_boot_service_restart_refused_after_stopping_offers_to_authorize_and_start(
-    cx: &mut TestAppContext,
-) {
-    let core = ScriptedCore::new(Ok(connected(2)));
-    let service = ScriptedService::with_boot_startup(Ok(running()));
-    let (window, cx) = open_settings(offered_with_service(&core, &service), cx);
-    click(NAVIGATION_SELECTOR, cx);
-
-    choose(RESTART_SELECTOR, cx);
-    click_modal(RESTART_CONFIRM_SELECTOR, cx);
-
-    assert_eq!(service.changes(), vec![ServiceCall::Restart]);
-    let presented = service_presentation(&window, cx);
-    assert_eq!(
-        presented.explanation.as_ref(),
-        "Choose Authorize and Start to run SpaceTerm Core at startup."
-    );
-    assert_eq!(
-        presented.actions,
-        vec![ServiceAction::AuthorizeStart, ServiceAction::Uninstall]
-    );
-
-    click(AUTHORIZE_START_SELECTOR, cx);
-    click_modal(AUTHORIZE_CONFIRM_SELECTOR, cx);
-
-    assert_eq!(
-        service.changes(),
-        vec![
-            ServiceCall::Restart,
             ServiceCall::AuthorizeStartup,
             ServiceCall::Start,
         ]
@@ -2100,42 +2046,6 @@ fn start_machine_chosen_during_a_read_that_finds_it_running_does_nothing(cx: &mu
 }
 
 /// The Server row keeps its height whether it offers a button or not.
-#[gpui::test]
-fn the_machine_row_keeps_its_height_with_or_without_a_button(cx: &mut TestAppContext) {
-    use crate::ui::settings_window::core_update::{UPDATE_SELECTOR, UpdateFacts};
-
-    let (window, _core, update, cx) = open_machines_with_update(cx);
-    cx.run_until_parked();
-    assert!(
-        rendered(UPDATE_SELECTOR, cx),
-        "an available update offers Update"
-    );
-    let with_button = cx
-        .debug_bounds(ROW_SELECTOR)
-        .expect("the Server row renders");
-
-    update.change(|facts: &mut UpdateFacts| {
-        if let Ok(included) = &mut facts.included {
-            included.approved = true;
-        }
-    });
-    window.update(cx, |settings, cx| settings.check_core_update(cx));
-    cx.run_until_parked();
-
-    assert!(
-        !rendered(UPDATE_SELECTOR, cx),
-        "an up-to-date server offers no button"
-    );
-    assert_eq!(
-        cx.debug_bounds(ROW_SELECTOR)
-            .expect("the Server row renders")
-            .size,
-        with_button.size
-    );
-}
-
-/// A read that succeeds makes the Start automatically change that waited on it, even while an
-/// earlier operation's failure is still shown.
 #[gpui::test]
 fn a_successful_read_makes_a_waiting_change_after_an_earlier_failure(cx: &mut TestAppContext) {
     let (window, _core, service, cx) = open_machines_with_service(Ok(running()), cx);

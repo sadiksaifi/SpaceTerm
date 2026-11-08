@@ -189,6 +189,13 @@ struct Retry {
     attempt: u32,
     interaction: Interaction,
     state: UnpairProgress,
+    /// A route was asked to retry now while an attempt ran, so a failure of that attempt tries
+    /// again at once.
+    now: bool,
+    /// A route refused for an incompatible work protocol was asked to retry now. Its Core may
+    /// have been updated through the service lane, so the worker checks the saved route once
+    /// more. No other refusal is checked again.
+    recheck: bool,
 }
 
 impl Retry {
@@ -198,6 +205,8 @@ impl Retry {
             attempt: 0,
             interaction,
             state: UnpairProgress::Retrying,
+            now: false,
+            recheck: false,
         }
     }
 }
@@ -444,6 +453,45 @@ impl DirectConnections {
 
     pub fn resume(&self, id: &DirectRouteId) {
         self.connect(id);
+    }
+
+    /// Tries an active route that is not connected again now, and forgets the backoff its
+    /// earlier failures earned, so its next failure waits the shortest delay. A Machine whose
+    /// Core restarts on purpose returns within seconds, sooner than the backoff would try. An
+    /// attempt already running finishes first, and its failure tries again at once.
+    ///
+    /// A route its Core refused for an incompatible work protocol is checked once more with its
+    /// saved pin and credential, because that Core may return updated to a compatible version.
+    /// A connected or disconnected route, a route refused as revoked, pin-mismatched or with an
+    /// invalid proof, and one that waits for the person are left as they are. It changes no
+    /// status, so it notifies no view.
+    pub fn retry_now(&self, id: &DirectRouteId) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let active = state
+            .document
+            .routes
+            .iter()
+            .any(|saved| &saved.route.id == id && saved.active);
+        let running = state.route_jobs.contains(id);
+        let Some(route) = state.routes.get_mut(id) else {
+            return;
+        };
+        let incompatible = route.status == DirectRouteStatus::Refused(RefusalReason::Incompatible);
+        if !active
+            || route.status == DirectRouteStatus::Connected
+            || !(incompatible || worker::checkable(route))
+        {
+            return;
+        }
+        route.retry.recheck = incompatible;
+        route.retry.attempt = 0;
+        if running {
+            route.retry.now = true;
+        } else {
+            route.retry.due = Instant::now();
+        }
+        drop(state);
+        self.0.work.wake();
     }
 
     pub fn disconnect(&self, id: &DirectRouteId) {

@@ -6,7 +6,10 @@
 //! change its [`Sources`] report, such as a route connecting or disconnecting or the local
 //! service changing, abandons the long poll and reads the Machine's reach again. A follower whose
 //! Core it can't reach waits for the next such change. It never reads on a timer, except while a
-//! restart it expects has not come back.
+//! restart it expects has not come back. Then it also asks the Machine's routes to retry now,
+//! so the returning Core is reached without waiting out the routes' backoff. A Core whose
+//! work route was refused as incompatible and whose service lane then reports a compatible work
+//! protocol gets that route checked again once, however fast it returned from its update.
 //!
 //! A local Core that is deliberately stopped reads as [`MachineLink::Stopped`] from the service
 //! manager, which needs no connection. A Core that answers `Facts` with `unsupported` predates
@@ -103,6 +106,10 @@ pub(crate) enum Reach {
     Lane {
         lane: Arc<dyn MachineLane>,
         work: Result<(), Incompatible>,
+        /// Whether the lane belongs to a route whose Core refused this desktop's work
+        /// protocol. With a compatible `work`, that Core has since been updated, and the route
+        /// admits work again only once it is checked again.
+        refused: bool,
     },
 }
 
@@ -113,6 +120,10 @@ pub(crate) trait Machine: Send + Sync {
     fn reach(&self) -> Reach;
     /// Starts a deliberately stopped local Core through the service manager.
     fn start(&self) -> Result<(), ActionFailure>;
+    /// Asks each route to the Machine to try again now, without the backoff its earlier
+    /// failures earned, because its Core is expected back from a restart or was updated out
+    /// of an incompatible work protocol. A route refused as incompatible is checked once more.
+    fn retry(&self);
 }
 
 /// A Machine its source knows, with every route it has.
@@ -361,6 +372,11 @@ fn preview(
         machine,
         action: action.clone(),
         sessions: lane_preview.effects.ends_sessions,
+        running: lane_preview
+            .effects
+            .from
+            .as_ref()
+            .and_then(|from| Version::parse(&from.version).ok()),
         target: previewed_target(&lane_preview),
         id: 0,
     };
@@ -497,6 +513,9 @@ struct Entry {
     boot: Option<String>,
     /// A restart this desktop asked for, or the Core announced, that has not come back.
     restart: Option<Awaited>,
+    /// Whether the follower asked the Machine's routes to check a refused work route again
+    /// since its service lane began reporting a compatible work protocol.
+    rechecked: bool,
 }
 
 struct Awaited {
@@ -505,6 +524,8 @@ struct Awaited {
     /// The run that restarts. Facts from another run end the wait.
     boot: Option<String>,
     deadline: Instant,
+    /// When the follower last asked the Machine's routes to retry now.
+    retried: Option<Instant>,
 }
 
 impl Shared {
@@ -653,11 +674,14 @@ impl Shared {
                         facts: None,
                         capabilities: unconnected(),
                         push: None,
+                        bundled: None,
+                        failed_push: None,
                     },
                     known: machine.clone(),
                     wake: Arc::clone(&wake),
                     boot: None,
                     restart: None,
+                    rechecked: false,
                 };
                 let shared = Arc::clone(self);
                 let id = machine.id;
@@ -705,8 +729,10 @@ impl Shared {
     fn observed(&self, id: MachineId, observed: &Observed, work: Result<(), Incompatible>) {
         let limit = self.restart_limit;
         let push = self.embedded.offer(&observed.facts);
+        let bundled = self.embedded.newer(&observed.facts);
         self.publish(id, |entry| {
             entry.update.push = push;
+            entry.update.bundled = bundled;
             entry.update.link = match work {
                 Ok(()) => MachineLink::Connected,
                 Err(incompatible) => MachineLink::Incompatible(incompatible),
@@ -725,6 +751,7 @@ impl Shared {
                         expected: Some(to),
                         boot: Some(observed.boot.clone()),
                         deadline: Instant::now() + limit,
+                        retried: None,
                     });
                 }
                 // A new run answered, so the restart came back. A version it didn't start on
@@ -744,6 +771,7 @@ impl Shared {
             entry.update.capabilities = reached(work);
             entry.update.facts = None;
             entry.update.push = None;
+            entry.update.bundled = None;
             entry.restart = None;
         });
     }
@@ -761,37 +789,53 @@ impl Shared {
         });
     }
 
-    /// Nothing answered. Returns how long to wait before trying again, while a restart is
-    /// expected.
-    fn unreachable(&self, id: MachineId) -> Option<Duration> {
-        self.publish(id, |entry| {
-            entry.update.capabilities = unconnected();
-            if let Some(awaited) = &entry.restart {
-                if let Some(left) = awaited.deadline.checked_duration_since(Instant::now()) {
-                    return Some(left.min(RESTART_RETRY));
+    /// Nothing answered `machine`. Returns how long to wait before trying again, while a
+    /// restart is expected. Until the restart comes back, it also asks the Machine's routes to
+    /// retry now, at most every [`RESTART_RETRY`], so a Core that returns within seconds is
+    /// reached within seconds instead of on the routes' backoff.
+    fn unreachable(&self, id: MachineId, machine: &dyn Machine) -> Option<Duration> {
+        let (limit, retry) = self.publish(id, Self::unreached)?;
+        if retry {
+            machine.retry();
+        }
+        limit
+    }
+
+    /// The Machine of `entry` did not answer. Returns how long to wait before trying again and
+    /// whether to retry its routes now.
+    fn unreached(entry: &mut Entry) -> (Option<Duration>, bool) {
+        entry.update.capabilities = unconnected();
+        if let Some(awaited) = &mut entry.restart {
+            let now = Instant::now();
+            if let Some(left) = awaited.deadline.checked_duration_since(now) {
+                let retry = awaited
+                    .retried
+                    .is_none_or(|at| now.duration_since(at) >= RESTART_RETRY);
+                if retry {
+                    awaited.retried = Some(now);
                 }
-                if let Some(expected) = awaited.expected.clone() {
-                    entry.update.link = MachineLink::Unconfirmed {
-                        expected,
-                        since: crate::updates::now(),
-                    };
-                    entry.restart = None;
-                    return None;
-                }
+                return (Some(left.min(RESTART_RETRY)), retry);
+            }
+            if let Some(expected) = awaited.expected.clone() {
+                entry.update.link = MachineLink::Unconfirmed {
+                    expected,
+                    since: crate::updates::now(),
+                };
                 entry.restart = None;
+                return (None, false);
             }
-            match entry.update.link {
-                // "Can't confirm" stays until the Core answers again.
-                MachineLink::Unconfirmed { .. } | MachineLink::Offline { .. } => {}
-                _ => {
-                    entry.update.link = MachineLink::Offline {
-                        since: crate::updates::now(),
-                    };
-                }
+            entry.restart = None;
+        }
+        match entry.update.link {
+            // "Can't confirm" stays until the Core answers again.
+            MachineLink::Unconfirmed { .. } | MachineLink::Offline { .. } => {}
+            _ => {
+                entry.update.link = MachineLink::Offline {
+                    since: crate::updates::now(),
+                };
             }
-            None
-        })
-        .flatten()
+        }
+        (None, false)
     }
 
     /// This desktop asked `id` to restart into `expected`: until the Core answers from a new
@@ -810,12 +854,42 @@ impl Shared {
                 }),
                 boot: entry.boot.clone(),
                 deadline: Instant::now() + limit,
+                retried: None,
             });
         });
     }
 
     fn forget_restart(&self, id: MachineId) {
         self.publish(id, |entry| entry.restart = None);
+    }
+
+    /// The follower read `id`'s reach. When the service lane of a route refused as
+    /// incompatible reports a compatible work protocol, the Core was updated, so the
+    /// Machine's routes check the refused route again with its saved pairing. That happens
+    /// once each time the reach starts reporting so, whether or not the Machine was seen
+    /// offline in between, and never in a loop: a route still refused waits for the next
+    /// compatibility change, or for Reconnect.
+    fn compatible_again(&self, id: MachineId, machine: &dyn Machine, reach: &Reach) {
+        let readmitted = matches!(
+            reach,
+            Reach::Lane {
+                work: Ok(()),
+                refused: true,
+                ..
+            }
+        );
+        let recheck = {
+            let mut state = self.lock();
+            let Some(entry) = state.entries.get_mut(&id) else {
+                return;
+            };
+            let recheck = readmitted && !entry.rechecked;
+            entry.rechecked = readmitted;
+            recheck
+        };
+        if recheck {
+            machine.retry();
+        }
     }
 }
 
@@ -837,13 +911,15 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
         let Some(machine) = shared.machine(id) else {
             return;
         };
-        let limit = match machine.reach() {
+        let reach = machine.reach();
+        shared.compatible_again(id, machine.as_ref(), &reach);
+        let limit = match reach {
             Reach::Stopped => {
                 shared.stopped(id);
                 None
             }
-            Reach::Offline => shared.unreachable(id),
-            Reach::Lane { lane, work } => match lane.facts() {
+            Reach::Offline => shared.unreachable(id, machine.as_ref()),
+            Reach::Lane { lane, work, .. } => match lane.facts() {
                 Ok(observed) => {
                     shared.observed(id, &observed, work);
                     let stale = || wake.generation() != Some(seen);
@@ -877,7 +953,7 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
                     shared.unreported(id, work);
                     None
                 }
-                Err(_) => shared.unreachable(id),
+                Err(_) => shared.unreachable(id, machine.as_ref()),
             },
         };
         if !wake.wait(seen, limit) {
@@ -912,6 +988,7 @@ pub(crate) fn failure_of_code(code: &str) -> ActionFailure {
         "service_busy" | "capacity" | "activation_unresolved" => ActionFailure::Busy,
         "changed" | "candidate_changed" => ActionFailure::Changed,
         "login_item_off" => ActionFailure::LoginItemOff,
+        "disk_full" => ActionFailure::DiskFull,
         "unreachable" | "not_running" | "stopped" | "network_off" | "service_unavailable" => {
             ActionFailure::Unreachable
         }

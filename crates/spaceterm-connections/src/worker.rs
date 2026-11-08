@@ -357,12 +357,16 @@ impl WorkerWake {
 }
 
 /// Whether the worker checks this route when its retry is due. A connected route whose link
-/// the worker follows is checked only once that link ends.
-fn checkable(runtime: &RouteState) -> bool {
-    !matches!(
-        runtime.status,
-        DirectRouteStatus::NeedsInteraction | DirectRouteStatus::Refused(_)
-    ) && !(runtime.status == DirectRouteStatus::Connected && runtime.health.is_some())
+/// the worker follows is checked only once that link ends. A refused route is checked only
+/// when its Core refused an incompatible work protocol and a retry asked to check it again.
+pub(super) fn checkable(runtime: &RouteState) -> bool {
+    match runtime.status {
+        DirectRouteStatus::NeedsInteraction => false,
+        DirectRouteStatus::Refused(RefusalReason::Incompatible) => runtime.retry.recheck,
+        DirectRouteStatus::Refused(_) => false,
+        DirectRouteStatus::Connected => runtime.health.is_none(),
+        _ => true,
+    }
 }
 
 /// Starts the jobs that are due, and returns when the next one that is not running will be.
@@ -543,8 +547,14 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
         Err(error) => {
             runtime.status = route_failure(error, runtime.core.is_some());
             runtime.retry.delay();
+            if runtime.retry.now {
+                runtime.retry.attempt = 0;
+                runtime.retry.due = Instant::now();
+            }
         }
     }
+    runtime.retry.now = false;
+    runtime.retry.recheck = false;
     drop(state);
     owner.notify();
 }

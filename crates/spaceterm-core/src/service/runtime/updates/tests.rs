@@ -633,13 +633,38 @@ fn waiting_for_facts_returns_once_they_change() {
         let updates = Updates::open(machine.service.clone()).unwrap();
         let first = updates.facts();
         assert_eq!(first.revision, 1);
-        assert_eq!(updates.wait(first.revision, Duration::ZERO), first);
+        assert_eq!(updates.wait(first.revision, Duration::ZERO), Some(first));
         let waiting = updates.clone();
         let waiter = std::thread::spawn(move || waiting.wait(1, Duration::from_secs(20)));
         std::thread::sleep(Duration::from_millis(50));
         updates.set_sessions(4);
-        let changed = waiter.join().unwrap();
+        let changed = waiter.join().unwrap().unwrap();
         assert_eq!((changed.revision, changed.sessions), (2, 4));
+    });
+}
+
+#[test]
+fn stopping_the_engine_ends_every_wait_for_facts() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let first = updates.facts();
+        let waiting = updates.clone();
+        let waiter = std::thread::spawn(move || {
+            let facts = waiting.wait(first.revision, Duration::from_secs(20));
+            (facts, Instant::now())
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let stopped = Instant::now();
+        updates.stop();
+        let (facts, returned) = waiter.join().unwrap();
+        assert_eq!(facts, None);
+        assert!(returned.duration_since(stopped) < Duration::from_millis(100));
+        // A wait that begins after the stop returns at once.
+        let late = Instant::now();
+        assert_eq!(updates.wait(first.revision, Duration::from_secs(20)), None);
+        assert!(late.elapsed() < Duration::from_millis(100));
+        assert_eq!(updates.facts().revision, first.revision);
     });
 }
 

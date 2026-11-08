@@ -41,6 +41,8 @@ fn machine(id: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
         }),
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
+        bundled: None,
+        failed_push: None,
     }
 }
 
@@ -173,16 +175,16 @@ fn action_command(menu: &Menu, title: &str) -> Command {
 #[gpui::test]
 fn restarting_a_core_with_sessions_asks_first_with_the_agreed_alert(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin\u{2026}");
 
     cx.update(|cx| fixture.menu.perform(restart.clone(), cx));
     cx.run_until_parked();
     assert_eq!(
         fixture.host.alerts.borrow().as_slice(),
         [Alert {
-            title: "Restart SpaceTerm Core on penguin?".to_owned(),
-            message: "This will close your 3 running sessions.".to_owned(),
-            confirm: Some("Restart".to_owned()),
+            title: "Update SpaceTerm Core on penguin?".to_owned(),
+            message: "SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 3 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.".to_owned(),
+            confirm: Some("Update Core".to_owned()),
         }]
     );
     assert!(
@@ -210,7 +212,12 @@ fn restarting_a_core_with_sessions_asks_first_with_the_agreed_alert(cx: &mut Tes
 #[gpui::test]
 fn restarting_a_core_without_sessions_restarts_at_once(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin");
+
+    assert!(fixture.host.menu().flat().iter().any(|row| matches!(
+        row,
+        FlatRow::Action { title, command } if title == "Update penguin" && *command == restart
+    )));
 
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
@@ -231,7 +238,7 @@ fn restart_all_asks_once_then_restarts_every_waiting_machine(cx: &mut TestAppCon
         ],
         cx,
     );
-    let restart_all = action_command(&fixture.host.menu(), "Restart All\u{2026}");
+    let restart_all = action_command(&fixture.host.menu(), "Update All\u{2026}");
     fixture.host.answers.borrow_mut().push(true);
 
     cx.update(|cx| fixture.menu.perform(restart_all, cx));
@@ -239,9 +246,9 @@ fn restart_all_asks_once_then_restarts_every_waiting_machine(cx: &mut TestAppCon
     assert_eq!(
         fixture.host.alerts.borrow().as_slice(),
         [Alert {
-            title: "Restart SpaceTerm Core on 2 machines?".to_owned(),
-            message: "This will close 7 running sessions.".to_owned(),
-            confirm: Some("Restart".to_owned()),
+            title: "Update SpaceTerm Core on This Mac and penguin?".to_owned(),
+            message: "SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 3 Terminal Sessions on This Mac. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it. SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 4 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.".to_owned(),
+            confirm: Some("Update Core".to_owned()),
         }]
     );
     assert_eq!(
@@ -294,7 +301,7 @@ fn only_this_mac_offers_stop_and_stopping_with_sessions_asks(cx: &mut TestAppCon
 #[gpui::test]
 fn a_restart_drawn_before_sessions_opened_never_runs_without_asking(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin");
     // Someone opened 2 sessions on penguin after the menu drew its no-ask restart.
     fixture
         .machines
@@ -312,7 +319,7 @@ fn a_restart_drawn_before_sessions_opened_never_runs_without_asking(cx: &mut Tes
 #[gpui::test]
 fn a_failed_action_from_the_menu_opens_an_alert_and_others_stay_quiet(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin");
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
     // An action no surface performed fails too; nobody reports it.
@@ -384,11 +391,10 @@ fn the_flat_menu_names_the_machine_each_pending_action_affects(cx: &mut TestAppC
             "penguin \u{b7} Version 0.8.0 \u{b7} Update ready".to_owned(),
             "build-box \u{b7} Version 0.8.0 \u{b7} Update ready".to_owned(),
             "-".to_owned(),
-            "[Restart SpaceTerm Core on This Mac]".to_owned(),
             "[Stop SpaceTerm Core on This Mac]".to_owned(),
-            "[Restart to Update on penguin\u{2026}]".to_owned(),
-            "[Restart to Update on build-box\u{2026}]".to_owned(),
-            "[Restart All\u{2026}]".to_owned(),
+            "[Update penguin\u{2026}]".to_owned(),
+            "[Update build-box\u{2026}]".to_owned(),
+            "[Update All\u{2026}]".to_owned(),
             "-".to_owned(),
             "[SpaceTerm Settings\u{2026}]".to_owned(),
             "[Quit SpaceTerm]".to_owned(),
@@ -424,7 +430,7 @@ fn updating_the_desktop_relaunches_without_asking(cx: &mut TestAppContext) {
         menu.header.line
     );
 
-    let relaunch = action_command(&menu, "Update SpaceTerm and Relaunch");
+    let relaunch = action_command(&menu, "Relaunch to Update SpaceTerm");
     cx.update(|cx| fixture.menu.perform(relaunch, cx));
     cx.run_until_parked();
     assert!(fixture.host.alerts.borrow().is_empty());
@@ -447,7 +453,7 @@ fn changed(fixture: &Fixture, update: MachineUpdate, cx: &mut TestAppContext) {
 #[gpui::test]
 fn sessions_that_change_while_the_alert_is_open_ask_again(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin\u{2026}");
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
     changed(&fixture, waiting(machine(PENGUIN, "penguin", 4)), cx);
@@ -460,7 +466,7 @@ fn sessions_that_change_while_the_alert_is_open_ask_again(cx: &mut TestAppContex
     );
     assert_eq!(
         fixture.host.alerts.borrow().last().unwrap().message,
-        "This will close your 4 running sessions."
+        "SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 4 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it."
     );
 
     fixture.host.answer(true);
@@ -474,7 +480,7 @@ fn sessions_that_change_while_the_alert_is_open_ask_again(cx: &mut TestAppContex
 #[gpui::test]
 fn a_new_pending_version_while_the_alert_is_open_asks_again(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin\u{2026}");
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
     let mut newer = waiting(machine(PENGUIN, "penguin", 3));
@@ -503,7 +509,7 @@ fn a_new_pending_version_while_the_alert_is_open_asks_again(cx: &mut TestAppCont
 #[gpui::test]
 fn sessions_that_all_close_while_the_alert_is_open_restart_at_once(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin\u{2026}");
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
     changed(&fixture, waiting(machine(PENGUIN, "penguin", 0)), cx);
@@ -526,7 +532,7 @@ fn restart_all_and_stop_ask_again_after_their_sessions_change(cx: &mut TestAppCo
         ],
         cx,
     );
-    let restart_all = action_command(&fixture.host.menu(), "Restart All\u{2026}");
+    let restart_all = action_command(&fixture.host.menu(), "Update All\u{2026}");
     cx.update(|cx| fixture.menu.perform(restart_all, cx));
     cx.run_until_parked();
     changed(
@@ -539,7 +545,7 @@ fn restart_all_and_stop_ask_again_after_their_sessions_change(cx: &mut TestAppCo
     assert!(fixture.machines.executed_actions().is_empty());
     assert_eq!(
         fixture.host.alerts.borrow().last().unwrap().message,
-        "This will close 8 running sessions."
+        "SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 3 Terminal Sessions on This Mac. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it. SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 5 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it."
     );
     fixture.host.answer(false);
     cx.run_until_parked();
@@ -611,11 +617,13 @@ fn the_flat_menu_offers_start_for_a_stopped_local_core(cx: &mut TestAppContext) 
             ))
         )
     );
-    assert!(
-        actions
-            .iter()
-            .any(|(title, _)| title == "Restart SpaceTerm Core on penguin\u{2026}"),
-        "a running Machine keeps its restart action: {actions:?}"
+    assert_eq!(
+        actions[1..],
+        [
+            ("SpaceTerm Settings…".to_owned(), Command::Settings),
+            ("Quit SpaceTerm".to_owned(), Command::Quit),
+        ],
+        "an up-to-date remote Core offers no action"
     );
 }
 
@@ -671,7 +679,7 @@ fn a_start_refused_by_login_items_opens_that_list_and_never_runs_by_itself(
 }
 
 #[gpui::test]
-fn the_flat_menu_keeps_local_restart_and_stop_and_never_offers_remote_stop(
+fn the_flat_menu_keeps_local_stop_and_update_and_never_offers_same_version_restart(
     cx: &mut TestAppContext,
 ) {
     let fixture = start(
@@ -695,20 +703,15 @@ fn the_flat_menu_keeps_local_restart_and_stop_and_never_offers_remote_stop(
     };
     assert_eq!(
         titles(fixture.host.menu()),
-        [
-            "Restart SpaceTerm Core on This Computer\u{2026}",
-            "Stop SpaceTerm Core on This Computer\u{2026}",
-            "Restart SpaceTerm Core on penguin",
-        ],
+        ["Stop SpaceTerm Core on This Computer\u{2026}"],
     );
 
     changed(&fixture, waiting(machine(LOCAL, "This Computer", 2)), cx);
     assert_eq!(
         titles(fixture.host.menu()),
         [
-            "Restart to Update on This Computer\u{2026}",
+            "Update This Computer\u{2026}",
             "Stop SpaceTerm Core on This Computer\u{2026}",
-            "Restart SpaceTerm Core on penguin",
         ],
     );
 
@@ -716,10 +719,7 @@ fn the_flat_menu_keeps_local_restart_and_stop_and_never_offers_remote_stop(
     stopping.facts.as_mut().unwrap().operation =
         Some(spaceterm_core::update::facts::Operation::Stopping);
     changed(&fixture, stopping, cx);
-    assert_eq!(
-        titles(fixture.host.menu()),
-        ["Restart SpaceTerm Core on penguin"],
-    );
+    assert!(titles(fixture.host.menu()).is_empty());
 }
 
 /// `machine` with a Core that reports no update facts.
@@ -734,64 +734,64 @@ fn unreported(id: MachineId, name: &'static str) -> MachineUpdate {
 /// sessions it reports. Nothing runs before the Core answers, and nothing runs through the
 /// unpreviewed path.
 #[gpui::test]
-fn a_machine_without_facts_restarts_and_stops_only_on_its_cores_preview(cx: &mut TestAppContext) {
+fn a_machine_without_facts_stops_only_on_its_cores_preview(cx: &mut TestAppContext) {
     let fixture = start(vec![unreported(LOCAL, "This Mac")], cx);
     fixture.machines.hold_previews();
-    for (title, action, button) in [
-        ("Restart SpaceTerm Core", MachineAction::Restart, "Restart"),
-        ("Stop SpaceTerm Core", MachineAction::Stop, "Stop"),
-    ] {
-        let executed = fixture.machines.executed().len();
-        let command = submenu_command(&fixture.host.menu(), LOCAL, title);
-        cx.update(|cx| fixture.menu.perform(command, cx));
-        cx.run_until_parked();
-        assert_eq!(
-            fixture.machines.asked().last(),
-            Some(&(LOCAL, action.clone()))
-        );
-        assert_eq!(
-            fixture.machines.executed().len(),
-            executed,
-            "nothing runs before the Core answers"
-        );
+    assert_eq!(
+        fixture.host.menu().commands().count(),
+        3,
+        "only Stop, Settings and Quit are offered"
+    );
+    let executed = fixture.machines.executed().len();
+    let command = submenu_command(&fixture.host.menu(), LOCAL, "Stop SpaceTerm Core");
+    cx.update(|cx| fixture.menu.perform(command, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.asked().last(),
+        Some(&(LOCAL, MachineAction::Stop))
+    );
+    assert_eq!(
+        fixture.machines.executed().len(),
+        executed,
+        "nothing runs before the Core answers"
+    );
 
-        fixture.machines.answer_preview(|machine, action| {
-            Ok(crate::updates::machines::testing::preview(
-                machine, action, 3,
-            ))
-        });
-        cx.run_until_parked();
-        let alert = fixture
-            .host
-            .alerts
-            .borrow()
-            .last()
-            .cloned()
-            .expect("it asks");
-        assert_eq!(alert.confirm.as_deref(), Some(button));
-        assert!(
-            alert
-                .message
-                .starts_with("This will close your 3 running sessions."),
-            "the alert names the sessions the Core reports: {}",
-            alert.message
-        );
-        assert_eq!(
-            fixture.machines.executed().len(),
-            executed,
-            "nothing runs while it asks"
-        );
-        fixture.host.answer(true);
-        cx.run_until_parked();
-        assert_eq!(
-            fixture.machines.executed_actions().last(),
-            Some(&(LOCAL, action))
-        );
-    }
-    assert_eq!(fixture.machines.executed_actions().len(), 2);
+    fixture.machines.answer_preview(|machine, action| {
+        Ok(crate::updates::machines::testing::preview(
+            machine, action, 3,
+        ))
+    });
+    cx.run_until_parked();
+    let alert = fixture
+        .host
+        .alerts
+        .borrow()
+        .last()
+        .cloned()
+        .expect("it asks");
+    assert_eq!(alert.confirm.as_deref(), Some("Stop"));
+    assert!(
+        alert
+            .message
+            .starts_with("This will close your 3 running sessions."),
+        "the alert names the sessions the Core reports: {}",
+        alert.message
+    );
+    assert_eq!(
+        fixture.machines.executed().len(),
+        executed,
+        "nothing runs while it asks"
+    );
+    fixture.host.answer(true);
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.executed_actions().last(),
+        Some(&(LOCAL, MachineAction::Stop))
+    );
+    assert_eq!(fixture.machines.executed_actions().len(), 1);
     assert!(
         fixture.machines.performed().is_empty(),
-        "a Restart or Stop never runs without its preview"
+        "Stop never runs without its preview"
     );
 }
 
@@ -800,7 +800,7 @@ fn a_machine_without_facts_restarts_and_stops_only_on_its_cores_preview(cx: &mut
 #[gpui::test]
 fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin");
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
     assert_eq!(
@@ -824,7 +824,7 @@ fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut Test
             .last()
             .cloned()
             .expect("it asks again");
-        assert_eq!(alert.confirm.as_deref(), Some("Restart"));
+        assert_eq!(alert.confirm.as_deref(), Some("Update Core"));
         fixture.host.answer(approved);
         cx.run_until_parked();
         assert_eq!(
@@ -847,13 +847,14 @@ fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut Test
 fn sessions_the_core_previews_ask_even_when_the_menu_showed_none(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
     fixture.machines.hold_previews();
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin");
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
     fixture.machines.answer_preview(|machine, action| {
-        Ok(crate::updates::machines::testing::preview(
-            machine, action, 2,
-        ))
+        Ok(crate::updates::machines::MachinePreview {
+            target: Some(Version::parse("0.9.0").unwrap()),
+            ..crate::updates::machines::testing::preview(machine, action, 2)
+        })
     });
     cx.run_until_parked();
     assert!(fixture.machines.executed().is_empty());
@@ -864,7 +865,7 @@ fn sessions_the_core_previews_ask_even_when_the_menu_showed_none(cx: &mut TestAp
             .borrow()
             .last()
             .map(|alert| alert.message.clone()),
-        Some("This will close your 2 running sessions.".to_owned())
+        Some("SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 2 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.".to_owned())
     );
     fixture.host.answer(false);
     cx.run_until_parked();
@@ -875,7 +876,7 @@ fn sessions_the_core_previews_ask_even_when_the_menu_showed_none(cx: &mut TestAp
     assert_eq!(fixture.machines.asked().len(), 1);
 }
 
-/// One Machine's preview failing in Restart All reports that Machine alone, at once. The others
+/// One Machine's preview failing in Update All reports that Machine alone, at once. The others
 /// still ask, with their own sessions, and run.
 #[gpui::test]
 fn a_failed_preview_in_restart_all_leaves_the_other_machines_to_restart(cx: &mut TestAppContext) {
@@ -890,7 +891,7 @@ fn a_failed_preview_in_restart_all_leaves_the_other_machines_to_restart(cx: &mut
         cx,
     );
     fixture.machines.hold_previews();
-    let restart_all = action_command(&fixture.host.menu(), "Restart All\u{2026}");
+    let restart_all = action_command(&fixture.host.menu(), "Update All\u{2026}");
     cx.update(|cx| fixture.menu.perform(restart_all, cx));
     cx.run_until_parked();
     assert_eq!(
@@ -916,17 +917,20 @@ fn a_failed_preview_in_restart_all_leaves_the_other_machines_to_restart(cx: &mut
     );
 
     for (id, sessions) in [(LOCAL, 3), (PENGUIN, 4)] {
-        fixture
-            .machines
-            .answer_preview_of(id, |action| Ok(preview(id, action, sessions)));
+        fixture.machines.answer_preview_of(id, |action| {
+            Ok(crate::updates::machines::MachinePreview {
+                target: Some(Version::parse("0.9.0").unwrap()),
+                ..preview(id, action, sessions)
+            })
+        });
     }
     cx.run_until_parked();
     assert_eq!(
         fixture.host.alerts.borrow().last().cloned(),
         Some(Alert {
-            title: "Restart SpaceTerm Core on 2 machines?".to_owned(),
-            message: "This will close 7 running sessions.".to_owned(),
-            confirm: Some("Restart".to_owned()),
+            title: "Update SpaceTerm Core on This Mac and penguin?".to_owned(),
+            message: "SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 3 Terminal Sessions on This Mac. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it. SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 4 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.".to_owned(),
+            confirm: Some("Update Core".to_owned()),
         })
     );
     assert!(fixture.machines.executed().is_empty());
@@ -946,7 +950,7 @@ fn a_failed_preview_in_restart_all_leaves_the_other_machines_to_restart(cx: &mut
 #[gpui::test]
 fn an_update_that_ran_while_the_alert_was_open_restarts_nothing_more(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 3))], cx);
-    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Restart to Update\u{2026}");
+    let restart = submenu_command(&fixture.host.menu(), PENGUIN, "Update penguin\u{2026}");
     cx.update(|cx| fixture.menu.perform(restart, cx));
     cx.run_until_parked();
     assert_eq!(fixture.host.alerts.borrow().len(), 1);

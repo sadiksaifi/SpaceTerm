@@ -9,6 +9,8 @@ use spaceterm_core::pane::{SessionEnd, control::Controller};
 /// A Pane connection whose answers a test sets and whose explicit requests it counts.
 struct Connection {
     status: Mutex<CorePaneStatus>,
+    version: Mutex<Option<spaceterm_core::update::facts::Version>>,
+    restart: Mutex<Option<spaceterm_core::update::facts::Version>>,
     session_end: Mutex<Option<SessionEnd>>,
     start_unconfirmed: AtomicBool,
     generation: AtomicU64,
@@ -21,6 +23,8 @@ impl Connection {
     fn new(status: CorePaneStatus) -> Arc<Self> {
         Arc::new(Self {
             status: Mutex::new(status),
+            version: Mutex::default(),
+            restart: Mutex::default(),
             session_end: Mutex::default(),
             start_unconfirmed: AtomicBool::new(false),
             generation: AtomicU64::new(0),
@@ -46,6 +50,12 @@ impl Connection {
 }
 
 impl MachinePaneConnection for Connection {
+    fn restarting_version(&self) -> Option<spaceterm_core::update::facts::Version> {
+        self.restart.lock().unwrap().clone()
+    }
+    fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {
+        self.version.lock().unwrap().clone()
+    }
     fn status(&self) -> CorePaneStatus {
         *self.status.lock().expect("status")
     }
@@ -386,4 +396,57 @@ fn another_clients_exited_shell_offers_start_session_through_take_over() {
             ..
         })
     ));
+}
+
+#[test]
+fn a_restored_pane_names_the_update_it_observed_and_keeps_other_end_causes() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    *connection.version.lock().unwrap() =
+        Some(spaceterm_core::update::facts::Version::parse("0.11.0").unwrap());
+    let mut view = CorePaneView::new(connection.clone());
+    connection.answer(CorePaneStatus::Reconnecting);
+    view.sync();
+    *connection.version.lock().unwrap() =
+        Some(spaceterm_core::update::facts::Version::parse("0.11.1").unwrap());
+    connection.answer(CorePaneStatus::Restored);
+    view.sync();
+    assert_eq!(
+        view.dormant_copy(None).detail.as_ref(),
+        "SpaceTerm Core restarted to update to 0.11.1."
+    );
+    assert_eq!(
+        view.dormant_copy(Some(SessionEnd::Signaled))
+            .detail
+            .as_ref(),
+        super::SIGNALED_DETAIL
+    );
+    connection.answer(CorePaneStatus::Connected);
+    view.sync();
+    connection.answer(CorePaneStatus::Restored);
+    view.sync();
+    assert_eq!(
+        view.dormant_copy(None).detail.as_ref(),
+        super::RESTORED_DETAIL,
+        "a later same-version restart has its own cause"
+    );
+}
+
+#[test]
+fn a_pane_names_an_announced_update_even_when_the_core_returns_to_its_previous_version() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    *connection.version.lock().unwrap() =
+        Some(spaceterm_core::update::facts::Version::parse("0.11.0").unwrap());
+    let mut view = CorePaneView::new(connection.clone());
+    *connection.restart.lock().unwrap() =
+        Some(spaceterm_core::update::facts::Version::parse("0.11.1").unwrap());
+    view.sync();
+    connection.answer(CorePaneStatus::Reconnecting);
+    view.sync();
+    *connection.restart.lock().unwrap() = None;
+    connection.answer(CorePaneStatus::Restored);
+    view.sync();
+    assert_eq!(
+        view.dormant_copy(None).detail.as_ref(),
+        "SpaceTerm Core restarted to update to 0.11.1."
+    );
 }

@@ -559,6 +559,8 @@ pub(in crate::platform) mod tests {
             }),
             capabilities: Capabilities::fake(&Capability::ALL),
             push: None,
+            bundled: None,
+            failed_push: None,
         };
         let machines = [machine(1, "This Mac"), machine(2, "penguin")];
         let update = Presentation::new(
@@ -568,6 +570,7 @@ pub(in crate::platform) mod tests {
                 stage: Default::default(),
                 notes_unread: false,
                 running: env!("SPACETERM_VERSION"),
+                relaunch_held: false,
             },
             &machines,
             &Dismissed::new(),

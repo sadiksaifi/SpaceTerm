@@ -11,7 +11,7 @@ use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 use crate::updates::policy::{CheckInterval, UpdatePreferences};
 
-use super::updates::{CHECK_NOW_SELECTOR, DOWNLOAD_SELECTOR, RESTART_SELECTOR};
+use super::updates::{CHECK_NOW_SELECTOR, RESTART_SELECTOR};
 use super::{SettingsSectionId, SettingsWindow};
 use crate::settings::storage::testing::MemoryStorage;
 
@@ -119,7 +119,7 @@ fn status_should_offer_no_update_action_without_the_update_service(cx: &mut Test
 
     let status = window.read_with(cx, |settings, cx| settings.update_status(cx));
     assert_eq!(status.action, None);
-    for selector in [CHECK_NOW_SELECTOR, DOWNLOAD_SELECTOR, RESTART_SELECTOR] {
+    for selector in [CHECK_NOW_SELECTOR, RESTART_SELECTOR] {
         assert!(
             cx.debug_bounds(selector).is_none(),
             "{selector} should not render"
@@ -128,5 +128,118 @@ fn status_should_offer_no_update_action_without_the_update_service(cx: &mut Test
     assert!(
         cx.debug_bounds("settings-row-update-status-description")
             .is_some()
+    );
+}
+
+#[gpui::test]
+fn ready_settings_and_title_bar_share_copy_and_relaunch_without_confirmation(
+    cx: &mut TestAppContext,
+) {
+    use crate::updates::{ApplicationUpdates, UpdateEvent, UpdateService};
+    let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+    let (window, cx) = open_updates(cx);
+    let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
+    updates.update(cx, |updates, cx| updates.check(false, cx));
+    adapter.emit(UpdateEvent::Available("0.11.1".into()));
+    adapter.emit(UpdateEvent::Ready);
+    cx.run_until_parked();
+    let status = window.read_with(cx, |settings, cx| settings.update_status(cx));
+    assert_eq!(
+        status.summary.as_ref(),
+        "SpaceTerm 0.11.1 is ready. Relaunching keeps every Terminal Session running."
+    );
+    assert_eq!(status.button.as_ref(), "Relaunch");
+    let shared = cx.update(|_, cx| crate::updates::presentation::current(cx).desktop.sentence());
+    assert_eq!(status.summary, shared);
+    click(RESTART_SELECTOR, cx);
+    assert_eq!(
+        adapter.installations.get(),
+        1,
+        "one click requests relaunch"
+    );
+    assert!(
+        cx.debug_bounds(RESTART_SELECTOR).is_none(),
+        "relaunch is in progress"
+    );
+}
+
+/// A relaunch that ran out of time leaves the updater holding its installer, and no new check
+/// can replace it. After the person acknowledges the title bar's explanation, every surface
+/// still offers to relaunch, and the Settings button quits again into the held installer.
+#[gpui::test]
+fn an_acknowledged_relaunch_failure_still_relaunches_from_settings(cx: &mut TestAppContext) {
+    use crate::updates::presentation::{self, Command, DesktopAction, ExtraItem, ItemKey};
+    use crate::updates::{ApplicationUpdates, UpdateEvent, UpdateService};
+    let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+    let (window, cx) = open_updates(cx);
+    let quits = Rc::new(std::cell::Cell::new(0));
+    let counted = quits.clone();
+    cx.update(|_, cx| {
+        cx.on_action(move |_: &crate::app::QuitApplication, _| counted.set(counted.get() + 1));
+    });
+    let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
+    updates.update(cx, |updates, cx| updates.check(false, cx));
+    adapter.emit(UpdateEvent::Available("0.11.1".into()));
+    adapter.emit(UpdateEvent::Ready);
+    cx.run_until_parked();
+    click(RESTART_SELECTOR, cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(30));
+    cx.run_until_parked();
+
+    // The person acknowledges the title bar's explanation.
+    let failed = cx.update(|_, cx| presentation::current(cx).items());
+    let Some(Command::Explain(explanation)) = failed
+        .iter()
+        .find(|item| item.key == ItemKey::Desktop)
+        .and_then(|item| item.command.clone())
+    else {
+        panic!("the failed relaunch explains");
+    };
+    let then = *explanation.then.expect("OK acknowledges the failure");
+    cx.update(|_, cx| {
+        crate::ui::updates::commands::perform(
+            then,
+            crate::ui::updates::commands::Presenter::Front,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let shared = cx.update(|_, cx| presentation::current(cx));
+    let relaunch = Command::Desktop(DesktopAction::Update);
+    let item = shared
+        .items()
+        .into_iter()
+        .find(|item| item.key == ItemKey::Desktop)
+        .expect("the title bar still offers to relaunch");
+    assert_eq!(item.label.as_ref(), "Relaunch");
+    assert_eq!(item.command.as_ref(), Some(&relaunch));
+    assert!(
+        shared.extra_actions().iter().any(
+            |action| matches!(action, ExtraItem::Action { command, .. } if *command == relaunch)
+        ),
+        "the menu bar extra still offers to relaunch"
+    );
+    let status = window.read_with(cx, |settings, cx| settings.update_status(cx));
+    assert_eq!(
+        status.summary.as_ref(),
+        "SpaceTerm 0.11.1 is downloaded, but SpaceTerm couldn't quit to install it. Your \
+         Terminal Sessions are still running."
+    );
+    assert_eq!(status.button.as_ref(), "Try Again");
+
+    click(RESTART_SELECTOR, cx);
+    assert_eq!(quits.get(), 1, "Try Again quits into the held installer");
+    assert!(
+        cx.update(|_, cx| crate::updates::relaunch_approval(cx))
+            .is_some()
+    );
+    assert_eq!(
+        adapter.checks.get(),
+        1,
+        "the held installer needs no new check"
     );
 }

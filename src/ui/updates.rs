@@ -1,18 +1,15 @@
-//! Update presentation: the title-bar update control, its alerts, menu commands, prompts, and
-//! launch view. [`crate::updates`] owns update policy and state, and
+//! Update presentation: the title-bar update control, its alerts, menu commands and prompts.
+//! [`crate::updates`] owns update policy and state, and
 //! [`crate::updates::presentation`] owns what every update surface says.
 
 pub(crate) mod commands;
 mod control;
-mod launch;
 pub(crate) mod whats_new;
 
 pub(super) use control::UpdateControl;
-pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
 
 use gpui::{
-    AnyWindowHandle, App, BorrowAppContext, Context, Entity, Global, Subscription, Window,
-    WindowHandle, actions,
+    App, BorrowAppContext, Context, Entity, Global, Subscription, Window, WindowHandle, actions,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
@@ -20,7 +17,6 @@ use spaceterm_ui::{
 };
 
 use super::WorkspaceManager;
-use super::settings_window::SettingsWindow;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice};
 use crate::updates::reminders::{ReminderActivated, UpdateReminders};
@@ -86,8 +82,6 @@ struct UpdatePrompts {
 enum InstallRequest {
     /// The application menu or the Updates menu, answered in the front Workspace window.
     FrontWorkspace,
-    /// A window that hosts update prompts itself, such as Settings.
-    Window(AnyWindowHandle),
 }
 
 impl Global for UpdatePrompts {}
@@ -190,11 +184,19 @@ fn check_for_updates(cx: &mut App) {
         });
         return;
     };
+    // A dismissed relaunch failure still holds its installer, which no new check can replace.
+    if updates.read(cx).holds_failed_relaunch() {
+        present_relaunch_failure(cx);
+        return;
+    }
     let state = updates.read(cx).state().clone();
     match state {
         UpdateState::Unavailable => present_in_front_window(cx, |window, cx| {
             present_failure(UpdateError::Unavailable, window, cx)
         }),
+        UpdateState::Failed {
+            error: UpdateError::Relaunch,
+        } => present_relaunch_failure(cx),
         UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed { .. } => {
             update_results(CheckResults::request, cx);
             updates.update(cx, |updates, cx| updates.check(true, cx));
@@ -214,9 +216,8 @@ fn check_for_updates(cx: &mut App) {
             }
         }
         UpdateState::Ready { .. } => request_install(&updates, InstallRequest::FrontWorkspace, cx),
-        UpdateState::Installing { version } => present_in_front_window(cx, move |window, cx| {
-            present_finish_install(&version, window, cx)
-        }),
+        // SpaceTerm is relaunching. The relaunch deadline reports it if it doesn't quit.
+        UpdateState::Installing { .. } => {}
     }
 }
 
@@ -227,13 +228,6 @@ fn request_install(updates: &Entity<ApplicationUpdates>, request: InstallRequest
         });
     }
     updates.update(cx, |updates, cx| updates.request_install_confirmation(cx));
-}
-
-/// Asks to install from a window that presents the confirmation itself.
-pub(crate) fn request_install_from(window: AnyWindowHandle, cx: &mut App) {
-    if let Some(updates) = service(cx) {
-        request_install(&updates, InstallRequest::Window(window), cx);
-    }
 }
 
 fn receive_notice(notice: UpdateNotice, cx: &mut App) {
@@ -252,14 +246,6 @@ fn receive_notice(notice: UpdateNotice, cx: &mut App) {
             // An unrequested confirmation waits for the button rather than stacking behind
             // another decision. The Updates menu keeps the ready step prominent until the user acts.
             let requested = request.is_some();
-            if let Some(InstallRequest::Window(handle)) = request
-                && let Some(settings) = handle.downcast::<SettingsWindow>()
-                && settings
-                    .update(cx, |_, window, cx| present_install(window, cx))
-                    .is_ok()
-            {
-                return;
-            }
             let Some(handle) = front_workspace_window(cx) else {
                 return;
             };
@@ -286,6 +272,9 @@ fn present_result(state: UpdateState, cx: &mut App) {
         UpdateState::Available { version } => present_in_front_window(cx, move |window, cx| {
             present_available(&version, window, cx)
         }),
+        UpdateState::Failed {
+            error: UpdateError::Relaunch,
+        } => present_relaunch_failure(cx),
         UpdateState::Failed { error } => {
             present_in_front_window(cx, move |window, cx| present_failure(error, window, cx))
         }
@@ -329,7 +318,7 @@ enum PromptAction {
     TryAgain,
     StopDownload,
     KeepDownloading,
-    Restart,
+    Relaunch,
 }
 
 fn action(
@@ -466,6 +455,11 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
             AlertIntent::Warning,
         ),
         UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
+        UpdateError::Relaunch => (
+            "Couldn\u{2019}t Relaunch SpaceTerm",
+            true,
+            AlertIntent::Warning,
+        ),
     };
     let mut actions = Vec::with_capacity(2);
     if retry {
@@ -502,6 +496,66 @@ fn present_failure<T: 'static>(error: UpdateError, window: &mut Window, cx: &mut
         if action == Some(PromptAction::TryAgain) {
             check_for_updates(cx);
         }
+    });
+}
+
+fn relaunch_failure_alert(version: &str) -> Alert<PromptAction> {
+    Alert::new(
+        ModalId::new("update-relaunch-failure"),
+        "Couldn\u{2019}t relaunch SpaceTerm",
+        "Couldn\u{2019}t Relaunch SpaceTerm",
+        format!(
+            "SpaceTerm {version} is downloaded, but SpaceTerm couldn\u{2019}t quit to install it. \
+             Your Terminal Sessions are still running."
+        ),
+        vec![
+            action(
+                PromptAction::TryAgain,
+                "Try Again",
+                ModalActionRole::Affirmative,
+                "update-relaunch-failure-try-again",
+            )
+            .with_emphasis(ModalActionEmphasis::Prominent)
+            .default_action(true),
+            action(
+                PromptAction::Later,
+                "Later",
+                ModalActionRole::Cancel,
+                "update-relaunch-failure-later",
+            ),
+        ],
+    )
+    .intent(AlertIntent::Warning)
+}
+
+/// The person chose Relaunch and is waiting for SpaceTerm to quit, so the failure appears even
+/// with no Workspace Window open: SpaceTerm opens one to show it, as its relaunch would have.
+fn present_relaunch_failure(cx: &mut App) {
+    let Some(updates) = service(cx) else { return };
+    let version = updates
+        .read(cx)
+        .pending_version()
+        .unwrap_or_default()
+        .to_owned();
+    if front_workspace_window(cx).is_none() {
+        crate::app::activate_default_window(cx, None);
+        cx.activate(true);
+    }
+    present_in_front_window(cx, move |window, cx| {
+        present(
+            relaunch_failure_alert(&version),
+            window,
+            cx,
+            |action, cx| match action {
+                Some(PromptAction::TryAgain) => {
+                    if let Some(updates) = service(cx) {
+                        updates.update(cx, |updates, cx| updates.relaunch(cx));
+                    }
+                }
+                Some(PromptAction::Later) => put_off(cx),
+                _ => {}
+            },
+        );
     });
 }
 
@@ -542,15 +596,15 @@ fn present_stop_download<T: 'static>(version: &str, window: &mut Window, cx: &mu
 fn install_alert(version: &str) -> Alert<PromptAction> {
     Alert::new(
         ModalId::new("update-install"),
-        "Install update",
-        format!("Restart to Install SpaceTerm {version}?"),
-        "SpaceTerm quits, installs the update, and opens again. Your Terminal Sessions keep running.",
+        "Update ready",
+        format!("SpaceTerm {version} Is Ready"),
+        "Relaunching installs it. Your Terminal Sessions keep running.",
         vec![
             action(
-                PromptAction::Restart,
-                "Restart and Install",
+                PromptAction::Relaunch,
+                "Relaunch",
                 ModalActionRole::Affirmative,
-                "update-install-restart",
+                "update-install-relaunch",
             )
             .with_emphasis(ModalActionEmphasis::Prominent)
             .default_action(true),
@@ -584,7 +638,7 @@ fn present_install<T: 'static>(window: &mut Window, cx: &mut Context<T>) {
         window,
         cx,
         move |action, cx| {
-            let accepted = action == Some(PromptAction::Restart);
+            let accepted = action == Some(PromptAction::Relaunch);
             settle.update(cx, |updates, cx| {
                 updates.finish_install_confirmation(confirmation, accepted, cx)
             });
@@ -599,50 +653,6 @@ fn present_install<T: 'static>(window: &mut Window, cx: &mut Context<T>) {
         updates.update(cx, |updates, cx| {
             updates.finish_install_confirmation(unpresented, false, cx)
         });
-    }
-}
-
-fn finish_install_alert(version: &str) -> Alert<PromptAction> {
-    Alert::new(
-        ModalId::new("update-finish-install"),
-        "Finish installing update",
-        format!("Restart to Install SpaceTerm {version}?"),
-        "The update installs when SpaceTerm quits.",
-        vec![
-            action(
-                PromptAction::Restart,
-                "Restart",
-                ModalActionRole::Affirmative,
-                "update-finish-install-restart",
-            )
-            .with_emphasis(ModalActionEmphasis::Prominent)
-            .default_action(true),
-            action(
-                PromptAction::Later,
-                "Later",
-                ModalActionRole::Cancel,
-                "update-finish-install-later",
-            ),
-        ],
-    )
-}
-
-fn present_finish_install<T: 'static>(version: &str, window: &mut Window, cx: &mut Context<T>) {
-    present(
-        finish_install_alert(version),
-        window,
-        cx,
-        |action, cx| match action {
-            Some(PromptAction::Restart) => retry_install(cx),
-            Some(PromptAction::Later) => put_off(cx),
-            _ => {}
-        },
-    );
-}
-
-fn retry_install(cx: &mut App) {
-    if let Some(updates) = service(cx) {
-        updates.update(cx, |updates, cx| updates.retry_install(cx));
     }
 }
 
@@ -841,7 +851,7 @@ mod tests {
             available_alert("0.4.2"),
             stop_download_alert("0.4.2"),
             install_alert("0.4.2"),
-            finish_install_alert("0.4.2"),
+            relaunch_failure_alert("0.4.2"),
         ];
         alerts.extend(
             [
@@ -851,6 +861,7 @@ mod tests {
                 UpdateError::Verification,
                 UpdateError::Installation,
                 UpdateError::ReadOnly,
+                UpdateError::Relaunch,
             ]
             .map(|error| failure_alert(error, testing_wording())),
         );
@@ -879,16 +890,16 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn restarting_to_install_shows_no_claim_about_ending_terminal_sessions(
+    /// Presents `alert` on its own window and reads what assistive technology reads.
+    fn presented(
+        alert: Alert<PromptAction>,
         cx: &mut gpui::TestAppContext,
-    ) {
+    ) -> spaceterm_ui::a11y_testing::A11yTree {
         use gpui::prelude::*;
-        use spaceterm_ui::a11y_testing::A11yTree;
 
-        struct InstallAlertHost;
+        struct AlertHost;
 
-        impl Render for InstallAlertHost {
+        impl Render for AlertHost {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 spaceterm_ui::ModalLayer::new(gpui::div().size_full())
             }
@@ -896,26 +907,44 @@ mod tests {
 
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let (host, cx) = cx.add_window_view(|_, _| InstallAlertHost);
+        let (host, cx) = cx.add_window_view(|_, _| AlertHost);
         let _handle = cx.update(|window, cx| {
             host.update(cx, |_, cx| {
-                install_alert("0.4.2")
+                alert
                     .present(window, cx, |_, _| {})
-                    .expect("the install confirmation presents")
+                    .expect("the alert presents")
             })
         });
         cx.run_until_parked();
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+    }
 
-        let tree = A11yTree::read(cx);
-        tree.text("Restart to Install SpaceTerm 0.4.2?");
-        for action in ["Restart and Install", "Release Notes", "Later"] {
+    #[gpui::test]
+    fn the_ready_alert_relaunches_and_keeps_terminal_sessions_running(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let tree = presented(install_alert("0.4.2"), cx);
+        tree.text("SpaceTerm 0.4.2 Is Ready");
+        for action in ["Relaunch", "Release Notes", "Later"] {
             tree.node(action);
         }
-        tree.text(
-            "SpaceTerm quits, installs the update, and opens again. Your Terminal Sessions keep running.",
-        );
-        let alert = tree.node("Install update");
+        tree.text("Relaunching installs it. Your Terminal Sessions keep running.");
+        let alert = tree.node("Update ready");
         assert_eq!(alert["aria"]["role"], "AlertDialog");
         assert_eq!(tree.with_role("Button").len(), 3);
+    }
+
+    #[gpui::test]
+    fn the_relaunch_failure_alert_offers_try_again_and_later(cx: &mut gpui::TestAppContext) {
+        let tree = presented(relaunch_failure_alert("0.4.2"), cx);
+        tree.text("Couldn\u{2019}t Relaunch SpaceTerm");
+        tree.text(
+            "SpaceTerm 0.4.2 is downloaded, but SpaceTerm couldn\u{2019}t quit to install it. \
+             Your Terminal Sessions are still running.",
+        );
+        for action in ["Try Again", "Later"] {
+            tree.node(action);
+        }
+        assert_eq!(tree.with_role("Button").len(), 2);
     }
 }

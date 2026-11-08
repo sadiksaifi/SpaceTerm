@@ -823,6 +823,23 @@ mod connection {
     pub(crate) trait MachinePaneConnection: Send + Sync {
         fn status(&self) -> CorePaneStatus;
 
+        /// The running version already received over this Pane's authenticated connection.
+        fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {
+            self.directory_core()?
+                .update_facts()
+                .map(|facts| facts.running.clone())
+        }
+
+        /// The restart target already announced by this Pane's Core before it disconnects.
+        fn restarting_version(&self) -> Option<spaceterm_core::update::facts::Version> {
+            match &self.directory_core()?.update_facts()?.operation {
+                Some(spaceterm_core::update::facts::Operation::Restarting { to }) => {
+                    Some(to.clone())
+                }
+                _ => None,
+            }
+        }
+
         /// Whether the original presentation admission still occupies a startup slot. Receiving
         /// a screen is a separate input barrier and may wait while this Pane is hidden.
         fn startup_pending(&self) -> bool {
@@ -1015,6 +1032,9 @@ mod connection {
         announcements: ScreenAnnouncements,
         connection: Arc<dyn MachinePaneConnection>,
         status: CorePaneStatus,
+        running_version: Option<spaceterm_core::update::facts::Version>,
+        restored_update: Option<spaceterm_core::update::facts::Version>,
+        expected_restart: Option<spaceterm_core::update::facts::Version>,
         controller: Option<Controller>,
         session_end: Option<SessionEnd>,
         generation: u64,
@@ -1038,6 +1058,9 @@ mod connection {
             let mut view = Self {
                 announcements: ScreenAnnouncements::default(),
                 status: connection.status(),
+                running_version: connection.running_version(),
+                restored_update: None,
+                expected_restart: connection.restarting_version(),
                 controller: connection.controller(),
                 session_end: connection.session_end(),
                 generation: connection.connection_generation(),
@@ -1073,13 +1096,35 @@ mod connection {
             // Status first, because a connection publishes its generation before it reports
             // Connected.
             let status = self.connection.status();
+            if let Some(target) = self.connection.restarting_version() {
+                self.expected_restart = Some(target);
+            }
+            let version = self.connection.running_version();
+            let version_changed = version.is_some() && version != self.running_version;
+            if version_changed {
+                if self.running_version.is_some() {
+                    self.restored_update = version.clone();
+                }
+                self.running_version = version;
+            }
             let generation = self.connection.connection_generation();
             let generation_changed = generation != self.generation;
+            if status == CorePaneStatus::Restored && self.status != CorePaneStatus::Restored {
+                self.restored_update = self.expected_restart.take().or(self.restored_update.take());
+            }
+            if status == CorePaneStatus::Connected
+                && (self.status != CorePaneStatus::Connected
+                    || version_changed
+                    || generation_changed)
+            {
+                self.expected_restart = None;
+            }
             let progress = self.connection.directory_progress();
             let controller = self.connection.controller();
             let session_end = self.connection.session_end();
             let start_unknown = self.connection.start_unconfirmed();
             if status == self.status
+                && !version_changed
                 && !generation_changed
                 && progress == self.directory_progress
                 && controller == self.controller
@@ -1135,6 +1180,7 @@ mod connection {
 
         fn apply(&mut self) -> CorePaneSync {
             if self.status == CorePaneStatus::Connected {
+                self.restored_update = None;
                 self.announcements = ScreenAnnouncements::default();
                 self.takeover_shown = false;
                 self.take_over_unconfirmed = false;
@@ -1230,6 +1276,18 @@ mod connection {
         /// The Session ended while another client controlled it, so nothing remains to take over.
         pub(crate) fn session_ended(&self) -> bool {
             self.status == CorePaneStatus::TakeoverFailed(CoreError::SessionUnavailable)
+        }
+
+        /// A version change observed by this Pane explains why its former shell ended. A new
+        /// Session clears that cause, so a later ordinary restart cannot inherit it.
+        pub(crate) fn dormant_copy(&self, ended: Option<SessionEnd>) -> super::DormantCopy {
+            let mut copy = super::DormantCopy::of(ended);
+            if ended.is_none()
+                && let Some(version) = &self.restored_update
+            {
+                copy.detail = format!("SpaceTerm Core restarted to update to {version}.").into();
+            }
+            copy
         }
 
         /// The screen replacing the Pane, if one does.

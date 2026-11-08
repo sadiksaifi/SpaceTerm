@@ -180,6 +180,48 @@ fn with_lane_running(version: &str, run: impl FnOnce(Lane)) {
     });
 }
 
+/// Runs `run` with fixture signing trust after it approves a signed installation at `paths`,
+/// so a server started there opens its update engine and answers its service lane.
+pub(crate) fn with_approved(paths: &crate::host::Paths, run: impl FnOnce()) {
+    let source = paths.data.with_extension("source");
+    with_artifact(&source, &paths.identity, |archive, signature| {
+        approve(paths, VERSION, archive, signature);
+        run();
+    });
+}
+
+/// Provisions the signed `version` at `archive` as the approved installation at `paths`.
+fn approve(
+    paths: &crate::host::Paths,
+    version: &str,
+    archive: &std::path::Path,
+    signature: &std::path::Path,
+) -> Service {
+    let service = Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running));
+    let approved = service
+        .provision(archive, signature, target(), COMMIT, version)
+        .unwrap();
+    let installation = approved
+        .directory
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .into();
+    let state = super::super::State {
+        installation,
+        stopped: false,
+        automatic_start: true,
+        installed: true,
+        removing: false,
+        run: None,
+        activation: None,
+    };
+    let data = Directory::open(&paths.data, false).unwrap();
+    data.write_json(c"service.json", &state).unwrap();
+    service
+}
+
 /// Serves the signed `version` at `archive` as the approved installation of `fixture`.
 fn serve(
     fixture: &super::super::tests::Fixture,
@@ -188,24 +230,7 @@ fn serve(
     signature: &std::path::Path,
     run: impl FnOnce(Lane),
 ) {
-    let service = Service::new(
-        fixture.paths.clone(),
-        fixture.paths.identity.clone(),
-        Arc::new(Running),
-    );
-    let approved = service
-        .provision(archive, signature, target(), COMMIT, version)
-        .unwrap();
-    let data = Directory::open(&fixture.paths.data, false).unwrap();
-    let mut state = Service::state(&data).unwrap().unwrap();
-    state.installation = approved
-        .directory
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .into();
-    data.write_json(c"service.json", &state).unwrap();
+    let service = approve(&fixture.paths, version, archive, signature);
     let host = Arc::new(Host::default());
     let launches = Arc::new(AtomicUsize::new(0));
     let counted = launches.clone();
@@ -1227,6 +1252,20 @@ fn a_running_core_refuses_a_restart_preview_while_an_activation_holds_the_servic
             effects.to.as_ref().map(|to| to.version.as_str()),
             Some("1.0.0")
         );
+    });
+}
+
+/// A Restart with no Pending Version names the version it restarts, so a confirmation never
+/// names a running version from facts another client's update has made stale.
+#[test]
+fn a_same_version_restart_preview_names_the_running_version() {
+    with_lane_running("0.9.0", |lane| {
+        let (_, effects) = preview(&lane.lane, LaneAction::Restart);
+        let from = effects.from.expect("the preview names the running version");
+        assert_eq!(from.version, "0.9.0");
+        assert_eq!(from.commit, COMMIT);
+        assert_eq!(effects.to, None);
+        assert_eq!(effects.to_major, None);
     });
 }
 

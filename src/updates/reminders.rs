@@ -1,8 +1,10 @@
 //! Daily notifications about overdue updates. The desktop's own reminder follows its update
 //! history: one day after the release, then daily, and once when the next launch starts to
-//! require it. A Machine whose Pending Version waits a day or more is named once a day with its
-//! session count; SpaceTerm never restarts it while sessions are open. Clicking a notification
-//! emits [`ReminderActivated`], and the window layer runs what the item's control does now.
+//! require it. A Machine whose breaking Pending Version waits a day or more is named once a day
+//! with its session count. A Pending Version that is not breaking waits only on open Terminal
+//! Sessions, because the Core restarts into it by itself once none is open, so it sends no
+//! notification and keeps only its menu row. Clicking a notification emits
+//! [`ReminderActivated`], and the window layer runs what the item's control does now.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -15,17 +17,17 @@ use super::machines::MachineId;
 use super::machines::store::MachineUpdates;
 use super::policy::DAY;
 use super::presentation::{self, ItemKey, Reminder};
-use spaceterm_core::update::facts::Version;
+use spaceterm_core::update::facts::{PendingVersion, Version};
 
 /// The Pending Version `machine` waits with now.
-fn pending_version(machine: MachineId, cx: &App) -> Option<Version> {
+fn pending(machine: MachineId, cx: &App) -> Option<PendingVersion> {
     let store = MachineUpdates::global(cx)?;
     let store = store.read(cx);
     let update = store
         .machines()
         .iter()
         .find(|update| update.machine == machine)?;
-    Some(update.facts.as_ref()?.pending.as_ref()?.version.clone())
+    update.facts.as_ref()?.pending.clone()
 }
 
 /// How often the schedule is read again when nothing else changes.
@@ -141,10 +143,13 @@ impl UpdateReminders {
         for reminder in reminders {
             let due = match reminder.key {
                 ItemKey::Desktop => desktop_due,
-                ItemKey::Machine(machine) => self
-                    .named
-                    .get(&machine)
-                    .is_none_or(|(_, last)| now.saturating_sub(*last) >= DAY),
+                ItemKey::Machine(machine) => {
+                    pending(machine, cx).is_some_and(|pending| pending.breaking)
+                        && self
+                            .named
+                            .get(&machine)
+                            .is_none_or(|(_, last)| now.saturating_sub(*last) >= DAY)
+                }
             };
             if !due {
                 continue;
@@ -162,8 +167,8 @@ impl UpdateReminders {
                     }
                 }
                 ItemKey::Machine(machine) => {
-                    if let Some(pending) = pending_version(machine, cx) {
-                        self.named.insert(machine, (pending, now));
+                    if let Some(pending) = pending(machine, cx) {
+                        self.named.insert(machine, (pending.version, now));
                     }
                 }
             }
@@ -248,6 +253,20 @@ mod tests {
     };
 
     fn overdue_penguin(sessions: u32) -> MachineUpdate {
+        let mut update = waiting_penguin(sessions);
+        update
+            .facts
+            .as_mut()
+            .unwrap()
+            .pending
+            .as_mut()
+            .unwrap()
+            .breaking = true;
+        update
+    }
+
+    /// Penguin's Pending Version, which is not breaking, has waited a day on open sessions.
+    fn waiting_penguin(sessions: u32) -> MachineUpdate {
         let now = crate::updates::now();
         MachineUpdate {
             machine: [2; 32],
@@ -274,6 +293,8 @@ mod tests {
             }),
             capabilities: Capabilities::fake(&Capability::ALL),
             push: None,
+            bundled: None,
+            failed_push: None,
         }
     }
 
@@ -297,6 +318,27 @@ mod tests {
             shown[0].2,
             "SpaceTerm Core 0.9.0 has waited 1 day. Restarting closes 3 running sessions."
         );
+    }
+
+    /// A Pending Version that is not breaking waits only on open Terminal Sessions. It keeps
+    /// its menu row but sends no notification.
+    #[gpui::test]
+    fn an_update_that_waits_on_open_sessions_sends_no_notification(cx: &mut gpui::TestAppContext) {
+        let machines = Rc::new(ScriptedMachines::default());
+        let reminders = Rc::new(RecordingReminders::default());
+        cx.update(|cx| {
+            MachineUpdates::install(machines.clone(), cx);
+            UpdateReminders::install(reminders.clone(), cx);
+        });
+        machines.emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(3)]));
+        cx.run_until_parked();
+        machines.emit(MachineUpdatesEvent::Changed(Box::new(waiting_penguin(3))));
+        cx.run_until_parked();
+
+        assert!(reminders.shown.borrow().is_empty());
+        let rows = cx.read(|cx| presentation::current(cx).extra_rows());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tone, presentation::Tone::Problem);
     }
 
     #[gpui::test]

@@ -101,6 +101,24 @@ impl EmbeddedCores {
         .ok()
         .map(|()| build.candidate.version().clone())
     }
+
+    /// The embedded build's version when it is newer than every version a Machine with `facts`
+    /// has and not the skipped one, whether or not its Update Floor admits the running version.
+    /// Below the floor, the Core reaches it from its own feed through a Stepping Stone.
+    pub(crate) fn newer(&self, facts: &UpdateFacts) -> Option<Version> {
+        let build = self.build(facts.platform)?;
+        match ordering::admit(
+            &build.candidate,
+            &facts.running,
+            facts.pending.as_ref().map(|pending| &pending.version),
+            facts.skipped.as_ref(),
+        ) {
+            Ok(()) | Err(ordering::Refusal::BelowFloor { .. }) => {
+                Some(build.candidate.version().clone())
+            }
+            Err(ordering::Refusal::NotNewer | ordering::Refusal::Skipped) => None,
+        }
+    }
 }
 
 /// Reads and verifies one catalog entry: `artifact.tar.gz`, its raw `artifact.sig` and its
@@ -170,6 +188,7 @@ pub(crate) fn failure(error: &LaneError) -> ActionFailure {
     match error {
         LaneError::Code(code) => match code.as_str() {
             "service_busy" => ActionFailure::Busy,
+            "disk_full" => ActionFailure::DiskFull,
             "changed" | "not_newer" | "version_skipped" => ActionFailure::Changed,
             "unreachable" => ActionFailure::Unreachable,
             _ => ActionFailure::Failed,
@@ -264,6 +283,13 @@ mod tests {
             cores.offer(&facts("1.1.0", None, None)),
             Some(version("1.2.2"))
         );
+        assert_eq!(
+            cores.newer(&facts("1.0.0", None, None)),
+            Some(version("1.2.2")),
+            "the Core below the floor is still older than the embedded build"
+        );
+        assert_eq!(cores.newer(&facts("1.0.0", None, Some("1.2.2"))), None);
+        assert_eq!(cores.newer(&facts("1.2.2", None, None)), None);
     }
 
     #[test]
@@ -336,7 +362,7 @@ mod tests {
             ("changed", ActionFailure::Changed),
             ("unreachable", ActionFailure::Unreachable),
             ("candidate_unverified", ActionFailure::Failed),
-            ("disk_full", ActionFailure::Failed),
+            ("disk_full", ActionFailure::DiskFull),
         ] {
             assert_eq!(
                 super::failure(&LaneError::Code(code.into())),

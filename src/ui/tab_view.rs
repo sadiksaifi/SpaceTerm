@@ -3239,7 +3239,7 @@ impl TabView {
                 offered,
                 ended,
             } => {
-                let copy = core_pane::DormantCopy::of(ended);
+                let copy = pane.dormant_copy(ended);
                 let status = if starting {
                     Some(core_pane::progress_status(
                         selector(&format!("{}-status", copy.action)),

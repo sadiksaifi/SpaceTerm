@@ -72,6 +72,7 @@ pub(crate) fn preview(machine: MachineId, action: MachineAction, sessions: u32) 
         action,
         sessions,
         target: None,
+        running: None,
         id: 0,
     }
 }

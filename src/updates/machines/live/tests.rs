@@ -170,7 +170,12 @@ impl MachineLane for ScriptedLane {
 enum Script {
     Stopped,
     Offline,
+    /// Reached over the service lane of a route refused as incompatible, whose Core still
+    /// refuses this desktop's work protocol.
     Incompatible,
+    /// Reached over the service lane of a route refused as incompatible, whose Core now
+    /// offers a compatible work protocol, as after an update.
+    Readmitted,
     Lane,
 }
 
@@ -178,6 +183,7 @@ struct ScriptedMachine {
     script: Mutex<Script>,
     lane: Arc<ScriptedLane>,
     starts: Mutex<u32>,
+    retries: Mutex<u32>,
 }
 
 impl ScriptedMachine {
@@ -186,6 +192,7 @@ impl ScriptedMachine {
             script: Mutex::new(script),
             lane,
             starts: Mutex::new(0),
+            retries: Mutex::new(0),
         })
     }
 
@@ -202,10 +209,17 @@ impl Machine for ScriptedMachine {
             Script::Incompatible => Reach::Lane {
                 lane: Arc::clone(&self.lane) as Arc<dyn MachineLane>,
                 work: Err(Incompatible::ListenerTooOld),
+                refused: true,
+            },
+            Script::Readmitted => Reach::Lane {
+                lane: Arc::clone(&self.lane) as Arc<dyn MachineLane>,
+                work: Ok(()),
+                refused: true,
             },
             Script::Lane => Reach::Lane {
                 lane: Arc::clone(&self.lane) as Arc<dyn MachineLane>,
                 work: Ok(()),
+                refused: false,
             },
         }
     }
@@ -213,6 +227,10 @@ impl Machine for ScriptedMachine {
     fn start(&self) -> Result<(), ActionFailure> {
         *self.starts.lock().unwrap() += 1;
         Ok(())
+    }
+
+    fn retry(&self) {
+        *self.retries.lock().unwrap() += 1;
     }
 }
 
@@ -430,6 +448,11 @@ fn an_unreachable_core_is_read_again_only_after_a_change() {
     eventually("a read after the change", || lane.count("facts") == 2);
     std::thread::sleep(QUIET);
     assert_eq!(lane.count("facts"), 2);
+    assert_eq!(
+        *machine.retries.lock().unwrap(),
+        0,
+        "routes keep their backoff"
+    );
 }
 
 /// A deliberately stopped local Core reads as Stopped from the service manager alone. Start
@@ -610,6 +633,102 @@ fn a_restart_that_does_not_come_back_reads_cant_confirm() {
     ));
 }
 
+/// While a restart this desktop asked for has not come back, the Machine's routes retry now, at
+/// most every two seconds however often its sources change, and stop once the Core answers.
+#[test]
+fn an_expected_restart_retries_the_machines_routes_until_the_core_returns() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, Some("0.9.0")))]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the facts", |update| update.facts.is_some());
+
+    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap());
+    assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
+    // The Core closes its lane to restart, and its route drops.
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    eventually("a retry of the routes", || {
+        *machine.retries.lock().unwrap() == 1
+    });
+    for _ in 0..3 {
+        sources.change();
+    }
+    std::thread::sleep(QUIET);
+    assert_eq!(
+        *machine.retries.lock().unwrap(),
+        1,
+        "at most every two seconds"
+    );
+
+    let mut returned = facts(1, 0, None);
+    returned.boot = "boot-2".into();
+    returned.facts.running = version("0.9.0");
+    lane.facts.lock().unwrap().push_back(Ok(returned));
+    machine.set(Script::Lane);
+    sources.change();
+    changed(&events, "the returned Core", |update| {
+        update
+            .facts
+            .as_ref()
+            .is_some_and(|facts| facts.running == version("0.9.0"))
+    });
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    changed(&events, "the offline Machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    std::thread::sleep(Duration::from_millis(2200));
+    sources.change();
+    std::thread::sleep(QUIET);
+    assert_eq!(
+        *machine.retries.lock().unwrap(),
+        1,
+        "no restart is expected now"
+    );
+}
+
+/// An incompatible Core that restarts into a compatible version and answers again before the
+/// follower finds it unreachable still gets its refused work route checked once more, so the
+/// work connection returns without Reconnect. Later changes check it no further.
+#[test]
+fn a_restart_out_of_incompatibility_that_returns_at_once_rechecks_the_work_route_once() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, Some("0.9.0")))]);
+    let machine = ScriptedMachine::new(Script::Incompatible, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the incompatible Core", |update| {
+        matches!(update.link, MachineLink::Incompatible(_))
+    });
+
+    let preview = previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap();
+    // The Core restarts into a compatible version, and its service lane answers again before
+    // the follower reads its reach, so the follower never finds it unreachable.
+    let mut returned = facts(1, 0, None);
+    returned.boot = "boot-2".into();
+    returned.facts.running = version("0.9.0");
+    lane.facts.lock().unwrap().push_back(Ok(returned));
+    machine.set(Script::Readmitted);
+    adapter.execute(preview);
+    assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
+    changed(&events, "the compatible Core", |update| {
+        update.link == MachineLink::Connected
+    });
+    eventually("a recheck of the refused work route", || {
+        *machine.retries.lock().unwrap() == 1
+    });
+
+    for _ in 0..3 {
+        sources.change();
+    }
+    std::thread::sleep(QUIET);
+    assert_eq!(
+        *machine.retries.lock().unwrap(),
+        1,
+        "one recheck per observed compatibility change"
+    );
+}
+
 /// A route change while a long poll waits abandons it and reads the Machine's reach again,
 /// so a disconnected Machine stops reading as connected.
 #[test]
@@ -719,6 +838,11 @@ struct Catalog(std::path::PathBuf);
 
 impl Catalog {
     fn new(identity: &str) -> Self {
+        Self::floored(identity, "0.9.0", "0.0.0")
+    }
+
+    /// A catalog whose build is `version` with the Update Floor `floor`.
+    fn floored(identity: &str, version: &str, floor: &str) -> Self {
         use ring::signature::Ed25519KeyPair;
         use sha2::{Digest, Sha256};
         use std::path::{Path, PathBuf};
@@ -733,8 +857,8 @@ impl Catalog {
         let layout = spaceterm_core::service::Layout::for_target(target, identity).unwrap();
         let manifest = serde_json::json!({
             "schema": 1, "stapled": false, "source_sha256": null, "identity": identity, "target": target,
-            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "version": "0.9.0",
-            "floor": "0.0.0", "protocols": Protocols::CURRENT,
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "version": version,
+            "floor": floor, "protocols": Protocols::CURRENT,
         });
         let mut entries = vec![
             (
@@ -835,6 +959,53 @@ fn a_core_without_feed_access_offers_the_verified_embedded_build() {
         });
         assert_eq!(update.push, Some(version("0.9.0")));
     }
+}
+
+/// A Core below the embedded build's Update Floor is offered no push across the floor, but it
+/// never reads as up to date: it offers the Core's own feed install, which reaches the floor
+/// through a Stepping Stone.
+#[test]
+fn a_core_below_the_embedded_floor_offers_its_feed_update() {
+    let catalog = Catalog::floored("spaceterm-development", "1.2.2", "1.1.0");
+    let mut observed = facts(1, 2, None);
+    observed.facts.running = version("1.0.0");
+    let lane = ScriptedLane::new([Ok(observed)]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let adapter = LiveMachines::new(sources, catalog.embedded("spaceterm-development"));
+    let (sent, events) = async_channel::unbounded();
+    adapter.start(sent).unwrap();
+    let update = changed(&events, "the Core facts", |update| update.facts.is_some());
+    assert_eq!(update.push, None, "no push crosses the floor");
+
+    let view = MachineView::new(&update, &Dismissed::new(), crate::updates::now());
+    assert_eq!(
+        view.state,
+        MachineState::BelowFloor {
+            to: version("1.2.2")
+        }
+    );
+    assert_eq!(
+        view.sentence().as_ref(),
+        "SpaceTerm Core 1.0.0 on penguin is too old to install SpaceTerm Core 1.2.2 directly. \
+         Updating penguin installs the release it needs first from its update feed. Its 2 \
+         Terminal Sessions keep running."
+    );
+    let row = view.settings_row();
+    assert_eq!(row.status.as_ref(), "Older than 1.2.2");
+    let button = row.button.expect("Settings offers the feed update");
+    assert_eq!(button.label.as_ref(), "Update penguin");
+    assert_eq!(
+        button.command,
+        crate::updates::presentation::Command::Machine(PENGUIN, MachineAction::Install)
+    );
+
+    adapter.perform(PENGUIN, MachineAction::Install);
+    assert_eq!(finished(&events, &MachineAction::Install), Ok(()));
+    assert!(
+        lane.requests().contains(&"install".into()),
+        "Install asks the Core to update from its own feed"
+    );
 }
 
 #[test]

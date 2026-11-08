@@ -1,41 +1,25 @@
-//! The local server's version and its one "Update SpaceTerm Core..." journey. Reading stages nothing.
-//! Choosing Update SpaceTerm Core installs the server package this SpaceTerm includes through the
-//! running Core's update engine, which ends nothing, and previews the restart into it. Only the
-//! restart the person then confirms replaces the approved runtime.
+//! Settings reads installed Core versions here. All running Machine updates and restarts belong
+//! to the shared Machine update store, including previews, confirmations and completion.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::prelude::*;
-use gpui::{AnyWindowHandle, Context, SharedString, Task};
+use gpui::{AnyWindowHandle, App, AppContext as _, Context, Task};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
     ModalActionRole, ModalId,
 };
 
-use super::SettingsWindow;
-use super::local_operations::UpdateCompletion;
+use super::{SettingsWindow, machine_list::MachineChoice};
 use crate::local_startup::CandidateError;
 use crate::machine_connection::CoreError;
-use crate::machine_connection::service::activation::{
-    ActivationPhase, ActivationStatus, is_released_downgrade,
-};
-use crate::machine_connection::service::control::{BuildName, UpdateWording, build_labels};
-use crate::machine_connection::service::lane::Offline;
-use crate::machine_connection::service::lane::admin;
-use crate::machine_connection::service::lane::client::{LaneError, Outcome};
-use crate::machine_connection::service::lane::{LaneAction, LaneOperationState, LaneVersion};
-use crate::machine_connection::service::updates::{Archive, InstallError, Source, Updates};
+use crate::machine_connection::service::activation::{ActivationStatus, is_released_downgrade};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
-use crate::machine_connection::update::facts::{
-    InstallFailure, StartFailure, UpdateFacts as EngineFacts,
-};
-use crate::machine_connection::update::ordering::{self, Candidate, Refusal};
-use crate::machine_connection::update::sources::SourceError;
-use crate::ui::sidebar_window::form::CaptionTone;
+use crate::updates::machines::store::{self, MachineUpdates, Surface};
+use crate::updates::machines::{ActionFailure, MachineAction};
+use crate::updates::presentation::{self, Command, Confirmation, MachineView};
 
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
-pub(super) const UPDATE_CHECK_SELECTOR: &str = "settings-server-update-check";
-pub(super) const FINISH_SELECTOR: &str = "settings-server-update-finish";
 pub(super) const UPDATE_CONFIRM_SELECTOR: &str = "settings-server-update-confirm";
 pub(super) const UPDATE_CANCEL_SELECTOR: &str = "settings-server-update-cancel";
 
@@ -65,291 +49,15 @@ pub(super) struct UpdateFacts {
     pub(super) activation: Option<ActivationStatus>,
 }
 
-/// A change the service prepared and bound to the observation it made. Only the person's
-/// confirmation runs it, once.
-pub(super) struct PreparedChange {
-    pub(super) previous: RetainedInstallation,
-    pub(super) candidate: RetainedInstallation,
-    pub(super) running: bool,
-    pub(super) stopped: bool,
-    /// Performs exactly the prepared change. The service rechecks its observation first and
-    /// refuses with [`CoreError::Changed`] when it differs.
-    pub(super) commit: Box<dyn FnOnce() -> Result<ActivationStatus, CoreError> + Send>,
-}
-
-/// The blocking update operations the row runs on the background executor.
+/// Reads native installation state only. The Machine store owns every update action.
 pub(super) trait CoreUpdateControl: Send + Sync {
-    /// Reads the service, its approved build, the included build, and any recorded update.
-    /// Verifies the included build's signed manifest without retaining or running it.
     fn read(&self) -> Result<UpdateFacts, CoreError>;
-    /// Verifies and retains the included build, then prepares its activation. `None` when it is
-    /// already the approved build.
-    fn prepare_update(&self) -> Result<Option<PreparedChange>, CoreError>;
-    /// Resolves the recorded update the person already confirmed, without new consent.
-    fn finish(&self) -> Result<Option<ActivationStatus>, CoreError>;
 }
 
 impl CoreUpdateControl for Service {
     fn read(&self) -> Result<UpdateFacts, CoreError> {
         read_facts(self, self.activation_status()?, Service::status)
     }
-
-    fn prepare_update(&self) -> Result<Option<PreparedChange>, CoreError> {
-        let candidate = crate::local_startup::discover_candidate().map_err(CoreError::from)?;
-        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-        let core = crate::machine_connection::MachineConnection::for_identity(identity)?;
-        let opened = core.service_lane().and_then(|lane| {
-            let pending = core.service_operations()?;
-            let (session, _) = admin::open(&lane, &pending).map_err(lane_error)?;
-            Ok((lane, pending, session))
-        });
-        let release = candidate.release()?;
-        let Ok((lane, pending, mut session)) = opened else {
-            // A stopped Core installs through its own engine here, and starts into the Pending
-            // Version on its next start. Nothing waits for confirmation.
-            install_stopped(
-                self,
-                &release,
-                Archive {
-                    archive: candidate.archive(),
-                    signature: candidate.signature(),
-                    sha256: candidate.digest(),
-                    source: Source::Local,
-                },
-            )?;
-            return Ok(None);
-        };
-        let observed = admin::facts(&mut session).map_err(lane_error)?.1;
-        let (facts, expected) = match route(&release, &observed) {
-            Route::Push => {
-                let signature = std::fs::read(candidate.signature())
-                    .map_err(|_| CoreError::CandidateMissing)?;
-                let length = std::fs::metadata(candidate.archive())
-                    .map_err(|_| CoreError::CandidateMissing)?
-                    .len();
-                let mut archive = std::fs::File::open(candidate.archive())
-                    .map_err(|_| CoreError::CandidateMissing)?;
-                let pushed = admin::push(
-                    &mut session,
-                    &admin::PushArchive {
-                        candidate: &release,
-                        length,
-                        sha256: candidate.digest(),
-                        signature: &signature,
-                    },
-                    &mut archive,
-                    &mut |_| {},
-                );
-                let facts = match pushed {
-                    Ok(facts) => facts,
-                    // The Core already has it, as its Pending Version or the running one.
-                    Err(LaneError::Code(code)) if code == "not_newer" => {
-                        admin::facts(&mut session).map_err(lane_error)?.1
-                    }
-                    Err(error) => return Err(lane_error(error)),
-                };
-                (facts, Some(release.version().clone()))
-            }
-            // The Core installs the release its own feed leads to, whatever its version.
-            Route::Feed => {
-                let facts = admin::install_from_feed(&mut session)
-                    .map_err(lane_error)?
-                    .1;
-                (facts, None)
-            }
-        };
-        let Some(version) = facts.pending.map(|pending| pending.version) else {
-            return Ok(None);
-        };
-        if expected.is_some_and(|expected| expected != version) {
-            return Ok(None);
-        }
-        let preview = admin::preview(&mut session, LaneAction::Restart).map_err(lane_error)?;
-        let (Some(from), Some(to)) = (&preview.effects.from, &preview.effects.to) else {
-            return Err(CoreError::Changed);
-        };
-        if to.version != version.as_str() {
-            return Err(CoreError::Changed);
-        }
-        let installations = self.installations_directory();
-        let retained = |version: &LaneVersion| RetainedInstallation {
-            directory: installations.join(&version.sha256),
-            version: version.version.clone(),
-            commit: version.commit.clone(),
-        };
-        let (previous, candidate) = (retained(from), retained(to));
-        Ok(Some(PreparedChange {
-            previous: previous.clone(),
-            candidate: candidate.clone(),
-            running: true,
-            stopped: false,
-            commit: Box::new(move || {
-                let outcome = admin::execute(
-                    &lane,
-                    session,
-                    preview.action,
-                    preview.token,
-                    admin::wait(&LaneAction::Restart),
-                    &pending,
-                    &mut admin::Unshared,
-                    &mut || Ok(()),
-                    &|| None,
-                )
-                .map_err(lane_error)?;
-                restarted(&outcome, previous, candidate)
-            }),
-        }))
-    }
-
-    fn finish(&self) -> Result<Option<ActivationStatus>, CoreError> {
-        self.recover_activation()
-    }
-}
-
-/// How a running Core reaches an update.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Route {
-    /// It takes the included build over its service lane.
-    Push,
-    /// It runs below the included build's Update Floor, so it updates from its own feed first.
-    Feed,
-}
-
-/// The route for a Core with `facts` to the included `release`, by the order every source
-/// passes through, as "Update from This Mac" decides for a Machine.
-pub(super) fn route(release: &Candidate, facts: &EngineFacts) -> Route {
-    match ordering::admit(
-        release,
-        &facts.running,
-        facts.pending.as_ref().map(|pending| &pending.version),
-        facts.skipped.as_ref(),
-    ) {
-        Err(Refusal::BelowFloor { .. }) => Route::Feed,
-        Ok(()) | Err(Refusal::NotNewer | Refusal::Skipped) => Route::Push,
-    }
-}
-
-/// A stopped Core's own update engine, which installs without its service lane.
-pub(super) trait StoppedCore {
-    /// The engine's persisted facts.
-    fn facts(&self) -> Result<EngineFacts, CoreError>;
-    /// Installs a signed local archive.
-    fn install(&self, archive: Archive<'_>) -> Result<(), InstallError>;
-    /// Installs the release the Core's own feed leads to.
-    fn install_from_feed(&self) -> Result<(), SourceError>;
-}
-
-impl StoppedCore for Service {
-    fn facts(&self) -> Result<EngineFacts, CoreError> {
-        Updates::stored(self)
-    }
-
-    fn install(&self, archive: Archive<'_>) -> Result<(), InstallError> {
-        Updates::open(self.clone())
-            .map_err(InstallError::Core)?
-            .install(archive)
-            .map(drop)
-    }
-
-    fn install_from_feed(&self) -> Result<(), SourceError> {
-        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-        Offline::new(identity)
-            .map_err(|error| SourceError::Install(InstallError::Core(error)))?
-            .install_from_feed()
-            .map(drop)
-    }
-}
-
-/// Installs the included `release` into a stopped Core through its update engine, by the same
-/// route a running Core takes. Below the release's Update Floor, the Core installs from its own
-/// feed and stays stopped.
-pub(super) fn install_stopped(
-    core: &impl StoppedCore,
-    release: &Candidate,
-    archive: Archive<'_>,
-) -> Result<(), CoreError> {
-    match route(release, &core.facts()?) {
-        Route::Push => match core.install(archive) {
-            Ok(()) | Err(InstallError::NotNewer) => Ok(()),
-            Err(error) => Err(install_error(error)),
-        },
-        Route::Feed => core.install_from_feed().map_err(|error| match error {
-            SourceError::Install(error) => install_error(error),
-            error => lane_error(LaneError::Code(error.code().into())),
-        }),
-    }
-}
-
-fn install_error(error: InstallError) -> CoreError {
-    match error {
-        InstallError::NotNewer | InstallError::Skipped | InstallError::BelowFloor { .. } => {
-            CoreError::CandidateMissing
-        }
-        InstallError::Busy => CoreError::ServiceBusy,
-        InstallError::Failed(InstallFailure::Verification) => CoreError::RuntimeUnavailable,
-        InstallError::Failed(_) => CoreError::StorageUnavailable,
-        InstallError::Core(error) => error,
-    }
-}
-
-/// The classification of a lane failure the row reports.
-pub(super) fn lane_error(error: LaneError) -> CoreError {
-    match error {
-        LaneError::Core(error) => error,
-        LaneError::Interrupted => CoreError::Changed,
-        LaneError::BelowFloor(_) => CoreError::CandidateMissing,
-        LaneError::Code(code) => match code.as_str() {
-            "changed" | "candidate_changed" => CoreError::Changed,
-            "service_busy" => CoreError::ServiceBusy,
-            "not_running" | "stopped" | "unreachable" => CoreError::NotRunning,
-            "not_newer" | "version_skipped" | "no_candidate" => CoreError::CandidateMissing,
-            "candidate_unverified" => CoreError::RuntimeUnavailable,
-            "disk_full" | "storage_unavailable" => CoreError::StorageUnavailable,
-            "activation_unresolved" => CoreError::ActivationUnresolved,
-            _ => CoreError::StartupFailed,
-        },
-    }
-}
-
-/// The row's record of a confirmed restart into the Pending Version, from how its lane
-/// operation ended.
-pub(super) fn restarted(
-    outcome: &Outcome,
-    previous: RetainedInstallation,
-    candidate: RetainedInstallation,
-) -> Result<ActivationStatus, CoreError> {
-    let (operation, phase) = match outcome {
-        Outcome::Settled { receipt, .. } => {
-            let phase = match receipt.state {
-                LaneOperationState::Done => ActivationPhase::Completed { running: true },
-                // The Core returned to the version it ran on its own.
-                LaneOperationState::Failed => ActivationPhase::Returned {
-                    failure: StartFailure::NotReady,
-                    running: true,
-                },
-                LaneOperationState::NotPerformed => return Err(CoreError::Changed),
-                _ => ActivationPhase::Uncertain,
-            };
-            (receipt.operation.as_str(), phase)
-        }
-        Outcome::Shutdown { operation, .. } | Outcome::Unconfirmed { operation, .. } => {
-            (operation.as_str(), ActivationPhase::Uncertain)
-        }
-    };
-    let mut id = [0; 32];
-    for (slot, pair) in id.iter_mut().zip(operation.as_bytes().chunks(2)) {
-        *slot = std::str::from_utf8(pair)
-            .ok()
-            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-            .unwrap_or(0);
-    }
-    Ok(ActivationStatus {
-        operation: id,
-        previous,
-        candidate,
-        stopped: false,
-        phase,
-    })
 }
 
 fn read_facts(
@@ -358,7 +66,7 @@ fn read_facts(
     status: fn(&Service) -> Result<ServiceStatus, CoreError>,
 ) -> Result<UpdateFacts, CoreError> {
     // Keep the recorded original visible even when the status read refuses an unresolved update.
-    // Settings may recover that original; the dropdown supplies the passive status reader.
+    // The service row supplies its recovery status independently of the live update store.
     let status = match (status(service), &activation) {
         (Ok(status), _) => Ok(status),
         (Err(error), Some(_)) => Err(error),
@@ -389,627 +97,222 @@ fn read_facts(
     })
 }
 
-/// Whether the Server row offers Update SpaceTerm Core for `service`, for a surface that opens
-/// the journey from elsewhere. Reads only, so it stages, installs, and starts nothing. Blocking.
+/// Whether an installed bundle offers a newer Core. This read stages and starts nothing.
 pub(crate) fn update_offered(service: &Service) -> bool {
     CoreUpdateControl::read(service).is_ok_and(|facts| {
-        present_update(&UpdateState {
-            facts: Some(facts),
-            ..UpdateState::default()
-        })
-        .actions
-        .contains(&UpdateAction::Update)
+        facts
+            .included
+            .is_ok_and(|included| !included.approved && !included.earlier)
     })
 }
 
-/// A step the person can take from the row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum UpdateAction {
-    Check,
-    /// Verifies the included build, then asks before replacing the approved runtime.
-    Update,
-    /// Resolves the update the person already confirmed. It asks nothing again.
-    Finish,
-}
-
-impl UpdateAction {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Check => "Check Now",
-            Self::Update => "Update SpaceTerm Core\u{2026}",
-            Self::Finish => "Finish Update",
-        }
-    }
-
-    pub(super) const fn selector(self) -> &'static str {
-        match self {
-            Self::Check => UPDATE_CHECK_SELECTOR,
-            Self::Update => UPDATE_SELECTOR,
-            Self::Finish => FINISH_SELECTOR,
-        }
-    }
-
-    /// Update and Finish share the leading slot, so keyboard focus stays on it when one
-    /// replaces the other.
-    pub(super) const fn slot(self) -> &'static str {
-        match self {
-            Self::Update | Self::Finish => "settings-server-update-primary",
-            Self::Check => "settings-server-update-secondary",
-        }
-    }
-
-    pub(super) const fn consequence(self) -> Option<&'static str> {
-        match self {
-            Self::Update => Some(
-                "Update SpaceTerm Core after confirmation. This ends its Terminal Sessions for every client.",
-            ),
-            Self::Finish => Some("Completes the confirmed update."),
-            Self::Check => None,
-        }
-    }
-}
-
-/// What the row is doing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UpdateStep {
     Check,
-    /// Verifying and retaining the included build, then preparing its confirmation.
-    Prepare,
-    /// The confirmed update runs. `running` is whether it ends live Terminal Sessions.
-    Update {
-        running: bool,
-    },
-    Finish,
 }
 
-impl UpdateStep {
-    const fn progress(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Check => ("Checking", "Reading the SpaceTerm Core version\u{2026}"),
-            Self::Prepare => (
-                "Verifying",
-                "Verifying the SpaceTerm Core version included with SpaceTerm\u{2026}",
-            ),
-            Self::Update { running: true } => (
-                "Updating",
-                "Updating SpaceTerm Core. Its Terminal Sessions end\u{2026}",
-            ),
-            Self::Update { running: false } => ("Updating", "Updating SpaceTerm Core\u{2026}"),
-            Self::Finish => ("Finishing", "Finishing the update you confirmed\u{2026}"),
-        }
-    }
-
-    /// Whether the step may change the service. Reading and preparing leave it as it is:
-    /// preparing only verifies and retains a build beside the approved one.
-    pub(super) const fn changes_service(self) -> bool {
-        matches!(self, Self::Update { .. } | Self::Finish)
-    }
-}
-
-/// What the row last learned and what it is doing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct UpdateState {
-    /// The last read. `None` until the first read succeeds.
     pub(super) facts: Option<UpdateFacts>,
-    /// The read failure, or the admitted failure retained until the next change.
     pub(super) failure: Option<CoreError>,
     pub(super) working: Option<UpdateStep>,
 }
 
-/// The row's complete presentation, derived from its state alone.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct UpdatePresentation {
-    pub(super) state: &'static str,
-    /// Names the state badge, so a test can tell each state apart by geometry.
-    pub(super) state_selector: &'static str,
-    pub(super) explanation: SharedString,
-    pub(super) tone: CaptionTone,
-    pub(super) actions: Vec<UpdateAction>,
-    pub(super) working: bool,
-}
-
-/// Names an update's two builds so they read apart.
-fn labels(previous: &RetainedInstallation, candidate: &RetainedInstallation) -> (String, String) {
-    build_labels(BuildName::of(previous), BuildName::of(candidate))
-}
-
-/// The presentation of one state. A failed operation keeps the badge and steps of the read after
-/// it, so the row says what is true now and why the operation did not finish.
-pub(super) fn present_update(state: &UpdateState) -> UpdatePresentation {
-    let (badge, state_selector, explanation, tone, actions) = match &state.facts {
-        None => match state.failure {
-            None => (
-                "Not checked",
-                "settings-server-update-state-not-checked",
-                "SpaceTerm reads the SpaceTerm Core version when you open this section.".into(),
-                CaptionTone::Guidance,
-                vec![UpdateAction::Check],
-            ),
-            Some(error) => (
-                "Unknown",
-                "settings-server-update-state-unknown",
-                error.to_string(),
-                CaptionTone::Error,
-                vec![UpdateAction::Check],
-            ),
-        },
-        Some(facts) => present_facts(facts),
-    };
-    // An unresolved update is what is true now, so its caption outlasts the failure that led
-    // to it.
-    let unresolved = state
-        .facts
-        .as_ref()
-        .and_then(|facts| facts.activation.as_ref())
-        .is_some_and(|activation| present_activation(activation).is_some());
-    let failure = state
-        .failure
-        .filter(|_| state.facts.is_some() && !unresolved);
-    let (explanation, tone) = match failure {
-        Some(error) => (failure_caption(error), CaptionTone::Error),
-        None => (explanation, tone),
-    };
-    let (label, explanation, tone) = match state.working {
-        Some(step) => {
-            let (label, explanation) = step.progress();
-            (label, explanation.to_owned(), CaptionTone::Guidance)
-        }
-        None => (badge, explanation, tone),
-    };
-    UpdatePresentation {
-        state: label,
-        state_selector,
-        explanation: explanation.into(),
-        tone,
-        actions,
-        working: state.working.is_some(),
-    }
-}
-
-/// Why an update operation stopped, in words that say what to do next.
-fn failure_caption(error: CoreError) -> String {
-    match error {
-        CoreError::CandidateChanged => RESTART_CLIENT.to_owned(),
-        CoreError::Changed => "SpaceTerm Core changed. Review the update again.".to_owned(),
-        error => error.to_string(),
-    }
-}
-
-const RESTART_CLIENT: &str = "Quit and reopen SpaceTerm to update SpaceTerm Core.";
-
-type Facts = (
-    &'static str,
-    &'static str,
-    String,
-    CaptionTone,
-    Vec<UpdateAction>,
-);
-
-fn present_facts(facts: &UpdateFacts) -> Facts {
-    if let Some(activation) = facts.activation.as_ref()
-        && let Some(unresolved) = present_activation(activation)
-    {
-        return unresolved;
-    }
-    let status = match facts.status {
-        Ok(status) => status,
-        Err(error) => {
-            return (
-                "Unknown",
-                "settings-server-update-state-unknown",
-                error.to_string(),
-                CaptionTone::Error,
-                vec![UpdateAction::Check],
-            );
-        }
-    };
-    if !status.installed {
-        return (
-            "Not installed",
-            "settings-server-update-state-not-installed",
-            "Install the background service above to see the SpaceTerm Core version.".into(),
-            CaptionTone::Guidance,
-            Vec::new(),
-        );
-    }
-    let Some(approved) = &facts.approved else {
-        return (
-            "Unknown",
-            "settings-server-update-state-unknown",
-            "Couldn\u{2019}t read the installed SpaceTerm Core version.".into(),
-            CaptionTone::Error,
-            vec![UpdateAction::Check],
-        );
-    };
-    // The included build is named beside the approved one, so both read apart.
-    let included_name = facts.included.as_ref().ok().map(|included| BuildName {
-        version: &included.version,
-        commit: &included.commit,
-        package: &included.package,
-    });
-    let (approved, included_label) = build_labels(
-        BuildName::of(approved),
-        included_name.unwrap_or(BuildName::of(approved)),
-    );
-    let now = if status.running {
-        format!("Version {approved} is running.")
-    } else if status.stopped {
-        format!("Version {approved} is installed, and you stopped SpaceTerm Core.")
-    } else {
-        format!("Version {approved} is installed but not running.")
-    };
-    match &facts.included {
-        Ok(included) if included.approved => (
-            "Up to date",
-            "settings-server-update-state-current",
-            format!("{now} It\u{2019}s the SpaceTerm Core version included with SpaceTerm."),
-            CaptionTone::Guidance,
-            Vec::new(),
-        ),
-        Ok(included) if included.earlier => (
-            "No update",
-            "settings-server-update-state-earlier",
-            format!(
-                "{now} SpaceTerm includes SpaceTerm Core version {included_label}, an \
-                 earlier release, so it offers no SpaceTerm Core update."
-            ),
-            CaptionTone::Guidance,
-            Vec::new(),
-        ),
-        Ok(_) => {
-            let included = included_label;
-            let effect = if status.running {
-                "Updating ends SpaceTerm Core\u{2019}s Terminal Sessions for every client, so \
-                 SpaceTerm asks first."
-            } else if status.stopped {
-                "Updating keeps SpaceTerm Core stopped until you start it."
-            } else {
-                "SpaceTerm Core isn\u{2019}t running, so updating ends no Terminal Sessions."
-            };
-            (
-                "Update available",
-                "settings-server-update-state-available",
-                format!("{now} SpaceTerm includes SpaceTerm Core version {included}. {effect}"),
-                CaptionTone::Guidance,
-                vec![UpdateAction::Update],
-            )
-        }
-        Err(CandidateError::Unavailable) => (
-            "No update",
-            "settings-server-update-state-unavailable",
-            format!(
-                "{now} This SpaceTerm doesn\u{2019}t include a SpaceTerm Core package, so \
-                 it offers no SpaceTerm Core update."
-            ),
-            CaptionTone::Guidance,
-            Vec::new(),
-        ),
-        Err(CandidateError::ClientRestartRequired) => (
-            "Restart SpaceTerm",
-            "settings-server-update-state-restart",
-            RESTART_CLIENT.to_owned(),
-            CaptionTone::Warning,
-            Vec::new(),
-        ),
-        Err(CandidateError::Verification(error)) => (
-            "Not verified",
-            "settings-server-update-state-not-verified",
-            format!("Couldn\u{2019}t verify the SpaceTerm Core package. {error}"),
-            CaptionTone::Error,
-            vec![UpdateAction::Check],
-        ),
-    }
-}
-
-/// An update the service has not resolved or that failed, or `None` once it completed.
-fn present_activation(activation: &ActivationStatus) -> Option<Facts> {
-    let (previous, candidate) = labels(&activation.previous, &activation.candidate);
-    Some(match activation.phase {
-        ActivationPhase::Completed { .. } => return None,
-        ActivationPhase::Returned { .. } => (
-            "Update failed",
-            "settings-server-update-state-failed",
-            format!(
-                "Version {candidate} didn\u{2019}t start, and Terminal Sessions ended. SpaceTerm Core returned to {previous}."
-            ),
-            CaptionTone::Error,
-            vec![UpdateAction::Check],
-        ),
-        ActivationPhase::Activating => (
-            "Update unfinished",
-            "settings-server-update-state-unfinished",
-            "Choose Finish Update to complete the update.".to_owned(),
-            CaptionTone::Warning,
-            vec![UpdateAction::Finish],
-        ),
-        ActivationPhase::Uncertain => (
-            "Update uncertain",
-            "settings-server-update-state-uncertain",
-            format!("Couldn\u{2019}t confirm the update to {candidate}. Choose Finish Update."),
-            CaptionTone::Error,
-            vec![UpdateAction::Finish],
-        ),
-    })
-}
-
-/// The confirmation for one prepared change, in the wording every control surface shows.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct UpdateConfirmation {
-    pub(super) title: &'static str,
-    pub(super) message: SharedString,
-    pub(super) detail: SharedString,
-    pub(super) confirm: String,
-}
-
-impl UpdateConfirmation {
-    /// Uses the shared confirmation for this application's server.
-    pub(super) fn of(prepared: &PreparedChange) -> Self {
-        let wording = UpdateWording::local(
-            &prepared.previous,
-            &prepared.candidate,
-            prepared.running,
-            prepared.stopped,
-        );
-        Self {
-            title: wording.title(),
-            message: wording.message().into(),
-            detail: wording.detail().into(),
-            confirm: wording.confirm_label(),
-        }
-    }
-}
-
-/// Presents update state and owns preparation, confirmation, and passive reads.
 pub(super) struct MachineUpdateRow {
     control: Arc<dyn CoreUpdateControl>,
     pub(super) state: UpdateState,
-    /// The Settings window, which presents the confirmation once a background step prepared it.
-    window: AnyWindowHandle,
-    /// Another surface asked for the update journey. It starts once the row is idle.
-    requested: bool,
-    /// A confirmation is open. The row starts nothing else until the person answers it.
-    asking: bool,
-    /// The service changed outside Settings while a version read ran. That read may have seen
-    /// the server before the change, so its answer is set aside and the version is read again.
     read_outdated: bool,
     _operation: Option<Task<()>>,
 }
 
 impl MachineUpdateRow {
-    pub(super) fn new(control: Arc<dyn CoreUpdateControl>, window: AnyWindowHandle) -> Self {
+    pub(super) fn new(control: Arc<dyn CoreUpdateControl>) -> Self {
         Self {
             control,
             state: UpdateState::default(),
-            window,
-            requested: false,
-            asking: false,
             read_outdated: false,
             _operation: None,
         }
     }
-
-    pub(super) fn presentation(&self) -> UpdatePresentation {
-        present_update(&self.state)
-    }
-
-    /// Whether a step that may change the service is running.
-    pub(super) fn changing(&self) -> bool {
-        self.state.working.is_some_and(UpdateStep::changes_service)
-    }
 }
 
 impl SettingsWindow {
-    pub(super) fn core_update_presentation(&self) -> Option<UpdatePresentation> {
-        self.core_update
-            .as_ref()
-            .map(MachineUpdateRow::presentation)
-    }
-
-    /// Whether the row can start `step` now. One server operation runs at a time across the
-    /// Servers rows, so the service and connection rows must be idle for a change.
-    fn core_update_ready(&self, step: UpdateStep) -> bool {
-        // A connection check only reads, and the change checks the connection again when it
-        // finishes, so a confirmed change never waits on one.
-        let service_busy = self.core_service_working();
-        self.core_update.as_ref().is_some_and(|row| {
-            row.state.working.is_none() && !row.asking && !(step.changes_service() && service_busy)
-        })
-    }
-
-    /// Reads the server version as the section comes into view, and after another row changed
-    /// the service.
     pub(super) fn check_core_update(&mut self, cx: &mut Context<Self>) {
-        self.run_update_step(UpdateStep::Check, cx);
-    }
-
-    /// Reads the version after the service changed outside Settings. A version read already
-    /// running may have seen the server before the change, so its answer is set aside and the
-    /// version is read again once it ends.
-    pub(super) fn reread_core_update(&mut self, cx: &mut Context<Self>) {
-        if let Some(row) = &mut self.core_update
-            && row.state.working == Some(UpdateStep::Check)
-        {
-            row.read_outdated = true;
-            return;
-        }
-        self.check_core_update(cx);
-    }
-
-    /// Another surface, such as the incompatible-server screen or the status item, asked for the
-    /// update journey. It starts once nothing else runs, and only if a read still offers it.
-    pub(crate) fn request_core_update(&mut self, cx: &mut Context<Self>) {
         let Some(row) = &mut self.core_update else {
             return;
         };
-        row.requested = true;
-        self.continue_requested_update(cx);
-    }
-
-    /// Starts a requested update once a fresh read offers it. A read that no longer offers it
-    /// drops the request, and the row says why.
-    pub(super) fn continue_requested_update(&mut self, cx: &mut Context<Self>) {
-        let Some(row) = &self.core_update else {
-            return;
-        };
-        if !row.requested || row.state.working.is_some() || row.asking {
+        if row.state.working.is_some() {
             return;
         }
-        // A row that has not read yet reads first. Its result continues the request.
-        if row.state.facts.is_none() && row.state.failure.is_none() {
-            self.check_core_update(cx);
-            return;
-        }
-        let offered = row.presentation().actions.contains(&UpdateAction::Update);
-        if let Some(row) = &mut self.core_update {
-            row.requested = false;
-        }
-        if offered {
-            self.run_update_step(UpdateStep::Prepare, cx);
-        }
-    }
-
-    pub(super) fn request_update_action(&mut self, action: UpdateAction, cx: &mut Context<Self>) {
-        let offered = self
-            .core_update_presentation()
-            .is_some_and(|presentation| presentation.actions.contains(&action));
-        if !offered {
-            return;
-        }
-        let step = match action {
-            UpdateAction::Check => UpdateStep::Check,
-            UpdateAction::Update => UpdateStep::Prepare,
-            UpdateAction::Finish => UpdateStep::Finish,
-        };
-        self.run_update_step(step, cx);
-    }
-
-    /// Runs one step on the background executor, then reads again so the row presents what is
-    /// true afterwards. A prepared change waits for the person's confirmation.
-    fn run_update_step(&mut self, step: UpdateStep, cx: &mut Context<Self>) {
-        debug_assert!(!matches!(step, UpdateStep::Update { .. }));
-        if !self.core_update_ready(step) {
-            return;
-        }
-        if step == UpdateStep::Finish {
-            let Some(control) = self
-                .core_update
-                .as_ref()
-                .map(|row| Arc::clone(&row.control))
-            else {
-                return;
-            };
-            self.run_admitted_update(step, move || control.finish(), cx);
-            return;
-        }
-        let Some(row) = &mut self.core_update else {
-            return;
-        };
+        row.state.working = Some(UpdateStep::Check);
         let control = Arc::clone(&row.control);
-        row.state.working = Some(step);
-        let prior_failure = if step == UpdateStep::Check {
-            self.local_operations.read(cx).update_failure
-        } else {
-            self.local_operations
-                .update(cx, |owner, _| owner.update_failure = None);
-            None
-        };
-        row.state.failure = None;
-        let result = cx.background_spawn(async move {
-            let outcome = match step {
-                UpdateStep::Prepare => control.prepare_update(),
-                _ => Ok(None),
-            };
-            let (prepared, failure) = match outcome {
-                Ok(prepared) => (prepared, prior_failure),
-                Err(error) => (None, Some(error)),
-            };
-            let read = control.read();
-            (prepared, failure, read)
-        });
+        let read = cx.background_spawn(async move { control.read() });
         row._operation = Some(cx.spawn(async move |settings, cx| {
-            let (prepared, failure, read) = result.await;
+            let read = read.await;
             let _ = settings.update(cx, |settings, cx| {
-                // A version read from before an outside change describes nothing current.
-                if step == UpdateStep::Check
-                    && let Some(row) = &mut settings.core_update
-                    && std::mem::take(&mut row.read_outdated)
-                {
-                    row.state.working = None;
+                let Some(row) = &mut settings.core_update else {
+                    return;
+                };
+                row.state.working = None;
+                if std::mem::take(&mut row.read_outdated) {
                     settings.check_core_update(cx);
-                    cx.notify();
                     return;
                 }
-                settings.update_step_finished(prepared, failure, read, cx);
+                match read {
+                    Ok(facts) => {
+                        row.state.facts = Some(facts);
+                        row.state.failure = None;
+                    }
+                    Err(error) => {
+                        row.state.facts = None;
+                        row.state.failure = Some(error);
+                    }
+                }
+                settings.continue_requested_start(cx);
+                cx.notify();
             });
         }));
         cx.notify();
     }
 
-    fn update_step_finished(
-        &mut self,
-        prepared: Option<PreparedChange>,
-        failure: Option<CoreError>,
-        read: Result<UpdateFacts, CoreError>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(row) = &mut self.core_update else {
-            return;
-        };
-        row.state.working = None;
-        match read {
-            Ok(facts) => {
-                row.state.facts = Some(facts);
-                row.state.failure = failure;
-            }
-            Err(error) => {
-                row.state.facts = None;
-                row.state.failure = failure.or(Some(error));
-            }
+    pub(super) fn reread_core_update(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = &mut self.core_update
+            && row.state.working.is_some()
+        {
+            row.read_outdated = true;
+        } else {
+            self.check_core_update(cx);
         }
-        let state = row.state.clone();
-        self.local_operations
-            .update(cx, |owner, _| owner.update = Some(state));
-        if let Some(prepared) = prepared {
-            self.confirm_change(prepared, cx);
-        }
-        self.continue_requested_update(cx);
-        self.continue_requested_start(cx);
-        cx.notify();
     }
 
-    /// Asks before the prepared change. Cancel is the default, so Return and Escape both leave
-    /// the server as it is. Cancelling keeps a verified build retained for a later update.
-    fn confirm_change(&mut self, prepared: PreparedChange, cx: &mut Context<Self>) {
-        let Some(handle) = self.core_update.as_ref().map(|row| row.window) else {
+    /// The same Machine presentation that the title bar reads. Saved route identity, rather
+    /// than its editable label, selects a paired Machine.
+    pub(super) fn machine_update_view(
+        &self,
+        choice: &MachineChoice,
+        cx: &App,
+    ) -> Option<MachineView> {
+        let shared = presentation::current(cx);
+        match choice {
+            MachineChoice::Local => shared.machines.into_iter().find(|view| view.local),
+            MachineChoice::Direct(route) => {
+                let machine = self
+                    .direct_routes
+                    .as_ref()?
+                    .connections
+                    .route(route)?
+                    .paired
+                    .pin
+                    .core;
+                shared
+                    .machines
+                    .into_iter()
+                    .find(|view| view.machine == machine)
+            }
+        }
+    }
+
+    pub(crate) fn request_core_update(&mut self, cx: &mut Context<Self>) {
+        let window = self.update_window;
+        let Some(view) = self.machine_update_view(&MachineChoice::Local, cx) else {
             return;
         };
-        let confirmation = UpdateConfirmation::of(&prepared);
-        let (id, confirm_selector, cancel_selector) = (
-            "settings-server-update",
-            UPDATE_CONFIRM_SELECTOR,
-            UPDATE_CANCEL_SELECTOR,
-        );
-        if let Some(row) = &mut self.core_update {
-            row.asking = true;
+        if matches!(
+            view.state,
+            presentation::MachineState::Ready { .. }
+                | presentation::MachineState::Overdue { .. }
+                | presentation::MachineState::CoreTooOld { .. }
+        ) && let Some(button) = view.settings_row().button
+        {
+            self.perform_update_command(button.command, window, cx);
         }
+    }
+
+    pub(super) fn request_machine_restart(
+        &mut self,
+        choice: &MachineChoice,
+        window: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.machine_update_view(choice, cx) else {
+            return;
+        };
+        self.perform_update_command(
+            Command::Machine(view.machine, MachineAction::Restart),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn perform_update_command(
+        &mut self,
+        command: Command,
+        window: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
         let owner = cx.weak_entity();
-        let entity = cx.entity();
-        // The background step finished outside any window update, so the alert is presented
-        // through the Settings window it belongs to.
         cx.defer(move |cx| {
-            let presented = handle.update(cx, |_, window, cx| {
-                entity.update(cx, |_, cx| {
-                    let alert = Alert::new(
-                        ModalId::new(id),
+            let _ = owner.update(cx, |settings, cx| {
+                settings.perform_update_command_now(command, window, cx)
+            });
+        });
+    }
+
+    fn perform_update_command_now(
+        &mut self,
+        command: Command,
+        window: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            Command::Confirm(confirmation) => {
+                self.request_machine_actions(confirmation.actions, false, window, cx)
+            }
+            Command::Machine(machine, action @ (MachineAction::Restart | MachineAction::Stop)) => {
+                self.request_machine_actions(vec![(machine, action)], false, window, cx)
+            }
+            Command::Machine(machine, action) => {
+                if let Some(store) = MachineUpdates::global(cx) {
+                    store.update(cx, |store, cx| {
+                        store.perform(machine, action, Surface::Settings, cx)
+                    });
+                }
+            }
+            command @ Command::Desktop(_) => crate::ui::updates::commands::perform(
+                command,
+                crate::ui::updates::commands::Presenter::Front,
+                cx,
+            ),
+            Command::Explain(explanation) => {
+                // This runs inside an update of Settings, which the alert must update again.
+                let owner = cx.weak_entity();
+                cx.defer(move |cx| present_explanation(owner, explanation, window, cx));
+            }
+        }
+    }
+
+    fn request_machine_actions(
+        &mut self,
+        actions: Vec<(crate::updates::machines::MachineId, MachineAction)>,
+        always: bool,
+        window: AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = cx.weak_entity();
+        let ask: store::Ask = Rc::new(move |confirmation: Confirmation, answered, cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                let _ = owner.update(cx, |_, cx| {
+                    let _ = Alert::new(
+                        ModalId::new("settings-server-update"),
+                        confirmation.title.clone(),
                         confirmation.title,
-                        confirmation.message.clone(),
-                        confirmation.detail.clone(),
+                        confirmation.message,
                         vec![
                             ModalAction::new(
                                 true,
-                                confirmation.confirm.clone(),
+                                confirmation.button,
                                 ModalActionRole::Affirmative,
-                                confirm_selector,
+                                UPDATE_CONFIRM_SELECTOR,
                             )
                             .with_intent(ModalActionIntent::Destructive)
                             .with_emphasis(ModalActionEmphasis::Prominent),
@@ -1017,336 +320,153 @@ impl SettingsWindow {
                                 false,
                                 "Cancel",
                                 ModalActionRole::Cancel,
-                                cancel_selector,
+                                UPDATE_CANCEL_SELECTOR,
                             ),
                         ],
                     )
-                    .intent(AlertIntent::Critical);
-                    let result = alert.present(window, cx, move |outcome, cx| {
-                        let confirmed = matches!(
-                            outcome,
-                            AlertOutcome::Activated {
-                                action_id: true,
-                                ..
-                            }
-                        );
-                        let _ = owner.update(cx, |settings, cx| {
-                            if let Some(row) = &mut settings.core_update {
-                                row.asking = false;
-                            }
-                            if confirmed {
-                                settings.commit_change(prepared, cx);
-                            }
-                            cx.notify();
-                        });
+                    .intent(AlertIntent::Critical)
+                    .present(window, cx, move |outcome, cx| {
+                        answered(
+                            matches!(
+                                outcome,
+                                AlertOutcome::Activated {
+                                    action_id: true,
+                                    ..
+                                }
+                            ),
+                            cx,
+                        )
                     });
-                    if result.is_err() {
-                        eprintln!("failed to present the SpaceTerm Core update confirmation");
-                    }
-                    result.is_ok()
-                })
-            });
-            // An alert that could not be presented asks nothing, so the row is free again.
-            if !presented.unwrap_or(false) {
-                entity.update(cx, |settings, cx| {
-                    if let Some(row) = &mut settings.core_update {
-                        row.asking = false;
-                    }
-                    cx.notify();
                 });
+            });
+        });
+        store::request(actions, always, Surface::Settings, ask, cx);
+    }
+
+    pub(super) fn observe_machine_updates(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = MachineUpdates::global(cx) else {
+            return;
+        };
+        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&store, |settings, _, notice, cx| {
+            if notice.surface != Surface::Settings {
+                return;
             }
-        });
-    }
-
-    /// Runs the change the person confirmed. The service refuses it if its observation changed,
-    /// and the person then reviews a fresh confirmation.
-    fn commit_change(&mut self, prepared: PreparedChange, cx: &mut Context<Self>) {
-        let step = UpdateStep::Update {
-            running: prepared.running,
-        };
-        if !self.core_update_ready(step) {
-            return;
-        }
-        self.run_admitted_update(step, move || (prepared.commit)().map(Some), cx);
-    }
-
-    fn run_admitted_update(
-        &mut self,
-        step: UpdateStep,
-        change: impl FnOnce() -> Result<Option<ActivationStatus>, CoreError> + Send + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(row) = &mut self.core_update else {
-            return;
-        };
-        let control = Arc::clone(&row.control);
-        row.state.working = Some(step);
-        row.state.failure = None;
-        let state = row.state.clone();
-        let result = cx.background_spawn(async move {
-            let outcome = change();
-            let failure = outcome.as_ref().err().copied();
-            let state = match control.read() {
-                Ok(facts) => UpdateState {
-                    facts: Some(facts),
-                    failure,
-                    working: None,
-                },
-                Err(error) => UpdateState {
-                    facts: None,
-                    failure: failure.or(Some(error)),
-                    working: None,
-                },
-            };
-            UpdateCompletion { state, outcome }
-        });
-        self.local_operations
-            .update(cx, |owner, cx| owner.run_update(state, result, cx));
-        cx.notify();
+            let Err(failure) = notice.outcome else { return };
+            let window = settings.update_window;
+            if failure == ActionFailure::Changed {
+                settings.request_machine_actions(
+                    vec![(notice.machine, notice.action.clone())],
+                    true,
+                    window,
+                    cx,
+                );
+            } else if failure == ActionFailure::LoginItemOff {
+                crate::local_startup::open_login_items();
+            } else if let Some((title, message)) =
+                presentation::action_failure(&notice.name, notice.local, &notice.action, failure)
+            {
+                settings.perform_update_command(
+                    Command::Explain(presentation::Explanation {
+                        title,
+                        message,
+                        then: None,
+                    }),
+                    window,
+                    cx,
+                );
+            }
+        })
+        .detach();
     }
 }
 
-/// An update control whose answers a test sets and whose operations it records.
+/// Presents `explanation` over Settings, outside any update of it.
+fn present_explanation(
+    owner: gpui::WeakEntity<SettingsWindow>,
+    explanation: presentation::Explanation,
+    window: AnyWindowHandle,
+    cx: &mut App,
+) {
+    let Some(presenter) = owner.upgrade() else {
+        return;
+    };
+    let handle = window;
+    let _ = window.update(cx, |_, window, cx| {
+        presenter.update(cx, |_, cx| {
+            let _ = Alert::new(
+                ModalId::new("settings-update-explanation"),
+                explanation.title.clone(),
+                explanation.title,
+                explanation.message,
+                vec![ModalAction::new(
+                    true,
+                    "OK",
+                    ModalActionRole::Affirmative,
+                    "settings-update-explanation-ok",
+                )],
+            )
+            .present(window, cx, move |outcome, cx| {
+                if matches!(
+                    outcome,
+                    AlertOutcome::Activated {
+                        action_id: true,
+                        ..
+                    }
+                ) && let Some(then) = explanation.then
+                {
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.perform_update_command(*then, handle, cx)
+                    });
+                }
+            });
+        });
+    });
+}
+
 #[cfg(test)]
-pub(super) mod testing {
-    use std::sync::{Arc, Mutex};
-
-    use super::{CoreUpdateControl, IncludedCore, PreparedChange, UpdateFacts};
-    use crate::machine_connection::CoreError;
-    use crate::machine_connection::service::RetainedInstallation;
-    use crate::machine_connection::service::activation::{ActivationPhase, ActivationStatus};
-    use crate::ui::settings_window::machines::testing::{retained, running, stopped};
-
-    /// One operation a [`ScriptedUpdate`] received.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(in crate::ui::settings_window) enum UpdateCall {
-        Read,
-        PrepareUpdate,
-        Activate,
-        Finish,
-    }
-
-    /// What the confirmed activation does.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(in crate::ui::settings_window) enum Outcome {
-        /// The candidate becomes the approved build. A stopped server stays stopped.
-        Ready,
-        /// The service's observation changed after the confirmation was prepared.
-        Changed,
-        /// The candidate never became ready, and the Core returned to the previous version.
-        Returned,
-    }
-
-    /// The approved build the scripted service starts with.
+pub(in crate::ui::settings_window) mod testing {
+    use super::*;
+    use std::sync::Mutex;
     pub(in crate::ui::settings_window) fn approved() -> RetainedInstallation {
-        retained("1.4.0", 'a')
+        super::super::machines::testing::retained("1.4.0", 'a')
     }
-
-    /// The build this SpaceTerm includes.
     pub(in crate::ui::settings_window) fn included() -> RetainedInstallation {
-        retained("1.5.0", 'b')
+        super::super::machines::testing::retained("1.5.0", 'b')
     }
-
-    /// The package digest a retained installation is named by.
-    pub(in crate::ui::settings_window) fn package(installation: &RetainedInstallation) -> String {
-        installation
-            .directory
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_owned()
-    }
-
-    /// The facts of a running server whose approved build differs from the included one.
     pub(in crate::ui::settings_window) fn available() -> UpdateFacts {
         UpdateFacts {
-            status: Ok(running()),
+            status: Ok(super::super::machines::testing::running()),
             approved: Some(approved()),
             included: Ok(IncludedCore {
                 version: included().version,
                 commit: included().commit,
-                package: package(&included()),
+                package: "b".repeat(64),
                 approved: false,
                 earlier: false,
             }),
             activation: None,
         }
     }
-
-    /// The scripted service's shared state, which a prepared change updates when it runs.
-    #[derive(Default)]
-    struct Shared {
-        facts: Option<UpdateFacts>,
-        outcome: Option<Outcome>,
-        calls: Vec<UpdateCall>,
-    }
-
-    impl Shared {
-        fn facts(&mut self) -> &mut UpdateFacts {
-            self.facts.as_mut().expect("facts")
-        }
-
-        fn record(&self, phase: ActivationPhase) -> ActivationStatus {
-            ActivationStatus {
-                operation: [7; 32],
-                previous: approved(),
-                candidate: included(),
-                stopped: self
-                    .facts
-                    .as_ref()
-                    .and_then(|facts| facts.status.ok())
-                    .is_some_and(|status| status.stopped),
-                phase,
-            }
-        }
-
-        /// The included build becomes the approved one, as a completed activation leaves it.
-        fn approve_included(&mut self, running: bool) -> ActivationStatus {
-            let status = self.record(ActivationPhase::Completed { running });
-            let facts = self.facts();
-            facts.approved = Some(included());
-            if let Ok(included) = &mut facts.included {
-                included.approved = true;
-            }
-            facts.activation = Some(status.clone());
-            status
-        }
-
-        fn activate(&mut self) -> Result<ActivationStatus, CoreError> {
-            self.calls.push(UpdateCall::Activate);
-            match self.outcome.unwrap_or(Outcome::Ready) {
-                Outcome::Changed => Err(CoreError::Changed),
-                Outcome::Ready => {
-                    let running = self.facts().status.is_ok_and(|status| status.running);
-                    Ok(self.approve_included(running))
-                }
-                Outcome::Returned => {
-                    let status = self.record(ActivationPhase::Returned {
-                        failure: crate::machine_connection::update::facts::StartFailure::NotReady,
-                        running: false,
-                    });
-                    let facts = self.facts();
-                    facts.status = Ok(stopped());
-                    facts.activation = Some(status);
-                    Err(CoreError::StartupFailed)
-                }
-            }
-        }
-    }
-
     pub(in crate::ui::settings_window) struct ScriptedUpdate {
-        shared: Arc<Mutex<Shared>>,
-        /// The refusal the next preparation returns.
-        refusal: Mutex<Option<CoreError>>,
-        read_failure: Mutex<Option<CoreError>>,
-        /// What the next read answers, as a read the service began before a later change would,
-        /// ahead of what the service reports now.
-        earlier: Mutex<Option<UpdateFacts>>,
+        facts: Mutex<UpdateFacts>,
+        reads: Mutex<usize>,
     }
-
     impl ScriptedUpdate {
         pub(in crate::ui::settings_window) fn new(facts: UpdateFacts) -> Arc<Self> {
             Arc::new(Self {
-                shared: Arc::new(Mutex::new(Shared {
-                    facts: Some(facts),
-                    ..Shared::default()
-                })),
-                refusal: Mutex::new(None),
-                read_failure: Mutex::new(None),
-                earlier: Mutex::new(None),
+                facts: Mutex::new(facts),
+                reads: Mutex::new(0),
             })
         }
-
-        fn shared(&self) -> std::sync::MutexGuard<'_, Shared> {
-            self.shared.lock().expect("shared")
-        }
-
-        /// Makes the next read answer what the service reports now, even after a later change, as
-        /// a read that began before the change does.
-        pub(in crate::ui::settings_window) fn read_before_change(&self) {
-            let now = self.shared().facts().clone();
-            *self.earlier.lock().expect("earlier") = Some(now);
-        }
-
-        /// Changes what the service reports, as another surface would.
-        pub(in crate::ui::settings_window) fn change(&self, change: impl FnOnce(&mut UpdateFacts)) {
-            change(self.shared().facts());
-        }
-
-        pub(in crate::ui::settings_window) fn refuse_next(&self, error: CoreError) {
-            *self.refusal.lock().expect("refusal") = Some(error);
-        }
-
-        pub(in crate::ui::settings_window) fn refuse_next_read(&self, error: CoreError) {
-            *self.read_failure.lock().expect("read failure") = Some(error);
-        }
-
-        pub(in crate::ui::settings_window) fn answer(&self, outcome: Outcome) {
-            self.shared().outcome = Some(outcome);
-        }
-
-        /// How many times the version was read.
         pub(in crate::ui::settings_window) fn reads(&self) -> usize {
-            self.shared()
-                .calls
-                .iter()
-                .filter(|call| **call == UpdateCall::Read)
-                .count()
-        }
-
-        /// The operations other than reads.
-        pub(in crate::ui::settings_window) fn changes(&self) -> Vec<UpdateCall> {
-            self.shared()
-                .calls
-                .iter()
-                .copied()
-                .filter(|call| *call != UpdateCall::Read)
-                .collect()
+            *self.reads.lock().unwrap()
         }
     }
-
     impl CoreUpdateControl for ScriptedUpdate {
         fn read(&self) -> Result<UpdateFacts, CoreError> {
-            let mut shared = self.shared();
-            shared.calls.push(UpdateCall::Read);
-            if let Some(error) = self.read_failure.lock().expect("read failure").take() {
-                return Err(error);
-            }
-            if let Some(earlier) = self.earlier.lock().expect("earlier").take() {
-                return Ok(earlier);
-            }
-            Ok(shared.facts().clone())
-        }
-
-        fn prepare_update(&self) -> Result<Option<PreparedChange>, CoreError> {
-            let mut shared = self.shared();
-            shared.calls.push(UpdateCall::PrepareUpdate);
-            if let Some(error) = self.refusal.lock().expect("refusal").take() {
-                return Err(error);
-            }
-            let facts = shared.facts().clone();
-            if facts
-                .included
-                .as_ref()
-                .is_ok_and(|included| included.approved)
-            {
-                return Ok(None);
-            }
-            let commit = Arc::clone(&self.shared);
-            Ok(Some(PreparedChange {
-                previous: approved(),
-                candidate: included(),
-                running: facts.status.is_ok_and(|status| status.running),
-                stopped: facts.status.is_ok_and(|status| status.stopped),
-                commit: Box::new(move || commit.lock().expect("shared").activate()),
-            }))
-        }
-
-        fn finish(&self) -> Result<Option<ActivationStatus>, CoreError> {
-            let mut shared = self.shared();
-            shared.calls.push(UpdateCall::Finish);
-            let running = shared.facts().status.is_ok_and(|status| status.running);
-            Ok(Some(shared.approve_included(running)))
+            *self.reads.lock().unwrap() += 1;
+            Ok(self.facts.lock().unwrap().clone())
         }
     }
 }

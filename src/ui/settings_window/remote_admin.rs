@@ -30,7 +30,6 @@ use crate::ui::sidebar_window::form::CaptionTone;
 
 pub(super) const RESTART_SELECTOR: &str = "settings-remote-server-restart";
 pub(super) const REMOVE_SELECTOR: &str = "settings-remote-machine-remove";
-pub(super) const UPDATE_SELECTOR: &str = "settings-remote-server-update";
 pub(super) const CONFIRM_SELECTOR: &str = "settings-remote-server-confirm";
 pub(super) const CANCEL_SELECTOR: &str = "settings-remote-server-cancel";
 
@@ -38,10 +37,6 @@ pub(super) const CANCEL_SELECTOR: &str = "settings-remote-server-cancel";
 /// itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Change {
-    Restart,
-    /// Installs the server's newest signed release beside its running version, then restarts
-    /// into it after confirmation.
-    Update,
     /// Uninstalls SpaceTerm Core on the machine, which revokes every pairing, then removes it
     /// here.
     Remove,
@@ -50,16 +45,12 @@ pub(crate) enum Change {
 impl Change {
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Restart => "Restart SpaceTerm Core\u{2026}",
-            Self::Update => "Update\u{2026}",
             Self::Remove => "Remove Machine\u{2026}",
         }
     }
 
     pub(super) const fn selector(self) -> &'static str {
         match self {
-            Self::Restart => RESTART_SELECTOR,
-            Self::Update => UPDATE_SELECTOR,
             Self::Remove => REMOVE_SELECTOR,
         }
     }
@@ -255,15 +246,6 @@ impl RemoteMachineControl for LaneControl {
     fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure> {
         let (_, _, mut session, settled) = self.open()?;
         let preview = match change {
-            Change::Restart => admin::preview(&mut session, LaneAction::Restart),
-            Change::Update => {
-                let (_, facts) =
-                    admin::install_from_feed(&mut session).map_err(RemoteFailure::of_lane)?;
-                if facts.pending.is_none() {
-                    return Err(RemoteFailure::NoUpdate);
-                }
-                admin::preview(&mut session, LaneAction::Restart)
-            }
             Change::Remove => admin::preview(&mut session, LaneAction::Uninstall),
         }
         .map_err(RemoteFailure::of_lane)?;
@@ -751,19 +733,6 @@ impl SettingsWindow {
         (read_over.same_handle(&current) && *link == current.link_generation()).then_some(admin)
     }
 
-    /// The server's own version, as its last lane read over the current link reported it.
-    pub(super) fn remote_version(&self, route: &DirectRouteId) -> Option<SharedString> {
-        let status = self.current_reading(route)?.status.as_ref()?;
-        Some(status.runtime.version.clone().into())
-    }
-
-    /// The server's Pending Version as the current link last read it, if one waits.
-    pub(super) fn remote_available(&self, route: &DirectRouteId) -> Option<SharedString> {
-        let status = self.current_reading(route)?.status.as_ref()?;
-        let pending = status.update.as_ref()?.pending.as_ref()?;
-        Some(pending.version.to_string().into())
-    }
-
     /// Why Remove Machine can't uninstall SpaceTerm Core on `route` over its lane, once a reading
     /// or a refusal has shown its Core lacks the capability, as the ⋯ menu notes it above the
     /// entry. The card's footnote says the full sentence after a refusal.
@@ -782,12 +751,10 @@ impl SettingsWindow {
     /// The verb of a change underway on `route`, which the Server row names under its label.
     pub(super) fn remote_operation(&self, route: &DirectRouteId) -> Option<&'static str> {
         match self.remote_work(route)? {
-            Work::Performing(Act::Restart) => Some("Restarting\u{2026}"),
-            Work::Performing(Act::Update(_)) => Some("Updating\u{2026}"),
+            Work::Performing(Act::Restart | Act::Update(_)) => None,
             // The card never performs a Stop or a Network Access change.
             Work::Performing(Act::Stop | Act::NetworkAccess) => None,
             Work::Performing(Act::Uninstall) => Some("Removing\u{2026}"),
-            Work::Preparing(Change::Update) => Some("Preparing\u{2026}"),
             Work::Reading | Work::Preparing(_) | Work::Confirming => None,
         }
     }
@@ -795,32 +762,15 @@ impl SettingsWindow {
     /// Whether a read or a short preview of `route` is underway, which the state shows as
     /// Checking.
     pub(super) fn remote_reading(&self, route: &DirectRouteId) -> bool {
-        matches!(
-            self.remote_work(route),
-            Some(Work::Reading | Work::Preparing(Change::Restart))
-        )
+        matches!(self.remote_work(route), Some(Work::Reading))
     }
 
     /// The change underway on `route`, as the Server row names it once it runs long.
     pub(super) fn remote_progress(&self, route: &DirectRouteId) -> Option<SharedString> {
-        let named = |version: &Option<SharedString>, named: &str, unnamed: &str| {
-            version.as_ref().map_or_else(
-                || unnamed.to_owned(),
-                |version| format!("{named} {version}\u{2026}"),
-            )
-        };
         let text = match self.remote_work(route)? {
-            Work::Performing(Act::Restart) => "Restarting SpaceTerm Core\u{2026}".to_owned(),
-            Work::Performing(Act::Update(to)) => {
-                named(to, "Updating to", "Updating SpaceTerm Core\u{2026}")
-            }
+            Work::Performing(Act::Restart | Act::Update(_)) => return None,
             Work::Performing(Act::Stop | Act::NetworkAccess) => return None,
             Work::Performing(Act::Uninstall) => "Uninstalling SpaceTerm Core\u{2026}".to_owned(),
-            Work::Preparing(Change::Update) => named(
-                &self.remote_available(route),
-                "Preparing the update to",
-                "Preparing the update\u{2026}",
-            ),
             Work::Reading | Work::Preparing(_) | Work::Confirming => return None,
         };
         Some(text.into())
@@ -1058,9 +1008,6 @@ pub(super) mod testing {
     /// Lane steps whose answers a test sets and whose requests it records.
     pub(in crate::ui::settings_window) struct ScriptedRemote {
         pub(in crate::ui::settings_window) read: Mutex<Result<Reading, RemoteFailure>>,
-        pending_read: Mutex<
-            Option<super::super::machines::testing::PendingAnswer<Result<Reading, RemoteFailure>>>,
-        >,
         pub(in crate::ui::settings_window) prepare: Mutex<Result<Prepared, RemoteFailure>>,
         pub(in crate::ui::settings_window) perform: Mutex<Result<Performed, RemoteFailure>>,
         pub(in crate::ui::settings_window) prepared: Mutex<Vec<Change>>,
@@ -1071,20 +1018,11 @@ pub(super) mod testing {
         pub(in crate::ui::settings_window) fn new() -> Arc<Self> {
             Arc::new(Self {
                 read: Mutex::new(Err(RemoteFailure::Unreachable)),
-                pending_read: Mutex::default(),
                 prepare: Mutex::new(Err(RemoteFailure::Unreachable)),
                 perform: Mutex::new(Err(RemoteFailure::Unreachable)),
                 prepared: Mutex::default(),
                 performed: Mutex::default(),
             })
-        }
-
-        pub(in crate::ui::settings_window) fn hold_read(
-            &self,
-        ) -> super::super::machines::testing::HeldAnswer<Result<Reading, RemoteFailure>> {
-            let (held, pending) = super::super::machines::testing::HeldAnswer::new();
-            *self.pending_read.lock().unwrap() = Some(pending);
-            held
         }
 
         /// Makes this the desktop's lane steps for every paired server.
@@ -1099,13 +1037,7 @@ pub(super) mod testing {
 
     impl RemoteMachineControl for ScriptedRemote {
         fn read(&self) -> ReadAnswer<'_> {
-            Box::pin(async move {
-                let pending = self.pending_read.lock().unwrap().take();
-                if let Some(pending) = pending {
-                    return pending.receive().await;
-                }
-                self.read.lock().unwrap().clone()
-            })
+            Box::pin(async move { self.read.lock().unwrap().clone() })
         }
 
         fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure> {

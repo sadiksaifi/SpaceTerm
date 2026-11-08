@@ -2,7 +2,7 @@
 //! desktop's own status, a Machines section with one row per Machine, Recent Updates, the actions
 //! that apply now, then Settings and Quit. There is no "Open SpaceTerm". Each row's wording comes
 //! from [`crate::updates::presentation`]; hosts render this tree natively.
-use crate::updates::machines::{MachineId, MachineUpdate};
+use crate::updates::machines::{MachineAction, MachineId, MachineUpdate};
 use crate::updates::presentation::{self, ExtraHeader, ExtraItem, ExtraRow, Tone};
 use spaceterm_core::update::facts::Platform;
 
@@ -128,12 +128,26 @@ impl Menu {
         let machines = self.machines.iter().flat_map(|machine| {
             machine.row.items.iter().flatten().filter_map(move |item| {
                 let (title, command) = action(item)?;
+                // Update actions already name their Machine. Other submenu actions get their
+                // Machine from the row and need it added when flattened.
+                let names_machine = match command {
+                    presentation::Command::Machine(_, MachineAction::Restart) => true,
+                    presentation::Command::Confirm(confirmation) => confirmation
+                        .actions
+                        .iter()
+                        .all(|(_, action)| *action == MachineAction::Restart),
+                    _ => false,
+                };
                 let (title, asks) = match title.strip_suffix('\u{2026}') {
                     Some(title) => (title, "\u{2026}"),
                     None => (title, ""),
                 };
                 Some(FlatRow::Action {
-                    title: format!("{title} on {}{asks}", machine.row.name),
+                    title: if names_machine {
+                        format!("{title}{asks}")
+                    } else {
+                        format!("{title} on {}{asks}", machine.row.name)
+                    },
                     command: Command::Update(command.clone()),
                 })
             })
