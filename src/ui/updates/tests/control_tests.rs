@@ -442,6 +442,8 @@ fn an_overdue_restart_with_sessions_open_never_runs_by_itself(cx: &mut gpui::Tes
     let pending = overdue.facts.as_mut().unwrap().pending.as_mut().unwrap();
     pending.installed_at = crate::updates::now() - 2 * crate::updates::policy::DAY;
     pending.overdue_since = Some(pending.installed_at + crate::updates::policy::DAY);
+    // Only a breaking update sends a daily notification.
+    pending.breaking = true;
     machines.emit(MachineUpdatesEvent::Machines(vec![overdue]));
     cx.run_until_parked();
 
