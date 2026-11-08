@@ -313,7 +313,7 @@ enum PromptAction {
     TryAgain,
     StopDownload,
     KeepDownloading,
-    Restart,
+    Relaunch,
 }
 
 fn action(
@@ -591,15 +591,15 @@ fn present_stop_download<T: 'static>(version: &str, window: &mut Window, cx: &mu
 fn install_alert(version: &str) -> Alert<PromptAction> {
     Alert::new(
         ModalId::new("update-install"),
-        "Install update",
-        format!("Restart to Install SpaceTerm {version}?"),
-        "SpaceTerm quits, installs the update, and opens again. Your Terminal Sessions keep running.",
+        "Update ready",
+        format!("SpaceTerm {version} Is Ready"),
+        "Relaunching installs it. Your Terminal Sessions keep running.",
         vec![
             action(
-                PromptAction::Restart,
-                "Restart and Install",
+                PromptAction::Relaunch,
+                "Relaunch",
                 ModalActionRole::Affirmative,
-                "update-install-restart",
+                "update-install-relaunch",
             )
             .with_emphasis(ModalActionEmphasis::Prominent)
             .default_action(true),
@@ -633,7 +633,7 @@ fn present_install<T: 'static>(window: &mut Window, cx: &mut Context<T>) {
         window,
         cx,
         move |action, cx| {
-            let accepted = action == Some(PromptAction::Restart);
+            let accepted = action == Some(PromptAction::Relaunch);
             settle.update(cx, |updates, cx| {
                 updates.finish_install_confirmation(confirmation, accepted, cx)
             });
@@ -885,16 +885,16 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn restarting_to_install_shows_no_claim_about_ending_terminal_sessions(
+    /// Presents `alert` on its own window and reads what assistive technology reads.
+    fn presented(
+        alert: Alert<PromptAction>,
         cx: &mut gpui::TestAppContext,
-    ) {
+    ) -> spaceterm_ui::a11y_testing::A11yTree {
         use gpui::prelude::*;
-        use spaceterm_ui::a11y_testing::A11yTree;
 
-        struct InstallAlertHost;
+        struct AlertHost;
 
-        impl Render for InstallAlertHost {
+        impl Render for AlertHost {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 spaceterm_ui::ModalLayer::new(gpui::div().size_full())
             }
@@ -902,26 +902,44 @@ mod tests {
 
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
-        let (host, cx) = cx.add_window_view(|_, _| InstallAlertHost);
+        let (host, cx) = cx.add_window_view(|_, _| AlertHost);
         let _handle = cx.update(|window, cx| {
             host.update(cx, |_, cx| {
-                install_alert("0.4.2")
+                alert
                     .present(window, cx, |_, _| {})
-                    .expect("the install confirmation presents")
+                    .expect("the alert presents")
             })
         });
         cx.run_until_parked();
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+    }
 
-        let tree = A11yTree::read(cx);
-        tree.text("Restart to Install SpaceTerm 0.4.2?");
-        for action in ["Restart and Install", "Release Notes", "Later"] {
+    #[gpui::test]
+    fn the_ready_alert_relaunches_and_keeps_terminal_sessions_running(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let tree = presented(install_alert("0.4.2"), cx);
+        tree.text("SpaceTerm 0.4.2 Is Ready");
+        for action in ["Relaunch", "Release Notes", "Later"] {
             tree.node(action);
         }
-        tree.text(
-            "SpaceTerm quits, installs the update, and opens again. Your Terminal Sessions keep running.",
-        );
-        let alert = tree.node("Install update");
+        tree.text("Relaunching installs it. Your Terminal Sessions keep running.");
+        let alert = tree.node("Update ready");
         assert_eq!(alert["aria"]["role"], "AlertDialog");
         assert_eq!(tree.with_role("Button").len(), 3);
+    }
+
+    #[gpui::test]
+    fn the_relaunch_failure_alert_offers_try_again_and_later(cx: &mut gpui::TestAppContext) {
+        let tree = presented(relaunch_failure_alert("0.4.2"), cx);
+        tree.text("Couldn\u{2019}t Relaunch SpaceTerm");
+        tree.text(
+            "SpaceTerm 0.4.2 is downloaded, but SpaceTerm couldn\u{2019}t quit to install it. \
+             Your Terminal Sessions are still running.",
+        );
+        for action in ["Try Again", "Later"] {
+            tree.node(action);
+        }
+        assert_eq!(tree.with_role("Button").len(), 2);
     }
 }

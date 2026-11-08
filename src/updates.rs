@@ -933,7 +933,7 @@ impl ApplicationUpdates {
             self.finish_install_confirmation(token, true, cx);
         }
         if let Some(notice) = notice {
-            // Download completion is quiet. Only an explicit restart action opens a confirmation.
+            // Download completion is quiet. Only the person's Relaunch installs it.
             if notice != UpdateNotice::ReadyToInstall
                 && !(notice == UpdateNotice::Failed && self.automatic_download)
             {
