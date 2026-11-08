@@ -170,6 +170,7 @@ pub(crate) fn failure(error: &LaneError) -> ActionFailure {
     match error {
         LaneError::Code(code) => match code.as_str() {
             "service_busy" => ActionFailure::Busy,
+            "disk_full" => ActionFailure::DiskFull,
             "changed" | "not_newer" | "version_skipped" => ActionFailure::Changed,
             "unreachable" => ActionFailure::Unreachable,
             _ => ActionFailure::Failed,
@@ -336,7 +337,7 @@ mod tests {
             ("changed", ActionFailure::Changed),
             ("unreachable", ActionFailure::Unreachable),
             ("candidate_unverified", ActionFailure::Failed),
-            ("disk_full", ActionFailure::Failed),
+            ("disk_full", ActionFailure::DiskFull),
         ] {
             assert_eq!(
                 super::failure(&LaneError::Code(code.into())),

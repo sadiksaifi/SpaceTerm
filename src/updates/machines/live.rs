@@ -664,6 +664,7 @@ impl Shared {
                         facts: None,
                         capabilities: unconnected(),
                         push: None,
+                        failed_push: None,
                     },
                     known: machine.clone(),
                     wake: Arc::clone(&wake),
@@ -941,6 +942,7 @@ pub(crate) fn failure_of_code(code: &str) -> ActionFailure {
         "service_busy" | "capacity" | "activation_unresolved" => ActionFailure::Busy,
         "changed" | "candidate_changed" => ActionFailure::Changed,
         "login_item_off" => ActionFailure::LoginItemOff,
+        "disk_full" => ActionFailure::DiskFull,
         "unreachable" | "not_running" | "stopped" | "network_off" | "service_unavailable" => {
             ActionFailure::Unreachable
         }

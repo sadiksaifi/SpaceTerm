@@ -296,6 +296,11 @@ pub(crate) enum MachineState {
         version: Version,
         reason: InstallFailure,
     },
+    /// This desktop's push of its bundled Core failed, which the Core's facts may not record.
+    PushFailed {
+        version: Version,
+        failure: ActionFailure,
+    },
     /// A restart began, and the Core did not come back on `expected`.
     CantConfirm {
         expected: Version,
@@ -361,6 +366,7 @@ impl MachineState {
             | Self::DesktopTooOld
             | Self::UpdateFailed { .. }
             | Self::InstallFailed { .. }
+            | Self::PushFailed { .. }
             | Self::CantConfirm { .. }
             | Self::CantCheck { .. } => Tone::Problem,
             _ => Tone::Action,
@@ -379,7 +385,7 @@ impl MachineState {
             | Self::Uninstalling
             | Self::Connecting => Glyph::Working,
             Self::UpdateFailed { .. } => Glyph::UpdateFailed,
-            Self::InstallFailed { .. } => Glyph::InstallFailed,
+            Self::InstallFailed { .. } | Self::PushFailed { .. } => Glyph::InstallFailed,
             Self::CantConfirm { .. } => Glyph::CantConfirm,
             Self::CantCheck { .. } => Glyph::CantCheck,
             Self::DesktopTooOld => Glyph::UpdateDesktop,
@@ -402,7 +408,7 @@ impl MachineState {
     fn urgency(&self) -> u8 {
         match self {
             Self::UpdateFailed { .. } => 0,
-            Self::InstallFailed { .. } => 1,
+            Self::InstallFailed { .. } | Self::PushFailed { .. } => 1,
             Self::CantConfirm { .. } => 4,
             Self::CantCheck { .. } => 5,
             Self::CoreTooOld { .. } => 6,
@@ -552,6 +558,24 @@ impl MachineView {
             MachineState::InstallFailed {
                 version, reason, ..
             } => install_failure(&name, &place, version, *reason),
+            MachineState::PushFailed { version, failure } => {
+                let cause = match failure {
+                    ActionFailure::DiskFull => format!(" because {name} is out of disk space"),
+                    ActionFailure::Unreachable
+                    | ActionFailure::Unavailable(Unavailable::NotConnected) => {
+                        format!(" because {name} stopped answering")
+                    }
+                    ActionFailure::Busy => {
+                        format!(" because SpaceTerm Core on {name} was busy with another update")
+                    }
+                    _ => String::new(),
+                };
+                let remedy = match failure {
+                    ActionFailure::DiskFull => "Free some space, then choose Try Again.",
+                    _ => "Choose Try Again to install it.",
+                };
+                format!("SpaceTerm Core {version} couldn't install on {name}{cause}. {name} still runs SpaceTerm Core {running}, and its Terminal Sessions keep running. {remedy}")
+            }
             MachineState::CantConfirm { expected } => {
                 format!(
                     "{name} stopped answering during its update, so SpaceTerm can't confirm \
@@ -624,7 +648,9 @@ impl MachineView {
             MachineState::Stopping => format!("Stopping {name}…"),
             MachineState::Uninstalling => format!("Uninstalling on {name}…"),
             MachineState::UpdateFailed { .. } => format!("{name} update failed"),
-            MachineState::InstallFailed { .. } => format!("{name} install failed"),
+            MachineState::InstallFailed { .. } | MachineState::PushFailed { .. } => {
+                format!("{name} install failed")
+            }
             MachineState::CantConfirm { .. } => format!("Can't confirm {name}"),
             MachineState::CantCheck { .. } => format!("Can't check {name}"),
             MachineState::DesktopTooOld => "Update SpaceTerm".to_owned(),
@@ -671,7 +697,7 @@ impl MachineView {
                     MachineAction::DismissFailure(*id),
                 ))),
             }),
-            MachineState::CantCheck { push: Some(_), .. } => {
+            MachineState::CantCheck { push: Some(_), .. } | MachineState::PushFailed { .. } => {
                 Command::Machine(machine, MachineAction::Install)
             }
             MachineState::CantCheck { reason, push: None } => {
@@ -729,7 +755,7 @@ impl MachineView {
                     Command::Machine(self.machine, MachineAction::DismissFailure(*id)),
                 )),
             ),
-            MachineState::InstallFailed { .. } => (
+            MachineState::InstallFailed { .. } | MachineState::PushFailed { .. } => (
                 "Install failed".to_owned(),
                 Some((
                     "Try Again".to_owned(),
@@ -829,7 +855,7 @@ impl MachineView {
                 Tone::Problem,
                 ExtraTile::Connected,
             ),
-            MachineState::InstallFailed { .. } => (
+            MachineState::InstallFailed { .. } | MachineState::PushFailed { .. } => (
                 "Install failed".to_owned(),
                 Tone::Problem,
                 ExtraTile::Connected,
@@ -916,7 +942,7 @@ impl MachineView {
                     MachineAction::DismissFailure(*id),
                 )]),
             ),
-            MachineState::InstallFailed { .. } => (
+            MachineState::InstallFailed { .. } | MachineState::PushFailed { .. } => (
                 Some(self.sentence()),
                 Some(vec![action("Try Again", None, MachineAction::Install)]),
             ),
@@ -1090,6 +1116,12 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
                 }
             }
         }
+    }
+    if let Some(failed) = &update.failed_push {
+        return MachineState::PushFailed {
+            version: failed.version.clone(),
+            failure: failed.failure,
+        };
     }
     if let Some(pending) = &facts.pending {
         let stranded = pending
@@ -1935,6 +1967,9 @@ pub(crate) fn action_failure(
         }
         ActionFailure::Busy => format!(
             "SpaceTerm Core on {place} is busy with another update. Try again when it finishes."
+        ),
+        ActionFailure::DiskFull => format!(
+            "SpaceTerm Core on {place} couldn't {verb} because {place} is out of disk space. Free some space, then try again."
         ),
         ActionFailure::Failed => format!("SpaceTerm Core on {place} couldn't {verb}."),
     };

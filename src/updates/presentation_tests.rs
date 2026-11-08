@@ -32,6 +32,7 @@ fn machine(id: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
         }),
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
+        failed_push: None,
     }
 }
 

@@ -36,6 +36,17 @@ pub(crate) struct MachineUpdate {
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
     /// `facts.running` and not `facts.skipped`. It drives "Update from This Mac".
     pub(crate) push: Option<Version>,
+    /// The last push of `push` that failed. The shared store records it, because a push that
+    /// breaks off or runs out of disk space records nothing in the Core's facts. Adapters leave
+    /// it None.
+    pub(crate) failed_push: Option<FailedPush>,
+}
+
+/// A push of this desktop's embedded Core build that failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FailedPush {
+    pub(crate) version: Version,
+    pub(crate) failure: ActionFailure,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +87,8 @@ pub(crate) enum ActionFailure {
     /// The sessions or the Pending Version changed since the confirmation. Ask again.
     Changed,
     Unreachable,
+    /// The Machine ran out of disk space.
+    DiskFull,
     /// This Mac's Core is off in Login Items, so it refused to start. Only the person turns it on,
     /// there, and the surface opens that list instead of explaining a failure.
     LoginItemOff,
