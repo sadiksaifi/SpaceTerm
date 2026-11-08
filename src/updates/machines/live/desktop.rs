@@ -215,6 +215,9 @@ impl Machine for LocalMachine {
     fn start(&self) -> Result<(), ActionFailure> {
         self.service.start().map_err(|error| core_failure(&error))
     }
+
+    /// The account-local lane has no backoff: every reach dials again.
+    fn retry(&self) {}
 }
 
 /// What the route registry reports about one Saved Connection.
@@ -223,6 +226,8 @@ pub(crate) trait Routes: Send + Sync {
     /// A handle whose service lane answers, while the route is connected or the Core refuses
     /// only this desktop's work protocol.
     fn lane(&self, route: &DirectRouteId) -> Option<Arc<dyn RouteLane>>;
+    /// Tries the route again now, without the backoff its earlier failures earned.
+    fn retry_now(&self, route: &DirectRouteId);
 }
 
 /// A route's service lane, and the work version its Core offered at admission.
@@ -239,6 +244,10 @@ impl Routes for RegistryRoutes {
 
     fn lane(&self, route: &DirectRouteId) -> Option<Arc<dyn RouteLane>> {
         Some(Arc::new(CoreLane::new(self.0.service(route)?)))
+    }
+
+    fn retry_now(&self, route: &DirectRouteId) {
+        self.0.retry_now(route);
     }
 }
 
@@ -287,6 +296,12 @@ impl Machine for PairedMachine {
     fn start(&self) -> Result<(), ActionFailure> {
         // A paired Core is started on its own computer.
         Err(ActionFailure::Failed)
+    }
+
+    fn retry(&self) {
+        for route in &self.ids {
+            self.routes.retry_now(route);
+        }
     }
 }
 
@@ -616,27 +631,58 @@ mod tests {
         assert_eq!(dialed.load(Ordering::SeqCst), 1);
     }
 
-    struct FakeRoutes(Vec<(DirectRouteId, DirectRouteStatus, Option<u16>)>);
+    #[derive(Default)]
+    struct FakeRoutes {
+        routes: Vec<(DirectRouteId, DirectRouteStatus, Option<u16>)>,
+        /// Each route `retry_now` was called for, in order.
+        retried: Mutex<Vec<DirectRouteId>>,
+    }
 
     impl Routes for FakeRoutes {
         fn status(&self, route: &DirectRouteId) -> Option<DirectRouteStatus> {
-            self.0
+            self.routes
                 .iter()
                 .find(|(id, ..)| id == route)
                 .map(|(_, s, _)| *s)
         }
 
         fn lane(&self, route: &DirectRouteId) -> Option<Arc<dyn RouteLane>> {
-            let (_, _, major) = self.0.iter().find(|(id, ..)| id == route)?;
+            let (_, _, major) = self.routes.iter().find(|(id, ..)| id == route)?;
             Some(Arc::new(Lane { major: (*major)? }))
+        }
+
+        fn retry_now(&self, route: &DirectRouteId) {
+            self.retried.lock().unwrap().push(*route);
         }
     }
 
     fn paired(routes: Vec<(DirectRouteId, DirectRouteStatus, Option<u16>)>) -> PairedMachine {
+        paired_with(Arc::new(FakeRoutes {
+            routes,
+            ..FakeRoutes::default()
+        }))
+    }
+
+    fn paired_with(routes: Arc<FakeRoutes>) -> PairedMachine {
         PairedMachine {
-            ids: routes.iter().map(|(id, ..)| *id).collect(),
-            routes: Arc::new(FakeRoutes(routes)),
+            ids: routes.routes.iter().map(|(id, ..)| *id).collect(),
+            routes,
         }
+    }
+
+    /// Retrying a paired Machine retries every one of its Saved Connections now.
+    #[test]
+    fn retrying_a_paired_machine_retries_each_of_its_routes() {
+        let routes = Arc::new(FakeRoutes {
+            routes: vec![
+                ([1; 32], DirectRouteStatus::Reconnecting, Some(1)),
+                ([2; 32], DirectRouteStatus::Disconnected, Some(1)),
+            ],
+            ..FakeRoutes::default()
+        });
+        let machine = paired_with(Arc::clone(&routes));
+        machine.retry();
+        assert_eq!(*routes.retried.lock().unwrap(), [[1; 32], [2; 32]]);
     }
 
     const INCOMPATIBLE: DirectRouteStatus = DirectRouteStatus::Refused(RefusalReason::Incompatible);

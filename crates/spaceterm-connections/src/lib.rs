@@ -189,6 +189,9 @@ struct Retry {
     attempt: u32,
     interaction: Interaction,
     state: UnpairProgress,
+    /// A route was asked to retry now while an attempt ran, so a failure of that attempt tries
+    /// again at once.
+    now: bool,
 }
 
 impl Retry {
@@ -198,6 +201,7 @@ impl Retry {
             attempt: 0,
             interaction,
             state: UnpairProgress::Retrying,
+            now: false,
         }
     }
 }
@@ -444,6 +448,37 @@ impl DirectConnections {
 
     pub fn resume(&self, id: &DirectRouteId) {
         self.connect(id);
+    }
+
+    /// Tries an active route that is not connected again now, and forgets the backoff its
+    /// earlier failures earned, so its next failure waits the shortest delay. A Machine whose
+    /// Core restarts on purpose returns within seconds, sooner than the backoff would try. An
+    /// attempt already running finishes first, and its failure tries again at once. A
+    /// connected, disconnected or refused route, or
+    /// one that waits for the person, is left as it is. It changes no status, so it notifies
+    /// no view.
+    pub fn retry_now(&self, id: &DirectRouteId) {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let active = state
+            .document
+            .routes
+            .iter()
+            .any(|saved| &saved.route.id == id && saved.active);
+        let running = state.route_jobs.contains(id);
+        let Some(route) = state.routes.get_mut(id) else {
+            return;
+        };
+        if !active || route.status == DirectRouteStatus::Connected || !worker::checkable(route) {
+            return;
+        }
+        route.retry.attempt = 0;
+        if running {
+            route.retry.now = true;
+        } else {
+            route.retry.due = Instant::now();
+        }
+        drop(state);
+        self.0.work.wake();
     }
 
     pub fn disconnect(&self, id: &DirectRouteId) {

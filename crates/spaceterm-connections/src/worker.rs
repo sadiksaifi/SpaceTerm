@@ -358,7 +358,7 @@ impl WorkerWake {
 
 /// Whether the worker checks this route when its retry is due. A connected route whose link
 /// the worker follows is checked only once that link ends.
-fn checkable(runtime: &RouteState) -> bool {
+pub(super) fn checkable(runtime: &RouteState) -> bool {
     !matches!(
         runtime.status,
         DirectRouteStatus::NeedsInteraction | DirectRouteStatus::Refused(_)
@@ -543,8 +543,13 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
         Err(error) => {
             runtime.status = route_failure(error, runtime.core.is_some());
             runtime.retry.delay();
+            if runtime.retry.now {
+                runtime.retry.attempt = 0;
+                runtime.retry.due = Instant::now();
+            }
         }
     }
+    runtime.retry.now = false;
     drop(state);
     owner.notify();
 }

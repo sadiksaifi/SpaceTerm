@@ -85,6 +85,8 @@ struct Network {
     events: Sender<Event>,
     release: Arc<Release>,
     blocked_through: u8,
+    /// How every connection attempt fails.
+    failure: DirectError,
 }
 impl DirectNetwork for Network {
     fn connect(
@@ -98,7 +100,7 @@ impl DirectNetwork for Network {
         if route.id[0] <= self.blocked_through {
             self.release.wait();
         }
-        Err(DirectError::PinMismatch)
+        Err(self.failure)
     }
     fn revoke(
         &self,
@@ -153,6 +155,20 @@ fn fixture(
     blocked_through: u8,
     recovery: bool,
 ) -> (DirectConnections, Receiver<Event>, ReleaseOnDrop) {
+    failing_fixture(
+        route_count,
+        blocked_through,
+        recovery,
+        DirectError::PinMismatch,
+    )
+}
+
+fn failing_fixture(
+    route_count: u8,
+    blocked_through: u8,
+    recovery: bool,
+    failure: DirectError,
+) -> (DirectConnections, Receiver<Event>, ReleaseOnDrop) {
     let records = Arc::new(MemoryRecords::default());
     let credentials = Arc::new(Credentials::default());
     let secret = DeviceCredential::generate().unwrap();
@@ -180,6 +196,7 @@ fn fixture(
         events,
         release: release.clone(),
         blocked_through,
+        failure,
     });
     let connections =
         DirectConnections::new("spaceterm-development", records, credentials, network, None);
@@ -224,6 +241,62 @@ fn direct_scheduler_bounds_route_work_and_reserves_revocation_capacity() {
         events.recv_timeout(Duration::from_secs(3)).unwrap(),
         Event::Connect(5)
     );
+}
+
+#[test]
+fn retrying_a_route_now_forgets_its_backoff() {
+    let (connections, events, _release) = failing_fixture(1, 0, false, DirectError::Transport);
+    let route = [1; 32];
+    let connected = |within: Duration| matches!(events.recv_timeout(within), Ok(Event::Connect(1)));
+    let settled = || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while connections.status(&route) == Some(DirectRouteStatus::Connecting) {
+            assert!(std::time::Instant::now() < deadline, "the attempt settled");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    assert!(connected(Duration::from_secs(3)));
+    settled();
+    assert_eq!(
+        connections.status(&route),
+        Some(DirectRouteStatus::Unavailable(UnavailableReason::Network))
+    );
+    // The first failure waits 2 seconds; retrying now skips that wait.
+    connections.retry_now(&route);
+    assert!(connected(Duration::from_millis(500)));
+    settled();
+    // That attempt counts as the first again, so its failure waits 2 seconds, not 4.
+    let started = std::time::Instant::now();
+    assert!(connected(Duration::from_secs(3)));
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+}
+
+#[test]
+fn retrying_now_leaves_a_disconnected_or_refused_route_alone() {
+    for (failure, disconnect) in [
+        (DirectError::Transport, true),
+        (DirectError::PinMismatch, false),
+    ] {
+        let (connections, events, _release) = failing_fixture(1, 0, false, failure);
+        let route = [1; 32];
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(3)),
+            Ok(Event::Connect(1))
+        ));
+        if disconnect {
+            connections.disconnect(&route);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while connections.status(&route) == Some(DirectRouteStatus::Connecting) {
+            assert!(std::time::Instant::now() < deadline, "the attempt settled");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        connections.retry_now(&route);
+        assert!(matches!(
+            events.recv_timeout(Duration::from_millis(500)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+    }
 }
 
 #[test]

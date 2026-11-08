@@ -178,6 +178,7 @@ struct ScriptedMachine {
     script: Mutex<Script>,
     lane: Arc<ScriptedLane>,
     starts: Mutex<u32>,
+    retries: Mutex<u32>,
 }
 
 impl ScriptedMachine {
@@ -186,6 +187,7 @@ impl ScriptedMachine {
             script: Mutex::new(script),
             lane,
             starts: Mutex::new(0),
+            retries: Mutex::new(0),
         })
     }
 
@@ -213,6 +215,10 @@ impl Machine for ScriptedMachine {
     fn start(&self) -> Result<(), ActionFailure> {
         *self.starts.lock().unwrap() += 1;
         Ok(())
+    }
+
+    fn retry(&self) {
+        *self.retries.lock().unwrap() += 1;
     }
 }
 
@@ -430,6 +436,11 @@ fn an_unreachable_core_is_read_again_only_after_a_change() {
     eventually("a read after the change", || lane.count("facts") == 2);
     std::thread::sleep(QUIET);
     assert_eq!(lane.count("facts"), 2);
+    assert_eq!(
+        *machine.retries.lock().unwrap(),
+        0,
+        "routes keep their backoff"
+    );
 }
 
 /// A deliberately stopped local Core reads as Stopped from the service manager alone. Start
@@ -608,6 +619,61 @@ fn a_restart_that_does_not_come_back_reads_cant_confirm() {
         unconfirmed.link,
         MachineLink::Unconfirmed { expected, .. } if expected == version("0.9.0")
     ));
+}
+
+/// While a restart this desktop asked for has not come back, the Machine's routes retry now, at
+/// most every two seconds however often its sources change, and stop once the Core answers.
+#[test]
+fn an_expected_restart_retries_the_machines_routes_until_the_core_returns() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, Some("0.9.0")))]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the facts", |update| update.facts.is_some());
+
+    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap());
+    assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
+    // The Core closes its lane to restart, and its route drops.
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    eventually("a retry of the routes", || {
+        *machine.retries.lock().unwrap() == 1
+    });
+    for _ in 0..3 {
+        sources.change();
+    }
+    std::thread::sleep(QUIET);
+    assert_eq!(
+        *machine.retries.lock().unwrap(),
+        1,
+        "at most every two seconds"
+    );
+
+    let mut returned = facts(1, 0, None);
+    returned.boot = "boot-2".into();
+    returned.facts.running = version("0.9.0");
+    lane.facts.lock().unwrap().push_back(Ok(returned));
+    machine.set(Script::Lane);
+    sources.change();
+    changed(&events, "the returned Core", |update| {
+        update
+            .facts
+            .as_ref()
+            .is_some_and(|facts| facts.running == version("0.9.0"))
+    });
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    changed(&events, "the offline Machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    std::thread::sleep(Duration::from_millis(2200));
+    sources.change();
+    std::thread::sleep(QUIET);
+    assert_eq!(
+        *machine.retries.lock().unwrap(),
+        1,
+        "no restart is expected now"
+    );
 }
 
 /// A route change while a long poll waits abandons it and reads the Machine's reach again,

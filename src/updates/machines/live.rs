@@ -6,7 +6,8 @@
 //! change its [`Sources`] report, such as a route connecting or disconnecting or the local
 //! service changing, abandons the long poll and reads the Machine's reach again. A follower whose
 //! Core it can't reach waits for the next such change. It never reads on a timer, except while a
-//! restart it expects has not come back.
+//! restart it expects has not come back. Then it also asks the Machine's routes to retry now,
+//! so the returning Core is reached without waiting out the routes' backoff.
 //!
 //! A local Core that is deliberately stopped reads as [`MachineLink::Stopped`] from the service
 //! manager, which needs no connection. A Core that answers `Facts` with `unsupported` predates
@@ -113,6 +114,9 @@ pub(crate) trait Machine: Send + Sync {
     fn reach(&self) -> Reach;
     /// Starts a deliberately stopped local Core through the service manager.
     fn start(&self) -> Result<(), ActionFailure>;
+    /// Asks each route to the Machine to try again now, without the backoff its earlier
+    /// failures earned, because its Core is expected back from a restart.
+    fn retry(&self);
 }
 
 /// A Machine its source knows, with every route it has.
@@ -505,6 +509,8 @@ struct Awaited {
     /// The run that restarts. Facts from another run end the wait.
     boot: Option<String>,
     deadline: Instant,
+    /// When the follower last asked the Machine's routes to retry now.
+    retried: Option<Instant>,
 }
 
 impl Shared {
@@ -725,6 +731,7 @@ impl Shared {
                         expected: Some(to),
                         boot: Some(observed.boot.clone()),
                         deadline: Instant::now() + limit,
+                        retried: None,
                     });
                 }
                 // A new run answered, so the restart came back. A version it didn't start on
@@ -761,37 +768,53 @@ impl Shared {
         });
     }
 
-    /// Nothing answered. Returns how long to wait before trying again, while a restart is
-    /// expected.
-    fn unreachable(&self, id: MachineId) -> Option<Duration> {
-        self.publish(id, |entry| {
-            entry.update.capabilities = unconnected();
-            if let Some(awaited) = &entry.restart {
-                if let Some(left) = awaited.deadline.checked_duration_since(Instant::now()) {
-                    return Some(left.min(RESTART_RETRY));
+    /// Nothing answered `machine`. Returns how long to wait before trying again, while a
+    /// restart is expected. Until the restart comes back, it also asks the Machine's routes to
+    /// retry now, at most every [`RESTART_RETRY`], so a Core that returns within seconds is
+    /// reached within seconds instead of on the routes' backoff.
+    fn unreachable(&self, id: MachineId, machine: &dyn Machine) -> Option<Duration> {
+        let (limit, retry) = self.publish(id, Self::unreached)?;
+        if retry {
+            machine.retry();
+        }
+        limit
+    }
+
+    /// The Machine of `entry` did not answer. Returns how long to wait before trying again and
+    /// whether to retry its routes now.
+    fn unreached(entry: &mut Entry) -> (Option<Duration>, bool) {
+        entry.update.capabilities = unconnected();
+        if let Some(awaited) = &mut entry.restart {
+            let now = Instant::now();
+            if let Some(left) = awaited.deadline.checked_duration_since(now) {
+                let retry = awaited
+                    .retried
+                    .is_none_or(|at| now.duration_since(at) >= RESTART_RETRY);
+                if retry {
+                    awaited.retried = Some(now);
                 }
-                if let Some(expected) = awaited.expected.clone() {
-                    entry.update.link = MachineLink::Unconfirmed {
-                        expected,
-                        since: crate::updates::now(),
-                    };
-                    entry.restart = None;
-                    return None;
-                }
+                return (Some(left.min(RESTART_RETRY)), retry);
+            }
+            if let Some(expected) = awaited.expected.clone() {
+                entry.update.link = MachineLink::Unconfirmed {
+                    expected,
+                    since: crate::updates::now(),
+                };
                 entry.restart = None;
+                return (None, false);
             }
-            match entry.update.link {
-                // "Can't confirm" stays until the Core answers again.
-                MachineLink::Unconfirmed { .. } | MachineLink::Offline { .. } => {}
-                _ => {
-                    entry.update.link = MachineLink::Offline {
-                        since: crate::updates::now(),
-                    };
-                }
+            entry.restart = None;
+        }
+        match entry.update.link {
+            // "Can't confirm" stays until the Core answers again.
+            MachineLink::Unconfirmed { .. } | MachineLink::Offline { .. } => {}
+            _ => {
+                entry.update.link = MachineLink::Offline {
+                    since: crate::updates::now(),
+                };
             }
-            None
-        })
-        .flatten()
+        }
+        (None, false)
     }
 
     /// This desktop asked `id` to restart into `expected`: until the Core answers from a new
@@ -810,6 +833,7 @@ impl Shared {
                 }),
                 boot: entry.boot.clone(),
                 deadline: Instant::now() + limit,
+                retried: None,
             });
         });
     }
@@ -842,7 +866,7 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
                 shared.stopped(id);
                 None
             }
-            Reach::Offline => shared.unreachable(id),
+            Reach::Offline => shared.unreachable(id, machine.as_ref()),
             Reach::Lane { lane, work } => match lane.facts() {
                 Ok(observed) => {
                     shared.observed(id, &observed, work);
@@ -877,7 +901,7 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
                     shared.unreported(id, work);
                     None
                 }
-                Err(_) => shared.unreachable(id),
+                Err(_) => shared.unreachable(id, machine.as_ref()),
             },
         };
         if !wake.wait(seen, limit) {
