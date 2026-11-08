@@ -4,15 +4,21 @@
 //! actions. Observers of [`MachineUpdatesService`] hear every change. [`MachineUpdatesNotice`]
 //! reports how each action a surface performed finished, so that surface, and only it, can
 //! explain a failure.
+//!
+//! It installs the Core build bundled in this desktop on every Machine it offers one to, with
+//! no click: once per Machine and offered version in each run, while the Machine's lane answers
+//! and its Core runs no update operation. An install ends no Terminal Session. A failed one is
+//! not retried, and it shows only through the Machine's facts, never as a notice.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
 use spaceterm_core::update::facts::Version;
 
 use super::{
-    ActionFailure, MachineAction, MachineId, MachinePreview, MachineUpdate, MachineUpdatesAdapter,
-    MachineUpdatesEvent,
+    ActionFailure, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
+    MachineUpdatesAdapter, MachineUpdatesEvent,
 };
 use crate::updates::presentation::{self, Approval, Confirmation, Dismissed};
 
@@ -125,6 +131,10 @@ pub(crate) struct MachineUpdates {
     dismissed: Dismissed,
     /// Actions performed that have not finished, oldest first.
     performed: Vec<(MachineId, MachineAction, Surface)>,
+    /// Each bundled Core version installed automatically in this run, by Machine.
+    offered: HashSet<(MachineId, Version)>,
+    /// Machines whose automatic install has not finished. Its finish reaches no surface.
+    installing: Vec<MachineId>,
     _events: Task<()>,
 }
 
@@ -155,6 +165,8 @@ impl MachineUpdates {
                 machines: Vec::new(),
                 dismissed: Dismissed::new(),
                 performed: Vec::new(),
+                offered: HashSet::new(),
+                installing: Vec::new(),
                 _events: events,
             }
         });
@@ -301,6 +313,12 @@ impl MachineUpdates {
                 action,
                 outcome,
             } => {
+                if action == MachineAction::Install
+                    && let Some(index) = self.installing.iter().position(|id| *id == machine)
+                {
+                    self.installing.remove(index);
+                    return;
+                }
                 let Some(index) = self
                     .performed
                     .iter()
@@ -315,7 +333,33 @@ impl MachineUpdates {
                 self.notify_outcome(machine, action, surface, outcome, cx);
             }
         }
+        self.install_bundled();
         cx.notify();
+    }
+
+    /// Installs the bundled Core on each Machine offered one that answers and runs no update
+    /// operation, once per Machine and offered version.
+    fn install_bundled(&mut self) {
+        let due: Vec<(MachineId, Version)> = self
+            .machines
+            .iter()
+            .filter(|update| {
+                matches!(
+                    update.link,
+                    MachineLink::Connected | MachineLink::Incompatible(_)
+                ) && update
+                    .facts
+                    .as_ref()
+                    .is_some_and(|facts| facts.operation.is_none())
+            })
+            .filter_map(|update| Some((update.machine, update.push.clone()?)))
+            .collect();
+        for (machine, version) in due {
+            if self.offered.insert((machine, version)) {
+                self.installing.push(machine);
+                self.adapter.perform(machine, MachineAction::Install);
+            }
+        }
     }
 }
 
@@ -345,7 +389,7 @@ mod tests {
     use super::*;
     use spaceterm_core::protocol::capability::{Capabilities, Capability};
     use spaceterm_core::update::facts::{
-        PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts,
+        Operation, PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts,
     };
 
     fn update(running: &str, pending: Option<&str>) -> MachineUpdate {
@@ -375,6 +419,96 @@ mod tests {
             capabilities: Capabilities::fake(&Capability::ALL),
             push: None,
         }
+    }
+
+    fn offered(update: MachineUpdate, push: &str) -> MachineUpdate {
+        MachineUpdate {
+            push: Some(Version::parse(push).unwrap()),
+            ..update
+        }
+    }
+
+    /// The bundled Core installs with no click on each Machine offered it, once per Machine and
+    /// version, only while the Machine answers and runs no update operation, and a failure
+    /// reaches no surface and is not retried.
+    #[gpui::test]
+    fn the_bundled_core_installs_once_per_machine_and_version(cx: &mut gpui::TestAppContext) {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
+        let notices = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let notices = notices.clone();
+            cx.subscribe(&store, move |_, notice: &MachineUpdatesNotice, _| {
+                notices.borrow_mut().push(notice.clone());
+            })
+        });
+        let local = MachineUpdate {
+            machine: [1; 32],
+            name: "This Mac".into(),
+            local: true,
+            ..update("0.8.0", None)
+        };
+        let offline = MachineUpdate {
+            link: super::super::MachineLink::Offline { since: 1 },
+            ..offered(update("0.8.0", None), "0.9.0")
+        };
+        let mut checking = offered(local.clone(), "0.9.0");
+        checking.facts.as_mut().unwrap().operation = Some(Operation::Checking);
+        adapter.emit(MachineUpdatesEvent::Machines(vec![checking, offline]));
+        cx.run_until_parked();
+        assert!(
+            adapter.performed().is_empty(),
+            "busy or offline Machines wait"
+        );
+
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            local.clone(),
+            "0.9.0",
+        ))));
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            update("0.8.0", None),
+            "0.9.0",
+        ))));
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            local.clone(),
+            "0.9.0",
+        ))));
+        cx.run_until_parked();
+        let install = MachineAction::Install;
+        assert_eq!(
+            adapter.performed(),
+            [([1; 32], install.clone()), ([2; 32], install.clone())]
+        );
+
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine: [2; 32],
+            action: install.clone(),
+            outcome: Err(ActionFailure::Failed),
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            update("0.8.0", None),
+            "0.9.0",
+        ))));
+        cx.run_until_parked();
+        assert!(
+            notices.borrow().is_empty(),
+            "an automatic install has no surface"
+        );
+        assert_eq!(
+            adapter.performed().len(),
+            2,
+            "a failed install is not retried"
+        );
+
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
+            update("0.8.0", None),
+            "0.9.1",
+        ))));
+        cx.run_until_parked();
+        assert_eq!(adapter.performed()[2], ([2; 32], install));
     }
 
     #[gpui::test]
