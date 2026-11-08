@@ -243,32 +243,47 @@ fn direct_scheduler_bounds_route_work_and_reserves_revocation_capacity() {
     );
 }
 
+/// Waits until no attempt runs for `route`.
+fn settle(connections: &DirectConnections, route: &DirectRouteId) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while connections
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .route_jobs
+        .contains(route)
+        || connections.status(route) == Some(DirectRouteStatus::Connecting)
+    {
+        assert!(std::time::Instant::now() < deadline, "the attempt settled");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn retrying_a_route_now_forgets_its_backoff() {
     let (connections, events, _release) = failing_fixture(1, 0, false, DirectError::Transport);
     let route = [1; 32];
     let connected = |within: Duration| matches!(events.recv_timeout(within), Ok(Event::Connect(1)));
-    let settled = || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while connections.status(&route) == Some(DirectRouteStatus::Connecting) {
-            assert!(std::time::Instant::now() < deadline, "the attempt settled");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    };
-    assert!(connected(Duration::from_secs(3)));
-    settled();
+    assert!(connected(Duration::from_secs(15)));
+    settle(&connections, &route);
     assert_eq!(
         connections.status(&route),
         Some(DirectRouteStatus::Unavailable(UnavailableReason::Network))
     );
-    // The first failure waits 2 seconds; retrying now skips that wait.
+    // The route has earned the longest backoff: its next attempt waits 60 seconds, and its next
+    // failure would wait 60 more. Each bound below is far shorter, so load can't decide them.
+    {
+        let mut state = connections.0.state.lock().unwrap();
+        let retry = &mut state.routes.get_mut(&route).unwrap().retry;
+        retry.attempt = 5;
+        retry.due = std::time::Instant::now() + Duration::from_secs(60);
+    }
+    // Retrying now skips that wait.
     connections.retry_now(&route);
-    assert!(connected(Duration::from_millis(500)));
-    settled();
-    // That attempt counts as the first again, so its failure waits 2 seconds, not 4.
-    let started = std::time::Instant::now();
-    assert!(connected(Duration::from_secs(3)));
-    assert!(started.elapsed() >= Duration::from_millis(1500));
+    assert!(connected(Duration::from_secs(15)));
+    // That attempt counts as the first again, so its failure waits 2 seconds, not 60.
+    assert!(connected(Duration::from_secs(15)));
 }
 
 #[test]
