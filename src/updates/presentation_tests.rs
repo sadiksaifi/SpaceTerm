@@ -761,6 +761,26 @@ fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
     let Some(Command::Explain(explanation)) = single(&shown).command.clone() else {
         panic!("Relaunch failed explains");
     };
+    // The updater ended its cycle, so only a new check can download the release again.
+    assert_eq!(
+        explanation.message.as_ref(),
+        "SpaceTerm 0.11.1 is downloaded, but SpaceTerm couldn't quit to install it. Your \
+         Terminal Sessions are still running. Choose Check Now in SpaceTerm Settings to download \
+         it again."
+    );
+    let held = Presentation::new(
+        DesktopFacts {
+            pending: Some("0.11.1"),
+            relaunch_held: true,
+            ..desktop(&failed, UpdateStage::Optional)
+        },
+        &[],
+        &Dismissed::new(),
+        NOW,
+    );
+    let Some(Command::Explain(explanation)) = single(&held).command.clone() else {
+        panic!("Relaunch failed explains");
+    };
     assert_eq!(
         explanation.message.as_ref(),
         "SpaceTerm 0.11.1 is downloaded, but SpaceTerm couldn't quit to install it. Your \

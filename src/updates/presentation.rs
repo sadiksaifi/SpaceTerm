@@ -222,6 +222,9 @@ pub(crate) enum DesktopState {
     InstallFailed {
         version: Option<String>,
         error: UpdateError,
+        /// The updater still holds the installer of a failed relaunch, so Relaunch can finish
+        /// it. Otherwise a new check must download the release again.
+        held: bool,
     },
     Relaunching {
         version: String,
@@ -1278,6 +1281,7 @@ impl DesktopState {
             } => Self::InstallFailed {
                 version: pending,
                 error: *error,
+                held: facts.relaunch_held,
             },
             UpdateState::Idle | UpdateState::Checking | UpdateState::Failed { .. }
                 if overdue && pending.is_some() =>
@@ -1410,7 +1414,7 @@ impl DesktopState {
                     None => "a newer SpaceTerm".to_owned(),
                 }
             ),
-            Self::InstallFailed { version: v, error } => desktop_failure(&version(v), *error),
+            Self::InstallFailed { version: v, error, .. } => desktop_failure(&version(v), *error),
             Self::RelaunchHeld { version: v } => desktop_failure(&version(v), UpdateError::Relaunch),
             Self::Relaunching { .. } => "SpaceTerm is relaunching. Terminal Sessions keep running.".to_owned(),
             Self::WhatsNew { version } => format!("SpaceTerm updated to {version}."),
@@ -1447,10 +1451,22 @@ impl DesktopState {
                     self,
                     Self::InstallFailed {
                         error: UpdateError::Relaunch,
+                        held: true,
                         ..
                     }
                 ) {
                     format!("{} Choose Relaunch to try again.", self.sentence())
+                } else if matches!(
+                    self,
+                    Self::InstallFailed {
+                        error: UpdateError::Relaunch,
+                        ..
+                    }
+                ) {
+                    format!(
+                        "{} Choose Check Now in SpaceTerm Settings to download it again.",
+                        self.sentence()
+                    )
                 } else {
                     format!("{} SpaceTerm tries again later.", self.sentence())
                 }
