@@ -3,93 +3,35 @@
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, SharedString};
-use spaceterm_ui::{SegmentedControl, SegmentedOption, Switch, ToggleSize};
+use spaceterm_ui::{
+    Button, ButtonSize, ButtonVariant, SegmentedControl, SegmentedOption, Switch, ToggleSize,
+};
 
 use super::{SettingsRowId, SettingsWindow};
 use crate::application_identity::ApplicationIdentity;
-use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::settings::SettingsDocument;
-use crate::ui::sidebar_window::form::action_button;
 use crate::updates::policy::{CheckInterval, UpdatePreferences};
+use crate::updates::presentation::{self, Command};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateService, UpdateState};
 
 /// The status row's label names the running build, so the page answers "which version" first.
 pub(super) const CURRENT_VERSION_LABEL: &str = ApplicationIdentity::current().version_label();
 
 pub(super) const CHECK_NOW_SELECTOR: &str = "settings-update-check-now";
-pub(super) const DOWNLOAD_SELECTOR: &str = "settings-update-download";
 pub(super) const RESTART_SELECTOR: &str = "settings-update-restart";
 
-/// The one next step the status row offers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The shared row's next command, or a passive check when nothing needs action.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum UpdateStatusAction {
-    /// Checks now. Disabled while a check is already running.
-    CheckNow {
-        enabled: bool,
-    },
-    Download,
-    /// Asks for the install confirmation. Installing happens only after the person confirms.
-    RequestInstall,
-    /// The install was confirmed and its restart was interrupted.
-    FinishInstall,
+    CheckNow { enabled: bool },
+    Command(Command),
 }
 
-/// The status row's summary and its action for one service state.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct UpdateStatusPresentation {
     pub(super) summary: SharedString,
     pub(super) action: Option<UpdateStatusAction>,
-}
-
-impl UpdateStatusPresentation {
-    /// `last_check` and `now` are Unix seconds.
-    pub(super) fn resolve(
-        state: &UpdateState,
-        last_check: Option<u64>,
-        now: u64,
-        wording: DesktopWording,
-    ) -> Self {
-        let check_now = Some(UpdateStatusAction::CheckNow { enabled: true });
-        let (summary, action) = match state {
-            UpdateState::Unavailable => (UpdateError::Unavailable.to_string(), None),
-            UpdateState::Idle => (format!("{}.", last_checked(last_check, now)), check_now),
-            UpdateState::Checking => (
-                "Checking for updates…".to_owned(),
-                Some(UpdateStatusAction::CheckNow { enabled: false }),
-            ),
-            UpdateState::UpToDate => ("Up to date.".to_owned(), check_now),
-            UpdateState::Available { version } => (
-                format!("Version {version} available."),
-                Some(UpdateStatusAction::Download),
-            ),
-            UpdateState::Downloading {
-                version,
-                received,
-                total,
-            } if *total > 0 => {
-                let percent = (*received as f64 / *total as f64).clamp(0.0, 1.0) * 100.0;
-                (format!("Downloading {version}… {}%", percent.floor()), None)
-            }
-            UpdateState::Downloading { version, .. } => (format!("Downloading {version}…"), None),
-            UpdateState::Verifying { version } => (format!("Preparing {version}…"), None),
-            UpdateState::Ready { version } => (
-                format!("Version {version} installs when you quit."),
-                Some(UpdateStatusAction::RequestInstall),
-            ),
-            UpdateState::Installing { version } => (
-                format!("Version {version} installs when SpaceTerm restarts."),
-                Some(UpdateStatusAction::FinishInstall),
-            ),
-            UpdateState::Failed { error } => (
-                crate::ui::updates::failure_message(*error, wording),
-                check_now,
-            ),
-        };
-        Self {
-            summary: summary.into(),
-            action,
-        }
-    }
+    pub(super) button: SharedString,
 }
 
 /// How long ago the service last completed a check. A stamp after `now` reads as just now.
@@ -129,40 +71,83 @@ fn service(cx: &App) -> Option<Entity<ApplicationUpdates>> {
 
 impl SettingsWindow {
     pub(super) fn update_status(&self, cx: &App) -> UpdateStatusPresentation {
-        let Some(updates) = service(cx) else {
-            return UpdateStatusPresentation::resolve(
-                &UpdateState::Unavailable,
-                None,
-                0,
-                DesktopPresentation::get(cx).wording(),
+        let shared = presentation::current(cx);
+        if let Some(row) = shared.desktop_row() {
+            let (button, action) = row.button.map_or_else(
+                || (SharedString::default(), None),
+                |button| {
+                    (
+                        button.label,
+                        Some(UpdateStatusAction::Command(button.command)),
+                    )
+                },
             );
+            return UpdateStatusPresentation {
+                summary: row.sentence,
+                action,
+                button,
+            };
+        }
+        let Some(updates) = service(cx) else {
+            return UpdateStatusPresentation {
+                summary: UpdateError::Unavailable.to_string().into(),
+                action: None,
+                button: SharedString::default(),
+            };
         };
-        let wording = DesktopPresentation::get(cx).wording();
         let updates = updates.read(cx);
-        UpdateStatusPresentation::resolve(
-            updates.state(),
-            updates.last_check(),
-            unix_now(),
-            wording,
-        )
+        if matches!(updates.state(), UpdateState::Unavailable) {
+            return UpdateStatusPresentation {
+                summary: UpdateError::Unavailable.to_string().into(),
+                action: None,
+                button: SharedString::default(),
+            };
+        }
+        let checking = matches!(updates.state(), UpdateState::Checking);
+        UpdateStatusPresentation {
+            summary: if checking {
+                "Checking for SpaceTerm updates…".into()
+            } else {
+                format!(
+                    "{} {}.",
+                    shared.desktop.sentence(),
+                    last_checked(updates.last_check(), unix_now())
+                )
+                .into()
+            },
+            action: Some(UpdateStatusAction::CheckNow { enabled: !checking }),
+            button: "Check Now".into(),
+        }
     }
 
     pub(super) fn render_update_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let owner = cx.weak_entity();
-        let button = self.update_status(cx).action.map(|action| {
-            let (selector, label, enabled) = match action {
-                UpdateStatusAction::CheckNow { enabled } => {
-                    (CHECK_NOW_SELECTOR, "Check Now", enabled)
-                }
-                UpdateStatusAction::Download => (DOWNLOAD_SELECTOR, "Download", true),
-                UpdateStatusAction::RequestInstall => {
-                    (RESTART_SELECTOR, "Restart to Install…", true)
-                }
-                UpdateStatusAction::FinishInstall => (RESTART_SELECTOR, "Restart", true),
+        let status = self.update_status(cx);
+        let button = status.action.map(|action| {
+            let (selector, enabled) = match &action {
+                UpdateStatusAction::CheckNow { enabled } => (CHECK_NOW_SELECTOR, *enabled),
+                UpdateStatusAction::Command(_) => (RESTART_SELECTOR, true),
             };
-            action_button(selector, label, enabled, move |window, cx| {
-                let _ = owner.update(cx, |_, cx| perform(action, window, cx));
-            })
+            Button::new(selector, status.button)
+                .accessibility_description(status.summary.clone())
+                .tab_stop(true)
+                .variant(ButtonVariant::Outline)
+                .size(ButtonSize::Regular)
+                .disabled(!enabled)
+                .debug_selector(selector)
+                .on_activate(move |_, window, cx| {
+                    let action = action.clone();
+                    let _ = owner.update(cx, |settings, cx| match action {
+                        UpdateStatusAction::CheckNow { .. } => {
+                            if let Some(updates) = service(cx) {
+                                updates.update(cx, |updates, cx| updates.check(true, cx));
+                            }
+                        }
+                        UpdateStatusAction::Command(command) => {
+                            settings.perform_update_command(command, window.window_handle(), cx)
+                        }
+                    });
+                })
         });
         gpui::div()
             .debug_selector(|| "settings-row-update-status-control".to_owned())
@@ -262,31 +247,12 @@ fn reset_update_preference(row: SettingsRowId, preferences: &mut UpdatePreferenc
 /// One line of guidance for the preference rows.
 pub(super) fn update_row_description(row: SettingsRowId) -> Option<&'static str> {
     Some(match row {
-        SettingsRowId::AutomaticUpdateDownloads => "Updates install when you quit SpaceTerm.",
+        SettingsRowId::AutomaticUpdateDownloads => {
+            "Relaunch SpaceTerm to install a downloaded update. Terminal Sessions keep running."
+        }
         SettingsRowId::UpdateCheckInterval => "SpaceTerm checks when it opens.",
         _ => return None,
     })
-}
-
-fn perform(
-    action: UpdateStatusAction,
-    window: &mut gpui::Window,
-    cx: &mut Context<SettingsWindow>,
-) {
-    let Some(updates) = service(cx) else { return };
-    match action {
-        // The row reports the result itself, so this check claims no alert.
-        UpdateStatusAction::CheckNow { .. } => {
-            updates.update(cx, |updates, cx| updates.check(true, cx));
-        }
-        UpdateStatusAction::Download => updates.update(cx, |updates, cx| updates.download(cx)),
-        UpdateStatusAction::RequestInstall => {
-            crate::ui::updates::request_install_from(window.window_handle(), cx);
-        }
-        UpdateStatusAction::FinishInstall => {
-            updates.update(cx, |updates, cx| updates.retry_install(cx));
-        }
-    }
 }
 
 #[cfg(test)]
@@ -294,91 +260,6 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_000_000;
-
-    fn resolve(state: UpdateState) -> UpdateStatusPresentation {
-        UpdateStatusPresentation::resolve(
-            &state,
-            Some(NOW - 5 * 60),
-            NOW,
-            crate::desktop_profile::testing_presentation().wording(),
-        )
-    }
-
-    #[test]
-    fn status_should_offer_the_services_next_step_and_nothing_while_it_works() {
-        let version = || "0.4.2".to_owned();
-        let cases = [
-            (UpdateState::Unavailable, None),
-            (
-                UpdateState::Idle,
-                Some(UpdateStatusAction::CheckNow { enabled: true }),
-            ),
-            (
-                UpdateState::Checking,
-                Some(UpdateStatusAction::CheckNow { enabled: false }),
-            ),
-            (
-                UpdateState::UpToDate,
-                Some(UpdateStatusAction::CheckNow { enabled: true }),
-            ),
-            (
-                UpdateState::Available { version: version() },
-                Some(UpdateStatusAction::Download),
-            ),
-            (
-                UpdateState::Downloading {
-                    version: version(),
-                    received: 1,
-                    total: 2,
-                },
-                None,
-            ),
-            (UpdateState::Verifying { version: version() }, None),
-            (
-                UpdateState::Ready { version: version() },
-                Some(UpdateStatusAction::RequestInstall),
-            ),
-            (
-                UpdateState::Installing { version: version() },
-                Some(UpdateStatusAction::FinishInstall),
-            ),
-            (
-                UpdateState::Failed {
-                    error: UpdateError::Check,
-                },
-                Some(UpdateStatusAction::CheckNow { enabled: true }),
-            ),
-        ];
-        for (state, action) in cases {
-            assert_eq!(resolve(state.clone()).action, action, "{state:?}");
-        }
-    }
-
-    #[test]
-    fn status_should_report_the_update_and_the_quit_install() {
-        assert_eq!(
-            resolve(UpdateState::UpToDate).summary.as_ref(),
-            "Up to date."
-        );
-        assert_eq!(
-            resolve(UpdateState::Ready {
-                version: "0.4.2".to_owned()
-            })
-            .summary
-            .as_ref(),
-            "Version 0.4.2 installs when you quit."
-        );
-        assert_eq!(
-            resolve(UpdateState::Downloading {
-                version: "0.4.2".to_owned(),
-                received: 2,
-                total: 3,
-            })
-            .summary
-            .as_ref(),
-            "Downloading 0.4.2… 66%"
-        );
-    }
 
     #[test]
     fn last_check_should_read_as_elapsed_time_and_survive_clock_rollback() {

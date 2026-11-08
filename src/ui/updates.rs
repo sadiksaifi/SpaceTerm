@@ -11,8 +11,7 @@ pub(super) use control::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
 
 use gpui::{
-    AnyWindowHandle, App, BorrowAppContext, Context, Entity, Global, Subscription, Window,
-    WindowHandle, actions,
+    App, BorrowAppContext, Context, Entity, Global, Subscription, Window, WindowHandle, actions,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
@@ -20,7 +19,6 @@ use spaceterm_ui::{
 };
 
 use super::WorkspaceManager;
-use super::settings_window::SettingsWindow;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice};
 use crate::updates::reminders::{ReminderActivated, UpdateReminders};
@@ -86,8 +84,6 @@ struct UpdatePrompts {
 enum InstallRequest {
     /// The application menu or the Updates menu, answered in the front Workspace window.
     FrontWorkspace,
-    /// A window that hosts update prompts itself, such as Settings.
-    Window(AnyWindowHandle),
 }
 
 impl Global for UpdatePrompts {}
@@ -229,13 +225,6 @@ fn request_install(updates: &Entity<ApplicationUpdates>, request: InstallRequest
     updates.update(cx, |updates, cx| updates.request_install_confirmation(cx));
 }
 
-/// Asks to install from a window that presents the confirmation itself.
-pub(crate) fn request_install_from(window: AnyWindowHandle, cx: &mut App) {
-    if let Some(updates) = service(cx) {
-        request_install(&updates, InstallRequest::Window(window), cx);
-    }
-}
-
 fn receive_notice(notice: UpdateNotice, cx: &mut App) {
     let Some(updates) = service(cx) else { return };
     match notice {
@@ -252,14 +241,6 @@ fn receive_notice(notice: UpdateNotice, cx: &mut App) {
             // An unrequested confirmation waits for the button rather than stacking behind
             // another decision. The Updates menu keeps the ready step prominent until the user acts.
             let requested = request.is_some();
-            if let Some(InstallRequest::Window(handle)) = request
-                && let Some(settings) = handle.downcast::<SettingsWindow>()
-                && settings
-                    .update(cx, |_, window, cx| present_install(window, cx))
-                    .is_ok()
-            {
-                return;
-            }
             let Some(handle) = front_workspace_window(cx) else {
                 return;
             };

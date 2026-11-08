@@ -3,11 +3,9 @@
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 
 use super::SettingsWindow;
-use super::core_update::UpdateState;
 use super::machines::ServiceState;
 use crate::machine_connection::CoreError;
 use crate::machine_connection::service::ServiceStatus;
-use crate::machine_connection::service::activation::{ActivationPhase, ActivationStatus};
 
 struct InstalledOperations(Entity<LocalCoreOperations>);
 impl Global for InstalledOperations {}
@@ -15,15 +13,9 @@ impl Global for InstalledOperations {}
 #[derive(Clone, Copy)]
 pub(crate) enum CompletedOperation {
     Service,
-    Update,
     /// A service change made outside Settings, such as from the status item. Settings reads the
     /// service again rather than trusting what it observed before.
     Elsewhere,
-}
-
-pub(super) struct UpdateCompletion {
-    pub(super) state: UpdateState,
-    pub(super) outcome: Result<Option<ActivationStatus>, CoreError>,
 }
 
 /// Retains admitted progress and typed outcomes across Settings Window replacement. Preparation
@@ -31,11 +23,8 @@ pub(super) struct UpdateCompletion {
 #[derive(Default)]
 pub(crate) struct LocalCoreOperations {
     pub(super) service: Option<ServiceState>,
-    pub(super) update: Option<UpdateState>,
     /// Admitted failures survive passive reads; a successful read still clears a read failure.
     pub(super) service_failure: Option<CoreError>,
-    pub(super) update_failure: Option<CoreError>,
-    last_update: Option<Result<Option<ActivationStatus>, CoreError>>,
     operation: Option<Task<()>>,
 }
 
@@ -71,47 +60,6 @@ impl LocalCoreOperations {
                     .filter(|error| *error != CoreError::AuthorizationRequired);
                 owner.service = Some(state);
                 owner.finished(CompletedOperation::Service, running, cx);
-            });
-        }));
-    }
-
-    pub(super) fn run_update(
-        &mut self,
-        state: UpdateState,
-        completion: Task<UpdateCompletion>,
-        cx: &mut Context<Self>,
-    ) {
-        self.update_failure = None;
-        self.last_update = None;
-        self.update = Some(state);
-        self.operation = Some(cx.spawn(async move |owner, cx| {
-            let UpdateCompletion { state, outcome } = completion.await;
-            let _ = owner.update(cx, |owner, cx| {
-                owner.last_update = Some(outcome);
-                let running = state
-                    .facts
-                    .as_ref()
-                    .and_then(|facts| facts.status.ok())
-                    .map(|status| status.running && !status.stopped)
-                    .unwrap_or_else(|| {
-                        matches!(
-                            owner.last_update.as_ref(),
-                            Some(Ok(Some(ActivationStatus {
-                                stopped: false,
-                                phase: ActivationPhase::Completed { running: true },
-                                ..
-                            })))
-                        )
-                    });
-                // A follow-up read can fail after activation succeeded. Retain the operation's
-                // own failure; a successful later read clears only the observation failure.
-                owner.update_failure = owner
-                    .last_update
-                    .as_ref()
-                    .and_then(|outcome| outcome.as_ref().err())
-                    .copied();
-                owner.update = Some(state);
-                owner.finished(CompletedOperation::Update, running, cx);
             });
         }));
     }
@@ -154,9 +102,6 @@ impl SettingsWindow {
     pub(super) fn synchronize_local_operations(&mut self, cx: &App) {
         let owner = self.local_operations.read(cx);
         if let (Some(row), Some(state)) = (&mut self.core_service, &owner.service) {
-            row.state = state.clone();
-        }
-        if let (Some(row), Some(state)) = (&mut self.core_update, &owner.update) {
             row.state = state.clone();
         }
     }

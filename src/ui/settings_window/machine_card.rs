@@ -16,7 +16,7 @@ use spaceterm_ui::{
 };
 
 use super::SettingsWindow;
-use super::core_update::{UpdateAction, UpdateState, UpdateStep};
+use super::core_update::UpdateStep;
 use super::machine_list::{MachineChoice, status_dot, tone_color};
 use super::machine_selection;
 use super::machines::{LocalCoreStatus, ServiceAction, ServicePhase};
@@ -30,6 +30,7 @@ use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_machines::DirectMachineAction;
 use crate::ui::sidebar_window::form::CaptionTone;
+use crate::updates::presentation::{Command, MachineState};
 
 pub(super) const STATUS_SELECTOR: &str = "settings-server-status";
 pub(super) const MENU_SELECTOR: &str = "settings-server-menu";
@@ -245,6 +246,7 @@ pub(super) fn operating_system_name(reported: &str) -> SharedString {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum StatusStep {
     Local(ServiceAction),
+    Shared(Command),
     Direct(DirectMachineAction),
     /// A change to a paired server over its service lane.
     Remote(Change),
@@ -315,20 +317,12 @@ impl SettingsWindow {
                     )
                 });
                 let update_step = self.core_update.as_ref().and_then(|row| row.state.working);
-                let updating = update_step.is_some_and(|step| step.changes_service());
+                let updating = false;
                 let mut state = local_state(connection, service, updating);
                 // Reading the connection or the version leaves the state as last observed too.
                 state.checking |= self.local_core_working()
                     || update_step == Some(UpdateStep::Check)
                     || self.version_checking(choice);
-                let failed = self.core_update_presentation().is_some_and(|update| {
-                    update.state_selector == "settings-server-update-state-failed"
-                });
-                if failed && state.operation.is_none() {
-                    state.state = "Update failed".into();
-                    state.short = "Update failed".into();
-                    state.tone = Tone::Problem;
-                }
                 state
             }
             MachineChoice::Direct(route) => {
@@ -402,7 +396,7 @@ impl SettingsWindow {
     pub(super) fn machine_card_footnote(&self, cx: &App) -> Option<SharedString> {
         let choice = self.selected_machine()?;
         let mut parts: Vec<SharedString> = Vec::new();
-        for (text, _) in [self.status_message(), self.version_message()]
+        for (text, _) in [self.status_message(), self.version_message(cx)]
             .into_iter()
             .flatten()
         {
@@ -548,13 +542,13 @@ impl SettingsWindow {
 
     /// What the selected server's update explains at length when it waits for the person or
     /// didn't finish.
-    fn version_message(&self) -> Option<(SharedString, CaptionTone)> {
-        match self.selected_machine()? {
-            MachineChoice::Local => {
-                let update = self.core_update_presentation()?;
-                (!update.working && update.tone != CaptionTone::Guidance)
-                    .then_some((update.explanation, update.tone))
-            }
+    fn version_message(&self, cx: &App) -> Option<(SharedString, CaptionTone)> {
+        let choice = self.selected_machine()?;
+        if let Some(view) = self.machine_update_view(&choice, cx) {
+            return Some((view.sentence(), CaptionTone::Guidance));
+        }
+        match choice {
+            MachineChoice::Local => None,
             MachineChoice::Direct(route) => {
                 self.remote_message(&route, &self.machine_name(&MachineChoice::Direct(route)))
             }
@@ -569,12 +563,12 @@ impl SettingsWindow {
         cx: &App,
     ) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
         match choice {
-            MachineChoice::Local => self.local_status_steps(),
+            MachineChoice::Local => self.local_status_steps(cx),
             MachineChoice::Direct(route) => self.direct_status_steps(*route, cx),
         }
     }
 
-    fn local_status_steps(&self) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
+    fn local_status_steps(&self, cx: &App) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
         let Some(presentation) = self.core_service_presentation() else {
             // Without a service, such as in a Development run, the connection can still be
             // checked again.
@@ -613,9 +607,30 @@ impl SettingsWindow {
         let menu = if installed {
             vec![
                 MenuItem::new(
-                    "Restart SpaceTerm Core\u{2026}",
+                    self.machine_update_view(&MachineChoice::Local, cx)
+                        .map_or_else(
+                            || {
+                                format!(
+                                    "Restart SpaceTerm Core on {}…",
+                                    self.machine_name(&MachineChoice::Local)
+                                )
+                            },
+                            |view| {
+                                if matches!(
+                                    view.state,
+                                    MachineState::Ready { .. } | MachineState::Overdue { .. }
+                                ) {
+                                    view.control_label()
+                                } else {
+                                    format!("Restart SpaceTerm Core on {}…", view.name)
+                                }
+                            },
+                        ),
                     StatusStep::Local(ServiceAction::Restart),
-                    idle && offered(ServiceAction::Restart),
+                    idle && offered(ServiceAction::Restart)
+                        && self
+                            .machine_update_view(&MachineChoice::Local, cx)
+                            .is_some(),
                 ),
                 MenuItem::new(
                     "Stop SpaceTerm Core\u{2026}",
@@ -649,16 +664,13 @@ impl SettingsWindow {
             return (Vec::new(), Vec::new());
         };
         let presentation = crate::ui::direct_machines::present(status, "");
-        let mut buttons: Vec<(StatusStep, bool)> = presentation
+        let buttons: Vec<(StatusStep, bool)> = presentation
             .actions
             .iter()
             .map(|action| (StatusStep::Direct(*action), false))
             .collect();
         // The server's own update check found a newer release, so Update leads the row.
         let ready = self.remote_ready(&route, cx);
-        if self.remote_available(&route).is_some() && ready {
-            buttons.push((StatusStep::Remote(Change::Update), false));
-        }
         let reconnectable = !matches!(
             status,
             DirectRouteStatus::Connecting | DirectRouteStatus::Refused(RefusalReason::Revoked)
@@ -666,12 +678,25 @@ impl SettingsWindow {
         let mut menu = Vec::new();
         // Restart reaches SpaceTerm Core over its service lane while SpaceTerm holds a connection
         // to it. Start and Stop run only on the Machine itself, so the menu offers neither.
-        if super::remote_admin::installed(cx).is_some() {
-            menu.push(MenuItem::new(
-                Change::Restart.label(),
-                StatusStep::Remote(Change::Restart),
+        if let Some(view) = self.machine_update_view(&MachineChoice::Direct(route), cx) {
+            let label = if matches!(
+                view.state,
+                MachineState::Ready { .. } | MachineState::Overdue { .. }
+            ) {
+                view.control_label()
+            } else {
+                format!("Restart SpaceTerm Core on {}…", view.name)
+            };
+            let mut restart = MenuItem::new(
+                label,
+                StatusStep::Shared(Command::Machine(
+                    view.machine,
+                    crate::updates::machines::MachineAction::Restart,
+                )),
                 ready,
-            ));
+            );
+            restart.selector = super::remote_admin::RESTART_SELECTOR.into();
+            menu.push(restart);
         }
         let reconnect = MenuItem::new(
             "Reconnect",
@@ -707,6 +732,9 @@ impl SettingsWindow {
         };
         match (step, choice) {
             (StatusStep::Version(step), _) => self.take_version_step(step, cx),
+            (StatusStep::Shared(command), _) => {
+                self.perform_update_command(command, window.window_handle(), cx)
+            }
             (StatusStep::InstallBuild(build, directory), MachineChoice::Local) => {
                 self.confirm_installing(build, directory, window, cx);
             }
@@ -884,7 +912,6 @@ impl DelayedProgress {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VersionStep {
-    Local(UpdateAction),
     /// Check Now for a server with no update journey here, such as a paired server or a
     /// Development run: SpaceTerm checks for its own update and reads the server's facts again.
     Observe,
@@ -904,34 +931,13 @@ const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl VersionStep {
     const fn label(self) -> &'static str {
-        match self {
-            Self::Local(action) => action.label(),
-            Self::Observe => "Check Now",
-        }
+        "Check Now"
     }
-
     const fn selector(self) -> &'static str {
-        match self {
-            Self::Local(action) => action.selector(),
-            Self::Observe => VERSION_CHECK_SELECTOR,
-        }
+        VERSION_CHECK_SELECTOR
     }
-
-    /// The element the step occupies. Steps that replace one another share a slot, so keyboard
-    /// focus stays on it when, say, Update SpaceTerm Core gives way to Finish Update.
     const fn slot(self) -> &'static str {
-        match self {
-            Self::Local(action) => action.slot(),
-            Self::Observe => VERSION_CHECK_SELECTOR,
-        }
-    }
-
-    /// The step that changes the server leads, as the primary button.
-    const fn primary(self) -> bool {
-        matches!(
-            self,
-            Self::Local(UpdateAction::Update | UpdateAction::Finish)
-        )
+        VERSION_CHECK_SELECTOR
     }
 }
 
@@ -945,101 +951,31 @@ impl SettingsWindow {
 
     /// The selected server's version and update, as its update journey presents them.
     fn version_view(&self, cx: &App) -> VersionView {
-        let observed = self
-            .selected_facts(cx)
-            .and_then(|facts| facts.version)
-            .map(SharedString::from);
         let Some(choice) = self.selected_machine() else {
             return VersionView {
                 subtitle: SharedString::default(),
                 actions: Vec::new(),
             };
         };
-        let needs_update = self.core_state(&choice).state.as_ref() == "Needs update";
-        match choice {
-            MachineChoice::Local => self.local_version_view(observed, needs_update),
-            // Check Now checks SpaceTerm, reads the paired server's facts again over its
-            // connection, and asks the server's lane for its version and newest release.
-            MachineChoice::Direct(route) => {
-                let version = version_text(self.remote_version(&route).or(observed).as_ref());
-                let subtitle = match self.remote_available(&route) {
-                    Some(available) => available_subtitle(&version, Some(&available)),
-                    None => version,
-                };
-                VersionView {
-                    subtitle: subtitle.into(),
-                    actions: vec![VersionStep::Observe],
-                }
-            }
-        }
-    }
-
-    fn local_version_view(
-        &self,
-        observed: Option<SharedString>,
-        needs_update: bool,
-    ) -> VersionView {
-        let Some(row) = self.core_update.as_ref() else {
+        if let Some(view) = self.machine_update_view(&choice, cx) {
             return VersionView {
-                subtitle: SharedString::new_static(
-                    "This run builds its own SpaceTerm Core, so it has no update.",
-                ),
+                subtitle: view.extra_row().line,
                 actions: vec![VersionStep::Observe],
             };
-        };
-        let presentation = row.presentation();
-        let facts = row.state.facts.as_ref();
-        let value = facts
+        }
+        let observed = self
+            .selected_facts(cx)
+            .and_then(|facts| facts.version)
+            .map(SharedString::from);
+        let installed = matches!(choice, MachineChoice::Local)
+            .then(|| self.core_update.as_ref())
+            .flatten()
+            .and_then(|row| row.state.facts.as_ref())
             .and_then(|facts| facts.approved.as_ref())
-            .map(|approved| SharedString::from(approved.version.clone()))
-            .or(observed);
-        let version = version_text(value.as_ref());
-        let included = facts
-            .and_then(|facts| facts.included.as_ref().ok())
-            .map(|included| included.version.clone());
-        let activation = facts.and_then(|facts| facts.activation.as_ref());
-        let candidate = activation
-            .map(|activation| activation.candidate.version.clone())
-            .or_else(|| included.clone());
-        let offered = |action: UpdateAction| presentation.actions.contains(&action);
-        let failed = presentation.state_selector == "settings-server-update-state-failed";
-        // The update's own record names the version it left, even before the approved build
-        // reads again.
-        let previous = activation.map_or_else(
-            || value.as_ref().map_or_else(String::new, ToString::to_string),
-            |activation| activation.previous.version.clone(),
-        );
-        let (subtitle, actions): (String, Vec<UpdateAction>) = if failed {
-            (
-                failed_subtitle(candidate.as_deref(), &previous),
-                vec![UpdateAction::Check],
-            )
-        } else if offered(UpdateAction::Finish) {
-            (
-                unfinished_subtitle(&version, candidate.as_deref()),
-                vec![UpdateAction::Finish],
-            )
-        } else if offered(UpdateAction::Update) && needs_update {
-            (
-                format!("{version} · Update required"),
-                vec![UpdateAction::Update],
-            )
-        } else if offered(UpdateAction::Update) {
-            (
-                available_subtitle(&version, included.as_deref()),
-                vec![UpdateAction::Update],
-            )
-        } else if presentation.state_selector == "settings-server-update-state-not-installed" {
-            (
-                "Install to see the SpaceTerm Core version.".to_owned(),
-                Vec::new(),
-            )
-        } else {
-            (version, vec![UpdateAction::Check])
-        };
+            .map(|approved| SharedString::from(approved.version.clone()));
         VersionView {
-            subtitle: subtitle.into(),
-            actions: actions.into_iter().map(VersionStep::Local).collect(),
+            subtitle: version_text(installed.or(observed).as_ref()).into(),
+            actions: vec![VersionStep::Observe],
         }
     }
 
@@ -1050,7 +986,7 @@ impl SettingsWindow {
         let choice = self.selected_machine()?;
         let version = self.version_view(cx);
         let (buttons, menu) = self.status_steps(&choice, cx);
-        let busy = self.core_progress(&choice).is_some();
+        let busy = self.core_progress(&choice, cx).is_some();
         let mut steps: Vec<StatusStep> = version
             .actions
             .iter()
@@ -1065,6 +1001,12 @@ impl SettingsWindow {
             .min()
             .map(|(_, index)| index);
         let button = leading.map(|index| steps.remove(index));
+        let shared = self.machine_update_view(&choice, cx);
+        let button = shared
+            .as_ref()
+            .and_then(|view| view.settings_row().button)
+            .map(|button| StatusStep::Shared(button.command))
+            .or(button);
         // Stopping a connection attempt stays possible while it runs.
         let cancels =
             |step: &StatusStep| matches!(step, StatusStep::Direct(DirectMachineAction::Cancel));
@@ -1129,23 +1071,22 @@ impl SettingsWindow {
 
     /// The operation underway on `choice` that changes it, as the Server row names it under its
     /// label. A read isn't one: the state says Checking instead.
-    fn core_progress(&self, choice: &MachineChoice) -> Option<SharedString> {
+    fn core_progress(&self, choice: &MachineChoice, cx: &App) -> Option<SharedString> {
+        if let Some(view) = self.machine_update_view(choice, cx)
+            && matches!(
+                view.state,
+                MachineState::Installing { .. } | MachineState::Restarting { .. }
+            )
+        {
+            return Some(view.control_label().into());
+        }
         match choice {
-            MachineChoice::Local => {
-                if let Some(row) = self.core_update.as_ref()
-                    && let Some(text) = row
-                        .state
-                        .working
-                        .and_then(|step| update_progress(step, &row.state))
-                {
-                    return Some(text.into());
-                }
-                self.core_service
-                    .as_ref()
-                    .and_then(|row| row.state.working)
-                    .filter(|action| *action != ServiceAction::Check)
-                    .map(|action| SharedString::new_static(service_progress(action)))
-            }
+            MachineChoice::Local => self
+                .core_service
+                .as_ref()
+                .and_then(|row| row.state.working)
+                .filter(|action| *action != ServiceAction::Check)
+                .map(|action| SharedString::new_static(service_progress(action))),
             MachineChoice::Direct(route) => self.remote_progress(route),
         }
     }
@@ -1156,7 +1097,7 @@ impl SettingsWindow {
         let (checking, busy) = self.selected_machine().map_or((None, None), |choice| {
             (
                 self.core_state(&choice).checking.then(|| choice.clone()),
-                self.core_progress(&choice).is_some().then_some(choice),
+                self.core_progress(&choice, cx).is_some().then_some(choice),
             )
         });
         self.check_progress.track(checking, cx);
@@ -1172,7 +1113,7 @@ impl SettingsWindow {
         if self
             .operation_progress
             .revealed(cx.background_executor().now())
-            && let Some(progress) = self.core_progress(&choice)
+            && let Some(progress) = self.core_progress(&choice, cx)
         {
             return progress;
         }
@@ -1188,7 +1129,7 @@ impl SettingsWindow {
         {
             return None;
         }
-        let progress = self.core_progress(&choice)?;
+        let progress = self.core_progress(&choice, cx)?;
         Some(
             ProgressRing::new(
                 SharedString::from(PROGRESS_SELECTOR),
@@ -1299,20 +1240,8 @@ impl SettingsWindow {
         }
     }
 
-    fn take_version_step(&mut self, step: VersionStep, cx: &mut Context<Self>) {
-        match (step, self.selected_machine()) {
-            (VersionStep::Local(UpdateAction::Check), _) | (VersionStep::Observe, _) => {
-                self.check_versions(cx)
-            }
-            // An update asked for while a read runs starts once the read offers it again.
-            (VersionStep::Local(UpdateAction::Update), Some(MachineChoice::Local)) => {
-                self.request_core_update(cx)
-            }
-            (VersionStep::Local(action), Some(MachineChoice::Local)) => {
-                self.request_update_action(action, cx)
-            }
-            _ => {}
-        }
+    fn take_version_step(&mut self, _step: VersionStep, cx: &mut Context<Self>) {
+        self.check_versions(cx);
     }
 
     /// The Server row's control: the state, at most one button, and a ⋯ menu. A read running
@@ -1373,17 +1302,27 @@ impl SettingsWindow {
         let button = view.button.map(|step| {
             let owner = owner.clone();
             let label: SharedString = match &step {
-                // The row names the server, so its update reads as one word.
-                StatusStep::Version(VersionStep::Local(UpdateAction::Update)) => {
-                    SharedString::new_static("Update\u{2026}")
-                }
+                StatusStep::Shared(_) => self
+                    .machine_update_view(&choice, cx)
+                    .map(|view| {
+                        view.settings_row()
+                            .button
+                            .map_or_else(|| view.control_label().into(), |button| button.label)
+                    })
+                    .unwrap_or_else(|| "Update Core…".into()),
                 _ => SharedString::new_static(status_step_label(&step)),
             };
             // Steps that replace each other share a slot, so keyboard focus stays on it when,
             // say, Start SpaceTerm Core gives way to Update.
             let slot = status_step_slot(&step).unwrap_or_else(|| status_step_selector(&step));
-            let description = status_step_consequence(&step, &name).unwrap_or_else(|| {
-                SharedString::from(format!("{} {name}", label.trim_end_matches('\u{2026}')))
+            let description = if matches!(step, StatusStep::Shared(_)) {
+                self.machine_update_view(&choice, cx)
+                    .map(|view| view.sentence())
+            } else {
+                status_step_consequence(&step, &name)
+            }
+            .unwrap_or_else(|| {
+                SharedString::from(format!("{} {name}", label.trim_end_matches('…')))
             });
             Button::new(
                 ElementId::from(SharedString::from(format!("{STATUS_SELECTOR}-{slot}"))),
@@ -1564,6 +1503,7 @@ impl SettingsWindow {
 fn status_step_selector(step: &StatusStep) -> &'static str {
     match step {
         StatusStep::Local(action) => action.selector(),
+        StatusStep::Shared(_) => super::core_update::UPDATE_SELECTOR,
         StatusStep::Direct(action) => action.selector(),
         StatusStep::Remote(change) => change.selector(),
         StatusStep::UnpairThisDevice => "settings-server-unpair",
@@ -1585,19 +1525,9 @@ fn status_step_slot(step: &StatusStep) -> Option<&'static str> {
 fn status_step_consequence(step: &StatusStep, machine: &str) -> Option<SharedString> {
     match step {
         StatusStep::Local(action) => action.consequence().map(SharedString::new_static),
-        StatusStep::Version(VersionStep::Local(UpdateAction::Check) | VersionStep::Observe) => {
-            Some(SharedString::from(format!(
-                "Checks for a newer SpaceTerm and reads {machine} again."
-            )))
-        }
-        StatusStep::Version(VersionStep::Local(action)) => {
-            action.consequence().map(SharedString::new_static)
-        }
-        StatusStep::Remote(Change::Restart) => Some(SharedString::from(format!(
-            "Restarts {machine}, ending its Terminal Sessions for every client."
-        ))),
-        StatusStep::Remote(Change::Update) => Some(SharedString::from(format!(
-            "Updates {machine}, ending its Terminal Sessions for every client."
+        StatusStep::Shared(_) => None,
+        StatusStep::Version(VersionStep::Observe) => Some(SharedString::from(format!(
+            "Checks for a newer SpaceTerm and reads {machine} again."
         ))),
         _ => None,
     }
@@ -1605,16 +1535,14 @@ fn status_step_consequence(step: &StatusStep, machine: &str) -> Option<SharedStr
 
 /// Whether the step leads as the primary button: one that updates the server.
 fn status_step_primary(step: &StatusStep) -> bool {
-    matches!(step, StatusStep::Version(step) if step.primary())
-        || *step == StatusStep::Remote(Change::Update)
+    matches!(step, StatusStep::Shared(_))
 }
 
 /// How strongly a step claims the Server row's one button, lowest first. `None` belongs in the
 /// ⋯ menu.
 fn button_rank(step: &StatusStep) -> Option<u8> {
     match step {
-        StatusStep::Version(VersionStep::Local(UpdateAction::Update))
-        | StatusStep::Remote(Change::Update) => Some(1),
+        StatusStep::Shared(_) => Some(1),
         StatusStep::Local(ServiceAction::Start | ServiceAction::OpenLoginItems) => Some(2),
         _ => None,
     }
@@ -1626,66 +1554,6 @@ fn version_text(value: Option<&SharedString>) -> String {
         || "Version unknown".to_owned(),
         |value| format!("Version {value}"),
     )
-}
-
-fn available_subtitle(version: &str, candidate: Option<&str>) -> String {
-    match candidate {
-        Some(candidate) => format!("{version} \u{b7} {candidate} is available"),
-        None => format!("{version} · Update available"),
-    }
-}
-
-fn unfinished_subtitle(version: &str, candidate: Option<&str>) -> String {
-    match candidate {
-        Some(candidate) => format!("{version} · Update to {candidate} unfinished"),
-        None => format!("{version} · Update unfinished"),
-    }
-}
-
-fn failed_subtitle(candidate: Option<&str>, previous: &str) -> String {
-    let attempted = candidate.map_or_else(
-        || "Couldn\u{2019}t update".to_owned(),
-        |candidate| format!("Couldn\u{2019}t update to {candidate}"),
-    );
-    if previous.is_empty() {
-        attempted
-    } else {
-        format!("{attempted} \u{b7} Still on {previous}")
-    }
-}
-
-/// The update step underway, as the Server row names it. A read isn't one.
-fn update_progress(step: UpdateStep, state: &UpdateState) -> Option<String> {
-    let facts = state.facts.as_ref();
-    let included = facts
-        .and_then(|facts| facts.included.as_ref().ok())
-        .map(|included| included.version.as_str());
-    let activation = facts.and_then(|facts| facts.activation.as_ref());
-    let candidate = activation
-        .map(|activation| activation.candidate.version.as_str())
-        .or(included);
-    let named = |version: Option<&str>, named: &str, unnamed: &str| {
-        version.map_or_else(
-            || unnamed.to_owned(),
-            |version| format!("{named} {version}\u{2026}"),
-        )
-    };
-    Some(match step {
-        UpdateStep::Check => return None,
-        UpdateStep::Prepare => named(
-            included,
-            "Preparing the update to",
-            "Preparing the update\u{2026}",
-        ),
-        UpdateStep::Update { .. } => {
-            named(included, "Updating to", "Updating SpaceTerm Core\u{2026}")
-        }
-        UpdateStep::Finish => named(
-            candidate,
-            "Finishing the update to",
-            "Finishing the update\u{2026}",
-        ),
-    })
 }
 
 /// A local service step underway, as the Server row names it.
@@ -1708,6 +1576,7 @@ const fn service_progress(action: ServiceAction) -> &'static str {
 fn status_step_label(step: &StatusStep) -> &'static str {
     match step {
         StatusStep::Local(ServiceAction::Install) => "Install\u{2026}",
+        StatusStep::Shared(_) => "Update Core…",
         StatusStep::Local(ServiceAction::Check) => "Check Status",
         StatusStep::Local(action) => action.label(),
         StatusStep::Direct(action) => action.label(),

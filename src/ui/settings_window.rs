@@ -458,6 +458,7 @@ pub(crate) struct SettingsWindow {
     core_service: Option<machines::MachineServiceRow>,
     /// The server version and its update journey. `None` omits its row.
     core_update: Option<core_update::MachineUpdateRow>,
+    update_window: AnyWindowHandle,
     /// This computer's command for the local server's identity. `None` omits its row.
     command_line_tool: Option<command_line_tool::CommandLineToolRow>,
     /// The desktop's direct network connections. `None` omits their rows.
@@ -823,13 +824,11 @@ impl SettingsWindow {
             settings.reread_command_line_tool(cx);
             match operation {
                 local_operations::CompletedOperation::Service => settings.check_core_update(cx),
-                local_operations::CompletedOperation::Update => settings.check_core_service(cx),
                 local_operations::CompletedOperation::Elsewhere => {
                     settings.reread_core_service(cx);
                     settings.reread_core_update(cx);
                 }
             }
-            settings.continue_requested_update(cx);
             cx.notify();
         })
         .detach();
@@ -879,10 +878,11 @@ impl SettingsWindow {
                 .as_ref()
                 .and_then(|offered| offered.service.clone())
                 .map(machines::MachineServiceRow::new),
+            update_window: window.window_handle(),
             core_update: local_core
                 .as_ref()
                 .and_then(|offered| offered.update.clone())
-                .map(|control| core_update::MachineUpdateRow::new(control, window.window_handle())),
+                .map(core_update::MachineUpdateRow::new),
             command_line_tool: local_core
                 .as_ref()
                 .and_then(|offered| offered.command_line_tool.clone())
@@ -919,6 +919,7 @@ impl SettingsWindow {
         settings.follow_machine_selection(cx);
         settings.reconcile_machines(cx);
         settings.synchronize_local_operations(cx);
+        settings.observe_machine_updates(cx);
         settings.refresh_notification_access(cx);
         settings
     }

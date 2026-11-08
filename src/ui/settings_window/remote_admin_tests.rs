@@ -291,18 +291,6 @@ fn open_penguin<'a>(remote: &Arc<ScriptedRemote>, cx: &'a mut TestAppContext) ->
     machines
 }
 
-/// Whether the Server row's ⋯ menu offers `selector`. It closes the menu again without
-/// choosing anything.
-fn menu_offers(selector: &str, cx: &mut VisualTestContext) -> bool {
-    click(super::super::machine_card::MENU_SELECTOR, cx);
-    let offered = cx
-        .debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
-        .is_some();
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    offered
-}
-
 fn alert_open(cx: &mut VisualTestContext) -> bool {
     cx.debug_bounds(Box::leak(
         format!("modal-action-{CONFIRM_SELECTOR}").into_boxed_str(),
@@ -323,41 +311,6 @@ fn footnote(machines: &Machines<'_>) -> String {
     })
 }
 
-fn state(machines: &Machines<'_>) -> super::super::machine_card::CoreState {
-    machines.window.read_with(machines.cx, |settings, _| {
-        settings.core_state(&super::super::machine_list::MachineChoice::Direct(
-            machines.routes[0],
-        ))
-    })
-}
-
-#[gpui::test]
-fn a_connected_paired_machine_offers_restart_but_never_start_or_stop(cx: &mut TestAppContext) {
-    let remote = ScriptedRemote::new();
-    let machines = open_penguin(&remote, cx);
-
-    assert!(menu_offers(RESTART_SELECTOR, machines.cx));
-    // A paired Machine has no Stop change at all; the local Stop is never offered for it either.
-    assert!(
-        !menu_offers(
-            super::super::machines::ServiceAction::Stop.selector(),
-            machines.cx
-        ),
-        "Stop runs only on the Machine itself"
-    );
-    assert!(
-        !menu_offers(
-            super::super::machines::ServiceAction::Start.selector(),
-            machines.cx
-        ),
-        "Start stays on the server's own computer"
-    );
-    assert!(
-        remote.prepared.lock().unwrap().is_empty(),
-        "showing the card asks the server nothing"
-    );
-}
-
 #[gpui::test]
 fn a_disconnected_paired_machine_takes_no_lane_step(cx: &mut TestAppContext) {
     let remote = ScriptedRemote::new();
@@ -371,7 +324,7 @@ fn a_disconnected_paired_machine_takes_no_lane_step(cx: &mut TestAppContext) {
     });
     assert!(!ready);
     click(super::super::machine_card::MENU_SELECTOR, machines.cx);
-    click(RESTART_SELECTOR, machines.cx);
+    assert!(machines.cx.debug_bounds(RESTART_SELECTOR).is_none());
     assert!(remote.prepared.lock().unwrap().is_empty());
     assert!(
         footnote(&machines).contains("Connect to penguin to change these settings."),
@@ -380,245 +333,6 @@ fn a_disconnected_paired_machine_takes_no_lane_step(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn cancelling_a_confirmation_executes_nothing(cx: &mut TestAppContext) {
-    let remote = ScriptedRemote::new();
-    *remote.prepare.lock().unwrap() = Ok(Prepared {
-        preview: preview(LaneAction::Restart, effects(0)),
-        settled: Vec::new(),
-    });
-    let machines = open_penguin(&remote, cx);
-
-    click(RESTART_SELECTOR, machines.cx);
-    answer(CANCEL_SELECTOR, machines.cx);
-    machines.cx.run_until_parked();
-
-    assert!(remote.performed.lock().unwrap().is_empty());
-    let ready = machines.window.read_with(machines.cx, |settings, cx| {
-        settings.remote_ready(&machines.routes[0], cx)
-    });
-    assert!(ready, "the card is free again");
-}
-
-/// A refused preview explains itself and asks nothing.
-#[gpui::test]
-fn a_refused_preview_explains_why_and_asks_nothing(cx: &mut TestAppContext) {
-    let remote = ScriptedRemote::new();
-    *remote.prepare.lock().unwrap() = Err(RemoteFailure::Busy);
-    let machines = open_penguin(&remote, cx);
-
-    click(RESTART_SELECTOR, machines.cx);
-
-    assert!(!alert_open(machines.cx));
-    assert!(
-        footnote(&machines).contains("penguin is finishing another change."),
-        "got {:?}",
-        footnote(&machines)
-    );
-}
-
-/// Check Now reads the server's lane. A newer release puts Update on the row, which confirms the
-/// server's preview and follows the update until the server returns.
-#[gpui::test]
-fn check_now_offers_the_machines_update_and_update_follows_it_to_the_end(cx: &mut TestAppContext) {
-    let remote = ScriptedRemote::new();
-    *remote.read.lock().unwrap() = Ok(Reading {
-        status: pending_status(version("1.2.0", "aaaaaaaaaa"), "1.3.0"),
-        settled: vec![receipt(LaneAction::Restart, LaneOperationState::Done, "a")],
-    });
-    *remote.prepare.lock().unwrap() = Ok(Prepared {
-        preview: update_preview(None),
-        settled: Vec::new(),
-    });
-    let update = LaneAction::Restart;
-    *remote.perform.lock().unwrap() = Ok(Performed {
-        outcome: Outcome::Settled {
-            receipt: receipt(update, LaneOperationState::Done, "b"),
-            boot: "a".into(),
-        },
-        settled: Vec::new(),
-    });
-    let machines = open_penguin(&remote, cx);
-
-    click(
-        super::super::machine_card::VERSION_CHECK_SELECTOR,
-        machines.cx,
-    );
-    machines.cx.run_until_parked();
-    let subtitle = machines
-        .window
-        .read_with(machines.cx, |settings, cx| settings.core_subtitle(cx));
-    assert_eq!(subtitle.as_ref(), "Version 1.2.0 \u{b7} 1.3.0 is available");
-    assert!(
-        footnote(&machines)
-            .contains("SpaceTerm confirmed that an earlier restart of penguin finished."),
-        "got {:?}",
-        footnote(&machines)
-    );
-
-    click(UPDATE_SELECTOR, machines.cx);
-    assert_eq!(*remote.prepared.lock().unwrap(), vec![Change::Update]);
-    let tree = A11yTree::read(machines.cx);
-    let message = tree
-        .find_text("Update SpaceTerm Core on penguin to 1.3.0 (commit bbbbbbb)?")
-        .is_some();
-    assert!(message, "the alert names the server and the version");
-    answer(CONFIRM_SELECTOR, machines.cx);
-    machines.cx.run_until_parked();
-
-    assert_eq!(remote.performed.lock().unwrap().len(), 1);
-    assert!(
-        footnote(&machines).contains("penguin updated to 1.3.0."),
-        "got {:?}",
-        footnote(&machines)
-    );
-    assert!(state(&machines).operation.is_none(), "nothing is underway");
-}
-
-/// A reading belongs to the link it was read over. Once the connection is replaced, as after an
-/// update made from the CLI, the facts the new connection observes take precedence, and the old
-/// update offer goes.
-#[gpui::test]
-fn a_new_connection_retires_the_last_lane_reading(cx: &mut TestAppContext) {
-    let remote = ScriptedRemote::new();
-    *remote.read.lock().unwrap() = Ok(Reading {
-        status: pending_status(version("1.2.0", "aaaaaaaaaa"), "1.3.0"),
-        settled: Vec::new(),
-    });
-    let machines = open_penguin(&remote, cx);
-    let route = machines.routes[0];
-    let subtitle = |machines: &Machines<'_>| {
-        machines
-            .window
-            .read_with(machines.cx, |settings, cx| settings.core_subtitle(cx))
-    };
-
-    click(
-        super::super::machine_card::VERSION_CHECK_SELECTOR,
-        machines.cx,
-    );
-    machines.cx.run_until_parked();
-    assert_eq!(
-        subtitle(&machines).as_ref(),
-        "Version 1.2.0 \u{b7} 1.3.0 is available"
-    );
-
-    let late = remote.hold_read();
-    click(
-        super::super::machine_card::VERSION_CHECK_SELECTOR,
-        machines.cx,
-    );
-    machines.cx.run_until_parked();
-    late.wait_started(&machines.cx.cx);
-    // Someone updated penguin from its own command line, and SpaceTerm's connection to it is
-    // replaced.
-    let before = machines.direct.core(&route).expect("a connection");
-    machines.direct.connect(&route);
-    let direct = machines.direct.clone();
-    settle(machines.cx, |_| {
-        direct
-            .core(&route)
-            .is_some_and(|core| !core.same_handle(&before))
-            && direct.status(&route)
-                == Some(crate::direct_connections::DirectRouteStatus::Connected)
-    });
-    let replacement_lane = ScriptedRemote::new();
-    *replacement_lane.read.lock().unwrap() = Ok(Reading {
-        status: status(version("2.4.0", "cccccccccc")),
-        settled: Vec::new(),
-    });
-    machines.cx.update(|_, cx| replacement_lane.install(cx));
-    late.release(Ok(Reading {
-        status: pending_status(version("1.1.0", "dddddddddd"), "1.9.0"),
-        settled: Vec::new(),
-    }));
-    machines.cx.run_until_parked();
-    let key = super::super::machine_list::MachineChoice::Direct(route).key();
-    let observed = machines.cx.update(|_, cx| {
-        super::super::machine_selection::facts(&key, cx).and_then(|facts| facts.version)
-    });
-
-    // The card shows what the new connection observed, never the old link's version.
-    let expected = observed.map_or_else(
-        || "Version unknown".to_owned(),
-        |version| format!("Version {version}"),
-    );
-    assert_eq!(subtitle(&machines).as_ref(), expected);
-    assert!(!subtitle(&machines).contains("1.2.0"));
-    assert!(!subtitle(&machines).contains("1.1.0"));
-    assert!(!subtitle(&machines).contains("1.9.0"));
-    click(
-        super::super::machine_card::VERSION_CHECK_SELECTOR,
-        machines.cx,
-    );
-    machines.cx.run_until_parked();
-    machines
-        .window
-        .update(machines.cx, |settings, cx| settings.read_remote(route, cx));
-    machines.cx.run_until_parked();
-    assert_eq!(subtitle(&machines).as_ref(), "Version 2.4.0");
-    assert!(
-        machines.cx.debug_bounds(UPDATE_SELECTOR).is_none(),
-        "the update the old reading offered is gone"
-    );
-}
-
-/// A Restart whose receipt never arrives says it can't be confirmed. The next Check Now settles
-/// the pending operation and says what became of it.
-#[gpui::test]
-fn an_uncertain_restart_is_reported_and_the_next_check_settles_it(cx: &mut TestAppContext) {
-    let remote = ScriptedRemote::new();
-    *remote.prepare.lock().unwrap() = Ok(Prepared {
-        preview: preview(LaneAction::Restart, effects(1)),
-        settled: Vec::new(),
-    });
-    *remote.perform.lock().unwrap() = Ok(Performed {
-        outcome: Outcome::Unconfirmed {
-            operation: "0123456789abcdef0123456789abcdef".into(),
-            boot: "a".into(),
-            last: None,
-        },
-        settled: Vec::new(),
-    });
-    let machines = open_penguin(&remote, cx);
-
-    click(RESTART_SELECTOR, machines.cx);
-    answer(CONFIRM_SELECTOR, machines.cx);
-    machines.cx.run_until_parked();
-    assert!(
-        footnote(&machines).contains(
-            "SpaceTerm couldn\u{2019}t confirm whether penguin finished its restart. Check Now \
-             asks penguin again."
-        ),
-        "got {:?}",
-        footnote(&machines)
-    );
-
-    // The server's start-up couldn't prove the Restart either, so its receipt settles as
-    // unresolved, and this connection acknowledges it.
-    *remote.read.lock().unwrap() = Ok(Reading {
-        status: status(version("1.2.0", "aaaaaaaaaa")),
-        settled: vec![receipt(
-            LaneAction::Restart,
-            LaneOperationState::Unresolved,
-            "b",
-        )],
-    });
-    click(
-        super::super::machine_card::VERSION_CHECK_SELECTOR,
-        machines.cx,
-    );
-    machines.cx.run_until_parked();
-    assert!(
-        footnote(&machines)
-            .contains("penguin couldn\u{2019}t confirm whether an earlier restart finished."),
-        "got {:?}",
-        footnote(&machines)
-    );
-}
-
-/// The card makes no Network Access change, so it names one only when a connection settles an
-/// earlier change the CLI made.
 #[test]
 fn an_earlier_network_access_change_reads_as_an_earlier_change() {
     let network = LaneAction::Network {
@@ -833,4 +547,70 @@ fn a_reading_of_a_core_too_old_to_uninstall_disables_remove_machine(cx: &mut Tes
         true
     );
     assert!(remote.prepared.lock().unwrap().is_empty());
+}
+
+#[gpui::test]
+fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mut TestAppContext) {
+    use crate::updates::machines::{
+        MachineAction, MachineLink, MachineUpdate, MachineUpdatesEvent,
+    };
+    use crate::updates::machines::{store::MachineUpdates, testing::ScriptedMachines};
+    use spaceterm_core::protocol::capability::{Capabilities, Capability};
+    let adapter = std::rc::Rc::new(ScriptedMachines::default());
+    cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+    let remote = ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    let id = machines
+        .direct
+        .route(&machines.routes[0])
+        .unwrap()
+        .paired
+        .pin
+        .core;
+    let facts = pending_status(version("1.2.0", "aaaaaaaaaa"), "1.3.0")
+        .update
+        .unwrap();
+    let update = MachineUpdate {
+        machine: id,
+        name: "penguin".into(),
+        local: false,
+        link: MachineLink::Connected,
+        facts: Some(*facts),
+        capabilities: Capabilities::fake(&Capability::ALL),
+        push: None,
+    };
+    adapter.emit(MachineUpdatesEvent::Machines(vec![update.clone()]));
+    machines.cx.run_until_parked();
+    let subtitle = machines
+        .window
+        .read_with(machines.cx, |settings, cx| settings.core_subtitle(cx));
+    assert_eq!(subtitle.as_ref(), "Version 1.2.0 · Update ready");
+    click(super::super::core_update::UPDATE_SELECTOR, machines.cx);
+    let tree = A11yTree::read(machines.cx);
+    tree.text("Update SpaceTerm Core on penguin?");
+    tree.text("SpaceTerm Core restarts from 1.2.0 to 1.3.0. This ends 2 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.");
+    answer(
+        super::super::core_update::UPDATE_CONFIRM_SELECTOR,
+        machines.cx,
+    );
+    assert_eq!(adapter.executed_actions(), [(id, MachineAction::Restart)]);
+    assert!(
+        remote.prepared.lock().unwrap().is_empty(),
+        "Settings has no second restart tracker"
+    );
+    assert!(remote.performed.lock().unwrap().is_empty());
+    let mut updating = update;
+    updating.facts.as_mut().unwrap().operation =
+        Some(spaceterm_core::update::facts::Operation::Restarting {
+            to: spaceterm_core::update::facts::Version::parse("1.3.0").unwrap(),
+        });
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(updating)));
+    machines.cx.run_until_parked();
+    assert!(footnote(&machines).contains("Updating SpaceTerm Core on penguin to 1.3.0."));
+    assert!(
+        machines
+            .cx
+            .debug_bounds(super::super::core_update::UPDATE_SELECTOR)
+            .is_none()
+    );
 }

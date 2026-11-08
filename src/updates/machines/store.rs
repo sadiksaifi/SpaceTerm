@@ -29,6 +29,8 @@ pub(crate) enum Surface {
     Window,
     /// The menu bar extra or the Linux status item.
     StatusMenu,
+    /// The Settings window owns its confirmation and failure alerts.
+    Settings,
 }
 
 /// How an action a surface performed finished.

@@ -115,7 +115,6 @@ pub(super) trait CoreServiceControl: Send + Sync {
     fn start(&self) -> CoreAnswer<'_, ServiceStatus>;
     /// Stops the server, ends its Terminal Sessions, and keeps it stopped until an explicit Start.
     fn stop(&self) -> Result<ServiceStatus, CoreError>;
-    fn restart(&self) -> Result<ServiceStatus, CoreError>;
     /// Stops and removes the service. Workspaces and installations are kept.
     fn uninstall(&self) -> Result<ServiceStatus, CoreError>;
     /// When the service starts the server.
@@ -159,10 +158,6 @@ impl CoreServiceControl for Service {
 
     fn stop(&self) -> Result<ServiceStatus, CoreError> {
         Service::stop(self)
-    }
-
-    fn restart(&self) -> Result<ServiceStatus, CoreError> {
-        Service::restart(self)
     }
 
     fn uninstall(&self) -> Result<ServiceStatus, CoreError> {
@@ -1364,7 +1359,7 @@ fn perform_service_operation(
             (Action::Check | Action::OpenLoginItems, _) => control.status().await,
             (Action::Start, _) => control.start().await,
             (Action::Stop, _) => control.stop(),
-            (Action::Restart, _) => control.restart(),
+            (Action::Restart, _) => unreachable!("restarts require the shared Machine preview"),
             (Action::Uninstall, _) => control.uninstall(),
             (Action::AuthorizeInstall | Action::AuthorizeStart, _) => {
                 match control.authorize_startup() {
@@ -1533,17 +1528,6 @@ impl SettingsWindow {
         self.core_service
             .as_ref()
             .is_some_and(MachineServiceRow::changing)
-            || self
-                .core_update
-                .as_ref()
-                .is_some_and(super::core_update::MachineUpdateRow::changing)
-    }
-
-    /// Whether the service row has an action running.
-    pub(super) fn core_service_working(&self) -> bool {
-        self.core_service
-            .as_ref()
-            .is_some_and(|row| row.state.working.is_some())
     }
 
     /// Whether the connection row has an action running.
@@ -1586,6 +1570,14 @@ impl SettingsWindow {
                 }
                 cx.notify();
             }
+            return;
+        }
+        if action == ServiceAction::Restart {
+            self.request_machine_restart(
+                &super::machine_list::MachineChoice::Local,
+                window.window_handle(),
+                cx,
+            );
             return;
         }
         match action {
@@ -2178,7 +2170,6 @@ pub(super) mod testing {
         Install(PathBuf),
         Start,
         Stop,
-        Restart,
         Uninstall,
         AuthorizeStartup,
         SetAutomaticStart(bool),
@@ -2397,16 +2388,6 @@ pub(super) mod testing {
 
         fn stop(&self) -> Result<ServiceStatus, CoreError> {
             self.change(ServiceCall::Stop, |_| stopped())
-        }
-
-        fn restart(&self) -> Result<ServiceStatus, CoreError> {
-            let restarted = self.change(ServiceCall::Restart, |_| running());
-            // Restarting stops the server before it starts again, so a refused start leaves it
-            // stopped, as the service does.
-            if restarted == Err(CoreError::AuthorizationRequired) {
-                *self.status.lock().expect("status") = Ok(stopped());
-            }
-            restarted
         }
 
         fn uninstall(&self) -> Result<ServiceStatus, CoreError> {
