@@ -462,6 +462,7 @@ fn every_core_label_names_its_subject() {
             local: false,
             running: Some(version("0.8.0")),
             sessions: 3,
+            pending: None,
             state,
         };
         assert!(
@@ -802,4 +803,34 @@ fn an_overdue_or_required_desktop_download_keeps_its_download_name() {
             "Download SpaceTerm 0.11.1"
         );
     }
+}
+
+#[test]
+fn a_failure_notice_does_not_hide_a_breaking_restarts_consequences() {
+    let mut failed = waiting(machine(PENGUIN, "penguin", 0), NOW - 120);
+    let facts = failed.facts.as_mut().unwrap();
+    facts.pending.as_mut().unwrap().breaking = true;
+    facts.pending.as_mut().unwrap().stranded = vec![StrandedDevice {
+        pairing: [4; 32],
+        name: "old-mini".into(),
+    }];
+    facts.last_failure = Some(UpdateFailure {
+        id: 9,
+        at: NOW - 60,
+        version: version("0.9.0"),
+        kind: FailureKind::Start(StartFailure::DiskFull),
+    });
+    let shown = present(&[failed]);
+    let preview = MachinePreview {
+        target: Some(version("0.9.0")),
+        ..crate::updates::machines::testing::preview(PENGUIN, MachineAction::Restart, 0)
+    };
+    let confirmation = shown
+        .previewed(&[preview], false)
+        .expect("a breaking restart always asks, including after a retryable failure");
+    assert!(
+        confirmation
+            .message
+            .contains("SpaceTerm on old-mini will stop working with penguin until it updates.")
+    );
 }
