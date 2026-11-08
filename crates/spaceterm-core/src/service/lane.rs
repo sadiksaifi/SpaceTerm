@@ -296,8 +296,9 @@ pub struct LaneStatus {
     pub terminal_counters: Option<TerminalCounterSnapshot>,
 }
 
-/// Mirrors the confirmation `effects` of `stop` and `restart`. Stop and a Restart into the
-/// running version leave the version fields empty; a Restart into the Pending Version names it.
+/// Mirrors the confirmation `effects` of `stop` and `restart`. A Restart names the version it
+/// restarts from, unless the Core's update engine could not open; a Restart into the Pending
+/// Version also names that version and its work major. Stop leaves the version fields empty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneEffects {
     pub ends_sessions: u32,
@@ -1020,7 +1021,16 @@ impl LaneCore {
     }
 
     fn preview(&self, action: &LaneAction, actor: &Actor) -> Result<LaneReply, CoreError> {
-        let prepared = self.admin().prepare(action, &self.core, &self.boot)?;
+        let mut prepared = self.admin().prepare(action, &self.core, &self.boot)?;
+        // A Restart into the running version names the build this run started from, whose
+        // version its facts report as running. The token binds this boot, so it names no
+        // other run's version.
+        if *action == LaneAction::Restart && prepared.effects.to.is_none() {
+            prepared.effects.from = self
+                .updates()
+                .ok()
+                .map(|updates| version_of(updates.running()));
+        }
         let sessions = self.host.sessions();
         let observation = observation(&prepared, &sessions);
         let issued =

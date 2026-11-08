@@ -1255,6 +1255,20 @@ fn a_running_core_refuses_a_restart_preview_while_an_activation_holds_the_servic
     });
 }
 
+/// A Restart with no Pending Version names the version it restarts, so a confirmation never
+/// names a running version from facts another client's update has made stale.
+#[test]
+fn a_same_version_restart_preview_names_the_running_version() {
+    with_lane_running("0.9.0", |lane| {
+        let (_, effects) = preview(&lane.lane, LaneAction::Restart);
+        let from = effects.from.expect("the preview names the running version");
+        assert_eq!(from.version, "0.9.0");
+        assert_eq!(from.commit, COMMIT);
+        assert_eq!(effects.to, None);
+        assert_eq!(effects.to_major, None);
+    });
+}
+
 #[test]
 fn a_restart_moves_into_the_pending_version_when_one_waits() {
     with_lane(|lane| {
