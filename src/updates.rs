@@ -67,6 +67,10 @@ pub(crate) enum UpdateError {
     /// Desktop wording names the remedy, which differs by platform.
     #[error("SpaceTerm can’t replace its installation.")]
     ReadOnly,
+    /// SpaceTerm was still running when its approved relaunch ended or ran out of time. The update
+    /// stays downloaded and Try Again relaunches into it.
+    #[error("SpaceTerm couldn’t quit to install the update.")]
+    Relaunch,
 }
 
 #[cfg_attr(
@@ -253,6 +257,12 @@ impl UpdateModel {
         }
         if matches!(event, UpdateEvent::Finished) {
             self.cycle_active = false;
+            // The updater gave up its installer while SpaceTerm kept running.
+            if !self.cancelling && matches!(self.state, UpdateState::Installing { .. }) {
+                self.confirmation_open = false;
+                self.fail_relaunch();
+                return Some(UpdateNotice::Failed);
+            }
             if self.cancelling
                 || matches!(
                     self.state,
@@ -318,6 +328,7 @@ impl UpdateModel {
             }
             UpdateEvent::Failed(error) => {
                 let visible = self.manual_check || self.version.is_some();
+                self.install_authorized = false;
                 self.state = UpdateState::Failed { error };
                 return visible.then_some(UpdateNotice::Failed);
             }
@@ -325,7 +336,37 @@ impl UpdateModel {
         }
         None
     }
+
+    /// The approved relaunch did not quit SpaceTerm. Quit requests follow ADR 0049 again, and the
+    /// release stays pending for Try Again.
+    fn fail_relaunch(&mut self) {
+        self.install_authorized = false;
+        self.state = UpdateState::Failed {
+            error: UpdateError::Relaunch,
+        };
+    }
+
+    /// Approves the relaunch again after it failed while the updater still holds its installer.
+    fn retry_relaunch(&mut self) -> bool {
+        if !self.cycle_active
+            || self.state
+                != (UpdateState::Failed {
+                    error: UpdateError::Relaunch,
+                })
+        {
+            return false;
+        }
+        let Some(version) = self.version.clone() else {
+            return false;
+        };
+        self.install_authorized = true;
+        self.state = UpdateState::Installing { version };
+        true
+    }
 }
+
+/// How long an approved relaunch may take before SpaceTerm reports that it is still running.
+const RELAUNCH_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Whether Sparkle may install the appcast item: a stable release whose enclosure is that
 /// release's disk image, named as the release publishes it.
@@ -437,6 +478,10 @@ pub(crate) struct ApplicationUpdates {
     prepared: bool,
     automatic_download: bool,
     download_requested: bool,
+    /// The person chose Relaunch before the release was ready, so it relaunches once it is.
+    relaunch_requested: bool,
+    /// How many relaunches the person approved, which names the current one.
+    relaunch_approvals: u64,
     last_attempt: u64,
     /// The history as last written, so a write happens only when the contents change.
     saved_history: UpdateHistory,
@@ -445,6 +490,8 @@ pub(crate) struct ApplicationUpdates {
     /// Settings changes, until the scheduler takes the receiver.
     settings_changes: Option<async_channel::Receiver<()>>,
     _launch_timeout: Option<Task<()>>,
+    /// Fails an approved relaunch that has not quit SpaceTerm in time.
+    _relaunch_deadline: Option<Task<()>>,
     _events: Task<()>,
     _schedule: Task<()>,
     _wake: Subscription,
@@ -558,10 +605,13 @@ impl ApplicationUpdates {
                 prepared: false,
                 automatic_download: false,
                 download_requested: false,
+                relaunch_requested: false,
+                relaunch_approvals: 0,
                 last_attempt: 0,
                 reschedule,
                 settings_changes: None,
                 _launch_timeout: None,
+                _relaunch_deadline: None,
                 model,
                 adapter,
                 pending_quit: None,
@@ -790,6 +840,7 @@ impl ApplicationUpdates {
     }
 
     pub(crate) fn cancel(&mut self, cx: &mut Context<Self>) {
+        self.relaunch_requested = false;
         if self.model.cycle_active && !self.model.install_authorized {
             self.model.cancelling = true;
             self.model.confirmation_open = false;
@@ -813,12 +864,31 @@ impl ApplicationUpdates {
         accepted: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.model.confirm(token, accepted)
-            && let Err(error) = self.adapter.install()
-        {
-            self.receive(UpdateEvent::Failed(error), cx);
+        if self.model.confirm(token, accepted) {
+            self.approve_relaunch(cx);
+            if let Err(error) = self.adapter.install() {
+                self.receive(UpdateEvent::Failed(error), cx);
+            }
         }
         cx.notify();
+    }
+
+    /// The person approved the relaunch: its outcome is theirs to hear, and it must quit
+    /// SpaceTerm within the deadline.
+    fn approve_relaunch(&mut self, cx: &mut Context<Self>) {
+        self.automatic_download = false;
+        self.relaunch_requested = false;
+        self.relaunch_approvals += 1;
+        self._relaunch_deadline = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RELAUNCH_DEADLINE).await;
+            let _ = this.update(cx, |this, cx| {
+                if matches!(this.model.state, UpdateState::Installing { .. }) {
+                    this.model.fail_relaunch();
+                    cx.emit(UpdateNotice::Failed);
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     pub(crate) fn request_install_confirmation(&mut self, cx: &mut Context<Self>) {
@@ -828,17 +898,37 @@ impl ApplicationUpdates {
     }
 
     /// Installs the ready release and relaunches into it without asking: relaunching keeps every
-    /// Terminal Session running.
+    /// Terminal Session running. After a failed relaunch it tries again: it quits again while the
+    /// updater still holds its installer, and otherwise checks again and relaunches once the
+    /// release is ready.
     pub(crate) fn relaunch(&mut self, cx: &mut Context<Self>) {
+        if self.model.retry_relaunch() {
+            self.approve_relaunch(cx);
+            cx.defer(|cx| cx.dispatch_action(&crate::app::QuitApplication));
+            cx.notify();
+            return;
+        }
         if let Some(token) = self.model.confirmation() {
             self.finish_install_confirmation(token, true, cx);
+            return;
+        }
+        if matches!(
+            self.model.state,
+            UpdateState::Failed {
+                error: UpdateError::Relaunch
+            }
+        ) {
+            self.retry_download(cx);
+            self.relaunch_requested = matches!(self.model.state, UpdateState::Checking);
         }
     }
 
-    /// Whether the person approved a relaunch that is still in progress. While it holds, a quit
+    /// The relaunch the person approved, while it is still in progress. While it holds, a quit
     /// request is that relaunch rather than an exit.
-    pub(crate) fn relaunch_authorized(&self) -> bool {
-        self.model.install_authorized && matches!(self.model.state, UpdateState::Installing { .. })
+    pub(crate) fn relaunch_approval(&self) -> Option<RelaunchApproval> {
+        (self.model.install_authorized
+            && matches!(self.model.state, UpdateState::Installing { .. }))
+        .then_some(RelaunchApproval(self.relaunch_approvals))
     }
 
     /// Clears a failed download or installation. The release stays pending, and the next
@@ -899,6 +989,7 @@ impl ApplicationUpdates {
             }
             if !self.prepared
                 && (self.download_requested
+                    || self.relaunch_requested
                     || self.preferences().automatic_downloads
                     || self.launch == LaunchState::Required)
             {
@@ -926,6 +1017,16 @@ impl ApplicationUpdates {
         if failed || current || (finished && self.launch != LaunchState::Installing) {
             self.open_launch(cx);
         }
+        if failed || current || finished {
+            self.relaunch_requested = false;
+        }
+        if ready
+            && std::mem::take(&mut self.relaunch_requested)
+            && !self.model.cancelling
+            && let Some(token) = self.model.confirmation()
+        {
+            self.finish_install_confirmation(token, true, cx);
+        }
         if let Some(notice) = notice {
             // Download completion is quiet. Only an explicit restart action opens a confirmation.
             if notice != UpdateNotice::ReadyToInstall
@@ -944,10 +1045,14 @@ impl ApplicationUpdates {
     }
 }
 
-/// Whether an approved update relaunch is in progress, so a quit request is that relaunch.
-pub(crate) fn relaunch_authorized(cx: &App) -> bool {
+/// One approval of an update relaunch. Try Again after a failed relaunch is a new approval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RelaunchApproval(u64);
+
+/// The approved update relaunch in progress, if any. A quit request is that relaunch then.
+pub(crate) fn relaunch_approval(cx: &App) -> Option<RelaunchApproval> {
     cx.try_global::<UpdateService>()
-        .is_some_and(|service| service.0.read(cx).relaunch_authorized())
+        .and_then(|service| service.0.read(cx).relaunch_approval())
 }
 
 /// Ordinary quit can finish a verified installer without forcing termination or relaunch.
@@ -1122,6 +1227,68 @@ mod tests {
         adapter.emit(UpdateEvent::Finished);
         cx.run_until_parked();
         assert_eq!(resumes.get(), 0);
+    }
+
+    /// An approved relaunch that has not quit SpaceTerm within the deadline fails visibly and
+    /// gives up its authority to quit. Try Again after the updater ended its cycle checks again
+    /// and relaunches into the release once it is ready, with no second click.
+    #[gpui::test]
+    fn a_relaunch_that_does_not_quit_in_time_fails_and_try_again_relaunches(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let adapter = Rc::new(RecordingAdapter::available());
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        let notices = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let received = notices.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&service, move |_, notice, _| {
+                received.borrow_mut().push(*notice)
+            })
+        });
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Ready);
+        cx.run_until_parked();
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        assert_eq!(adapter.installations.get(), 1);
+        assert!(cx.update(|cx| relaunch_approval(cx)).is_some());
+
+        cx.executor()
+            .advance_clock(RELAUNCH_DEADLINE - Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(cx.update(|cx| relaunch_approval(cx)).is_some());
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let relaunch_failed = UpdateState::Failed {
+            error: UpdateError::Relaunch,
+        };
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.state().clone()),
+            relaunch_failed
+        );
+        assert_eq!(cx.update(|cx| relaunch_approval(cx)), None);
+        assert_eq!(*notices.borrow(), [UpdateNotice::Failed]);
+
+        adapter.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.state().clone()),
+            relaunch_failed
+        );
+        assert_eq!(notices.borrow().len(), 1, "one failure is reported once");
+
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        assert_eq!(adapter.checks.get(), 2);
+        adapter.emit(UpdateEvent::ReleaseMetadata {
+            published_at: now(),
+            prepared: true,
+        });
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Ready);
+        cx.run_until_parked();
+        assert_eq!(adapter.installations.get(), 2);
+        assert!(cx.update(|cx| relaunch_approval(cx)).is_some());
     }
 
     #[gpui::test]
@@ -1644,6 +1811,25 @@ mod tests {
         model.receive(UpdateEvent::Finished);
         assert_eq!(model.state, UpdateState::Idle);
         assert!(!model.cycle_active);
+    }
+
+    #[test]
+    fn an_updater_that_ends_its_cycle_during_a_relaunch_fails_the_relaunch() {
+        let mut model = ready();
+        let token = model.confirmation().unwrap();
+        assert!(model.confirm(token, true));
+        assert_eq!(
+            model.receive(UpdateEvent::Finished),
+            Some(UpdateNotice::Failed)
+        );
+        assert_eq!(
+            model.state,
+            UpdateState::Failed {
+                error: UpdateError::Relaunch
+            }
+        );
+        assert!(!model.install_authorized);
+        assert_eq!(model.version.as_deref(), Some("0.1.1"));
     }
 
     #[test]

@@ -743,7 +743,7 @@ fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
         assert_eq!(shown.control(), Control::Hidden);
     }
     let failed = UpdateState::Failed {
-        error: UpdateError::Installation,
+        error: UpdateError::Relaunch,
     };
     let shown = Presentation::new(
         DesktopFacts {

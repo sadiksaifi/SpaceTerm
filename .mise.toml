@@ -177,7 +177,7 @@ run = [{ task = "development:{{ os() }}", env = { SPACETERM_DEVELOPER_WORKBENCH 
 description = "Preview the real update UI in SpaceTerm Development with a simulated updater"
 usage = '''
 arg "[scenario]" help="Simulated updater state" default="available" {
-  choices "available" "warning" "overdue" "startup-overdue" "startup-ready" "offline" "up-to-date" "check-error" "download-error" "verification-error" "install-error"
+  choices "available" "warning" "overdue" "startup-overdue" "startup-ready" "offline" "up-to-date" "check-error" "download-error" "verification-error" "install-error" "relaunch-error"
 }
 '''
 run = [{ task = "development:{{ os() }}", env = { SPACETERM_UPDATE_PREVIEW = "{{usage.scenario}}" } }]

@@ -22,6 +22,8 @@ pub(crate) enum Scenario {
     DownloadError,
     VerificationError,
     InstallError,
+    /// The updater ends its cycle while SpaceTerm keeps running after Relaunch.
+    RelaunchError,
 }
 
 impl Scenario {
@@ -38,6 +40,7 @@ impl Scenario {
             "download-error" => Self::DownloadError,
             "verification-error" => Self::VerificationError,
             "install-error" => Self::InstallError,
+            "relaunch-error" => Self::RelaunchError,
             _ => return None,
         })
     }
@@ -181,6 +184,9 @@ impl UpdateAdapter for PreviewUpdates {
     }
 
     fn install(&self) -> Result<(), UpdateError> {
+        if matches!(self.scenario, Scenario::RelaunchError) {
+            return self.play(vec![(STEP, UpdateEvent::Finished)]);
+        }
         let result = if matches!(self.scenario, Scenario::InstallError) {
             UpdateEvent::Failed(UpdateError::Installation)
         } else {

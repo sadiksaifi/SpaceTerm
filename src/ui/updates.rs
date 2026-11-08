@@ -191,6 +191,9 @@ fn check_for_updates(cx: &mut App) {
         UpdateState::Unavailable => present_in_front_window(cx, |window, cx| {
             present_failure(UpdateError::Unavailable, window, cx)
         }),
+        UpdateState::Failed {
+            error: UpdateError::Relaunch,
+        } => present_relaunch_failure(cx),
         UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed { .. } => {
             update_results(CheckResults::request, cx);
             updates.update(cx, |updates, cx| updates.check(true, cx));
@@ -266,6 +269,9 @@ fn present_result(state: UpdateState, cx: &mut App) {
         UpdateState::Available { version } => present_in_front_window(cx, move |window, cx| {
             present_available(&version, window, cx)
         }),
+        UpdateState::Failed {
+            error: UpdateError::Relaunch,
+        } => present_relaunch_failure(cx),
         UpdateState::Failed { error } => {
             present_in_front_window(cx, move |window, cx| present_failure(error, window, cx))
         }
@@ -446,6 +452,11 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
             AlertIntent::Warning,
         ),
         UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
+        UpdateError::Relaunch => (
+            "Couldn\u{2019}t Relaunch SpaceTerm",
+            true,
+            AlertIntent::Warning,
+        ),
     };
     let mut actions = Vec::with_capacity(2);
     if retry {
@@ -482,6 +493,66 @@ fn present_failure<T: 'static>(error: UpdateError, window: &mut Window, cx: &mut
         if action == Some(PromptAction::TryAgain) {
             check_for_updates(cx);
         }
+    });
+}
+
+fn relaunch_failure_alert(version: &str) -> Alert<PromptAction> {
+    Alert::new(
+        ModalId::new("update-relaunch-failure"),
+        "Couldn\u{2019}t relaunch SpaceTerm",
+        "Couldn\u{2019}t Relaunch SpaceTerm",
+        format!(
+            "SpaceTerm {version} is downloaded, but SpaceTerm couldn\u{2019}t quit to install it. \
+             Your Terminal Sessions are still running."
+        ),
+        vec![
+            action(
+                PromptAction::TryAgain,
+                "Try Again",
+                ModalActionRole::Affirmative,
+                "update-relaunch-failure-try-again",
+            )
+            .with_emphasis(ModalActionEmphasis::Prominent)
+            .default_action(true),
+            action(
+                PromptAction::Later,
+                "Later",
+                ModalActionRole::Cancel,
+                "update-relaunch-failure-later",
+            ),
+        ],
+    )
+    .intent(AlertIntent::Warning)
+}
+
+/// The person chose Relaunch and is waiting for SpaceTerm to quit, so the failure appears even
+/// with no Workspace Window open: SpaceTerm opens one to show it, as its relaunch would have.
+fn present_relaunch_failure(cx: &mut App) {
+    let Some(updates) = service(cx) else { return };
+    let version = updates
+        .read(cx)
+        .pending_version()
+        .unwrap_or_default()
+        .to_owned();
+    if front_workspace_window(cx).is_none() {
+        crate::app::activate_default_window(cx, None);
+        cx.activate(true);
+    }
+    present_in_front_window(cx, move |window, cx| {
+        present(
+            relaunch_failure_alert(&version),
+            window,
+            cx,
+            |action, cx| match action {
+                Some(PromptAction::TryAgain) => {
+                    if let Some(updates) = service(cx) {
+                        updates.update(cx, |updates, cx| updates.relaunch(cx));
+                    }
+                }
+                Some(PromptAction::Later) => put_off(cx),
+                _ => {}
+            },
+        );
     });
 }
 
@@ -777,6 +848,7 @@ mod tests {
             available_alert("0.4.2"),
             stop_download_alert("0.4.2"),
             install_alert("0.4.2"),
+            relaunch_failure_alert("0.4.2"),
         ];
         alerts.extend(
             [
@@ -786,6 +858,7 @@ mod tests {
                 UpdateError::Verification,
                 UpdateError::Installation,
                 UpdateError::ReadOnly,
+                UpdateError::Relaunch,
             ]
             .map(|error| failure_alert(error, testing_wording())),
         );

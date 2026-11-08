@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -434,6 +434,7 @@ fn install_application_quit(
         adapter: Rc::downgrade(&adapter),
         state: RefCell::new(ApplicationQuitCoordinatorState::Idle),
         status_area: adapter.status_area_name(),
+        relaunch: Cell::default(),
         sessions: crate::local_startup::owned_foreground()
             .then(|| Arc::new(DevelopmentQuitSessions) as Arc<dyn QuitSessions>),
     });
@@ -490,6 +491,8 @@ struct ApplicationQuitCoordinator {
     adapter: Weak<dyn ApplicationQuitAdapter>,
     state: RefCell<ApplicationQuitCoordinatorState>,
     status_area: StatusAreaName,
+    /// The update relaunch this coordinator already began quitting for.
+    relaunch: Cell<Option<crate::updates::RelaunchApproval>>,
     /// Source Development's foreground Server and its Terminal Sessions end with the client.
     /// An installed client exits while its independently supervised Server keeps running.
     sessions: Option<Arc<dyn QuitSessions>>,
@@ -558,22 +561,25 @@ impl ApplicationQuitCoordinator {
         ApplicationQuitDecision::Cancel
     }
 
-    /// Whether the person approved an update relaunch that is still in progress. The updater
-    /// then asks to quit, and neither the Quit Apple Event it sends nor any other quit request is
-    /// a dismissal or an exit. A relaunch that failed or was cancelled leaves quitting to ADR 0049
+    /// The update relaunch the person approved, while it is in progress. The updater then asks
+    /// to quit, and neither the Quit Apple Event it sends nor any other quit request is a
+    /// dismissal or an exit. A relaunch that failed or was cancelled leaves quitting to ADR 0049
     /// again.
-    fn relaunching(&self, cx: &App) -> bool {
-        let authorized = crate::updates::relaunch_authorized(cx);
-        if !authorized && *self.state.borrow() == ApplicationQuitCoordinatorState::Relaunching {
+    fn relaunching(&self, cx: &App) -> Option<crate::updates::RelaunchApproval> {
+        let approval = crate::updates::relaunch_approval(cx);
+        if approval.is_none()
+            && *self.state.borrow() == ApplicationQuitCoordinatorState::Relaunching
+        {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
         }
-        authorized
+        approval
     }
 
     /// An approved update relaunch closes no window and asks nothing: it saves Settings, then
-    /// quits once. A failed save keeps SpaceTerm running, and the relaunch deadline reports it.
-    fn relaunch(self: &Rc<Self>, cx: &mut App) {
-        if *self.state.borrow() == ApplicationQuitCoordinatorState::Relaunching {
+    /// quits once for each approval. A failed save keeps SpaceTerm running, and the relaunch
+    /// deadline reports it.
+    fn relaunch(self: &Rc<Self>, approval: crate::updates::RelaunchApproval, cx: &mut App) {
+        if self.relaunch.replace(Some(approval)) == Some(approval) {
             return;
         }
         // An open quit warning sees the changed state when answered and closes without acting.
@@ -593,8 +599,8 @@ impl ApplicationQuitCoordinator {
                     }
                     let coordinator = Rc::clone(&coordinator);
                     cx.defer(move |cx| {
-                        if *coordinator.state.borrow()
-                            == ApplicationQuitCoordinatorState::Relaunching
+                        // The relaunch may have failed while Settings were saving.
+                        if coordinator.relaunching(cx) == Some(approval)
                             && let Some(adapter) = coordinator.adapter.upgrade()
                         {
                             adapter.confirm_quit(cx);
@@ -612,16 +618,16 @@ impl ApplicationQuitCoordinator {
 
     /// Every actual user exit requires the quit warning, including an idle or windowless client.
     fn exit(self: &Rc<Self>, cx: &mut App) {
-        if self.relaunching(cx) {
-            self.relaunch(cx);
+        if let Some(approval) = self.relaunching(cx) {
+            self.relaunch(approval, cx);
         } else if self.ready(cx) {
             self.observe(None, cx);
         }
     }
 
     fn dismiss(self: &Rc<Self>, cx: &mut App) {
-        if self.relaunching(cx) {
-            self.relaunch(cx);
+        if let Some(approval) = self.relaunching(cx) {
+            self.relaunch(approval, cx);
             return;
         }
         if !self.ready(cx) {
@@ -2296,6 +2302,7 @@ mod tests {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::Idle),
             status_area: StatusAreaName::MenuBar,
+            relaunch: Cell::default(),
             sessions: Some(Arc::new(ScriptedQuitSessions(std::sync::Mutex::new(
                 readings.into(),
             )))),
@@ -3912,6 +3919,33 @@ mod runtime_tests {
         assert_eq!(quit.confirmations(), 1);
     }
 
+    /// A relaunch that has not quit SpaceTerm after 30 seconds fails, and its alert appears even
+    /// though the person closed every window: SpaceTerm opens a Workspace Window to show it. Try
+    /// Again quits through the relaunch, with no quit warning.
+    #[gpui::test]
+    fn a_failed_relaunch_alerts_without_a_window_and_try_again_quits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_, quit, service) = relaunch_fixture(cx);
+        cx.update(|cx| cx.dispatch_action(&DismissApplication));
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(30));
+        cx.run_until_parked();
+
+        let windows = cx.update(|cx| workspace_windows(cx));
+        assert_eq!(windows.len(), 1);
+        let cx = &mut gpui::VisualTestContext::from_window(windows[0].into(), cx);
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert_eq!(quit.confirmations(), 0);
+        click("modal-action-update-relaunch-failure-try-again", cx);
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.confirmations(), 1);
+    }
+
     /// A windowed client with its status item and a downloaded update ready to install.
     fn relaunch_fixture(
         cx: &mut gpui::TestAppContext,
@@ -3931,6 +3965,7 @@ mod runtime_tests {
         adapters.local_core = crate::ui::launch_testing::unanswered();
         cx.update(|cx| {
             start_application(cx, &host).unwrap();
+            install_headless_window_actions(cx, Rc::clone(&host));
             crate::status_menu::set_available(cx, true);
         });
         let service = cx.update(|cx| cx.global::<crate::updates::UpdateService>().0.clone());
@@ -4302,6 +4337,7 @@ mod runtime_tests {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
             status_area: StatusAreaName::MenuBar,
+            relaunch: Cell::default(),
             sessions: None,
         });
 
@@ -4320,6 +4356,7 @@ mod runtime_tests {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
             status_area: StatusAreaName::MenuBar,
+            relaunch: Cell::default(),
             sessions: None,
         });
 

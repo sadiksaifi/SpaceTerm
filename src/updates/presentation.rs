@@ -1167,7 +1167,8 @@ impl DesktopState {
                     error @ (UpdateError::Download
                     | UpdateError::Verification
                     | UpdateError::Installation
-                    | UpdateError::ReadOnly),
+                    | UpdateError::ReadOnly
+                    | UpdateError::Relaunch),
             } => Self::InstallFailed {
                 version: pending,
                 error: *error,
@@ -1263,7 +1264,7 @@ impl DesktopState {
             Self::Ready { .. } | Self::Overdue { .. } => "Relaunch",
             Self::TooOld { .. } => "Update SpaceTerm",
             Self::InstallFailed {
-                error: UpdateError::Installation,
+                error: UpdateError::Relaunch,
                 ..
             } => "Relaunch failed",
             Self::InstallFailed { .. } => "SpaceTerm install failed",
@@ -1322,7 +1323,7 @@ impl DesktopState {
                     _ if matches!(
                         self,
                         Self::InstallFailed {
-                            error: UpdateError::Installation,
+                            error: UpdateError::Relaunch,
                             ..
                         }
                     ) =>
@@ -1353,7 +1354,7 @@ impl DesktopState {
             Self::Overdue { .. } => ("Overdue".to_owned(), update()),
             Self::TooOld { .. } => ("Too old".to_owned(), update()),
             Self::InstallFailed { error, .. } => (
-                if *error == UpdateError::Installation {
+                if *error == UpdateError::Relaunch {
                     "Relaunch failed"
                 } else {
                     "Install failed"
@@ -2033,10 +2034,10 @@ fn desktop_failure(release: &str, error: UpdateError) -> String {
         UpdateError::ReadOnly => {
             format!("SpaceTerm can't replace its installation to install {release}.")
         }
-        UpdateError::Installation => format!(
+        UpdateError::Relaunch => format!(
             "{release} is downloaded, but SpaceTerm couldn't quit to install it. Your Terminal Sessions are still running."
         ),
-        UpdateError::Check | UpdateError::Unavailable => {
+        UpdateError::Installation | UpdateError::Check | UpdateError::Unavailable => {
             format!("{release} didn't install.")
         }
     }
