@@ -205,7 +205,11 @@ impl Machine for LocalMachine {
             // A deliberately stopped Core is read from the service manager alone.
             Ok(status) if status.installed && status.stopped => Reach::Stopped,
             Ok(status) if status.installed => match (self.connect)() {
-                Ok((lane, work)) => Reach::Lane { lane, work },
+                Ok((lane, work)) => Reach::Lane {
+                    lane,
+                    work,
+                    refused: false,
+                },
                 Err(_) => Reach::Offline,
             },
             _ => Reach::Offline,
@@ -271,6 +275,7 @@ impl Machine for PairedMachine {
             return Reach::Lane {
                 lane: lane as Arc<dyn MachineLane>,
                 work: Ok(()),
+                refused: false,
             };
         }
         let incompatible = self
@@ -288,6 +293,7 @@ impl Machine for PairedMachine {
             Ok(offered) => Reach::Lane {
                 work: work_with(offered),
                 lane: lane as Arc<dyn MachineLane>,
+                refused: true,
             },
             Err(_) => Reach::Offline,
         }
@@ -719,6 +725,21 @@ mod tests {
         assert!(matches!(unreachable.reach(), Reach::Offline));
     }
 
+    /// A refused route whose Core was updated to a compatible work major reads compatible and
+    /// still refused, so the follower knows to check the route again.
+    #[test]
+    fn an_updated_core_behind_a_refused_route_reads_compatible_and_refused() {
+        let updated = paired(vec![([1; 32], INCOMPATIBLE, Some(protocol::WORK.major))]);
+        assert!(matches!(
+            updated.reach(),
+            Reach::Lane {
+                work: Ok(()),
+                refused: true,
+                ..
+            }
+        ));
+    }
+
     /// Of a Machine's Saved Connections, a connected one is used before one that is
     /// disconnected or refuses the work protocol.
     #[test]
@@ -728,7 +749,14 @@ mod tests {
             ([2; 32], INCOMPATIBLE, Some(protocol::WORK.major + 1)),
             ([3; 32], DirectRouteStatus::Connected, Some(1)),
         ]);
-        assert!(matches!(machine.reach(), Reach::Lane { work: Ok(()), .. }));
+        assert!(matches!(
+            machine.reach(),
+            Reach::Lane {
+                work: Ok(()),
+                refused: false,
+                ..
+            }
+        ));
         let none = paired(vec![([1; 32], DirectRouteStatus::Disconnected, Some(1))]);
         assert!(matches!(none.reach(), Reach::Offline));
     }

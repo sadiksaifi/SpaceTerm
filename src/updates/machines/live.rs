@@ -7,7 +7,9 @@
 //! service changing, abandons the long poll and reads the Machine's reach again. A follower whose
 //! Core it can't reach waits for the next such change. It never reads on a timer, except while a
 //! restart it expects has not come back. Then it also asks the Machine's routes to retry now,
-//! so the returning Core is reached without waiting out the routes' backoff.
+//! so the returning Core is reached without waiting out the routes' backoff. A Core whose
+//! work route was refused as incompatible and whose service lane then reports a compatible work
+//! protocol gets that route checked again once, however fast it returned from its update.
 //!
 //! A local Core that is deliberately stopped reads as [`MachineLink::Stopped`] from the service
 //! manager, which needs no connection. A Core that answers `Facts` with `unsupported` predates
@@ -104,6 +106,10 @@ pub(crate) enum Reach {
     Lane {
         lane: Arc<dyn MachineLane>,
         work: Result<(), Incompatible>,
+        /// Whether the lane belongs to a route whose Core refused this desktop's work
+        /// protocol. With a compatible `work`, that Core has since been updated, and the route
+        /// admits work again only once it is checked again.
+        refused: bool,
     },
 }
 
@@ -115,7 +121,8 @@ pub(crate) trait Machine: Send + Sync {
     /// Starts a deliberately stopped local Core through the service manager.
     fn start(&self) -> Result<(), ActionFailure>;
     /// Asks each route to the Machine to try again now, without the backoff its earlier
-    /// failures earned, because its Core is expected back from a restart.
+    /// failures earned, because its Core is expected back from a restart or was updated out
+    /// of an incompatible work protocol. A route refused as incompatible is checked once more.
     fn retry(&self);
 }
 
@@ -506,6 +513,9 @@ struct Entry {
     boot: Option<String>,
     /// A restart this desktop asked for, or the Core announced, that has not come back.
     restart: Option<Awaited>,
+    /// Whether the follower asked the Machine's routes to check a refused work route again
+    /// since its service lane began reporting a compatible work protocol.
+    rechecked: bool,
 }
 
 struct Awaited {
@@ -671,6 +681,7 @@ impl Shared {
                     wake: Arc::clone(&wake),
                     boot: None,
                     restart: None,
+                    rechecked: false,
                 };
                 let shared = Arc::clone(self);
                 let id = machine.id;
@@ -851,6 +862,35 @@ impl Shared {
     fn forget_restart(&self, id: MachineId) {
         self.publish(id, |entry| entry.restart = None);
     }
+
+    /// The follower read `id`'s reach. When the service lane of a route refused as
+    /// incompatible reports a compatible work protocol, the Core was updated, so the
+    /// Machine's routes check the refused route again with its saved pairing. That happens
+    /// once each time the reach starts reporting so, whether or not the Machine was seen
+    /// offline in between, and never in a loop: a route still refused waits for the next
+    /// compatibility change, or for Reconnect.
+    fn compatible_again(&self, id: MachineId, machine: &dyn Machine, reach: &Reach) {
+        let readmitted = matches!(
+            reach,
+            Reach::Lane {
+                work: Ok(()),
+                refused: true,
+                ..
+            }
+        );
+        let recheck = {
+            let mut state = self.lock();
+            let Some(entry) = state.entries.get_mut(&id) else {
+                return;
+            };
+            let recheck = readmitted && !entry.rechecked;
+            entry.rechecked = readmitted;
+            recheck
+        };
+        if recheck {
+            machine.retry();
+        }
+    }
 }
 
 /// Keeps the Machines in line with `sources` until the adapter closes.
@@ -871,13 +911,15 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
         let Some(machine) = shared.machine(id) else {
             return;
         };
-        let limit = match machine.reach() {
+        let reach = machine.reach();
+        shared.compatible_again(id, machine.as_ref(), &reach);
+        let limit = match reach {
             Reach::Stopped => {
                 shared.stopped(id);
                 None
             }
             Reach::Offline => shared.unreachable(id, machine.as_ref()),
-            Reach::Lane { lane, work } => match lane.facts() {
+            Reach::Lane { lane, work, .. } => match lane.facts() {
                 Ok(observed) => {
                     shared.observed(id, &observed, work);
                     let stale = || wake.generation() != Some(seen);

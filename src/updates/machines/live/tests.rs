@@ -170,7 +170,12 @@ impl MachineLane for ScriptedLane {
 enum Script {
     Stopped,
     Offline,
+    /// Reached over the service lane of a route refused as incompatible, whose Core still
+    /// refuses this desktop's work protocol.
     Incompatible,
+    /// Reached over the service lane of a route refused as incompatible, whose Core now
+    /// offers a compatible work protocol, as after an update.
+    Readmitted,
     Lane,
 }
 
@@ -204,10 +209,17 @@ impl Machine for ScriptedMachine {
             Script::Incompatible => Reach::Lane {
                 lane: Arc::clone(&self.lane) as Arc<dyn MachineLane>,
                 work: Err(Incompatible::ListenerTooOld),
+                refused: true,
+            },
+            Script::Readmitted => Reach::Lane {
+                lane: Arc::clone(&self.lane) as Arc<dyn MachineLane>,
+                work: Ok(()),
+                refused: true,
             },
             Script::Lane => Reach::Lane {
                 lane: Arc::clone(&self.lane) as Arc<dyn MachineLane>,
                 work: Ok(()),
+                refused: false,
             },
         }
     }
@@ -673,6 +685,47 @@ fn an_expected_restart_retries_the_machines_routes_until_the_core_returns() {
         *machine.retries.lock().unwrap(),
         1,
         "no restart is expected now"
+    );
+}
+
+/// An incompatible Core that restarts into a compatible version and answers again before the
+/// follower finds it unreachable still gets its refused work route checked once more, so the
+/// work connection returns without Reconnect. Later changes check it no further.
+#[test]
+fn a_restart_out_of_incompatibility_that_returns_at_once_rechecks_the_work_route_once() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, Some("0.9.0")))]);
+    let machine = ScriptedMachine::new(Script::Incompatible, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the incompatible Core", |update| {
+        matches!(update.link, MachineLink::Incompatible(_))
+    });
+
+    let preview = previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap();
+    // The Core restarts into a compatible version, and its service lane answers again before
+    // the follower reads its reach, so the follower never finds it unreachable.
+    let mut returned = facts(1, 0, None);
+    returned.boot = "boot-2".into();
+    returned.facts.running = version("0.9.0");
+    lane.facts.lock().unwrap().push_back(Ok(returned));
+    machine.set(Script::Readmitted);
+    adapter.execute(preview);
+    assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
+    changed(&events, "the compatible Core", |update| {
+        update.link == MachineLink::Connected
+    });
+    eventually("a recheck of the refused work route", || {
+        *machine.retries.lock().unwrap() == 1
+    });
+
+    for _ in 0..3 {
+        sources.change();
+    }
+    std::thread::sleep(QUIET);
+    assert_eq!(
+        *machine.retries.lock().unwrap(),
+        1,
+        "one recheck per observed compatibility change"
     );
 }
 
