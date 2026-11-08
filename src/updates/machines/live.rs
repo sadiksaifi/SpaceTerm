@@ -365,6 +365,11 @@ fn preview(
         machine,
         action: action.clone(),
         sessions: lane_preview.effects.ends_sessions,
+        running: lane_preview
+            .effects
+            .from
+            .as_ref()
+            .and_then(|from| Version::parse(&from.version).ok()),
         target: previewed_target(&lane_preview),
         id: 0,
     };

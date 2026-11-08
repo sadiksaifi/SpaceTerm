@@ -2,8 +2,8 @@
 //! labels, tone, glyph, full sentence and the command a click performs. The title-bar control,
 //! its menu and the menu bar extra render from this module and derive no state themselves.
 //!
-//! Labels follow the agreed copy: control labels are at most two words in sentence case, buttons
-//! and menu items use title case, and an item that asks before it acts ends in an ellipsis.
+//! Every Core action names its Machine. Relaunch always names the desktop action. An action
+//! that asks before it acts ends in an ellipsis.
 #![allow(
     dead_code,
     reason = "the title-bar control and the menu bar extra each read part of this model"
@@ -43,7 +43,7 @@ pub(crate) enum Glyph {
     Working,
     /// Download a desktop release that is not downloaded yet.
     Download,
-    /// Relaunch the desktop or restart a Core into its Pending Version.
+    /// Relaunch the desktop.
     Restart,
     Overdue,
     /// The desktop is too old for a Machine.
@@ -82,7 +82,7 @@ pub(crate) enum DesktopAction {
 pub(crate) struct Confirmation {
     pub(crate) title: SharedString,
     pub(crate) message: SharedString,
-    /// The destructive button: "Restart" or "Stop".
+    /// The destructive button: "Update Core", "Restart Core" or "Stop".
     pub(crate) button: SharedString,
     pub(crate) actions: Vec<(MachineId, MachineAction)>,
     /// The work the alert described. Approving it authorizes exactly that work.
@@ -210,11 +210,13 @@ pub(crate) enum DesktopState {
     Overdue {
         version: String,
         stage: UpdateStage,
+        ready: bool,
     },
     /// A Machine's Core is newer than this desktop can talk to.
     TooOld {
         version: Option<String>,
         machine: SharedString,
+        ready: bool,
     },
     InstallFailed {
         version: Option<String>,
@@ -246,6 +248,10 @@ pub(crate) struct DesktopFacts<'a> {
 pub(crate) enum MachineState {
     /// Nothing pending.
     Current,
+    /// A newer bundled Core is waiting for the shared store to install it automatically.
+    Available {
+        to: Version,
+    },
     /// Connected, with no facts yet.
     Connecting,
     /// A Pending Version waits for a restart.
@@ -282,6 +288,7 @@ pub(crate) enum MachineState {
     UpdateFailed {
         id: u64,
         version: Version,
+        reason: StartFailure,
     },
     InstallFailed {
         id: u64,
@@ -297,7 +304,9 @@ pub(crate) enum MachineState {
         push: Option<Version>,
     },
     Stopped,
-    Offline,
+    Offline {
+        offered: Option<Version>,
+    },
 }
 
 /// Why a Machine can't check for updates.
@@ -315,12 +324,14 @@ impl MachineState {
         !matches!(
             self,
             Self::Current
+                | Self::Available { .. }
                 | Self::Connecting
+                | Self::Installing { .. }
                 | Self::DesktopTooOld
                 | Self::Stopping
                 | Self::Uninstalling
                 | Self::Stopped
-                | Self::Offline
+                | Self::Offline { .. }
         )
     }
 
@@ -357,9 +368,9 @@ impl MachineState {
 
     fn glyph(&self) -> Option<Glyph> {
         Some(match self {
-            Self::Ready { .. } => Glyph::Restart,
-            Self::Overdue { .. } => Glyph::Overdue,
-            Self::CoreTooOld { .. } => Glyph::UpdateCore,
+            Self::Ready { .. } => Glyph::UpdateCore,
+            Self::Overdue { .. } => Glyph::UpdateCore,
+            Self::CoreTooOld { .. } | Self::Available { .. } => Glyph::UpdateCore,
             Self::Installing { .. }
             | Self::Restarting { .. }
             | Self::Checking
@@ -371,7 +382,7 @@ impl MachineState {
             Self::CantConfirm { .. } => Glyph::CantConfirm,
             Self::CantCheck { .. } => Glyph::CantCheck,
             Self::DesktopTooOld => Glyph::UpdateDesktop,
-            Self::Current | Self::Stopped | Self::Offline => return None,
+            Self::Current | Self::Stopped | Self::Offline { .. } => return None,
         })
     }
 
@@ -434,11 +445,7 @@ impl MachineView {
 
     /// The Machine's name inside a sentence: "this Mac", "this computer" or the paired name.
     fn place(&self) -> String {
-        if self.local {
-            LOCAL_PLACE.to_owned()
-        } else {
-            self.name.to_string()
-        }
+        self.name.to_string()
     }
 
     /// The Machine's name at the start of a sentence.
@@ -463,7 +470,7 @@ impl MachineView {
     /// Restarts at once, or asks first when sessions close or other devices stop working.
     pub(crate) fn restart_command(&self) -> Command {
         if self.restart_asks() {
-            Command::Confirm(restart_confirmation(std::slice::from_ref(self)))
+            Command::Confirm(update_confirmation(std::slice::from_ref(self)))
         } else {
             Command::Machine(self.machine, MachineAction::Restart)
         }
@@ -505,6 +512,7 @@ impl MachineView {
                     sessions(n)
                 ),
             },
+            MachineState::Available { to } => format!("SpaceTerm Core {running} runs on {name}. SpaceTerm installs SpaceTerm Core {to} automatically."),
             MachineState::Connecting => format!("Connecting to SpaceTerm Core on {place}."),
             MachineState::Ready { .. } | MachineState::Overdue { .. } => self.restart_sentence(),
             MachineState::CoreTooOld { push } => match push {
@@ -520,20 +528,29 @@ impl MachineView {
             MachineState::Installing { to, .. } => {
                 format!("Installing SpaceTerm Core {to} on {place}.")
             }
-            MachineState::Restarting { .. } => format!("Restarting SpaceTerm Core on {place}."),
+            MachineState::Restarting { to } => format!("Updating SpaceTerm Core on {place} to {to}."),
             MachineState::Checking => format!("Checking SpaceTerm Core on {place}."),
             MachineState::Stopping => format!("Stopping SpaceTerm Core on {place}."),
             MachineState::Uninstalling => format!("Uninstalling SpaceTerm Core on {place}."),
-            MachineState::UpdateFailed { version, .. } => format!(
-                "SpaceTerm Core {version} could not start, so SpaceTerm went back to {running}. \
-                 Your Workspaces are restored."
-            ),
+            MachineState::UpdateFailed { version, reason, .. } => {
+                let cause = match reason {
+                    StartFailure::NotReady => String::new(),
+                    StartFailure::DiskFull => format!(" because {name} is out of disk space"),
+                    StartFailure::PortInUse => format!(" because another app is using {name}'s Network Access port"),
+                };
+                let remedy = match reason {
+                    StartFailure::NotReady => String::new(),
+                    StartFailure::DiskFull => format!(" Free some space, then choose Update {name} again."),
+                    StartFailure::PortInUse => format!(" Close that app or change its port, then choose Update {name} again."),
+                };
+                format!("SpaceTerm Core {version} couldn't start on {name}{cause}. {name} went back to SpaceTerm Core {running}. Its Workspaces are kept. The Terminal Sessions that ended don't come back.{remedy}")
+            }
             MachineState::InstallFailed {
                 version, reason, ..
             } => install_failure(&name, &place, version, *reason),
             MachineState::CantConfirm { expected } => {
                 format!(
-                    "{name} stopped answering during its restart, so SpaceTerm can't confirm \
+                    "{name} stopped answering during its update, so SpaceTerm can't confirm \
                      that SpaceTerm Core {expected} started."
                 )
             }
@@ -553,10 +570,11 @@ impl MachineView {
             MachineState::Stopped => {
                 format!("SpaceTerm Core on {place} is stopped. Its Workspaces open when it starts.")
             }
-            MachineState::Offline => format!(
-                "{name} is offline. It was last seen with SpaceTerm Core {running}, so it \
-                 updates when it is back."
-            ),
+            MachineState::Offline { offered } => {
+                let last = self.running.as_ref().map_or_else(String::new, |v| format!(" It last ran SpaceTerm Core {v}."));
+                let install = offered.as_ref().map_or_else(String::new, |v| format!(" SpaceTerm installs {v} when it reconnects."));
+                format!("{name} is offline.{last}{install}")
+            }
         }
         .into()
     }
@@ -568,52 +586,47 @@ impl MachineView {
     }
 
     fn restart_sentence(&self) -> String {
-        let place = self.place();
-        let mut text = format!("Restart SpaceTerm Core on {place} to finish the update.");
-        if self.sessions > 0 {
-            text.push_str(&format!(
-                " This will close your {}{}.",
-                running_sessions(self.sessions),
-                self.there()
-            ));
-        }
-        if let MachineState::Overdue { days: waited, .. } = &self.state {
-            text.push_str(&format!(
-                " It has waited {}. SpaceTerm never restarts it while sessions are open.",
-                days(*waited)
-            ));
-        }
-        if let Some((_, _, stranded)) = self.state.waiting()
-            && !stranded.is_empty()
-        {
+        let name = &self.name;
+        let Some((to, _, stranded)) = self.state.waiting() else {
+            return String::new();
+        };
+        let mut text = format!(
+            "SpaceTerm Core {to} is installed on {name}. Updating restarts SpaceTerm Core and ends {}.",
+            terminal_sessions(self.sessions)
+        );
+        if !stranded.is_empty() {
             text.push(' ');
-            text.push_str(&stranded_sentence(&place, stranded));
+            text.push_str(&stranded_sentence(name, stranded));
         }
         text
     }
 
-    /// The title-bar label: at most two words.
-    fn control_label(&self) -> &'static str {
+    /// Every Core control names its Machine, including progress and failures.
+    pub(crate) fn control_label(&self) -> String {
+        let name = &self.name;
         match &self.state {
-            // The ellipsis says the button asks first.
-            MachineState::Ready { .. } if self.restart_asks() => "Restart…",
-            MachineState::Ready { .. } => "Restart",
-            MachineState::Overdue { .. } if self.restart_asks() => "Restart overdue…",
-            MachineState::Overdue { .. } => "Restart overdue",
-            MachineState::CoreTooOld { .. } => "Update needed",
-            MachineState::Installing { .. } => "Installing…",
-            MachineState::Restarting { .. } => "Restarting…",
-            MachineState::Checking | MachineState::Connecting => "Checking…",
-            MachineState::Stopping => "Stopping…",
-            MachineState::Uninstalling => "Uninstalling…",
-            MachineState::UpdateFailed { .. } => "Update failed",
-            MachineState::InstallFailed { .. } => "Install failed",
-            MachineState::CantConfirm { .. } => "Can't confirm",
-            MachineState::CantCheck { .. } => "Can't check",
-            MachineState::DesktopTooOld => "Update SpaceTerm",
-            MachineState::Current => "Current",
-            MachineState::Stopped => "Stopped",
-            MachineState::Offline => "Offline",
+            MachineState::Ready { .. } | MachineState::Overdue { .. } => {
+                format!(
+                    "Update {name}{}",
+                    if self.restart_asks() { "…" } else { "" }
+                )
+            }
+            MachineState::CoreTooOld { .. } | MachineState::Available { .. } => {
+                format!("Update {name}")
+            }
+            MachineState::Installing { .. } => format!("Installing on {name}…"),
+            MachineState::Restarting { .. } => format!("Updating {name}…"),
+            MachineState::Checking | MachineState::Connecting => format!("Checking {name}…"),
+            MachineState::Stopping => format!("Stopping {name}…"),
+            MachineState::Uninstalling => format!("Uninstalling on {name}…"),
+            MachineState::UpdateFailed { .. } => format!("{name} update failed"),
+            MachineState::InstallFailed { .. } => format!("{name} install failed"),
+            MachineState::CantConfirm { .. } => format!("Can't confirm {name}"),
+            MachineState::CantCheck { .. } => format!("Can't check {name}"),
+            MachineState::DesktopTooOld => "Update SpaceTerm".to_owned(),
+            MachineState::Current => format!("{name} is current"),
+            MachineState::Stopped => format!("{name} is stopped"),
+            MachineState::Offline { .. } => format!("{name} is offline"),
         }
     }
 
@@ -626,7 +639,7 @@ impl MachineView {
             MachineState::CantConfirm { .. } => {
                 Command::Machine(machine, MachineAction::CheckAgain)
             }
-            MachineState::UpdateFailed { id, version } => Command::Explain(Explanation {
+            MachineState::UpdateFailed { id, version, .. } => Command::Explain(Explanation {
                 title: format!(
                     "SpaceTerm Core {version} couldn't start on {}",
                     self.place()
@@ -678,61 +691,51 @@ impl MachineView {
 
     /// The in-window menu row: a short status and at most one button.
     fn menu_row(&self) -> Option<MenuRow> {
-        let (status, button): (String, Option<(&str, Command)>) = match &self.state {
+        let (status, button): (String, Option<(String, Command)>) = match &self.state {
             MachineState::Ready { stranded, .. } => {
                 let status = if self.sessions > 0 {
-                    format!("Closes {}", sessions(self.sessions))
+                    format!("Ends {}", terminal_sessions(self.sessions))
                 } else if !stranded.is_empty() {
                     format!("Stops {}", count(stranded.len(), "app"))
                 } else {
                     "Ready".to_owned()
                 };
-                let label = if self.restart_asks() {
-                    "Restart…"
-                } else {
-                    "Restart"
-                };
-                (status, Some((label, self.restart_command())))
+                (status, Some((self.control_label(), self.restart_command())))
             }
             MachineState::Overdue { .. } => (
                 format!("Overdue · {}", sessions(self.sessions)),
-                Some((
-                    if self.restart_asks() {
-                        "Restart…"
-                    } else {
-                        "Restart"
-                    },
-                    self.restart_command(),
-                )),
+                Some((self.control_label(), self.restart_command())),
             ),
+            MachineState::Available { to } => (format!("Update {to} available"), None),
             MachineState::CoreTooOld { .. } => (
                 "Too old".to_owned(),
                 Some((
-                    "Update",
+                    "Update".to_owned(),
                     Command::Machine(self.machine, MachineAction::Install),
                 )),
             ),
-            MachineState::Installing { .. }
-            | MachineState::Restarting { .. }
-            | MachineState::Checking => (self.control_label().to_owned(), None),
+            MachineState::Installing { to, .. } => (format!("Installing {to}…"), None),
+            MachineState::Restarting { .. } | MachineState::Checking => {
+                (self.control_label(), None)
+            }
             MachineState::UpdateFailed { id, .. } => (
                 format!("Back on {}", self.running_text()),
                 Some((
-                    "Dismiss Notice",
+                    "Dismiss Notice".to_owned(),
                     Command::Machine(self.machine, MachineAction::DismissFailure(*id)),
                 )),
             ),
             MachineState::InstallFailed { .. } => (
                 "Install failed".to_owned(),
                 Some((
-                    "Try Again",
+                    "Try Again".to_owned(),
                     Command::Machine(self.machine, MachineAction::Install),
                 )),
             ),
             MachineState::CantConfirm { .. } => (
                 "Can't confirm".to_owned(),
                 Some((
-                    "Check Again",
+                    "Check Again".to_owned(),
                     Command::Machine(self.machine, MachineAction::CheckAgain),
                 )),
             ),
@@ -740,19 +743,19 @@ impl MachineView {
                 "Can't check".to_owned(),
                 push.as_ref().map(|_| {
                     (
-                        UPDATE_FROM_LOCAL,
+                        UPDATE_FROM_LOCAL.to_owned(),
                         Command::Machine(self.machine, MachineAction::Install),
                     )
                 }),
             ),
-            MachineState::Offline => ("Offline".to_owned(), None),
+            MachineState::Offline { .. } => ("Offline".to_owned(), None),
             _ => return None,
         };
         Some(MenuRow {
             key: ItemKey::Machine(self.machine),
             name: self.name.clone(),
             status: status.into(),
-            tone: if self.state == MachineState::Offline {
+            tone: if matches!(self.state, MachineState::Offline { .. }) {
                 None
             } else {
                 Some(self.state.tone())
@@ -767,6 +770,20 @@ impl MachineView {
         })
     }
 
+    /// Settings renders the same update row and sentence as the title bar's menu.
+    pub(crate) fn settings_row(&self) -> MenuRow {
+        self.menu_row().unwrap_or_else(|| MenuRow {
+            key: ItemKey::Machine(self.machine),
+            name: self.name.clone(),
+            status: self.extra_state().0.into(),
+            tone: Some(self.state.tone()),
+            glyph: self.state.glyph(),
+            fraction: self.state.fraction(),
+            sentence: self.sentence(),
+            button: None,
+        })
+    }
+
     /// The menu bar extra's state after "Version X · ".
     fn extra_state(&self) -> (String, Tone, ExtraTile) {
         let quiet = |text: String| (text, Tone::Action, ExtraTile::Connected);
@@ -776,10 +793,11 @@ impl MachineView {
             } else {
                 sessions(self.sessions)
             }),
+            MachineState::Available { to } => quiet(format!("Update {to} available")),
             MachineState::Connecting => ("Connecting…".to_owned(), Tone::Action, ExtraTile::Busy),
             MachineState::Ready { .. } => quiet("Update ready".to_owned()),
             MachineState::Overdue { .. } => (
-                "Restart overdue".to_owned(),
+                "Update overdue".to_owned(),
                 Tone::Problem,
                 ExtraTile::Connected,
             ),
@@ -795,7 +813,7 @@ impl MachineView {
                 (format!("Installing {to}…"), Tone::Action, ExtraTile::Busy)
             }
             MachineState::Restarting { .. } => {
-                ("Restarting…".to_owned(), Tone::Action, ExtraTile::Busy)
+                ("Updating…".to_owned(), Tone::Action, ExtraTile::Busy)
             }
             MachineState::Checking => ("Checking…".to_owned(), Tone::Action, ExtraTile::Busy),
             MachineState::Stopping => ("Stopping…".to_owned(), Tone::Action, ExtraTile::Busy),
@@ -823,22 +841,15 @@ impl MachineView {
                 ExtraTile::Connected,
             ),
             MachineState::Stopped => ("Stopped".to_owned(), Tone::Action, ExtraTile::Off),
-            MachineState::Offline => ("Offline".to_owned(), Tone::Action, ExtraTile::Offline),
+            MachineState::Offline { .. } => {
+                ("Offline".to_owned(), Tone::Action, ExtraTile::Offline)
+            }
         }
     }
 
     /// The menu bar extra's row for this Machine.
     pub(crate) fn extra_row(&self) -> ExtraRow {
         let (state, tone, tile) = self.extra_state();
-        let restart = ExtraItem::Action {
-            title: if self.sessions > 0 {
-                "Restart SpaceTerm Core…".into()
-            } else {
-                "Restart SpaceTerm Core".into()
-            },
-            subtitle: Some(closes(self.sessions).into()),
-            command: self.restart_command(),
-        };
         let machine = self.machine;
         let action =
             |title: &str, subtitle: Option<&str>, action: MachineAction| ExtraItem::Action {
@@ -848,16 +859,14 @@ impl MachineView {
             };
         let info = |text: String| Some(SharedString::from(text));
         let (info, items): (Option<SharedString>, Option<Vec<ExtraItem>>) = match &self.state {
-            MachineState::Current | MachineState::DesktopTooOld => (
+            MachineState::Current
+            | MachineState::Available { .. }
+            | MachineState::DesktopTooOld => (
                 matches!(self.state, MachineState::DesktopTooOld).then(|| self.sentence()),
-                Some(vec![restart]),
+                Some(Vec::new()),
             ),
             MachineState::Ready { stranded, .. } | MachineState::Overdue { stranded, .. } => {
-                let title = if self.restart_asks() {
-                    "Restart to Update…"
-                } else {
-                    "Restart to Update"
-                };
+                let title = self.control_label();
                 let subtitle = match (self.sessions, stranded.len()) {
                     (0, 0) => closes(0),
                     (n, 0) => closes(n),
@@ -897,19 +906,15 @@ impl MachineView {
             ),
             MachineState::UpdateFailed { id, .. } => (
                 Some(self.sentence()),
-                Some(vec![
-                    action("Dismiss Notice", None, MachineAction::DismissFailure(*id)),
-                    ExtraItem::Separator,
-                    restart,
-                ]),
+                Some(vec![action(
+                    "Dismiss Notice",
+                    None,
+                    MachineAction::DismissFailure(*id),
+                )]),
             ),
             MachineState::InstallFailed { .. } => (
                 Some(self.sentence()),
-                Some(vec![
-                    action("Try Again", None, MachineAction::Install),
-                    ExtraItem::Separator,
-                    restart,
-                ]),
+                Some(vec![action("Try Again", None, MachineAction::Install)]),
             ),
             MachineState::CantConfirm { .. } => (
                 Some(self.sentence()),
@@ -918,16 +923,12 @@ impl MachineView {
             MachineState::CantCheck { push, .. } => (
                 Some(self.sentence()),
                 Some(match push {
-                    Some(_) => vec![
-                        action(
-                            UPDATE_FROM_LOCAL,
-                            Some("Sessions stay open"),
-                            MachineAction::Install,
-                        ),
-                        ExtraItem::Separator,
-                        restart,
-                    ],
-                    None => vec![restart],
+                    Some(_) => vec![action(
+                        UPDATE_FROM_LOCAL,
+                        Some("Sessions stay open"),
+                        MachineAction::Install,
+                    )],
+                    None => Vec::new(),
                 }),
             ),
             MachineState::Stopped => (
@@ -944,11 +945,13 @@ impl MachineView {
             | MachineState::Checking
             | MachineState::Stopping
             | MachineState::Uninstalling
-            | MachineState::Offline => (None, None),
+            | MachineState::Offline { .. } => (None, None),
         };
         let items = items.map(|mut items| {
             if self.local && self.state != MachineState::Stopped {
-                items.push(ExtraItem::Separator);
+                if !items.is_empty() {
+                    items.push(ExtraItem::Separator);
+                }
                 items.push(ExtraItem::Action {
                     title: if self.sessions > 0 {
                         "Stop SpaceTerm Core…".into()
@@ -998,7 +1001,11 @@ fn machine_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Mac
 
 fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> MachineState {
     match &update.link {
-        MachineLink::Offline { .. } => return MachineState::Offline,
+        MachineLink::Offline { .. } => {
+            return MachineState::Offline {
+                offered: update.push.clone(),
+            };
+        }
         MachineLink::Stopped => return MachineState::Stopped,
         MachineLink::Unconfirmed { expected, .. } => {
             return MachineState::CantConfirm {
@@ -1063,10 +1070,11 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
                 .is_some_and(|pending| pending.installed_at > failure.at);
         if !superseded {
             match failure.kind {
-                FailureKind::Start(StartFailure::NotReady) => {
+                FailureKind::Start(reason) => {
                     return MachineState::UpdateFailed {
                         id: failure.id,
                         version: failure.version.clone(),
+                        reason,
                     };
                 }
                 FailureKind::Install(reason) => {
@@ -1076,8 +1084,6 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
                         reason,
                     };
                 }
-                // Transient: the version stays pending, and the next restart tries again.
-                FailureKind::Start(StartFailure::PortInUse | StartFailure::DiskFull) => {}
             }
         }
     }
@@ -1109,6 +1115,9 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
             push: update.push.clone(),
         };
     }
+    if let Some(to) = &update.push {
+        return MachineState::Available { to: to.clone() };
+    }
     MachineState::Current
 }
 
@@ -1121,6 +1130,7 @@ impl DesktopState {
             UpdateState::Ready { version } if overdue => Self::Overdue {
                 version: version.clone(),
                 stage: facts.stage,
+                ready: true,
             },
             UpdateState::Ready { version } => Self::Ready {
                 version: version.clone(),
@@ -1128,6 +1138,7 @@ impl DesktopState {
             UpdateState::Available { version } if overdue => Self::Overdue {
                 version: version.clone(),
                 stage: facts.stage,
+                ready: false,
             },
             UpdateState::Available { version } => Self::Available {
                 version: version.clone(),
@@ -1163,6 +1174,7 @@ impl DesktopState {
                 Self::Overdue {
                     version: pending.unwrap_or_default(),
                     stage: facts.stage,
+                    ready: false,
                 }
             }
             _ => Self::Current,
@@ -1178,6 +1190,7 @@ impl DesktopState {
             ) => Self::TooOld {
                 version: facts.pending.map(str::to_owned),
                 machine,
+                ready: matches!(facts.state, UpdateState::Ready { .. }),
             },
             (Self::Current, None) if facts.notes_unread => Self::WhatsNew {
                 version: facts.running.to_owned(),
@@ -1187,7 +1200,13 @@ impl DesktopState {
     }
 
     pub(crate) fn pending(&self) -> bool {
-        !matches!(self, Self::Current | Self::Downloading { .. })
+        !matches!(
+            self,
+            Self::Current
+                | Self::Downloading { .. }
+                | Self::WhatsNew { .. }
+                | Self::Relaunching { .. }
+        )
     }
 
     fn tone(&self) -> Tone {
@@ -1204,8 +1223,7 @@ impl DesktopState {
             Self::Current => return None,
             Self::Available { .. } => Glyph::Download,
             Self::Downloading { .. } | Self::Relaunching { .. } => Glyph::Working,
-            Self::Ready { .. } => Glyph::Restart,
-            Self::Overdue { .. } => Glyph::Overdue,
+            Self::Ready { .. } | Self::Overdue { .. } => Glyph::Restart,
             Self::TooOld { .. } => Glyph::UpdateDesktop,
             Self::InstallFailed { .. } => Glyph::InstallFailed,
             Self::WhatsNew { .. } => Glyph::WhatsNew,
@@ -1223,18 +1241,32 @@ impl DesktopState {
         }
     }
 
-    fn control_label(&self) -> &'static str {
+    fn control_label(&self) -> String {
         match self {
-            Self::Current => "Current",
-            Self::Available { .. } => "Download",
-            Self::Downloading { .. } => "Downloading…",
-            Self::Ready { .. } => "Relaunch",
-            Self::Overdue { .. } => "Update overdue",
+            Self::Available { version }
+            | Self::Overdue {
+                version,
+                ready: false,
+                ..
+            }
+            | Self::TooOld {
+                version: Some(version),
+                ready: false,
+                ..
+            } => return format!("Download SpaceTerm {version}"),
+            Self::Current => "SpaceTerm is current",
+            Self::Downloading { .. } => "Downloading SpaceTerm…",
+            Self::Ready { .. } | Self::Overdue { .. } => "Relaunch",
             Self::TooOld { .. } => "Update SpaceTerm",
-            Self::InstallFailed { .. } => "Install failed",
+            Self::InstallFailed {
+                error: UpdateError::Installation,
+                ..
+            } => "Relaunch failed",
+            Self::InstallFailed { .. } => "SpaceTerm install failed",
             Self::Relaunching { .. } => "Relaunching…",
-            Self::WhatsNew { .. } => "What's new",
+            Self::WhatsNew { .. } => "What's new in SpaceTerm",
         }
+        .to_owned()
     }
 
     pub(crate) fn sentence(&self) -> SharedString {
@@ -1245,36 +1277,30 @@ impl DesktopState {
         };
         match self {
             Self::Current => "SpaceTerm is up to date.".to_owned(),
-            Self::Available { version } => format!(
-                "SpaceTerm {version} is available. Downloading it keeps every session running."
+            Self::Available { version } | Self::Overdue { version, ready: false, .. } => format!(
+                "SpaceTerm {version} is available. Downloading it keeps every Terminal Session running."
             ),
             Self::Downloading { version, .. } => format!("Downloading SpaceTerm {version}."),
             Self::Ready { version } => format!(
-                "SpaceTerm {version} is ready. Relaunching SpaceTerm keeps every session running."
+                "SpaceTerm {version} is ready. Relaunching keeps every Terminal Session running."
             ),
-            Self::Overdue { version, stage } => match stage {
-                UpdateStage::Overdue => format!(
-                    "SpaceTerm {version} has waited 2 days. SpaceTerm installs it the next time \
-                     it opens. Relaunching now keeps every session running."
-                ),
-                _ => format!(
-                    "SpaceTerm {version} has waited 1 day. Relaunching keeps every session \
-                     running. If you don't, SpaceTerm installs it the next time it opens."
-                ),
-            },
+            Self::Overdue { version, .. } => format!(
+                "SpaceTerm {version} is ready. Relaunching keeps every Terminal Session running."
+            ),
             Self::TooOld {
                 version: v,
                 machine,
+                ready,
             } => format!(
-                "This SpaceTerm is too old for SpaceTerm Core on {machine}. Relaunching installs \
-                 {} and keeps every session running.",
+                "This SpaceTerm is too old for SpaceTerm Core on {machine}. {} installs {} and keeps every Terminal Session running.",
+                if *ready { "Relaunching" } else { "Downloading and relaunching" },
                 match v {
                     Some(_) => version(v),
                     None => "a newer SpaceTerm".to_owned(),
                 }
             ),
             Self::InstallFailed { version: v, error } => desktop_failure(&version(v), *error),
-            Self::Relaunching { .. } => "SpaceTerm is relaunching. No sessions close.".to_owned(),
+            Self::Relaunching { .. } => "SpaceTerm is relaunching. Terminal Sessions keep running.".to_owned(),
             Self::WhatsNew { version } => format!("SpaceTerm updated to {version}."),
         }
         .into()
@@ -1289,6 +1315,16 @@ impl DesktopState {
             Self::WhatsNew { .. } => Command::Desktop(DesktopAction::WhatsNew),
             Self::InstallFailed { version, .. } => Command::Explain(Explanation {
                 title: match version {
+                    _ if matches!(
+                        self,
+                        Self::InstallFailed {
+                            error: UpdateError::Installation,
+                            ..
+                        }
+                    ) =>
+                    {
+                        "Couldn't Relaunch SpaceTerm".to_owned()
+                    }
                     Some(version) => format!("Couldn't install SpaceTerm {version}"),
                     None => "Couldn't install the SpaceTerm update".to_owned(),
                 }
@@ -1309,11 +1345,16 @@ impl DesktopState {
                 Some(("Download", Command::Desktop(DesktopAction::Update))),
             ),
             Self::Downloading { .. } => ("Downloading…".to_owned(), None),
-            Self::Ready { .. } => ("Keeps sessions".to_owned(), update()),
+            Self::Ready { .. } => ("Terminal Sessions keep running".to_owned(), update()),
             Self::Overdue { .. } => ("Overdue".to_owned(), update()),
             Self::TooOld { .. } => ("Too old".to_owned(), update()),
-            Self::InstallFailed { .. } => (
-                "Install failed".to_owned(),
+            Self::InstallFailed { error, .. } => (
+                if *error == UpdateError::Installation {
+                    "Relaunch failed"
+                } else {
+                    "Install failed"
+                }
+                .to_owned(),
                 Some(("Try Again", Command::Desktop(DesktopAction::Update))),
             ),
             Self::Relaunching { .. } => ("Relaunching…".to_owned(), None),
@@ -1334,7 +1375,16 @@ impl DesktopState {
             },
             sentence: self.sentence(),
             button: button.map(|(label, command)| RowButton {
-                label: label.into(),
+                label: if matches!(
+                    self,
+                    Self::Available { .. }
+                        | Self::Overdue { ready: false, .. }
+                        | Self::TooOld { ready: false, .. }
+                ) {
+                    self.control_label().into()
+                } else {
+                    label.into()
+                },
                 command,
             }),
         })
@@ -1399,12 +1449,12 @@ pub(crate) struct RowButton {
     pub(crate) command: Command,
 }
 
-/// "Restart All…": every Machine whose Pending Version waits.
+/// "Update All…": every Machine whose Pending Version waits.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RestartAll {
     pub(crate) machines: usize,
     pub(crate) sessions: u32,
-    /// "Restart All…".
+    /// "Update All…".
     pub(crate) label: SharedString,
     /// The in-window menu's trailing text: "7 sessions".
     pub(crate) trailing: SharedString,
@@ -1519,7 +1569,9 @@ impl Presentation {
         let machines = self
             .machines
             .iter()
-            .filter(|view| view.state.pending())
+            .filter(|view| {
+                view.state.pending() && (view.state.waiting().is_none() || view.restart_asks())
+            })
             .map(|view| Item {
                 key: ItemKey::Machine(view.machine),
                 label: view.control_label().into(),
@@ -1571,7 +1623,7 @@ impl Presentation {
             .collect()
     }
 
-    /// "Restart All…", when two or more Pending Versions wait.
+    /// "Update All…", when two or more Pending Versions wait.
     pub(crate) fn restart_all(&self) -> Option<RestartAll> {
         let waiting: Vec<MachineView> = self
             .machines
@@ -1583,11 +1635,11 @@ impl Presentation {
             return None;
         }
         let total: u32 = waiting.iter().map(|view| view.sessions).sum();
-        let confirmation = restart_confirmation(&waiting);
+        let confirmation = update_confirmation(&waiting);
         Some(RestartAll {
             machines: waiting.len(),
             sessions: total,
-            label: "Restart All…".into(),
+            label: "Update All…".into(),
             trailing: sessions(total).into(),
             subtitle: format!(
                 "Updates {} machines, closes {}",
@@ -1619,6 +1671,25 @@ impl Presentation {
             .filter_map(|preview| {
                 let mut view = self.machine(preview.machine)?.clone();
                 view.sessions = preview.sessions;
+                if let Some(running) = &preview.running {
+                    view.running = Some(running.clone());
+                }
+                if preview.action == MachineAction::Restart {
+                    view.state = match &preview.target {
+                        Some(to) => MachineState::Ready {
+                            to: to.clone(),
+                            breaking: view
+                                .state
+                                .waiting()
+                                .is_some_and(|(_, breaking, _)| breaking),
+                            stranded: view
+                                .state
+                                .waiting()
+                                .map_or_else(Vec::new, |(_, _, stranded)| stranded.to_vec()),
+                        },
+                        None => MachineState::Current,
+                    };
+                }
                 Some(view)
             })
             .collect();
@@ -1631,7 +1702,7 @@ impl Presentation {
             }
             Some(MachineAction::Restart) if !views.is_empty() => (always
                 || views.iter().any(MachineView::restart_asks))
-            .then(|| restart_confirmation(&views)),
+            .then(|| update_confirmation(&views)),
             _ => None,
         }
     }
@@ -1649,7 +1720,9 @@ impl Presentation {
             DesktopState::TooOld { machine, .. } => {
                 (running, Some(format!("Too old for {machine}")))
             }
-            DesktopState::InstallFailed { .. } => (running, Some("Install failed".to_owned())),
+            DesktopState::InstallFailed { .. } => {
+                (running, Some(self.desktop.control_label().to_owned()))
+            }
             DesktopState::Relaunching { .. } => (running, Some("Relaunching…".to_owned())),
             DesktopState::WhatsNew { .. } => (running, Some("Updated".to_owned())),
         };
@@ -1668,12 +1741,36 @@ impl Presentation {
     pub(crate) fn extra_actions(&self) -> Vec<ExtraItem> {
         let mut actions = Vec::new();
         match &self.desktop {
-            DesktopState::Available { .. }
-            | DesktopState::Ready { .. }
-            | DesktopState::Overdue { .. }
-            | DesktopState::TooOld { .. } => actions.push(ExtraItem::Action {
-                title: "Update SpaceTerm and Relaunch".into(),
-                subtitle: Some("Keeps all sessions open".into()),
+            DesktopState::Available { version }
+            | DesktopState::Downloading { version, .. }
+            | DesktopState::Overdue {
+                version,
+                ready: false,
+                ..
+            }
+            | DesktopState::TooOld {
+                version: Some(version),
+                ready: false,
+                ..
+            } => actions.push(ExtraItem::Action {
+                title: format!("Download SpaceTerm {version}").into(),
+                subtitle: Some("Terminal Sessions keep running".into()),
+                command: Command::Desktop(DesktopAction::Update),
+            }),
+            DesktopState::Ready { .. }
+            | DesktopState::Overdue { ready: true, .. }
+            | DesktopState::TooOld { ready: true, .. } => actions.push(ExtraItem::Action {
+                title: "Relaunch to Update SpaceTerm".into(),
+                subtitle: Some("Terminal Sessions keep running".into()),
+                command: Command::Desktop(DesktopAction::Update),
+            }),
+            DesktopState::TooOld {
+                version: None,
+                ready: false,
+                ..
+            } => actions.push(ExtraItem::Action {
+                title: "Update SpaceTerm".into(),
+                subtitle: Some("Terminal Sessions keep running".into()),
                 command: Command::Desktop(DesktopAction::Update),
             }),
             DesktopState::InstallFailed { .. } => actions.push(ExtraItem::Action {
@@ -1691,9 +1788,7 @@ impl Presentation {
                 subtitle: None,
                 command: Command::Desktop(DesktopAction::WhatsNew),
             }),
-            DesktopState::Current
-            | DesktopState::Downloading { .. }
-            | DesktopState::Relaunching { .. } => {}
+            DesktopState::Current | DesktopState::Relaunching { .. } => {}
         }
         if let Some(all) = self.restart_all() {
             actions.push(ExtraItem::Action {
@@ -1708,7 +1803,7 @@ impl Presentation {
     /// The daily notifications due for overdue items.
     pub(crate) fn reminders(&self) -> Vec<Reminder> {
         let desktop = match &self.desktop {
-            DesktopState::Overdue { version, stage } => Some(Reminder {
+            DesktopState::Overdue { version, stage, .. } => Some(Reminder {
                 key: ItemKey::Desktop,
                 title: "SpaceTerm update overdue".into(),
                 body: match stage {
@@ -1806,10 +1901,10 @@ pub(crate) fn action_failure(
     let message = match failure {
         ActionFailure::Changed | ActionFailure::LoginItemOff => return None,
         ActionFailure::Unavailable(Unavailable::CoreTooOld) => format!(
-            "SpaceTerm Core on {place} is too old to {verb} from this SpaceTerm. Update it on              {place} first."
+            "SpaceTerm Core on {place} is too old to {verb} from this SpaceTerm. Update it on {place} first."
         ),
         ActionFailure::Unavailable(Unavailable::ClientTooOld) => format!(
-            "This SpaceTerm is too old for SpaceTerm Core on {place}. Update SpaceTerm, then try              again."
+            "This SpaceTerm is too old for SpaceTerm Core on {place}. Update SpaceTerm, then try again."
         ),
         ActionFailure::Unavailable(Unavailable::NotConnected) | ActionFailure::Unreachable => {
             format!("SpaceTerm can't reach {place}. Try again when it is connected.")
@@ -1826,44 +1921,58 @@ pub(crate) fn action_failure(
 }
 
 /// The confirmation for restarting one or more Machines into their Pending Versions.
-fn restart_confirmation(views: &[MachineView]) -> Confirmation {
-    let total: u32 = views.iter().map(|view| view.sessions).sum();
-    let (title, message) = match views {
-        [view] => (
-            format!("Restart SpaceTerm Core on {}?", view.place()),
-            (view.sessions > 0)
-                .then(|| format!("This will close your {}.", running_sessions(view.sessions))),
+fn update_confirmation(views: &[MachineView]) -> Confirmation {
+    let updating = views.iter().any(|view| view.state.waiting().is_some());
+    let title = match views {
+        [view] => format!(
+            "{} SpaceTerm Core on {}?",
+            if updating { "Update" } else { "Restart" },
+            view.name
         ),
-        _ => (
-            format!("Restart SpaceTerm Core on {} machines?", views.len()),
-            (total > 0).then(|| format!("This will close {}.", running_sessions(total))),
+        _ => format!(
+            "Update SpaceTerm Core on {}?",
+            list_and(
+                &views
+                    .iter()
+                    .map(|view| view.name.to_string())
+                    .collect::<Vec<_>>()
+            )
         ),
     };
-    let breaking = views.iter().filter_map(|view| {
-        let (to, breaking, stranded) = view.state.waiting()?;
-        if !stranded.is_empty() {
-            Some(stranded_sentence(&view.place(), stranded))
-        } else {
-            breaking.then(|| {
-                format!(
-                    "SpaceTerm Core {to} is a breaking update for {}, so it restarts only when \
-                     you ask.",
-                    view.place()
-                )
-            })
+    let message = views.iter().map(|view| {
+        let name = &view.name;
+        let running = view.running_text();
+        match view.state.waiting() {
+            Some((to, _, stranded)) => {
+                let mut text = format!("SpaceTerm Core restarts from {running} to {to}. This ends {} on {name}. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.", terminal_sessions(view.sessions));
+                if !stranded.is_empty() {
+                    text.push(' ');
+                    text.push_str(&stranded_sentence(name, stranded));
+                }
+                text
+            }
+            None => format!("SpaceTerm Core {running} restarts without updating. This ends {} on {name}.", terminal_sessions(view.sessions)),
         }
-    });
-    let message: Vec<String> = message.into_iter().chain(breaking).collect();
+    }).collect::<Vec<_>>().join(" ");
     Confirmation {
         title: title.into(),
-        message: message.join(" ").into(),
-        button: "Restart".into(),
+        message: message.into(),
+        button: if updating {
+            "Update Core"
+        } else {
+            "Restart Core"
+        }
+        .into(),
         actions: views
             .iter()
             .map(|view| (view.machine, MachineAction::Restart))
             .collect(),
         approval: Approval::of(views),
     }
+}
+
+fn terminal_sessions(n: u32) -> String {
+    format!("{n} Terminal Session{}", if n == 1 { "" } else { "s" })
 }
 
 fn stranded_sentence(place: &str, stranded: &[String]) -> String {
@@ -1902,7 +2011,10 @@ fn desktop_failure(release: &str, error: UpdateError) -> String {
         UpdateError::ReadOnly => {
             format!("SpaceTerm can't replace its installation to install {release}.")
         }
-        UpdateError::Installation | UpdateError::Check | UpdateError::Unavailable => {
+        UpdateError::Installation => format!(
+            "{release} is downloaded, but SpaceTerm couldn't quit to install it. Your Terminal Sessions are still running."
+        ),
+        UpdateError::Check | UpdateError::Unavailable => {
             format!("{release} didn't install.")
         }
     }

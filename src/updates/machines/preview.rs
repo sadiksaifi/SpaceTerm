@@ -286,6 +286,7 @@ impl MachineUpdatesAdapter for PreviewMachines {
                     machine,
                     action: action.clone(),
                     sessions: facts.sessions,
+                    running: Some(facts.running.clone()),
                     target: match action {
                         MachineAction::Restart => facts
                             .pending

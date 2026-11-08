@@ -131,6 +131,8 @@ pub(crate) struct MachinePreview {
     pub(crate) action: MachineAction,
     /// The Terminal Sessions it ends.
     pub(crate) sessions: u32,
+    /// The running version the Core's preview observed.
+    pub(crate) running: Option<Version>,
     /// The version a Restart starts, when the Core names one.
     pub(crate) target: Option<Version>,
     /// The adapter's own name for the retained preview.
