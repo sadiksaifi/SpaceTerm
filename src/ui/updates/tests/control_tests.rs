@@ -96,11 +96,10 @@ fn unread_notes_workspace(
 
 #[cfg(spaceterm_release_notes)]
 #[gpui::test]
-fn the_title_bar_opens_unread_notes_with_and_without_an_application_menu(
+fn unread_notes_stay_out_of_the_title_bar_with_and_without_an_application_menu(
     cx: &mut gpui::TestAppContext,
 ) {
     use crate::desktop_profile::{DesktopPresentation, HostFeature};
-    use crate::updates::presentation::{Control, Glyph};
 
     for application_menu in [true, false] {
         let (updates, _, visual) = unread_notes_workspace(cx);
@@ -114,27 +113,10 @@ fn the_title_bar_opens_unread_notes_with_and_without_an_application_menu(
                         &[HostFeature::ApplicationMenuBar]
                     });
             cx.set_global(presentation);
-            let Control::Single(item) = crate::updates::presentation::current(cx).control() else {
-                panic!("unread notes offer a plain title-bar button");
-            };
-            assert_eq!(item.glyph, Glyph::WhatsNew, "the control uses sparkles");
         });
-        A11yTree::read(visual).node("What's new");
-        let button = visual.debug_bounds("update-control").unwrap();
-        visual.simulate_click(button.center(), gpui::Modifiers::none());
-        visual.run_until_parked();
-
-        let tree = A11yTree::read(visual);
-        tree.node(&crate::updates::release_notes::embedded().unwrap().title());
-        tree.node("View release on GitHub");
-        assert!(!visual.update(|_, cx| updates.read(cx).release_notes_unread()));
-        spaceterm_ui::a11y_testing::perform(
-            visual,
-            tree.node("Done"),
-            gpui::accesskit::Action::Click,
-        );
-        visual.run_until_parked();
         assert!(visual.debug_bounds("update-control").is_none());
+        assert!(visual.debug_bounds("update-control-menu").is_none());
+        assert!(visual.update(|_, cx| updates.read(cx).release_notes_unread()));
         visual.update(|window, _| window.remove_window());
     }
 }
@@ -143,9 +125,10 @@ fn the_title_bar_opens_unread_notes_with_and_without_an_application_menu(
 #[gpui::test]
 fn closing_the_update_menu_keeps_notes_unread_until_the_sheet_opens(cx: &mut gpui::TestAppContext) {
     let (updates, machines, visual) = unread_notes_workspace(cx);
-    machines.emit(MachineUpdatesEvent::Machines(vec![waiting(
-        PENGUIN, "penguin", 0,
-    )]));
+    machines.emit(MachineUpdatesEvent::Machines(vec![
+        waiting(PENGUIN, "penguin", 3),
+        waiting(BUILD_BOX, "build-box", 1),
+    ]));
     visual.run_until_parked();
     let trigger = visual.debug_bounds("update-control-menu").unwrap();
     visual.simulate_click(trigger.center(), gpui::Modifiers::none());
@@ -204,37 +187,49 @@ fn one_ready_desktop_update_is_a_plain_button_that_relaunches_without_asking(
     );
 }
 
-#[gpui::test]
-fn a_restart_with_no_sessions_performs_at_once(cx: &mut gpui::TestAppContext) {
-    let (_, _, machines) = services(cx);
-    let (_, visual) = cx.add_window_view(UpdateControl::new);
-    machines.emit(MachineUpdatesEvent::Machines(vec![waiting(
-        PENGUIN, "penguin", 0,
-    )]));
-    visual.run_until_parked();
-    A11yTree::read(visual).node("Restart");
-    let button = visual.debug_bounds("update-control").unwrap();
-    visual.simulate_click(button.center(), gpui::Modifiers::none());
-    visual.run_until_parked();
-    assert_eq!(
-        machines.executed_actions(),
-        vec![(PENGUIN, MachineAction::Restart)]
-    );
-}
-
-/// When the Core refuses a restart's preview, the window previews again and asks; it never
-/// restarts again by itself.
-#[gpui::test]
-fn a_refused_restart_never_runs_again_by_itself(cx: &mut gpui::TestAppContext) {
-    let (_, _, machines) = services(cx);
-    // The application-wide owner of update prompts hears each window action's outcome.
+/// A no-session update stays out of the title bar, but remains actionable in its menu.
+fn no_session_update_menu(
+    cx: &mut gpui::TestAppContext,
+) -> (Rc<ScriptedMachines>, &mut gpui::VisualTestContext) {
+    let (adapter, updates, machines) = services(cx);
     cx.update(crate::ui::updates::init);
     let visual = hosted(cx);
     machines.emit(MachineUpdatesEvent::Machines(vec![waiting(
         PENGUIN, "penguin", 0,
     )]));
     visual.run_until_parked();
-    click("update-control", visual);
+    assert!(visual.debug_bounds("update-control").is_none());
+    assert!(visual.debug_bounds("update-control-menu").is_none());
+
+    updates.update(visual, |updates, cx| updates.check(false, cx));
+    adapter.emit(UpdateEvent::Available(version()));
+    machines.emit(MachineUpdatesEvent::Machines(vec![
+        waiting(PENGUIN, "penguin", 0),
+        waiting(BUILD_BOX, "build-box", 1),
+    ]));
+    visual.run_until_parked();
+    (machines, visual)
+}
+
+#[gpui::test]
+fn a_menu_update_with_no_sessions_performs_at_once(cx: &mut gpui::TestAppContext) {
+    let (machines, visual) = no_session_update_menu(cx);
+    click("update-control-menu", visual);
+    click("update-row-1", visual);
+    assert_eq!(
+        machines.executed_actions(),
+        vec![(PENGUIN, MachineAction::Restart)]
+    );
+    assert!(visual.debug_bounds(CONFIRM).is_none(), "no alert asks");
+}
+
+/// When the Core refuses a restart's preview, the window previews again and asks; it never
+/// restarts again by itself.
+#[gpui::test]
+fn a_refused_restart_never_runs_again_by_itself(cx: &mut gpui::TestAppContext) {
+    let (machines, visual) = no_session_update_menu(cx);
+    click("update-control-menu", visual);
+    click("update-row-1", visual);
     assert_eq!(
         machines.executed_actions(),
         vec![(PENGUIN, MachineAction::Restart)]
@@ -323,7 +318,7 @@ fn the_title_bar_restart_asks_and_only_the_approved_work_restarts(cx: &mut gpui:
         PENGUIN, "penguin", 3,
     )]));
     visual.run_until_parked();
-    A11yTree::read(visual).node("Restart…");
+    A11yTree::read(visual).node("Update penguin…");
 
     click("update-control", visual);
     assert!(
@@ -331,8 +326,9 @@ fn the_title_bar_restart_asks_and_only_the_approved_work_restarts(cx: &mut gpui:
         "the agreed alert asks"
     );
     let tree = A11yTree::read(visual);
-    tree.text("Restart SpaceTerm Core on penguin?");
-    tree.text("This will close your 3 running sessions.");
+    tree.text("Update SpaceTerm Core on penguin?");
+    tree.node("Update Core");
+    tree.text("SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 3 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.");
     assert!(
         machines.executed_actions().is_empty(),
         "an open alert performs nothing"
@@ -355,7 +351,7 @@ fn the_title_bar_restart_asks_and_only_the_approved_work_restarts(cx: &mut gpui:
         machines.executed_actions().is_empty(),
         "an approval for three sessions never closes four"
     );
-    A11yTree::read(visual).text("This will close your 4 running sessions.");
+    A11yTree::read(visual).text("SpaceTerm Core restarts from 0.8.0 to 0.9.0. This ends 4 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.");
 
     click(CONFIRM, visual);
     assert_eq!(
@@ -409,7 +405,7 @@ fn installing_from_the_title_bar_performs_it_without_settings(cx: &mut gpui::Tes
     too_old.facts.as_mut().unwrap().pending = None;
     machines.emit(MachineUpdatesEvent::Machines(vec![too_old]));
     visual.run_until_parked();
-    A11yTree::read(visual).node("Update needed");
+    A11yTree::read(visual).node("Update penguin");
     let windows = visual.update(|_, cx| cx.windows().len());
 
     click("update-control", visual);
@@ -465,7 +461,9 @@ fn an_overdue_restart_with_sessions_open_never_runs_by_itself(cx: &mut gpui::Tes
 }
 
 #[gpui::test]
-fn work_in_progress_is_a_focusable_status(cx: &mut gpui::TestAppContext) {
+fn a_core_install_stays_out_of_the_title_bar_and_is_readable_in_the_menu(
+    cx: &mut gpui::TestAppContext,
+) {
     let (_, _, machines) = services(cx);
     let visual = hosted(cx);
     let mut installing = waiting(PENGUIN, "penguin", 0);
@@ -476,16 +474,51 @@ fn work_in_progress_is_a_focusable_status(cx: &mut gpui::TestAppContext) {
         received: 1,
         total: 2,
     });
-    machines.emit(MachineUpdatesEvent::Machines(vec![installing]));
+    machines.emit(MachineUpdatesEvent::Machines(vec![installing.clone()]));
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("update-control").is_none());
+    assert!(visual.debug_bounds("update-control-menu").is_none());
+
+    machines.emit(MachineUpdatesEvent::Machines(vec![
+        installing,
+        waiting(BUILD_BOX, "build-box", 1),
+        waiting([4; 32], "builder", 2),
+    ]));
+    visual.run_until_parked();
+    A11yTree::read(visual).node("2 updates");
+    click("update-control-menu", visual);
+    let tree = A11yTree::read(visual);
+    let row = tree.node("penguin");
+    assert_eq!(row["aria"]["role"], "Label");
+    assert_ne!(row["aria"]["disabled"], true);
+    assert_eq!(
+        row["aria"]["description"],
+        "Installing SpaceTerm Core 0.9.0 on penguin."
+    );
+    assert!(machines.executed_actions().is_empty());
+    assert!(machines.performed().is_empty());
+}
+
+#[gpui::test]
+fn work_in_progress_is_a_focusable_status(cx: &mut gpui::TestAppContext) {
+    let (_, _, machines) = services(cx);
+    let visual = hosted(cx);
+    let mut updating = waiting(PENGUIN, "penguin", 0);
+    let facts = updating.facts.as_mut().unwrap();
+    facts.pending = None;
+    facts.operation = Some(spaceterm_core::update::facts::Operation::Restarting {
+        to: Version::parse("0.9.0").unwrap(),
+    });
+    machines.emit(MachineUpdatesEvent::Machines(vec![updating]));
     visual.run_until_parked();
 
     let tree = A11yTree::read(visual);
-    let status = tree.node("Installing…");
+    let status = tree.node("Updating penguin…");
     assert_eq!(status["aria"]["role"], "Status");
     assert_ne!(status["aria"]["disabled"], true);
     assert_eq!(
         status["aria"]["description"],
-        "Installing SpaceTerm Core 0.9.0 on penguin."
+        "Updating SpaceTerm Core on penguin to 0.9.0."
     );
     assert!(tree.with_role("Button").is_empty(), "nothing to press");
 }
@@ -527,7 +560,7 @@ fn the_menu_reads_in_full_and_its_information_stays_reachable(cx: &mut gpui::Tes
     assert_ne!(row["aria"]["disabled"], true);
     assert_eq!(
         row["aria"]["description"],
-        "Restarting SpaceTerm Core on penguin."
+        "Updating SpaceTerm Core on penguin to 0.9.0."
     );
     assert!(row["aria"]["keyboard_shortcut"].is_null());
     let recent = tree.node("Recent");
