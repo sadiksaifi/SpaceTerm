@@ -968,6 +968,15 @@ pub(crate) fn prepare_before_quit(cx: &mut App, resume: ResumeQuit) -> bool {
         if !updates.model.cycle_active || updates.model.install_authorized {
             return false;
         }
+        // A relaunch that timed out left its installer with the updater, which can no longer
+        // cancel it or end its cycle. The quit proceeds, and the updater installs on it.
+        if updates.model.state
+            == (UpdateState::Failed {
+                error: UpdateError::Relaunch,
+            })
+        {
+            return false;
+        }
         if matches!(updates.model.state, UpdateState::Ready { .. }) {
             updates.model.confirmation_open = false;
             if updates.adapter.finish_on_quit().is_ok() {
@@ -1133,6 +1142,28 @@ mod tests {
     /// An approved relaunch that has not quit SpaceTerm within the deadline fails visibly and
     /// gives up its authority to quit. Try Again after the updater ended its cycle checks again
     /// and relaunches into the release once it is ready, with no second click.
+    #[gpui::test]
+    fn quitting_after_a_relaunch_timed_out_does_not_wait_for_the_updater(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let adapter = Rc::new(RecordingAdapter::available());
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Ready);
+        cx.run_until_parked();
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        cx.executor().advance_clock(RELAUNCH_DEADLINE);
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| relaunch_approval(cx)), None);
+
+        // The updater already holds its installer, so it can't cancel and never ends its cycle.
+        let waits = cx.update(|cx| prepare_before_quit(cx, Rc::new(|_| {})));
+        assert!(!waits, "a confirmed quit proceeds at once");
+        assert_eq!(adapter.cancellations.get(), 0);
+    }
+
     #[gpui::test]
     fn a_relaunch_that_does_not_quit_in_time_fails_and_try_again_relaunches(
         cx: &mut gpui::TestAppContext,
