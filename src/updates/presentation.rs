@@ -1831,12 +1831,13 @@ impl Presentation {
                 title: "SpaceTerm update overdue".into(),
                 body: match stage {
                     UpdateStage::Overdue => format!(
-                        "SpaceTerm installs {version} the next time it opens. Relaunch now to \
-                         choose when."
+                        "SpaceTerm {version} has waited more than two days. Relaunch to install \
+                         it. Your Terminal Sessions keep running."
                     ),
-                    _ => {
-                        format!("Relaunch to install SpaceTerm {version}. Your sessions stay open.")
-                    }
+                    _ => format!(
+                        "Relaunch to install SpaceTerm {version}. Your Terminal Sessions keep \
+                         running."
+                    ),
                 }
                 .into(),
             }),

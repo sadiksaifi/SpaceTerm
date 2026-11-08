@@ -176,11 +176,11 @@ fn after_one_day_the_desktop_update_is_overdue_and_reminds() {
     for (stage, body) in [
         (
             UpdateStage::Warning,
-            "Relaunch to install SpaceTerm 0.9.0. Your sessions stay open.",
+            "Relaunch to install SpaceTerm 0.9.0. Your Terminal Sessions keep running.",
         ),
         (
             UpdateStage::Overdue,
-            "SpaceTerm installs 0.9.0 the next time it opens. Relaunch now to choose when.",
+            "SpaceTerm 0.9.0 has waited more than two days. Relaunch to install it. Your Terminal Sessions keep running.",
         ),
     ] {
         let presentation = Presentation::new(desktop(&ready, stage), &[], &Dismissed::new(), NOW);
