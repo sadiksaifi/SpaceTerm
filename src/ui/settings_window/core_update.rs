@@ -284,39 +284,9 @@ impl SettingsWindow {
                 cx,
             ),
             Command::Explain(explanation) => {
+                // This runs inside an update of Settings, which the alert must update again.
                 let owner = cx.weak_entity();
-                let presenter = cx.entity();
-                let handle = window;
-                let _ = window.update(cx, |_, window, cx| {
-                    presenter.update(cx, |_, cx| {
-                        let _ = Alert::new(
-                            ModalId::new("settings-update-explanation"),
-                            explanation.title.clone(),
-                            explanation.title,
-                            explanation.message,
-                            vec![ModalAction::new(
-                                true,
-                                "OK",
-                                ModalActionRole::Affirmative,
-                                "settings-update-explanation-ok",
-                            )],
-                        )
-                        .present(window, cx, move |outcome, cx| {
-                            if matches!(
-                                outcome,
-                                AlertOutcome::Activated {
-                                    action_id: true,
-                                    ..
-                                }
-                            ) && let Some(then) = explanation.then
-                            {
-                                let _ = owner.update(cx, |settings, cx| {
-                                    settings.perform_update_command(*then, handle, cx)
-                                });
-                            }
-                        });
-                    });
-                });
+                cx.defer(move |cx| present_explanation(owner, explanation, window, cx));
             }
         }
     }
@@ -409,6 +379,49 @@ impl SettingsWindow {
         })
         .detach();
     }
+}
+
+/// Presents `explanation` over Settings, outside any update of it.
+fn present_explanation(
+    owner: gpui::WeakEntity<SettingsWindow>,
+    explanation: presentation::Explanation,
+    window: AnyWindowHandle,
+    cx: &mut App,
+) {
+    let Some(presenter) = owner.upgrade() else {
+        return;
+    };
+    let handle = window;
+    let _ = window.update(cx, |_, window, cx| {
+        presenter.update(cx, |_, cx| {
+            let _ = Alert::new(
+                ModalId::new("settings-update-explanation"),
+                explanation.title.clone(),
+                explanation.title,
+                explanation.message,
+                vec![ModalAction::new(
+                    true,
+                    "OK",
+                    ModalActionRole::Affirmative,
+                    "settings-update-explanation-ok",
+                )],
+            )
+            .present(window, cx, move |outcome, cx| {
+                if matches!(
+                    outcome,
+                    AlertOutcome::Activated {
+                        action_id: true,
+                        ..
+                    }
+                ) && let Some(then) = explanation.then
+                {
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.perform_update_command(*then, handle, cx)
+                    });
+                }
+            });
+        });
+    });
 }
 
 #[cfg(test)]

@@ -232,3 +232,18 @@ fn an_update_request_never_turns_into_a_same_version_restart(cx: &mut TestAppCon
     assert!(adapter.asked().is_empty());
     assert!(adapter.executed().is_empty());
 }
+
+#[gpui::test]
+fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, Some("1.6.0"));
+    adapter.hold_previews();
+    click(UPDATE_SELECTOR, cx);
+    adapter.answer_preview(|_, _| Err(crate::updates::machines::ActionFailure::Unreachable));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-settings-update-explanation-ok")
+            .is_some(),
+        "the failure is explained"
+    );
+    assert!(adapter.executed().is_empty());
+}
