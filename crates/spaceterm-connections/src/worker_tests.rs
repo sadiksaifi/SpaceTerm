@@ -1,5 +1,5 @@
 use std::sync::Condvar;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -85,13 +85,15 @@ struct Network {
     events: Sender<Event>,
     release: Arc<Release>,
     blocked_through: u8,
-    /// How every connection attempt fails.
+    /// How every connection attempt fails while `admits` is false.
     failure: DirectError,
+    /// Whether the Core admits this client's work protocol, as an updated Core does.
+    admits: Arc<AtomicBool>,
 }
 impl DirectNetwork for Network {
     fn connect(
         &self,
-        _: &str,
+        identity: &str,
         route: &DirectRoute,
         _: DeviceCredential,
         _: Arc<AtomicBool>,
@@ -99,6 +101,15 @@ impl DirectNetwork for Network {
         self.events.send(Event::Connect(route.id[0])).unwrap();
         if route.id[0] <= self.blocked_through {
             self.release.wait();
+        }
+        if self.admits.load(Ordering::Acquire) {
+            return MachineConnection::direct(
+                identity,
+                route.id,
+                route.paired.clone(),
+                Arc::new(NoConnection),
+            )
+            .map_err(DirectError::from);
         }
         Err(self.failure)
     }
@@ -169,6 +180,24 @@ fn failing_fixture(
     recovery: bool,
     failure: DirectError,
 ) -> (DirectConnections, Receiver<Event>, ReleaseOnDrop) {
+    let (connections, events, release, _) =
+        admitting_fixture(route_count, blocked_through, recovery, failure);
+    (connections, events, release)
+}
+
+/// A fixture whose routes fail with `failure` until the returned flag is set, and are then
+/// admitted.
+fn admitting_fixture(
+    route_count: u8,
+    blocked_through: u8,
+    recovery: bool,
+    failure: DirectError,
+) -> (
+    DirectConnections,
+    Receiver<Event>,
+    ReleaseOnDrop,
+    Arc<AtomicBool>,
+) {
     let records = Arc::new(MemoryRecords::default());
     let credentials = Arc::new(Credentials::default());
     let secret = DeviceCredential::generate().unwrap();
@@ -192,16 +221,18 @@ fn failing_fixture(
     drop(document);
     let (events, received) = mpsc::channel();
     let release = Arc::new(Release::default());
+    let admits = Arc::new(AtomicBool::new(false));
     let network = Arc::new(Network {
         events,
         release: release.clone(),
         blocked_through,
         failure,
+        admits: admits.clone(),
     });
     let connections =
         DirectConnections::new("spaceterm-development", records, credentials, network, None);
     connections.resume_retained();
-    (connections, received, ReleaseOnDrop(release))
+    (connections, received, ReleaseOnDrop(release), admits)
 }
 
 #[test]
@@ -243,7 +274,8 @@ fn direct_scheduler_bounds_route_work_and_reserves_revocation_capacity() {
     );
 }
 
-/// Waits until no attempt runs for `route`.
+/// Waits until no attempt runs for `route`. Retrying a refused route changes no status, so its
+/// status can't tell when the attempt ends.
 fn settle(connections: &DirectConnections, route: &DirectRouteId) {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while connections
@@ -290,7 +322,9 @@ fn retrying_a_route_now_forgets_its_backoff() {
 fn retrying_now_leaves_a_disconnected_or_refused_route_alone() {
     for (failure, disconnect) in [
         (DirectError::Transport, true),
+        (DirectError::Revoked, false),
         (DirectError::PinMismatch, false),
+        (DirectError::AuthenticationRefused, false),
     ] {
         let (connections, events, _release) = failing_fixture(1, 0, false, failure);
         let route = [1; 32];
@@ -314,10 +348,44 @@ fn retrying_now_leaves_a_disconnected_or_refused_route_alone() {
     }
 }
 
+/// A Core that refused this desktop's work protocol can be updated through its service lane.
+/// The expected restart's retry then checks the saved route once more and admits it once the
+/// Core speaks a compatible work protocol.
+#[test]
+fn retrying_now_checks_an_incompatible_route_again_until_it_is_admitted() {
+    let (connections, events, _release, admits) =
+        admitting_fixture(1, 0, false, DirectError::IncompatibleProtocol);
+    let route = [1; 32];
+    let attempted = |within: Duration| matches!(events.recv_timeout(within), Ok(Event::Connect(1)));
+    let refused = Some(DirectRouteStatus::Refused(RefusalReason::Incompatible));
+    assert!(attempted(Duration::from_secs(15)));
+    settle(&connections, &route);
+    assert_eq!(connections.status(&route), refused);
+
+    // A Core still on the incompatible version refuses again, and the route stays refused
+    // without further attempts.
+    connections.retry_now(&route);
+    assert!(attempted(Duration::from_secs(15)));
+    settle(&connections, &route);
+    assert_eq!(connections.status(&route), refused);
+    assert!(connections.core(&route).is_none());
+    assert!(!attempted(Duration::from_millis(2500)));
+
+    admits.store(true, Ordering::Release);
+    connections.retry_now(&route);
+    assert!(attempted(Duration::from_secs(15)));
+    settle(&connections, &route);
+    assert_eq!(
+        connections.status(&route),
+        Some(DirectRouteStatus::Connected)
+    );
+    assert!(connections.core(&route).is_some());
+}
+
 #[test]
 fn direct_subscription_close_waits_for_an_inflight_wake_and_prevents_later_notifications() {
     use std::future::Future;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll, Wake, Waker};
 
     struct InFlightWake {
