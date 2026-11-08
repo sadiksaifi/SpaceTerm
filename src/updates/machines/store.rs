@@ -680,6 +680,58 @@ mod tests {
         );
     }
 
+    /// A Core too old for this desktop's work major keeps its failed automatic install on every
+    /// surface, with the remedy, the incompatibility and Try Again, instead of a generic Update.
+    #[gpui::test]
+    fn an_incompatible_core_shows_its_failed_automatic_install(cx: &mut gpui::TestAppContext) {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        let penguin = [2; 32];
+        let install = MachineAction::Install;
+        let incompatible = || MachineUpdate {
+            link: super::super::MachineLink::Incompatible(
+                spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+            ),
+            ..offered(update("0.8.0", None), "0.9.0")
+        };
+        adapter.emit(MachineUpdatesEvent::Machines(vec![incompatible()]));
+        cx.run_until_parked();
+        assert_eq!(adapter.performed(), [(penguin, install.clone())]);
+
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine: penguin,
+            action: install.clone(),
+            outcome: Err(ActionFailure::DiskFull),
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(incompatible())));
+        cx.run_until_parked();
+        let shown = cx.update(|cx| presentation::current(cx));
+        let view = shown.machine(penguin).unwrap();
+        assert_eq!(view.control_label(), "penguin install failed");
+        assert_eq!(
+            view.sentence().as_ref(),
+            "SpaceTerm Core 0.9.0 couldn't install on penguin because penguin is out of disk \
+             space. penguin still runs SpaceTerm Core 0.8.0, which is too old for this \
+             SpaceTerm. Its Terminal Sessions keep running. Free some space, then choose Try \
+             Again."
+        );
+        let row = view.settings_row();
+        assert_eq!(row.status.as_ref(), "Install failed");
+        let button = row.button.expect("Settings offers Try Again");
+        assert_eq!(button.label.as_ref(), "Try Again");
+        assert_eq!(button.command, Command::Machine(penguin, install.clone()));
+        let items = view.extra_row().items.unwrap();
+        assert!(items.iter().any(|item| matches!(
+            item,
+            presentation::ExtraItem::Action { title, command, .. }
+                if title.as_ref() == "Try Again"
+                    && *command == Command::Machine(penguin, install.clone())
+        )));
+        assert_eq!(adapter.performed().len(), 1, "nothing retries it");
+    }
+
     #[gpui::test]
     fn recent_names_each_install_and_update_and_failures_reach_observers(
         cx: &mut gpui::TestAppContext,

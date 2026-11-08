@@ -302,9 +302,11 @@ pub(crate) enum MachineState {
         reason: InstallFailure,
     },
     /// This desktop's push of its bundled Core failed, which the Core's facts may not record.
+    /// `core_too_old` says the Core it left running is too old for this desktop.
     PushFailed {
         version: Version,
         failure: ActionFailure,
+        core_too_old: bool,
     },
     /// A restart began, and the Core did not come back on `expected`.
     CantConfirm {
@@ -573,7 +575,11 @@ impl MachineView {
             MachineState::InstallFailed {
                 version, reason, ..
             } => install_failure(&name, &place, version, *reason),
-            MachineState::PushFailed { version, failure } => {
+            MachineState::PushFailed {
+                version,
+                failure,
+                core_too_old,
+            } => {
                 let cause = match failure {
                     ActionFailure::DiskFull => format!(" because {name} is out of disk space"),
                     ActionFailure::Unreachable
@@ -589,7 +595,12 @@ impl MachineView {
                     ActionFailure::DiskFull => "Free some space, then choose Try Again.",
                     _ => "Choose Try Again to install it.",
                 };
-                format!("SpaceTerm Core {version} couldn't install on {name}{cause}. {name} still runs SpaceTerm Core {running}, and its Terminal Sessions keep running. {remedy}")
+                let still = if *core_too_old {
+                    format!("{name} still runs SpaceTerm Core {running}, which is too old for this SpaceTerm. Its Terminal Sessions keep running.")
+                } else {
+                    format!("{name} still runs SpaceTerm Core {running}, and its Terminal Sessions keep running.")
+                };
+                format!("SpaceTerm Core {version} couldn't install on {name}{cause}. {still} {remedy}")
             }
             MachineState::CantConfirm { expected } => {
                 format!(
@@ -1091,7 +1102,22 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
         update.link,
         MachineLink::Incompatible(Incompatible::ListenerTooOld)
     );
+    // A failed push outranks the Core being too old: it carries the remedy and Try Again, and
+    // its sentence still names the incompatibility.
+    let push_failed = || {
+        update
+            .failed_push
+            .as_ref()
+            .map(|failed| MachineState::PushFailed {
+                version: failed.version.clone(),
+                failure: failed.failure,
+                core_too_old,
+            })
+    };
     let Some(facts) = &update.facts else {
+        if let Some(failed) = push_failed() {
+            return failed;
+        }
         return if core_too_old {
             MachineState::CoreTooOld {
                 push: update.push.clone(),
@@ -1119,6 +1145,9 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
         Some(Operation::Checking) | None => {}
     }
     if core_too_old && facts.pending.is_none() {
+        if let Some(failed) = push_failed() {
+            return failed;
+        }
         return MachineState::CoreTooOld {
             push: update.push.clone(),
         };
@@ -1150,11 +1179,8 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
             }
         }
     }
-    if let Some(failed) = &update.failed_push {
-        return MachineState::PushFailed {
-            version: failed.version.clone(),
-            failure: failed.failure,
-        };
+    if let Some(failed) = push_failed() {
+        return failed;
     }
     if let Some(pending) = &facts.pending {
         let stranded = pending
