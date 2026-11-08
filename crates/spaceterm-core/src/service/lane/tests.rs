@@ -180,6 +180,48 @@ fn with_lane_running(version: &str, run: impl FnOnce(Lane)) {
     });
 }
 
+/// Runs `run` with fixture signing trust after it approves a signed installation at `paths`,
+/// so a server started there opens its update engine and answers its service lane.
+pub(crate) fn with_approved(paths: &crate::host::Paths, run: impl FnOnce()) {
+    let source = paths.data.with_extension("source");
+    with_artifact(&source, &paths.identity, |archive, signature| {
+        approve(paths, VERSION, archive, signature);
+        run();
+    });
+}
+
+/// Provisions the signed `version` at `archive` as the approved installation at `paths`.
+fn approve(
+    paths: &crate::host::Paths,
+    version: &str,
+    archive: &std::path::Path,
+    signature: &std::path::Path,
+) -> Service {
+    let service = Service::new(paths.clone(), paths.identity.clone(), Arc::new(Running));
+    let approved = service
+        .provision(archive, signature, target(), COMMIT, version)
+        .unwrap();
+    let installation = approved
+        .directory
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .into();
+    let state = super::super::State {
+        installation,
+        stopped: false,
+        automatic_start: true,
+        installed: true,
+        removing: false,
+        run: None,
+        activation: None,
+    };
+    let data = Directory::open(&paths.data, false).unwrap();
+    data.write_json(c"service.json", &state).unwrap();
+    service
+}
+
 /// Serves the signed `version` at `archive` as the approved installation of `fixture`.
 fn serve(
     fixture: &super::super::tests::Fixture,
@@ -188,24 +230,7 @@ fn serve(
     signature: &std::path::Path,
     run: impl FnOnce(Lane),
 ) {
-    let service = Service::new(
-        fixture.paths.clone(),
-        fixture.paths.identity.clone(),
-        Arc::new(Running),
-    );
-    let approved = service
-        .provision(archive, signature, target(), COMMIT, version)
-        .unwrap();
-    let data = Directory::open(&fixture.paths.data, false).unwrap();
-    let mut state = Service::state(&data).unwrap().unwrap();
-    state.installation = approved
-        .directory
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .into();
-    data.write_json(c"service.json", &state).unwrap();
+    let service = approve(&fixture.paths, version, archive, signature);
     let host = Arc::new(Host::default());
     let launches = Arc::new(AtomicUsize::new(0));
     let counted = launches.clone();

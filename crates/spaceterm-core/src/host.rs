@@ -823,6 +823,11 @@ fn serve_runtime_ready(
     }
     stop.request();
     SIGNAL_WAKE.store(-1, Ordering::Release);
+    // A client long-polling for update facts holds its connection thread in the engine, so the
+    // engine releases every wait before the threads are joined.
+    if let Ok(updates) = &updates {
+        updates.stop();
+    }
     // Connections still waiting to be accepted close in order. A listener closed with them
     // pending resets them on Linux.
     while let Ok((stream, _)) = listener.accept() {
@@ -1109,7 +1114,8 @@ pub(crate) struct Served {
 const FOLLOW_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Sends one work connection the update facts now, then again after every change, until it is
-/// dropped. It follows on its own thread, which ends at its next recheck after the drop.
+/// dropped or the server stops. It follows on its own thread, which ends at its next recheck
+/// after the drop, and at once when the server stops.
 struct FactsFollower {
     ended: Arc<AtomicBool>,
 }
@@ -1122,7 +1128,9 @@ impl FactsFollower {
             let ended = Arc::clone(&ended);
             move || {
                 while !ended.load(Ordering::Acquire) {
-                    let facts = source.wait(sent.revision, FOLLOW_RECHECK);
+                    let Some(facts) = source.wait(sent.revision, FOLLOW_RECHECK) else {
+                        return;
+                    };
                     if facts.revision == sent.revision || ended.load(Ordering::Acquire) {
                         continue;
                     }
@@ -1455,13 +1463,13 @@ mod tests {
             fn facts(&self) -> UpdateFacts {
                 self.0.lock().unwrap().clone()
             }
-            fn wait(&self, revision: u64, timeout: std::time::Duration) -> UpdateFacts {
+            fn wait(&self, revision: u64, timeout: std::time::Duration) -> Option<UpdateFacts> {
                 let facts = self.0.lock().unwrap();
                 let (facts, _) = self
                     .1
                     .wait_timeout_while(facts, timeout, |facts| facts.revision == revision)
                     .unwrap();
-                facts.clone()
+                Some(facts.clone())
             }
         }
 
@@ -2472,6 +2480,90 @@ mod startup_tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the waiting-for-facts shutdown test"]
+    fn core_facts_child() {
+        install_shutdown_signals().unwrap();
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
+        let paths = Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("d"),
+            runtime: root.join("r"),
+        };
+        // Only the supervised runtime serves beside an approved installation.
+        crate::service::lane::tests::with_approved(&paths, || {
+            serve_runtime(&paths, None, true).unwrap();
+        });
+    }
+
+    #[test]
+    fn shutdown_does_not_wait_for_a_client_waiting_for_update_facts() {
+        use crate::protocol::Preamble;
+        use crate::service::lane::{LaneReply, LaneRequest, MAX_FRAME};
+        let fixture = Fixture::new();
+        let mut child = fixture.start_test("host::startup_tests::core_facts_child", false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut lane = loop {
+            let mut stream = connect_when_ready(&fixture);
+            if protocol::admit_service_lane(
+                &mut stream,
+                protocol::Caller {
+                    client: &fixture.device,
+                    name: &"Test".into(),
+                    agent: None,
+                },
+                &fixture.pin,
+                "spaceterm-development",
+            )
+            .is_ok()
+            {
+                break stream;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the server never admitted a lane"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let call = |lane: &mut UnixStream, request: &LaneRequest| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            Preamble::send(lane, &serde_json::to_vec(request).unwrap(), deadline)?;
+            let reply = Preamble::receive(lane, MAX_FRAME, deadline)?;
+            Ok::<_, CoreError>(serde_json::from_slice::<LaneReply>(&reply).unwrap())
+        };
+        let Ok(LaneReply::Facts { boot, facts }) = call(&mut lane, &LaneRequest::Facts {}) else {
+            panic!("the server answered no facts");
+        };
+        let waiting = std::thread::spawn(move || {
+            let wait = LaneRequest::WaitFacts {
+                boot,
+                revision: facts.revision,
+            };
+            let _ = call(&mut lane, &wait);
+        });
+        // The long poll reaches the server before it stops.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!waiting.is_finished(), "the facts did not wait");
+        // SAFETY: the guard owns this live child process.
+        assert_eq!(
+            unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(exit) = child.0.try_wait().unwrap() {
+                assert!(exit.success(), "server must finish cleanup before exiting");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shutdown waited for the update facts long poll"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        waiting.join().unwrap();
     }
 
     #[test]

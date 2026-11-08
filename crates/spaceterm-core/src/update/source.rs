@@ -9,6 +9,6 @@ pub trait FactsSource: Send + Sync {
     fn facts(&self) -> UpdateFacts;
 
     /// The facts once their revision differs from `revision`, or the unchanged facts after
-    /// `timeout`.
-    fn wait(&self, revision: u64, timeout: Duration) -> UpdateFacts;
+    /// `timeout`. None once the server is shutting down, at once and without waiting.
+    fn wait(&self, revision: u64, timeout: Duration) -> Option<UpdateFacts>;
 }

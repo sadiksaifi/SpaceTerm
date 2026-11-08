@@ -342,6 +342,8 @@ struct Live {
     /// A silent restart that settled while this server kept running waits until then before
     /// the next one, so a helper that keeps failing does not fence the server every second.
     silent_after: Option<Instant>,
+    /// The server is shutting down, so no caller waits for the facts to change.
+    stopped: bool,
 }
 
 /// A change a client confirmed over the service lane, which the engine owns while it runs.
@@ -395,6 +397,7 @@ impl Updates {
                 operation: None,
                 facts: placeholder(&running),
                 silent_after: None,
+                stopped: false,
             }),
             running,
             protocols,
@@ -680,6 +683,14 @@ impl Updates {
         if sessions == 0 {
             let _ = self.restart(Restart::Silent);
         }
+    }
+
+    /// The server is shutting down. Every caller waiting for the facts to change returns now,
+    /// and later waits return at once, so connection threads finish without the long poll and
+    /// facts followers end.
+    pub(crate) fn stop(&self) {
+        self.shared.lock().stopped = true;
+        self.shared.changed.notify_all();
     }
 
     fn refresh(&self) {
@@ -1010,10 +1021,10 @@ impl FactsSource for Updates {
         self.shared.lock().facts.clone()
     }
 
-    fn wait(&self, revision: u64, timeout: Duration) -> UpdateFacts {
+    fn wait(&self, revision: u64, timeout: Duration) -> Option<UpdateFacts> {
         let deadline = Instant::now() + timeout;
         let mut live = self.shared.lock();
-        while live.facts.revision == revision {
+        while live.facts.revision == revision && !live.stopped {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -1025,7 +1036,7 @@ impl FactsSource for Updates {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
-        live.facts.clone()
+        (!live.stopped).then(|| live.facts.clone())
     }
 }
 

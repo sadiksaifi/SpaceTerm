@@ -620,11 +620,11 @@ impl LaneCore {
                 .map(LaneReply::Status),
             LaneRequest::Facts {} => self.facts().map(|facts| self.facts_reply(facts)),
             LaneRequest::WaitFacts { boot, revision } => self.updates().map(|updates| {
-                self.facts_reply(if boot == hex(&self.boot) {
-                    updates.wait(revision, WAIT_FACTS_LIMIT)
-                } else {
-                    updates.facts()
-                })
+                // A stopping server answers with its facts now, then closes the lane.
+                let waited = (boot == hex(&self.boot))
+                    .then(|| updates.wait(revision, WAIT_FACTS_LIMIT))
+                    .flatten();
+                self.facts_reply(waited.unwrap_or_else(|| updates.facts()))
             }),
             LaneRequest::Check => return (sourced(self.check()), None),
             LaneRequest::StageFetch => return (sourced(self.stage_fetch()), None),
