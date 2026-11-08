@@ -248,8 +248,14 @@ def main():
                         run(str(apps[0] / "Contents/MacOS/Fixture"))
                         assert "relaunched" in log.read_text()
                     else:
+                        # One Relaunch quits through the quit policy and relaunches, with no
+                        # dismissal and no second click.
                         assert (
-                            "confirmed" in events and "relaunched" in events and version == "0.1.1"
+                            events.count("confirmed") == 1
+                            and "relaunch-quit" in events
+                            and "dismissed" not in events
+                            and "relaunched" in events
+                            and version == "0.1.1"
                         ), events
                     if signed and version == "0.1.1":
                         verify_certificate(apps[0], fingerprint)

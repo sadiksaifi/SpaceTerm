@@ -828,13 +828,17 @@ impl ApplicationUpdates {
     }
 
     /// Installs the ready release and relaunches into it without asking: relaunching keeps every
-    /// Terminal Session running. Retries an authorized installation that a cancelled quit left.
+    /// Terminal Session running.
     pub(crate) fn relaunch(&mut self, cx: &mut Context<Self>) {
         if let Some(token) = self.model.confirmation() {
             self.finish_install_confirmation(token, true, cx);
-        } else {
-            self.retry_install(cx);
         }
+    }
+
+    /// Whether the person approved a relaunch that is still in progress. While it holds, a quit
+    /// request is that relaunch rather than an exit.
+    pub(crate) fn relaunch_authorized(&self) -> bool {
+        self.model.install_authorized && matches!(self.model.state, UpdateState::Installing { .. })
     }
 
     /// Clears a failed download or installation. The release stays pending, and the next
@@ -843,16 +847,6 @@ impl ApplicationUpdates {
         if matches!(self.model.state, UpdateState::Failed { .. }) {
             self.model.state = UpdateState::Idle;
             cx.notify();
-        }
-    }
-
-    /// Retry the already authorized restart if the application's quit confirmation was cancelled.
-    pub(crate) fn retry_install(&mut self, cx: &mut Context<Self>) {
-        if self.model.install_authorized
-            && matches!(self.model.state, UpdateState::Installing { .. })
-            && let Err(error) = self.adapter.install()
-        {
-            self.receive(UpdateEvent::Failed(error), cx);
         }
     }
 
@@ -948,6 +942,12 @@ impl ApplicationUpdates {
         self.reschedule();
         cx.notify();
     }
+}
+
+/// Whether an approved update relaunch is in progress, so a quit request is that relaunch.
+pub(crate) fn relaunch_authorized(cx: &App) -> bool {
+    cx.try_global::<UpdateService>()
+        .is_some_and(|service| service.0.read(cx).relaunch_authorized())
 }
 
 /// Ordinary quit can finish a verified installer without forcing termination or relaunch.

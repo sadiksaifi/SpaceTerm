@@ -210,9 +210,8 @@ fn check_for_updates(cx: &mut App) {
             }
         }
         UpdateState::Ready { .. } => request_install(&updates, InstallRequest::FrontWorkspace, cx),
-        UpdateState::Installing { version } => present_in_front_window(cx, move |window, cx| {
-            present_finish_install(&version, window, cx)
-        }),
+        // SpaceTerm is relaunching. The relaunch deadline reports it if it doesn't quit.
+        UpdateState::Installing { .. } => {}
     }
 }
 
@@ -583,50 +582,6 @@ fn present_install<T: 'static>(window: &mut Window, cx: &mut Context<T>) {
     }
 }
 
-fn finish_install_alert(version: &str) -> Alert<PromptAction> {
-    Alert::new(
-        ModalId::new("update-finish-install"),
-        "Finish installing update",
-        format!("Restart to Install SpaceTerm {version}?"),
-        "The update installs when SpaceTerm quits.",
-        vec![
-            action(
-                PromptAction::Restart,
-                "Restart",
-                ModalActionRole::Affirmative,
-                "update-finish-install-restart",
-            )
-            .with_emphasis(ModalActionEmphasis::Prominent)
-            .default_action(true),
-            action(
-                PromptAction::Later,
-                "Later",
-                ModalActionRole::Cancel,
-                "update-finish-install-later",
-            ),
-        ],
-    )
-}
-
-fn present_finish_install<T: 'static>(version: &str, window: &mut Window, cx: &mut Context<T>) {
-    present(
-        finish_install_alert(version),
-        window,
-        cx,
-        |action, cx| match action {
-            Some(PromptAction::Restart) => retry_install(cx),
-            Some(PromptAction::Later) => put_off(cx),
-            _ => {}
-        },
-    );
-}
-
-fn retry_install(cx: &mut App) {
-    if let Some(updates) = service(cx) {
-        updates.update(cx, |updates, cx| updates.retry_install(cx));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -822,7 +777,6 @@ mod tests {
             available_alert("0.4.2"),
             stop_download_alert("0.4.2"),
             install_alert("0.4.2"),
-            finish_install_alert("0.4.2"),
         ];
         alerts.extend(
             [

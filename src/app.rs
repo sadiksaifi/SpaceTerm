@@ -482,6 +482,8 @@ enum ApplicationQuitCoordinatorState {
     SessionEnding,
     WaitingForSettings,
     WaitingForUpdater,
+    /// An approved update relaunch is saving Settings before it quits.
+    Relaunching,
 }
 
 struct ApplicationQuitCoordinator {
@@ -556,6 +558,53 @@ impl ApplicationQuitCoordinator {
         ApplicationQuitDecision::Cancel
     }
 
+    /// Whether the person approved an update relaunch that is still in progress. The updater
+    /// then asks to quit, and neither the Quit Apple Event it sends nor any other quit request is
+    /// a dismissal or an exit. A relaunch that failed or was cancelled leaves quitting to ADR 0049
+    /// again.
+    fn relaunching(&self, cx: &App) -> bool {
+        let authorized = crate::updates::relaunch_authorized(cx);
+        if !authorized && *self.state.borrow() == ApplicationQuitCoordinatorState::Relaunching {
+            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+        }
+        authorized
+    }
+
+    /// An approved update relaunch closes no window and asks nothing: it saves Settings, then
+    /// quits once. A failed save keeps SpaceTerm running, and the relaunch deadline reports it.
+    fn relaunch(self: &Rc<Self>, cx: &mut App) {
+        if *self.state.borrow() == ApplicationQuitCoordinatorState::Relaunching {
+            return;
+        }
+        // An open quit warning sees the changed state when answered and closes without acting.
+        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Relaunching;
+        let coordinator = Rc::clone(self);
+        // The native request is still being answered. Saving and quitting follow it.
+        cx.defer(move |cx| {
+            crate::ui::settings_window::quit_when_saved(
+                cx,
+                ApplicationQuitAfterSave::new(move |cx, outcome| {
+                    if *coordinator.state.borrow() != ApplicationQuitCoordinatorState::Relaunching {
+                        return;
+                    }
+                    if outcome == ApplicationQuitSaveOutcome::Failed {
+                        *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                        return;
+                    }
+                    let coordinator = Rc::clone(&coordinator);
+                    cx.defer(move |cx| {
+                        if *coordinator.state.borrow()
+                            == ApplicationQuitCoordinatorState::Relaunching
+                            && let Some(adapter) = coordinator.adapter.upgrade()
+                        {
+                            adapter.confirm_quit(cx);
+                        }
+                    });
+                }),
+            );
+        });
+    }
+
     fn ready(&self, cx: &App) -> bool {
         *self.state.borrow() == ApplicationQuitCoordinatorState::Idle
             && !application_has_pending_close_confirmation(cx)
@@ -563,12 +612,18 @@ impl ApplicationQuitCoordinator {
 
     /// Every actual user exit requires the quit warning, including an idle or windowless client.
     fn exit(self: &Rc<Self>, cx: &mut App) {
-        if self.ready(cx) {
+        if self.relaunching(cx) {
+            self.relaunch(cx);
+        } else if self.ready(cx) {
             self.observe(None, cx);
         }
     }
 
     fn dismiss(self: &Rc<Self>, cx: &mut App) {
+        if self.relaunching(cx) {
+            self.relaunch(cx);
+            return;
+        }
         if !self.ready(cx) {
             return;
         }
@@ -3823,6 +3878,67 @@ mod runtime_tests {
             assert!(cx.update(|cx| cx.windows().is_empty()));
             assert_eq!(quit.confirmations(), 0);
         }
+    }
+
+    /// The updater's quit request after an approved Relaunch is that relaunch. It closes no
+    /// window, asks nothing and confirms the quit once, whether it arrives as the Quit Apple Event
+    /// Sparkle sends, as the exit request a self-updating archive makes, or as Command-Q. Once the
+    /// relaunch fails, the same requests follow ADR 0049 again.
+    #[gpui::test]
+    fn an_approved_relaunch_quits_once_without_dismissal_or_warning(cx: &mut gpui::TestAppContext) {
+        let (updates, quit, service) = relaunch_fixture(cx);
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        assert_eq!(updates.installations.get(), 1);
+
+        assert_eq!(
+            quit.simulate_native_request(ApplicationQuitRequest::Dismissal),
+            ApplicationQuitDecision::Cancel
+        );
+        cx.update(|cx| quit.request_quit(cx));
+        cx.update(|cx| cx.dispatch_action(&DismissApplication));
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+        assert_eq!(quit.confirmations(), 1);
+
+        updates.emit(crate::updates::UpdateEvent::Failed(
+            crate::updates::UpdateError::Installation,
+        ));
+        cx.run_until_parked();
+        quit.simulate_native_request(ApplicationQuitRequest::Dismissal);
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+        assert_eq!(quit.confirmations(), 1);
+    }
+
+    /// A windowed client with its status item and a downloaded update ready to install.
+    fn relaunch_fixture(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Rc<crate::updates::testing::RecordingAdapter>,
+        Rc<crate::platform::application_quit::testing::RecordingApplicationQuitAdapter>,
+        gpui::Entity<crate::updates::ApplicationUpdates>,
+    ) {
+        let updates = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let mut host = host_with_settings();
+        let adapters = &mut Rc::get_mut(&mut host).unwrap().adapters;
+        adapters.updates = updates.clone();
+        adapters.application_quit = quit.clone();
+        adapters.local_core = crate::ui::launch_testing::unanswered();
+        cx.update(|cx| {
+            start_application(cx, &host).unwrap();
+            crate::status_menu::set_available(cx, true);
+        });
+        let service = cx.update(|cx| cx.global::<crate::updates::UpdateService>().0.clone());
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        updates.emit(crate::updates::UpdateEvent::Available("0.1.1".into()));
+        updates.emit(crate::updates::UpdateEvent::Ready);
+        cx.run_until_parked();
+        (updates, quit, service)
     }
 
     /// Answers each launch question from a script and records what it was asked. `before`

@@ -5,6 +5,8 @@
 static void *session;
 static NSString *mode;
 static NSString *logFile;
+/// The person approved the update relaunch, as SpaceTerm's Relaunch does.
+static BOOL relaunchAuthorized;
 
 static void record(NSString *message) {
     NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:logFile];
@@ -12,6 +14,28 @@ static void record(NSString *message) {
     [file writeData:[[message stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
     [file closeFile];
 }
+// SpaceTerm's quit policy (ADR 0049). A Quit Apple Event without a reason, which the Dock and
+// Sparkle both send, is a dismissal: SpaceTerm closes its windows and keeps running. While an
+// approved update relaunch is in progress, the same request is that relaunch: SpaceTerm saves
+// Settings and quits afterwards, outside the Apple Event, with no quit warning.
+@interface SPTFixtureDelegate : NSObject <NSApplicationDelegate>
+@end
+@implementation SPTFixtureDelegate
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    NSAppleEventDescriptor *event = NSAppleEventManager.sharedAppleEventManager.currentAppleEvent;
+    BOOL dismissal = event && event.eventClass == 'aevt' && event.eventID == 'quit' &&
+        ![event paramDescriptorForKeyword:'why?'];
+    if (!dismissal) return NSTerminateNow;
+    if (!relaunchAuthorized) {
+        record(@"dismissed");
+        return NSTerminateCancel;
+    }
+    record(@"relaunch-quit");
+    dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+    return NSTerminateCancel;
+}
+@end
+
 static bool validate(const char *version, const char *display, const char *url, bool informational) {
     return !informational && strcmp(version, "0.1.1") == 0 && strcmp(display, "0.1.1") == 0 &&
         [@(url) hasPrefix:@"http://127.0.0.1:"];
@@ -22,6 +46,7 @@ static void event(void *context, uint32_t kind, const char *version, uint64_t fi
     if (kind == 5) {
         if ([mode isEqualToString:@"install"]) {
             record(@"confirmed");
+            relaunchAuthorized = YES;
             dispatch_async(dispatch_get_main_queue(), ^{ spt_updater_install(session); });
         } else if ([mode isEqualToString:@"quit"]) {
             record(@"normal-quit");
@@ -46,6 +71,8 @@ int main(void) {
         }
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+        SPTFixtureDelegate *delegate = [SPTFixtureDelegate new];
+        NSApp.delegate = delegate;
         session = spt_updater_create(NULL, event, validate);
         if (!session) { record(@"startup-failed"); return 2; }
         dispatch_async(dispatch_get_main_queue(), ^{ spt_updater_check(session); });

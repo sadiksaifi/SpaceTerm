@@ -403,9 +403,11 @@ unsafe extern "C-unwind" fn should_terminate(
     }
 }
 
-/// A Quit Apple Event without a reason comes from the person, such as the Dock's Quit. One with a
-/// reason means the session is logging out, restarting, or shutting down. A termination outside
-/// any Apple Event comes from the client itself, such as an installed update relaunching it.
+/// A Quit Apple Event without a reason comes from the Dock's Quit, and from Sparkle when an
+/// approved update relaunches the client; the quit coordinator tells the two apart by whether a
+/// relaunch is approved. One with a reason means the session is logging out, restarting, or
+/// shutting down. A termination outside any Apple Event comes from the client itself, such as
+/// Command-Q or a confirmed quit.
 fn termination_request() -> ApplicationQuitRequest {
     let Some(manager_class) = AnyClass::get(c"NSAppleEventManager") else {
         return ApplicationQuitRequest::Exit;

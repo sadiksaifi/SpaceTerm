@@ -15,7 +15,6 @@ enum { SPTUnavailable = 0, SPTCheckError, SPTDownloadError, SPTVerificationError
 @property(nonatomic, weak) SPUUpdater *updater;
 @property(nonatomic, copy) void (^choice)(SPUUserUpdateChoice);
 @property(nonatomic, copy) void (^cancellation)(void);
-@property(nonatomic, copy) void (^retryTermination)(void);
 @property(nonatomic) BOOL cancelling;
 @property(nonatomic) BOOL ready;
 @property(nonatomic) BOOL authorized;
@@ -95,13 +94,14 @@ enum { SPTUnavailable = 0, SPTCheckError, SPTDownloadError, SPTVerificationError
     if (self.cancelling) { [self cancel]; return; }
     [self emit:SPTReady];
 }
+// The application's quit policy approves the termination Sparkle requests for an authorized
+// install, so there is nothing to retry. A cancelled termination ends in the relaunch deadline.
 - (void)showInstallingUpdateWithApplicationTerminated:(BOOL)terminated retryTerminatingApplication:(void (^)(void))retry {
-    self.retryTermination = terminated ? nil : retry;
     [self emit:SPTInstalling];
 }
 - (void)showUpdateInstalledAndRelaunched:(BOOL)relaunched acknowledgement:(void (^)(void))acknowledgement { acknowledgement(); }
 - (void)dismissUpdateInstallation {
-    self.choice = nil; self.cancellation = nil; self.retryTermination = nil;
+    self.choice = nil; self.cancellation = nil;
 }
 - (BOOL)updaterShouldPromptForPermissionToCheckForUpdates:(SPUUpdater *)updater { return NO; }
 - (BOOL)updater:(SPUUpdater *)updater shouldDownloadReleaseNotesForUpdate:(SUAppcastItem *)item { return NO; }
@@ -124,7 +124,7 @@ enum { SPTUnavailable = 0, SPTCheckError, SPTDownloadError, SPTVerificationError
     [self emit:SPTFailed version:nil first:kind second:0];
 }
 - (void)updater:(SPUUpdater *)updater didFinishUpdateCycleForUpdateCheck:(SPUUpdateCheck)check error:(NSError *)error {
-    self.choice = nil; self.cancellation = nil; self.retryTermination = nil;
+    self.choice = nil; self.cancellation = nil;
     self.ready = NO;
     [self emit:SPTFinished];
 }
@@ -174,7 +174,6 @@ void spt_updater_cancel(void *pointer) { [((__bridge SPTUpdateSession *)pointer)
 bool spt_updater_install(void *pointer) {
     SPTUpdateDriver *driver = ((__bridge SPTUpdateSession *)pointer).driver;
     if (![NSThread isMainThread] || driver.cancelling) return false;
-    if (driver.authorized && driver.retryTermination) { driver.retryTermination(); return true; }
     if (!driver.ready || !driver.choice) return false;
     driver.authorized = YES;
     void (^reply)(SPUUserUpdateChoice) = driver.choice; driver.choice = nil;
