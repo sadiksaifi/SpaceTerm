@@ -1900,6 +1900,17 @@ mod startup_tests {
     const CHILD_TEST: &str = "host::startup_tests::core_start_child";
     const CHILD_ROOT: &str = "SPACETERM_MACHINE_START_FIXTURE";
 
+    /// The Core paths of the fixture at `root`. The data sits four levels below `root` as it
+    /// sits below an account home, so the service supervisor, and with it the update engine and
+    /// the service lane, opens on every platform.
+    fn fixture_paths(root: &Path) -> Paths {
+        Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join(".local/share/spaceterm-development/core"),
+            runtime: root.join("r"),
+        }
+    }
+
     struct Fixture {
         root: PathBuf,
         paths: Paths,
@@ -1913,11 +1924,7 @@ mod startup_tests {
                 .canonicalize()
                 .unwrap()
                 .join(format!("st530-{nonce:x}"));
-            let paths = Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            };
+            let paths = fixture_paths(&root);
             let data = Directory::open(&paths.data, true).unwrap();
             let _lock = data.lock("setup.lock", false).unwrap();
             let device = protocol::random().unwrap();
@@ -2122,11 +2129,7 @@ mod startup_tests {
     fn core_start_child() {
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         let result = serve_with_panes(
-            &Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            },
+            &fixture_paths(&root),
             None,
         );
         assert_eq!(result, Err(CoreError::StorageUnavailable));
@@ -2153,11 +2156,7 @@ mod startup_tests {
         }
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).unwrap());
         let result = serve_owned(
-            &Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            },
+            &fixture_paths(&root),
             crate::panes(Arc::default(), {
                 let root = root.clone();
                 move |_| Ok(Panes(root))
@@ -2345,11 +2344,7 @@ mod startup_tests {
         install_shutdown_signals().unwrap();
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         serve_with_panes(
-            &Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            },
+            &fixture_paths(&root),
             None,
         )
         .unwrap();
@@ -2373,11 +2368,7 @@ mod startup_tests {
         install_shutdown_signals().unwrap();
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         serve_with_panes(
-            &Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            },
+            &fixture_paths(&root),
             None,
         )
         .unwrap();
@@ -2487,11 +2478,7 @@ mod startup_tests {
     fn core_facts_child() {
         install_shutdown_signals().unwrap();
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
-        let paths = Paths {
-            identity: "spaceterm-development".into(),
-            data: root.join("d"),
-            runtime: root.join("r"),
-        };
+        let paths = fixture_paths(&root);
         // Only the supervised runtime serves beside an approved installation.
         crate::service::lane::tests::with_approved(&paths, || {
             serve_runtime(&paths, None, true).unwrap();
@@ -2576,11 +2563,7 @@ mod startup_tests {
         let late = Arc::clone(&late_requests);
         let mut stopped = false;
         serve_with_panes(
-            &Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            },
+            &fixture_paths(&root),
             // Like a real service, this one keeps the shared sync worker until it is dropped.
             Some(crate::panes(Arc::default(), move |sync| {
                 Ok(Answering(move |operation| {
@@ -2641,11 +2624,7 @@ mod startup_tests {
     fn owed_reply_shutdown_child() {
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         serve_with_panes(
-            &Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            },
+            &fixture_paths(&root),
             Some(crate::panes(Arc::default(), |_| Ok(Deferring::default()))),
         )
         .unwrap();
@@ -2700,11 +2679,7 @@ mod startup_tests {
         use crate::protocol::{ClaimReply, ReplyBody, Restored};
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         serve_with_panes(
-            &Paths {
-                identity: "spaceterm-development".into(),
-                data: root.join("d"),
-                runtime: root.join("r"),
-            },
+            &fixture_paths(&root),
             Some(crate::panes(Arc::default(), |_| {
                 Ok(Answering(|operation| {
                     Dispatch::reply(Ok(match operation {
