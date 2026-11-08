@@ -830,9 +830,9 @@ impl ApplicationUpdates {
     }
 
     /// Installs the ready release and relaunches into it without asking: relaunching keeps every
-    /// Terminal Session running. After a failed relaunch it tries again: it quits again while the
-    /// updater still holds its installer, and otherwise checks again and relaunches once the
-    /// release is ready.
+    /// Terminal Session running. A release that isn't ready yet is checked for and downloaded
+    /// first, and relaunches once it is ready, with no second click. After a failed relaunch it
+    /// tries again: it quits again while the updater still holds its installer.
     pub(crate) fn relaunch(&mut self, cx: &mut Context<Self>) {
         if self.model.retry_relaunch() {
             self.approve_relaunch(cx);
@@ -844,15 +844,17 @@ impl ApplicationUpdates {
             self.finish_install_confirmation(token, true, cx);
             return;
         }
-        if matches!(
-            self.model.state,
-            UpdateState::Failed {
-                error: UpdateError::Relaunch
+        match self.model.state {
+            UpdateState::Available { .. } => self.download(cx),
+            UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed { .. } => {
+                self.retry_download(cx);
             }
-        ) {
-            self.retry_download(cx);
-            self.relaunch_requested = matches!(self.model.state, UpdateState::Checking);
+            _ => {}
         }
+        self.relaunch_requested = matches!(
+            self.model.state,
+            UpdateState::Checking | UpdateState::Downloading { .. } | UpdateState::Verifying { .. }
+        );
     }
 
     /// The relaunch the person approved, while it is still in progress. While it holds, a quit
@@ -1187,6 +1189,43 @@ mod tests {
         adapter.emit(UpdateEvent::Ready);
         cx.run_until_parked();
         assert_eq!(adapter.installations.get(), 2);
+        assert!(cx.update(|cx| relaunch_approval(cx)).is_some());
+    }
+
+    /// Relaunch chosen before the release is downloaded downloads it, then relaunches once it is
+    /// ready, with no second click, even with automatic downloads off.
+    #[gpui::test]
+    fn relaunch_before_the_download_relaunches_once_the_release_is_ready(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (adapter, service) = launch_fixture(cx);
+        let document = crate::settings::SettingsDocument {
+            updates: UpdatePreferences {
+                automatic_downloads: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
+        );
+        service.update(cx, |updates, _| updates.attach_settings(settings));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        cx.run_until_parked();
+        assert_eq!(adapter.downloads.get(), 0);
+
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        assert_eq!(adapter.downloads.get(), 1);
+        adapter.emit(UpdateEvent::Downloading {
+            received: 1,
+            total: 2,
+        });
+        adapter.emit(UpdateEvent::Verifying);
+        cx.run_until_parked();
+        assert_eq!(adapter.installations.get(), 0);
+        adapter.emit(UpdateEvent::Ready);
+        cx.run_until_parked();
+        assert_eq!(adapter.installations.get(), 1);
         assert!(cx.update(|cx| relaunch_approval(cx)).is_some());
     }
 

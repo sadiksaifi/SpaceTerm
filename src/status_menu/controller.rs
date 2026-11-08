@@ -9,10 +9,10 @@ use gpui::App;
 use spaceterm_core::service::ServiceStatus;
 
 use super::model::{Command, Menu};
+use crate::updates::UpdateService;
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
 use crate::updates::presentation::{self, DesktopAction};
-use crate::updates::{UpdateService, UpdateState};
 
 /// A native alert the status item shows by itself.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -301,11 +301,7 @@ fn desktop(action: DesktopAction, cx: &mut App) {
             let Some(service) = service else {
                 return;
             };
-            service.update(cx, |updates, cx| match updates.state() {
-                UpdateState::Ready { .. } | UpdateState::Installing { .. } => updates.relaunch(cx),
-                UpdateState::Available { .. } => updates.download(cx),
-                _ => updates.retry_download(cx),
-            });
+            service.update(cx, |updates, cx| updates.relaunch(cx));
         }
         DesktopAction::WhatsNew => {
             crate::app::activate_default_window(cx, None);

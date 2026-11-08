@@ -11,7 +11,6 @@ use spaceterm_ui::{
 };
 
 use super::{UpdateControl, front_workspace_window, service, whats_new};
-use crate::updates::UpdateState;
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
 use crate::updates::presentation::{
@@ -63,20 +62,12 @@ fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
     }
 }
 
-/// Relaunches into a ready release without asking, or downloads it first.
+/// Relaunches into a ready release without asking, or downloads it first and relaunches once it
+/// is ready.
 fn update_desktop(cx: &mut App) {
-    let Some(updates) = service(cx) else { return };
-    let state = updates.read(cx).state().clone();
-    updates.update(cx, |updates, cx| match state {
-        UpdateState::Ready { .. } | UpdateState::Installing { .. } => updates.relaunch(cx),
-        UpdateState::Available { .. } => updates.download(cx),
-        UpdateState::Downloading { .. } | UpdateState::Verifying { .. } | UpdateState::Checking => {
-        }
-        UpdateState::Idle
-        | UpdateState::UpToDate
-        | UpdateState::Failed { .. }
-        | UpdateState::Unavailable => updates.retry_download(cx),
-    });
+    if let Some(updates) = service(cx) {
+        updates.update(cx, |updates, cx| updates.relaunch(cx));
+    }
 }
 
 /// Presents `alert` through `presenter`, and passes the answer to `answered`.
