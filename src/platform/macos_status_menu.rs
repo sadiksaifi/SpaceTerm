@@ -559,6 +559,7 @@ pub(in crate::platform) mod tests {
             }),
             capabilities: Capabilities::fake(&Capability::ALL),
             push: None,
+            bundled: None,
             failed_push: None,
         };
         let machines = [machine(1, "This Mac"), machine(2, "penguin")];

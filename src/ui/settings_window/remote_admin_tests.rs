@@ -578,6 +578,7 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
         facts: Some(*facts),
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
+        bundled: None,
         failed_push: None,
     };
     adapter.emit(MachineUpdatesEvent::Machines(vec![update.clone()]));

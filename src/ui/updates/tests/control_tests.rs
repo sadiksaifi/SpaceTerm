@@ -43,6 +43,7 @@ fn waiting(machine: MachineId, name: &'static str, sessions: u32) -> MachineUpda
         }),
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
+        bundled: None,
         failed_push: None,
     }
 }

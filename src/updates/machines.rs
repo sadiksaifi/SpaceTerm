@@ -36,6 +36,11 @@ pub(crate) struct MachineUpdate {
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
     /// `facts.running` and not `facts.skipped`. It drives "Update from This Mac".
     pub(crate) push: Option<Version>,
+    /// This desktop's embedded Core version for the Machine's platform, when it is newer than
+    /// every version the Core has and not `facts.skipped`, whether or not its Update Floor
+    /// admits `facts.running`. It differs from `push` while the Core must first reach that floor
+    /// from its own feed through a Stepping Stone.
+    pub(crate) bundled: Option<Version>,
     /// The last push of `push` that failed. The shared store records it, because a push that
     /// breaks off or runs out of disk space records nothing in the Core's facts. Adapters leave
     /// it None.

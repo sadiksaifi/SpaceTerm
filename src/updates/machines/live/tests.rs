@@ -785,6 +785,11 @@ struct Catalog(std::path::PathBuf);
 
 impl Catalog {
     fn new(identity: &str) -> Self {
+        Self::floored(identity, "0.9.0", "0.0.0")
+    }
+
+    /// A catalog whose build is `version` with the Update Floor `floor`.
+    fn floored(identity: &str, version: &str, floor: &str) -> Self {
         use ring::signature::Ed25519KeyPair;
         use sha2::{Digest, Sha256};
         use std::path::{Path, PathBuf};
@@ -799,8 +804,8 @@ impl Catalog {
         let layout = spaceterm_core::service::Layout::for_target(target, identity).unwrap();
         let manifest = serde_json::json!({
             "schema": 1, "stapled": false, "source_sha256": null, "identity": identity, "target": target,
-            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "version": "0.9.0",
-            "floor": "0.0.0", "protocols": Protocols::CURRENT,
+            "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "version": version,
+            "floor": floor, "protocols": Protocols::CURRENT,
         });
         let mut entries = vec![
             (
@@ -901,6 +906,53 @@ fn a_core_without_feed_access_offers_the_verified_embedded_build() {
         });
         assert_eq!(update.push, Some(version("0.9.0")));
     }
+}
+
+/// A Core below the embedded build's Update Floor is offered no push across the floor, but it
+/// never reads as up to date: it offers the Core's own feed install, which reaches the floor
+/// through a Stepping Stone.
+#[test]
+fn a_core_below_the_embedded_floor_offers_its_feed_update() {
+    let catalog = Catalog::floored("spaceterm-development", "1.2.2", "1.1.0");
+    let mut observed = facts(1, 2, None);
+    observed.facts.running = version("1.0.0");
+    let lane = ScriptedLane::new([Ok(observed)]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let adapter = LiveMachines::new(sources, catalog.embedded("spaceterm-development"));
+    let (sent, events) = async_channel::unbounded();
+    adapter.start(sent).unwrap();
+    let update = changed(&events, "the Core facts", |update| update.facts.is_some());
+    assert_eq!(update.push, None, "no push crosses the floor");
+
+    let view = MachineView::new(&update, &Dismissed::new(), crate::updates::now());
+    assert_eq!(
+        view.state,
+        MachineState::BelowFloor {
+            to: version("1.2.2")
+        }
+    );
+    assert_eq!(
+        view.sentence().as_ref(),
+        "SpaceTerm Core 1.0.0 on penguin is too old to install SpaceTerm Core 1.2.2 directly. \
+         Updating penguin installs the release it needs first from its update feed. Its 2 \
+         Terminal Sessions keep running."
+    );
+    let row = view.settings_row();
+    assert_eq!(row.status.as_ref(), "Older than 1.2.2");
+    let button = row.button.expect("Settings offers the feed update");
+    assert_eq!(button.label.as_ref(), "Update penguin");
+    assert_eq!(
+        button.command,
+        crate::updates::presentation::Command::Machine(PENGUIN, MachineAction::Install)
+    );
+
+    adapter.perform(PENGUIN, MachineAction::Install);
+    assert_eq!(finished(&events, &MachineAction::Install), Ok(()));
+    assert!(
+        lane.requests().contains(&"install".into()),
+        "Install asks the Core to update from its own feed"
+    );
 }
 
 #[test]

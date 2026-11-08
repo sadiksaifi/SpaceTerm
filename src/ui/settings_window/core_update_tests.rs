@@ -26,6 +26,7 @@ fn machine(pending: Option<&str>, sessions: u32) -> MachineUpdate {
         link: MachineLink::Connected,
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
+        bundled: None,
         failed_push: None,
         facts: Some(UpdateFacts {
             revision: 1,

@@ -527,6 +527,7 @@ fn machine(
         facts: Some(connected_facts(platform, sessions, now)),
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
+        bundled: None,
         failed_push: None,
     }
 }

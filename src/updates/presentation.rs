@@ -253,6 +253,11 @@ pub(crate) enum MachineState {
     Available {
         to: Version,
     },
+    /// The Core is older than this desktop's bundled Core but below its Update Floor, so no push
+    /// reaches it. Its own feed reaches the floor first through a Stepping Stone.
+    BelowFloor {
+        to: Version,
+    },
     /// Connected, with no facts yet.
     Connecting,
     /// A Pending Version waits for a restart.
@@ -331,6 +336,7 @@ impl MachineState {
             self,
             Self::Current
                 | Self::Available { .. }
+                | Self::BelowFloor { .. }
                 | Self::Connecting
                 | Self::Installing { .. }
                 | Self::DesktopTooOld
@@ -377,7 +383,9 @@ impl MachineState {
         Some(match self {
             Self::Ready { .. } => Glyph::UpdateCore,
             Self::Overdue { .. } => Glyph::UpdateCore,
-            Self::CoreTooOld { .. } | Self::Available { .. } => Glyph::UpdateCore,
+            Self::CoreTooOld { .. } | Self::Available { .. } | Self::BelowFloor { .. } => {
+                Glyph::UpdateCore
+            }
             Self::Installing { .. }
             | Self::Restarting { .. }
             | Self::Checking
@@ -523,6 +531,13 @@ impl MachineView {
                 ),
             },
             MachineState::Available { to } => format!("SpaceTerm Core {running} runs on {name}. SpaceTerm installs SpaceTerm Core {to} automatically."),
+            MachineState::BelowFloor { to } => {
+                let keep = match self.sessions {
+                    0 => String::new(),
+                    n => format!(" Its {} keep running.", terminal_sessions(n)),
+                };
+                format!("SpaceTerm Core {running} on {place} is too old to install SpaceTerm Core {to} directly. Updating {name} installs the release it needs first from its update feed.{keep}")
+            }
             MachineState::Connecting => format!("Connecting to SpaceTerm Core on {place}."),
             MachineState::Ready { .. } | MachineState::Overdue { .. } => self.restart_sentence(),
             MachineState::CoreTooOld { push } => match push {
@@ -639,9 +654,9 @@ impl MachineView {
                     if self.restart_asks() { "…" } else { "" }
                 )
             }
-            MachineState::CoreTooOld { .. } | MachineState::Available { .. } => {
-                format!("Update {name}")
-            }
+            MachineState::CoreTooOld { .. }
+            | MachineState::Available { .. }
+            | MachineState::BelowFloor { .. } => format!("Update {name}"),
             MachineState::Installing { .. } => format!("Installing on {name}…"),
             MachineState::Restarting { .. } => format!("Updating {name}…"),
             MachineState::Checking | MachineState::Connecting => format!("Checking {name}…"),
@@ -665,7 +680,9 @@ impl MachineView {
         let machine = self.machine;
         Some(match &self.state {
             MachineState::Ready { .. } | MachineState::Overdue { .. } => self.restart_command(),
-            MachineState::CoreTooOld { .. } => Command::Machine(machine, MachineAction::Install),
+            MachineState::CoreTooOld { .. } | MachineState::BelowFloor { .. } => {
+                Command::Machine(machine, MachineAction::Install)
+            }
             MachineState::CantConfirm { .. } => {
                 Command::Machine(machine, MachineAction::CheckAgain)
             }
@@ -737,6 +754,13 @@ impl MachineView {
                 Some((self.control_label(), self.restart_command())),
             ),
             MachineState::Available { to } => (format!("Update {to} available"), None),
+            MachineState::BelowFloor { to } => (
+                format!("Older than {to}"),
+                Some((
+                    self.control_label(),
+                    Command::Machine(self.machine, MachineAction::Install),
+                )),
+            ),
             MachineState::CoreTooOld { .. } => (
                 "Too old".to_owned(),
                 Some((
@@ -824,6 +848,7 @@ impl MachineView {
                 sessions(self.sessions)
             }),
             MachineState::Available { to } => quiet(format!("Update {to} available")),
+            MachineState::BelowFloor { to } => quiet(format!("Older than {to}")),
             MachineState::Connecting => ("Connecting…".to_owned(), Tone::Action, ExtraTile::Busy),
             MachineState::Ready { .. } => quiet("Update ready".to_owned()),
             MachineState::Overdue { .. } => (
@@ -923,6 +948,14 @@ impl MachineView {
                     }]),
                 )
             }
+            MachineState::BelowFloor { .. } => (
+                Some(self.sentence()),
+                Some(vec![ExtraItem::Action {
+                    title: self.control_label().into(),
+                    subtitle: Some("Sessions stay open".into()),
+                    command: Command::Machine(machine, MachineAction::Install),
+                }]),
+            ),
             MachineState::CoreTooOld { push } => (
                 info(match push {
                     Some(to) => format!("This SpaceTerm needs SpaceTerm Core {to}."),
@@ -1153,6 +1186,9 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
     }
     if let Some(to) = &update.push {
         return MachineState::Available { to: to.clone() };
+    }
+    if let Some(to) = &update.bundled {
+        return MachineState::BelowFloor { to: to.clone() };
     }
     MachineState::Current
 }

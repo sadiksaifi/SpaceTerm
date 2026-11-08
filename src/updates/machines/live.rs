@@ -664,6 +664,7 @@ impl Shared {
                         facts: None,
                         capabilities: unconnected(),
                         push: None,
+                        bundled: None,
                         failed_push: None,
                     },
                     known: machine.clone(),
@@ -717,8 +718,10 @@ impl Shared {
     fn observed(&self, id: MachineId, observed: &Observed, work: Result<(), Incompatible>) {
         let limit = self.restart_limit;
         let push = self.embedded.offer(&observed.facts);
+        let bundled = self.embedded.newer(&observed.facts);
         self.publish(id, |entry| {
             entry.update.push = push;
+            entry.update.bundled = bundled;
             entry.update.link = match work {
                 Ok(()) => MachineLink::Connected,
                 Err(incompatible) => MachineLink::Incompatible(incompatible),
@@ -757,6 +760,7 @@ impl Shared {
             entry.update.capabilities = reached(work);
             entry.update.facts = None;
             entry.update.push = None;
+            entry.update.bundled = None;
             entry.restart = None;
         });
     }

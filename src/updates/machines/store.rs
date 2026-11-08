@@ -489,6 +489,7 @@ mod tests {
             }),
             capabilities: Capabilities::fake(&Capability::ALL),
             push: None,
+            bundled: None,
             failed_push: None,
         }
     }
