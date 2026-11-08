@@ -181,6 +181,9 @@ struct UpdateModel {
     install_authorized: bool,
     cancelling: bool,
     cycle_active: bool,
+    /// The updater still holds the installer of a relaunch that ran out of time. It can no longer
+    /// cancel it or end its cycle, so only a quit installs it. Dismissing the failure keeps it.
+    installer_held: bool,
     manual_check: bool,
 }
 
@@ -198,6 +201,7 @@ impl UpdateModel {
             install_authorized: false,
             cancelling: false,
             cycle_active: false,
+            installer_held: false,
             manual_check: false,
         }
     }
@@ -254,6 +258,7 @@ impl UpdateModel {
         }
         if matches!(event, UpdateEvent::Finished) {
             self.cycle_active = false;
+            self.installer_held = false;
             // The updater gave up its installer while SpaceTerm kept running.
             if !self.cancelling && matches!(self.state, UpdateState::Installing { .. }) {
                 self.confirmation_open = false;
@@ -338,6 +343,7 @@ impl UpdateModel {
     /// release stays pending for Try Again.
     fn fail_relaunch(&mut self) {
         self.install_authorized = false;
+        self.installer_held = self.cycle_active;
         self.state = UpdateState::Failed {
             error: UpdateError::Relaunch,
         };
@@ -345,17 +351,13 @@ impl UpdateModel {
 
     /// Approves the relaunch again after it failed while the updater still holds its installer.
     fn retry_relaunch(&mut self) -> bool {
-        if !self.cycle_active
-            || self.state
-                != (UpdateState::Failed {
-                    error: UpdateError::Relaunch,
-                })
-        {
+        if !self.installer_held {
             return false;
         }
         let Some(version) = self.version.clone() else {
             return false;
         };
+        self.installer_held = false;
         self.install_authorized = true;
         self.state = UpdateState::Installing { version };
         true
@@ -865,8 +867,14 @@ impl ApplicationUpdates {
         .then_some(RelaunchApproval(self.relaunch_approvals))
     }
 
+    /// Whether a relaunch ran out of time while the updater still holds its installer. Relaunch
+    /// tries it again and a quit installs it, even after the failure was dismissed.
+    pub(crate) fn holds_failed_relaunch(&self) -> bool {
+        self.model.installer_held
+    }
+
     /// Clears a failed download or installation. The release stays pending, and the next
-    /// scheduled check tries again.
+    /// scheduled check tries again. An installer the updater already holds stays held.
     pub(crate) fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
         if matches!(self.model.state, UpdateState::Failed { .. }) {
             self.model.state = UpdateState::Idle;
@@ -970,11 +978,7 @@ pub(crate) fn prepare_before_quit(cx: &mut App, resume: ResumeQuit) -> bool {
         }
         // A relaunch that timed out left its installer with the updater, which can no longer
         // cancel it or end its cycle. The quit proceeds, and the updater installs on it.
-        if updates.model.state
-            == (UpdateState::Failed {
-                error: UpdateError::Relaunch,
-            })
-        {
+        if updates.model.installer_held {
             return false;
         }
         if matches!(updates.model.state, UpdateState::Ready { .. }) {
@@ -1159,6 +1163,56 @@ mod tests {
         assert_eq!(cx.update(|cx| relaunch_approval(cx)), None);
 
         // The updater already holds its installer, so it can't cancel and never ends its cycle.
+        let waits = cx.update(|cx| prepare_before_quit(cx, Rc::new(|_| {})));
+        assert!(!waits, "a confirmed quit proceeds at once");
+        assert_eq!(adapter.cancellations.get(), 0);
+    }
+
+    /// Times out an approved relaunch while the updater keeps its installer, then acknowledges
+    /// the failure the way the title bar's explanation does.
+    fn acknowledge_a_timed_out_relaunch(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Rc<RecordingAdapter>, Entity<ApplicationUpdates>) {
+        let adapter = Rc::new(RecordingAdapter::available());
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Ready);
+        cx.run_until_parked();
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        cx.executor().advance_clock(RELAUNCH_DEADLINE);
+        cx.run_until_parked();
+        service.update(cx, |updates, cx| updates.dismiss_failure(cx));
+        (adapter, service)
+    }
+
+    #[gpui::test]
+    fn try_again_after_acknowledging_a_failed_relaunch_quits_again(cx: &mut gpui::TestAppContext) {
+        let (adapter, service) = acknowledge_a_timed_out_relaunch(cx);
+        let quits = Rc::new(std::cell::Cell::new(0));
+        let counted = quits.clone();
+        cx.update(|cx| {
+            cx.on_action(move |_: &crate::app::QuitApplication, _| counted.set(counted.get() + 1));
+        });
+
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        cx.run_until_parked();
+        assert_eq!(quits.get(), 1, "Try Again quits again");
+        assert!(cx.update(|cx| relaunch_approval(cx)).is_some());
+        assert_eq!(
+            adapter.checks.get(),
+            1,
+            "the held installer needs no new check"
+        );
+    }
+
+    #[gpui::test]
+    fn quitting_after_acknowledging_a_failed_relaunch_does_not_wait_for_the_updater(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (adapter, _service) = acknowledge_a_timed_out_relaunch(cx);
+
         let waits = cx.update(|cx| prepare_before_quit(cx, Rc::new(|_| {})));
         assert!(!waits, "a confirmed quit proceeds at once");
         assert_eq!(adapter.cancellations.get(), 0);

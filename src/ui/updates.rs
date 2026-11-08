@@ -184,6 +184,11 @@ fn check_for_updates(cx: &mut App) {
         });
         return;
     };
+    // A dismissed relaunch failure still holds its installer, which no new check can replace.
+    if updates.read(cx).holds_failed_relaunch() {
+        present_relaunch_failure(cx);
+        return;
+    }
     let state = updates.read(cx).state().clone();
     match state {
         UpdateState::Unavailable => present_in_front_window(cx, |window, cx| {
