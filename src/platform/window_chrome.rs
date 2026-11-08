@@ -86,7 +86,6 @@ pub(crate) enum WindowRole {
     SidebarWindow,
     /// A small fixed modeless window such as About.
     Panel,
-    Launch,
 }
 
 #[derive(Clone)]

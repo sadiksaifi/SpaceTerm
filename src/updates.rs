@@ -150,9 +150,6 @@ pub(crate) trait UpdateAdapter {
         UpdateHistory::default()
     }
     fn save_history(&self, _history: &UpdateHistory) {}
-    fn preview_running_session(&self) -> bool {
-        false
-    }
     /// Seconds since the Unix epoch, the clock checks and reminders are scheduled by.
     fn now(&self) -> u64 {
         now()
@@ -454,22 +451,12 @@ pub(crate) fn record_recent(text: String, cx: &mut App) {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LaunchState {
-    Open,
-    Checking,
-    Required,
-    Installing,
-}
-
 type ResumeQuit = Rc<dyn Fn(&mut App)>;
 
 pub(crate) struct ApplicationUpdates {
     model: UpdateModel,
     adapter: Rc<dyn UpdateAdapter>,
     pending_quit: Option<ResumeQuit>,
-    launch: LaunchState,
-    resume_launch: Option<ResumeQuit>,
     settings: Option<crate::settings::Settings>,
     history: UpdateHistory,
     stage: UpdateStage,
@@ -489,7 +476,6 @@ pub(crate) struct ApplicationUpdates {
     reschedule: async_channel::Sender<()>,
     /// Settings changes, until the scheduler takes the receiver.
     settings_changes: Option<async_channel::Receiver<()>>,
-    _launch_timeout: Option<Task<()>>,
     /// Fails an approved relaunch that has not quit SpaceTerm in time.
     _relaunch_deadline: Option<Task<()>>,
     _events: Task<()>,
@@ -596,8 +582,6 @@ impl ApplicationUpdates {
             let mut updates = Self {
                 saved_history,
                 history,
-                launch: LaunchState::Open,
-                resume_launch: None,
                 settings: None,
                 stage: UpdateStage::Optional,
                 reminder: None,
@@ -610,7 +594,6 @@ impl ApplicationUpdates {
                 last_attempt: 0,
                 reschedule,
                 settings_changes: None,
-                _launch_timeout: None,
                 _relaunch_deadline: None,
                 model,
                 adapter,
@@ -669,9 +652,6 @@ impl ApplicationUpdates {
             .unwrap_or_default()
     }
 
-    pub(crate) fn launch_state(&self) -> LaunchState {
-        self.launch
-    }
     pub(crate) fn reminder(&self) -> Option<UpdateStage> {
         self.reminder
     }
@@ -716,50 +696,6 @@ impl ApplicationUpdates {
         cx.notify();
     }
 
-    /// Begins once, before any Workspace or Terminal Session exists. A bounded check and
-    /// download stall timeout release access; later completion then requires confirmation.
-    pub(crate) fn begin_launch(&mut self, resume: ResumeQuit, cx: &mut Context<Self>) {
-        self.resume_launch = Some(resume);
-        if matches!(self.model.state, UpdateState::Unavailable)
-            || self.adapter.preview_running_session()
-        {
-            self.open_launch(cx);
-            self.check(false, cx);
-            return;
-        }
-        self.launch = LaunchState::Checking;
-        self.arm_launch_timeout(Duration::from_secs(10), cx);
-        self.check(false, cx);
-        cx.notify();
-    }
-
-    fn arm_launch_timeout(&mut self, duration: Duration, cx: &mut Context<Self>) {
-        self._launch_timeout = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(duration).await;
-            let _ = this.update(cx, |this, cx| this.open_launch(cx));
-        }));
-    }
-
-    pub(crate) fn release_launch(cx: &mut App) {
-        if let Some(service) = cx.try_global::<UpdateService>().cloned() {
-            service.0.update(cx, |updates, cx| {
-                if updates.launch != LaunchState::Installing {
-                    updates.open_launch(cx);
-                }
-            });
-        }
-    }
-
-    fn open_launch(&mut self, cx: &mut Context<Self>) {
-        self.launch = LaunchState::Open;
-        self.reschedule();
-        self._launch_timeout = None;
-        if let Some(resume) = self.resume_launch.take() {
-            cx.defer(move |cx| resume(cx));
-        }
-        cx.notify();
-    }
-
     fn tick(&mut self, time: u64, cx: &mut Context<Self>) {
         let preferences = self.preferences();
         self.stage = self.history.stage(time);
@@ -768,11 +704,7 @@ impl ApplicationUpdates {
                 self.model.state,
                 UpdateState::UpToDate | UpdateState::Installing { .. }
             );
-        if outstanding
-            && self.launch == LaunchState::Open
-            && cx.active_window().is_some()
-            && self.history.reminder_due(time)
-        {
+        if outstanding && cx.active_window().is_some() && self.history.reminder_due(time) {
             self.reminder = Some(self.stage);
             self.history.reminded(time);
         }
@@ -973,49 +905,20 @@ impl ApplicationUpdates {
             self.save_history();
         }
         let finished = matches!(event, UpdateEvent::Finished);
-        let progress = matches!(
-            event,
-            UpdateEvent::Downloading { .. } | UpdateEvent::Verifying
-        );
         let notice = self.model.receive(event);
         if found && matches!(self.model.state, UpdateState::Available { .. }) {
-            if self.launch == LaunchState::Checking {
-                if self.prepared || self.stage == UpdateStage::Overdue {
-                    self.launch = LaunchState::Required;
-                    self.arm_launch_timeout(Duration::from_secs(30), cx);
-                } else {
-                    self.open_launch(cx);
-                }
-            }
             if !self.prepared
                 && (self.download_requested
                     || self.relaunch_requested
-                    || self.preferences().automatic_downloads
-                    || self.launch == LaunchState::Required)
+                    || self.preferences().automatic_downloads)
             {
-                self.automatic_download = !self.model.manual_check && !self.download_requested;
+                self.automatic_download = !self.model.manual_check
+                    && !self.download_requested
+                    && !self.relaunch_requested;
                 self.download_requested = false;
                 self.download(cx);
             }
             self.tick(time, cx);
-        }
-        if progress && self.launch != LaunchState::Open {
-            self.arm_launch_timeout(Duration::from_secs(30), cx);
-        }
-        if ready && self.launch != LaunchState::Open && !self.model.cancelling {
-            self.model.install_authorized = true;
-            if let Some(version) = self.model.version.clone() {
-                self.model.state = UpdateState::Installing { version };
-                self.launch = LaunchState::Installing;
-                // Once termination is authorized, never create work beneath a pending installer.
-                self._launch_timeout = None;
-                if let Err(error) = self.adapter.install() {
-                    self.receive(UpdateEvent::Failed(error), cx);
-                }
-            }
-        }
-        if failed || current || (finished && self.launch != LaunchState::Installing) {
-            self.open_launch(cx);
         }
         if failed || current || finished {
             self.relaunch_requested = false;
@@ -1030,7 +933,6 @@ impl ApplicationUpdates {
         if let Some(notice) = notice {
             // Download completion is quiet. Only an explicit restart action opens a confirmation.
             if notice != UpdateNotice::ReadyToInstall
-                && self.launch == LaunchState::Open
                 && !(notice == UpdateNotice::Failed && self.automatic_download)
             {
                 cx.emit(notice);
@@ -1061,9 +963,6 @@ pub(crate) fn prepare_before_quit(cx: &mut App, resume: ResumeQuit) -> bool {
         return false;
     };
     service.0.update(cx, |updates, cx| {
-        // Quit is authorized. Neither updater cleanup nor a timeout may resume startup.
-        updates.resume_launch = None;
-        updates._launch_timeout = None;
         if !updates.model.cycle_active || updates.model.install_authorized {
             return false;
         }
@@ -1556,127 +1455,44 @@ mod tests {
 
     fn launch_fixture(
         cx: &mut gpui::TestAppContext,
-    ) -> (
-        Rc<RecordingAdapter>,
-        Entity<ApplicationUpdates>,
-        Rc<std::cell::Cell<usize>>,
-    ) {
+    ) -> (Rc<RecordingAdapter>, Entity<ApplicationUpdates>) {
         let adapter = Rc::new(RecordingAdapter::available());
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
-        let opened = Rc::new(std::cell::Cell::new(0));
-        service.update(cx, |updates, cx| {
-            let opened = opened.clone();
-            updates.begin_launch(Rc::new(move |_| opened.set(opened.get() + 1)), cx);
-        });
+        service.update(cx, |updates, cx| updates.check(false, cx));
         cx.run_until_parked();
-        (adapter, service, opened)
+        (adapter, service)
     }
 
+    /// Nothing installs without the person's Relaunch, however old the release or whether the
+    /// updater retained its installer.
     #[gpui::test]
-    fn fresh_launch_waits_for_an_overdue_update_without_creating_work(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (adapter, service, opened) = launch_fixture(cx);
-        let document = crate::settings::SettingsDocument {
-            updates: UpdatePreferences {
-                automatic_downloads: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let settings = crate::settings::Settings::load(
-            crate::settings::storage::testing::MemoryStorage::with_document(&document),
-        );
-        service.update(cx, |updates, _| updates.attach_settings(settings));
+    fn an_overdue_or_prepared_update_never_installs_by_itself(cx: &mut gpui::TestAppContext) {
+        let (adapter, service) = launch_fixture(cx);
         adapter.emit(UpdateEvent::ReleaseMetadata {
             published_at: now() - 2 * policy::DAY,
-            prepared: false,
-        });
-        adapter.emit(UpdateEvent::Available("0.1.1".into()));
-        cx.run_until_parked();
-        assert_eq!(opened.get(), 0);
-        assert_eq!(adapter.downloads.get(), 1);
-        assert_eq!(
-            service.read_with(cx, |updates, _| updates.launch_state()),
-            LaunchState::Required
-        );
-        adapter.emit(UpdateEvent::Ready);
-        cx.run_until_parked();
-        assert_eq!(adapter.installations.get(), 1);
-        assert_eq!(opened.get(), 0);
-        // A slow installer must never gain a Workspace underneath its authorized termination.
-        cx.executor().advance_clock(Duration::from_secs(60));
-        cx.run_until_parked();
-        assert_eq!(opened.get(), 0);
-    }
-
-    #[gpui::test]
-    fn prepared_update_installs_on_launch_even_before_deadline(cx: &mut gpui::TestAppContext) {
-        let (adapter, _, opened) = launch_fixture(cx);
-        adapter.emit(UpdateEvent::ReleaseMetadata {
-            published_at: now(),
             prepared: true,
         });
         adapter.emit(UpdateEvent::Available("0.1.1".into()));
         adapter.emit(UpdateEvent::Ready);
         cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
         assert_eq!(adapter.downloads.get(), 0);
-        assert_eq!(adapter.installations.get(), 1);
-        assert_eq!(opened.get(), 0);
-    }
-
-    #[gpui::test]
-    fn offline_or_failed_update_releases_launch_once(cx: &mut gpui::TestAppContext) {
-        let (adapter, service, opened) = launch_fixture(cx);
-        adapter.emit(UpdateEvent::ReleaseMetadata {
-            published_at: now() - 2 * policy::DAY,
-            prepared: false,
-        });
-        adapter.emit(UpdateEvent::Available("0.1.1".into()));
-        adapter.emit(UpdateEvent::Failed(UpdateError::Download));
-        adapter.emit(UpdateEvent::Finished);
-        cx.run_until_parked();
-        assert_eq!(opened.get(), 1);
-        assert_eq!(
-            service.read_with(cx, |updates, _| updates.launch_state()),
-            LaunchState::Open
-        );
-        assert_eq!(adapter.installations.get(), 0);
-    }
-
-    #[gpui::test]
-    fn timed_out_check_cannot_auto_install_later_over_active_work(cx: &mut gpui::TestAppContext) {
-        let (adapter, service, opened) = launch_fixture(cx);
-        cx.executor().advance_clock(Duration::from_secs(10));
-        cx.run_until_parked();
-        assert_eq!(opened.get(), 1);
-        adapter.emit(UpdateEvent::ReleaseMetadata {
-            published_at: now() - 2 * policy::DAY,
-            prepared: false,
-        });
-        adapter.emit(UpdateEvent::Available("0.1.1".into()));
-        adapter.emit(UpdateEvent::Ready);
-        cx.run_until_parked();
         assert_eq!(adapter.installations.get(), 0);
         assert_eq!(
-            service.read_with(cx, |updates, _| updates.launch_state()),
-            LaunchState::Open
+            service.read_with(cx, |updates, _| updates.state().clone()),
+            UpdateState::Ready {
+                version: "0.1.1".into()
+            }
         );
-        let confirmation = service.update(cx, |updates, _| {
-            updates.begin_install_confirmation().unwrap()
-        });
-        service.update(cx, |updates, cx| {
-            updates.finish_install_confirmation(confirmation, true, cx)
-        });
-        assert_eq!(adapter.installations.get(), 1);
     }
 
     #[gpui::test]
     fn saved_download_opt_out_keeps_optional_updates_available_for_manual_download(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (adapter, service, opened) = launch_fixture(cx);
+        let (adapter, service) = launch_fixture(cx);
         let document = crate::settings::SettingsDocument {
             updates: UpdatePreferences {
                 automatic_downloads: false,
@@ -1690,7 +1506,6 @@ mod tests {
         service.update(cx, |updates, _| updates.attach_settings(settings));
         adapter.emit(UpdateEvent::Available("0.1.1".into()));
         cx.run_until_parked();
-        assert_eq!(opened.get(), 1);
         assert_eq!(adapter.downloads.get(), 0);
         service.update(cx, |updates, cx| updates.download(cx));
         assert_eq!(adapter.downloads.get(), 1);
@@ -1710,10 +1525,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn optional_background_download_is_quiet_and_does_not_hold_launch(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (adapter, service, opened) = launch_fixture(cx);
+    fn optional_background_download_is_quiet(cx: &mut gpui::TestAppContext) {
+        let (adapter, service) = launch_fixture(cx);
         let notices = Rc::new(std::cell::RefCell::new(Vec::new()));
         let received = notices.clone();
         let _subscription = cx.update(|cx| {
@@ -1723,7 +1536,6 @@ mod tests {
         });
         adapter.emit(UpdateEvent::Available("0.1.1".into()));
         cx.run_until_parked();
-        assert_eq!(opened.get(), 1);
         assert_eq!(adapter.downloads.get(), 1);
         adapter.emit(UpdateEvent::Ready);
         cx.run_until_parked();
@@ -1740,7 +1552,7 @@ mod tests {
         let adapter = Rc::new(adapter);
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
-        service.update(cx, |updates, cx| updates.begin_launch(Rc::new(|_| {}), cx));
+        service.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(UpdateEvent::Failed(UpdateError::Check));
         adapter.emit(UpdateEvent::Finished);
         cx.run_until_parked();
@@ -1749,10 +1561,6 @@ mod tests {
                 .pending_version()
                 .map(str::to_owned)),
             Some("0.1.1".into())
-        );
-        assert_eq!(
-            service.read_with(cx, |updates, _| updates.launch_state()),
-            LaunchState::Open
         );
     }
 

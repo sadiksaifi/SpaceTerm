@@ -1,14 +1,12 @@
-//! Update presentation: the title-bar update control, its alerts, menu commands, prompts, and
-//! launch view. [`crate::updates`] owns update policy and state, and
+//! Update presentation: the title-bar update control, its alerts, menu commands and prompts.
+//! [`crate::updates`] owns update policy and state, and
 //! [`crate::updates::presentation`] owns what every update surface says.
 
 pub(crate) mod commands;
 mod control;
-mod launch;
 pub(crate) mod whats_new;
 
 pub(super) use control::UpdateControl;
-pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
 
 use gpui::{
     App, BorrowAppContext, Context, Entity, Global, Subscription, Window, WindowHandle, actions,

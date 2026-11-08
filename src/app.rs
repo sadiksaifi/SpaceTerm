@@ -1171,14 +1171,6 @@ pub(crate) fn open(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
-    if cx
-        .try_global::<crate::updates::UpdateService>()
-        .is_some_and(|service| {
-            service.0.read(cx).launch_state() != crate::updates::LaunchState::Open
-        })
-    {
-        return Err(RuntimeError::Initialization);
-    }
     let adapters = crate::ui::WorkspaceManagerAdapters {
         local_filesystem: host.adapters.local_filesystem.clone(),
         key_input: Rc::clone(&host.adapters.key_input),
@@ -1338,9 +1330,7 @@ fn close_all_windows(cx: &mut App) {
             let _ = workspace.update(cx, |manager, window, cx| {
                 manager.request_window_close(window, cx);
             });
-        } else if !crate::ui::settings_window::request_window_close(window, cx)
-            && !crate::ui::updates::request_launch_window_close(window, cx)
-        {
+        } else if !crate::ui::settings_window::request_window_close(window, cx) {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
     }
@@ -1718,10 +1708,6 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
         }
         let gate = Rc::new(LaunchGate::for_host(&host));
         let launch: Rc<dyn Fn(&mut App)> = Rc::new(move |cx: &mut App| {
-            let host = Rc::clone(&host);
-            let reported_failure = Rc::clone(&reported_failure);
-            let desktop_channel = Rc::clone(&desktop_channel);
-            let pending_invitations = Rc::clone(&pending_invitations);
             if let Err(error) = initialize_admitted(cx, &host) {
                 reported_failure.set(Some(error));
                 cx.quit();
@@ -1731,52 +1717,31 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             if let Some(install) = host.status_menu {
                 install(cx, Rc::clone(&host.window_movement));
             }
-            let service = cx.global::<crate::updates::UpdateService>().0.clone();
-            service.update(cx, |updates, cx| {
-                updates.begin_launch(
-                    Rc::new(move |cx| {
-                        let host = Rc::clone(&host);
-                        let reported_failure = Rc::clone(&reported_failure);
-                        let desktop_channel = Rc::clone(&desktop_channel);
-                        let pending_invitations = Rc::clone(&pending_invitations);
-                        let open = Rc::new(move |cx: &mut App| {
-                            if let Err(error) = open_initial_workspace(cx, &host) {
-                                reported_failure.set(Some(error));
-                                cx.quit();
-                                return;
-                            }
-                            if let Some(endpoint) = desktop_channel.borrow_mut().take() {
-                                crate::ui::serve_desktop_requests(
-                                    endpoint,
-                                    crate::application_identity::ApplicationIdentity::current()
-                                        .directory_name(),
-                                    Arc::clone(&host.adapters.lifecycle.counters),
-                                    cx,
-                                );
-                            }
-                            if let Some(receiver) = pending_invitations.borrow_mut().take() {
-                                cx.spawn(async move |cx| {
-                                    while let Ok(link) = receiver.recv().await {
-                                        cx.update(|cx| {
-                                            leave_menu_only(cx);
-                                            crate::ui::settings_window::open_add_machine(
-                                                Some(link),
-                                                None,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                })
-                                .detach();
-                            }
-                        });
-                        open(cx);
-                    }),
+            // Workspaces open at once. The update service checks in the background and installs
+            // nothing until the person chooses Relaunch.
+            if let Err(error) = open_initial_workspace(cx, &host) {
+                reported_failure.set(Some(error));
+                cx.quit();
+                return;
+            }
+            if let Some(endpoint) = desktop_channel.borrow_mut().take() {
+                crate::ui::serve_desktop_requests(
+                    endpoint,
+                    crate::application_identity::ApplicationIdentity::current().directory_name(),
+                    Arc::clone(&host.adapters.lifecycle.counters),
                     cx,
                 );
-            });
-            if service.read(cx).launch_state() != crate::updates::LaunchState::Open {
-                crate::ui::updates::show_launch(cx);
+            }
+            if let Some(receiver) = pending_invitations.borrow_mut().take() {
+                cx.spawn(async move |cx| {
+                    while let Ok(link) = receiver.recv().await {
+                        cx.update(|cx| {
+                            leave_menu_only(cx);
+                            crate::ui::settings_window::open_add_machine(Some(link), None, cx);
+                        });
+                    }
+                })
+                .detach();
             }
         });
         open_after_data_check(gate, launch, cx);
@@ -3350,108 +3315,38 @@ mod runtime_tests {
         assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     }
 
+    /// A launch opens its Workspaces while the update check it started is still pending, and a
+    /// release the check finds installs nothing, however old or prepared it is.
     #[gpui::test]
-    fn launch_gate_prevents_workspace_creation_and_reopen_until_offline_fallback(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    fn a_launch_opens_workspaces_while_the_update_check_is_pending(cx: &mut gpui::TestAppContext) {
+        use crate::updates::{UpdateEvent, UpdateService, UpdateState};
+        let updates = Rc::new(crate::updates::testing::RecordingAdapter::available());
         let mut host = host_with_settings();
-        Rc::get_mut(&mut host).unwrap().adapters.updates = adapter.clone();
-        cx.update(|cx| {
-            initialize_application(cx, &host).unwrap();
-            let service = cx.global::<crate::updates::UpdateService>().0.clone();
-            let resumed_host = host.clone();
-            service.update(cx, |updates, cx| {
-                updates.begin_launch(
-                    Rc::new(move |cx| {
-                        open_initial_workspace(cx, &resumed_host).unwrap();
-                    }),
-                    cx,
-                )
-            });
-            assert!(open(cx, &host).is_err());
-            restore_default_window(cx, &host);
-            assert!(workspace_windows(cx).is_empty());
-        });
-        adapter.emit(crate::updates::UpdateEvent::Failed(
-            crate::updates::UpdateError::Check,
-        ));
-        adapter.emit(crate::updates::UpdateEvent::Finished);
+        Rc::get_mut(&mut host).unwrap().adapters.updates = updates.clone();
+        cx.update(|cx| initialize_application(cx, &host).unwrap());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
-        cx.update(|cx| assert_eq!(workspace_windows(cx).len(), 1));
-    }
-
-    #[gpui::test]
-    fn quitting_during_startup_check_does_not_open_a_workspace(cx: &mut gpui::TestAppContext) {
-        quit_during_startup_update(cx, false);
-    }
-
-    #[gpui::test]
-    fn quitting_during_startup_download_retires_the_launch_timeout(cx: &mut gpui::TestAppContext) {
-        quit_during_startup_update(cx, true);
-    }
-
-    fn quit_during_startup_update(
-        cx: &mut gpui::TestAppContext,
-        delayed_download_cancellation: bool,
-    ) {
-        use crate::updates::{ApplicationUpdates, UpdateEvent, UpdateService};
-
-        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
-        let quit = Rc::new(
-            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
-        );
-        let mut host = host_with_settings();
-        let adapters = &mut Rc::get_mut(&mut host).unwrap().adapters;
-        adapters.updates = updater.clone();
-        adapters.application_quit = quit.clone();
-        cx.update(|cx| {
-            initialize_application(cx, &host).unwrap();
-            let service = cx.global::<UpdateService>().0.clone();
-            let resumed_host = host.clone();
-            service.update(cx, |updates, cx| {
-                updates.begin_launch(
-                    Rc::new(move |cx| {
-                        open_initial_workspace(cx, &resumed_host).unwrap();
-                    }),
-                    cx,
-                );
-            });
-        });
-        if delayed_download_cancellation {
-            updater.emit(UpdateEvent::ReleaseMetadata {
-                published_at: crate::updates::now() - 2 * crate::updates::policy::DAY,
-                prepared: false,
-            });
-            updater.emit(UpdateEvent::Available("0.1.1".into()));
-        }
-        cx.run_until_parked();
-        cx.update(|cx| cx.dispatch_action(&QuitApplication));
-        cx.run_until_parked();
-        assert!(cx.has_pending_prompt());
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        assert_eq!(updates.checks.get(), 1);
         assert_eq!(
-            updater.cancellations.get(),
-            0,
-            "Cancel must keep startup intact"
+            service.read_with(cx, |updates, _| updates.state().clone()),
+            UpdateState::Checking
         );
-        cx.simulate_prompt_answer("Quit");
+
+        cx.update(|cx| open_initial_workspace(cx, &host).unwrap());
         cx.run_until_parked();
-        assert_eq!(updater.cancellations.get(), 1);
-        assert_eq!(quit.confirmations(), 0);
-        if delayed_download_cancellation {
-            assert_eq!(updater.downloads.get(), 1);
-            cx.executor()
-                .advance_clock(std::time::Duration::from_secs(31));
-            cx.run_until_parked();
-            assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
-            // A launch view that fails to open must not revive startup during quit either.
-            cx.update(ApplicationUpdates::release_launch);
-        }
-        updater.emit(UpdateEvent::Finished);
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+
+        updates.emit(UpdateEvent::ReleaseMetadata {
+            published_at: crate::updates::now() - 2 * crate::updates::policy::DAY,
+            prepared: true,
+        });
+        updates.emit(UpdateEvent::Available("0.1.1".into()));
+        updates.emit(UpdateEvent::Ready);
         cx.run_until_parked();
-        assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
-        assert!(!cx.has_pending_prompt());
-        assert_eq!(quit.confirmations(), 1);
+        assert_eq!(updates.installations.get(), 0);
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
     }
 
     #[gpui::test]

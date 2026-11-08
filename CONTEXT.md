@@ -189,7 +189,7 @@ _Avoid_: Hotkey, key equivalent
 
 ## Updates
 
-**Overdue Update**: An available update that a fresh launch requires before opening.
+**Overdue Update**: An available update whose release is at least two days old. Its Update Reminders repeat until it is installed. It never holds a launch, and nothing installs it without the person.
 
 **Update Reminder**: A deferrable notice about an outstanding update.
 
