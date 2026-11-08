@@ -226,6 +226,11 @@ pub(crate) enum DesktopState {
     Relaunching {
         version: String,
     },
+    /// A relaunch failed and the person acknowledged it, while the updater still holds its
+    /// installer. No check can replace that installer, so Relaunch tries again.
+    RelaunchHeld {
+        version: Option<String>,
+    },
     /// This build came by an update and its release notes are unread.
     WhatsNew {
         version: String,
@@ -242,6 +247,9 @@ pub(crate) struct DesktopFacts<'a> {
     pub(crate) notes_unread: bool,
     /// The running desktop version.
     pub(crate) running: &'a str,
+    /// A failed relaunch left its installer with the updater. It stays held after the person
+    /// acknowledges the failure, until a relaunch or quit installs it.
+    pub(crate) relaunch_held: bool,
 }
 
 /// One Machine's update state.
@@ -1225,6 +1233,10 @@ impl DesktopState {
         let pending = facts.pending.map(str::to_owned);
         let overdue = facts.stage != UpdateStage::Optional;
         let state = match facts.state {
+            // Acknowledging the failure hides its notice, not the way to finish the relaunch.
+            UpdateState::Idle if facts.relaunch_held => Self::RelaunchHeld {
+                version: pending.clone(),
+            },
             UpdateState::Ready { version } if overdue => Self::Overdue {
                 version: version.clone(),
                 stage: facts.stage,
@@ -1322,7 +1334,7 @@ impl DesktopState {
             Self::Current => return None,
             Self::Available { .. } => Glyph::Download,
             Self::Downloading { .. } | Self::Relaunching { .. } => Glyph::Working,
-            Self::Ready { .. } | Self::Overdue { .. } => Glyph::Restart,
+            Self::Ready { .. } | Self::Overdue { .. } | Self::RelaunchHeld { .. } => Glyph::Restart,
             Self::TooOld { .. } => Glyph::UpdateDesktop,
             Self::InstallFailed { .. } => Glyph::InstallFailed,
             Self::WhatsNew { .. } => Glyph::WhatsNew,
@@ -1334,7 +1346,7 @@ impl DesktopState {
             Self::InstallFailed { .. } => 2,
             Self::TooOld { .. } => 3,
             Self::Overdue { .. } => 8,
-            Self::Ready { .. } | Self::Available { .. } => 10,
+            Self::Ready { .. } | Self::Available { .. } | Self::RelaunchHeld { .. } => 10,
             Self::WhatsNew { .. } => 12,
             _ => 14,
         }
@@ -1355,7 +1367,7 @@ impl DesktopState {
             } => return format!("Download SpaceTerm {version}"),
             Self::Current => "SpaceTerm is current",
             Self::Downloading { .. } => "Downloading SpaceTerm…",
-            Self::Ready { .. } | Self::Overdue { .. } => "Relaunch",
+            Self::Ready { .. } | Self::Overdue { .. } | Self::RelaunchHeld { .. } => "Relaunch",
             Self::TooOld { .. } => "Update SpaceTerm",
             Self::InstallFailed {
                 error: UpdateError::Relaunch,
@@ -1399,6 +1411,7 @@ impl DesktopState {
                 }
             ),
             Self::InstallFailed { version: v, error } => desktop_failure(&version(v), *error),
+            Self::RelaunchHeld { version: v } => desktop_failure(&version(v), UpdateError::Relaunch),
             Self::Relaunching { .. } => "SpaceTerm is relaunching. Terminal Sessions keep running.".to_owned(),
             Self::WhatsNew { version } => format!("SpaceTerm updated to {version}."),
         }
@@ -1410,7 +1423,8 @@ impl DesktopState {
             Self::Available { .. }
             | Self::Ready { .. }
             | Self::Overdue { .. }
-            | Self::TooOld { .. } => Command::Desktop(DesktopAction::Update),
+            | Self::TooOld { .. }
+            | Self::RelaunchHeld { .. } => Command::Desktop(DesktopAction::Update),
             Self::WhatsNew { .. } => Command::Desktop(DesktopAction::WhatsNew),
             Self::InstallFailed { version, .. } => Command::Explain(Explanation {
                 title: match version {
@@ -1454,6 +1468,10 @@ impl DesktopState {
                     "Install failed"
                 }
                 .to_owned(),
+                Some(("Try Again", Command::Desktop(DesktopAction::Update))),
+            ),
+            Self::RelaunchHeld { .. } => (
+                "Relaunch failed".to_owned(),
                 Some(("Try Again", Command::Desktop(DesktopAction::Update))),
             ),
             Self::Relaunching { .. } => ("Relaunching…".to_owned(), None),
@@ -1840,6 +1858,7 @@ impl Presentation {
             DesktopState::InstallFailed { .. } => {
                 (running, Some(self.desktop.control_label().to_owned()))
             }
+            DesktopState::RelaunchHeld { .. } => (running, Some("Relaunch failed".to_owned())),
             DesktopState::Relaunching { .. } => (running, Some("Relaunching…".to_owned())),
             DesktopState::WhatsNew { .. } => (running, Some("Updated".to_owned())),
         };
@@ -1890,11 +1909,13 @@ impl Presentation {
                 subtitle: Some("Terminal Sessions keep running".into()),
                 command: Command::Desktop(DesktopAction::Update),
             }),
-            DesktopState::InstallFailed { .. } => actions.push(ExtraItem::Action {
-                title: "Retry SpaceTerm Update".into(),
-                subtitle: Some(self.desktop.sentence()),
-                command: Command::Desktop(DesktopAction::Update),
-            }),
+            DesktopState::InstallFailed { .. } | DesktopState::RelaunchHeld { .. } => {
+                actions.push(ExtraItem::Action {
+                    title: "Retry SpaceTerm Update".into(),
+                    subtitle: Some(self.desktop.sentence()),
+                    command: Command::Desktop(DesktopAction::Update),
+                });
+            }
             DesktopState::WhatsNew { version } => actions.push(ExtraItem::Action {
                 title: super::release_notes::embedded()
                     .map_or_else(
@@ -1976,6 +1997,7 @@ pub(crate) fn current(cx: &App) -> Presentation {
             notes_unread: super::release_notes::embedded().is_some()
                 && updates.release_notes_unread(),
             running,
+            relaunch_held: updates.holds_failed_relaunch(),
         },
         None => DesktopFacts {
             state: &unavailable,
@@ -1983,6 +2005,7 @@ pub(crate) fn current(cx: &App) -> Presentation {
             stage: UpdateStage::Optional,
             notes_unread: false,
             running,
+            relaunch_held: false,
         },
     };
     let now = super::now();

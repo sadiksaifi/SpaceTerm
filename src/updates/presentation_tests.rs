@@ -57,6 +57,7 @@ fn desktop(state: &UpdateState, stage: UpdateStage) -> DesktopFacts<'_> {
         stage,
         notes_unread: false,
         running: "0.8.0",
+        relaunch_held: false,
     }
 }
 
@@ -757,6 +758,75 @@ fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
         NOW,
     );
     assert_eq!(single(&shown).label.as_ref(), "Relaunch failed");
+}
+
+/// After the person acknowledges a failed relaunch whose installer the updater still holds,
+/// the notice turns quiet, and every surface still relaunches into that installer.
+#[test]
+fn an_acknowledged_relaunch_failure_keeps_relaunch_on_every_surface() {
+    let facts = DesktopFacts {
+        pending: Some("0.11.1"),
+        relaunch_held: true,
+        ..desktop(&UpdateState::Idle, UpdateStage::Overdue)
+    };
+    let shown = Presentation::new(facts, &[], &Dismissed::new(), NOW);
+    let relaunch = Command::Desktop(DesktopAction::Update);
+    let sentence = "SpaceTerm 0.11.1 is downloaded, but SpaceTerm couldn't quit to install it. \
+                    Your Terminal Sessions are still running.";
+
+    let item = single(&shown);
+    assert_eq!(
+        (
+            item.label.as_ref(),
+            item.tone,
+            item.glyph,
+            item.sentence.as_ref()
+        ),
+        ("Relaunch", Tone::Action, Glyph::Restart, sentence)
+    );
+    assert_eq!(item.command, Some(relaunch.clone()));
+
+    let row = shown
+        .desktop_row()
+        .expect("Settings and the menu show the desktop");
+    assert_eq!(
+        (row.status.as_ref(), row.sentence.as_ref()),
+        ("Relaunch failed", sentence)
+    );
+    assert_eq!(
+        row.button,
+        Some(RowButton {
+            label: "Try Again".into(),
+            command: relaunch.clone(),
+        })
+    );
+
+    assert_eq!(
+        shown.extra_header().state.as_deref(),
+        Some("Relaunch failed")
+    );
+    assert_eq!(
+        shown.extra_actions(),
+        [ExtraItem::Action {
+            title: "Retry SpaceTerm Update".into(),
+            subtitle: Some(sentence.into()),
+            command: relaunch,
+        }]
+    );
+
+    let released = Presentation::new(
+        DesktopFacts {
+            relaunch_held: false,
+            ..facts
+        },
+        &[],
+        &Dismissed::new(),
+        NOW,
+    );
+    assert!(
+        !matches!(released.desktop, DesktopState::RelaunchHeld { .. }),
+        "without a held installer, an acknowledged failure leaves no relaunch"
+    );
 }
 
 #[test]

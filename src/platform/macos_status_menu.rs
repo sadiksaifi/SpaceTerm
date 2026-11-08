@@ -570,6 +570,7 @@ pub(in crate::platform) mod tests {
                 stage: Default::default(),
                 notes_unread: false,
                 running: env!("SPACETERM_VERSION"),
+                relaunch_held: false,
             },
             &machines,
             &Dismissed::new(),
