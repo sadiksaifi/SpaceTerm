@@ -2128,10 +2128,7 @@ mod startup_tests {
     #[ignore = "runs only as a child of the server startup tests"]
     fn core_start_child() {
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
-        let result = serve_with_panes(
-            &fixture_paths(&root),
-            None,
-        );
+        let result = serve_with_panes(&fixture_paths(&root), None);
         assert_eq!(result, Err(CoreError::StorageUnavailable));
     }
 
@@ -2343,11 +2340,7 @@ mod startup_tests {
     fn core_signal_child() {
         install_shutdown_signals().unwrap();
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
-        serve_with_panes(
-            &fixture_paths(&root),
-            None,
-        )
-        .unwrap();
+        serve_with_panes(&fixture_paths(&root), None).unwrap();
     }
 
     #[test]
@@ -2367,11 +2360,7 @@ mod startup_tests {
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
         install_shutdown_signals().unwrap();
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
-        serve_with_panes(
-            &fixture_paths(&root),
-            None,
-        )
-        .unwrap();
+        serve_with_panes(&fixture_paths(&root), None).unwrap();
     }
 
     #[test]
