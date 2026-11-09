@@ -28,6 +28,8 @@ pub(crate) mod application_menu_model;
 #[cfg(feature = "desktop")]
 pub(crate) mod application_quit;
 #[cfg(feature = "desktop")]
+pub(crate) mod quit_policy;
+#[cfg(feature = "desktop")]
 pub(crate) mod capture_access;
 #[cfg(feature = "desktop")]
 pub(crate) mod desktop_events;

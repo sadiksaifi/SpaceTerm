@@ -40,6 +40,11 @@ pub(crate) fn perform(command: Command, presenter: Presenter, cx: &mut App) {
 fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
     match command {
         Command::Desktop(DesktopAction::Update) => update_desktop(cx),
+        Command::Desktop(DesktopAction::Download) => {
+            if let Some(updates) = service(cx) {
+                updates.update(cx, |updates, cx| updates.download_now(cx));
+            }
+        }
         Command::Desktop(DesktopAction::WhatsNew) => whats_new::open_whats_new(cx),
         Command::Desktop(DesktopAction::DismissFailure) => {
             if let Some(updates) = service(cx) {

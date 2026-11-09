@@ -17,6 +17,7 @@ use crate::platform::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitHandler,
     ApplicationQuitRequest, QuitAnswer, QuitButtons, QuitPrompt, StatusAreaName,
 };
+use crate::platform::quit_policy::{QuitStep, RelaunchPhase, quit_step};
 use crate::ssh::command::OpenSshExecutable;
 use crate::ssh::host_config::HostConfigFilesystem;
 use crate::ssh::process::SshProcessAdapter;
@@ -483,8 +484,14 @@ enum ApplicationQuitCoordinatorState {
     SessionEnding,
     WaitingForSettings,
     WaitingForUpdater,
+    /// A confirmed quit waits for This Mac's SpaceTerm Core to finish its restart.
+    WaitingForCore,
     /// An approved update relaunch is saving Settings before it quits.
     Relaunching,
+    /// Settings are saved and the updater holds the relaunch. Its quit request quits SpaceTerm.
+    RelaunchReleased,
+    /// SpaceTerm confirmed its quit for the relaunch.
+    RelaunchQuitting,
 }
 
 struct ApplicationQuitCoordinator {
@@ -545,43 +552,72 @@ impl ApplicationQuitSnapshot {
 }
 
 impl ApplicationQuitCoordinator {
+    /// Answers every quit request through [`quit_step`], the policy the macOS updater test
+    /// shares.
     fn request(
         self: &Rc<Self>,
         request: ApplicationQuitRequest,
         cx: &mut App,
     ) -> ApplicationQuitDecision {
-        match request {
-            ApplicationQuitRequest::Dismissal => self.dismiss(cx),
-            ApplicationQuitRequest::Exit => self.exit(cx),
-            ApplicationQuitRequest::SessionEnd => {
+        let (phase, approval) = self.relaunch_phase(cx);
+        match quit_step(request, phase) {
+            QuitStep::Proceed => {
                 *self.state.borrow_mut() = ApplicationQuitCoordinatorState::SessionEnding;
                 return ApplicationQuitDecision::Proceed;
             }
+            QuitStep::BeginRelaunch => {
+                if let Some(approval) = approval {
+                    self.relaunch(approval, cx);
+                }
+            }
+            QuitStep::Wait => {}
+            QuitStep::QuitForRelaunch => self.quit_for_relaunch(cx),
+            QuitStep::Dismiss => self.dismiss_now(cx),
+            QuitStep::Exit => self.exit_now(cx),
         }
         ApplicationQuitDecision::Cancel
     }
 
-    /// The update relaunch the person approved, while it is in progress. The updater then asks
-    /// to quit, and neither the Quit Apple Event it sends nor any other quit request is a
-    /// dismissal or an exit. A relaunch that failed or was cancelled leaves quitting to ADR 0049
-    /// again.
+    /// The update relaunch the person approved, while it is in progress. A relaunch that failed
+    /// or was cancelled leaves quitting to ADR 0049 again.
     fn relaunching(&self, cx: &App) -> Option<crate::updates::RelaunchApproval> {
         let approval = crate::updates::relaunch_approval(cx);
         if approval.is_none()
-            && *self.state.borrow() == ApplicationQuitCoordinatorState::Relaunching
+            && matches!(
+                *self.state.borrow(),
+                ApplicationQuitCoordinatorState::Relaunching
+                    | ApplicationQuitCoordinatorState::RelaunchReleased
+                    | ApplicationQuitCoordinatorState::RelaunchQuitting
+            )
         {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
         }
         approval
     }
 
+    fn relaunch_phase(
+        &self,
+        cx: &App,
+    ) -> (RelaunchPhase, Option<crate::updates::RelaunchApproval>) {
+        let Some(approval) = self.relaunching(cx) else {
+            return (RelaunchPhase::None, None);
+        };
+        let phase = if self.relaunch.get() != Some(approval) {
+            RelaunchPhase::Approved
+        } else if *self.state.borrow() == ApplicationQuitCoordinatorState::RelaunchReleased {
+            RelaunchPhase::Released
+        } else {
+            RelaunchPhase::Quitting
+        };
+        (phase, Some(approval))
+    }
+
     /// An approved update relaunch closes no window and asks nothing: it saves Settings, then
-    /// quits once for each approval. A failed save keeps SpaceTerm running, and the relaunch
-    /// deadline reports it.
+    /// hands the relaunch to the updater and quits once. A failed save fails the relaunch at
+    /// once, so an ordinary quit afterwards installs the release without starting SpaceTerm
+    /// again.
     fn relaunch(self: &Rc<Self>, approval: crate::updates::RelaunchApproval, cx: &mut App) {
-        if self.relaunch.replace(Some(approval)) == Some(approval) {
-            return;
-        }
+        self.relaunch.set(Some(approval));
         // An open quit warning sees the changed state when answered and closes without acting.
         *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Relaunching;
         let coordinator = Rc::clone(self);
@@ -595,19 +631,40 @@ impl ApplicationQuitCoordinator {
                     }
                     if outcome == ApplicationQuitSaveOutcome::Failed {
                         *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                        crate::updates::fail_unsaved_relaunch(approval, cx);
                         return;
                     }
                     let coordinator = Rc::clone(&coordinator);
                     cx.defer(move |cx| {
                         // The relaunch may have failed while Settings were saving.
-                        if coordinator.relaunching(cx) == Some(approval)
-                            && let Some(adapter) = coordinator.adapter.upgrade()
+                        if coordinator.relaunching(cx) != Some(approval)
+                            || *coordinator.state.borrow()
+                                != ApplicationQuitCoordinatorState::Relaunching
                         {
-                            adapter.confirm_quit(cx);
+                            return;
+                        }
+                        if crate::updates::release_relaunch(approval, cx) {
+                            *coordinator.state.borrow_mut() =
+                                ApplicationQuitCoordinatorState::RelaunchReleased;
+                        } else {
+                            coordinator.quit_for_relaunch(cx);
                         }
                     });
                 }),
             );
+        });
+    }
+
+    /// Quits for the relaunch once, after the request that asked returns.
+    fn quit_for_relaunch(self: &Rc<Self>, cx: &mut App) {
+        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::RelaunchQuitting;
+        let coordinator = Rc::clone(self);
+        cx.defer(move |cx| {
+            if *coordinator.state.borrow() == ApplicationQuitCoordinatorState::RelaunchQuitting
+                && let Some(adapter) = coordinator.adapter.upgrade()
+            {
+                adapter.confirm_quit(cx);
+            }
         });
     }
 
@@ -616,27 +673,25 @@ impl ApplicationQuitCoordinator {
             && !application_has_pending_close_confirmation(cx)
     }
 
+    fn dismiss(self: &Rc<Self>, cx: &mut App) {
+        self.request(ApplicationQuitRequest::Dismissal, cx);
+    }
+
     /// Every actual user exit requires the quit warning, including an idle or windowless client.
-    fn exit(self: &Rc<Self>, cx: &mut App) {
-        if let Some(approval) = self.relaunching(cx) {
-            self.relaunch(approval, cx);
-        } else if self.ready(cx) {
+    fn exit_now(self: &Rc<Self>, cx: &mut App) {
+        if self.ready(cx) {
             self.observe(None, cx);
         }
     }
 
-    fn dismiss(self: &Rc<Self>, cx: &mut App) {
-        if let Some(approval) = self.relaunching(cx) {
-            self.relaunch(approval, cx);
-            return;
-        }
+    fn dismiss_now(self: &Rc<Self>, cx: &mut App) {
         if !self.ready(cx) {
             return;
         }
         if crate::status_menu::available(cx) {
             close_all_windows(cx);
         } else {
-            self.exit(cx);
+            self.exit_now(cx);
         }
     }
 
@@ -750,6 +805,39 @@ impl ApplicationQuitCoordinator {
     }
 
     fn finish(self: &Rc<Self>, current: ApplicationQuitSnapshot, cx: &mut App) {
+        // An installed client's quit leaves its Core running. While This Mac's Core restarts, the
+        // quit waits until it is back, so Recent Updates records the update it finished.
+        if self.sessions.is_none() && LocalRestart::current(cx).is_some() {
+            self.wait_for_local_restart(current, cx);
+            return;
+        }
+        self.finish_now(current, cx);
+    }
+
+    fn wait_for_local_restart(self: &Rc<Self>, current: ApplicationQuitSnapshot, cx: &mut App) {
+        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForCore;
+        let coordinator = Rc::clone(self);
+        cx.spawn(async move |cx| {
+            let executor = cx.background_executor().clone();
+            let deadline = executor.now() + LOCAL_RESTART_WAIT;
+            loop {
+                executor.timer(std::time::Duration::from_millis(100)).await;
+                let restarting = cx.update(|cx| LocalRestart::current(cx).is_some());
+                if !restarting || executor.now() >= deadline {
+                    break;
+                }
+            }
+            cx.update(|cx| {
+                if *coordinator.state.borrow() == ApplicationQuitCoordinatorState::WaitingForCore {
+                    *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                    coordinator.finish_now(current, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn finish_now(self: &Rc<Self>, current: ApplicationQuitSnapshot, cx: &mut App) {
         let coordinator = Rc::clone(self);
         let updater_authorization = current.clone();
         if crate::updates::prepare_before_quit(
@@ -799,7 +887,8 @@ impl ApplicationQuitCoordinator {
         };
         // Without a status area, quitting leaves nothing the warning could name.
         let status_area = crate::status_menu::available(cx).then_some(self.status_area);
-        let prompt = quit_prompt(status_area, snapshot.sessions.as_ref());
+        let restart = LocalRestart::current(cx);
+        let prompt = quit_prompt(status_area, snapshot.sessions.as_ref(), restart.as_ref());
         let Some((answer, place)) = present_quit_prompt(adapter.as_ref(), &prompt, cx) else {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
             return;
@@ -1125,11 +1214,44 @@ fn cancel_quit_prompt(place: QuitPromptPlace, cx: &mut App) {
     close_quit_prompt_host(place, cx);
 }
 
+/// This Mac's SpaceTerm Core restarting while the person quits, which the quit waits for so
+/// Recent Updates still records its update.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocalRestart {
+    /// "This Mac" or "This Computer".
+    machine: gpui::SharedString,
+    /// The version it updates to, or None for a restart that changes no version.
+    to: Option<String>,
+}
+
+impl LocalRestart {
+    fn current(cx: &App) -> Option<Self> {
+        use spaceterm_core::update::facts::Operation;
+        let store = crate::updates::machines::store::MachineUpdates::global(cx)?;
+        let store = store.read(cx);
+        let update = store.machines().iter().find(|update| update.local)?;
+        let to = match update.facts.as_ref()?.operation.as_ref()? {
+            Operation::Restarting { to } => Some(to.to_string()),
+            Operation::RestartingSameVersion => None,
+            _ => return None,
+        };
+        Some(Self {
+            machine: update.name.clone(),
+            to,
+        })
+    }
+}
+
+/// How long a confirmed quit waits for This Mac's SpaceTerm Core to come back from its restart.
+const LOCAL_RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// `status_area` names where the client shows its status item, or None when the session shows
-/// none.
+/// none. `restart` names This Mac's Core restart, whose Terminal Sessions already ended, so the
+/// warning claims none keep running.
 fn quit_prompt(
     status_area: Option<StatusAreaName>,
     sessions: Option<&spaceterm_core::hierarchy::CloseInventory>,
+    restart: Option<&LocalRestart>,
 ) -> QuitPrompt {
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
     let count = sessions.map_or(0, |sessions| {
@@ -1139,7 +1261,24 @@ fn quit_prompt(
             .filter(|pane| pane.session.is_some())
             .count()
     });
+    let restarting = restart.map(|restart| match &restart.to {
+        Some(to) => format!(
+            "SpaceTerm Core on {} is updating to {to} and keeps running after {name} quits.",
+            restart.machine
+        ),
+        None => format!(
+            "SpaceTerm Core on {} is restarting and keeps running after {name} quits.",
+            restart.machine
+        ),
+    });
     let detail = match (sessions, count, status_area.map(StatusAreaName::phrase)) {
+        (None, _, place) if restarting.is_some() => {
+            let restarting = restarting.unwrap_or_default();
+            match place {
+                Some(place) => format!("{name} leaves the {place}. {restarting}"),
+                None => restarting,
+            }
+        }
         (None, _, Some(place)) => format!(
             "{name} leaves the {place}. Your Terminal Sessions keep running, so everything is where you left it."
         ),
@@ -2033,7 +2172,7 @@ mod tests {
             (StatusAreaName::MenuBar, "menu bar"),
             (StatusAreaName::StatusArea, "status area"),
         ] {
-            let prompt = quit_prompt(Some(status_area), None);
+            let prompt = quit_prompt(Some(status_area), None, None);
             assert_eq!(prompt.title, format!("Quit {name}?"));
             assert_eq!(
                 prompt.detail,
@@ -2047,12 +2186,12 @@ mod tests {
 
     #[test]
     fn quit_warning_without_a_status_area_names_no_place_to_leave() {
-        let prompt = quit_prompt(None, None);
+        let prompt = quit_prompt(None, None, None);
         assert_eq!(
             prompt.detail,
             "Your Terminal Sessions keep running, so everything is where you left it."
         );
-        let idle = quit_prompt(None, Some(&quit_sessions(1, &[None])));
+        let idle = quit_prompt(None, Some(&quit_sessions(1, &[None])), None);
         assert_eq!(
             idle.detail,
             "Quitting stops this development build's SpaceTerm Core. No Terminal Sessions are running."
@@ -2065,6 +2204,7 @@ mod tests {
         let idle = quit_prompt(
             Some(StatusAreaName::MenuBar),
             Some(&quit_sessions(1, &[None])),
+            None,
         );
         assert_eq!(
             idle.detail,
@@ -2080,6 +2220,7 @@ mod tests {
         let status_area_idle = quit_prompt(
             Some(StatusAreaName::StatusArea),
             Some(&quit_sessions(1, &[None])),
+            None,
         );
         assert_eq!(
             status_area_idle.detail,
@@ -2090,6 +2231,7 @@ mod tests {
         let one = quit_prompt(
             Some(StatusAreaName::MenuBar),
             Some(&quit_sessions(1, &[Some(1)])),
+            None,
         );
         assert_eq!(
             one.detail,
@@ -2228,7 +2370,7 @@ mod tests {
         let (quit, dock) = windowless_client_asking_alone(cx);
         let coordinator =
             development_coordinator(&quit, vec![Err(spaceterm_core::CoreError::NotRunning)]);
-        cx.update(|cx| coordinator.exit(cx));
+        cx.update(|cx| coordinator.request(ApplicationQuitRequest::Exit, cx));
         cx.run_until_parked();
         let prompts = quit.windowless_prompts();
         assert_eq!(prompts.len(), 1);
@@ -2252,7 +2394,7 @@ mod tests {
         cx.add_window(|_, _| gpui::EmptyView);
         let coordinator =
             development_coordinator(&quit, vec![Err(spaceterm_core::CoreError::NotRunning)]);
-        cx.update(|cx| coordinator.exit(cx));
+        cx.update(|cx| coordinator.request(ApplicationQuitRequest::Exit, cx));
         cx.run_until_parked();
         assert_eq!(
             cx.pending_prompt().unwrap().0,
@@ -2330,7 +2472,7 @@ mod tests {
         let (coordinator, quit) =
             development_quit_coordinator(cx, vec![Ok(sessions.clone()), Ok(sessions)]);
         assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
-        cx.update(|cx| coordinator.exit(cx));
+        cx.update(|cx| coordinator.request(ApplicationQuitRequest::Exit, cx));
         cx.run_until_parked();
         let (_, detail) = cx
             .pending_prompt()
@@ -2352,7 +2494,7 @@ mod tests {
                 cx,
                 vec![Ok(quit_sessions(1, &[Some(1)])), Ok(changed)],
             );
-            cx.update(|cx| coordinator.exit(cx));
+            cx.update(|cx| coordinator.request(ApplicationQuitRequest::Exit, cx));
             cx.run_until_parked();
             cx.simulate_prompt_answer("Quit");
             cx.run_until_parked();
@@ -2377,7 +2519,7 @@ mod tests {
         ] {
             let initial_succeeds = readings.len() > 1;
             let (coordinator, quit) = development_quit_coordinator(cx, readings);
-            cx.update(|cx| coordinator.exit(cx));
+            cx.update(|cx| coordinator.request(ApplicationQuitRequest::Exit, cx));
             cx.run_until_parked();
             if initial_succeeds {
                 cx.simulate_prompt_answer("Quit");
@@ -3866,10 +4008,72 @@ mod runtime_tests {
         let cx = &mut gpui::VisualTestContext::from_window(windows[0].into(), cx);
         cx.run_until_parked();
         assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-        assert_eq!(quit.confirmations(), 0);
+        assert_eq!(
+            quit.confirmations(),
+            1,
+            "the relaunch confirmed its quit, and SpaceTerm kept running"
+        );
         click("modal-action-update-relaunch-failure-try-again", cx);
         assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.confirmations(), 2);
+    }
+
+    /// On macOS the updater asks to quit only once SpaceTerm has saved Settings and released the
+    /// relaunch. SpaceTerm quits once on that request and on no earlier one.
+    #[gpui::test]
+    fn a_released_relaunch_quits_on_the_updater_request(cx: &mut gpui::TestAppContext) {
+        let (updates, quit, service) = relaunch_fixture(cx);
+        updates.releases_itself.set(true);
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        cx.run_until_parked();
+        assert_eq!(updates.releases.get(), 1, "Settings saved, then released");
+        assert_eq!(
+            quit.confirmations(),
+            0,
+            "the updater asks to quit by itself"
+        );
+
+        assert_eq!(
+            quit.simulate_native_request(ApplicationQuitRequest::Dismissal),
+            ApplicationQuitDecision::Cancel
+        );
+        cx.run_until_parked();
         assert_eq!(quit.confirmations(), 1);
+        quit.simulate_native_request(ApplicationQuitRequest::Dismissal);
+        cx.update(|cx| quit.request_quit(cx));
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 1, "the relaunch quits once");
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+    }
+
+    /// The quit warning during This Mac's Core update claims no Terminal Session keeps running:
+    /// the update just ended them.
+    #[test]
+    fn the_quit_warning_during_this_macs_core_update_names_the_update() {
+        let name = crate::application_identity::ApplicationIdentity::current().display_name();
+        let updating = LocalRestart {
+            machine: "This Mac".into(),
+            to: Some("0.12.0".to_owned()),
+        };
+        let prompt = quit_prompt(Some(StatusAreaName::MenuBar), None, Some(&updating));
+        assert_eq!(
+            prompt.detail,
+            format!(
+                "{name} leaves the menu bar. SpaceTerm Core on This Mac is updating to 0.12.0 and keeps running after {name} quits."
+            )
+        );
+        assert_eq!(prompt.buttons, QuitButtons::Quit);
+        let restarting = LocalRestart {
+            machine: "This Mac".into(),
+            to: None,
+        };
+        assert_eq!(
+            quit_prompt(None, None, Some(&restarting)).detail,
+            format!(
+                "SpaceTerm Core on This Mac is restarting and keeps running after {name} quits."
+            )
+        );
     }
 
     /// A windowed client with its status item and a downloaded update ready to install.

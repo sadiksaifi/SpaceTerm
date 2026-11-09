@@ -8,6 +8,8 @@ bool spt_updater_check(void *session);
 bool spt_updater_download(void *session);
 void spt_updater_cancel(void *session);
 bool spt_updater_install(void *session);
+// Hand the authorized relaunch to Sparkle once Settings are saved. Sparkle then asks to quit.
+bool spt_updater_release(void *session);
 void spt_updater_destroy(void *session);
 
 // Finish an already verified update on ordinary quit, without requesting termination.

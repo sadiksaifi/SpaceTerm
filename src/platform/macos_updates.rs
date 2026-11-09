@@ -40,6 +40,7 @@ mod native {
         fn spt_updater_download(session: *mut c_void) -> bool;
         fn spt_updater_cancel(session: *mut c_void);
         fn spt_updater_install(session: *mut c_void) -> bool;
+        fn spt_updater_release(session: *mut c_void) -> bool;
         fn spt_updater_destroy(session: *mut c_void);
         fn spt_updater_finish_on_quit(session: *mut c_void) -> bool;
     }
@@ -157,6 +158,11 @@ mod native {
         }
         fn finish_on_quit(&self) -> Result<(), UpdateError> {
             self.command(spt_updater_finish_on_quit, UpdateError::Installation)
+        }
+        /// Sparkle asks the installer to relaunch only now, then asks SpaceTerm to quit.
+        fn release_relaunch(&self) -> bool {
+            self.command(spt_updater_release, UpdateError::Installation)
+                .is_ok()
         }
         fn observe_clock_changes(&self, changed: Box<dyn Fn() + Send + Sync>) {
             *self.clock_changes.borrow_mut() = Some(

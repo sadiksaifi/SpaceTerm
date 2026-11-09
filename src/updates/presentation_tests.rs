@@ -840,12 +840,12 @@ fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
     let Some(Command::Explain(explanation)) = single(&shown).command.clone() else {
         panic!("Relaunch failed explains");
     };
-    // The updater ended its cycle, so only a new check can download the release again.
+    // The updater ended its cycle, so only a new download can install the release.
     assert_eq!(
         explanation.message.as_ref(),
         "SpaceTerm 0.11.1 is downloaded, but SpaceTerm couldn't quit to install it. Your \
-         Terminal Sessions are still running. Choose Check Now in SpaceTerm Settings to download \
-         it again."
+         Terminal Sessions are still running. Choose Download SpaceTerm 0.11.1 to download it \
+         again."
     );
     let held = Presentation::new(
         DesktopFacts {
@@ -1012,4 +1012,49 @@ fn a_failure_notice_does_not_hide_a_breaking_restarts_consequences() {
             .message
             .contains("SpaceTerm on old-mini will stop working with penguin until it updates.")
     );
+}
+
+/// A known release stays visible, with a Download that only downloads, after Stop Download, a
+/// dismissed failure, a failed check and an offline launch. Nothing says "up to date" then.
+#[test]
+fn a_known_desktop_release_stays_visible_and_its_download_only_downloads() {
+    for state in [
+        UpdateState::Idle,
+        UpdateState::Checking,
+        UpdateState::Failed {
+            error: UpdateError::Check,
+        },
+    ] {
+        let shown = Presentation::new(
+            DesktopFacts {
+                pending: Some("0.11.1"),
+                ..desktop(&state, UpdateStage::Optional)
+            },
+            &[],
+            &Dismissed::new(),
+            NOW,
+        );
+        assert_eq!(
+            shown.desktop,
+            DesktopState::Available {
+                version: "0.11.1".into()
+            },
+            "{state:?}"
+        );
+        assert_ne!(
+            shown.desktop.sentence().as_ref(),
+            "SpaceTerm is up to date."
+        );
+        let item = single(&shown);
+        assert_eq!(item.label.as_ref(), "Download SpaceTerm 0.11.1");
+        assert_eq!(
+            item.command,
+            Some(Command::Desktop(DesktopAction::Download))
+        );
+        let row = shown.desktop_row().expect("Settings shows the release");
+        assert_eq!(
+            row.button.map(|button| button.command),
+            Some(Command::Desktop(DesktopAction::Download))
+        );
+    }
 }

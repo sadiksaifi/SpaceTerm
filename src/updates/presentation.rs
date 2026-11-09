@@ -74,6 +74,8 @@ pub(crate) enum Command {
 pub(crate) enum DesktopAction {
     /// Relaunches into a ready release without asking, or downloads it first.
     Update,
+    /// Downloads the pending release. Relaunching stays a separate choice.
+    Download,
     WhatsNew,
     /// Clears a failed desktop install; the desktop tries again later.
     DismissFailure,
@@ -1295,7 +1297,8 @@ impl DesktopState {
                     | UpdateError::Installation
                     | UpdateError::DiskFull
                     | UpdateError::ReadOnly
-                    | UpdateError::Relaunch),
+                    | UpdateError::Relaunch
+                    | UpdateError::SettingsUnsaved),
             } => Self::InstallFailed {
                 version: pending,
                 error: *error,
@@ -1308,6 +1311,15 @@ impl DesktopState {
                     version: pending.unwrap_or_default(),
                     stage: facts.stage,
                     ready: false,
+                }
+            }
+            // A known release stays visible after Stop Download, a dismissed failure, a failed
+            // check and an offline launch. Downloading it checks for it again first.
+            UpdateState::Idle | UpdateState::Checking | UpdateState::Failed { .. }
+                if pending.is_some() =>
+            {
+                Self::Available {
+                    version: pending.unwrap_or_default(),
                 }
             }
             _ => Self::Current,
@@ -1392,10 +1404,7 @@ impl DesktopState {
             Self::Downloading { .. } => "Downloading SpaceTerm…",
             Self::Ready { .. } | Self::Overdue { .. } | Self::RelaunchHeld { .. } => "Relaunch",
             Self::TooOld { .. } => "Update SpaceTerm",
-            Self::InstallFailed {
-                error: UpdateError::Relaunch,
-                ..
-            } => "Relaunch failed",
+            Self::InstallFailed { error, .. } if error.relaunch_failed() => "Relaunch failed",
             Self::InstallFailed { .. } => "SpaceTerm install failed",
             Self::Relaunching { .. } => "Relaunching…",
             Self::WhatsNew { .. } => "What's new in SpaceTerm",
@@ -1427,11 +1436,17 @@ impl DesktopState {
                 machine,
                 ready,
             } => format!(
-                "This SpaceTerm is too old for SpaceTerm Core on {machine}. {} installs {} and keeps every Terminal Session running.",
-                if *ready { "Relaunching" } else { "Downloading and relaunching" },
-                match v {
-                    Some(_) => version(v),
-                    None => "a newer SpaceTerm".to_owned(),
+                "This SpaceTerm is too old for SpaceTerm Core on {machine}. {}",
+                match (v, ready) {
+                    (Some(_), true) => format!(
+                        "Relaunching installs {} and keeps every Terminal Session running.",
+                        version(v)
+                    ),
+                    (Some(_), false) => format!(
+                        "Download {}, then relaunch to install it. Relaunching keeps every Terminal Session running.",
+                        version(v)
+                    ),
+                    (None, _) => "Updating installs a newer SpaceTerm and keeps every Terminal Session running.".to_owned(),
                 }
             ),
             Self::InstallFailed { version: v, error, .. } => desktop_failure(&version(v), *error),
@@ -1446,7 +1461,13 @@ impl DesktopState {
     fn control_command(&self) -> Option<Command> {
         Some(match self {
             Self::Available { .. }
-            | Self::Ready { .. }
+            | Self::Overdue { ready: false, .. }
+            | Self::TooOld {
+                version: Some(_),
+                ready: false,
+                ..
+            } => Command::Desktop(DesktopAction::Download),
+            Self::Ready { .. }
             | Self::Overdue { .. }
             | Self::TooOld { .. }
             | Self::RelaunchHeld { .. } => Command::Desktop(DesktopAction::Update),
@@ -1455,10 +1476,7 @@ impl DesktopState {
                 title: match version {
                     _ if matches!(
                         self,
-                        Self::InstallFailed {
-                            error: UpdateError::Relaunch,
-                            ..
-                        }
+                        Self::InstallFailed { error, .. } if error.relaunch_failed()
                     ) =>
                     {
                         "Couldn't Relaunch SpaceTerm".to_owned()
@@ -1471,14 +1489,21 @@ impl DesktopState {
                 // installation SpaceTerm can't replace names its remedy in the sentence.
                 message: match self {
                     Self::InstallFailed {
-                        error: UpdateError::Relaunch,
-                        held: true,
-                        ..
-                    } => format!("{} Choose Relaunch to try again.", self.sentence()),
+                        error, held: true, ..
+                    } if error.relaunch_failed() => {
+                        format!("{} Choose Relaunch to try again.", self.sentence())
+                    }
+                    // Once the failure is acknowledged, the control and Settings offer the
+                    // download, or Settings offers Check Now when no version is known.
                     Self::InstallFailed {
-                        error: UpdateError::Relaunch,
+                        error,
+                        version: Some(version),
                         ..
-                    } => format!(
+                    } if error.relaunch_failed() => format!(
+                        "{} Choose Download SpaceTerm {version} to download it again.",
+                        self.sentence()
+                    ),
+                    Self::InstallFailed { error, .. } if error.relaunch_failed() => format!(
                         "{} Choose Check Now in SpaceTerm Settings to download it again.",
                         self.sentence()
                     ),
@@ -1520,20 +1545,28 @@ impl DesktopState {
             Self::Current | Self::NeedsNewerSystem => return None,
             Self::Available { .. } => (
                 "Not downloaded".to_owned(),
-                Some(("Download", Command::Desktop(DesktopAction::Update))),
+                Some(("Download", Command::Desktop(DesktopAction::Download))),
             ),
             Self::Downloading { .. } => ("Downloading…".to_owned(), None),
             Self::Ready { .. } => ("Terminal Sessions keep running".to_owned(), update()),
             Self::Overdue { .. } => ("Overdue".to_owned(), update()),
             Self::TooOld { .. } => ("Too old".to_owned(), update()),
+            // Try Again relaunches only after a failed relaunch. Otherwise it only downloads.
             Self::InstallFailed { error, .. } => (
-                if *error == UpdateError::Relaunch {
+                if error.relaunch_failed() {
                     "Relaunch failed"
                 } else {
                     "Install failed"
                 }
                 .to_owned(),
-                Some(("Try Again", Command::Desktop(DesktopAction::Update))),
+                Some((
+                    "Try Again",
+                    Command::Desktop(if error.relaunch_failed() {
+                        DesktopAction::Update
+                    } else {
+                        DesktopAction::Download
+                    }),
+                )),
             ),
             Self::RelaunchHeld { .. } => (
                 "Relaunch failed".to_owned(),
@@ -1544,6 +1577,16 @@ impl DesktopState {
                 format!("Updated to {version}"),
                 Some(("What's New", Command::Desktop(DesktopAction::WhatsNew))),
             ),
+        };
+        // A release not yet downloaded offers its download, which never relaunches.
+        let button = match self {
+            Self::Overdue { ready: false, .. }
+            | Self::TooOld {
+                version: Some(_),
+                ready: false,
+                ..
+            } => Some(("Download", Command::Desktop(DesktopAction::Download))),
+            _ => button,
         };
         Some(MenuRow {
             key: ItemKey::Desktop,
@@ -2230,6 +2273,9 @@ fn desktop_failure(release: &str, error: UpdateError) -> String {
         }
         UpdateError::Relaunch => format!(
             "{release} is downloaded, but SpaceTerm couldn't quit to install it. Your Terminal Sessions are still running."
+        ),
+        UpdateError::SettingsUnsaved => format!(
+            "{release} is downloaded, but SpaceTerm couldn't save Settings, so it didn't relaunch. Your Terminal Sessions are still running."
         ),
         UpdateError::SystemTooOld => UpdateError::SystemTooOld.to_string(),
         UpdateError::Installation | UpdateError::Check | UpdateError::Unavailable => {

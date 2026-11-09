@@ -327,6 +327,11 @@ fn desktop(action: DesktopAction, activation: Option<String>, cx: &mut App) {
             };
             service.update(cx, |updates, cx| updates.relaunch(cx));
         }
+        DesktopAction::Download => {
+            if let Some(service) = service {
+                service.update(cx, |updates, cx| updates.download_now(cx));
+            }
+        }
         DesktopAction::WhatsNew => {
             crate::app::activate_default_window(cx, activation.as_deref());
             crate::ui::updates::whats_new::open_whats_new(cx);

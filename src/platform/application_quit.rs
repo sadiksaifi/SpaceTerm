@@ -8,31 +8,7 @@ pub(crate) enum ApplicationQuitDecision {
     Cancel,
 }
 
-/// Why the host asked the application to quit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ApplicationQuitRequest {
-    /// The person asked to quit, such as from the Dock. Close windows when the status item
-    /// remains available; otherwise confirm exiting the client.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "Linux commands invoke dismissal directly; only macOS reports Dock requests"
-        )
-    )]
-    Dismissal,
-    /// The client chose to exit, such as from its status item or an installed update.
-    Exit,
-    /// The operating system is logging out, restarting, or shutting down. Never prompt.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "Linux session shutdown terminates the process outside application Quit"
-        )
-    )]
-    SessionEnd,
-}
+pub(crate) use super::quit_policy::ApplicationQuitRequest;
 
 /// The host's name for the place a windowless client stays reachable.
 #[cfg_attr(
