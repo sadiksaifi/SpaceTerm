@@ -383,6 +383,50 @@ fn a_starting_core_removes_what_a_crash_or_a_finished_update_left_behind() {
 }
 
 #[test]
+fn an_overdue_pending_version_keeps_the_overdue_value_every_peer_accepts() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Local,
+        )
+        .unwrap();
+        let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
+        let waited = |seconds: u64| {
+            let record = change(&data, |record| {
+                if let Some(pending) = &mut record.pending {
+                    pending.installed_at = now() - seconds;
+                }
+                record.clone()
+            })
+            .unwrap();
+            updates.shared.lock().record = record;
+            updates.facts()
+        };
+        let one_day = waited(OVERDUE_SINCE_AFTER + 60);
+        assert_eq!(
+            one_day.pending.unwrap().overdue_since,
+            None,
+            "not yet overdue"
+        );
+        let two_days = waited(OVERDUE_AFTER + 60);
+        assert_eq!(two_days.validate(), Ok(()));
+        let pending = two_days.clone().pending.unwrap();
+        assert_eq!(
+            pending.overdue_since,
+            Some(pending.installed_at + OVERDUE_SINCE_AFTER)
+        );
+        // A desktop of 0.11.2 checks the same value at work 1.0.
+        let older = ProtocolVersion { major: 1, minor: 0 };
+        assert_eq!(two_days.for_selected(older).validate(), Ok(()));
+    });
+}
+
+#[test]
 fn a_pending_version_of_another_work_or_service_major_is_breaking() {
     with_fixture_trust(|| {
         let current = Protocols::CURRENT;

@@ -16,6 +16,10 @@ pub const MAX_DEVICE_NAME_BYTES: usize = 192;
 pub const MAX_STRANDED: usize = 256;
 /// Seconds from [`PendingVersion::installed_at`] until a waiting Pending Version is overdue.
 pub const OVERDUE_AFTER: u64 = 2 * 86_400;
+/// Seconds from [`PendingVersion::installed_at`] to the value of
+/// [`PendingVersion::overdue_since`]. Work and service 1.x fix it at one day, and every peer
+/// refuses another value, so it stays apart from [`OVERDUE_AFTER`].
+pub const OVERDUE_SINCE_AFTER: u64 = 86_400;
 
 /// What one Machine's SpaceTerm Core reports about its updates.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,7 +236,9 @@ pub struct PendingVersion {
     pub breaking: bool,
     /// Unix seconds when it finished installing.
     pub installed_at: u64,
-    /// `installed_at + OVERDUE_AFTER` once that time has passed and the version still waits.
+    /// `installed_at + OVERDUE_SINCE_AFTER` once the version is overdue. This Core sets it once
+    /// [`OVERDUE_AFTER`] passed; a Core of 0.11.2 or earlier, after one day. A reader decides
+    /// with [`PendingVersion::overdue`].
     /// None before that time.
     pub overdue_since: Option<u64>,
     /// Paired Devices that cannot connect after the restart: those whose last admitted Hello
@@ -241,10 +247,16 @@ pub struct PendingVersion {
 }
 
 impl PendingVersion {
+    /// Whether the version waited [`OVERDUE_AFTER`] at `now`, Unix seconds, whichever Core
+    /// reported it.
+    pub fn overdue(&self, now: u64) -> bool {
+        now.saturating_sub(self.installed_at) >= OVERDUE_AFTER
+    }
+
     fn validate(&self) -> Result<(), InvalidFacts> {
         let overdue = self
             .overdue_since
-            .is_none_or(|since| Some(since) == self.installed_at.checked_add(OVERDUE_AFTER));
+            .is_none_or(|since| Some(since) == self.installed_at.checked_add(OVERDUE_SINCE_AFTER));
         let stranded = self.stranded.len() <= MAX_STRANDED
             && (self.breaking || self.stranded.is_empty())
             && self
@@ -435,7 +447,7 @@ mod tests {
             },
             breaking,
             installed_at: 1_793_750_400,
-            overdue_since: Some(1_793_750_400 + OVERDUE_AFTER),
+            overdue_since: Some(1_793_750_400 + OVERDUE_SINCE_AFTER),
             stranded: if breaking {
                 vec![StrandedDevice {
                     pairing: [0x9c; 32],
@@ -543,6 +555,24 @@ mod tests {
     }
 
     #[test]
+    fn overdue_facts_keep_the_value_every_1_x_peer_accepts() {
+        // A Core of 0.11.2 sets `overdue_since` one day after the install.
+        let released = PendingVersion {
+            overdue_since: Some(1_793_750_400 + 86_400),
+            ..pending(false)
+        };
+        assert_eq!(released.validate(), Ok(()));
+        // Overdue follows the two days, whichever Core reported the version.
+        assert!(!released.overdue(1_793_750_400 + 86_400));
+        assert!(released.overdue(1_793_750_400 + OVERDUE_AFTER));
+        let two_days = PendingVersion {
+            overdue_since: Some(1_793_750_400 + OVERDUE_AFTER),
+            ..pending(false)
+        };
+        assert_eq!(two_days.validate(), Err(InvalidFacts));
+    }
+
+    #[test]
     fn json_names_platforms_and_pairings_as_text() {
         let json = serde_json::to_value(facts()).unwrap();
         assert_eq!(json["platform"], "linux-x86_64");
@@ -609,7 +639,7 @@ mod tests {
             },
             UpdateFacts {
                 pending: Some(PendingVersion {
-                    overdue_since: Some(1_793_750_400 + OVERDUE_AFTER - 1),
+                    overdue_since: Some(1_793_750_400 + OVERDUE_SINCE_AFTER - 1),
                     ..pending(false)
                 }),
                 ..facts()

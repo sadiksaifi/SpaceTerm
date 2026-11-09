@@ -13,8 +13,9 @@ use std::time::Duration;
 use spaceterm_core::protocol::capability::{Capabilities, Capability, Unavailable};
 use spaceterm_core::protocol::version::{self as protocol, Incompatible, ProtocolVersion};
 use spaceterm_core::update::facts::{
-    CheckFailure, FailureKind, InstallFailure, OVERDUE_AFTER, Operation, PendingVersion, Platform,
-    Protocols, StartFailure, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure, Version,
+    CheckFailure, FailureKind, InstallFailure, OVERDUE_SINCE_AFTER, Operation, PendingVersion,
+    Platform, Protocols, StartFailure, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure,
+    Version,
 };
 
 use super::{
@@ -609,7 +610,7 @@ fn machines(scenario: Scenario, now: u64) -> Vec<MachineUpdate> {
             let facts = facts(&mut penguin);
             facts.sessions = 3;
             if let Some(pending) = &mut facts.pending {
-                pending.overdue_since = Some(installed_at + OVERDUE_AFTER);
+                pending.overdue_since = Some(installed_at + OVERDUE_SINCE_AFTER);
             }
         }
         Scenario::Breaking => {

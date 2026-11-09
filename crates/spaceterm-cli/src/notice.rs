@@ -5,7 +5,7 @@
 //! `--quiet` or `--json`. After one day the notice escalates: it says how long the version has
 //! waited and how many Terminal Sessions a restart ends.
 use crate::contract::{EXIT_BROKEN_PIPE, MachineRef, Mode};
-use spaceterm_core::update::facts::{OVERDUE_AFTER, UpdateFacts};
+use spaceterm_core::update::facts::UpdateFacts;
 use std::io::Write;
 
 /// Whether a notice prints in this output mode.
@@ -60,7 +60,7 @@ pub fn line(facts: &UpdateFacts, machine: &str, restart: &str, now: u64) -> Opti
     let pending = facts.pending.as_ref()?;
     let version = &pending.version;
     let waited = now.saturating_sub(pending.installed_at);
-    let overdue = pending.overdue_since.is_some() || waited >= OVERDUE_AFTER;
+    let overdue = pending.overdue(now);
     if !overdue {
         return Some(format!(
             "notice: SpaceTerm Core {version} is installed on {machine}. Restart to use it: {restart}"
@@ -86,7 +86,8 @@ pub fn line(facts: &UpdateFacts, machine: &str, restart: &str, now: u64) -> Opti
 mod tests {
     use super::*;
     use spaceterm_core::update::facts::{
-        PendingVersion, Platform, Protocols, UpdateCheck, Version,
+        OVERDUE_AFTER, OVERDUE_SINCE_AFTER, PendingVersion, Platform, Protocols, UpdateCheck,
+        Version,
     };
 
     const INSTALLED: u64 = 1_793_750_400;
@@ -102,7 +103,7 @@ mod tests {
                 protocols: Protocols::CURRENT,
                 breaking: false,
                 installed_at: INSTALLED,
-                overdue_since: overdue.then_some(INSTALLED + OVERDUE_AFTER),
+                overdue_since: overdue.then_some(INSTALLED + OVERDUE_SINCE_AFTER),
                 stranded: Vec::new(),
             }),
             sessions,
@@ -165,6 +166,14 @@ mod tests {
                  Restart to use it: spaceterm --machine penguin restart"
             ),
             "the CLI's clock escalates even before the Core's facts do"
+        );
+        assert_eq!(
+            line(&facts(0, true), "penguin", RESTART, INSTALLED + 86_400 + 5).as_deref(),
+            Some(
+                "notice: SpaceTerm Core 0.7.2 is installed on penguin. Restart to use it: \
+                 spaceterm --machine penguin restart"
+            ),
+            "an older Core's one-day fact is not yet Overdue"
         );
     }
 

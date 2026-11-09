@@ -9,8 +9,9 @@ use super::super::{RetainedInstallation, Service, State, boot};
 use crate::CoreError;
 use crate::storage::Directory;
 use crate::update::facts::{
-    FailureKind, InstallFailure, OVERDUE_AFTER, Operation, PendingVersion, Platform, Protocols,
-    StartFailure, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure, Version,
+    FailureKind, InstallFailure, OVERDUE_AFTER, OVERDUE_SINCE_AFTER, Operation, PendingVersion,
+    Platform, Protocols, StartFailure, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure,
+    Version,
 };
 use crate::update::ordering::{self, Candidate, Floor};
 use crate::update::source::FactsSource;
@@ -992,12 +993,13 @@ impl Shared {
         let pending = live.record.pending.as_ref().map(|stored| {
             let breaking = breaking(&self.protocols, &stored.protocols);
             let overdue = stored.installed_at.saturating_add(OVERDUE_AFTER);
+            let since = stored.installed_at.saturating_add(OVERDUE_SINCE_AFTER);
             PendingVersion {
                 version: stored.version.clone(),
                 protocols: stored.protocols,
                 breaking,
                 installed_at: stored.installed_at,
-                overdue_since: (now >= overdue).then_some(overdue),
+                overdue_since: (now >= overdue).then_some(since),
                 stranded: match (breaking, self.stranded.get()) {
                     (true, Some(stranded)) => stranded(stored.protocols.work.major),
                     _ => Vec::new(),
