@@ -1810,7 +1810,7 @@ fn only_an_interactive_connection_accepts_input() {
 }
 
 #[test]
-fn a_resolving_update_keeps_the_pane_reconnecting_without_carrying_a_click() {
+fn a_resolving_update_keeps_the_pane_reconnecting_and_retains_a_waiting_start() {
     for (takeover, reconnecting) in [
         (false, CorePaneStatus::Reconnecting),
         (true, CorePaneStatus::TakeoverReconnecting),
@@ -1820,9 +1820,9 @@ fn a_resolving_update_keeps_the_pane_reconnecting_without_carrying_a_click() {
         state.start_restored.store(true, Ordering::Release);
         assert!(state.connection_failed(CoreError::ActivationUnresolved, takeover));
         assert_eq!(state.status(), reconnecting);
-        // The reconnect neither takes control nor starts a shell on the person's behalf.
+        // Take Over names an old control target; Start Session waits for a new observation.
         assert!(!state.take_over.load(Ordering::Acquire));
-        assert!(!state.start_restored.load(Ordering::Acquire));
+        assert!(state.start_waiting());
     }
     // A deliberate Stop and permanent refusals still wait for the person.
     for error in [

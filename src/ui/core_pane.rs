@@ -26,6 +26,14 @@ use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::terminal_pane::StatusIntent;
 
+pub(crate) const fn local_machine_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "This Mac"
+    } else {
+        "This Computer"
+    }
+}
+
 /// What the window knows while it cannot ask the server who controls the Pane: only that this
 /// window does not.
 pub(crate) const TAKEOVER_TITLE: &str = "Take Over to Continue";
@@ -87,7 +95,7 @@ pub(crate) fn session_end_detail(end: SessionEnd) -> SharedString {
 pub(crate) struct DormantCopy {
     /// Names the screen's selector.
     pub(crate) screen: &'static str,
-    pub(crate) title: &'static str,
+    pub(crate) title: SharedString,
     pub(crate) detail: SharedString,
     /// Names the action's selector, and its status slot's.
     pub(crate) action: &'static str,
@@ -103,7 +111,7 @@ impl DormantCopy {
         if let Some(end) = ended {
             Self {
                 screen: "session-ended",
-                title: SESSION_ENDED_TITLE,
+                title: SESSION_ENDED_TITLE.into(),
                 detail: session_end_detail(end),
                 action: "start-session",
                 label: "Start Session",
@@ -114,7 +122,7 @@ impl DormantCopy {
         } else {
             Self {
                 screen: "restored",
-                title: RESTORED_TITLE,
+                title: RESTORED_TITLE.into(),
                 detail: RESTORED_DETAIL.into(),
                 action: "start-shell",
                 label: "Start Session",
@@ -814,6 +822,7 @@ mod connection {
 
     use super::{Controller, Dormant, ScreenAnnouncements, SessionEnd};
     use crate::machine_connection::CoreError;
+    use crate::terminal::core_session::restart::CoreRestart;
     use crate::terminal::core_session::{CorePaneState, CorePaneStatus};
 
     /// What a Pane needs from the server connection behind it.
@@ -830,14 +839,8 @@ mod connection {
                 .map(|facts| facts.running.clone())
         }
 
-        /// The restart target already announced by this Pane's Core before it disconnects.
-        fn restarting_version(&self) -> Option<spaceterm_core::update::facts::Version> {
-            match &self.directory_core()?.update_facts()?.operation {
-                Some(spaceterm_core::update::facts::Operation::Restarting { to }) => {
-                    Some(to.clone())
-                }
-                _ => None,
-            }
+        fn restart_progress(&self) -> Option<CoreRestart> {
+            CoreRestart::of(self.directory_core()?.update_facts()?.as_ref())
         }
 
         /// Whether the original presentation admission still occupies a startup slot. Receiving
@@ -893,6 +896,9 @@ mod connection {
         fn start_unconfirmed(&self) -> bool {
             false
         }
+        fn start_waiting(&self) -> bool {
+            false
+        }
         fn directory_progress(&self) -> (bool, Option<&'static str>) {
             (false, None)
         }
@@ -911,6 +917,9 @@ mod connection {
     }
 
     impl MachinePaneConnection for CorePaneState {
+        fn start_waiting(&self) -> bool {
+            Self::start_waiting(self)
+        }
         fn status(&self) -> CorePaneStatus {
             Self::status(self)
         }
@@ -1034,7 +1043,12 @@ mod connection {
         status: CorePaneStatus,
         running_version: Option<spaceterm_core::update::facts::Version>,
         restored_update: Option<spaceterm_core::update::facts::Version>,
-        expected_restart: Option<spaceterm_core::update::facts::Version>,
+        retained_restart: Option<(
+            spaceterm_core::hierarchy::Id,
+            crate::terminal::core_session::restart::PaneRestartCauses,
+        )>,
+        restart: Option<CoreRestart>,
+        machine_name: gpui::SharedString,
         controller: Option<Controller>,
         session_end: Option<SessionEnd>,
         generation: u64,
@@ -1060,7 +1074,9 @@ mod connection {
                 status: connection.status(),
                 running_version: connection.running_version(),
                 restored_update: None,
-                expected_restart: connection.restarting_version(),
+                retained_restart: None,
+                restart: connection.restart_progress(),
+                machine_name: super::local_machine_name().into(),
                 controller: connection.controller(),
                 session_end: connection.session_end(),
                 generation: connection.connection_generation(),
@@ -1080,6 +1096,30 @@ mod connection {
             view
         }
 
+        pub(crate) fn retain_restart_cause(
+            &mut self,
+            pane: spaceterm_core::hierarchy::Id,
+            causes: crate::terminal::core_session::restart::PaneRestartCauses,
+        ) {
+            self.retained_restart = Some((pane, causes));
+            self.read_restart_cause();
+        }
+
+        fn read_restart_cause(&mut self) {
+            if let Some((pane, causes)) = &self.retained_restart {
+                self.restored_update = causes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .find(|saved| saved.pane == *pane)
+                    .and_then(|saved| saved.updated.clone());
+            }
+        }
+
+        pub(crate) fn set_machine_name(&mut self, name: gpui::SharedString) {
+            self.machine_name = name;
+        }
+
         /// Asks the server for this Pane, which starts or acquires only this Pane. Only an
         /// explicit Pane selection or Tab opening calls it; rendering and reconciliation never do.
         pub(crate) fn select(&self) {
@@ -1096,9 +1136,14 @@ mod connection {
             // Status first, because a connection publishes its generation before it reports
             // Connected.
             let status = self.connection.status();
-            if let Some(target) = self.connection.restarting_version() {
-                self.expected_restart = Some(target);
-            }
+            let restart = self.connection.restart_progress().filter(|_| {
+                !matches!(
+                    status,
+                    CorePaneStatus::Failed(_) | CorePaneStatus::TakeoverFailed(_)
+                )
+            });
+            let restart_changed = restart != self.restart;
+            self.restart = restart;
             let version = self.connection.running_version();
             let version_changed = version.is_some() && version != self.running_version;
             if version_changed {
@@ -1107,24 +1152,19 @@ mod connection {
                 }
                 self.running_version = version;
             }
+            let previous_update = self.restored_update.clone();
+            self.read_restart_cause();
+            let cause_changed = self.restored_update != previous_update;
             let generation = self.connection.connection_generation();
             let generation_changed = generation != self.generation;
-            if status == CorePaneStatus::Restored && self.status != CorePaneStatus::Restored {
-                self.restored_update = self.expected_restart.take().or(self.restored_update.take());
-            }
-            if status == CorePaneStatus::Connected
-                && (self.status != CorePaneStatus::Connected
-                    || version_changed
-                    || generation_changed)
-            {
-                self.expected_restart = None;
-            }
             let progress = self.connection.directory_progress();
             let controller = self.connection.controller();
             let session_end = self.connection.session_end();
             let start_unknown = self.connection.start_unconfirmed();
             if status == self.status
                 && !version_changed
+                && !restart_changed
+                && !cause_changed
                 && !generation_changed
                 && progress == self.directory_progress
                 && controller == self.controller
@@ -1141,6 +1181,7 @@ mod connection {
             }
             if !start_unknown {
                 self.check_unanswered = false;
+                self.start_unconfirmed = false;
             }
             self.start_unknown = start_unknown;
             self.directory_progress = progress;
@@ -1169,7 +1210,7 @@ mod connection {
                 )
             {
                 self.start_pending = false;
-                self.start_unconfirmed = true;
+                self.start_unconfirmed = start_unknown;
             }
             self.status = status;
             self.generation = generation;
@@ -1217,10 +1258,14 @@ mod connection {
             // A start in flight that meets an interruption has lost its answer, whether a click or
             // a first selection sent it. The Pane says so through checks and reconnects until the
             // server settles the start.
-            if !self.start_unknown || self.status == CorePaneStatus::Connected {
+            if !self.start_unknown
+                || self.status == CorePaneStatus::Connected
+                || self.restart.is_some()
+            {
                 self.unknown_shown = false;
             }
-            let entering_unknown = !self.unknown_shown
+            let entering_unknown = self.restart.is_none()
+                && !self.unknown_shown
                 && self.start_unknown
                 && matches!(
                     self.status,
@@ -1256,7 +1301,7 @@ mod connection {
                 // answers it.
                 CorePaneStatus::Reconnecting | CorePaneStatus::Failed(_) if self.start_pending => {
                     self.start_pending = false;
-                    self.start_unconfirmed = true;
+                    self.start_unconfirmed = self.start_unknown && self.restart.is_none();
                     return false;
                 }
                 _ => return false,
@@ -1282,6 +1327,11 @@ mod connection {
         /// Session clears that cause, so a later ordinary restart cannot inherit it.
         pub(crate) fn dormant_copy(&self, ended: Option<SessionEnd>) -> super::DormantCopy {
             let mut copy = super::DormantCopy::of(ended);
+            if let Some(restart) = self.restart {
+                copy.title = restart.label(&self.machine_name).into();
+                copy.detail = "Pane actions wait for SpaceTerm Core to reconnect.".into();
+                return copy;
+            }
             if ended.is_none()
                 && let Some(version) = &self.restored_update
             {
@@ -1307,8 +1357,10 @@ mod connection {
                         offered: self.can_start_shell(),
                     },
                     Dormant::Restored | Dormant::Ended(_) => CorePaneScreen::Restored {
-                        starting: self.starting_shell() || self.start_in_flight(),
-                        unconfirmed: self.start_unconfirmed,
+                        starting: self.starting_shell()
+                            || self.start_in_flight()
+                            || self.connection.start_waiting(),
+                        unconfirmed: self.start_unconfirmed && self.restart.is_none(),
                         offered: self.can_start_shell(),
                         ended: match dormant {
                             Dormant::Ended(end) => Some(end),
@@ -1323,9 +1375,9 @@ mod connection {
             // Ended screen as the one holding its grant, and its Start Session takes over.
             if let Some(end) = self.ended_elsewhere() {
                 return Some(CorePaneScreen::Restored {
-                    starting: taking_over,
-                    unconfirmed: self.take_over_unconfirmed,
-                    offered,
+                    starting: taking_over || self.connection.start_waiting(),
+                    unconfirmed: self.take_over_unconfirmed && self.restart.is_none(),
+                    offered: self.can_start_shell(),
                     ended: Some(end),
                 });
             }
@@ -1364,15 +1416,20 @@ mod connection {
 
         pub(crate) fn can_start_shell(&self) -> bool {
             if self.ended_elsewhere().is_some() {
-                return self.can_take_over();
+                return self.can_take_over()
+                    || (self.status == CorePaneStatus::TakeoverReconnecting
+                        && !self.start_unknown
+                        && !self.connection.start_waiting()
+                        && !self.start_pending);
             }
             !self.start_unknown
-                && matches!(
+                && !self.connection.start_waiting()
+                && (matches!(
                     self.status,
                     CorePaneStatus::Restored
                         | CorePaneStatus::SessionEnded(_)
                         | CorePaneStatus::Failed(CoreError::DirectoryUnavailable)
-                )
+                ) || (self.status == CorePaneStatus::Reconnecting && self.dormant.is_some()))
                 && !self.start_pending
                 && !self.directory_progress.0
         }
@@ -1397,6 +1454,13 @@ mod connection {
             &self,
         ) -> Option<(gpui::SharedString, gpui::SharedString, super::StatusIntent)> {
             use gpui::SharedString;
+            if let Some(restart) = self.restart {
+                return Some((
+                    restart.label(&self.machine_name).into(),
+                    "Pane actions wait for SpaceTerm Core to reconnect.".into(),
+                    super::StatusIntent::Information,
+                ));
+            }
             match self.status {
                 CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting => Some((
                     SharedString::new_static("Reconnecting…"),
@@ -1407,7 +1471,7 @@ mod connection {
                     } else if self.ended_elsewhere().is_some()
                         || matches!(self.dormant, Some(Dormant::Restored | Dormant::Ended(_)))
                     {
-                        "Start Session is available after reconnection."
+                        "Start Session waits for SpaceTerm Core to reconnect."
                     } else if self.takeover_shown {
                         "Take Over is available after reconnection."
                     } else if self.dormant.is_some() {
@@ -1504,7 +1568,7 @@ mod connection {
         /// Whether the interruption notice offers Retry. The unconfirmed-start screen offers its own
         /// Retry, so the notice doesn't repeat it.
         pub(crate) fn notice_offers_retry(&self) -> bool {
-            self.can_retry() && !self.unknown_shown
+            self.restart.is_none() && self.can_retry() && !self.unknown_shown
         }
 
         /// Connects again once the server behind this Pane runs again, after the person started
@@ -1548,7 +1612,7 @@ mod connection {
         }
 
         pub(crate) fn start_shell(&mut self) -> CorePaneSync {
-            if self.ended_elsewhere().is_some() {
+            if self.ended_elsewhere().is_some() && self.can_take_over() {
                 return self.take_over();
             }
             if !self.can_start_shell() {

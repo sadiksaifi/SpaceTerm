@@ -174,7 +174,7 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
         };
         let copy = DormantCopy::of(ended);
         assert_eq!(
-            (copy.title, copy.label),
+            (copy.title.as_ref(), copy.label),
             ("SpaceTerm Core Restarted", "Start Session")
         );
     }

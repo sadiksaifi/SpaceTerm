@@ -1,5 +1,5 @@
 //! Background persistence for this client's arrangements of Workspaces, outside Settings.
-use spaceterm_core::client_view::{ClientView, RetainedInventory};
+use spaceterm_core::client_view::{ClientView, PaneRestart, RetainedInventory};
 use spaceterm_core::{CoreError, MachineConnection};
 use std::sync::{Arc, Mutex};
 
@@ -8,6 +8,8 @@ struct State {
     loaded: Option<Result<ClientView, CoreError>>,
     attachments: Option<Result<spaceterm_core::attachments::Attachments, CoreError>>,
     pending: Option<ClientView>,
+    pane_restarts: Option<Vec<PaneRestart>>,
+    pending_restarts: Option<Vec<PaneRestart>>,
     error: Option<CoreError>,
     closed: bool,
     /// The Workspaces and Tabs this client last presented from the server, as read.
@@ -46,6 +48,10 @@ impl RetainedClientViews {
                             .map(|store| store.view().clone())
                             .map_err(|error| *error),
                     );
+                    state.pane_restarts = opened
+                        .as_ref()
+                        .ok()
+                        .map(|store| store.pane_restarts().to_vec());
                     state.retained = opened
                         .as_ref()
                         .ok()
@@ -58,11 +64,12 @@ impl RetainedClientViews {
                 };
                 let mut discarded = false;
                 loop {
-                    let (pending, inventory, discard, closed) = {
+                    let (pending, inventory, restarts, discard, closed) = {
                         let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
                         (
                             state.pending.take(),
                             state.pending_inventory.take(),
+                            state.pending_restarts.take(),
                             state.discarded,
                             state.closed,
                         )
@@ -77,6 +84,12 @@ impl RetainedClientViews {
                         // The copy only stands in for the server until it connects, so a failed
                         // write leaves the previous copy and blocks nothing.
                         let _ = store.save_inventory(inventory);
+                    }
+                    if let Some(restarts) = restarts
+                        && let Err(error) = store.save_pane_restarts(restarts)
+                    {
+                        shared.lock().unwrap_or_else(|e| e.into_inner()).error = Some(error);
+                        return;
                     }
                     if let Some(view) = pending
                         && let Err(error) = store.save(view)
@@ -137,6 +150,23 @@ impl RetainedClientViews {
             return;
         }
         state.pending = Some(view);
+        let _ = self.wake.try_send(());
+    }
+    pub(super) fn pane_restarts(&self) -> Option<Vec<PaneRestart>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pane_restarts
+            .clone()
+    }
+    pub(super) fn save_pane_restarts(&self, panes: Vec<PaneRestart>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.error.is_some() || state.pane_restarts.as_ref() == Some(&panes) {
+            return;
+        }
+        state.pane_restarts = Some(panes.clone());
+        state.pending_restarts = Some(panes);
+        drop(state);
         let _ = self.wake.try_send(());
     }
     /// The Workspaces and Tabs this client last presented from the server, once read.

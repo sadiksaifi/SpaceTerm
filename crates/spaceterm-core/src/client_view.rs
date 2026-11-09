@@ -28,6 +28,17 @@ pub struct TabView {
     pub layout: Layout,
 }
 
+/// A Pane's last confirmed Core boot and the update that ended its Terminal Session.
+/// These facts explain presentation only and grant no authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaneRestart {
+    pub pane: Id,
+    pub boot: Id,
+    pub running: crate::update::facts::Version,
+    pub updated: Option<crate::update::facts::Version>,
+}
+
 /// A flat tree avoids a serialization depth limit for deeply nested personal layouts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -486,6 +497,7 @@ struct Record {
     core: Id,
     client: Id,
     view: ClientView,
+    pane_restarts: Vec<PaneRestart>,
 }
 
 #[cfg(feature = "client")]
@@ -555,6 +567,7 @@ impl ClientViewStore {
                 core,
                 client,
                 view: ClientView::default(),
+                pane_restarts: Vec::new(),
             });
         if record.version != 1 || record.core != core || record.client != client {
             return Err(CoreError::AuthenticationRefused);
@@ -606,6 +619,34 @@ impl ClientViewStore {
     pub fn discard_inventory(&mut self) -> Result<(), CoreError> {
         self.inventory = None;
         discard_inventory(&self.directory)
+    }
+    pub fn pane_restarts(&self) -> &[PaneRestart] {
+        &self.record.pane_restarts
+    }
+    /// Saves bounded, unique Pane restart facts beside this client's arrangements.
+    pub fn save_pane_restarts(&mut self, panes: Vec<PaneRestart>) -> Result<(), CoreError> {
+        if self.blocked {
+            return Err(CoreError::StorageUnavailable);
+        }
+        if panes.len() > MAX_WORKSPACES * MAX_TABS * MAX_PANES
+            || panes
+                .iter()
+                .map(|pane| pane.pane)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != panes.len()
+        {
+            return Err(CoreError::UnsafeStorage);
+        }
+        if self.record.pane_restarts == panes {
+            return Ok(());
+        }
+        self.record.pane_restarts = panes;
+        if let Err(error) = self.directory.write_json(c"view.json", &self.record) {
+            self.blocked = true;
+            return Err(error);
+        }
+        Ok(())
     }
     pub fn view(&self) -> &ClientView {
         &self.record.view
@@ -1035,5 +1076,32 @@ mod retained_inventory_tests {
         assert!(retained.same_structure(&named));
         assert!(!retained.same_structure(&renamed));
         assert!(!retained.same_structure(&split));
+    }
+}
+
+#[cfg(all(test, feature = "client"))]
+mod pane_restart_tests {
+    use super::*;
+
+    #[test]
+    fn pane_restart_cause_is_retained_when_the_view_store_reopens() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-pane-restart-{:x}",
+            u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let directory = || crate::storage::Directory::open(&root, true).unwrap();
+        let cause = PaneRestart {
+            pane: [1; 32],
+            boot: [2; 32],
+            running: crate::update::facts::Version::parse("0.11.2").unwrap(),
+            updated: Some(crate::update::facts::Version::parse("0.11.2").unwrap()),
+        };
+        let mut store = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        store.save_pane_restarts(vec![cause.clone()]).unwrap();
+        drop(store);
+        let reopened = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        assert_eq!(reopened.pane_restarts(), &[cause]);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

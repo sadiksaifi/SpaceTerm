@@ -17,22 +17,38 @@ pub(super) struct Recovery {
     healthy_since: Option<Instant>,
     observed_boot: Option<[u8; 32]>,
     start: Option<Start>,
+    restart_since: Option<Instant>,
 }
 
 impl Recovery {
+    pub fn restart_wait(&mut self, now: Instant) -> bool {
+        now.saturating_duration_since(*self.restart_since.get_or_insert(now))
+            < super::restart::RECONNECT_LIMIT
+    }
+
+    pub fn restart_expired(&self, now: Instant) -> bool {
+        self.restart_since.is_some_and(|since| {
+            now.saturating_duration_since(since) >= super::restart::RECONNECT_LIMIT
+        })
+    }
+
     pub fn start_unconfirmed(&self) -> bool {
         self.start.is_some()
     }
 
-    pub fn retry(&mut self) {
+    fn reset_failures(&mut self) {
         self.failures = 0;
         self.cause = None;
         self.healthy_since = None;
     }
+    pub fn retry(&mut self) {
+        self.reset_failures();
+        self.restart_since = None;
+    }
 
     pub fn direct_reachable(&mut self) -> bool {
         if self.cause == Some(CoreError::Direct(DirectError::Transport)) {
-            self.retry();
+            self.reset_failures();
             true
         } else {
             false
@@ -41,9 +57,10 @@ impl Recovery {
 
     /// Starts, or keeps, the healthy period of a live connection.
     pub fn connected(&mut self, now: Instant) {
+        self.restart_since = None;
         let since = *self.healthy_since.get_or_insert(now);
         if now.saturating_duration_since(since) >= HEALTHY_CONNECTION {
-            self.retry();
+            self.reset_failures();
             self.healthy_since = Some(now);
         }
     }
@@ -60,7 +77,7 @@ impl Recovery {
             .take()
             .is_some_and(|since| now.saturating_duration_since(since) >= HEALTHY_CONNECTION)
         {
-            self.retry();
+            self.reset_failures();
         }
         if self.cause.is_none() {
             self.cause = self.start.as_ref().and_then(|start| start.cause);
@@ -150,6 +167,18 @@ impl Recovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restart_wait_has_one_deadline_even_when_each_attempt_fails() {
+        let mut recovery = Recovery::default();
+        let now = Instant::now();
+        assert!(recovery.restart_wait(now));
+        for seconds in [1, 5, 60, 179] {
+            recovery.failed(CoreError::ServiceBusy, now + Duration::from_secs(seconds));
+            assert!(recovery.restart_wait(now + Duration::from_secs(seconds)));
+        }
+        assert!(!recovery.restart_wait(now + Duration::from_secs(180)));
+    }
 
     #[test]
     fn a_stable_connection_renews_recovery_but_a_brief_screen_does_not() {

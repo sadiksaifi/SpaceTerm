@@ -8,7 +8,8 @@
 //! Every shared change goes to the server as one [`Mutation`]. Connected interactions project
 //! their presentation immediately over authoritative membership. Provisional identities open no
 //! Terminal Session and grant no input authority. A refusal recomputes the affected presentation
-//! without replacing later intent, and an offline client queues no new shared work.
+//! without replacing later intent. A Core restart retains bounded intent until reconnecting;
+//! an ordinary offline client queues no new shared work.
 //!
 //! Closing a Pane or Tab, and Kill Workspace, end Terminal Sessions for every client. Each
 //! one asks the server to end exactly the Panes and Sessions a person reviewed, so a confirmation
@@ -70,6 +71,7 @@ mod core_workspaces {
     use crate::domain::{PaneId, TabId, WorkspaceId};
     use crate::machine_connection::MachineConnection;
     use crate::terminal::WorkspaceTerminalSessionFactory;
+    use crate::terminal::core_session::restart::{CoreRestart, RECONNECT_LIMIT};
     use crate::terminal::core_session::{CoreSessionFactory, PaneControls};
     use crate::terminal::workspace_client::{WorkspaceClient, WorkspaceSnapshot};
     use crate::ui::core_pane::{CorePaneView, MachinePaneConnection};
@@ -194,13 +196,16 @@ mod core_workspaces {
     }
 
     /// Connected interaction intent is bounded and ordered here. The transport journals only
-    /// the operation currently dispatched; a disconnected client retains no undispatched work.
+    /// the operation currently dispatched. A Core restart retains undispatched work until its
+    /// reconnect deadline; other disconnections reject it.
     ///
     /// A paired route's transport changes as its connections come and go. Every clone follows
     /// the replacement, and the interactions already queued keep their order.
     #[derive(Clone)]
     pub(crate) struct WorkspaceEditSource {
         edits: Rc<std::cell::RefCell<Rc<dyn WorkspaceEdits>>>,
+        machine: Rc<std::cell::RefCell<Option<MachineConnection>>>,
+        restart_since: Rc<std::cell::Cell<Option<std::time::Instant>>>,
         /// Counts transport replacements, so a subscription knows to follow the new one.
         generation: Rc<std::cell::Cell<u64>>,
         /// The inventory a paired route last confirmed, presented while its transport has none.
@@ -364,6 +369,8 @@ mod core_workspaces {
         pub(crate) fn new(edits: Rc<dyn WorkspaceEdits>) -> Self {
             Self {
                 edits: Rc::new(std::cell::RefCell::new(edits)),
+                machine: Rc::default(),
+                restart_since: Rc::default(),
                 generation: Rc::default(),
                 stand_in: Rc::default(),
                 standing_in: Rc::default(),
@@ -464,8 +471,39 @@ mod core_workspaces {
             });
         }
 
+        fn restart_progress(&self) -> Option<CoreRestart> {
+            let progress = self
+                .machine
+                .borrow()
+                .as_ref()
+                .and_then(|core| core.update_facts())
+                .and_then(|facts| CoreRestart::of(&facts));
+            if progress.is_some() {
+                let since = self
+                    .restart_since
+                    .get()
+                    .unwrap_or_else(std::time::Instant::now);
+                self.restart_since.set(Some(since));
+                progress.filter(|_| since.elapsed() < RECONNECT_LIMIT)
+            } else {
+                self.restart_since.set(None);
+                None
+            }
+        }
+
+        fn restart_expired(&self) -> bool {
+            self.restart_since
+                .get()
+                .is_some_and(|since| since.elapsed() >= RECONNECT_LIMIT)
+        }
+
         fn editability(&self) -> WorkspaceEditability {
-            if !self.transport().availability().0 || self.standing_in.get() {
+            let restart = self.restart_progress();
+            if (!self.transport().availability().0
+                || self.standing_in.get()
+                || self.restart_expired())
+                && restart.is_none()
+            {
                 WorkspaceEditability::Offline
             } else if self.pending.borrow().full() {
                 WorkspaceEditability::Pending
@@ -537,7 +575,7 @@ mod core_workspaces {
         fn dispatch(&self) {
             let edits = self.transport();
             let (connected, busy) = edits.availability();
-            if connected && !busy {
+            if connected && !busy && self.restart_progress().is_none() && !self.restart_expired() {
                 let mut pending = self.pending.borrow_mut();
                 if let Some(mutation) = pending.next_dispatch() {
                     if edits.submit(mutation.clone()) {
@@ -562,6 +600,12 @@ mod core_workspaces {
                 snapshot.inventory.clone_from(&self.stand_in.borrow());
             }
             self.standing_in.set(standing_in);
+            self.pending
+                .borrow_mut()
+                .wait_for_restart(self.restart_progress().is_some());
+            if self.restart_expired() {
+                self.pending.borrow_mut().disconnect();
+            }
             let owned = self.pending.borrow_mut().observe(&snapshot);
             for sequence in owned {
                 self.hold(sequence);
@@ -657,17 +701,25 @@ mod core_workspaces {
     }
 
     /// What one Workspace's sidebar row says in place of its directory.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) struct WorkspaceRowStatus {
         pub(crate) text: &'static str,
+        machine: Option<SharedString>,
         /// Whether the status reports a problem, rather than work in progress.
         pub(crate) warning: bool,
     }
 
     impl WorkspaceRowStatus {
+        pub(crate) fn label(&self) -> SharedString {
+            self.machine.as_ref().map_or_else(
+                || self.text.into(),
+                |machine| format!("{} {machine}…", self.text).into(),
+            )
+        }
         const fn progress(text: &'static str) -> Self {
             Self {
                 text,
+                machine: None,
                 warning: false,
             }
         }
@@ -954,6 +1006,9 @@ mod core_workspaces {
     /// because only an explicit selection of that Pane asks the server for one.
     pub(crate) trait WorkspacePaneOpener {
         fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription>;
+        fn connection(&self) -> Option<MachineConnection> {
+            None
+        }
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory;
 
         /// Only an account-local route can interpret server directory text on this client.
@@ -1011,6 +1066,9 @@ mod core_workspaces {
     }
 
     impl WorkspacePaneOpener for LocalCorePanes {
+        fn connection(&self) -> Option<MachineConnection> {
+            Some(self.core.clone())
+        }
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
             WorkspaceTerminalSessionFactory::pending()
         }
@@ -1046,6 +1104,9 @@ mod core_workspaces {
     }
 
     impl WorkspacePaneOpener for RemoteMachinePanes {
+        fn connection(&self) -> Option<MachineConnection> {
+            Some(self.core.clone())
+        }
         fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
             WorkspaceTerminalSessionFactory::pending()
         }
@@ -1078,6 +1139,7 @@ mod core_workspaces {
         opener: Rc<dyn WorkspacePaneOpener>,
         panes: PaneConstruction,
         edits: Option<WorkspaceEditSource>,
+        restart_causes: crate::terminal::core_session::restart::PaneRestartCauses,
     }
 
     impl WorkspacePaneSessions {
@@ -1122,6 +1184,7 @@ mod core_workspaces {
                 opener,
                 panes: panes.clone(),
                 edits: None,
+                restart_causes: Arc::default(),
             }
         }
 
@@ -1284,7 +1347,14 @@ mod core_workspaces {
             state.observe(self.changes.0.clone());
             self.opened
                 .insert(pane_id, Some(self.sessions.generation()));
-            self.views.insert(pane_id, CorePaneView::new(state));
+            let mut view = CorePaneView::new(state);
+            view.retain_restart_cause(core, Arc::clone(&self.sessions.restart_causes));
+            view.set_machine_name(
+                self.sessions
+                    .remote_name()
+                    .unwrap_or_else(|| crate::ui::core_pane::local_machine_name().into()),
+            );
+            self.views.insert(pane_id, view);
             self.screen_focus.insert(pane_id, screen_focus);
         }
 
@@ -1796,6 +1866,7 @@ mod core_workspaces {
 
     impl Workspaces {
         pub(crate) fn new(edits: WorkspaceEditSource, sessions: WorkspacePaneSessions) -> Self {
+            *edits.machine.borrow_mut() = sessions.opener.connection();
             Self {
                 sessions: sessions.with_edits(edits.clone()),
                 edits,
@@ -2145,6 +2216,17 @@ mod core_workspaces {
                     } else {
                         return Ok(false);
                     }
+                    if let Some(restarts) = self
+                        .retained_views
+                        .as_ref()
+                        .and_then(|views| views.pane_restarts())
+                    {
+                        *self
+                            .sessions
+                            .restart_causes
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = restarts;
+                    }
                     self.saved_views = Some(saved);
                     Ok(true)
                 }
@@ -2257,6 +2339,20 @@ mod core_workspaces {
             workspace: Id,
             repository: Option<&Path>,
         ) -> Option<WorkspaceRowStatus> {
+            if let Some(restart) = self.edits.restart_progress() {
+                return Some(WorkspaceRowStatus {
+                    text: match restart {
+                        CoreRestart::Updating => "Updating",
+                        CoreRestart::Restarting => "Restarting",
+                    },
+                    machine: Some(
+                        self.sessions
+                            .remote_name()
+                            .unwrap_or_else(|| crate::ui::core_pane::local_machine_name().into()),
+                    ),
+                    warning: false,
+                });
+            }
             if let Some(text) = self.worktree_status(workspace, repository) {
                 return Some(WorkspaceRowStatus::progress(text));
             }
@@ -2272,6 +2368,7 @@ mod core_workspaces {
                 {
                     Some(WorkspaceRowStatus {
                         text: "Not connected",
+                        machine: None,
                         warning: true,
                     })
                 }
@@ -2303,18 +2400,25 @@ mod core_workspaces {
                 && (self.saved_views.is_some() || self.retained_views.is_none())
         }
 
-        /// Waits for exact creation identities before capturing any destructive approval.
+        /// Waits for a reconnect or exact creation identities before capturing destructive approval.
         pub(crate) fn defer_close(
             &self,
             intent: WorkspaceCloseIntent,
         ) -> Result<bool, WorkspaceRefusalReason> {
-            if !self.edits.transport().availability().0 {
+            let restarting = self.edits.restart_progress().is_some();
+            if (!self.edits.transport().availability().0 || self.edits.restart_expired())
+                && !restarting
+            {
                 return Err(WorkspaceRefusalReason::Offline);
             }
+            self.edits.pending.borrow_mut().wait_for_restart(restarting);
             self.edits.pending.borrow_mut().defer_close(intent)
         }
 
         pub(crate) fn take_close_intent(&self) -> Option<WorkspaceCloseIntent> {
+            if self.edits.restart_progress().is_some() || !self.edits.transport().availability().0 {
+                return None;
+            }
             self.edits.pending.borrow_mut().take_close_intent()
         }
 
@@ -2599,7 +2703,34 @@ mod core_workspaces {
         /// for reports an acceptance the window may act on, so a publication from another client
         /// never moves the Active Workspace, Tab, or Pane.
         pub(crate) fn poll(&mut self) -> WorkspacePoll {
+            if let Some(core) = self.sessions.opener.connection() {
+                *self.edits.machine.borrow_mut() = Some(core);
+            }
             let (snapshot, standing_in) = self.edits.read();
+            if snapshot.connected
+                && !standing_in
+                && let Some(inventory) = &snapshot.inventory
+                && let Some(facts) = self
+                    .edits
+                    .machine
+                    .borrow()
+                    .as_ref()
+                    .and_then(|core| core.update_facts())
+            {
+                let mut causes = self
+                    .sessions
+                    .restart_causes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                crate::terminal::core_session::restart::observe_panes(
+                    &mut causes,
+                    inventory,
+                    &facts.running,
+                );
+                if let Some(retained) = &self.retained_views {
+                    retained.save_pane_restarts(causes.clone());
+                }
+            }
             let mut poll = WorkspacePoll::default();
             if self.standing_in != standing_in {
                 // The server's first inventory after the retained copy initializes attachments
@@ -2843,11 +2974,53 @@ mod core_workspaces {
                 Outcome::Missing => self.refuse(WorkspaceRefusal::Missing, sequence),
                 Outcome::Invalid => self.refuse(WorkspaceRefusal::Invalid, sequence),
                 Outcome::Limit => self.refuse(WorkspaceRefusal::Limit, sequence),
-                // What the close would end changed after a person approved it. Ending the new
-                // Sessions needs a fresh review, so nothing asks again on its own.
+                // New Terminal Sessions always need a fresh review. A Core restart can leave
+                // the same Panes with no live Terminal Session to end.
                 Outcome::StaleConfirmation => match &outcome.mutation {
-                    Mutation::Close { target, .. } => {
-                        self.stale_closes.push_back((*target, sequence));
+                    Mutation::Close {
+                        target,
+                        confirmation,
+                    } => {
+                        // A restart can fence the close before its announcement reaches us.
+                        // Retry only after a new boot, with exactly the same Panes and no new
+                        // Terminal Session. The normal close path captures fresh confirmation.
+                        let unchanged = inventory
+                            .and_then(|inventory| inventory.close_confirmation(*target))
+                            .is_some_and(|current| {
+                                current.boot != confirmation.boot
+                                    && current.panes.iter().all(|pane| pane.session.is_none())
+                                    && current
+                                        .panes
+                                        .iter()
+                                        .map(|pane| pane.id)
+                                        .collect::<BTreeSet<_>>()
+                                        == confirmation
+                                            .panes
+                                            .iter()
+                                            .map(|pane| pane.id)
+                                            .collect::<BTreeSet<_>>()
+                            });
+                        let queued = unchanged
+                            && self
+                                .submitted_close
+                                .as_ref()
+                                .filter(|(submitted, _)| submitted == target)
+                                .is_some_and(|(_, local)| {
+                                    self.edits
+                                        .pending
+                                        .borrow_mut()
+                                        .queue_close(WorkspaceCloseIntent {
+                                            core: *target,
+                                            local: *local,
+                                            keyboard: None,
+                                        })
+                                        .is_ok()
+                                });
+                        if queued {
+                            self.edits.presented(sequence);
+                        } else {
+                            self.stale_closes.push_back((*target, sequence));
+                        }
                     }
                     _ => self.edits.presented(sequence),
                 },
@@ -4086,6 +4259,170 @@ mod core_workspaces {
                         .max(total.min(snapshot.forgotten));
                 });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+    use spaceterm_core::{
+        MachineConnection,
+        connection::link::CoreLink,
+        hierarchy::{Axis, CloseTarget, Mutation},
+        protocol::{self, CoreMessage, RawFrame},
+        update::facts::{Operation, Platform, UpdateCheck, UpdateFacts, Version},
+    };
+    use std::{rc::Rc, sync::Arc, time::Instant};
+
+    struct Panes(MachineConnection);
+    impl WorkspacePaneOpener for Panes {
+        fn open(&self, _: spaceterm_core::hierarchy::Id) -> Option<WorkspacePaneSubscription> {
+            None
+        }
+        fn connection(&self) -> Option<MachineConnection> {
+            Some(self.0.clone())
+        }
+        fn placeholder(&self) -> crate::terminal::WorkspaceTerminalSessionFactory {
+            crate::terminal::WorkspaceTerminalSessionFactory::pending()
+        }
+    }
+
+    fn publish(link: &CoreLink, operation: Option<Operation>) {
+        let facts = UpdateFacts {
+            revision: 1,
+            platform: Platform::HOST,
+            running: Version::parse("0.11.1").unwrap(),
+            pending: None,
+            sessions: 0,
+            operation,
+            check: UpdateCheck::Disabled,
+            skipped: None,
+            last_failure: None,
+        };
+        let wire =
+            protocol::frame::encode_core(&CoreMessage::UpdateFacts(Box::new(facts))).unwrap();
+        for frame in wire.frames {
+            link.receive(RawFrame::parse(&frame).unwrap(), Instant::now())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn pane_creation_and_close_wait_for_the_core_to_reconnect() {
+        use super::tests::{inventory, pane, tab};
+        for operation in [
+            Operation::Restarting {
+                to: Version::parse("0.11.2").unwrap(),
+            },
+            Operation::RestartingSameVersion,
+        ] {
+            let core = MachineConnection::for_identity("spaceterm-development").unwrap();
+            let link = CoreLink::new(Arc::new(|_| {}), Arc::new(|| {}), Instant::now());
+            core.adopt(link.clone());
+            let sessions = WorkspacePaneSessions::with_opener(
+                Rc::new(Panes(core)),
+                &crate::ui::pane_lifecycle::PaneConstruction::testing(),
+            );
+            let edits = Rc::new(testing::ScriptedEdits::new(Some(inventory(
+                1,
+                vec![tab([2; 32], vec![pane([3; 32], None, Axis::Right)])],
+            ))));
+            let source = WorkspaceEditSource::new(edits.clone());
+            let mut binding = Workspaces::new(source.clone(), sessions);
+            binding.poll();
+            publish(&link, Some(operation));
+            edits.set_connected(false);
+            binding.poll();
+            let mutation = Mutation::CreateTab {
+                workspace: [1; 32],
+                source: Some([3; 32]),
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
+            };
+            assert!(binding.accepts_edits());
+            assert_eq!(
+                source.submit(mutation.clone()),
+                WorkspaceSubmission::Submitted
+            );
+            let target = CloseTarget::Pane {
+                workspace: [1; 32],
+                tab: [2; 32],
+                pane: [3; 32],
+            };
+            assert!(
+                binding
+                    .defer_close(WorkspaceCloseIntent {
+                        core: target,
+                        local: crate::close_confirmation::CloseTarget::Pane {
+                            workspace_id: crate::domain::WorkspaceId::new(1),
+                            tab_id: crate::domain::TabId::new(2),
+                            pane_id: crate::domain::PaneId::new(3)
+                        },
+                        keyboard: None
+                    })
+                    .unwrap()
+            );
+            binding.poll();
+            assert!(
+                edits.submitted().is_empty(),
+                "no new operation crosses the restart fence"
+            );
+            assert!(binding.take_close_intent().is_none());
+            assert!(!binding.row_status([1; 32], None).unwrap().warning);
+            publish(&link, None);
+            edits.reconnect();
+            binding.poll();
+            assert_eq!(edits.submitted(), vec![mutation]);
+            assert_eq!(binding.take_close_intent().unwrap().core, target);
+            assert!(binding.next_refusal().is_none());
+        }
+    }
+    #[test]
+    fn a_close_fenced_before_the_restart_announcement_waits_for_fresh_confirmation() {
+        use super::tests::{inventory, pane, tab};
+        for new_session in [false, true] {
+            let core = MachineConnection::for_identity("spaceterm-development").unwrap();
+            let sessions = WorkspacePaneSessions::with_opener(
+                Rc::new(Panes(core)),
+                &crate::ui::pane_lifecycle::PaneConstruction::testing(),
+            );
+            let initial = inventory(
+                1,
+                vec![tab([2; 32], vec![pane([3; 32], None, Axis::Right)])],
+            );
+            let edits = Rc::new(testing::ScriptedEdits::new(Some(initial.clone())));
+            let source = WorkspaceEditSource::new(edits.clone());
+            let mut binding = Workspaces::new(source, sessions);
+            binding.poll();
+            let target = CloseTarget::Pane {
+                workspace: [1; 32],
+                tab: [2; 32],
+                pane: [3; 32],
+            };
+            let local = crate::close_confirmation::CloseTarget::Pane {
+                workspace_id: crate::domain::WorkspaceId::new(1),
+                tab_id: crate::domain::TabId::new(2),
+                pane_id: crate::domain::PaneId::new(3),
+            };
+            let approval = binding.close_approval(target).unwrap();
+            assert_eq!(
+                binding.close(approval, local),
+                WorkspaceSubmission::Submitted
+            );
+            let mut reconnected = initial;
+            reconnected.close.as_mut().unwrap().boot = [10; 32];
+            if new_session {
+                reconnected.close.as_mut().unwrap().sessions[0].session = Some([4; 32]);
+            }
+            edits.set_inventory(reconnected);
+            edits.answer(spaceterm_core::hierarchy::Outcome::StaleConfirmation);
+            binding.poll();
+            assert_eq!(binding.take_close_intent().is_some(), !new_session);
+            assert_eq!(
+                binding.next_stale_close().is_some(),
+                new_session,
+                "a new Terminal Session always needs the person's fresh review"
+            );
         }
     }
 }

@@ -50,8 +50,12 @@ impl Connection {
 }
 
 impl MachinePaneConnection for Connection {
-    fn restarting_version(&self) -> Option<spaceterm_core::update::facts::Version> {
-        self.restart.lock().unwrap().clone()
+    fn restart_progress(&self) -> Option<crate::terminal::core_session::restart::CoreRestart> {
+        self.restart
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|_| crate::terminal::core_session::restart::CoreRestart::Updating)
     }
     fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {
         self.version.lock().unwrap().clone()
@@ -432,7 +436,7 @@ fn a_restored_pane_names_the_update_it_observed_and_keeps_other_end_causes() {
 }
 
 #[test]
-fn a_pane_names_an_announced_update_even_when_the_core_returns_to_its_previous_version() {
+fn a_pane_does_not_claim_an_update_when_the_core_returns_to_its_previous_version() {
     let connection = Connection::new(CorePaneStatus::Connected);
     *connection.version.lock().unwrap() =
         Some(spaceterm_core::update::facts::Version::parse("0.11.0").unwrap());
@@ -447,6 +451,65 @@ fn a_pane_names_an_announced_update_even_when_the_core_returns_to_its_previous_v
     view.sync();
     assert_eq!(
         view.dormant_copy(None).detail.as_ref(),
-        "SpaceTerm Core restarted to update to 0.11.1."
+        super::RESTORED_DETAIL
     );
+}
+
+#[test]
+fn a_resolved_start_clears_its_unconfirmed_message_after_reconnect() {
+    let (connection, mut view) = lost_start();
+    connection.set_start_unconfirmed(false);
+    connection.answer(CorePaneStatus::Restored);
+    view.sync();
+    assert!(matches!(
+        view.screen(),
+        Some(CorePaneScreen::Restored {
+            unconfirmed: false,
+            offered: true,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_pane_uses_its_restored_update_cause_after_the_app_relaunches() {
+    let connection = Connection::new(CorePaneStatus::Restored);
+    let mut view = CorePaneView::new(connection);
+    let saved = spaceterm_core::client_view::PaneRestart {
+        pane: [2; 32],
+        boot: [3; 32],
+        running: spaceterm_core::update::facts::Version::parse("0.11.2").unwrap(),
+        updated: Some(spaceterm_core::update::facts::Version::parse("0.11.2").unwrap()),
+    };
+    let bytes = serde_json::to_vec(&vec![saved]).unwrap();
+    view.retain_restart_cause(
+        [2; 32],
+        Arc::new(Mutex::new(serde_json::from_slice(&bytes).unwrap())),
+    );
+    assert_eq!(
+        view.dormant_copy(None).detail.as_ref(),
+        "SpaceTerm Core restarted to update to 0.11.2."
+    );
+}
+
+#[test]
+fn a_normal_update_wait_shows_one_machine_message_without_an_error_or_retry() {
+    let (connection, mut view) = lost_start();
+    *connection.restart.lock().unwrap() =
+        Some(spaceterm_core::update::facts::Version::parse("0.11.2").unwrap());
+    view.set_machine_name("This Mac".into());
+    view.sync();
+    assert_eq!(
+        notice(&view),
+        Some((
+            "Updating This Mac…".to_owned(),
+            "Pane actions wait for SpaceTerm Core to reconnect.".to_owned()
+        ))
+    );
+    assert!(!matches!(
+        view.screen(),
+        Some(CorePaneScreen::StartUnknown { .. })
+    ));
+    assert!(!view.notice_offers_retry());
+    assert_eq!(view.dormant_copy(None).title.as_ref(), "Updating This Mac…");
 }
