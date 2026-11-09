@@ -49,12 +49,6 @@ pub const RULES: &[FileRule] = &[
         stamp: None,
     },
     FileRule {
-        name: "pane-restarts.json",
-        kind: DataKind::View,
-        read: crate::client_view::readable_pane_restarts,
-        stamp: None,
-    },
-    FileRule {
         name: "workspace-order.json",
         kind: DataKind::WorkspaceOrder,
         read: crate::workspace_order::readable,

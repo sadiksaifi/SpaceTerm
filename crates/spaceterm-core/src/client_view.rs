@@ -534,11 +534,9 @@ impl RestartsRecord {
     }
 }
 
-/// Whether `value` is a `pane-restarts.json` this build reads.
-#[cfg(feature = "client")]
-pub(crate) fn readable_pane_restarts(value: &serde_json::Value) -> bool {
-    RestartsRecord::deserialize(value).is_ok_and(|record| record.valid())
-}
+/// The name of the Pane restart facts file in a client directory. It holds no retained state
+/// a root's admission reads: its store treats a copy it can't read as empty.
+pub const PANE_RESTARTS: &str = "pane-restarts.json";
 
 #[cfg(feature = "client")]
 #[derive(Serialize, Deserialize)]
@@ -627,7 +625,7 @@ impl ClientViewStore {
             })
             .map(|retained| retained.inventory);
         let pane_restarts = directory
-            .read_json::<RestartsRecord>("pane-restarts.json")
+            .read_json::<RestartsRecord>(PANE_RESTARTS)
             .ok()
             .flatten()
             .filter(|retained| {
@@ -1192,11 +1190,52 @@ mod pane_restart_tests {
             .unwrap();
         let saved = std::fs::read(root.join("view.json")).unwrap();
         assert!(serde_json::from_slice::<Released>(&saved).is_ok());
-        let restarts: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(root.join("pane-restarts.json")).unwrap())
-                .unwrap();
-        assert!(readable_pane_restarts(&restarts));
         drop(store);
+        let reopened = ClientViewStore::open(
+            crate::storage::Directory::open(&root, true).unwrap(),
+            [3; 32],
+            [4; 32],
+        )
+        .unwrap();
+        assert_eq!(reopened.pane_restarts().len(), 1);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_pane_restart_file_reads_as_empty_and_keeps_the_view() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-pane-restart-{:x}",
+            u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let directory = || crate::storage::Directory::open(&root, true).unwrap();
+        let view = ClientView {
+            workspaces: vec![WorkspaceView {
+                workspace: [5; 32],
+                tabs: Vec::new(),
+            }],
+        };
+        let mut store = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        store.save(view.clone()).unwrap();
+        drop(store);
+        directory()
+            .write_json(RESTARTS, &serde_json::json!({ "version": 1, "panes": "?" }))
+            .unwrap();
+        let mut reopened = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        assert!(reopened.pane_restarts().is_empty());
+        assert_eq!(reopened.view(), &view);
+        // The next facts replace the unreadable copy.
+        let cause = PaneRestart {
+            pane: [1; 32],
+            boot: [2; 32],
+            running: crate::update::facts::Version::parse("0.11.3").unwrap(),
+            updated: None,
+        };
+        reopened.save_pane_restarts(vec![cause.clone()]).unwrap();
+        drop(reopened);
+        let again = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        assert_eq!(again.pane_restarts(), &[cause]);
+        drop(again);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
