@@ -192,7 +192,7 @@ pub fn run(
     reply
 }
 
-/// The notice about a version that waits for a restart on the Core this command reached.
+/// The notice about a Pending Version of the Core this command reached.
 /// `status`, `update` and `restart` already report it.
 fn notice(context: &Context<'_>, command: &CoreCommand, reply: &Reply) -> Option<String> {
     if matches!(

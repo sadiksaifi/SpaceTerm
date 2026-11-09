@@ -1,9 +1,9 @@
-//! The `notice:` line about a SpaceTerm Core version that waits for a restart.
+//! The `notice:` line about a Pending Version that SpaceTerm Core has not updated to yet.
 //!
 //! A command that reached a Core prints at most one notice on stderr, after its result, about
 //! that Core. It prints only in text mode, only when stderr is a terminal, and never with
-//! `--quiet` or `--json`. After one day the notice escalates: it says how long the version has
-//! waited and how many Terminal Sessions a restart ends.
+//! `--quiet` or `--json`. Once the update is overdue, the notice says how long the version has
+//! waited and how many Terminal Sessions updating to it ends.
 use crate::contract::{EXIT_BROKEN_PIPE, MachineRef, Mode};
 use spaceterm_core::update::facts::UpdateFacts;
 use std::io::Write;
@@ -63,7 +63,7 @@ pub fn line(facts: &UpdateFacts, machine: &str, restart: &str, now: u64) -> Opti
     let overdue = pending.overdue(now);
     if !overdue {
         return Some(format!(
-            "notice: SpaceTerm Core {version} is installed on {machine}. Restart to use it: {restart}"
+            "notice: SpaceTerm Core {version} is installed on {machine}. Update with: {restart}"
         ));
     }
     let days = (waited / 86_400).max(1);
@@ -73,12 +73,14 @@ pub fn line(facts: &UpdateFacts, machine: &str, restart: &str, now: u64) -> Opti
         format!("{days} days")
     };
     let ends = match facts.sessions {
-        0 => "Restart to use it".to_owned(),
-        1 => "Restarting ends 1 Terminal Session".to_owned(),
-        sessions => format!("Restarting ends {sessions} Terminal Sessions"),
+        0 => String::new(),
+        sessions => format!(
+            " Updating to it ends {}.",
+            crate::admin::lifecycle::terminal_sessions(sessions)
+        ),
     };
     Some(format!(
-        "notice: SpaceTerm Core {version} has waited {days} for a restart on {machine}. {ends}: {restart}"
+        "notice: SpaceTerm Core {version} has waited {days} on {machine}.{ends} Update with: {restart}"
     ))
 }
 
@@ -119,7 +121,7 @@ mod tests {
         assert_eq!(
             line(&facts(4, false), "penguin", RESTART, INSTALLED + 60).as_deref(),
             Some(
-                "notice: SpaceTerm Core 0.7.2 is installed on penguin. Restart to use it: \
+                "notice: SpaceTerm Core 0.7.2 is installed on penguin. Update with: \
                  spaceterm --machine penguin restart"
             )
         );
@@ -136,8 +138,8 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "notice: SpaceTerm Core 0.7.2 has waited 3 days for a restart on penguin. \
-                 Restarting ends 4 Terminal Sessions: spaceterm --machine penguin restart"
+                "notice: SpaceTerm Core 0.7.2 has waited 3 days on penguin. Updating to it ends 4 \
+                 Terminal Sessions. Update with: spaceterm --machine penguin restart"
             )
         );
         assert_eq!(
@@ -149,8 +151,8 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "notice: SpaceTerm Core 0.7.2 has waited 2 days for a restart on This Mac. \
-                 Restarting ends 1 Terminal Session: spaceterm --machine penguin restart"
+                "notice: SpaceTerm Core 0.7.2 has waited 2 days on This Mac. Updating to it ends 1 \
+                 Terminal Session. Update with: spaceterm --machine penguin restart"
             )
         );
         assert_eq!(
@@ -162,15 +164,15 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "notice: SpaceTerm Core 0.7.2 has waited 2 days for a restart on penguin. \
-                 Restart to use it: spaceterm --machine penguin restart"
+                "notice: SpaceTerm Core 0.7.2 has waited 2 days on penguin. Update with: \
+                 spaceterm --machine penguin restart"
             ),
             "the CLI's clock escalates even before the Core's facts do"
         );
         assert_eq!(
             line(&facts(0, true), "penguin", RESTART, INSTALLED + 86_400 + 5).as_deref(),
             Some(
-                "notice: SpaceTerm Core 0.7.2 is installed on penguin. Restart to use it: \
+                "notice: SpaceTerm Core 0.7.2 is installed on penguin. Update with: \
                  spaceterm --machine penguin restart"
             ),
             "an older Core's one-day fact is not yet Overdue"
@@ -223,7 +225,7 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "notice: SpaceTerm Core 0.7.2 is installed on penguin. Restart to use it: \
+                "notice: SpaceTerm Core 0.7.2 is installed on penguin. Update with: \
                  spaceterm --machine penguin --as builder restart"
             )
         );

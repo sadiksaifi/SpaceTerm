@@ -944,7 +944,7 @@ codes! {
     Stopped = "stopped", Unavailable, false, "SpaceTerm Core was stopped. Start it with: spaceterm start.";
     LoginItemOff = "login_item_off", ActionRequired, false, "SpaceTerm Core is off in Login Items. Turn it on in System Settings > General > Login Items & Extensions.";
     Changed = "changed", Target, true, "The target changed. Review it and try again.";
-    ActivationUnresolved = "activation_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm whether SpaceTerm Core restarted on the new version.";
+    ActivationUnresolved = "activation_unresolved", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm whether SpaceTerm Core updated to its Pending Version.";
     CandidateUnverified = "candidate_unverified", Failed, false, "SpaceTerm couldn\u{2019}t verify the SpaceTerm Core package.";
     NoCandidate = "no_candidate", Target, false, "There is no SpaceTerm Core package to install.";
     // Update sources.
@@ -1253,7 +1253,7 @@ impl WarningCode {
             Self::HistoryGap => "Some rows were discarded before they could be read.",
             Self::CoverageCoalesced => "Some screen states were coalesced and are not shown.",
             Self::ClientMajorDiffers => {
-                "After this restart, work commands need a CLI with SpaceTerm Core's protocol major."
+                "After this update, work commands need a CLI with SpaceTerm Core's protocol major."
             }
             Self::DataReset => {
                 "SpaceTerm reset saved data of this CLI that this version couldn't read. See details.kinds."

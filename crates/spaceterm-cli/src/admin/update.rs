@@ -180,7 +180,7 @@ fn finish(
     recovered: Vec<contract::RecoveredOperation>,
 ) -> Reply {
     let restart = context.command_line(&machine, &["restart"]);
-    let text = text(installed, facts, &restart);
+    let text = text(installed, facts, super::display_name(&machine), &restart);
     Reply::new(
         &envelope(machine, installed, facts, recovered, crate::notice::now()),
         text,
@@ -204,8 +204,9 @@ pub(crate) fn envelope(
     super::with_recovered(Envelope::ok(COMMAND, Some(machine), data), recovered)
 }
 
-/// What installing found, and how to use the Pending Version.
-pub(crate) fn text(installed: bool, facts: &UpdateFacts, restart: &str) -> String {
+/// What installing found, and how SpaceTerm Core on `machine` updates to the Pending Version.
+/// `restart` is the command line that updates it.
+pub(crate) fn text(installed: bool, facts: &UpdateFacts, machine: &str, restart: &str) -> String {
     let running = &facts.running;
     let Some(pending) = &facts.pending else {
         return format!("SpaceTerm Core {running} is up to date.\n");
@@ -224,14 +225,13 @@ pub(crate) fn text(installed: bool, facts: &UpdateFacts, restart: &str) -> Strin
     let how = match facts.sessions {
         // The Core restarts into a compatible version by itself while no Session is open.
         0 if !pending.breaking => {
-            "SpaceTerm Core restarts into it by itself while no Terminal Session is open."
-                .to_owned()
+            "SpaceTerm Core updates to it by itself once no Terminal Session is open.".to_owned()
         }
-        0 => format!("Restart to use it: {restart}"),
-        1 => format!("Restart to use it; restarting ends 1 Terminal Session: {restart}"),
-        sessions => {
-            format!("Restart to use it; restarting ends {sessions} Terminal Sessions: {restart}")
-        }
+        0 => format!("Update with: {restart}"),
+        sessions => format!(
+            "Updating to it ends {} on {machine}. Update with: {restart}",
+            super::lifecycle::terminal_sessions(sessions)
+        ),
     };
     format!("{what} {how}\n")
 }

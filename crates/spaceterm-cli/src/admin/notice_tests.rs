@@ -1,8 +1,8 @@
-//! The pending-restart notice at the machine verbs' output boundary.
+//! The Pending Version notice at the machine verbs' output boundary.
 use super::Reply;
 use crate::contract::{Envelope, MachineRef, Mode};
 
-const NOTICE: &str = "notice: SpaceTerm Core 0.7.2 is installed on penguin. Restart to use it: \
+const NOTICE: &str = "notice: SpaceTerm Core 0.7.2 is installed on penguin. Update with: \
                       spaceterm --machine penguin restart";
 
 fn reply() -> Reply {

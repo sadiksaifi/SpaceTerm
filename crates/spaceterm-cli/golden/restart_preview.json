@@ -44,7 +44,7 @@
         "client_major": 1,
         "core_major": 2
       },
-      "message": "After this restart, work commands need a CLI with SpaceTerm Core's protocol major."
+      "message": "After this update, work commands need a CLI with SpaceTerm Core's protocol major."
     }
   ]
 }

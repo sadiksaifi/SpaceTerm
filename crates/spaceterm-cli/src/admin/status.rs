@@ -411,7 +411,7 @@ fn text(core: &MachineRef, data: &CoreStatus, commands: &Commands<'_>) -> String
             "finish it on that machine with: spaceterm start"
         };
         out.push_str(&format!(
-            "Update: the restart into the new version has not finished. Check again in a minute. If it still has not finished, {finish}\n"
+            "Update: the update to the Pending Version has not finished. Check again in a minute. If it still has not finished, {finish}\n"
         ));
     }
     if let Some(skipped) = &data.skipped {
@@ -454,12 +454,12 @@ fn text(core: &MachineRef, data: &CoreStatus, commands: &Commands<'_>) -> String
 
 fn pending_text(pending: &PendingStatus, restart: &str) -> String {
     let overdue = if pending.overdue_since.is_some() {
-        ", restart overdue"
+        ", update overdue"
     } else {
         ""
     };
     let mut out = format!(
-        "Pending: {}, installed {}{overdue}. Restart to use it: {restart}\n",
+        "Pending: {}, installed {}{overdue}. Update with: {restart}\n",
         pending.version, pending.installed_at
     );
     if pending.breaking {

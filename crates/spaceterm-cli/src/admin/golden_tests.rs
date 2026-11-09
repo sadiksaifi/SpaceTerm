@@ -147,7 +147,7 @@ fn status_reports_service_network_devices_and_held_outcomes() {
     assert_golden("status", &envelope);
     assert!(
         text.contains(
-            "Pending: 0.8.0, installed 2026-11-03T09:12:00Z, restart overdue. Restart to use it: \
+            "Pending: 0.8.0, installed 2026-11-03T09:12:00Z, update overdue. Update with: \
              spaceterm --machine penguin restart\n  It changes the protocol. These devices stop \
              working until they update: old-mini\n"
         ),
@@ -178,10 +178,10 @@ fn status_calls_a_pending_version_overdue_after_two_days_whichever_core_reported
     };
     let (marker, text) = read(INSTALLED + 86_400 + 43_200);
     assert_eq!(marker, serde_json::Value::Null);
-    assert!(!text.contains("restart overdue"), "{text}");
+    assert!(!text.contains("update overdue"), "{text}");
     let (marker, text) = read(INSTALLED + 2 * 86_400);
     assert_eq!(marker, "2026-11-05T09:12:00Z");
-    assert!(text.contains("restart overdue"), "{text}");
+    assert!(text.contains("update overdue"), "{text}");
 }
 
 #[test]
@@ -309,7 +309,7 @@ fn an_unfinished_restart_reads_as_restarting_or_names_the_command_that_finishes_
     lane.update = None;
     assert!(
         status_text(&lane).contains(
-            "Update: the restart into the new version has not finished. Check again in a \
+            "Update: the update to the Pending Version has not finished. Check again in a \
              minute. If it still has not finished, finish it on that machine with: spaceterm \
              start\n"
         ),
@@ -776,28 +776,28 @@ fn update_reports_the_version_it_installed_and_how_to_use_it() {
     assert_exit(&envelope, 0);
     assert_golden("update_installed", &envelope);
     assert_eq!(
-        update::text(true, &installed, RESTART),
-        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Restart to use it; restarting ends 2 \
-         Terminal Sessions: spaceterm --machine penguin restart\n"
+        update::text(true, &installed, "penguin", RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Updating to it ends 2 Terminal Sessions on \
+         penguin. Update with: spaceterm --machine penguin restart\n"
     );
     assert_eq!(
-        update::text(false, &installed, RESTART),
-        "SpaceTerm Core 0.8.0 is already installed beside 0.7.0. Restart to use it; restarting \
-         ends 2 Terminal Sessions: spaceterm --machine penguin restart\n"
+        update::text(false, &installed, "penguin", RESTART),
+        "SpaceTerm Core 0.8.0 is already installed beside 0.7.0. Updating to it ends 2 Terminal \
+         Sessions on penguin. Update with: spaceterm --machine penguin restart\n"
     );
     let mut idle = installed.clone();
     idle.sessions = 0;
     assert_eq!(
-        update::text(true, &idle, RESTART),
-        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. SpaceTerm Core restarts into it by itself \
-         while no Terminal Session is open.\n"
+        update::text(true, &idle, "penguin", RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. SpaceTerm Core updates to it by itself \
+         once no Terminal Session is open.\n"
     );
     let mut breaking = idle.clone();
     breaking.pending = Some(pending(true, false));
     assert_eq!(
-        update::text(true, &breaking, RESTART),
-        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Restart to use it: spaceterm --machine \
-         penguin restart\n",
+        update::text(true, &breaking, "penguin", RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Update with: spaceterm --machine penguin \
+         restart\n",
         "a breaking version never restarts by itself"
     );
     let current = facts(None, UpdateCheck::Succeeded { at: SUCCEEDED });
@@ -805,7 +805,7 @@ fn update_reports_the_version_it_installed_and_how_to_use_it() {
     assert_exit(&envelope, 0);
     assert_golden("update_current", &envelope);
     assert_eq!(
-        update::text(false, &current, RESTART),
+        update::text(false, &current, "penguin", RESTART),
         "SpaceTerm Core 0.7.0 is up to date.\n"
     );
 }
