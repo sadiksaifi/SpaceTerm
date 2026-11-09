@@ -334,7 +334,7 @@ fn a_failed_action_from_the_menu_opens_an_alert_and_others_stay_quiet(cx: &mut T
     assert_eq!(
         fixture.host.alerts.borrow().as_slice(),
         [Alert {
-            title: "Couldn't restart SpaceTerm Core on penguin".to_owned(),
+            title: "Couldn't Restart SpaceTerm Core on penguin".to_owned(),
             message: "SpaceTerm can't reach penguin. Try again when it is connected.".to_owned(),
             confirm: None,
         }]
@@ -356,7 +356,7 @@ fn the_menu_ends_with_settings_and_quit_and_never_offers_open(cx: &mut TestAppCo
     );
     assert_eq!(
         menu.machines[0].row.line.as_ref(),
-        "Version 0.8.0 \u{b7} 3 sessions"
+        "Version 0.8.0 \u{b7} 3 Terminal Sessions"
     );
     assert!(
         menu.actions.is_empty(),
@@ -387,7 +387,7 @@ fn the_flat_menu_names_the_machine_each_pending_action_affects(cx: &mut TestAppC
         rows,
         [
             format!("SpaceTerm \u{b7} Version {}", env!("SPACETERM_VERSION")),
-            "This Mac \u{b7} Version 0.8.0 \u{b7} No sessions".to_owned(),
+            "This Mac \u{b7} Version 0.8.0 \u{b7} No Terminal Sessions".to_owned(),
             "penguin \u{b7} Version 0.8.0 \u{b7} Update ready".to_owned(),
             "build-box \u{b7} Version 0.8.0 \u{b7} Update ready".to_owned(),
             "-".to_owned(),
@@ -472,9 +472,14 @@ fn the_flat_menu_keeps_reasons_and_recent_updates_and_names_each_machine_once(
         "{texts:?}"
     );
     assert!(titles.contains(&"Update penguin"), "{titles:?}");
-    assert!(titles.contains(&"Dismiss Notice on build-box"), "{titles:?}");
     assert!(
-        !titles.iter().any(|title| title.contains("penguin on penguin")),
+        titles.contains(&"Dismiss Notice on build-box"),
+        "{titles:?}"
+    );
+    assert!(
+        !titles
+            .iter()
+            .any(|title| title.contains("penguin on penguin")),
         "{titles:?}"
     );
 }
@@ -633,7 +638,7 @@ fn restart_all_and_stop_ask_again_after_their_sessions_change(cx: &mut TestAppCo
     assert!(fixture.machines.executed_actions().is_empty());
     assert_eq!(
         fixture.host.alerts.borrow().last().unwrap().message,
-        "This will close your 1 running session. SpaceTerm Core stays stopped until you start it again."
+        "This ends 1 Terminal Session. SpaceTerm Core stays stopped until you start it again."
     );
 }
 
@@ -841,9 +846,7 @@ fn a_machine_without_facts_stops_only_on_its_cores_preview(cx: &mut TestAppConte
         .expect("it asks");
     assert_eq!(alert.confirm.as_deref(), Some("Stop"));
     assert!(
-        alert
-            .message
-            .starts_with("This will close your 3 running sessions."),
+        alert.message.starts_with("This ends 3 Terminal Sessions."),
         "the alert names the sessions the Core reports: {}",
         alert.message
     );
@@ -979,7 +982,7 @@ fn a_failed_preview_in_restart_all_leaves_the_other_machines_to_restart(cx: &mut
     assert_eq!(
         fixture.host.alerts.borrow().as_slice(),
         [Alert {
-            title: "Couldn't restart SpaceTerm Core on build-box".to_owned(),
+            title: "Couldn't Restart SpaceTerm Core on build-box".to_owned(),
             message: "SpaceTerm can't reach build-box. Try again when it is connected.".to_owned(),
             confirm: None,
         }],
