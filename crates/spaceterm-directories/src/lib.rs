@@ -49,6 +49,14 @@ impl AppDirectoryEnvironment {
         }
     }
 
+    /// The XDG data home itself, without an application directory: an absolute
+    /// `XDG_DATA_HOME`, otherwise `~/.local/share`. Desktop entries live in its `applications`.
+    pub fn data_home(&self) -> Option<PathBuf> {
+        absolute_environment_path(self.xdg_data_home.as_deref()).or_else(|| {
+            absolute_environment_path(self.home.as_deref()).map(|home| home.join(".local/share"))
+        })
+    }
+
     pub fn configured_runtime_root(&self) -> Option<PathBuf> {
         absolute_environment_path(self.xdg_runtime_dir.as_deref())
     }
@@ -247,8 +255,7 @@ impl DesktopResourceDirectories {
         let home = absolute_environment_path(environment.home.as_deref());
         let config_home = absolute_environment_path(environment.xdg_config_home.as_deref())
             .or_else(|| home.as_ref().map(|home| home.join(".config")));
-        let data_home = absolute_environment_path(environment.xdg_data_home.as_deref())
-            .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+        let data_home = environment.data_home();
         let mut system_data: Vec<PathBuf> = data_dirs
             .filter(|value| !value.is_empty())
             .map(|value| {
@@ -397,6 +404,27 @@ mod tests {
             resources.kde_globals_file(),
             Some(PathBuf::from("/home/test/.config/kdeglobals"))
         );
+    }
+
+    #[test]
+    fn the_data_home_should_use_an_absolute_override_or_the_home_default() {
+        let explicit = AppDirectoryEnvironment {
+            home: Some("/home/test".into()),
+            xdg_data_home: Some("/explicit/data".into()),
+            ..Default::default()
+        };
+        assert_eq!(explicit.data_home(), Some(PathBuf::from("/explicit/data")));
+        for ignored in [OsString::new(), "relative/data".into()] {
+            let defaulted = AppDirectoryEnvironment {
+                xdg_data_home: Some(ignored),
+                ..explicit.clone()
+            };
+            assert_eq!(
+                defaulted.data_home(),
+                Some(PathBuf::from("/home/test/.local/share"))
+            );
+        }
+        assert_eq!(AppDirectoryEnvironment::default().data_home(), None);
     }
 
     #[test]

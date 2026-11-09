@@ -695,12 +695,7 @@ struct DesktopEntry {
 
 impl DesktopEntry {
     fn locate(id: &'static str) -> Option<Self> {
-        let data_home = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| {
-                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
-            })?;
+        let data_home = super::app_directories::AppDirectoryEnvironment::capture().data_home()?;
         Some(Self::under(&data_home, id))
     }
 
