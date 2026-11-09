@@ -2733,6 +2733,120 @@ fn concurrent_shared_links_of_one_pairing_each_admit_and_answer() {
     }
 }
 
+/// While SpaceTerm Core restarts, its link ends and the next link has no facts yet. The shared
+/// handle keeps the facts that said it restarts until another link's facts arrive.
+#[cfg(feature = "client")]
+#[test]
+fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_ones() {
+    use crate::MachineConnection;
+    use crate::update::facts::{self, Platform, UpdateCheck, UpdateFacts, Version};
+    use crate::update::source::FactsSource;
+
+    /// Facts that never change.
+    struct Fixed(UpdateFacts);
+    impl FactsSource for Fixed {
+        fn facts(&self) -> UpdateFacts {
+            self.0.clone()
+        }
+        fn wait(&self, _: u64, timeout: Duration) -> Option<UpdateFacts> {
+            std::thread::sleep(timeout);
+            Some(self.0.clone())
+        }
+    }
+    struct Connector {
+        endpoint: String,
+        paired: PairedDevice,
+        credential: Arc<DeviceCredential>,
+    }
+    impl DirectConnector for Connector {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
+        }
+    }
+
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = Arc::new(DeviceCredential::generate().unwrap());
+    let paired = fixture.enroll(&credential);
+    let serve = |operation: Option<facts::Operation>| {
+        let mut environment = fixture.environment(service(Refusing));
+        environment.facts = Some(Arc::new(Fixed(UpdateFacts {
+            revision: 1,
+            platform: Platform::HOST,
+            running: Version::parse("1.4.0").unwrap(),
+            pending: None,
+            sessions: 0,
+            operation,
+            check: UpdateCheck::Never,
+            skipped: None,
+            last_failure: None,
+        })));
+        let state = Arc::clone(&fixture.state);
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let accepted = state.lock().unwrap().accept();
+                if let Some((stream, generation)) = accepted {
+                    let (waker, wake) = Waker::new().unwrap();
+                    return host::serve(
+                        stream,
+                        generation,
+                        state,
+                        &environment,
+                        waker,
+                        wake,
+                        &host::LaneStop::default(),
+                    );
+                }
+                assert!(Instant::now() < deadline, "QUIC accept deadline");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+    let core = MachineConnection::direct(
+        &paired.pin.build,
+        [42; 32],
+        paired.clone(),
+        Arc::new(Connector {
+            endpoint: fixture.endpoint(),
+            paired: paired.clone(),
+            credential: Arc::clone(&credential),
+        }),
+    )
+    .unwrap();
+    let operation =
+        |core: &MachineConnection| core.update_facts().map(|facts| facts.operation.clone());
+    let until = |core: &MachineConnection, expected: Option<Option<facts::Operation>>| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while operation(core) != expected {
+            assert!(Instant::now() < deadline, "{:?}", operation(core));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let restarting = facts::Operation::Restarting {
+        to: Version::parse("1.5.0").unwrap(),
+    };
+    let first = serve(Some(restarting.clone()));
+    core.link().unwrap();
+    until(&core, Some(Some(restarting.clone())));
+    // The restart ends the link.
+    core.disconnect();
+    assert!(core.live_link().is_none());
+    assert_eq!(operation(&core), Some(Some(restarting)));
+    let _ = first.join().unwrap();
+    // The next link's facts replace them.
+    let second = serve(None);
+    core.link().unwrap();
+    until(&core, Some(None));
+    core.disconnect();
+    assert_eq!(
+        operation(&core),
+        None,
+        "facts without a restart stay with their link"
+    );
+    let _ = second.join().unwrap();
+}
+
 #[test]
 fn an_unresponsive_core_port_is_a_transport_failure() {
     let fixture = Fixture::new();
