@@ -711,49 +711,23 @@ impl DesktopEntry {
         }
     }
 
-    /// Rewrites the entry from the release `installation` holds now. An entry that launches
-    /// another installation, or that the person removed, stays as it is. Returns whether the
-    /// entry changed.
+    /// Rewrites the entry from the release `installation` holds now, but only while it is still
+    /// the entry the install script generated from the replaced release, which the exchange left
+    /// in the staging directory. An entry the person edited or removed, or one that launches
+    /// another installation, stays as it is. Returns whether the entry changed.
     fn refresh(&self, installation: &Installation) -> io::Result<bool> {
-        let Some(exec) = exec_value(&installation.executable) else {
-            return Ok(false);
-        };
-        let exec = format!("Exec={exec} %u");
         let current = match fs::read_to_string(&self.path) {
             Ok(current) => current,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error),
         };
-        if !current.lines().any(|line| line == exec) {
+        let previous = self.render(&installation.staged_tree(), installation)?;
+        if previous.as_deref() != Some(current.as_str()) {
             return Ok(false);
         }
-        let packaged = fs::read_to_string(
-            installation
-                .root
-                .join("share/applications")
-                .join(format!("{}.desktop", self.id)),
-        )?;
-        let icon = installation
-            .root
-            .join("share/icons/hicolor/scalable/apps")
-            .join(format!("{}.svg", self.id));
-        let Some(icon) = icon.to_str() else {
+        let Some(entry) = self.render(&installation.root, installation)? else {
             return Ok(false);
         };
-        let icon = format!("Icon={}", icon.replace('\\', "\\\\"));
-        let entry: String = packaged
-            .lines()
-            .map(|line| {
-                let line = if line.starts_with("Exec=") {
-                    exec.as_str()
-                } else if line.starts_with("Icon=") {
-                    icon.as_str()
-                } else {
-                    line
-                };
-                format!("{line}\n")
-            })
-            .collect();
         if entry == current {
             return Ok(false);
         }
@@ -767,6 +741,43 @@ impl DesktopEntry {
             let _ = fs::remove_file(&staged);
         })?;
         Ok(true)
+    }
+
+    /// The entry the install script writes for `installation` from the packaged entry in
+    /// `tree`: its Exec and Icon name the installation's executable and icon. None when either
+    /// path is not UTF-8, which no entry can name.
+    fn render(&self, tree: &Path, installation: &Installation) -> io::Result<Option<String>> {
+        let packaged = fs::read_to_string(
+            tree.join("share/applications")
+                .join(format!("{}.desktop", self.id)),
+        )?;
+        let Some(exec) = exec_value(&installation.executable) else {
+            return Ok(None);
+        };
+        let exec = format!("Exec={exec} %u");
+        let icon = installation
+            .root
+            .join("share/icons/hicolor/scalable/apps")
+            .join(format!("{}.svg", self.id));
+        let Some(icon) = icon.to_str() else {
+            return Ok(None);
+        };
+        let icon = format!("Icon={}", icon.replace('\\', "\\\\"));
+        Ok(Some(
+            packaged
+                .lines()
+                .map(|line| {
+                    let line = if line.starts_with("Exec=") {
+                        exec.as_str()
+                    } else if line.starts_with("Icon=") {
+                        icon.as_str()
+                    } else {
+                        line
+                    };
+                    format!("{line}\n")
+                })
+                .collect(),
+        ))
     }
 
     /// Updates the MIME cache that maps the `spaceterm:` scheme to the entry, as the install
@@ -1096,38 +1107,57 @@ mod tests {
 
     const DESKTOP_ID: &str = "com.peblon.spaceterm";
 
-    /// Writes the release's packaged entry into the installation and the install script's entry
-    /// for it into `data_home`, which launches `executable`.
-    fn desktop_entries(fixture: &Fixture, data_home: &Path, executable: &Path, packaged: &str) {
-        let root = &fixture.installation.root;
-        fs::create_dir_all(root.join("share/applications")).unwrap();
+    /// An installation whose release packaged the desktop entry `previous`, replaced by a release
+    /// that packages `packaged`. The returned XDG data home holds the install script's entry,
+    /// which `entry` renders for the installation's root.
+    fn updated(
+        previous: &str,
+        packaged: &str,
+        entry: impl FnOnce(&Path) -> String,
+    ) -> (Fixture, PathBuf) {
+        let fixture = installed("old");
+        let installation = &fixture.installation;
+        let applications = installation.root.join("share/applications");
+        fs::create_dir_all(&applications).unwrap();
+        fs::write(applications.join(format!("{DESKTOP_ID}.desktop")), previous).unwrap();
+        installation.create_staging().unwrap();
+        let tree = installation.staged_tree();
+        fs::create_dir_all(tree.join("bin")).unwrap();
+        fs::create_dir_all(tree.join("share/spaceterm")).unwrap();
+        fs::create_dir_all(tree.join("share/applications")).unwrap();
+        fs::write(tree.join("bin/spaceterm-desktop"), "new").unwrap();
         fs::write(
-            root.join(format!("share/applications/{DESKTOP_ID}.desktop")),
+            tree.join(format!("share/applications/{DESKTOP_ID}.desktop")),
             packaged,
         )
         .unwrap();
+        installation.replace().unwrap();
+        let data_home = fixture._directory.path().join("data");
         fs::create_dir_all(data_home.join("applications")).unwrap();
         fs::write(
             data_home.join(format!("applications/{DESKTOP_ID}.desktop")),
-            format!(
-                "[Desktop Entry]\nName=SpaceTerm\nExec={} %u\nIcon=old\n",
-                exec_value(executable).unwrap()
-            ),
+            entry(&fixture.installation.root),
         )
         .unwrap();
+        (fixture, data_home)
+    }
+
+    const PREVIOUS: &str =
+        "[Desktop Entry]\nName=SpaceTerm\nExec=spaceterm-desktop %u\nIcon=com.peblon.spaceterm\n";
+    const PACKAGED: &str = "[Desktop Entry]\nName=SpaceTerm\nExec=spaceterm-desktop %u\nMimeType=x-scheme-handler/spaceterm;\nIcon=com.peblon.spaceterm\n";
+
+    /// The entry the install script writes for the installation at `root` from `PREVIOUS`.
+    fn generated(root: &Path) -> String {
+        let root = root.to_str().unwrap();
+        format!(
+            "[Desktop Entry]\nName=SpaceTerm\nExec=\"{root}/bin/spaceterm-desktop\" %u\nIcon={root}/share/icons/hicolor/scalable/apps/{DESKTOP_ID}.svg\n"
+        )
     }
 
     #[test]
     fn linux_update_should_rewrite_the_desktop_entry_from_the_installed_release() {
-        let fixture = installed("old");
-        let data_home = fixture._directory.path().join("data");
+        let (fixture, data_home) = updated(PREVIOUS, PACKAGED, generated);
         let installation = &fixture.installation;
-        desktop_entries(
-            &fixture,
-            &data_home,
-            &installation.executable,
-            "[Desktop Entry]\nName=SpaceTerm\nExec=spaceterm-desktop %u\nMimeType=x-scheme-handler/spaceterm;\nIcon=com.peblon.spaceterm\n",
-        );
         let entry = DesktopEntry::under(&data_home, DESKTOP_ID);
         assert!(entry.refresh(installation).unwrap());
         let root = installation.root.to_str().unwrap();
@@ -1137,7 +1167,8 @@ mod tests {
                 "[Desktop Entry]\nName=SpaceTerm\nExec=\"{root}/bin/spaceterm-desktop\" %u\nMimeType=x-scheme-handler/spaceterm;\nIcon={root}/share/icons/hicolor/scalable/apps/{DESKTOP_ID}.svg\n"
             )
         );
-        // The same release writes nothing again, and leaves no staged entry behind.
+        // The rewritten entry is no longer the previous release's, so nothing writes it again,
+        // and no staged entry stays behind.
         assert!(!entry.refresh(installation).unwrap());
         assert_eq!(
             fs::read_dir(data_home.join("applications"))
@@ -1147,17 +1178,24 @@ mod tests {
         );
     }
 
+    /// The person changed the entry the install script wrote, so the update keeps their entry.
+    #[test]
+    fn linux_update_should_keep_a_desktop_entry_the_person_edited() {
+        let edited = |root: &Path| format!("{}NoDisplay=true\n", generated(root));
+        let (fixture, data_home) = updated(PREVIOUS, PACKAGED, edited);
+        let entry = DesktopEntry::under(&data_home, DESKTOP_ID);
+        assert!(!entry.refresh(&fixture.installation).unwrap());
+        assert_eq!(
+            fs::read_to_string(&entry.path).unwrap(),
+            edited(&fixture.installation.root)
+        );
+    }
+
     #[test]
     fn linux_update_should_leave_an_entry_for_another_installation_or_none() {
-        let fixture = installed("old");
-        let data_home = fixture._directory.path().join("data");
-        let packaged = "[Desktop Entry]\nExec=spaceterm-desktop %u\nName=New\n";
-        desktop_entries(
-            &fixture,
-            &data_home,
-            Path::new("/elsewhere/spaceterm/bin/spaceterm-desktop"),
-            packaged,
-        );
+        let (fixture, data_home) = updated(PREVIOUS, PACKAGED, |_| {
+            generated(Path::new("/elsewhere/spaceterm"))
+        });
         let entry = DesktopEntry::under(&data_home, DESKTOP_ID);
         let before = fs::read_to_string(&entry.path).unwrap();
         assert!(!entry.refresh(&fixture.installation).unwrap());
