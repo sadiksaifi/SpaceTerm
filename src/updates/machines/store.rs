@@ -679,7 +679,7 @@ mod tests {
             cx.run_until_parked();
             let shown = cx.update(|cx| presentation::current(cx));
             let view = shown.machine(penguin).unwrap();
-            assert_eq!(view.control_label(), "penguin install failed");
+            assert_eq!(view.control_label(), "penguin Install Failed");
             assert_eq!(view.sentence().as_ref(), sentence);
             let row = view.settings_row();
             assert_eq!(row.status.as_ref(), "Install failed");
@@ -766,7 +766,7 @@ mod tests {
         cx.run_until_parked();
         let shown = cx.update(|cx| presentation::current(cx));
         let view = shown.machine(penguin).unwrap();
-        assert_eq!(view.control_label(), "penguin install failed");
+        assert_eq!(view.control_label(), "penguin Install Failed");
         assert_eq!(
             view.sentence().as_ref(),
             "SpaceTerm Core 0.9.0 couldn't install on penguin because penguin is out of disk \
