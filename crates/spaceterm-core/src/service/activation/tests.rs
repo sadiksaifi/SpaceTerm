@@ -484,7 +484,8 @@ fn interrupted(
         } else {
             Some(take_snapshot(&data).unwrap())
         },
-        started_at: None,
+        started: None,
+        interrupted: false,
         ready: false,
         failed: false,
         failure: matches!(
@@ -1355,7 +1356,11 @@ fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
         };
         admit_run(&mut state, &run).unwrap();
         state.run = Some(run);
-        state.activation.as_mut().unwrap().started_at = Some(0);
+        // This process watched the Start, long enough ago that its deadline passed.
+        state.activation.as_mut().unwrap().started = Some(Started {
+            observer: observer().unwrap().to_owned(),
+            at: 0,
+        });
         data.write_json(c"service.json", &state).unwrap();
         // The candidate's run stays recorded, as a run that fails or crashes during startup
         // leaves it, and its process is gone.
@@ -1375,6 +1380,47 @@ fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
             }
         );
         assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+    });
+}
+
+#[test]
+fn a_start_another_process_watched_returns_as_interrupted_and_stays_pending() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::StartDispatched,
+            false,
+        );
+        pending_record(&service, &candidate);
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        // A helper before a reboot, logout or crash watched this Start, long ago.
+        state.activation.as_mut().unwrap().started = Some(Started {
+            observer: "0".repeat(32),
+            at: 0,
+        });
+        data.write_json(c"service.json", &state).unwrap();
+        supervisor.running.store(false, Ordering::SeqCst);
+        *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(previous.directory.clone());
+        let status = service.recover_activation().unwrap().unwrap();
+        assert_eq!(
+            status.phase,
+            ActivationPhase::Returned {
+                failure: StartFailure::Interrupted,
+                running: true
+            }
+        );
+        let facts = runtime::updates::Updates::stored(&service).unwrap();
+        assert_eq!(facts.skipped, None, "its readiness was never measured");
+        assert!(facts.pending.is_some(), "the version stays pending");
     });
 }
 
@@ -1516,7 +1562,7 @@ fn boot_runs_the_approved_version_first_and_then_restarts_into_the_pending_one()
             updates.run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
                 None
             })?;
-            updates.set_sessions(0);
+            quiet(&updates);
             Ok(())
         })
         .unwrap();
@@ -1540,4 +1586,15 @@ fn boot_runs_the_approved_version_first_and_then_restarts_into_the_pending_one()
         }
         assert_eq!(*admitted.0.lock().unwrap(), [(Some(pending), true)]);
     });
+}
+
+/// The server had no Terminal Session and no session request for the whole grace period.
+pub(crate) fn quiet(updates: &runtime::updates::Updates) {
+    let idle = runtime::updates::Activity {
+        sessions: 0,
+        requested: false,
+    };
+    let now = Instant::now();
+    updates.observe(idle, now);
+    updates.observe(idle, now + runtime::updates::SILENT_GRACE);
 }

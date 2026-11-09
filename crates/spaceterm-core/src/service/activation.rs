@@ -163,13 +163,65 @@ pub(super) struct Operation {
     step: Step,
     /// The digest of the retained-state snapshot taken once the server was quiescent.
     saved: Option<[u8; 32]>,
-    /// Unix seconds when the candidate's Start was dispatched, for the readiness deadline.
-    started_at: Option<u64>,
+    /// When the last Start was dispatched, for the readiness deadline.
+    started: Option<Started>,
+    /// A reboot, logout or crash ended the process that watched a Start, so the readiness of
+    /// what that Start ran was never measured. Its failure says nothing about the version.
+    interrupted: bool,
     ready: bool,
     failed: bool,
     /// Why the candidate did not become ready, once the return began.
     failure: Option<StartFailure>,
 }
+/// When a Start was dispatched, on the uptime clock of the process that watches it. The clock
+/// is monotonic and stops while the computer sleeps, so neither a clock change nor sleep
+/// counts. Another process, as after a reboot, logout or crash, can't read it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Started {
+    /// The process that watches the Start: [`observer`].
+    observer: String,
+    /// Milliseconds on [`uptime`] at dispatch.
+    at: u64,
+}
+
+impl Started {
+    fn now() -> Result<Self, CoreError> {
+        Ok(Self {
+            observer: observer()?.to_owned(),
+            at: uptime(),
+        })
+    }
+}
+
+/// A random name for this process, which no other process has.
+fn observer() -> Result<&'static str, CoreError> {
+    static OBSERVER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(observer) = OBSERVER.get() {
+        return Ok(observer);
+    }
+    let random = crate::protocol::random()?;
+    let text: String = random[..16].iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(OBSERVER.get_or_init(|| text))
+}
+
+/// Milliseconds since boot, without the time the computer slept.
+fn uptime() -> u64 {
+    #[cfg(target_os = "macos")]
+    let clock = libc::CLOCK_UPTIME_RAW;
+    #[cfg(target_os = "linux")]
+    let clock = libc::CLOCK_MONOTONIC;
+    // SAFETY: clock_gettime fills the zeroed timespec for a clock this platform has.
+    let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(clock, &mut now) } != 0 {
+        return 0;
+    }
+    u64::try_from(now.tv_sec)
+        .unwrap_or(0)
+        .saturating_mul(1000)
+        .saturating_add(u64::try_from(now.tv_nsec).unwrap_or(0) / 1_000_000)
+}
+
 /// How an activation ended, as the update record must name it.
 pub(super) enum Outcome<'a> {
     /// The candidate became ready and runs now.
@@ -209,6 +261,11 @@ impl Operation {
     }
     pub(super) fn pending(&self) -> bool {
         !matches!(self.step, Step::Completed | Step::Returned)
+    }
+    /// Whether the activation may still return to its previous installation, which therefore
+    /// stays on disk.
+    pub(super) fn retains_previous(&self) -> bool {
+        self.pending() || (self.step == Step::Completed && !self.ready)
     }
     pub(super) fn settled(&self) -> bool {
         matches!(self.step, Step::Returned) || (!self.pending() && !self.failed)
@@ -357,7 +414,8 @@ impl Service {
                 candidate_run: None,
                 step: Step::Admitted,
                 saved: None,
-                started_at: None,
+                started: None,
+                interrupted: false,
                 ready: false,
                 failed: false,
                 failure: None,
@@ -560,9 +618,10 @@ impl Service {
                     }
                     self.supervisor.check(&self.runtime(&state), false)?;
                     self.supervisor.prepare_start()?;
+                    let started = Started::now()?;
                     self.change(data, operation.id, |operation| {
                         operation.step = Step::StartDispatched;
-                        operation.started_at = Some(unix_now());
+                        operation.started = Some(started);
                     })?;
                     if self.supervisor.start().is_err() {
                         // The candidate may have become ready before its Start reported failure.
@@ -597,6 +656,8 @@ impl Service {
                         runtime::updates::record_completed(data, &operation.candidate.digest)?;
                         remove_snapshot(data)?;
                         self.supervisor.disarm_recovery()?;
+                        // No return is left, so the previous installation goes.
+                        let _ = runtime::updates::retire_obsolete(self);
                     }
                     return policy;
                 }
@@ -615,7 +676,7 @@ impl Service {
                 }
                 Step::ReturnStopDispatched => {
                     self.wait_quiescent(data, &operation, operation.candidate_run.as_ref(), true)?;
-                    let failure = self.classify();
+                    let failure = self.classify(operation.interrupted);
                     let _intent = data.lock("service-intent.lock", false)?;
                     state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
                     let _writes = data
@@ -660,9 +721,10 @@ impl Service {
                     }
                     self.supervisor.check(&self.runtime(&state), false)?;
                     self.supervisor.prepare_start()?;
+                    let started = Started::now()?;
                     self.change(data, operation.id, |operation| {
                         operation.step = Step::ReturnStartDispatched;
-                        operation.started_at = Some(unix_now());
+                        operation.started = Some(started);
                     })?;
                     self.supervisor.start()?;
                     if let Err(error) = self.supervisor.set_automatic_start(state.automatic_start) {
@@ -680,6 +742,8 @@ impl Service {
                     self.repoint_cli_locked(&self.runtime(&state));
                     remove_snapshot(data)?;
                     self.supervisor.disarm_recovery()?;
+                    // A skipped candidate goes; one that stays pending stays.
+                    let _ = runtime::updates::retire_obsolete(self);
                     return policy;
                 }
             }
@@ -687,16 +751,31 @@ impl Service {
     }
     /// Waits until the started server's own run moves `operation` on from `step`, or until the
     /// readiness deadline from its dispatch. Returns whether it moved on.
+    ///
+    /// The deadline runs on this process's uptime clock. A Start that another process watched
+    /// was interrupted by a reboot, logout or crash, so its window starts again now, and a miss
+    /// counts as [`StartFailure::Interrupted`], never as a version that is not ready.
     fn await_step(
         &self,
         data: &Directory,
         operation: &Operation,
         step: Step,
     ) -> Result<bool, CoreError> {
-        let deadline = operation
-            .started_at
-            .unwrap_or(0)
-            .saturating_add(self.supervisor.ready_deadline().as_secs());
+        let observer = observer()?;
+        let started = match &operation.started {
+            Some(started) if started.observer == observer => started.at,
+            _ => {
+                let started = Started::now()?;
+                let at = started.at;
+                self.change(data, operation.id, |operation| {
+                    operation.started = Some(started);
+                    operation.interrupted = true;
+                })?;
+                at
+            }
+        };
+        let limit = u64::try_from(self.supervisor.ready_deadline().as_millis()).unwrap_or(u64::MAX);
+        let deadline = started.saturating_add(limit);
         loop {
             let current = Self::state(data)?
                 .and_then(|state| state.activation)
@@ -705,7 +784,7 @@ impl Service {
             if current != Some(step) {
                 return Ok(true);
             }
-            if unix_now() >= deadline {
+            if uptime() >= deadline {
                 return Ok(false);
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -749,9 +828,9 @@ impl Service {
             }
         }
     }
-    /// Why the candidate did not become ready. Disk full and a network port another program
-    /// holds are transient: they say nothing about the version.
-    fn classify(&self) -> StartFailure {
+    /// Why the candidate did not become ready. Disk full, a network port another program holds
+    /// and an `interrupted` watch are transient: they say nothing about the version.
+    fn classify(&self, interrupted: bool) -> StartFailure {
         if runtime::updates::storage_full(&self.paths.data, 64 * 1024 * 1024) {
             return StartFailure::DiskFull;
         }
@@ -760,6 +839,9 @@ impl Service {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
         {
             return StartFailure::PortInUse;
+        }
+        if interrupted {
+            return StartFailure::Interrupted;
         }
         StartFailure::NotReady
     }
@@ -819,11 +901,6 @@ impl Service {
     }
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
 
 /// Copies the retained state beside itself and returns the copy's digest.
 fn take_snapshot(data: &Directory) -> Result<[u8; 32], CoreError> {
@@ -963,4 +1040,4 @@ pub(super) fn admit_run(state: &mut State, run: &Run) -> Result<(), CoreError> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -84,6 +84,12 @@ pub fn pending_reset(identity: &str) -> Result<Option<PendingReset>, CoreError> 
     super::pending(&store(&paths.data)).map_err(storage)
 }
 
+/// Whether a newer SpaceTerm Core wrote the Core data root in `data`, so this build's runtime
+/// refuses to read it.
+pub(crate) fn newer_at(data: &Path) -> bool {
+    super::newer(&REGISTRY, &store(data))
+}
+
 /// The reset the Core data root in `data` waits for, when it can be read.
 pub(crate) fn pending_reset_at(data: &Path) -> Option<PendingReset> {
     super::pending(&store(data)).ok().flatten()
