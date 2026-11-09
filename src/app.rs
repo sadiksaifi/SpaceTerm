@@ -4047,6 +4047,43 @@ mod runtime_tests {
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
     }
 
+    /// Once the updater holds the relaunch, SpaceTerm can't take it back: any quit relaunches.
+    /// A relaunch that then runs out of time reports the failure, and the updater's late quit
+    /// request or the person's next quit still quits once for that relaunch, never through the
+    /// dismissal or the quit warning.
+    #[gpui::test]
+    fn a_released_relaunch_that_times_out_still_quits_as_the_relaunch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (updates, quit, service) = relaunch_fixture(cx);
+        updates.releases_itself.set(true);
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        cx.run_until_parked();
+        assert_eq!(updates.releases.get(), 1);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.state().clone()),
+            crate::updates::UpdateState::Failed {
+                error: crate::updates::UpdateError::Relaunch
+            }
+        );
+
+        assert_eq!(
+            quit.simulate_native_request(ApplicationQuitRequest::Dismissal),
+            ApplicationQuitDecision::Cancel
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            quit.confirmations(),
+            1,
+            "the late request quits for the relaunch"
+        );
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
+    }
+
     /// The quit warning during This Mac's Core update claims no Terminal Session keeps running:
     /// the update just ended them.
     #[test]

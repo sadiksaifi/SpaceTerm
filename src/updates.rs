@@ -221,6 +221,9 @@ struct UpdateModel {
     /// The updater still holds the installer of a relaunch that ran out of time. It can no longer
     /// cancel it or end its cycle, so only a quit installs it. Dismissing the failure keeps it.
     installer_held: bool,
+    /// The updater holds the approved relaunch and relaunches on any quit, which SpaceTerm can't
+    /// take back. Until the updater ends its cycle, every quit is that relaunch.
+    relaunch_released: bool,
     manual_check: bool,
 }
 
@@ -239,6 +242,7 @@ impl UpdateModel {
             cancelling: false,
             cycle_active: false,
             installer_held: false,
+            relaunch_released: false,
             manual_check: false,
         }
     }
@@ -252,6 +256,7 @@ impl UpdateModel {
         self.install_authorized = false;
         self.cancelling = false;
         self.cycle_active = true;
+        self.relaunch_released = false;
         self.manual_check = manual;
         self.state = UpdateState::Checking;
         true
@@ -326,6 +331,7 @@ impl UpdateModel {
         if matches!(event, UpdateEvent::Finished) {
             self.cycle_active = false;
             self.installer_held = false;
+            self.relaunch_released = false;
             // The updater gave up its installer while SpaceTerm kept running.
             if !self.cancelling && matches!(self.state, UpdateState::Installing { .. }) {
                 self.confirmation_open = false;
@@ -968,11 +974,12 @@ impl ApplicationUpdates {
         );
     }
 
-    /// The relaunch the person approved, while it is still in progress. While it holds, a quit
-    /// request is that relaunch rather than an exit.
+    /// The relaunch the person approved, while it is still in progress or the updater already
+    /// holds it. While it holds, a quit request is that relaunch rather than an exit.
     pub(crate) fn relaunch_approval(&self) -> Option<RelaunchApproval> {
-        (self.model.install_authorized
-            && matches!(self.model.state, UpdateState::Installing { .. }))
+        (self.model.relaunch_released
+            || self.model.install_authorized
+                && matches!(self.model.state, UpdateState::Installing { .. }))
         .then_some(RelaunchApproval(self.relaunch_approvals))
     }
 
@@ -1092,7 +1099,10 @@ pub(crate) fn release_relaunch(approval: RelaunchApproval, cx: &mut App) -> bool
         .cloned()
         .is_some_and(|service| {
             service.0.update(cx, |updates, _| {
-                updates.relaunch_approval() == Some(approval) && updates.adapter.release_relaunch()
+                let released = updates.relaunch_approval() == Some(approval)
+                    && updates.adapter.release_relaunch();
+                updates.model.relaunch_released |= released;
+                released
             })
         })
 }

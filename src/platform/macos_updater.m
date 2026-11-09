@@ -18,6 +18,8 @@ enum { SPTUnavailable = 0, SPTCheckError, SPTDownloadError, SPTVerificationError
 // Sparkle's request to relaunch, held until SpaceTerm has saved Settings and releases it.
 @property(nonatomic, copy) void (^relaunch)(void);
 @property(nonatomic) BOOL released;
+// Asks the installer to request termination again, after a termination that didn't happen.
+@property(nonatomic, copy) void (^retryTermination)(void);
 @property(nonatomic) BOOL cancelling;
 @property(nonatomic) BOOL ready;
 @property(nonatomic) BOOL authorized;
@@ -106,8 +108,10 @@ enum { SPTUnavailable = 0, SPTCheckError, SPTDownloadError, SPTVerificationError
     return YES;
 }
 // The application's quit policy approves the termination Sparkle requests for a released
-// relaunch, so there is nothing to retry. A cancelled termination ends in the relaunch deadline.
+// relaunch. A termination that didn't happen ends in the relaunch deadline, and its Try Again
+// releases the relaunch again, which retries the termination.
 - (void)showInstallingUpdateWithApplicationTerminated:(BOOL)terminated retryTerminatingApplication:(void (^)(void))retry {
+    self.retryTermination = terminated ? nil : retry;
     [self emit:SPTInstalling];
 }
 - (void)showUpdateInstalledAndRelaunched:(BOOL)relaunched acknowledgement:(void (^)(void))acknowledgement { acknowledgement(); }
@@ -170,7 +174,7 @@ bool spt_updater_check(void *pointer) {
     SPTUpdateSession *session = (__bridge SPTUpdateSession *)pointer;
     if (![NSThread isMainThread] || !session.updater.canCheckForUpdates) return false;
     session.driver.cancelling = NO; session.driver.ready = NO; session.driver.authorized = NO;
-    session.driver.released = NO; session.driver.relaunch = nil;
+    session.driver.released = NO; session.driver.relaunch = nil; session.driver.retryTermination = nil;
     session.driver.phase = SPTCheckError;
     [session.updater checkForUpdates];
     return true;
@@ -195,9 +199,12 @@ bool spt_updater_install(void *pointer) {
 bool spt_updater_release(void *pointer) {
     SPTUpdateDriver *driver = ((__bridge SPTUpdateSession *)pointer).driver;
     if (![NSThread isMainThread] || !driver.authorized || driver.cancelling) return false;
+    // A relaunch released before can't be taken back. Releasing it again asks the installer to
+    // request termination again.
+    void (^relaunch)(void) = driver.released ? driver.retryTermination : driver.relaunch;
     driver.released = YES;
-    void (^relaunch)(void) = driver.relaunch;
     driver.relaunch = nil;
+    driver.retryTermination = nil;
     // Sparkle then asks the installer to relaunch, and the installer asks SpaceTerm to quit.
     if (relaunch) dispatch_async(dispatch_get_main_queue(), relaunch);
     return true;
