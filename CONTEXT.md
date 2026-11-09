@@ -189,7 +189,7 @@ _Avoid_: Hotkey, key equivalent
 
 ## Updates
 
-**Overdue Update**: An available update whose release is at least two days old. Its Update Reminders repeat until it is installed. It never holds a launch, and nothing installs it without the person.
+**Overdue Update**: An available update whose release is at least two days old. A desktop update's Update Reminders repeat daily until it is installed. A SpaceTerm Core update's Update Reminders repeat daily only while its Pending Version changes a protocol major, because SpaceTerm Core restarts into any other Pending Version by itself once no Terminal Session is open. It never holds a launch, and nothing installs it without the person.
 
 **Update Reminder**: A deferrable notice about an outstanding update.
 
