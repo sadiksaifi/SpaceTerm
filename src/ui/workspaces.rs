@@ -4376,19 +4376,16 @@ mod restart_tests {
                 tab: [2; 32],
                 pane: [3; 32],
             };
-            assert!(
-                binding
-                    .defer_close(WorkspaceCloseIntent {
-                        core: target,
-                        local: crate::close_confirmation::CloseTarget::Pane {
-                            workspace_id: crate::domain::WorkspaceId::new(1),
-                            tab_id: crate::domain::TabId::new(2),
-                            pane_id: crate::domain::PaneId::new(3)
-                        },
-                        keyboard: None
-                    })
-                    .unwrap()
-            );
+            let intent = || WorkspaceCloseIntent {
+                core: target,
+                local: crate::close_confirmation::CloseTarget::Pane {
+                    workspace_id: crate::domain::WorkspaceId::new(1),
+                    tab_id: crate::domain::TabId::new(2),
+                    pane_id: crate::domain::PaneId::new(3),
+                },
+                keyboard: None,
+            };
+            assert!(binding.defer_close(intent()).unwrap());
             binding.poll();
             assert!(
                 edits.submitted().is_empty(),
@@ -4402,6 +4399,10 @@ mod restart_tests {
             assert_eq!(edits.submitted(), vec![mutation]);
             assert_eq!(binding.take_close_intent().unwrap().core, target);
             assert!(binding.next_refusal().is_none());
+            assert!(
+                !binding.defer_close(intent()).unwrap(),
+                "a close after the reconnect goes to confirmation instead of waiting"
+            );
         }
     }
     #[test]
@@ -4430,8 +4431,16 @@ mod restart_tests {
             // Fresh facts no longer report the restart once the Core reconnects.
             assert_eq!(pending.follow_restart(false, reconnected), None);
             if dispatches {
-                assert_eq!(pending.next_dispatch(), Some(mutation));
+                assert_eq!(pending.next_dispatch(), Some(mutation.clone()));
                 assert!(answer.try_recv().is_err());
+                // After the reconnect, an ordinary disconnection refuses what waits again.
+                let (reply, later) = async_channel::bounded(1);
+                pending.push(mutation, Some(reply), None).unwrap();
+                pending.disconnect();
+                assert_eq!(
+                    later.try_recv().unwrap().unwrap_err(),
+                    WorkspaceRefusalReason::Offline
+                );
             } else {
                 assert_eq!(pending.next_dispatch(), None, "the wait ran out");
                 assert_eq!(

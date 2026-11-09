@@ -87,6 +87,7 @@ impl PendingEdits {
         }
         if !restarting {
             self.restart_deadline = None;
+            self.waiting_for_restart = false;
             return None;
         }
         let deadline = *self.restart_deadline.get_or_insert(now + RECONNECT_LIMIT);
