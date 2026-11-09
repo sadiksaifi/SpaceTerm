@@ -1240,6 +1240,28 @@ fn a_replacement_that_installs_on_retry_settles_its_install_failure_but_not_a_st
     }
 }
 
+#[test]
+fn an_older_version_installed_after_a_newer_one_failed_keeps_that_failure() {
+    for kind in [
+        FailureKind::Install(InstallFailure::Download),
+        FailureKind::Start(StartFailure::DiskFull),
+    ] {
+        // 0.9.1 failed, then a desktop pushed its 0.9.0, installed after the failure.
+        let mut update = waiting(machine(PENGUIN, "penguin", 2), NOW - 60);
+        update.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+            id: 1,
+            at: NOW - 120,
+            version: version("0.9.1"),
+            kind,
+        });
+        let state = present(&[update]).machine(PENGUIN).unwrap().state.clone();
+        assert!(
+            !matches!(state, MachineState::Ready { .. }),
+            "{kind:?}: {state:?}"
+        );
+    }
+}
+
 /// A known release stays visible, with a Download that only downloads, after Stop Download, a
 /// dismissed failure, a failed check and an offline launch. Nothing says "up to date" then.
 #[test]

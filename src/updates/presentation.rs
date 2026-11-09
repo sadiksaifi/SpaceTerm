@@ -1328,19 +1328,23 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
     if let Some(failure) = &facts.last_failure
         && !dismissed.contains(&(update.machine, failure.id))
     {
-        // A Pending Version of the version whose install failed settles that failure, however
-        // long ago the version it replaced was installed. A start failure stays: only a
-        // restart settles it.
-        let installed = matches!(failure.kind, FailureKind::Install(_));
+        // A Pending Version settles an install failure of its own version or an older one, as
+        // the Core does, and a start failure of an older version only: only a restart settles
+        // a start failure of its own. When it was installed decides nothing, so an older
+        // version installed later never hides a newer one's failure.
         let superseded = facts.running == failure.version
             || facts.pending.as_ref().is_some_and(|pending| {
-                (installed && pending.version == failure.version)
-                    || pending.installed_at > failure.at
-                    || pending
-                        .version
-                        .release()
-                        .zip(failure.version.release())
-                        .is_some_and(|(pending, failed)| pending > failed)
+                let order = match (pending.version.release(), failure.version.release()) {
+                    (Some(pending), Some(failed)) => Some(pending.cmp(&failed)),
+                    _ => (pending.version == failure.version).then_some(std::cmp::Ordering::Equal),
+                };
+                match failure.kind {
+                    FailureKind::Install(_) => matches!(
+                        order,
+                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                    ),
+                    FailureKind::Start(_) => order == Some(std::cmp::Ordering::Greater),
+                }
             });
         if !superseded {
             match failure.kind {
