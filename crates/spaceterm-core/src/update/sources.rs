@@ -710,14 +710,49 @@ impl<P: Fn(u64)> Write for Digesting<'_, P> {
 /// leaves them. A live install of this release holds its owner lock, in this process or
 /// another, such as a stopped Core's CLI downloading from the feed, so its files stay. An
 /// install of an earlier release takes no owner lock and leaves no other sign that it ended,
-/// so its files always stay. It removes them itself when it ends; only a crash leaves them.
+/// so its files stay here; [`clear_unowned_staging`] removes them once no such release can
+/// run.
 pub(crate) fn clear_staging(data: &Path) {
     let directory = data.join("staging");
     let Ok(staging) = crate::storage::Directory::open(&directory, false) else {
         return;
     };
-    let Ok(entries) = std::fs::read_dir(&directory) else {
+    for id in staged_ids(&directory) {
+        let names = Staging::names(&id);
+        let [_, _, owner] = &names;
+        // Taking a lock creates its file, so only a lock file that exists proves an owner, and
+        // only a free one proves that owner ended.
+        let ended = directory.join(owner).exists()
+            && staging.try_lock(owner).is_ok_and(|lock| lock.is_some());
+        if ended {
+            for name in &names {
+                let _ = std::fs::remove_file(directory.join(name));
+            }
+        }
+    }
+}
+
+/// Removes the files in `<data>/staging` of installs without an owner lock. Only a release
+/// before this one writes those, so the caller first proves that none can run.
+pub(crate) fn clear_unowned_staging(data: &Path) {
+    let directory = data.join("staging");
+    if crate::storage::Directory::open(&directory, false).is_err() {
         return;
+    }
+    for id in staged_ids(&directory) {
+        let names = Staging::names(&id);
+        if !directory.join(&names[2]).exists() {
+            for name in &names {
+                let _ = std::fs::remove_file(directory.join(name));
+            }
+        }
+    }
+}
+
+/// The install IDs of the files in the staging `directory`.
+fn staged_ids(directory: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
     };
     let mut ids: Vec<String> = entries
         .flatten()
@@ -733,19 +768,7 @@ pub(crate) fn clear_staging(data: &Path) {
         .collect();
     ids.sort_unstable();
     ids.dedup();
-    for id in ids {
-        let names = Staging::names(&id);
-        let [_, _, owner] = &names;
-        // Taking a lock creates its file, so only a lock file that exists proves an owner, and
-        // only a free one proves that owner ended.
-        let ended = directory.join(owner).exists()
-            && staging.try_lock(owner).is_ok_and(|lock| lock.is_some());
-        if ended {
-            for name in &names {
-                let _ = std::fs::remove_file(directory.join(name));
-            }
-        }
-    }
+    ids
 }
 
 /// One install's private files in `<data>/staging`, removed when it ends. Its owner lock lasts

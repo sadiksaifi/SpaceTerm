@@ -1025,9 +1025,24 @@ impl Updates {
     /// Removes the retained installations no longer needed, once no other service operation
     /// holds the service lock. An activation holds it until it settles: the helper of a release
     /// before this one removes nothing itself. Returns whether it ran.
+    ///
+    /// Once only this server's installation and the Pending Version remain, no release before
+    /// this one can run here: every CLI and helper runs from an installation, the CLI launcher
+    /// names the approved one, and the desktop carries only archives. The staged downloads such
+    /// a release left without an owner lock then go too.
     fn retire_installations(&self) -> bool {
         match self.shared.data.try_lock("service.lock") {
-            Ok(Some(_operation)) => retire_obsolete(&self.shared.service).is_ok(),
+            Ok(Some(_operation)) => match retire_obsolete(&self.shared.service) {
+                Ok(alone) => {
+                    if alone {
+                        crate::update::sources::clear_unowned_staging(
+                            self.shared.service.paths.data.as_path(),
+                        );
+                    }
+                    true
+                }
+                Err(_) => false,
+            },
             _ => false,
         }
     }
@@ -1036,10 +1051,16 @@ impl Updates {
 /// Removes the retained installations `service` no longer needs, unless an activation may
 /// still return to its previous one. On macOS each is unregistered from Launch Services first.
 /// The caller holds the service lock, so no install or activation changes them meanwhile.
-pub(in crate::service) fn retire_obsolete(service: &Service) -> Result<(), CoreError> {
+/// Returns whether only the approved installation and the Pending Version remain, as when no
+/// activation may return to its previous installation.
+pub(in crate::service) fn retire_obsolete(service: &Service) -> Result<bool, CoreError> {
     let (data, state) = service.read()?.ok_or(CoreError::NotInstalled)?;
     let pending = load(&data)?.pending.map(|pending| pending.digest);
-    prune(service, &state, &[pending.as_deref()])
+    prune(service, &state, &[pending.as_deref()])?;
+    Ok(!state
+        .activation
+        .as_ref()
+        .is_some_and(super::super::activation::Operation::retains_previous))
 }
 
 impl Shared {

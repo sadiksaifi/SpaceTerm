@@ -545,6 +545,46 @@ fn check_reasons_0_11_2_lacks_stay_out_of_the_values_it_reads() {
 }
 
 #[test]
+fn unowned_staged_downloads_go_once_no_earlier_release_can_run() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Local,
+        )
+        .unwrap();
+        let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
+        // The other installation stands for one of an earlier release, whose CLI could still
+        // be downloading.
+        change(&data, |record| record.pending = None).unwrap();
+        let staging = machine.fixture.paths.data.join("staging");
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&staging)
+            .unwrap();
+        // Crashes of such a CLI left several downloads, none with an owner lock.
+        let unowned: Vec<_> = ["ab", "cd", "ef"]
+            .map(|digits| staging.join(format!("{}.tar.gz", digits.repeat(16))))
+            .into();
+        for path in &unowned {
+            std::fs::write(path, b"partial").unwrap();
+        }
+        // The activation that started this server still holds the service lock.
+        let helper = data.lock("service.lock", true).unwrap();
+        updates.remove_leftovers();
+        assert!(unowned.iter().all(|path| path.exists()));
+        assert_eq!(installations(&machine), ["1.0.0", "1.1.0"]);
+        drop(helper);
+        updates.observe(sessions(1), Instant::now());
+        assert_eq!(installations(&machine), ["1.0.0"]);
+        assert!(unowned.iter().all(|path| !path.exists()));
+    });
+}
+
+#[test]
 fn an_overdue_pending_version_keeps_the_overdue_value_every_peer_accepts() {
     with_fixture_trust(|| {
         let machine = machine("1.0.0");
