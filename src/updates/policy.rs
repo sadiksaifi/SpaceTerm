@@ -72,8 +72,11 @@ pub(crate) struct UpdateHistory {
     recent: Vec<RecentUpdate>,
 }
 
-/// The most entries Recent Updates keeps.
+/// The most entries Recent Updates keeps, besides the newest update of SpaceTerm itself.
 pub(crate) const RECENT_LIMIT: usize = 4;
+
+/// How Recent Updates names an update of SpaceTerm itself.
+const DESKTOP_UPDATED: &str = "SpaceTerm updated to ";
 
 /// One finished update, as Recent Updates lists it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -203,12 +206,13 @@ impl UpdateHistory {
             .as_deref()
             .is_some_and(|previous| newer(installed, previous))
         {
-            self.record(format!("SpaceTerm updated to {installed}"), now);
+            self.record(format!("{DESKTOP_UPDATED}{installed}"), now);
         }
         self.launched = Some(installed.to_owned());
     }
 
-    /// Adds a finished update to Recent.
+    /// Adds a finished update to Recent. One release updates SpaceTerm and then each Machine, so
+    /// the newest update of SpaceTerm itself stays while the Machines' updates fill the rest.
     pub(crate) fn record(&mut self, text: impl Into<String>, at: u64) {
         self.recent.insert(
             0,
@@ -217,7 +221,20 @@ impl UpdateHistory {
                 at,
             },
         );
-        self.recent.truncate(RECENT_LIMIT);
+        let desktop = self
+            .recent
+            .iter()
+            .position(|entry| entry.text.starts_with(DESKTOP_UPDATED));
+        let mut machines = 0;
+        let mut index = 0;
+        self.recent.retain(|_| {
+            let keep = Some(index) == desktop || {
+                machines += 1;
+                machines <= RECENT_LIMIT
+            };
+            index += 1;
+            keep
+        });
     }
 
     /// Newest first.
@@ -313,14 +330,30 @@ mod tests {
                 ("penguin updated to 0.9.0".to_owned(), 300),
             ]
         );
+        // The Machines' updates of one release fill Recent, and SpaceTerm's own update stays.
         for at in 0..RECENT_LIMIT as u64 {
             relaunched.record(format!("build-box updated to 0.9.{at}"), 500 + at);
         }
-        assert_eq!(relaunched.recent().len(), RECENT_LIMIT);
+        assert_eq!(relaunched.recent().len(), RECENT_LIMIT + 1);
         assert_eq!(relaunched.recent()[0].text, "build-box updated to 0.9.3");
+        assert_eq!(
+            relaunched.recent()[RECENT_LIMIT].text,
+            "SpaceTerm updated to 0.9.0"
+        );
+        relaunched.launched("0.9.1", 550);
+        relaunched.record("penguin updated to 0.9.1", 560);
+        assert_eq!(
+            texts(&relaunched)
+                .iter()
+                .filter(|(text, _)| text.starts_with("SpaceTerm"))
+                .count(),
+            1,
+            "only the newest update of SpaceTerm stays beyond the limit"
+        );
+        assert_eq!(relaunched.recent().len(), RECENT_LIMIT + 1);
         // Going back is no update.
         relaunched.launched("0.8.0", 600);
-        assert_eq!(relaunched.recent()[0].text, "build-box updated to 0.9.3");
+        assert_eq!(relaunched.recent()[0].text, "penguin updated to 0.9.1");
     }
 
     #[test]
