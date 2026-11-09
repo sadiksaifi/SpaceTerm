@@ -24,6 +24,16 @@ class CaskTests(unittest.TestCase):
         ):
             self.assertNotIn(removed, text)
 
+    def test_cask_quits_the_app_on_uninstall_and_zap_stops_spaceterm_core(self):
+        text = release_homebrew.cask("0.10.0", "a" * 64)
+        self.assertIn('uninstall quit: "com.peblon.spaceterm"\n', text)
+        zap = text[text.index("  zap ") :]
+        # Homebrew's launchctl directive unloads each agent and removes its LaunchAgents plist.
+        for label in ("com.peblon.spaceterm.core", "com.peblon.spaceterm.core.recovery"):
+            self.assertIn(f'"{label}",', zap[: zap.index("delete:")])
+        self.assertIn('delete:    "~/.local/bin/spaceterm",', zap)
+        self.assertIn('"~/.local/share/spaceterm",', zap[zap.index("trash:") :])
+
     def test_cask_refuses_legacy_versions_and_malformed_digests(self):
         for version, digest in (("0.6.8", "a" * 64), ("0.10.0", "a" * 63), ("0.10.0", "x" * 64)):
             with self.subTest(version=version, digest=digest), self.assertRaises(TaskError):
