@@ -636,6 +636,12 @@ impl ApplicationQuitCoordinator {
             QuitAction::Dismiss => self.dismiss_now(cx),
             QuitAction::Exit => self.exit_now(cx),
             QuitAction::Terminate => self.terminate(cx),
+            QuitAction::FailUnsavedAndTerminate => {
+                if let Some(approval) = approval {
+                    crate::updates::fail_unsaved_relaunch(approval, cx);
+                }
+                self.terminate(cx);
+            }
         }
         ApplicationQuitDecision::Cancel
     }
@@ -4238,6 +4244,55 @@ mod runtime_tests {
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
     }
 
+    /// A termination signal that arrives during an approved relaunch must still end the process.
+    /// When the relaunch's Settings save fails, the relaunch fails and SpaceTerm quits anyway,
+    /// once, with no warning.
+    #[gpui::test]
+    fn a_termination_signal_during_a_relaunch_save_quits_when_the_save_fails(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let storage = Arc::new(crate::settings::storage::testing::MemoryStorage::default());
+        let (_, quit, service) = relaunch_fixture_storing_in(storage.clone(), cx);
+        cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
+        cx.run_until_parked();
+        let settings_window = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+                .expect("Settings window")
+        });
+        let mut settings_cx = gpui::VisualTestContext::from_window(settings_window.into(), cx);
+        click("settings-density-comfortable", &mut settings_cx);
+        storage.fail_writes(Some(crate::settings::storage::StorageError::Unavailable));
+
+        // Two signals arrive after Relaunch began its Settings save and before it finishes.
+        let signalled = Rc::clone(&quit);
+        cx.update(|cx| {
+            service.update(cx, |updates, cx| updates.relaunch(cx));
+            cx.defer(move |cx| {
+                cx.defer(move |cx| {
+                    for _ in 0..2 {
+                        signalled.simulate_request(ApplicationQuitRequest::Terminate, cx);
+                    }
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.state().clone()),
+            crate::updates::UpdateState::Failed {
+                error: crate::updates::UpdateError::SettingsUnsaved
+            }
+        );
+        let name = crate::application_identity::ApplicationIdentity::current().display_name();
+        assert_ne!(
+            cx.pending_prompt().map(|(title, _)| title),
+            Some(format!("Quit {name}?")),
+            "the signal asks nothing"
+        );
+        assert_eq!(quit.confirmations(), 1, "the signal still ends the process");
+    }
+
     /// The quit warning during This Mac's Core update claims no Terminal Session keeps running:
     /// the update just ended them.
     #[test]
@@ -4275,11 +4330,23 @@ mod runtime_tests {
         Rc<crate::platform::application_quit::testing::RecordingApplicationQuitAdapter>,
         gpui::Entity<crate::updates::ApplicationUpdates>,
     ) {
+        relaunch_fixture_storing_in(Arc::default(), cx)
+    }
+
+    /// [`relaunch_fixture`] with Settings kept in `storage`.
+    fn relaunch_fixture_storing_in(
+        storage: Arc<crate::settings::storage::testing::MemoryStorage>,
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Rc<crate::updates::testing::RecordingAdapter>,
+        Rc<crate::platform::application_quit::testing::RecordingApplicationQuitAdapter>,
+        gpui::Entity<crate::updates::ApplicationUpdates>,
+    ) {
         let updates = Rc::new(crate::updates::testing::RecordingAdapter::available());
         let quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         );
-        let mut host = host_with_settings();
+        let mut host = Rc::new(host_with_storage(storage));
         let adapters = &mut Rc::get_mut(&mut host).unwrap().adapters;
         adapters.updates = updates.clone();
         adapters.application_quit = quit.clone();

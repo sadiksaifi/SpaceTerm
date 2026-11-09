@@ -320,6 +320,20 @@ pub(crate) mod testing {
             self.confirmations.get()
         }
 
+        /// Delivers `request` as the platform does from inside the application, such as a
+        /// termination signal the main thread reads.
+        pub(crate) fn simulate_request(
+            &self,
+            request: ApplicationQuitRequest,
+            cx: &mut App,
+        ) -> ApplicationQuitDecision {
+            self.requests.set(self.requests.get() + 1);
+            let handler = self.handler.borrow().clone();
+            handler.map_or(ApplicationQuitDecision::Proceed, |handler| {
+                handler.handle(request, cx)
+            })
+        }
+
         pub(crate) fn simulate_native_request(
             &self,
             request: ApplicationQuitRequest,

@@ -54,6 +54,9 @@ pub(crate) enum QuitAction {
     Exit = 7,
     /// Save Settings and quit once, with no warning.
     Terminate = 8,
+    /// Settings couldn't be saved for a relaunch that a termination signal also asked to end:
+    /// fail the relaunch, then quit as [`QuitAction::Terminate`] does.
+    FailUnsavedAndTerminate = 9,
 }
 
 /// The quit of an approved update relaunch, from the first quit request through the Settings
@@ -64,6 +67,9 @@ pub(crate) enum QuitAction {
 pub(crate) struct RelaunchQuit<A> {
     /// The approval this quit began for, and how far it got.
     begun: Option<(A, RelaunchStage)>,
+    /// A termination signal arrived during the relaunch quit, so the process ends even when the
+    /// relaunch fails before the updater holds it.
+    terminate: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,7 +84,10 @@ enum RelaunchStage {
 
 impl<A> Default for RelaunchQuit<A> {
     fn default() -> Self {
-        Self { begun: None }
+        Self {
+            begun: None,
+            terminate: false,
+        }
     }
 }
 
@@ -93,9 +102,12 @@ impl<A: Copy + Eq> RelaunchQuit<A> {
         request: ApplicationQuitRequest,
         approval: Option<A>,
     ) -> QuitAction {
-        self.settle(approval);
+        let owed = self.settle(approval);
         if request == ApplicationQuitRequest::SessionEnd {
             return QuitAction::Proceed;
+        }
+        if owed {
+            return QuitAction::Terminate;
         }
         let Some(approval) = approval else {
             return match request {
@@ -104,6 +116,7 @@ impl<A: Copy + Eq> RelaunchQuit<A> {
                 _ => QuitAction::Exit,
             };
         };
+        self.terminate |= request == ApplicationQuitRequest::Terminate;
         match &mut self.begun {
             Some((begun, stage)) if *begun == approval => match stage {
                 RelaunchStage::Released => {
@@ -121,7 +134,9 @@ impl<A: Copy + Eq> RelaunchQuit<A> {
 
     /// Settings finished saving for the relaunch, or couldn't be saved.
     pub(crate) fn saved(&mut self, saved: bool, approval: Option<A>) -> QuitAction {
-        self.settle(approval);
+        if self.settle(approval) {
+            return QuitAction::Terminate;
+        }
         if !self.saving(approval) {
             return QuitAction::Nothing;
         }
@@ -129,18 +144,25 @@ impl<A: Copy + Eq> RelaunchQuit<A> {
             QuitAction::Release
         } else {
             self.begun = None;
-            QuitAction::FailUnsaved
+            if std::mem::take(&mut self.terminate) {
+                QuitAction::FailUnsavedAndTerminate
+            } else {
+                QuitAction::FailUnsaved
+            }
         }
     }
 
     /// The updater received the relaunch. `updater_quits` when it asks to quit by itself once it
     /// holds the relaunch; otherwise SpaceTerm quits now.
     pub(crate) fn released(&mut self, updater_quits: bool, approval: Option<A>) -> QuitAction {
-        self.settle(approval);
+        if self.settle(approval) {
+            return QuitAction::Terminate;
+        }
         if !self.saving(approval) {
             return QuitAction::Nothing;
         }
-        let (stage, action) = if updater_quits {
+        // A termination signal doesn't wait for the updater's own quit request.
+        let (stage, action) = if updater_quits && !self.terminate {
             (RelaunchStage::Released, QuitAction::Nothing)
         } else {
             (RelaunchStage::Quitting, QuitAction::Quit)
@@ -158,11 +180,13 @@ impl<A: Copy + Eq> RelaunchQuit<A> {
         )
     }
 
-    /// A relaunch the update service no longer holds leaves quitting to ADR 0049.
-    fn settle(&mut self, approval: Option<A>) {
-        if approval.is_none() {
-            self.begun = None;
+    /// A relaunch the update service no longer holds leaves quitting to ADR 0049. Returns
+    /// whether a termination signal that arrived during it is still owed its quit.
+    fn settle(&mut self, approval: Option<A>) -> bool {
+        if approval.is_none() && self.begun.take().is_some() {
+            return std::mem::take(&mut self.terminate);
         }
+        false
     }
 }
 
@@ -228,5 +252,36 @@ mod tests {
         assert_eq!(quit.request(Exit, Some(4)), QuitAction::SaveSettings);
         assert_eq!(quit.saved(true, None), QuitAction::Nothing);
         assert!(!quit.active());
+    }
+
+    /// Termination signals that arrive while a relaunch saves Settings still end the process
+    /// when the relaunch fails before the updater holds it, once however many arrived.
+    #[test]
+    fn a_termination_signal_during_a_relaunch_save_is_kept() {
+        use ApplicationQuitRequest::{Exit, Terminate};
+        let mut quit = RelaunchQuit::default();
+        assert_eq!(quit.request(Exit, Some(1)), QuitAction::SaveSettings);
+        assert_eq!(quit.request(Terminate, Some(1)), QuitAction::Nothing);
+        assert_eq!(quit.request(Terminate, Some(1)), QuitAction::Nothing);
+        assert_eq!(
+            quit.saved(false, Some(1)),
+            QuitAction::FailUnsavedAndTerminate
+        );
+        assert_eq!(
+            quit.request(Exit, None),
+            QuitAction::Exit,
+            "the quit is owed once"
+        );
+
+        // The relaunch fails some other way while Settings save.
+        assert_eq!(quit.request(Terminate, Some(2)), QuitAction::SaveSettings);
+        assert_eq!(quit.saved(true, None), QuitAction::Terminate);
+        assert_eq!(quit.request(Exit, None), QuitAction::Exit);
+
+        // A saved relaunch quits for the relaunch without waiting for the updater.
+        assert_eq!(quit.request(Exit, Some(3)), QuitAction::SaveSettings);
+        assert_eq!(quit.request(Terminate, Some(3)), QuitAction::Nothing);
+        assert_eq!(quit.saved(true, Some(3)), QuitAction::Release);
+        assert_eq!(quit.released(true, Some(3)), QuitAction::Quit);
     }
 }
