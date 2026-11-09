@@ -387,6 +387,33 @@ fn a_starting_core_removes_what_a_crash_or_a_finished_update_left_behind() {
 }
 
 #[test]
+fn a_starting_core_removes_the_previous_installation_once_its_activation_releases_the_lock() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Local,
+        )
+        .unwrap();
+        let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
+        change(&data, |record| record.pending = None).unwrap();
+        // The previous release's helper holds the service lock until its activation settles,
+        // and removes nothing itself.
+        let helper = data.lock("service.lock", true).unwrap();
+        updates.remove_leftovers();
+        updates.observe(sessions(1), Instant::now());
+        assert_eq!(installations(&machine), ["1.0.0", "1.1.0"]);
+        drop(helper);
+        updates.observe(sessions(1), Instant::now());
+        assert_eq!(installations(&machine), ["1.0.0"]);
+    });
+}
+
+#[test]
 fn an_overdue_pending_version_keeps_the_overdue_value_every_peer_accepts() {
     with_fixture_trust(|| {
         let machine = machine("1.0.0");

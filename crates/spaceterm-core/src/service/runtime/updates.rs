@@ -405,6 +405,9 @@ struct Live {
     silent_after: Option<Instant>,
     /// The server is shutting down, so no caller waits for the facts to change.
     stopped: bool,
+    /// Retained installations may still wait for removal, because another service operation,
+    /// such as the activation that started this server, held the service lock.
+    retire_pending: bool,
 }
 
 impl Live {
@@ -471,6 +474,7 @@ impl Updates {
                 reserved: false,
                 silent_after: None,
                 stopped: false,
+                retire_pending: false,
             }),
             running,
             build,
@@ -796,6 +800,10 @@ impl Updates {
                 .is_some_and(|since| now.saturating_duration_since(since) >= SILENT_GRACE)
         };
         self.refresh();
+        // The activation that started this server has settled once its lock is free.
+        if self.shared.lock().retire_pending && self.retire_installations() {
+            self.shared.lock().retire_pending = false;
+        }
         if due {
             let _ = self.restart(Restart::Silent);
         }
@@ -950,13 +958,20 @@ impl Updates {
     /// Removes what a crash or a finished update left behind: staged downloads, unfinished
     /// unpackings, and retained installations that are neither the running one nor the Pending
     /// Version. A server calls this once as it starts, before it serves any request, so no
-    /// download or push of its own is staged yet. Another service operation that holds the
-    /// service lock may install or activate now, so the installations then stay.
+    /// download or push of its own is staged yet.
     pub(crate) fn remove_leftovers(&self) {
-        let service = &self.shared.service;
-        crate::update::sources::clear_staging(service.paths.data.as_path());
-        if let Ok(Some(_operation)) = self.shared.data.try_lock("service.lock") {
-            let _ = retire_obsolete(service);
+        crate::update::sources::clear_staging(self.shared.service.paths.data.as_path());
+        let retired = self.retire_installations();
+        self.shared.lock().retire_pending = !retired;
+    }
+
+    /// Removes the retained installations no longer needed, once no other service operation
+    /// holds the service lock. An activation holds it until it settles: the helper of a release
+    /// before this one removes nothing itself. Returns whether it ran.
+    fn retire_installations(&self) -> bool {
+        match self.shared.data.try_lock("service.lock") {
+            Ok(Some(_operation)) => retire_obsolete(&self.shared.service).is_ok(),
+            _ => false,
         }
     }
 }
