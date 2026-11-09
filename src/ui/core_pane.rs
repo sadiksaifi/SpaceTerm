@@ -26,14 +26,6 @@ use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::terminal_pane::StatusIntent;
 
-pub(crate) const fn local_machine_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "This Mac"
-    } else {
-        "This Computer"
-    }
-}
-
 /// What the window knows while it cannot ask the server who controls the Pane: only that this
 /// window does not.
 pub(crate) const TAKEOVER_TITLE: &str = "Take Over to Continue";
@@ -1076,7 +1068,7 @@ mod connection {
                 restored_update: None,
                 retained_restart: None,
                 restart: connection.restart_progress(),
-                machine_name: super::local_machine_name().into(),
+                machine_name: gpui::SharedString::default(),
                 controller: connection.controller(),
                 session_end: connection.session_end(),
                 generation: connection.connection_generation(),

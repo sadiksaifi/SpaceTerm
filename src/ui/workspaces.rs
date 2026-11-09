@@ -1168,16 +1168,21 @@ mod core_workspaces {
         panes: PaneConstruction,
         edits: Option<WorkspaceEditSource>,
         restart_causes: crate::terminal::core_session::restart::PaneRestartCauses,
+        /// This computer's name in the platform's wording, for a server with no remote name.
+        this_computer: SharedString,
     }
 
     impl WorkspacePaneSessions {
+        /// Opens this computer's Panes. `this_computer` names this computer as its desktop
+        /// does, such as "This Mac".
         pub(crate) fn new(
             core: MachineConnection,
             controls: Arc<PaneControls>,
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             panes: &PaneConstruction,
+            this_computer: &'static str,
         ) -> Self {
-            Self::with_opener(
+            let mut sessions = Self::with_opener(
                 Rc::new(LocalCorePanes {
                     core,
                     controls,
@@ -1185,7 +1190,9 @@ mod core_workspaces {
                     counters: Arc::clone(panes.counters()),
                 }),
                 panes,
-            )
+            );
+            sessions.this_computer = this_computer.into();
+            sessions
         }
 
         /// Opens Panes of another computer's server through one connection of a paired route.
@@ -1213,6 +1220,7 @@ mod core_workspaces {
                 panes: panes.clone(),
                 edits: None,
                 restart_causes: Arc::default(),
+                this_computer: SharedString::default(),
             }
         }
 
@@ -1237,6 +1245,12 @@ mod core_workspaces {
         /// computer's server takes Start SpaceTerm Core from this client.
         pub(crate) fn remote_name(&self) -> Option<SharedString> {
             self.opener.remote_display().map(SharedString::from)
+        }
+
+        /// The server's Machine name: another computer's name, or this computer's.
+        pub(crate) fn machine_name(&self) -> SharedString {
+            self.remote_name()
+                .unwrap_or_else(|| self.this_computer.clone())
         }
 
         pub(crate) const fn panes(&self) -> &PaneConstruction {
@@ -1377,11 +1391,7 @@ mod core_workspaces {
                 .insert(pane_id, Some(self.sessions.generation()));
             let mut view = CorePaneView::new(state);
             view.retain_restart_cause(core, Arc::clone(&self.sessions.restart_causes));
-            view.set_machine_name(
-                self.sessions
-                    .remote_name()
-                    .unwrap_or_else(|| crate::ui::core_pane::local_machine_name().into()),
-            );
+            view.set_machine_name(self.sessions.machine_name());
             self.views.insert(pane_id, view);
             self.screen_focus.insert(pane_id, screen_focus);
         }
@@ -2373,11 +2383,7 @@ mod core_workspaces {
                         CoreRestart::Updating => "Updating",
                         CoreRestart::Restarting => "Restarting",
                     },
-                    machine: Some(
-                        self.sessions
-                            .remote_name()
-                            .unwrap_or_else(|| crate::ui::core_pane::local_machine_name().into()),
-                    ),
+                    machine: Some(self.sessions.machine_name()),
                     warning: false,
                 });
             }
