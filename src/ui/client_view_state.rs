@@ -85,11 +85,10 @@ impl RetainedClientViews {
                         // write leaves the previous copy and blocks nothing.
                         let _ = store.save_inventory(inventory);
                     }
-                    if let Some(restarts) = restarts
-                        && let Err(error) = store.save_pane_restarts(restarts)
-                    {
-                        shared.lock().unwrap_or_else(|e| e.into_inner()).error = Some(error);
-                        return;
+                    if let Some(restarts) = restarts {
+                        // The facts only explain presentation, so a failed write keeps the
+                        // previous ones and blocks no arrangement write.
+                        let _ = store.save_pane_restarts(restarts);
                     }
                     if let Some(view) = pending
                         && let Err(error) = store.save(view)

@@ -673,11 +673,10 @@ impl ClientViewStore {
     pub fn pane_restarts(&self) -> &[PaneRestart] {
         &self.pane_restarts
     }
-    /// Saves bounded, unique Pane restart facts beside this client's arrangements.
+    /// Saves bounded, unique Pane restart facts beside this client's arrangements. They only
+    /// explain presentation, so a failed write keeps the facts it had and blocks no later write
+    /// of the arrangements.
     pub fn save_pane_restarts(&mut self, panes: Vec<PaneRestart>) -> Result<(), CoreError> {
-        if self.blocked {
-            return Err(CoreError::StorageUnavailable);
-        }
         if self.pane_restarts == panes {
             return Ok(());
         }
@@ -690,10 +689,7 @@ impl ClientViewStore {
         if !record.valid() {
             return Err(CoreError::UnsafeStorage);
         }
-        if let Err(error) = self.directory.write_json(RESTARTS, &record) {
-            self.blocked = true;
-            return Err(error);
-        }
+        self.directory.write_json(RESTARTS, &record)?;
         self.pane_restarts = record.panes;
         Ok(())
     }
@@ -1198,6 +1194,38 @@ mod pane_restart_tests {
         )
         .unwrap();
         assert_eq!(reopened.pane_restarts().len(), 1);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_pane_restart_write_blocks_no_later_view_write() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-pane-restart-{:x}",
+            u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let directory = || crate::storage::Directory::open(&root, true).unwrap();
+        let mut store = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        // Something the store can't replace stands where the facts go.
+        std::fs::create_dir(root.join("pane-restarts.json")).unwrap();
+        let cause = PaneRestart {
+            pane: [1; 32],
+            boot: [2; 32],
+            running: crate::update::facts::Version::parse("0.11.3").unwrap(),
+            updated: None,
+        };
+        assert!(store.save_pane_restarts(vec![cause]).is_err());
+        assert!(store.pane_restarts().is_empty());
+        let view = ClientView {
+            workspaces: vec![WorkspaceView {
+                workspace: [5; 32],
+                tabs: Vec::new(),
+            }],
+        };
+        store.save(view.clone()).unwrap();
+        drop(store);
+        let reopened = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        assert_eq!(reopened.view(), &view);
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
