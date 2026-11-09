@@ -1589,33 +1589,12 @@ enum StartFailure0_11_2 {
 /// Asserts that a runtime of 0.11.2 reads the start failures in the journal and the update
 /// record, so a return to it can start.
 fn readable_by_0_11_2(service: &Service) {
-    #[derive(Debug, serde::Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    #[allow(dead_code)]
-    enum Kind {
-        Install(crate::update::facts::InstallFailure),
-        Start(StartFailure0_11_2),
-    }
-    #[derive(Debug, serde::Deserialize)]
-    #[allow(dead_code)]
-    struct Failure {
-        id: u64,
-        at: u64,
-        version: String,
-        kind: Kind,
-    }
-    #[derive(Debug, serde::Deserialize)]
-    #[allow(dead_code)]
-    struct Record {
-        last_failure: Option<Failure>,
-    }
-    let read = |name: &str| -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(service.paths.data.join(name)).unwrap()).unwrap()
-    };
-    let journal = read("service.json");
+    let journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(service.paths.data.join("service.json")).unwrap())
+            .unwrap();
     serde_json::from_value::<Option<StartFailure0_11_2>>(journal["activation"]["failure"].clone())
         .expect("0.11.2 reads the journal's failure");
-    serde_json::from_value::<Record>(read("updates.json")).expect("0.11.2 reads the update record");
+    runtime::updates::tests::readable_by_0_11_2(&service.paths.data);
 }
 
 #[test]

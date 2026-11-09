@@ -9,9 +9,9 @@ use super::super::{RetainedInstallation, Service, State, boot};
 use crate::CoreError;
 use crate::storage::Directory;
 use crate::update::facts::{
-    FailureKind, InstallFailure, OVERDUE_AFTER, OVERDUE_SINCE_AFTER, Operation, PendingVersion,
-    Platform, Protocols, StartFailure, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure,
-    Version,
+    CheckFailure, FailureKind, InstallFailure, OVERDUE_AFTER, OVERDUE_SINCE_AFTER, Operation,
+    PendingVersion, Platform, Protocols, StartFailure, StrandedDevice, UpdateCheck, UpdateFacts,
+    UpdateFailure, Version,
 };
 use crate::update::ordering::{self, Candidate, Floor};
 use crate::update::source::FactsSource;
@@ -167,6 +167,51 @@ struct Record {
     /// `last_failure`, whose values every runtime an update moves between decodes: one of
     /// 0.11.2 or earlier knows no `Interrupted`, and skips this field.
     interrupted: Option<Interruption>,
+    /// Why the checks fail, when `check` names a reason 0.11.2 and earlier don't know. `check`
+    /// then names `verification`, which every runtime and desktop that reads this record
+    /// decodes, and this field, which they skip, keeps the reason.
+    check_reason: Option<CheckFailure>,
+}
+
+impl Record {
+    /// The last check's outcome, with the reason `check_reason` keeps.
+    fn check(&self) -> UpdateCheck {
+        match (&self.check, self.check_reason) {
+            (
+                UpdateCheck::Failing {
+                    since,
+                    last_success,
+                    ..
+                },
+                Some(reason),
+            ) => UpdateCheck::Failing {
+                since: *since,
+                last_success: *last_success,
+                reason,
+            },
+            (check, _) => check.clone(),
+        }
+    }
+
+    /// Records `check`, naming a reason 0.11.2 doesn't know only in `check_reason`.
+    fn set_check(&mut self, check: UpdateCheck) {
+        self.check_reason = None;
+        self.check = match check {
+            UpdateCheck::Failing {
+                since,
+                last_success,
+                reason: reason @ (CheckFailure::ClockBehind | CheckFailure::SteppingStoneSkipped),
+            } => {
+                self.check_reason = Some(reason);
+                UpdateCheck::Failing {
+                    since,
+                    last_success,
+                    reason: CheckFailure::Verification,
+                }
+            }
+            check => check,
+        };
+    }
 }
 
 /// A restart whose readiness a reboot, logout or crash left unmeasured.
@@ -188,6 +233,7 @@ impl Default for Record {
             activation: None,
             stepping_stone: None,
             interrupted: None,
+            check_reason: None,
         }
     }
 }
@@ -1051,7 +1097,7 @@ impl Shared {
             sessions: live.sessions,
             operation: live.operation.clone(),
             check: if self.service.identity == "spaceterm" {
-                live.record.check.clone()
+                live.record.check()
             } else {
                 UpdateCheck::Disabled
             },
@@ -1171,7 +1217,7 @@ impl<'a> Checking<'a> {
     pub fn finish(&self, check: UpdateCheck) {
         let running = &self.updates.shared.running;
         if let Ok(record) = change(&self.updates.shared.data, |record| {
-            record.check = check;
+            record.set_check(check);
             if record.stepping_stone.as_ref() == Some(running) {
                 record.stepping_stone = None;
             }
@@ -1362,4 +1408,4 @@ fn digest_bytes(text: &str) -> Result<[u8; 32], CoreError> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

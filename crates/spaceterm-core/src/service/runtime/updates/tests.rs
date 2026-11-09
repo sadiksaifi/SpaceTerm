@@ -413,6 +413,133 @@ fn a_starting_core_removes_the_previous_installation_once_its_activation_release
     });
 }
 
+/// The update record as SpaceTerm 0.11.2 reads it. A desktop, CLI, helper or Core of that
+/// release reads this file while this release runs, so every value in it must be one these
+/// types decode.
+mod released {
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    pub(crate) struct Record {
+        pending: Option<Stored>,
+        skipped: Option<String>,
+        last_failure: Option<UpdateFailure>,
+        failures: u64,
+        check: UpdateCheck,
+        silent: Option<Attempt>,
+        activation: Option<[u8; 32]>,
+        stepping_stone: Option<String>,
+    }
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Stored {
+        digest: String,
+        version: String,
+        protocols: serde_json::Value,
+        installed_at: u64,
+    }
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Attempt {
+        boot: String,
+        digest: String,
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case", deny_unknown_fields)]
+    #[allow(dead_code)]
+    enum UpdateCheck {
+        Disabled,
+        Never,
+        Succeeded {
+            at: u64,
+        },
+        Failing {
+            since: u64,
+            last_success: Option<u64>,
+            reason: CheckFailure,
+        },
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum CheckFailure {
+        Network,
+        Proxy,
+        Verification,
+        SystemTooOld,
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct UpdateFailure {
+        id: u64,
+        at: u64,
+        version: String,
+        kind: FailureKind,
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum FailureKind {
+        Install(InstallFailure),
+        Start(StartFailure),
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum InstallFailure {
+        DiskFull,
+        Download,
+        Verification,
+    }
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum StartFailure {
+        NotReady,
+        PortInUse,
+        DiskFull,
+    }
+}
+
+/// Asserts that SpaceTerm 0.11.2 reads the update record in the Core data root `data`.
+pub(crate) fn readable_by_0_11_2(data: &Path) {
+    let bytes = std::fs::read(data.join("updates.json")).unwrap();
+    serde_json::from_slice::<released::Record>(&bytes).expect("0.11.2 reads the update record");
+}
+
+#[test]
+fn check_reasons_0_11_2_lacks_stay_out_of_the_values_it_reads() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let data = machine.fixture.paths.data.as_path();
+        let record = Directory::open(data, false).unwrap();
+        for reason in [
+            CheckFailure::ClockBehind,
+            CheckFailure::SteppingStoneSkipped,
+            CheckFailure::Network,
+        ] {
+            let failing = UpdateCheck::Failing {
+                since: 10,
+                last_success: Some(5),
+                reason,
+            };
+            updates.begin_check().unwrap().finish(failing.clone());
+            readable_by_0_11_2(data);
+            // This runtime reads the reason back. A Release Core reports it in its facts.
+            assert_eq!(load(&record).unwrap().check(), failing);
+        }
+        updates
+            .begin_check()
+            .unwrap()
+            .finish(UpdateCheck::Succeeded { at: 20 });
+        assert_eq!(
+            load(&record).unwrap().check(),
+            UpdateCheck::Succeeded { at: 20 }
+        );
+        readable_by_0_11_2(data);
+    });
+}
+
 #[test]
 fn an_overdue_pending_version_keeps_the_overdue_value_every_peer_accepts() {
     with_fixture_trust(|| {
