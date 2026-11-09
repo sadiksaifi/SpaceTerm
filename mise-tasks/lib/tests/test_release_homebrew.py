@@ -31,7 +31,7 @@ class CaskTests(unittest.TestCase):
         # only closes the windows, so the cask sends no quit. An upgrade signals too, so a
         # running SpaceTerm never keeps running from a replaced bundle.
         self.assertIn(
-            '  uninstall on_upgrade: :signal,\n'
+            "  uninstall on_upgrade: :signal,\n"
             '            signal:     ["TERM", "com.peblon.spaceterm"]\n',
             text,
         )
