@@ -495,8 +495,13 @@ impl Menu {
 
 #[cfg(test)]
 mod tests {
-    use super::Icons;
+    use super::{ITEM_PATH, Icons, MENU_PATH, Menu, Message, Published, StatusItem};
+    use crate::status_menu::model::{Command, FlatRow};
+    use std::io::{BufRead as _, BufReader};
     use std::path::Path;
+    use std::process::{Child, Command as Process, Stdio};
+    use std::sync::{Arc, Mutex};
+    use zbus::zvariant::Value;
 
     const APPLICATION_ID: &str = "com.peblon.spaceterm";
 
@@ -540,5 +545,96 @@ mod tests {
         let icons = Icons::under(Some(Path::new("/nonexistent/prefix")), APPLICATION_ID);
         assert_eq!(icons.theme_path, "");
         assert_eq!(icons.name(false), "com.peblon.spaceterm-symbolic");
+    }
+
+    /// A session bus of the test's own, so nothing reaches the person's desktop session.
+    struct PrivateBus(Child, String);
+
+    impl PrivateBus {
+        fn new() -> Self {
+            let mut child = Process::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("private session bus");
+            let mut address = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut address)
+                .unwrap();
+            Self(child, address.trim().to_owned())
+        }
+
+        fn connection(&self) -> zbus::blocking::connection::Builder<'_> {
+            zbus::blocking::connection::Builder::address(self.1.as_str()).unwrap()
+        }
+    }
+
+    impl Drop for PrivateBus {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A host that provides an activation token before it delivers a menu click, as GNOME's
+    /// AppIndicator extension does, hands that token to the clicked command. The token belongs
+    /// to that click only.
+    #[test]
+    fn a_tray_click_carries_the_activation_token_the_host_provided() {
+        let bus = PrivateBus::new();
+        let shared = Arc::new(Mutex::new(Published {
+            rows: vec![
+                FlatRow::Text("SpaceTerm".into()),
+                FlatRow::Action {
+                    title: "SpaceTerm Settings…".into(),
+                    command: Command::Settings,
+                },
+            ],
+            revision: 1,
+            ..Published::default()
+        }));
+        let (sender, messages) = async_channel::unbounded();
+        let item = bus
+            .connection()
+            .serve_at(
+                ITEM_PATH,
+                StatusItem {
+                    shared: shared.clone(),
+                    identity: "spaceterm",
+                    icons: Icons::under(None, APPLICATION_ID),
+                },
+            )
+            .unwrap()
+            .serve_at(MENU_PATH, Menu { shared, sender })
+            .unwrap()
+            .build()
+            .unwrap();
+        let host = bus.connection().build().unwrap();
+        let owner = item.unique_name().unwrap().to_owned();
+        let status = zbus::blocking::Proxy::new(
+            &host,
+            owner.as_str(),
+            ITEM_PATH,
+            "org.kde.StatusNotifierItem",
+        )
+        .unwrap();
+        let menu =
+            zbus::blocking::Proxy::new(&host, owner.as_str(), MENU_PATH, "com.canonical.dbusmenu")
+                .unwrap();
+        let click = || {
+            menu.call_method("Event", &(2i32, "clicked", Value::from(0i32), 0u32))
+                .unwrap();
+            match messages.try_recv() {
+                Ok(Message::Command(command, activation)) => (command, activation),
+                _ => panic!("the click reaches the menu's commands"),
+            }
+        };
+
+        status
+            .call_method("ProvideXdgActivationToken", &("tray-token",))
+            .unwrap();
+        assert_eq!(click(), (Command::Settings, Some("tray-token".to_owned())));
+        assert_eq!(click(), (Command::Settings, None));
     }
 }
