@@ -24,6 +24,9 @@ const RECORD: &std::ffi::CStr = c"updates.json";
 const LOCK: &str = "updates.lock";
 /// How often the engine reads the live Terminal Session count and the clock.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a Core has no live Terminal Session and no session request before it restarts by
+/// itself into a Pending Version. Each session request starts it again.
+pub const SILENT_GRACE: Duration = Duration::from_secs(10);
 /// Free space an install needs beyond its archive, for the unpacked files.
 const INSTALL_MARGIN: u64 = 64 * 1024 * 1024;
 
@@ -80,6 +83,8 @@ pub enum Restart {
     Asked,
     /// The Core decided on its own. It goes ahead only into a Pending Version that is not
     /// breaking, and only at zero Terminal Sessions, at most once per Pending Version and boot.
+    /// The engine asks for it once [`SILENT_GRACE`] passed with no session and no session
+    /// request.
     Silent,
 }
 
@@ -118,6 +123,16 @@ pub(crate) trait Restarter: Send + Sync {
         candidate: Option<[u8; 32]>,
         silent: bool,
     ) -> Result<(), RestartRefusal>;
+}
+
+/// What the running server reports to the engine on each watch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Activity {
+    /// Live Terminal Sessions now.
+    pub(crate) sessions: u32,
+    /// A session request, such as a Pane claim or a Workspace edit, arrived since the last
+    /// watch.
+    pub(crate) requested: bool,
 }
 
 /// The Paired Devices that cannot connect to a Core of a work major: those whose last admitted
@@ -342,11 +357,25 @@ struct Live {
     sessions: u32,
     operation: Option<Operation>,
     facts: UpdateFacts,
+    /// Since when the server had no live Terminal Session and no session request. None while
+    /// a session is live.
+    quiet_since: Option<Instant>,
+    /// A restart or confirmed change is being admitted. It holds the update operation like
+    /// `operation`, but the facts show it only once the admission succeeded, so a refused one
+    /// never shows.
+    reserved: bool,
     /// A silent restart that settled while this server kept running waits until then before
     /// the next one, so a helper that keeps failing does not fence the server every second.
     silent_after: Option<Instant>,
     /// The server is shutting down, so no caller waits for the facts to change.
     stopped: bool,
+}
+
+impl Live {
+    /// Whether an update operation runs or is being admitted.
+    fn busy(&self) -> bool {
+        self.operation.is_some() || self.reserved
+    }
 }
 
 /// A change a client confirmed over the service lane, which the engine owns while it runs.
@@ -357,6 +386,8 @@ pub(crate) enum Confirmed {
         candidate: Option<[u8; 32]>,
     },
     Stop,
+    /// Remove Machine. It moves into no installation, so a Pending Version doesn't matter.
+    Uninstall,
 }
 
 /// How long a silent restart that settled without the server stopping waits before it retries.
@@ -400,6 +431,8 @@ impl Updates {
                 sessions: 0,
                 operation: None,
                 facts: placeholder(&running),
+                quiet_since: None,
+                reserved: false,
                 silent_after: None,
                 stopped: false,
             }),
@@ -428,12 +461,13 @@ impl Updates {
     }
 
     /// Connect the running server's restart admission and Paired Device view, then follow its
-    /// live Terminal Session count until `sessions` returns `None`, when the server stops.
+    /// live Terminal Sessions and session requests until `activity` returns `None`, when the
+    /// server stops.
     pub(crate) fn run(
         &self,
         restarter: Weak<dyn Restarter>,
         stranded: Arc<Stranded>,
-        sessions: impl Fn() -> Option<u32> + Send + 'static,
+        activity: impl Fn() -> Option<Activity> + Send + 'static,
     ) -> Result<(), CoreError> {
         let _ = self.shared.restarter.set(restarter);
         let _ = self.shared.stranded.set(stranded);
@@ -442,11 +476,11 @@ impl Updates {
         std::thread::Builder::new()
             .name("spaceterm-core-updates".into())
             .spawn(move || {
-                while let Some(count) = sessions() {
+                while let Some(activity) = activity() {
                     let Some(shared) = shared.upgrade() else {
                         return;
                     };
-                    Self { shared }.set_sessions(count);
+                    Self { shared }.observe(activity, Instant::now());
                     std::thread::sleep(WATCH_INTERVAL);
                 }
             })
@@ -535,9 +569,9 @@ impl Updates {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(RestartRefusal::Core(CoreError::NotRunning))?;
-        let (candidate, to) = {
+        let (candidate, to, operation) = {
             let mut live = self.shared.lock();
-            if live.operation.is_some() {
+            if live.busy() {
                 return Err(RestartRefusal::Busy);
             }
             // Another process, such as a local installer, may have changed the record.
@@ -570,20 +604,19 @@ impl Updates {
                 .map_err(RestartRefusal::Core)?;
                 live.record.silent = Some(attempt);
             }
-            let to = pending
-                .as_ref()
-                .map_or_else(|| self.shared.running.clone(), |p| p.version.clone());
+            let (to, operation) = self.shared.restart_into(pending.as_ref());
             let candidate = pending
                 .map(|pending| digest_bytes(&pending.digest))
                 .transpose()
                 .map_err(RestartRefusal::Core)?;
-            live.operation = Some(Operation::Restarting { to: to.clone() });
-            (candidate, to)
+            // The facts show the restart only once the fence admitted it.
+            live.reserved = true;
+            (candidate, to, operation)
         };
-        self.refresh();
-        if let Err(refusal) = restarter.restart(candidate, request == Restart::Silent) {
-            let mut live = self.shared.lock();
-            live.operation = None;
+        let admitted = restarter.restart(candidate, request == Restart::Silent);
+        let mut live = self.shared.lock();
+        live.reserved = false;
+        if let Err(refusal) = admitted {
             if request == Restart::Silent
                 && let Ok(record) = change(&self.shared.data, |record| {
                     record.silent = None;
@@ -596,12 +629,16 @@ impl Updates {
             self.refresh();
             return Err(refusal);
         }
+        live.operation = Some(operation);
+        drop(live);
+        self.refresh();
         Ok(Restarting { to })
     }
 
-    /// Owns `change` as the update operation, so every client's facts show `Restarting` or
-    /// `Stopping`, then runs `admit`, the lane's admission of the confirmed change. A failed
-    /// admission ends the operation again.
+    /// Holds the update operation while `admit`, the lane's admission of the confirmed change,
+    /// runs. Once it admitted the change, `change` is the update operation, so every client's
+    /// facts show `Restarting`, `RestartingSameVersion`, `Stopping` or `Uninstalling`. A failed
+    /// admission never shows.
     ///
     /// # Errors
     /// Returns ServiceBusy while another update operation runs, Changed when `candidate` is not
@@ -611,15 +648,16 @@ impl Updates {
         change: Confirmed,
         admit: impl FnOnce() -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
-        {
+        let operation = {
             let mut live = self.shared.lock();
-            if live.operation.is_some() {
+            if live.busy() {
                 return Err(CoreError::ServiceBusy);
             }
             // Another process, such as a local installer, may have changed the record.
             live.record = load(&self.shared.data)?;
-            live.operation = Some(match change {
+            let operation = match change {
                 Confirmed::Stop => Operation::Stopping,
+                Confirmed::Uninstall => Operation::Uninstalling,
                 Confirmed::Restart { candidate } => {
                     let pending = live.record.pending.as_ref();
                     let digest = pending
@@ -628,19 +666,20 @@ impl Updates {
                     if digest != candidate {
                         return Err(CoreError::Changed);
                     }
-                    Operation::Restarting {
-                        to: pending
-                            .map_or_else(|| self.shared.running.clone(), |p| p.version.clone()),
-                    }
+                    self.shared.restart_into(pending).1
                 }
-            });
-        }
-        self.refresh();
+            };
+            live.reserved = true;
+            operation
+        };
         let admitted = admit();
-        if admitted.is_err() {
-            self.shared.lock().operation = None;
-            self.refresh();
+        let mut live = self.shared.lock();
+        live.reserved = false;
+        if admitted.is_ok() {
+            live.operation = Some(operation);
         }
+        drop(live);
+        self.refresh();
         admitted
     }
 
@@ -651,7 +690,12 @@ impl Updates {
         let mut live = self.shared.lock();
         if !matches!(
             live.operation,
-            Some(Operation::Restarting { .. } | Operation::Stopping)
+            Some(
+                Operation::Restarting { .. }
+                    | Operation::RestartingSameVersion
+                    | Operation::Stopping
+                    | Operation::Uninstalling
+            )
         ) {
             return;
         }
@@ -677,7 +721,7 @@ impl Updates {
     pub fn begin_check(&self) -> Result<Checking<'_>, InstallError> {
         {
             let mut live = self.shared.lock();
-            if live.operation.is_some() {
+            if live.busy() {
                 return Err(InstallError::Busy);
             }
             live.operation = Some(Operation::Checking);
@@ -686,12 +730,23 @@ impl Updates {
         Ok(Checking { updates: self })
     }
 
-    /// The server's live Terminal Session count changed. At zero, a waiting Pending Version that
-    /// is not breaking restarts silently.
-    pub fn set_sessions(&self, sessions: u32) {
-        self.shared.lock().sessions = sessions;
+    /// The server reported `activity` at `now`. Once it had no live Terminal Session and no
+    /// session request for [`SILENT_GRACE`], a waiting Pending Version that is not breaking
+    /// restarts silently.
+    pub(crate) fn observe(&self, activity: Activity, now: Instant) {
+        let due = {
+            let mut live = self.shared.lock();
+            live.sessions = activity.sessions;
+            if activity.sessions > 0 {
+                live.quiet_since = None;
+            } else if activity.requested || live.quiet_since.is_none() {
+                live.quiet_since = Some(now);
+            }
+            live.quiet_since
+                .is_some_and(|since| now.saturating_duration_since(since) >= SILENT_GRACE)
+        };
         self.refresh();
-        if sessions == 0 {
+        if due {
             let _ = self.restart(Restart::Silent);
         }
     }
@@ -786,20 +841,18 @@ impl Updates {
         }
         let size = std::fs::metadata(archive.archive).map_or(0, |v| v.len());
         let installations = service.installations_directory();
+        let replaced = self.shared.lock().record.pending.clone();
+        // Obsolete installations go first, so the space check counts what they free. A waiting
+        // Pending Version stays until this one has staged.
+        let waiting = replaced.as_ref().map(|pending| pending.digest.as_str());
+        prune(service, &installations, &[Some(state.installation.as_str()), waiting])
+            .map_err(InstallError::Core)?;
         if storage_full(
             &installations,
             size.saturating_mul(2).saturating_add(INSTALL_MARGIN),
         ) {
             return Err(InstallError::Failed(InstallFailure::DiskFull));
         }
-        // At most two versions stay on disk: the running one and the one installed now.
-        let record = change(data, |record| {
-            record.pending = None;
-            record.clone()
-        })
-        .map_err(InstallError::Core)?;
-        self.shared.lock().record = record;
-        prune(&installations, &state.installation).map_err(InstallError::Core)?;
         let retained = service
             .stage_candidate(archive.archive, archive.signature, archive.sha256)
             .map_err(|error| {
@@ -819,7 +872,11 @@ impl Updates {
             digest,
             version: version.clone(),
             protocols: metadata.protocols,
-            installed_at: now(),
+            // A version that replaces a waiting one waits as long as that one did, so it is
+            // Overdue as soon.
+            installed_at: replaced
+                .as_ref()
+                .map_or_else(now, |pending| pending.installed_at),
         };
         let record = change(data, |record| {
             record.pending = Some(stored.clone());
@@ -836,7 +893,50 @@ impl Updates {
         })
         .map_err(InstallError::Core)?;
         self.shared.lock().record = record;
+        // At most two versions stay on disk: the running one and the one installed now.
+        prune(
+            service,
+            &installations,
+            &[Some(state.installation.as_str()), Some(stored.digest.as_str())],
+        )
+        .map_err(InstallError::Core)?;
         Ok(stored)
+    }
+
+    /// Removes what a crash or a finished update left behind: staged downloads, unfinished
+    /// unpackings, and retained installations that are neither the running one nor the Pending
+    /// Version. A server calls this once as it starts, before it serves any request, so no
+    /// download or push of its own is staged yet. Another service operation that holds the
+    /// service lock may install or activate now, so the installations then stay.
+    pub(crate) fn remove_leftovers(&self) {
+        let service = &self.shared.service;
+        crate::update::sources::clear_staging(service.paths.data.as_path());
+        if let Ok(Some(_operation)) = self.shared.data.try_lock("service.lock") {
+            let _ = retire_obsolete(service);
+        }
+    }
+}
+
+/// Removes the retained installations `service` no longer needs, unless an activation may
+/// still return to its previous one. On macOS each is unregistered from Launch Services first.
+/// The caller holds the service lock, so no install or activation changes them meanwhile.
+pub(in crate::service) fn retire_obsolete(service: &Service) -> Result<(), CoreError> {
+    let (data, state) = service.read()?.ok_or(CoreError::NotInstalled)?;
+    let installations = service.installations_directory();
+    let pending = load(&data)?.pending.map(|pending| pending.digest);
+    let keep = if state
+        .activation
+        .as_ref()
+        .is_some_and(super::super::activation::Operation::retains_previous)
+    {
+        // Every valid installation stays: only unfinished unpackings go.
+        None
+    } else {
+        Some([Some(state.installation.as_str()), pending.as_deref()])
+    };
+    match keep {
+        Some(keep) => prune(service, &installations, &keep),
+        None => prune_unfinished(&installations),
     }
 }
 
@@ -845,8 +945,22 @@ impl Shared {
         self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The version a restart moves into, and the operation the facts show for it: the Pending
+    /// Version's `Restarting`, or `RestartingSameVersion` without one.
+    fn restart_into(&self, pending: Option<&Stored>) -> (Version, Operation) {
+        match pending {
+            Some(pending) => (
+                pending.version.clone(),
+                Operation::Restarting {
+                    to: pending.version.clone(),
+                },
+            ),
+            None => (self.running.clone(), Operation::RestartingSameVersion),
+        }
+    }
+
     fn admits(&self, live: &Live, candidate: &Candidate) -> Result<(), InstallError> {
-        if live.operation.is_some() {
+        if live.busy() {
             return Err(InstallError::Busy);
         }
         self.admits_version(live, candidate)
@@ -1100,22 +1214,58 @@ fn verification(archive: &Path, error: CoreError) -> InstallError {
     }
 }
 
-/// Removes every retained installation except `keep`, under the store's lock.
-fn prune(parent: &Path, keep: &str) -> Result<(), CoreError> {
+/// Removes every retained installation except those `keep` names, and every unfinished
+/// unpacking, under the store's lock. On macOS each installation is unregistered from Launch
+/// Services before it goes, so System Settings never names a bundle that no longer exists.
+fn prune(service: &Service, parent: &Path, keep: &[Option<&str>]) -> Result<(), CoreError> {
+    remove_entries(parent, |text| {
+        if unfinished(text) {
+            return Some(None);
+        }
+        let obsolete = super::digest_valid(text) && !keep.contains(&Some(text));
+        obsolete.then(|| Some(service.supervisor.as_ref()))
+    })
+}
+
+/// Removes every unfinished unpacking under the store's lock, which every unpacking holds
+/// until it publishes, so each one found is a crash's.
+fn prune_unfinished(parent: &Path) -> Result<(), CoreError> {
+    remove_entries(parent, |text| unfinished(text).then_some(None))
+}
+
+/// The name of an unpacking that never published: `.prepare-` and 32 hex digits.
+fn unfinished(text: &str) -> bool {
+    text.strip_prefix(".prepare-").is_some_and(|rest| {
+        rest.len() == 32 && rest.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Removes each directory in `parent` that `remove` chooses, under the store's lock. A chosen
+/// installation is first retired from the service manager `remove` names.
+fn remove_entries<'a>(
+    parent: &Path,
+    remove: impl Fn(&str) -> Option<Option<&'a dyn super::super::Supervisor>>,
+) -> Result<(), CoreError> {
+    if !parent.exists() {
+        return Ok(());
+    }
     let directory = super::owned_directory(parent)?;
     let _store = super::lock_directory(&directory)?;
     for name in super::files::names(&directory)? {
         let Some(text) = name.to_str() else {
             continue;
         };
-        if text == keep || !super::digest_valid(text) {
+        let Some(supervisor) = remove(text) else {
             continue;
-        }
+        };
         let path = parent.join(text);
         if std::fs::symlink_metadata(&path)
             .map_err(|_| CoreError::StorageUnavailable)?
             .is_dir()
         {
+            if let Some(supervisor) = supervisor {
+                supervisor.retire(&path);
+            }
             make_writable(&path)?;
             std::fs::remove_dir_all(&path).map_err(|_| CoreError::StorageUnavailable)?;
         }

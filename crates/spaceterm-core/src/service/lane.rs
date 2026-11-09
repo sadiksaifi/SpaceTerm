@@ -142,6 +142,42 @@ pub enum LaneRequest {
     },
 }
 
+impl LaneReply {
+    /// This reply as a connection whose admission selected `selected` reads it: its facts
+    /// through [`UpdateFacts::for_selected`], and a code the selected minor lacks as the nearest
+    /// one it has.
+    #[must_use]
+    pub fn for_selected(self, selected: crate::protocol::version::ProtocolVersion) -> Self {
+        let facts = |facts: Box<UpdateFacts>| Box::new(facts.for_selected(selected));
+        match self {
+            Self::Status(mut status) => {
+                status.update = status.update.map(facts);
+                Self::Status(status)
+            }
+            Self::Facts { boot, facts: f } => Self::Facts {
+                boot,
+                facts: facts(f),
+            },
+            Self::Installed { installed, facts: f } => Self::Installed {
+                installed,
+                facts: facts(f),
+            },
+            Self::Error { code }
+                if code == CLOCK_BEHIND
+                    && selected.minor < crate::update::facts::MINOR_RESTART_FACTS =>
+            {
+                Self::Error {
+                    code: "candidate_unverified".to_owned(),
+                }
+            }
+            reply => reply,
+        }
+    }
+}
+
+/// The code of a feed check that found this Machine's clock behind. Since service 1.1.
+pub(crate) const CLOCK_BEHIND: &str = "clock_behind";
+
 impl LaneRequest {
     /// The first service lane version that has this request. A client never sends a request
     /// that its admission's selected version lacks, and the lane refuses one as `unsupported`.
@@ -533,7 +569,7 @@ impl LaneCore {
                 Ok(request) => self.respond(request, &actor, caller, connection),
                 Err(_) => (error(&CoreError::Protocol), None),
             };
-            let sent = serde_json::to_vec(&reply)
+            let sent = serde_json::to_vec(&reply.for_selected(selected))
                 .map_err(|_| CoreError::Protocol)
                 .and_then(|bytes| stream.send(&bytes, Instant::now() + REQUEST_LIMIT));
             // The record is durable, so it starts even when its reply was lost. The client
@@ -1099,9 +1135,11 @@ impl LaneCore {
             })?;
             Ok(admitted)
         };
-        // The engine owns a confirmed Restart or Stop, so every client's facts show it.
+        // The engine owns a confirmed Restart, Stop or Uninstall, so every client's facts show
+        // it. An Uninstall moves into no installation, so a Pending Version doesn't change it.
         let change = match action {
             LaneAction::Stop => runtime::updates::Confirmed::Stop,
+            LaneAction::Uninstall => runtime::updates::Confirmed::Uninstall,
             _ => runtime::updates::Confirmed::Restart {
                 candidate: prepared.candidate,
             },

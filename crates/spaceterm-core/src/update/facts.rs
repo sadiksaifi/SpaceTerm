@@ -36,6 +36,11 @@ pub struct UpdateFacts {
     pub last_failure: Option<UpdateFailure>,
 }
 
+/// The work and service minor of major 1 that first carries [`Operation::RestartingSameVersion`],
+/// [`CheckFailure::ClockBehind`], [`CheckFailure::SteppingStoneSkipped`] and
+/// [`StartFailure::Interrupted`].
+pub const MINOR_RESTART_FACTS: u16 = 1;
+
 /// Facts that break a bound or an invariant of their types. A receiver treats them as a
 /// protocol violation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -43,6 +48,36 @@ pub struct UpdateFacts {
 pub struct InvalidFacts;
 
 impl UpdateFacts {
+    /// These facts as a connection whose admission selected `selected` reads them. A sender
+    /// never sends a value the selected minor lacks (ADR 0035), so each value a later minor
+    /// added becomes the nearest one the selected minor has. The work and service lanes add
+    /// fact values at the same minors.
+    #[must_use]
+    pub fn for_selected(mut self, selected: ProtocolVersion) -> Self {
+        if selected.minor >= MINOR_RESTART_FACTS {
+            return self;
+        }
+        if self.operation == Some(Operation::RestartingSameVersion) {
+            self.operation = Some(Operation::Restarting {
+                to: self.running.clone(),
+            });
+        }
+        if let UpdateCheck::Failing { reason, .. } = &mut self.check
+            && matches!(
+                reason,
+                CheckFailure::ClockBehind | CheckFailure::SteppingStoneSkipped
+            )
+        {
+            *reason = CheckFailure::Verification;
+        }
+        if self.last_failure.as_ref().is_some_and(|failure| {
+            failure.kind == FailureKind::Start(StartFailure::Interrupted)
+        }) {
+            self.last_failure = None;
+        }
+        self
+    }
+
     /// Checks the bounds and invariants that decoding alone does not.
     pub fn validate(&self) -> Result<(), InvalidFacts> {
         if let Some(pending) = &self.pending {
@@ -285,12 +320,18 @@ pub enum Operation {
         received: u64,
         total: u64,
     },
-    /// The helper restarts the Core into `to`. The Core closes its connections next.
+    /// The helper restarts the Core into its Pending Version `to`: Update Core. The Core closes
+    /// its connections next.
     Restarting {
         to: Version,
     },
     Stopping,
+    /// Remove Machine: the Core stops, revokes every pairing and removes itself. It does not
+    /// come back.
     Uninstalling,
+    /// The helper restarts the Core into the version it runs: Restart Core, with no version
+    /// change. Since [`MINOR_RESTART_FACTS`].
+    RestartingSameVersion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,6 +362,13 @@ pub enum CheckFailure {
     Verification,
     /// The newest release needs a newer system than this host, per `minimum_system`.
     SystemTooOld,
+    /// The feed verified, but it was published more than [`super::feed::MAX_CLOCK_SKEW`]
+    /// seconds after this Machine's clock: the clock is behind. Since [`MINOR_RESTART_FACTS`].
+    ClockBehind,
+    /// The newest release needs a Stepping Stone first, and that Stepping Stone is `skipped`
+    /// because it failed to start. The Core can't reach the newest release from its feed until
+    /// a newer Stepping Stone appears. Since [`MINOR_RESTART_FACTS`].
+    SteppingStoneSkipped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +410,9 @@ pub enum StartFailure {
     PortInUse,
     /// Transient, as `PortInUse`.
     DiskFull,
+    /// Transient: a reboot, logout or crash ended the restart before the version could become
+    /// ready, so its readiness was never measured. Since [`MINOR_RESTART_FACTS`].
+    Interrupted,
 }
 
 #[cfg(test)]
@@ -443,6 +494,50 @@ mod tests {
             let bytes = postcard::to_allocvec(&facts).unwrap();
             assert_eq!(postcard::from_bytes::<UpdateFacts>(&bytes).unwrap(), facts);
         }
+    }
+
+    #[test]
+    fn a_connection_at_minor_0_reads_each_later_value_as_the_nearest_one_it_has() {
+        let older = ProtocolVersion { major: 1, minor: 0 };
+        let current = ProtocolVersion {
+            major: 1,
+            minor: MINOR_RESTART_FACTS,
+        };
+        let later = UpdateFacts {
+            operation: Some(Operation::RestartingSameVersion),
+            check: UpdateCheck::Failing {
+                since: 100,
+                last_success: None,
+                reason: CheckFailure::SteppingStoneSkipped,
+            },
+            last_failure: Some(UpdateFailure {
+                id: 5,
+                at: 90,
+                version: version("1.4.0"),
+                kind: FailureKind::Start(StartFailure::Interrupted),
+            }),
+            ..facts()
+        };
+        assert_eq!(later.clone().for_selected(current), later);
+        let read = later.for_selected(older);
+        assert_eq!(
+            read.operation,
+            Some(Operation::Restarting {
+                to: version("dev.0123456789ab.dirty")
+            })
+        );
+        assert!(matches!(
+            read.check,
+            UpdateCheck::Failing {
+                reason: CheckFailure::Verification,
+                ..
+            }
+        ));
+        assert_eq!(read.last_failure, None);
+        // Values minor 0 has pass unchanged.
+        assert_eq!(facts().for_selected(older), facts());
+        let bytes = postcard::to_allocvec(&read).unwrap();
+        assert_eq!(postcard::from_bytes::<UpdateFacts>(&bytes).unwrap(), read);
     }
 
     #[test]

@@ -1520,7 +1520,11 @@ mod flow {
                     lane.serve(&mut core, LOCAL.into(), None, &|| Ok(()))
                 })
             });
-            Ok((Box::new(client), crate::protocol::version::SERVICE))
+            Ok((
+                Box::new(client),
+                crate::protocol::version::SERVICE,
+                crate::protocol::version::SERVICE,
+            ))
         }
     }
 
@@ -1839,7 +1843,11 @@ mod flow {
                     let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
                 }
             });
-            Ok((Box::new(client), crate::protocol::version::SERVICE))
+            Ok((
+                Box::new(client),
+                crate::protocol::version::SERVICE,
+                crate::protocol::version::SERVICE,
+            ))
         }
     }
 
@@ -1959,7 +1967,11 @@ mod flow {
                     let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
                 }
             });
-            Ok((Box::new(client), crate::protocol::version::SERVICE))
+            Ok((
+                Box::new(client),
+                crate::protocol::version::SERVICE,
+                crate::protocol::version::SERVICE,
+            ))
         }
     }
 
@@ -2200,6 +2212,44 @@ mod flow {
     }
 
     #[test]
+    fn a_reply_only_a_newer_core_sends_names_this_client_as_the_older_side() {
+        use crate::protocol::version::{Incompatible, ProtocolVersion, SERVICE};
+        /// Admits at this client's version, offers `core`, and answers every request with a
+        /// reply this client doesn't know.
+        struct Newer(ProtocolVersion);
+        impl Connector for Newer {
+            fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
+                let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+                std::thread::spawn(move || {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while core.receive(MAX_FRAME, deadline).is_ok() {
+                        let _ = core.send(br#"{"reply":"later"}"#, deadline);
+                    }
+                });
+                Ok((Box::new(client), SERVICE, self.0))
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let newer = ProtocolVersion {
+            minor: SERVICE.minor + 1,
+            ..SERVICE
+        };
+        for (core, expected) in [
+            (
+                newer,
+                CoreError::IncompatibleProtocol(Incompatible::CallerTooOld),
+            ),
+            (SERVICE, CoreError::Protocol),
+        ] {
+            let mut session = Session::open(&Newer(core), deadline).unwrap();
+            assert_eq!(
+                session.request(&LaneRequest::Facts {}, deadline),
+                Err(expected)
+            );
+        }
+    }
+
+    #[test]
     fn a_session_sends_nothing_its_selected_version_lacks() {
         /// Admits at [`OLDER`] and keeps the Core's end of the connection.
         #[derive(Default)]
@@ -2208,7 +2258,7 @@ mod flow {
             fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
                 let (client, core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
                 *self.0.lock().unwrap() = Some(core);
-                Ok((Box::new(client), OLDER))
+                Ok((Box::new(client), OLDER, OLDER))
             }
         }
         let older = Older::default();
@@ -2308,10 +2358,14 @@ fn no_client_can_activate_an_installation_it_names() {
 }
 
 #[test]
-fn every_client_sees_a_confirmed_restart_or_stop_in_the_update_facts() {
+fn every_client_sees_a_confirmed_restart_stop_or_uninstall_in_the_update_facts() {
     use crate::update::facts::Operation;
     use crate::update::source::FactsSource;
-    for (action, op) in [(LaneAction::Restart, 1), (LaneAction::Stop, 2)] {
+    for (action, op) in [
+        (LaneAction::Restart, 1),
+        (LaneAction::Stop, 2),
+        (LaneAction::Uninstall, 3),
+    ] {
         with_lane(|lane| {
             let updates = lane.lane.updates().unwrap().clone();
             let (token, _) = preview(&lane.lane, action.clone());
@@ -2319,13 +2373,95 @@ fn every_client_sees_a_confirmed_restart_or_stop_in_the_update_facts() {
             assert!(matches!(reply, LaneReply::Accepted { .. }), "{reply:?}");
             let expected = match action {
                 LaneAction::Stop => Operation::Stopping,
-                _ => Operation::Restarting {
-                    to: updates.facts().running,
-                },
+                LaneAction::Uninstall => Operation::Uninstalling,
+                // No Pending Version waits, so the version stays.
+                _ => Operation::RestartingSameVersion,
             };
+            // Another desktop follows the same engine, which it did not ask.
             assert_eq!(updates.facts().operation, Some(expected));
         });
     }
+}
+
+#[test]
+fn a_lane_of_service_1_0_reads_only_the_facts_and_codes_that_minor_has() {
+    use crate::protocol::version::ProtocolVersion;
+    use crate::update::facts::{CheckFailure, Operation, UpdateCheck};
+    use crate::update::source::FactsSource;
+    with_lane(|lane| {
+        let (token, _) = preview(&lane.lane, LaneAction::Restart);
+        execute(&lane.lane, LaneAction::Restart, &token, 1);
+        let reply = lane.lane.answer(LaneRequest::Facts {}, &ACTOR);
+        let older = ProtocolVersion { major: 1, minor: 0 };
+        let running = lane.lane.updates().unwrap().facts().running;
+        let LaneReply::Facts { facts, .. } = reply.clone().for_selected(older) else {
+            panic!("expected facts");
+        };
+        assert_eq!(facts.operation, Some(Operation::Restarting { to: running }));
+        let LaneReply::Facts { facts, .. } = reply.for_selected(crate::protocol::version::SERVICE)
+        else {
+            panic!("expected facts");
+        };
+        assert_eq!(facts.operation, Some(Operation::RestartingSameVersion));
+        let clock = LaneReply::Error {
+            code: "clock_behind".into(),
+        };
+        assert_eq!(code(clock.clone().for_selected(older)), "candidate_unverified");
+        assert_eq!(code(clock.for_selected(crate::protocol::version::SERVICE)), "clock_behind");
+        let failing = UpdateCheck::Failing {
+            since: 1,
+            last_success: None,
+            reason: CheckFailure::ClockBehind,
+        };
+        let facts = crate::update::facts::UpdateFacts {
+            check: failing,
+            ..*facts
+        };
+        assert!(matches!(
+            facts.for_selected(older).check,
+            UpdateCheck::Failing {
+                reason: CheckFailure::Verification,
+                ..
+            }
+        ));
+    });
+}
+
+#[test]
+fn removing_a_machine_with_a_pending_version_reads_as_uninstalling_everywhere() {
+    use crate::update::facts::Operation;
+    use crate::update::source::FactsSource;
+    with_lane(|lane| {
+        install_pending(&lane, "1.0.0");
+        let (token, _) = preview(&lane.lane, LaneAction::Uninstall);
+        assert!(matches!(
+            execute(&lane.lane, LaneAction::Uninstall, &token, 1),
+            LaneReply::Accepted { .. }
+        ));
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        let updates = lane.lane.updates().unwrap();
+        assert_eq!(updates.facts().operation, Some(Operation::Uninstalling));
+    });
+}
+
+#[test]
+fn a_confirmed_restart_into_the_pending_version_names_it() {
+    use crate::update::facts::{Operation, Version};
+    with_lane(|lane| {
+        install_pending(&lane, "1.0.0");
+        let (token, _) = preview(&lane.lane, LaneAction::Restart);
+        assert!(matches!(
+            execute(&lane.lane, LaneAction::Restart, &token, 1),
+            LaneReply::Accepted { .. }
+        ));
+        let LaneReply::Facts { facts, .. } = lane.lane.answer(LaneRequest::Facts {}, &ACTOR) else {
+            panic!("expected facts");
+        };
+        let updating = Some(Operation::Restarting {
+            to: Version::parse("1.0.0").unwrap(),
+        });
+        assert_eq!(facts.operation, updating);
+    });
 }
 
 #[test]
@@ -2365,7 +2501,7 @@ fn a_restart_whose_helper_fails_before_stopping_the_server_ends_and_may_try_agai
                 None
             })
             .unwrap();
-        updates.set_sessions(0);
+        crate::service::activation::tests::quiet(&updates);
         assert!(
             updates.facts().operation.is_some(),
             "the silent restart began"

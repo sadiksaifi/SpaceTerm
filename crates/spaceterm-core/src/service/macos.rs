@@ -321,6 +321,11 @@ impl Supervisor for LaunchAgent {
     fn uninstall(&self, runtime: &Path) -> Result<(), CoreError> {
         self.registration().remove(&self.contents(runtime)?)
     }
+    fn retire(&self, runtime: &Path) {
+        if let Some(layout) = super::runtime::Layout::host(&self.identity) {
+            let _ = crate::launch_services::unregister(&runtime.join(layout.signed()));
+        }
+    }
 }
 
 fn process(bytes: &[u8]) -> Result<Option<u32>, CoreError> {

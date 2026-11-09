@@ -25,8 +25,9 @@ const CHECK: Duration = Duration::from_millis(100);
 /// The thread name of lane I/O that [`within`] runs.
 const LANE_IO: &str = "spaceterm-lane-io";
 
-/// An admitted service-lane connection and the lane version its admission selected.
-pub(crate) type Connected = (Box<dyn Preamble + Send>, ProtocolVersion);
+/// An admitted service-lane connection, the lane version its admission selected, and the
+/// service version the Core offered.
+pub(crate) type Connected = (Box<dyn Preamble + Send>, ProtocolVersion, ProtocolVersion);
 
 /// Opens and admits a fresh service-lane connection.
 pub(crate) trait Connector: Send + Sync {
@@ -60,16 +61,19 @@ pub struct Session {
     stream: Option<Box<dyn Preamble + Send>>,
     /// The lane version admission selected. No request it lacks is sent.
     selected: ProtocolVersion,
+    /// The service version the Core offered at admission.
+    core: ProtocolVersion,
     /// When the last request was sent, or the connection opened.
     used: Instant,
 }
 
 impl Session {
     pub(crate) fn open(connector: &dyn Connector, deadline: Instant) -> Result<Self, CoreError> {
-        let (stream, selected) = connector.connect(deadline)?;
+        let (stream, selected, core) = connector.connect(deadline)?;
         Ok(Self {
             stream: Some(stream),
             selected,
+            core,
             used: Instant::now(),
         })
     }
@@ -94,13 +98,14 @@ impl Session {
     ) -> Result<Self, CoreError> {
         let connector = Arc::clone(connector);
         let fixed = deadline();
-        let (stream, selected) = within(LANE_IO, &|| Some(deadline()), move || {
+        let (stream, selected, core) = within(LANE_IO, &|| Some(deadline()), move || {
             connector.connect(fixed)
         })
         .ok_or(CoreError::Protocol)??;
         Ok(Self {
             stream: Some(stream),
             selected,
+            core,
             used: Instant::now(),
         })
     }
@@ -116,7 +121,23 @@ impl Session {
         self.used = Instant::now();
         stream.send(&bytes, deadline)?;
         let reply = stream.receive(MAX_FRAME, deadline)?;
-        serde_json::from_slice(&reply).map_err(|_| CoreError::Protocol)
+        self.decode(&reply)
+    }
+
+    /// Reads one reply. A reply this client can't read from a Core whose lane minor is newer
+    /// than this client's means this client is the older side, which the person updates; any
+    /// other unreadable reply breaks the protocol.
+    fn decode(&self, reply: &[u8]) -> Result<LaneReply, CoreError> {
+        serde_json::from_slice(reply).map_err(|_| {
+            let ours = crate::protocol::version::SERVICE;
+            if self.core.major == ours.major && self.core.minor > ours.minor {
+                CoreError::IncompatibleProtocol(
+                    crate::protocol::version::Incompatible::CallerTooOld,
+                )
+            } else {
+                CoreError::Protocol
+            }
+        })
     }
 
     /// Like [`Self::request`], but stops waiting as soon as `deadline()` passes. A request
@@ -138,7 +159,7 @@ impl Session {
         })
         .ok_or(CoreError::Protocol)?;
         self.stream = Some(stream);
-        serde_json::from_slice(&reply?).map_err(|_| CoreError::Protocol)
+        self.decode(&reply?)
     }
 
     /// Sends one request and turns a lane `Error` into [`LaneError::Code`], and a `BelowFloor`
@@ -439,7 +460,8 @@ impl Connector for Local {
             &self.paths.identity,
         );
         record(&self.admissions, &admitted);
-        Ok((Box::new(stream), admitted?.selected))
+        let admitted = admitted?;
+        Ok((Box::new(stream), admitted.selected, admitted.core.service))
     }
 }
 
@@ -485,7 +507,7 @@ impl Connector for Paired {
                 .map_err(Clone::clone),
         );
         let (stream, negotiated) = admitted?;
-        Ok((stream, negotiated.selected))
+        Ok((stream, negotiated.selected, negotiated.core.service))
     }
 }
 

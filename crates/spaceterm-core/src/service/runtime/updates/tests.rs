@@ -158,6 +158,14 @@ fn installations(machine: &Machine) -> Vec<String> {
     versions
 }
 
+/// The server reports `sessions` live Terminal Sessions and no session request.
+fn sessions(sessions: u32) -> Activity {
+    Activity {
+        sessions,
+        requested: false,
+    }
+}
+
 fn approved(machine: &Machine) -> String {
     let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
     Service::state(&data).unwrap().unwrap().installation
@@ -312,6 +320,14 @@ fn a_newer_install_replaces_the_waiting_one_so_at_most_two_versions_stay() {
             Source::Feed,
         )
         .unwrap();
+        let first = updates.facts().pending.unwrap();
+        // A crash left an unfinished unpacking behind.
+        let unfinished = machine
+            .service
+            .installations_directory()
+            .join(format!(".prepare-{}", "ab".repeat(16)));
+        std::fs::create_dir_all(unfinished.join("bin")).unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
         install(
             &updates,
             &machine,
@@ -321,7 +337,48 @@ fn a_newer_install_replaces_the_waiting_one_so_at_most_two_versions_stay() {
         )
         .unwrap();
         assert_eq!(installations(&machine), ["1.0.0", "1.2.0"]);
-        assert_eq!(updates.facts().pending.unwrap().version, version("1.2.0"));
+        assert!(!unfinished.exists());
+        let pending = updates.facts().pending.unwrap();
+        assert_eq!(pending.version, version("1.2.0"));
+        // It waits as long as the version it replaced, so it is Overdue as soon.
+        assert_eq!(pending.installed_at, first.installed_at);
+    });
+}
+
+#[test]
+fn a_starting_core_removes_what_a_crash_or_a_finished_update_left_behind() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Local,
+        )
+        .unwrap();
+        let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
+        // A waiting Pending Version stays.
+        updates.remove_leftovers();
+        assert_eq!(installations(&machine), ["1.0.0", "1.1.0"]);
+        // Once no record names it, as after a skip, it is obsolete. A crash left a staged
+        // download and an unfinished unpacking.
+        change(&data, |record| record.pending = None).unwrap();
+        let staging = machine.fixture.paths.data.join("staging");
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&staging)
+            .unwrap();
+        std::fs::write(staging.join("ab.tar.gz"), b"partial").unwrap();
+        let unfinished = machine
+            .service
+            .installations_directory()
+            .join(format!(".prepare-{}", "cd".repeat(16)));
+        std::fs::create_dir_all(&unfinished).unwrap();
+        updates.remove_leftovers();
+        assert_eq!(installations(&machine), ["1.0.0"]);
+        assert!(!unfinished.exists());
+        assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
     });
 }
 
@@ -523,7 +580,7 @@ fn a_stopped_core_reports_the_facts_it_persisted() {
             Source::Local,
         )
         .unwrap();
-        updates.set_sessions(3);
+        updates.observe(sessions(3), Instant::now());
         let check = updates.begin_check().unwrap();
         check.finish(UpdateCheck::Succeeded { at: 10 });
         let facts = Updates::stored(&machine.service).unwrap();
@@ -534,7 +591,8 @@ fn a_stopped_core_reports_the_facts_it_persisted() {
 }
 
 #[test]
-fn a_silent_restart_waits_for_zero_sessions_and_tries_each_pending_version_once_per_boot() {
+fn a_silent_restart_waits_for_a_quiet_grace_period_and_tries_each_pending_version_once_per_boot()
+{
     with_fixture_trust(|| {
         let machine = machine("1.0.0");
         let updates = Updates::open(machine.service.clone()).unwrap();
@@ -545,9 +603,11 @@ fn a_silent_restart_waits_for_zero_sessions_and_tries_each_pending_version_once_
                 None
             })
             .unwrap();
-        updates.set_sessions(0);
+        let start = Instant::now();
+        updates.observe(sessions(0), start);
+        updates.observe(sessions(0), start + SILENT_GRACE);
         assert!(admitted.0.lock().unwrap().is_empty(), "nothing waits");
-        updates.set_sessions(2);
+        updates.observe(sessions(2), start);
         install(
             &updates,
             &machine,
@@ -556,9 +616,28 @@ fn a_silent_restart_waits_for_zero_sessions_and_tries_each_pending_version_once_
             Source::Feed,
         )
         .unwrap();
-        updates.set_sessions(1);
+        updates.observe(sessions(1), start);
         assert!(admitted.0.lock().unwrap().is_empty(), "sessions are open");
-        updates.set_sessions(0);
+        // The last session ended. The grace period runs from here.
+        updates.observe(sessions(0), start);
+        updates.observe(sessions(0), start + SILENT_GRACE / 2);
+        assert!(admitted.0.lock().unwrap().is_empty(), "the grace period runs");
+        // A session request starts it again, even when no session started.
+        let requested = Activity {
+            sessions: 0,
+            requested: true,
+        };
+        updates.observe(requested, start + SILENT_GRACE - Duration::from_secs(1));
+        updates.observe(sessions(0), start + SILENT_GRACE);
+        assert!(
+            admitted.0.lock().unwrap().is_empty(),
+            "the request started the grace period again"
+        );
+        assert_eq!(updates.facts().operation, None, "no restart shows yet");
+        updates.observe(
+            sessions(0),
+            start + SILENT_GRACE * 2 - Duration::from_secs(1),
+        );
         let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
         let digest = digest_bytes(&pending_digest(&data).unwrap().unwrap()).unwrap();
         assert_eq!(*admitted.0.lock().unwrap(), [(Some(digest), true)]);
@@ -575,13 +654,84 @@ fn a_silent_restart_waits_for_zero_sessions_and_tries_each_pending_version_once_
                 None
             })
             .unwrap();
-        updates.set_sessions(0);
+        updates.observe(sessions(0), start);
+        updates.observe(sessions(0), start + SILENT_GRACE);
         assert_eq!(admitted.0.lock().unwrap().len(), 1);
         assert_eq!(
             updates.restart(Restart::Asked).map(|r| r.to),
             Ok(version("1.1.0"))
         );
         assert_eq!(admitted.0.lock().unwrap()[1], (Some(digest), false));
+    });
+}
+
+/// The fence refuses every restart its admission finds sessions for.
+struct Refusing;
+impl Restarter for Refusing {
+    fn restart(self: Arc<Self>, _: Option<[u8; 32]>, _: bool) -> Result<(), RestartRefusal> {
+        Err(RestartRefusal::SessionsOpen)
+    }
+}
+
+#[test]
+fn a_restart_the_fence_refuses_never_shows_in_the_facts() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let restarter: Arc<dyn Restarter> = Arc::new(Refusing);
+        updates
+            .run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
+                None
+            })
+            .unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Feed,
+        )
+        .unwrap();
+        let before = updates.facts();
+        let waiting = updates.clone();
+        let waiter = std::thread::spawn(move || {
+            waiting.wait(before.revision, Duration::from_millis(500))
+        });
+        let start = Instant::now();
+        updates.observe(sessions(0), start);
+        updates.observe(sessions(0), start + SILENT_GRACE);
+        let seen = waiter.join().unwrap().unwrap();
+        assert_eq!(seen.operation, None, "a refused restart never shows");
+        assert_eq!(updates.facts().operation, None);
+    });
+}
+
+#[test]
+fn a_restart_without_a_pending_version_shows_that_the_version_stays() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let admitted = Arc::new(Admitted::default());
+        let restarter: Arc<dyn Restarter> = admitted.clone();
+        updates
+            .run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
+                None
+            })
+            .unwrap();
+        assert_eq!(
+            updates.restart(Restart::Asked).map(|r| r.to),
+            Ok(version("1.0.0"))
+        );
+        let facts = updates.facts();
+        assert_eq!(facts.operation, Some(Operation::RestartingSameVersion));
+        // A desktop whose admission selected work 1.0 reads the restart it knows.
+        let older = ProtocolVersion { major: 1, minor: 0 };
+        assert_eq!(
+            facts.for_selected(older).operation,
+            Some(Operation::Restarting {
+                to: version("1.0.0")
+            })
+        );
     });
 }
 
@@ -611,11 +761,11 @@ fn a_breaking_pending_version_never_restarts_silently_and_names_stranded_devices
                 || None,
             )
             .unwrap();
-        updates.set_sessions(1);
+        updates.observe(sessions(1), Instant::now());
         let breaking = with_major(next, Protocols::CURRENT.service.major);
         let pending = install(&updates, &machine, "2.0.0", breaking, Source::Push).unwrap();
         assert_eq!(pending.stranded, [device]);
-        updates.set_sessions(0);
+        updates.observe(sessions(0), Instant::now());
         assert_eq!(
             updates.restart(Restart::Silent),
             Err(RestartRefusal::Breaking)
@@ -637,7 +787,7 @@ fn waiting_for_facts_returns_once_they_change() {
         let waiting = updates.clone();
         let waiter = std::thread::spawn(move || waiting.wait(1, Duration::from_secs(20)));
         std::thread::sleep(Duration::from_millis(50));
-        updates.set_sessions(4);
+        updates.observe(sessions(4), Instant::now());
         let changed = waiter.join().unwrap().unwrap();
         assert_eq!((changed.revision, changed.sessions), (2, 4));
     });
