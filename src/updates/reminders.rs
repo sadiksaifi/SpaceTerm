@@ -33,18 +33,27 @@ fn pending(machine: MachineId, cx: &App) -> Option<PendingVersion> {
 /// How often the schedule is read again when nothing else changes.
 const RECHECK: Duration = Duration::from_secs(60 * 60);
 
+/// A clicked notification's key, with the activation token the notification server passed for
+/// the click, if any.
+pub(crate) type ReminderClick = (String, Option<String>);
+
 /// Shows operating-system notifications.
 pub(crate) trait UpdateReminderAdapter {
-    /// Sends the `key` of each notification the person clicks to `activated`. Called once,
-    /// before the first notification.
-    fn activations(&self, activated: async_channel::Sender<String>);
+    /// Sends the `key` of each notification the person clicks to `activated`, with the activation
+    /// token the notification server passed for the click, if any. Called once, before the first
+    /// notification.
+    fn activations(&self, activated: async_channel::Sender<ReminderClick>);
     /// Shows `title` and `body`, replacing an earlier notification with the same `key`.
     fn notify(&self, key: &str, title: &str, body: &str);
 }
 
-/// The person clicked the notification about this item.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ReminderActivated(pub(crate) ItemKey);
+/// The person clicked the notification about this item. `token` lets the window that answers
+/// the click come forward where the desktop requires one, such as Wayland.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReminderActivated {
+    pub(crate) key: ItemKey,
+    pub(crate) token: Option<String>,
+}
 
 pub(crate) struct UpdateReminders {
     adapter: Rc<dyn UpdateReminderAdapter>,
@@ -99,10 +108,10 @@ impl UpdateReminders {
             let (activated, clicks) = async_channel::unbounded();
             adapter.activations(activated);
             cx.spawn(async move |this, cx| {
-                while let Ok(key) = clicks.recv().await {
+                while let Ok((key, token)) = clicks.recv().await {
                     let Some(key) = parse_key(&key) else { continue };
                     if this
-                        .update(cx, |_, cx| cx.emit(ReminderActivated(key)))
+                        .update(cx, |_, cx| cx.emit(ReminderActivated { key, token }))
                         .is_err()
                     {
                         return;
@@ -213,7 +222,7 @@ pub(crate) mod testing {
     #[derive(Default)]
     pub(crate) struct RecordingReminders {
         pub(crate) shown: RefCell<Vec<(String, String, String)>>,
-        activated: RefCell<Option<async_channel::Sender<String>>>,
+        activated: RefCell<Option<async_channel::Sender<super::ReminderClick>>>,
     }
 
     impl RecordingReminders {
@@ -223,13 +232,13 @@ pub(crate) mod testing {
                 .borrow()
                 .as_ref()
                 .expect("the scheduler started")
-                .try_send(key.to_owned())
+                .try_send((key.to_owned(), None))
                 .expect("the scheduler listens");
         }
     }
 
     impl super::UpdateReminderAdapter for RecordingReminders {
-        fn activations(&self, activated: async_channel::Sender<String>) {
+        fn activations(&self, activated: async_channel::Sender<super::ReminderClick>) {
             *self.activated.borrow_mut() = Some(activated);
         }
 

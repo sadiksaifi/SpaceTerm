@@ -75,7 +75,7 @@ pub(crate) fn install(
     let menu = StatusMenu::install(item, cx);
     cx.spawn(async move |cx| {
         while let Ok(command) = messages.recv().await {
-            cx.update(|cx| menu.perform(command, cx));
+            cx.update(|cx| menu.perform(command, None, cx));
         }
     })
     .detach();
@@ -143,7 +143,13 @@ impl StatusHost for StatusItem {
         button.setToolTip(Some(&summary));
     }
 
-    fn alert(&self, alert: Alert, answered: Box<dyn FnOnce(bool) + Send>, cx: &mut App) {
+    fn alert(
+        &self,
+        alert: Alert,
+        _activation: Option<String>,
+        answered: Box<dyn FnOnce(bool) + Send>,
+        cx: &mut App,
+    ) {
         let alert = native_alert(&alert, self.mtm);
         present(alert, self.activation, cx.windows().is_empty(), answered);
     }

@@ -244,10 +244,11 @@ pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
     perform(Command::Explain(explanation), Presenter::Front, cx);
 }
 
-/// The person clicked the overdue notification about `key`: bring a Workspace Window forward and
-/// do what the item's control does now, which asks first wherever the control asks.
-pub(super) fn reminder_clicked(key: ItemKey, cx: &mut App) {
-    crate::app::activate_default_window(cx, None);
+/// The person clicked the overdue notification about `key`: bring a Workspace Window forward with
+/// the click's activation `token`, and do what the item's control does now, which asks first
+/// wherever the control asks.
+pub(super) fn reminder_clicked(key: ItemKey, token: Option<&str>, cx: &mut App) {
+    crate::app::activate_default_window(cx, token);
     cx.activate(true);
     let command = presentation::current(cx)
         .items()

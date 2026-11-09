@@ -53,7 +53,7 @@ pub(crate) fn init(cx: &mut App) {
     }));
     subscriptions.extend(UpdateReminders::global(cx).map(|reminders| {
         cx.subscribe(&reminders, |_, clicked: &ReminderActivated, cx| {
-            commands::reminder_clicked(clicked.0, cx);
+            commands::reminder_clicked(clicked.key, clicked.token.as_deref(), cx);
         })
     }));
     cx.set_global(UpdatePrompts {

@@ -612,6 +612,64 @@ mod tests {
         );
     }
 
+    /// Clicking an overdue update reminder brings the window forward with the token the
+    /// notification server sent for that click.
+    #[test]
+    fn linux_update_reminder_clicks_forward_their_activation_token() {
+        use crate::updates::reminders::UpdateReminderAdapter as _;
+        let private = PrivateBus::new();
+        let (submitted, notifications) = mpsc::channel();
+        let (closed, _closes) = mpsc::channel();
+        let server = private
+            .server()
+            .serve_at(
+                "/org/freedesktop/Notifications",
+                Notifications {
+                    submitted,
+                    closed,
+                    reply_delay: Duration::ZERO,
+                },
+            )
+            .unwrap()
+            .name("org.freedesktop.Notifications")
+            .unwrap()
+            .build()
+            .unwrap();
+        let bus = private.client();
+        let reminders = crate::platform::linux_notification::LinuxUpdateReminders::new(
+            Some(bus.clone()),
+            crate::application_identity::ApplicationIdentity::current(),
+        );
+        let (activated, clicks) = async_channel::unbounded();
+        reminders.activations(activated);
+        reminders.notify(
+            "desktop",
+            "SpaceTerm update overdue",
+            "Relaunch to install it.",
+        );
+        notifications.recv_timeout(Duration::from_secs(2)).unwrap();
+        bus.query(|_| Ok(())).unwrap();
+        let emit = |member: &str, body: &(u32, &str)| {
+            server
+                .emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/Notifications",
+                    "org.freedesktop.Notifications",
+                    member,
+                    body,
+                )
+                .unwrap();
+        };
+        // A token for another client's notification belongs to that click.
+        emit("ActivationToken", &(7, "foreign-token"));
+        emit("ActivationToken", &(42, "reminder-token"));
+        emit("ActionInvoked", &(42, "default"));
+        assert_eq!(
+            receive(&clicks).unwrap(),
+            ("desktop".to_owned(), Some("reminder-token".to_owned()))
+        );
+    }
+
     #[test]
     fn linux_desktop_notifications_own_an_id_that_arrives_after_the_method_timeout() {
         let private = PrivateBus::new();

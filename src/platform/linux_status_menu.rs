@@ -25,7 +25,8 @@ const ITEM_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
 
 enum Message {
-    Command(Command),
+    /// A clicked menu row, with the activation token the host provided for the click.
+    Command(Command, Option<String>),
     /// Whether a status-area host now shows the item.
     Hosted(bool),
 }
@@ -38,6 +39,8 @@ struct Published {
     /// Whether the item shows the attention glyph, as the macOS menu bar extra does.
     attention: bool,
     revision: u32,
+    /// The XDG activation token the host provided for the click it is about to deliver.
+    activation: Option<String>,
 }
 
 type Shared = Arc<Mutex<Published>>;
@@ -95,7 +98,7 @@ pub(crate) fn install(
         while let Ok(message) = messages.recv().await {
             cx.update(|cx| match message {
                 Message::Hosted(hosted) => status_menu::set_available(cx, hosted),
-                Message::Command(command) => menu.perform(command, cx),
+                Message::Command(command, activation) => menu.perform(command, activation, cx),
             });
         }
     })
@@ -153,9 +156,16 @@ impl StatusHost for LinuxStatusItem {
         publish(&self.connection, &self.shared, presentation);
     }
 
-    /// A status area has no alerts of its own, so the alert opens in the front Workspace window.
-    fn alert(&self, alert: Alert, answered: Box<dyn FnOnce(bool) + Send>, cx: &mut App) {
-        crate::app::activate_default_window(cx, None);
+    /// A status area has no alerts of its own, so the alert opens in the front Workspace window,
+    /// which comes forward with the click's activation token.
+    fn alert(
+        &self,
+        alert: Alert,
+        activation: Option<String>,
+        answered: Box<dyn FnOnce(bool) + Send>,
+        cx: &mut App,
+    ) {
+        crate::app::activate_default_window(cx, activation.as_deref());
         let Some(handle) = crate::ui::updates::front_workspace_window(cx) else {
             return answered(false);
         };
@@ -297,6 +307,13 @@ impl StatusItem {
 
     // The item is only a menu. Hosts that still send activation get no separate behavior.
     fn activate(&self, _x: i32, _y: i32) {}
+
+    /// Hosts such as GNOME's AppIndicator extension and KDE Plasma provide a token before they
+    /// deliver a click, so the window the click brings forward may take focus on Wayland.
+    fn provide_xdg_activation_token(&self, token: String) {
+        let token = (!token.is_empty() && token.len() <= 4096).then_some(token);
+        lock(&self.shared).activation = token;
+    }
 
     fn secondary_activate(&self, _x: i32, _y: i32) {}
 
@@ -442,10 +459,13 @@ impl Menu {
     }
 
     fn event(&self, id: i32, event_id: &str, _data: OwnedValue, _timestamp: u32) {
-        if event_id == "clicked"
-            && let Some(command) = self.command(id)
-        {
-            self.send(Message::Command(command));
+        if event_id != "clicked" {
+            return;
+        }
+        // A provided token belongs to the next click only.
+        let activation = lock(&self.shared).activation.take();
+        if let Some(command) = self.command(id) {
+            self.send(Message::Command(command, activation));
         }
     }
 

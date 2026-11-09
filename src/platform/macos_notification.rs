@@ -209,7 +209,7 @@ fn notification_settings_uri(identity: ApplicationIdentity) -> String {
 
 /// What the reminder delegate reports clicks to.
 struct ReminderDelegateIvars {
-    activated: async_channel::Sender<String>,
+    activated: async_channel::Sender<crate::updates::reminders::ReminderClick>,
 }
 
 define_class!(
@@ -248,7 +248,7 @@ define_class!(
         ) {
             let identifier = response.notification().request().identifier().to_string();
             if let Some(key) = reminder_key(&identifier) {
-                let _ = self.ivars().activated.try_send(key.to_owned());
+                let _ = self.ivars().activated.try_send((key.to_owned(), None));
             }
             completion.call(());
         }
@@ -277,7 +277,10 @@ impl MacosUpdateReminders {
 }
 
 impl crate::updates::reminders::UpdateReminderAdapter for MacosUpdateReminders {
-    fn activations(&self, activated: async_channel::Sender<String>) {
+    fn activations(
+        &self,
+        activated: async_channel::Sender<crate::updates::reminders::ReminderClick>,
+    ) {
         let Some(center) = notification_center() else {
             return;
         };

@@ -200,6 +200,17 @@ fn window_options(cx: &gpui::App) -> gpui::WindowOptions {
 
 /// Opens Settings, or activates it when it is already open, showing `section` when one is given.
 pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App) {
+    open_or_activate_with(section, None, cx);
+}
+
+/// Opens or activates Settings as [`open_or_activate`] does, with the activation `token` of the
+/// click outside SpaceTerm that asked for it, such as a status-area menu item. Wayland brings a
+/// window forward only with one.
+pub(crate) fn open_or_activate_with(
+    section: Option<SettingsSectionId>,
+    token: Option<String>,
+    cx: &mut App,
+) {
     if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
         // Settings edits the retained document through the appearance runtime. Without it there is
         // nothing to present, so declining is the honest outcome rather than an empty window.
@@ -212,7 +223,10 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
                 if let Some(section) = section {
                     settings.select_section(section, cx);
                 }
-                window.activate_window();
+                match &token {
+                    Some(token) => window.activate_window_with_token(token),
+                    None => window.activate_window(),
+                }
             });
         });
         return;
@@ -261,6 +275,9 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     match opened {
         Ok(handle) => {
             cx.set_global(OpenSettingsWindow(handle));
+            if let Some(token) = token {
+                let _ = handle.update(cx, |_, window, _| window.activate_window_with_token(&token));
+            }
             cx.activate(true);
         }
         Err(_) => eprintln!("failed to open the SpaceTerm Settings window"),
