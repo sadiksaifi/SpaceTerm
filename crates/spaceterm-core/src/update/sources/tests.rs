@@ -572,6 +572,60 @@ fn a_core_below_the_newest_floor_installs_the_release_at_that_floor_as_a_steppin
 }
 
 #[test]
+fn a_stepping_stone_that_failed_to_start_fails_the_check_instead_of_reading_current() {
+    let key = TestKey::generate();
+    let newest = floored_release(&key, "1.2.2", "1.2.0", OLD_GLIBC, b"newest");
+    let stone = floored_release(&key, "1.2.0", "1.0.0", OLD_GLIBC, b"stone");
+    let data = Data::new();
+    let host = Host::serving(&newest).publishing("1.2.0", &stone);
+    let check = feed_check(
+        &data,
+        Some(trust(&key, &TestKey::generate())),
+        host,
+        host_system,
+    );
+    let fake = Fake::with(&["1.1.0"]);
+    fake.state().skipped = Some(version("1.2.0"));
+    assert_eq!(
+        check.check.run(&fake),
+        Err(SourceError::Check(CheckFailure::SteppingStoneSkipped))
+    );
+    assert!(matches!(
+        fake.events().last(),
+        Some(Event::Finish(UpdateCheck::Failing {
+            reason: CheckFailure::SteppingStoneSkipped,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn a_machine_clock_behind_the_feed_fails_the_check_as_a_clock_problem() {
+    let key = TestKey::generate();
+    let release = release(&key, "1.5.0", OLD_GLIBC, b"newest");
+    let data = Data::new();
+    let mut check = feed_check(
+        &data,
+        Some(trust(&key, &TestKey::generate())),
+        Host::serving(&release),
+        host_system,
+    );
+    check.check.clock = || NOW - crate::update::feed::MAX_CLOCK_SKEW - 1;
+    let fake = Fake::with(&["1.4.0"]);
+    assert_eq!(
+        check.check.run(&fake),
+        Err(SourceError::Check(CheckFailure::ClockBehind))
+    );
+    assert!(matches!(
+        fake.events().last(),
+        Some(Event::Finish(UpdateCheck::Failing {
+            reason: CheckFailure::ClockBehind,
+            ..
+        }))
+    ));
+}
+
+#[test]
 fn floors_that_lead_to_no_release_fail_the_check_as_unverified() {
     let key = TestKey::generate();
     let newest = floored_release(&key, "1.2.2", "1.2.0", OLD_GLIBC, b"newest");
@@ -950,7 +1004,7 @@ fn a_completed_push_whose_digest_differs_records_a_verification_failure() {
 }
 
 #[test]
-fn a_push_that_breaks_off_records_nothing() {
+fn a_push_that_breaks_off_records_nothing_and_only_a_newer_push_replaces_one() {
     let data = Data::new();
     let pushes = Pushes::new(data.0.clone());
     let fake = Fake::with(&["1.4.0"]);
@@ -970,12 +1024,22 @@ fn a_push_that_breaks_off_records_nothing() {
     let replaced = pushes
         .begin(&fake, 3, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
         .unwrap();
+    // Another desktop's push of the same or an older version waits for the unfinished one.
+    for waits in ["1.5.0", "1.4.5"] {
+        assert_eq!(
+            pushes.begin(&fake, 4, candidate(waits), 3, &digest(b"abc"), &[3; 64]),
+            Err(SourceError::Install(InstallError::Busy)),
+            "{waits}"
+        );
+    }
+    assert_eq!(SourceError::Install(InstallError::Busy).code(), "service_busy");
+    // A newer one replaces it, because the Machine no longer needs the older one.
     let second = pushes
-        .begin(&fake, 4, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
+        .begin(&fake, 5, candidate("1.6.0"), 3, &digest(b"abc"), &[3; 64])
         .unwrap();
     assert_eq!(
         fake.events().last(),
-        Some(&Event::BeginInstall(version("1.5.0"), 3))
+        Some(&Event::BeginInstall(version("1.6.0"), 3))
     );
     assert_eq!(
         fake.events()
@@ -983,7 +1047,7 @@ fn a_push_that_breaks_off_records_nothing() {
             .filter(|event| **event == Event::Dropped)
             .count(),
         2,
-        "a new push replaces the unfinished one"
+        "a newer push replaces the unfinished one"
     );
     assert_eq!(
         pushes.chunk(&replaced, 0, b"a"),
@@ -1016,6 +1080,11 @@ fn every_failure_has_its_contract_code() {
         (
             SourceError::Check(CheckFailure::SystemTooOld),
             "system_too_old",
+        ),
+        (SourceError::Check(CheckFailure::ClockBehind), "clock_behind"),
+        (
+            SourceError::Check(CheckFailure::SteppingStoneSkipped),
+            "version_skipped",
         ),
         (SourceError::Install(InstallError::NotNewer), "not_newer"),
         (

@@ -918,6 +918,7 @@ codes! {
     FeedUnreachable = "feed_unreachable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t reach its update feed. Check the network.";
     ProxyUnreachable = "proxy_unreachable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t reach its update feed through the proxy. Check the proxy setting.";
     SystemTooOld = "system_too_old", Unavailable, false, "The newest SpaceTerm Core needs a newer operating system on that machine.";
+    ClockBehind = "clock_behind", ActionRequired, true, "The clock on that machine is behind, so SpaceTerm Core can\u{2019}t trust its update feed. Set the clock, then try again.";
     DiskFull = "disk_full", Failed, true, "SpaceTerm Core couldn\u{2019}t install the update because the disk is full. Nothing changed.";
     DownloadFailed = "download_failed", Failed, true, "SpaceTerm Core couldn\u{2019}t download the update. Nothing changed.";
     AuthorizationRequired = "authorization_required", ActionRequired, false, "Administrator authorization is required.";
@@ -1691,6 +1692,8 @@ pub enum UpdateCheckReason {
     Proxy,
     Verification,
     SystemTooOld,
+    ClockBehind,
+    SteppingStoneSkipped,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

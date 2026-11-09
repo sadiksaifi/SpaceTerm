@@ -201,6 +201,8 @@ pub(crate) fn update_check(facts: Option<&UpdateFacts>) -> UpdateCheckStatus {
                 CheckFailure::Proxy => UpdateCheckReason::Proxy,
                 CheckFailure::Verification => UpdateCheckReason::Verification,
                 CheckFailure::SystemTooOld => UpdateCheckReason::SystemTooOld,
+                CheckFailure::ClockBehind => UpdateCheckReason::ClockBehind,
+                CheckFailure::SteppingStoneSkipped => UpdateCheckReason::SteppingStoneSkipped,
             });
         }
     }
@@ -361,6 +363,10 @@ fn check_text(check: &UpdateCheckStatus) -> String {
         Some(UpdateCheckReason::Proxy) => "the proxy is unreachable",
         Some(UpdateCheckReason::Verification) => "the update feed did not verify",
         Some(UpdateCheckReason::SystemTooOld) => "the newest version needs a newer system",
+        Some(UpdateCheckReason::ClockBehind) => "the machine's clock is behind",
+        Some(UpdateCheckReason::SteppingStoneSkipped) => {
+            "the version the newest one needs first failed to start"
+        }
         None => "unknown",
     };
     match check.state {

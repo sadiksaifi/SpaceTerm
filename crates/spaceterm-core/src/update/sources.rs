@@ -173,6 +173,8 @@ impl SourceError {
             Self::Check(CheckFailure::Proxy) => "proxy_unreachable",
             Self::Check(CheckFailure::Verification) => "candidate_unverified",
             Self::Check(CheckFailure::SystemTooOld) => "system_too_old",
+            Self::Check(CheckFailure::ClockBehind) => crate::service::lane::CLOCK_BEHIND,
+            Self::Check(CheckFailure::SteppingStoneSkipped) => "version_skipped",
             Self::Install(error) => install_code(error),
             Self::Protocol => "protocol_error",
         }
@@ -298,8 +300,12 @@ impl FeedCheck {
         let next = feed::walk(&running, |release| {
             let signed = source.feed(self.target, release).map_err(check_failure)?;
             let trust = self.trust.as_ref().ok_or(CheckFailure::Verification)?;
-            feed::read(self.target, &signed.feed, &signed.signature, trust, at)
-                .map_err(|_| CheckFailure::Verification)
+            feed::read(self.target, &signed.feed, &signed.signature, trust, at).map_err(|error| {
+                match error {
+                    feed::FeedError::ClockBehind => CheckFailure::ClockBehind,
+                    _ => CheckFailure::Verification,
+                }
+            })
         })
         .and_then(|next| next.ok_or(CheckFailure::Verification));
         let (verified, stepping_stone) = match next {
@@ -310,6 +316,12 @@ impl FeedCheck {
         };
         match checking.admits(&verified.candidate()) {
             Ok(()) => {}
+            // The newest release waits behind a Stepping Stone that failed to start, so the
+            // Core can't reach it. That is no current Core.
+            Err(InstallError::Skipped) if stepping_stone => {
+                return finish(&checking, Err(CheckFailure::SteppingStoneSkipped))
+                    .map(|()| Outcome::Current);
+            }
             Err(InstallError::NotNewer | InstallError::Skipped) => {
                 return finish(&checking, Ok(())).map(|()| Outcome::Current);
             }
@@ -438,9 +450,15 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The pushes a running Core receives over its service lane: a desktop's embedded build, or a
-/// local archive the CLI sends. One push at a time; a new one replaces an unfinished one, and a
-/// push whose connection closes ends with it. A push that breaks off tells its sender alone; the
-/// Core records a failure only for a completed push that fails verification.
+/// local archive the CLI sends. One push at a time. A push whose connection closes ends with it.
+/// A push that breaks off tells its sender alone; the Core records a failure only for a completed
+/// push that fails verification.
+///
+/// Two desktops may push to one Machine at once. A newer version replaces an unfinished push,
+/// whose next chunk then fails `changed`, because the Machine no longer needs it. A push of the
+/// same or an older version waits: it fails `service_busy` while the unfinished one still
+/// receives, and its sender tries again later. An unfinished push that received nothing for
+/// [`PUSH_IDLE`] is abandoned, and any push replaces it.
 pub struct Pushes {
     data: PathBuf,
     slot: Mutex<Option<Push>>,
@@ -455,9 +473,21 @@ pub enum Received {
     Installed(PendingVersion),
 }
 
+/// Whether release `version` is newer than release `than`. Development versions have no order.
+fn newer(version: &super::facts::Version, than: &super::facts::Version) -> bool {
+    matches!((version.release(), than.release()), (Some(a), Some(b)) if a > b)
+}
+
+/// How long an unfinished push may receive nothing before another push may replace it.
+pub const PUSH_IDLE: Duration = Duration::from_secs(60);
+
 struct Push {
     id: String,
     connection: u64,
+    /// The version it installs.
+    version: super::facts::Version,
+    /// When its last chunk, or its start, arrived.
+    received: std::time::Instant,
     length: u64,
     sha256: [u8; 32],
     next: u64,
@@ -520,8 +550,16 @@ impl Pushes {
             return Err(SourceError::Protocol);
         }
         let mut slot = self.slot();
-        // A new push replaces an unfinished one, which records nothing.
+        // A newer version replaces an unfinished push, which records nothing. Any other waits
+        // for it, unless it stalled.
+        if let Some(unfinished) = slot.as_ref()
+            && unfinished.received.elapsed() < PUSH_IDLE
+            && !newer(candidate.version(), &unfinished.version)
+        {
+            return Err(SourceError::Install(InstallError::Busy));
+        }
         *slot = None;
+        let candidate_version = candidate.version().clone();
         let installing: Box<dyn BoxedInstalling> =
             Box::new(engine.begin_install(candidate, length)?);
         let staging = Staging::create(&self.data)?;
@@ -531,6 +569,8 @@ impl Pushes {
         *slot = Some(Push {
             id: id.clone(),
             connection,
+            version: candidate_version,
+            received: std::time::Instant::now(),
             length,
             sha256,
             next: 0,
@@ -565,6 +605,7 @@ impl Pushes {
         }
         push.digest.update(data);
         push.next += data.len() as u64;
+        push.received = std::time::Instant::now();
         if push.next < push.length {
             if push.reported.elapsed() >= PROGRESS_INTERVAL {
                 push.reported = std::time::Instant::now();
@@ -654,6 +695,23 @@ impl<P: Fn(u64)> Write for Digesting<'_, P> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.into.flush()
+    }
+}
+
+/// Removes every file in `<data>/staging`. A running server calls it once at start, before any
+/// download or push, so each file it finds is one a crash left.
+pub(crate) fn clear_staging(data: &Path) {
+    let directory = data.join("staging");
+    if crate::storage::Directory::open(&directory, false).is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
