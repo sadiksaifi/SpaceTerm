@@ -5,7 +5,9 @@
 //! replaced tree stays in the staging directory until the next launch removes it. Relaunch runs
 //! through the application quit policy, then replaces the exited process with the new executable.
 //! A filesystem without that exchange cannot replace the installation in one step, so the update
-//! stops before the download and the install script remains the way to update.
+//! stops before the download and the install script remains the way to update. A replaced
+//! installation also rewrites the desktop entry the install script wrote for it, from the new
+//! release's packaged entry.
 
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
@@ -93,6 +95,7 @@ struct Dependencies {
     target: FeedTarget,
     installation: Installation,
     archive_root: &'static str,
+    desktop_entry: Option<DesktopEntry>,
 }
 
 impl LinuxUpdates {
@@ -113,6 +116,7 @@ impl LinuxUpdates {
                 target,
                 installation,
                 archive_root: identity.directory_name(),
+                desktop_entry: DesktopEntry::locate(identity.application_id()),
             }),
             _ => None,
         };
@@ -142,6 +146,7 @@ impl UpdateAdapter for LinuxUpdates {
             target: dependencies.target,
             installation: dependencies.installation.clone(),
             archive_root: dependencies.archive_root,
+            desktop_entry: dependencies.desktop_entry.clone(),
             current_version: env!("SPACETERM_VERSION"),
             system: spaceterm_core::update::system::host,
             events,
@@ -208,6 +213,7 @@ impl UpdateAdapter for LinuxUpdates {
         }
         cycle.phase = Phase::Installed;
         drop(cycle);
+        shared.refresh_desktop_entry();
         self.relaunch
             .request(shared.installation.executable.clone());
         shared.send(UpdateEvent::Installing);
@@ -226,6 +232,8 @@ impl UpdateAdapter for LinuxUpdates {
             .replace()
             .map_err(|error| installation_failure(&error))?;
         cycle.phase = Phase::Installed;
+        drop(cycle);
+        shared.refresh_desktop_entry();
         Ok(())
     }
 
@@ -338,6 +346,7 @@ struct Shared {
     target: FeedTarget,
     installation: Installation,
     archive_root: &'static str,
+    desktop_entry: Option<DesktopEntry>,
     current_version: &'static str,
     /// The host's glibc version, which a release must meet.
     system: fn() -> Option<SystemVersion>,
@@ -540,6 +549,16 @@ impl Shared {
         Ok(archive)
     }
 
+    /// Rewrites the desktop entry after the installation was replaced. The entry only describes
+    /// how to launch SpaceTerm, so a failure leaves the update in place.
+    fn refresh_desktop_entry(&self) {
+        if let Some(entry) = &self.desktop_entry
+            && entry.refresh(&self.installation).unwrap_or(false)
+        {
+            entry.refresh_database();
+        }
+    }
+
     fn discard_staging_in_background(&self) {
         let installation = self.installation.clone();
         // A replaced tree can be large; removing it must not block the main thread.
@@ -662,6 +681,125 @@ fn writable_directory(directory: &Path) -> bool {
     };
     // SAFETY: the path is a valid NUL-terminated string for the duration of the call.
     unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+}
+
+/// The desktop entry the install script wrote for an installation:
+/// `$XDG_DATA_HOME/applications/<application ID>.desktop`, from the release's packaged entry with
+/// the installation's executable and icon filled in. A self-update writes it the same way from
+/// the release it installed, so the entry follows the release.
+#[derive(Clone, Debug)]
+struct DesktopEntry {
+    path: PathBuf,
+    id: &'static str,
+}
+
+impl DesktopEntry {
+    fn locate(id: &'static str) -> Option<Self> {
+        let data_home = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })?;
+        Some(Self::under(&data_home, id))
+    }
+
+    fn under(data_home: &Path, id: &'static str) -> Self {
+        Self {
+            path: data_home.join("applications").join(format!("{id}.desktop")),
+            id,
+        }
+    }
+
+    /// Rewrites the entry from the release `installation` holds now. An entry that launches
+    /// another installation, or that the person removed, stays as it is. Returns whether the
+    /// entry changed.
+    fn refresh(&self, installation: &Installation) -> io::Result<bool> {
+        let Some(exec) = exec_value(&installation.executable) else {
+            return Ok(false);
+        };
+        let exec = format!("Exec={exec} %u");
+        let current = match fs::read_to_string(&self.path) {
+            Ok(current) => current,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !current.lines().any(|line| line == exec) {
+            return Ok(false);
+        }
+        let packaged = fs::read_to_string(
+            installation
+                .root
+                .join("share/applications")
+                .join(format!("{}.desktop", self.id)),
+        )?;
+        let icon = installation
+            .root
+            .join("share/icons/hicolor/scalable/apps")
+            .join(format!("{}.svg", self.id));
+        let Some(icon) = icon.to_str() else {
+            return Ok(false);
+        };
+        let icon = format!("Icon={}", icon.replace('\\', "\\\\"));
+        let entry: String = packaged
+            .lines()
+            .map(|line| {
+                let line = if line.starts_with("Exec=") {
+                    exec.as_str()
+                } else if line.starts_with("Icon=") {
+                    icon.as_str()
+                } else {
+                    line
+                };
+                format!("{line}\n")
+            })
+            .collect();
+        if entry == current {
+            return Ok(false);
+        }
+        let Some(directory) = self.path.parent() else {
+            return Ok(false);
+        };
+        // Desktop shells watch the directory, so the entry is replaced whole.
+        let staged = directory.join(format!(".{}.desktop.{}", self.id, std::process::id()));
+        fs::write(&staged, entry)?;
+        fs::rename(&staged, &self.path).inspect_err(|_| {
+            let _ = fs::remove_file(&staged);
+        })?;
+        Ok(true)
+    }
+
+    /// Updates the MIME cache that maps the `spaceterm:` scheme to the entry, as the install
+    /// script does, where the desktop provides the tool.
+    fn refresh_database(&self) {
+        use std::process::{Command, Stdio};
+        if let Some(directory) = self.path.parent() {
+            let _ = Command::new("update-desktop-database")
+                .arg(directory)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// The install script's Exec value for `executable`: Desktop Entry Exec quoting, then string
+/// value escaping. A path that is not UTF-8 has no entry to match.
+fn exec_value(executable: &Path) -> Option<String> {
+    let mut value = String::from("\"");
+    for character in executable.to_str()?.chars() {
+        match character {
+            '\\' => value.push_str("\\\\\\\\"),
+            '"' | '`' | '$' => {
+                value.push_str("\\\\");
+                value.push(character);
+            }
+            character => value.push(character),
+        }
+    }
+    value.push('"');
+    Some(value)
 }
 
 /// Unpacks the regular files and directories under `root/` into `destination`.
@@ -956,6 +1094,88 @@ mod tests {
         assert_eq!(relaunch.take(), None);
     }
 
+    const DESKTOP_ID: &str = "com.peblon.spaceterm";
+
+    /// Writes the release's packaged entry into the installation and the install script's entry
+    /// for it into `data_home`, which launches `executable`.
+    fn desktop_entries(fixture: &Fixture, data_home: &Path, executable: &Path, packaged: &str) {
+        let root = &fixture.installation.root;
+        fs::create_dir_all(root.join("share/applications")).unwrap();
+        fs::write(
+            root.join(format!("share/applications/{DESKTOP_ID}.desktop")),
+            packaged,
+        )
+        .unwrap();
+        fs::create_dir_all(data_home.join("applications")).unwrap();
+        fs::write(
+            data_home.join(format!("applications/{DESKTOP_ID}.desktop")),
+            format!(
+                "[Desktop Entry]\nName=SpaceTerm\nExec={} %u\nIcon=old\n",
+                exec_value(executable).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn linux_update_should_rewrite_the_desktop_entry_from_the_installed_release() {
+        let fixture = installed("old");
+        let data_home = fixture._directory.path().join("data");
+        let installation = &fixture.installation;
+        desktop_entries(
+            &fixture,
+            &data_home,
+            &installation.executable,
+            "[Desktop Entry]\nName=SpaceTerm\nExec=spaceterm-desktop %u\nMimeType=x-scheme-handler/spaceterm;\nIcon=com.peblon.spaceterm\n",
+        );
+        let entry = DesktopEntry::under(&data_home, DESKTOP_ID);
+        assert!(entry.refresh(installation).unwrap());
+        let root = installation.root.to_str().unwrap();
+        assert_eq!(
+            fs::read_to_string(&entry.path).unwrap(),
+            format!(
+                "[Desktop Entry]\nName=SpaceTerm\nExec=\"{root}/bin/spaceterm-desktop\" %u\nMimeType=x-scheme-handler/spaceterm;\nIcon={root}/share/icons/hicolor/scalable/apps/{DESKTOP_ID}.svg\n"
+            )
+        );
+        // The same release writes nothing again, and leaves no staged entry behind.
+        assert!(!entry.refresh(installation).unwrap());
+        assert_eq!(
+            fs::read_dir(data_home.join("applications"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn linux_update_should_leave_an_entry_for_another_installation_or_none() {
+        let fixture = installed("old");
+        let data_home = fixture._directory.path().join("data");
+        let packaged = "[Desktop Entry]\nExec=spaceterm-desktop %u\nName=New\n";
+        desktop_entries(
+            &fixture,
+            &data_home,
+            Path::new("/elsewhere/spaceterm/bin/spaceterm-desktop"),
+            packaged,
+        );
+        let entry = DesktopEntry::under(&data_home, DESKTOP_ID);
+        let before = fs::read_to_string(&entry.path).unwrap();
+        assert!(!entry.refresh(&fixture.installation).unwrap());
+        assert_eq!(fs::read_to_string(&entry.path).unwrap(), before);
+
+        fs::remove_file(&entry.path).unwrap();
+        assert!(!entry.refresh(&fixture.installation).unwrap());
+        assert!(!entry.path.exists(), "a removed entry stays removed");
+    }
+
+    #[test]
+    fn linux_exec_value_should_quote_as_the_install_script_does() {
+        assert_eq!(
+            exec_value(Path::new(r#"/home/a b/x\"$`y"#)).unwrap(),
+            r#""/home/a b/x\\\\\\"\\$\\`y""#
+        );
+    }
+
     /// Serves fixed responses for the feed, its signature, and the archive.
     #[derive(Default)]
     struct ServedRelease(HashMap<String, Vec<u8>>);
@@ -1025,6 +1245,7 @@ mod tests {
             target: FeedTarget::DESKTOP_LINUX,
             installation: fixture.installation.clone(),
             archive_root: ROOT,
+            desktop_entry: None,
             current_version: "1.0.0",
             system: || Some(MINIMUM),
             events,
@@ -1313,6 +1534,7 @@ mod tests {
                 target: FeedTarget::DESKTOP_LINUX,
                 installation: fixture.installation.clone(),
                 archive_root: ROOT,
+                desktop_entry: None,
             }),
             shared: RefCell::new(None),
             history: crate::platform::update_history_file::UpdateHistoryFile::new(None),
