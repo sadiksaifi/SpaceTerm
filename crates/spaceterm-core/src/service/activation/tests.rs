@@ -484,8 +484,7 @@ fn interrupted(
         } else {
             Some(take_snapshot(&data).unwrap())
         },
-        started: None,
-        interrupted: false,
+        started_at: None,
         ready: false,
         failed: false,
         failure: matches!(
@@ -1356,11 +1355,16 @@ fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
         };
         admit_run(&mut state, &run).unwrap();
         state.run = Some(run);
-        // This process watched the Start, long enough ago that its deadline passed.
-        state.activation.as_mut().unwrap().started = Some(Started {
-            observer: observer().unwrap().to_owned(),
-            at: 0,
-        });
+        state.activation.as_mut().unwrap().started_at = Some(0);
+        // This process dispatched the Start, long enough ago that its deadline passed.
+        let id = state.activation.as_ref().unwrap().id;
+        watches().insert(
+            (id, Step::StartDispatched),
+            Watch {
+                since: Instant::now() - 2 * supervisor.ready_deadline(),
+                resumed: false,
+            },
+        );
         data.write_json(c"service.json", &state).unwrap();
         // The candidate's run stays recorded, as a run that fails or crashes during startup
         // leaves it, and its process is gone.
@@ -1383,6 +1387,61 @@ fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
     });
 }
 
+/// The fields of the activation journal SpaceTerm 0.11.2 reads and writes. The previous and
+/// the next runtime of an update share the journal, so neither may change its shape.
+const JOURNAL_0_11_2: [&str; 13] = [
+    "schema",
+    "id",
+    "previous",
+    "candidate",
+    "stopped",
+    "original_run",
+    "candidate_run",
+    "step",
+    "saved",
+    "started_at",
+    "ready",
+    "failed",
+    "failure",
+];
+
+#[test]
+fn the_journal_keeps_the_shape_both_runtimes_of_an_update_read() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::StartDispatched,
+            false,
+        );
+        let path = service.paths.data.join("service.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut fields: Vec<&str> = record["activation"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        let mut expected = JOURNAL_0_11_2;
+        expected.sort_unstable();
+        assert_eq!(fields, expected, "this runtime writes what 0.11.2 reads");
+        // The 0.11.2 helper that starts this runtime as its candidate wrote the dispatch time.
+        record["activation"]["started_at"] = 1_793_750_400.into();
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let state = Service::state(&data).unwrap().unwrap();
+        assert_eq!(
+            state.activation.unwrap().started_at,
+            Some(1_793_750_400),
+            "this runtime reads what 0.11.2 writes"
+        );
+    });
+}
+
 #[test]
 fn a_start_another_process_watched_returns_as_interrupted_and_stays_pending() {
     with_service(|service, previous, candidate, supervisor| {
@@ -1397,11 +1456,8 @@ fn a_start_another_process_watched_returns_as_interrupted_and_stays_pending() {
         pending_record(&service, &candidate);
         let data = Directory::open(&service.paths.data, false).unwrap();
         let mut state = Service::state(&data).unwrap().unwrap();
-        // A helper before a reboot, logout or crash watched this Start, long ago.
-        state.activation.as_mut().unwrap().started = Some(Started {
-            observer: "0".repeat(32),
-            at: 0,
-        });
+        // A helper before a reboot, logout or crash watched this Start, by a clock long past.
+        state.activation.as_mut().unwrap().started_at = Some(0);
         data.write_json(c"service.json", &state).unwrap();
         supervisor.running.store(false, Ordering::SeqCst);
         *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
