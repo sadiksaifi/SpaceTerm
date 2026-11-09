@@ -27,6 +27,9 @@ pub(crate) enum ApplicationQuitRequest {
         )
     )]
     SessionEnd,
+    /// A termination signal: the person or the system ends the process, such as `brew
+    /// uninstall`. Never prompt; save and quit.
+    Terminate,
 }
 
 /// What SpaceTerm does next for a quit request, or for a step of the relaunch quit it began.
@@ -49,6 +52,8 @@ pub(crate) enum QuitAction {
     Dismiss = 6,
     /// Warn about quitting.
     Exit = 7,
+    /// Save Settings and quit once, with no warning.
+    Terminate = 8,
 }
 
 /// The quit of an approved update relaunch, from the first quit request through the Settings
@@ -95,6 +100,7 @@ impl<A: Copy + Eq> RelaunchQuit<A> {
         let Some(approval) = approval else {
             return match request {
                 ApplicationQuitRequest::Dismissal => QuitAction::Dismiss,
+                ApplicationQuitRequest::Terminate => QuitAction::Terminate,
                 _ => QuitAction::Exit,
             };
         };
@@ -193,9 +199,10 @@ mod tests {
     /// again once the update service no longer holds the relaunch.
     #[test]
     fn a_relaunch_saves_releases_and_quits_once() {
-        use ApplicationQuitRequest::{Dismissal, Exit, SessionEnd};
+        use ApplicationQuitRequest::{Dismissal, Exit, SessionEnd, Terminate};
         let mut quit = RelaunchQuit::default();
         assert_eq!(quit.request(Dismissal, None), QuitAction::Dismiss);
+        assert_eq!(quit.request(Terminate, None), QuitAction::Terminate);
         assert_eq!(quit.request(Exit, Some(1)), QuitAction::SaveSettings);
         assert_eq!(quit.request(Dismissal, Some(1)), QuitAction::Nothing);
         assert_eq!(quit.saved(true, Some(1)), QuitAction::Release);

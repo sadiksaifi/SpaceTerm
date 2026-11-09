@@ -40,6 +40,13 @@ impl ApplicationQuitAdapter for LinuxApplicationQuitAdapter {
         Ok(())
     }
 
+    fn follow_termination_signals(&self, handler: &ApplicationQuitHandler) {
+        match super::unix_quit_signal::watch(libc::SIGTERM) {
+            Ok(signals) => handler.follow_termination(signals),
+            Err(_) => eprintln!("failed to follow termination signals"),
+        }
+    }
+
     fn request_quit(&self, cx: &mut App) {
         let handler = self.handler.borrow().clone();
         let decision = handler.map_or(ApplicationQuitDecision::Proceed, |handler| {

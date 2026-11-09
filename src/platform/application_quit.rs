@@ -155,6 +155,20 @@ impl ApplicationQuitHandler {
         (self.request)(cx, request)
     }
 
+    /// Hands each termination signal from `signals` to the quit policy as
+    /// [`ApplicationQuitRequest::Terminate`], on the main thread.
+    #[cfg(unix)]
+    pub(crate) fn follow_termination(&self, signals: async_channel::Receiver<()>) {
+        let handler = self.clone();
+        self.app
+            .spawn(async move |cx| {
+                while signals.recv().await.is_ok() {
+                    cx.update(|cx| handler.handle(ApplicationQuitRequest::Terminate, cx));
+                }
+            })
+            .detach();
+    }
+
     #[cfg_attr(
         not(target_os = "macos"),
         allow(
@@ -212,6 +226,11 @@ pub(crate) trait ApplicationQuitAdapter {
     ) -> Option<Task<Option<QuitAnswer>>> {
         None
     }
+
+    /// Delivers each termination signal the process receives to `handler` as
+    /// [`ApplicationQuitRequest::Terminate`], so the signal saves and quits instead of killing
+    /// the process.
+    fn follow_termination_signals(&self, _handler: &ApplicationQuitHandler) {}
 
     /// Asks the application to exit through the quit policy.
     fn request_quit(&self, cx: &mut App);

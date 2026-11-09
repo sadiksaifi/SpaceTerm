@@ -178,6 +178,13 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
         Some(cx.spawn(async move |_| answers.recv().await.ok()))
     }
 
+    fn follow_termination_signals(&self, handler: &ApplicationQuitHandler) {
+        match super::unix_quit_signal::watch(libc::SIGTERM) {
+            Ok(signals) => handler.follow_termination(signals),
+            Err(_) => eprintln!("failed to follow termination signals"),
+        }
+    }
+
     fn request_quit(&self, cx: &mut gpui::App) {
         if self.state.handler.borrow().is_some() {
             cx.quit();

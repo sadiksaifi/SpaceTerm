@@ -527,7 +527,7 @@ pub(crate) fn record_recent(text: String, cx: &mut App) {
     }
 }
 
-type ResumeQuit = Rc<dyn Fn(&mut App)>;
+pub(crate) type ResumeQuit = Rc<dyn Fn(&mut App)>;
 
 pub(crate) struct ApplicationUpdates {
     model: UpdateModel,

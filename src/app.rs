@@ -440,10 +440,10 @@ fn install_application_quit(
             .then(|| Arc::new(DevelopmentQuitSessions) as Arc<dyn QuitSessions>),
     });
     let handler = Rc::clone(&coordinator);
-    adapter.install(ApplicationQuitHandler::new(
-        cx,
-        Rc::new(move |cx, request| handler.request(request, cx)),
-    ))?;
+    let handler =
+        ApplicationQuitHandler::new(cx, Rc::new(move |cx, request| handler.request(request, cx)));
+    adapter.install(handler.clone())?;
+    adapter.follow_termination_signals(&handler);
     Ok(coordinator)
 }
 
@@ -488,6 +488,8 @@ enum ApplicationQuitCoordinatorState {
     WaitingForCore,
     /// An approved update relaunch quits. [`RelaunchQuit`] holds how far it got.
     Relaunching,
+    /// A termination signal ends the process: Settings save, then SpaceTerm quits.
+    Terminating,
 }
 
 struct ApplicationQuitCoordinator {
@@ -633,8 +635,41 @@ impl ApplicationQuitCoordinator {
             }
             QuitAction::Dismiss => self.dismiss_now(cx),
             QuitAction::Exit => self.exit_now(cx),
+            QuitAction::Terminate => self.terminate(cx),
         }
         ApplicationQuitDecision::Cancel
+    }
+
+    /// The ordinary confirmed quit with no warning, for a termination signal: Settings save,
+    /// the updater settles, then SpaceTerm quits once. The process ends even when Settings
+    /// can't be saved, as the signal asks.
+    fn terminate(self: &Rc<Self>, cx: &mut App) {
+        if *self.state.borrow() == ApplicationQuitCoordinatorState::Terminating {
+            return;
+        }
+        // An open quit warning sees the changed state when answered and closes without acting.
+        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Terminating;
+        let coordinator = Rc::clone(self);
+        cx.defer(move |cx| {
+            crate::ui::settings_window::quit_when_saved(
+                cx,
+                ApplicationQuitAfterSave::new(move |cx, _| {
+                    let coordinator = Rc::clone(&coordinator);
+                    // The save completion can run inside the Settings Window's update.
+                    cx.defer(move |cx| {
+                        let adapter = coordinator.adapter.clone();
+                        let quit: crate::updates::ResumeQuit = Rc::new(move |cx| {
+                            if let Some(adapter) = adapter.upgrade() {
+                                adapter.confirm_quit(cx);
+                            }
+                        });
+                        if !crate::updates::prepare_before_quit(cx, Rc::clone(&quit)) {
+                            quit(cx);
+                        }
+                    });
+                }),
+            );
+        });
     }
 
     fn ready(&self, cx: &App) -> bool {
@@ -2247,6 +2282,42 @@ mod tests {
             assert!(cx.update(|cx| cx.windows().is_empty()));
         }
         assert_eq!(quit.confirmations(), 1);
+    }
+
+    /// A termination signal, such as the one `brew uninstall` sends, is the person or the system
+    /// ending the process: it saves and quits once with no warning, and a warning already open
+    /// closes without acting.
+    #[gpui::test]
+    fn a_termination_signal_quits_once_without_a_warning(cx: &mut TestAppContext) {
+        let (quit, _) = windowless_client_asking_alone(cx);
+        assert_eq!(
+            quit.simulate_native_request(ApplicationQuitRequest::Terminate),
+            ApplicationQuitDecision::Cancel,
+            "the quit follows the signal, outside any native request"
+        );
+        quit.simulate_native_request(ApplicationQuitRequest::Terminate);
+        cx.run_until_parked();
+        assert!(quit.windowless_prompts().is_empty());
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.confirmations(), 1);
+    }
+
+    #[gpui::test]
+    fn a_termination_signal_closes_an_open_quit_warning(cx: &mut TestAppContext) {
+        let (quit, _) = windowless_client_asking_alone(cx);
+        quit.simulate_native_request(ApplicationQuitRequest::Exit);
+        cx.run_until_parked();
+        assert_eq!(quit.windowless_prompts().len(), 1);
+        quit.simulate_native_request(ApplicationQuitRequest::Terminate);
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 1);
+        quit.answer_windowless(Some(QuitAnswer::Quit));
+        cx.run_until_parked();
+        assert_eq!(
+            quit.confirmations(),
+            1,
+            "the open warning closes without acting"
+        );
     }
 
     /// A windowless client whose status item is showing, on a host that asks the warning by
