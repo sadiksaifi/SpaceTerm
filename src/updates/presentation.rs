@@ -575,12 +575,12 @@ impl MachineView {
             MachineState::Uninstalling => format!("Uninstalling SpaceTerm Core on {place}."),
             MachineState::UpdateFailed { version, reason, .. } => {
                 let cause = match reason {
-                    StartFailure::NotReady => String::new(),
+                    StartFailure::NotReady | StartFailure::Interrupted => String::new(),
                     StartFailure::DiskFull => format!(" because {name} is out of disk space"),
                     StartFailure::PortInUse => format!(" because another app is using {name}'s Network Access port"),
                 };
                 let remedy = match reason {
-                    StartFailure::NotReady => String::new(),
+                    StartFailure::NotReady | StartFailure::Interrupted => String::new(),
                     StartFailure::DiskFull => format!(" Free some space, then choose Update {name} again."),
                     StartFailure::PortInUse => format!(" Close that app or change its port, then choose Update {name} again."),
                 };
@@ -1155,6 +1155,11 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
             return MachineState::Installing {
                 to: version.clone(),
                 fraction: (*total > 0).then(|| (*received as f64 / *total as f64) as f32),
+            };
+        }
+        Some(Operation::RestartingSameVersion) => {
+            return MachineState::Restarting {
+                to: facts.running.clone(),
             };
         }
         Some(Operation::Restarting { to }) => {
@@ -2248,6 +2253,10 @@ fn check_failure(name: &str, reason: CheckProblem) -> String {
         CheckProblem::Failing(CheckFailure::SystemTooOld) => {
             format!("The newest SpaceTerm Core needs a newer system than {name} runs")
         }
+        CheckProblem::Failing(CheckFailure::ClockBehind) => format!("{name}'s clock is behind"),
+        CheckProblem::Failing(CheckFailure::SteppingStoneSkipped) => {
+            format!("{name} can't reach the newest SpaceTerm Core")
+        }
         CheckProblem::Unreported => format!("SpaceTerm Core on {name} doesn't report its updates"),
     }
 }
@@ -2258,6 +2267,10 @@ fn check_remedy(reason: CheckProblem) -> &'static str {
         CheckProblem::Failing(CheckFailure::Proxy) => "Check its proxy settings.",
         CheckProblem::Failing(CheckFailure::Verification) => "SpaceTerm tries again later.",
         CheckProblem::Failing(CheckFailure::SystemTooOld) => "Update its operating system.",
+        CheckProblem::Failing(CheckFailure::ClockBehind) => "Set its clock.",
+        CheckProblem::Failing(CheckFailure::SteppingStoneSkipped) => {
+            "SpaceTerm tries again when a newer version appears."
+        }
         CheckProblem::Unreported => "Run spaceterm update on it.",
     }
 }
