@@ -373,6 +373,85 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// Registers a throwaway bundle with a bundle identifier of its own, so the account's
+    /// SpaceTerm registrations stay untouched, then retires its installation.
+    #[cfg(feature = "native-tests")]
+    #[test]
+    #[ignore = "registers and unregisters a throwaway bundle in this account's Launch Services"]
+    fn retiring_an_installation_unregisters_its_bundle_from_launch_services() {
+        /// Whether Launch Services' database names `identifier`. Its lookup functions leave out
+        /// bundles outside the usual application folders, so this reads the database dump.
+        fn registered(identifier: &str) -> bool {
+            let dump = std::process::Command::new(crate::launch_services::LSREGISTER)
+                .arg("-dump")
+                .stderr(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&dump.stdout).contains(identifier)
+        }
+        /// Waits up to five seconds for `done`.
+        fn until(done: impl Fn() -> bool) -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !done() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            true
+        }
+
+        let identity = "spaceterm-development";
+        let random: String = crate::protocol::random().unwrap()[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("st-retire-{random}"));
+        let runtime = root.join("installations/retired");
+        let layout = super::super::runtime::Layout::host(identity).unwrap();
+        let bundle = runtime.join(layout.signed());
+        let identifier = format!("com.peblon.spaceterm-native-test.{random}");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        std::fs::write(
+            bundle.join("Contents/Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{identifier}</string>
+<key>CFBundleExecutable</key><string>retired</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+"#
+            ),
+        )
+        .unwrap();
+        let executable = bundle.join("Contents/MacOS/retired");
+        std::fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let agent = LaunchAgent::new(
+            &Paths {
+                identity: identity.into(),
+                data: root.join("home/.local/share/spaceterm-development/core"),
+                runtime: root.join("runtime"),
+            },
+            identity,
+        )
+        .unwrap();
+        assert!(crate::launch_services::register(&bundle));
+        let found = until(|| registered(&identifier));
+        agent.retire(&runtime);
+        let gone = until(|| !registered(&identifier));
+        // Whatever happened, nothing of the throwaway bundle stays registered or on disk.
+        crate::launch_services::unregister(&bundle);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(found, "Launch Services registered the throwaway bundle");
+        assert!(gone, "retiring its installation unregistered it");
+    }
+
     #[test]
     fn the_agent_is_labelled_for_the_identity_core_and_runs_internal_serve() {
         let paths = Paths {

@@ -47,7 +47,7 @@ pub(crate) fn register(bundle: &Path) -> bool {
 }
 
 /// Launch Services' own tool. Unregistering has no public function.
-const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
+pub(crate) const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
 
 /// Unregisters the bundle at `bundle` from Launch Services. Returns whether Launch Services
 /// accepted it.
