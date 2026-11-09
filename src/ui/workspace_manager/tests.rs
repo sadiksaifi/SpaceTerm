@@ -12936,10 +12936,11 @@ mod workspace_repositories {
         inventory
     }
 
-    /// The server publishes a Root Pane's new directory before it reads Git there, and keeps the
-    /// Root Tab's saved membership until the read finishes. Through that window the row presents
-    /// the repository the Tab is still in, so a `cd` between repositories, or out of one and back,
-    /// never flashes a former-repository group.
+    /// The server publishes a Root Pane's new directory before it reads Git there. Its read then
+    /// reports the directory's repository before it lists that repository's Worktrees, and the
+    /// server keeps the Root Tab's saved membership until the listing arrives. Through that window
+    /// the row presents the repository the Tab is still in, so a `cd` between repositories, or out
+    /// of one and back, never flashes a former-repository group.
     #[gpui::test]
     fn a_root_tab_moving_between_repositories_should_flash_no_worktree_group(
         cx: &mut TestAppContext,
@@ -12947,6 +12948,10 @@ mod workspace_repositories {
         const OUTSIDE: &str = "/srv/notes";
         let app = || facts_within(MAIN_ROOT, MAIN_ROOT, "main");
         let orbit = || facts_within(ORBIT_ROOT, ORBIT_ROOT, "trunk");
+        let unlisted = |facts: DirectoryFacts| DirectoryFacts {
+            worktrees: None,
+            ..facts
+        };
         let outside = DirectoryFacts {
             directory: OUTSIDE.into(),
             repository: None,
@@ -12955,11 +12960,18 @@ mod workspace_repositories {
         };
         let steps = [
             following_root_pane(2, ORBIT_ROOT, Some(MAIN_ROOT), vec![app()]),
-            following_root_pane(3, ORBIT_ROOT, Some(ORBIT_ROOT), vec![orbit()]),
-            following_root_pane(4, OUTSIDE, Some(ORBIT_ROOT), vec![orbit()]),
-            following_root_pane(5, OUTSIDE, None, vec![outside]),
-            following_root_pane(6, MAIN_ROOT, None, vec![]),
-            following_root_pane(7, MAIN_ROOT, Some(MAIN_ROOT), vec![app()]),
+            following_root_pane(
+                3,
+                ORBIT_ROOT,
+                Some(MAIN_ROOT),
+                vec![app(), unlisted(orbit())],
+            ),
+            following_root_pane(4, ORBIT_ROOT, Some(ORBIT_ROOT), vec![orbit()]),
+            following_root_pane(5, OUTSIDE, Some(ORBIT_ROOT), vec![orbit()]),
+            following_root_pane(6, OUTSIDE, None, vec![outside]),
+            following_root_pane(7, MAIN_ROOT, None, vec![]),
+            following_root_pane(8, MAIN_ROOT, None, vec![unlisted(app())]),
+            following_root_pane(9, MAIN_ROOT, Some(MAIN_ROOT), vec![app()]),
         ];
         let (harness, cx) = harness(
             cx,
@@ -12974,7 +12986,7 @@ mod workspace_repositories {
 
         assert_eq!(
             presented,
-            vec![false; 7],
+            vec![false; 9],
             "no Worktree group appears before, during, or after any read"
         );
         assert_eq!(harness.edits.submitted(), Vec::new());

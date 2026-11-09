@@ -129,17 +129,21 @@ impl CoreRepositories {
     /// saved Main Worktree is only where to look: what the server reads there decides the listing,
     /// and a row the server reads outside any repository lists nothing.
     ///
-    /// The server publishes an unpinned Root Pane's new directory before it reads Git there, and
-    /// keeps the Root Tab's saved membership until it does. Until then the row lists the
-    /// repository the Root Tab is still in, so a `cd` into another repository switches the row
-    /// once, when the read finishes.
+    /// The server publishes an unpinned Root Pane's new directory before it reads Git there. Its
+    /// read reports the directory's repository before it lists that repository's Worktrees, and
+    /// the server keeps the Root Tab's saved membership until the listing arrives. Until then the
+    /// row lists the repository the Root Tab is still in, so a `cd` into another repository
+    /// switches the row once, when the listing arrives.
     pub(crate) fn workspace_worktrees(&self, workspace: &Workspace) -> Option<&WorktreeInventory> {
         let directory = workspace_directory(workspace)?;
         if let Some(inventory) = self.worktrees(directory) {
             return Some(inventory);
         }
         let facts = self.facts(directory);
-        if facts.is_some_and(|facts| facts.failure.is_none()) {
+        let listing_pending = facts.is_none_or(|facts| {
+            facts.failure.is_none() && facts.repository.is_some() && facts.worktrees.is_none()
+        });
+        if facts.is_some_and(|facts| facts.failure.is_none()) && !listing_pending {
             return None;
         }
         let containing = workspace
@@ -155,7 +159,7 @@ impl CoreRepositories {
             .max_by_key(|(worktree, _)| worktree.components().count())
             .map(|(_, repository)| repository);
         let followed = || {
-            if workspace.pinned_directory.is_some() || facts.is_some() {
+            if workspace.pinned_directory.is_some() || !listing_pending {
                 return None;
             }
             workspace
