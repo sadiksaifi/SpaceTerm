@@ -28,7 +28,15 @@ pub(crate) struct Alert {
 pub(crate) trait StatusHost {
     fn render(&self, menu: &Menu);
     /// Shows `alert` and passes `answered` whether the person chose its destructive button.
-    fn alert(&self, alert: Alert, answered: Box<dyn FnOnce(bool) + Send>, cx: &mut App);
+    /// `activation` is the activation token of the menu click that led to it, if the host
+    /// received one, so a window that shows the alert can come forward.
+    fn alert(
+        &self,
+        alert: Alert,
+        activation: Option<String>,
+        answered: Box<dyn FnOnce(bool) + Send>,
+        cx: &mut App,
+    );
     /// Opens System Settings at Login Items & Extensions, where the person turns SpaceTerm Core
     /// on. It runs on the event thread.
     fn open_login_items(&self) {
@@ -117,7 +125,7 @@ impl StatusMenu {
 
     fn receive(&self, message: Message, cx: &mut App) {
         match message {
-            Message::Answered(command) => self.run(command, cx),
+            Message::Answered(command) => self.run(command, None, cx),
             Message::Confirmed(id, approved) => {
                 let answered = self.confirmations.borrow_mut().open.remove(&id);
                 if let Some(answered) = answered {
@@ -128,11 +136,19 @@ impl StatusMenu {
         self.render(cx);
     }
 
-    /// Restarts or stops on the Cores' own previews, confirming through this menu's alerts.
-    fn request(&self, actions: Vec<(MachineId, MachineAction)>, always: bool, cx: &mut App) {
+    /// Restarts or stops on the Cores' own previews, confirming through this menu's alerts. The
+    /// first alert comes forward with the click's `activation` token.
+    fn request(
+        &self,
+        actions: Vec<(MachineId, MachineAction)>,
+        always: bool,
+        activation: Option<String>,
+        cx: &mut App,
+    ) {
         let host = Rc::clone(&self.host);
         let messages = self.messages.clone();
         let confirmations = Rc::clone(&self.confirmations);
+        let activation = RefCell::new(activation);
         let ask: store::Ask = Rc::new(move |confirmation, answered, cx| {
             let id = {
                 let mut confirmations = confirmations.borrow_mut();
@@ -149,6 +165,7 @@ impl StatusMenu {
             let messages = messages.clone();
             host.alert(
                 alert,
+                activation.take(),
                 Box::new(move |approved| {
                     let _ = messages.send_blocking(Message::Confirmed(id, approved));
                 }),
@@ -166,7 +183,12 @@ impl StatusMenu {
             // The menu previews again and always asks, so nothing runs again by itself.
             Err(ActionFailure::Changed) => {
                 if matches!(notice.action, MachineAction::Restart | MachineAction::Stop) {
-                    self.request(vec![(notice.machine, notice.action.clone())], true, cx);
+                    self.request(
+                        vec![(notice.machine, notice.action.clone())],
+                        true,
+                        None,
+                        cx,
+                    );
                 }
             }
             // The Core starts nothing that is off in Login Items, so Start opens that list,
@@ -185,7 +207,7 @@ impl StatusMenu {
                         message: message.to_string(),
                         confirm: None,
                     };
-                    self.host.alert(alert, Box::new(|_| {}), cx);
+                    self.host.alert(alert, None, Box::new(|_| {}), cx);
                 }
             }
         }
@@ -226,8 +248,9 @@ impl StatusMenu {
     }
 
     /// Performs `command` if the menu still offers it. A host can deliver a row it drew before
-    /// the state changed.
-    pub(crate) fn perform(&self, command: Command, cx: &mut App) {
+    /// the state changed. `activation` is the click's activation token, if the host received
+    /// one: a window the command brings forward uses it.
+    pub(crate) fn perform(&self, command: Command, activation: Option<String>, cx: &mut App) {
         let offered = self
             .menu
             .borrow()
@@ -237,10 +260,10 @@ impl StatusMenu {
             return;
         }
         match command {
-            Command::Update(command) => self.run(command, cx),
+            Command::Update(command) => self.run(command, activation, cx),
             Command::Settings => {
                 crate::app::leave_menu_only(cx);
-                crate::ui::settings_window::open_or_activate(None, cx);
+                crate::ui::settings_window::open_or_activate_with(None, activation, cx);
                 cx.activate(true);
             }
             // The client's own quit policy decides, including its confirmation and saving.
@@ -248,16 +271,16 @@ impl StatusMenu {
         }
     }
 
-    fn run(&self, command: presentation::Command, cx: &mut App) {
+    fn run(&self, command: presentation::Command, activation: Option<String>, cx: &mut App) {
         match command {
             presentation::Command::Machine(
                 machine,
                 action @ (MachineAction::Restart | MachineAction::Stop),
-            ) => self.request(vec![(machine, action)], false, cx),
+            ) => self.request(vec![(machine, action)], false, activation, cx),
             presentation::Command::Machine(machine, action) => act(machine, action, cx),
             // The confirmation is built again from the Cores' previews before it shows.
             presentation::Command::Confirm(confirmation) => {
-                self.request(confirmation.actions, false, cx);
+                self.request(confirmation.actions, false, activation, cx);
             }
             presentation::Command::Explain(explanation) => {
                 let alert = Alert {
@@ -269,6 +292,7 @@ impl StatusMenu {
                 let then = explanation.then;
                 self.host.alert(
                     alert,
+                    activation,
                     Box::new(move |_| {
                         if let Some(then) = then {
                             let _ = messages.send_blocking(Message::Answered(*then));
@@ -277,7 +301,7 @@ impl StatusMenu {
                     cx,
                 );
             }
-            presentation::Command::Desktop(action) => desktop(action, cx),
+            presentation::Command::Desktop(action) => desktop(action, activation, cx),
         }
     }
 }
@@ -292,7 +316,7 @@ fn act(machine: MachineId, action: MachineAction, cx: &mut App) {
 }
 
 /// The desktop's own update. Relaunching closes no session, so it never asks.
-fn desktop(action: DesktopAction, cx: &mut App) {
+fn desktop(action: DesktopAction, activation: Option<String>, cx: &mut App) {
     let service = cx
         .try_global::<UpdateService>()
         .map(|service| service.0.clone());
@@ -303,8 +327,13 @@ fn desktop(action: DesktopAction, cx: &mut App) {
             };
             service.update(cx, |updates, cx| updates.relaunch(cx));
         }
+        DesktopAction::Download => {
+            if let Some(service) = service {
+                service.update(cx, |updates, cx| updates.download_now(cx));
+            }
+        }
         DesktopAction::WhatsNew => {
-            crate::app::activate_default_window(cx, None);
+            crate::app::activate_default_window(cx, activation.as_deref());
             crate::ui::updates::whats_new::open_whats_new(cx);
             cx.activate(true);
         }

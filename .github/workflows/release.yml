@@ -156,6 +156,8 @@ jobs:
           version: 2026.10.4
           cache: false
       - id: pairs
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: mise run compat:plan
 
   compatibility:
@@ -463,7 +465,7 @@ jobs:
     name: Verify final desktop macos without secrets
     needs: [desktop-macos, core-macos, core-linux]
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 35
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
@@ -487,6 +489,13 @@ jobs:
           path: dist/release-core
       - name: Execute only on the credential-free verifier
         run: mise run release:pipeline verify-desktop
+      - name: Select the compilation SDK for the updater fixture
+        run: sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+      # ADR 0064 requires this before publication. The fixture apps sign with a disposable
+      # self-signed certificate, so the test runs here, where no release secret exists.
+      - name: Exercise authenticated updates and Stepping Stones in fixture apps
+        timeout-minutes: 15
+        run: mise run test:updater:macos
       - uses: actions/upload-artifact@v7
         id: upload
         with:

@@ -7,13 +7,17 @@ use super::{Context, Opened, Pending, Reply};
 use crate::contract::{
     self, Activation, Code, CoreStatus, Device, DeviceRef, Envelope, Failure, HeldOutcomes,
     MachineRef, PendingStatus, RecoveredIdentity, StatusNetwork, UnreachableData,
-    UpdateCheckReason, UpdateCheckState, UpdateCheckStatus, Version,
+    UpdateCheckReason, UpdateCheckState, UpdateCheckStatus, UpdateFailureReason,
+    UpdateFailureStage, UpdateFailureStatus, UpdateOperation, UpdateOperationKind, Version,
 };
 use crate::state::{CliState, RouteKey};
 use spaceterm_core::service::lane::{
     LaneActivation, LaneReply, LaneRequest, LaneStatus, LaneVersion, Offline,
 };
-use spaceterm_core::update::facts::{CheckFailure, Operation, UpdateCheck, UpdateFacts};
+use spaceterm_core::update::facts::{
+    CheckFailure, FailureKind, InstallFailure, OVERDUE_AFTER, Operation, StartFailure, UpdateCheck,
+    UpdateFacts,
+};
 use std::time::{Duration, Instant};
 
 const COMMAND: &str = "status";
@@ -139,7 +143,18 @@ fn report(
     recovered: Vec<crate::contract::RecoveredOperation>,
 ) -> Reply {
     let restart = context.command_line(&core, &["restart"]);
-    let (envelope, text) = envelope(core, status, held(context, route), recovered, &restart);
+    let commands = Commands {
+        restart: &restart,
+        local: *route == RouteKey::Local,
+    };
+    let (envelope, text) = envelope(
+        core,
+        status,
+        held(context, route),
+        recovered,
+        &commands,
+        crate::notice::now(),
+    );
     Reply::new(&envelope, text)
 }
 
@@ -151,14 +166,18 @@ pub(crate) fn rfc3339(seconds: u64) -> String {
         .map_or_else(String::new, |at| at.to_string())
 }
 
-/// The Pending Version of `facts`, as `status` and `update` report it.
-pub(crate) fn pending(facts: &UpdateFacts) -> Option<PendingStatus> {
+/// The Pending Version of `facts` at `now`, Unix seconds, as `status` and `update` report it.
+/// It is overdue by the two-day policy, whichever Core reported it: one of 0.11.2 or earlier
+/// marks `overdue_since` after one day.
+pub(crate) fn pending(facts: &UpdateFacts, now: u64) -> Option<PendingStatus> {
     let pending = facts.pending.as_ref()?;
     Some(PendingStatus {
         version: pending.version.to_string(),
         breaking: pending.breaking,
         installed_at: rfc3339(pending.installed_at),
-        overdue_since: pending.overdue_since.map(rfc3339),
+        overdue_since: pending
+            .overdue(now)
+            .then(|| rfc3339(pending.installed_at.saturating_add(OVERDUE_AFTER))),
         stranded: pending
             .stranded
             .iter()
@@ -167,6 +186,72 @@ pub(crate) fn pending(facts: &UpdateFacts) -> Option<PendingStatus> {
                 name: device.name.clone(),
             })
             .collect(),
+    })
+}
+
+/// The update operation of `facts`, as `status` reports it.
+pub(crate) fn operation(facts: &UpdateFacts) -> Option<UpdateOperation> {
+    let plain = |kind| UpdateOperation {
+        kind,
+        version: None,
+        received: None,
+        total: None,
+    };
+    Some(match facts.operation.as_ref()? {
+        Operation::Checking => plain(UpdateOperationKind::Checking),
+        Operation::Installing {
+            version,
+            received,
+            total,
+        } => UpdateOperation {
+            kind: UpdateOperationKind::Installing,
+            version: Some(version.to_string()),
+            received: Some(*received),
+            total: Some(*total),
+        },
+        Operation::Restarting { to } => UpdateOperation {
+            version: Some(to.to_string()),
+            ..plain(UpdateOperationKind::Restarting)
+        },
+        Operation::RestartingSameVersion => plain(UpdateOperationKind::RestartingSameVersion),
+        Operation::Stopping => plain(UpdateOperationKind::Stopping),
+        Operation::Uninstalling => plain(UpdateOperationKind::Uninstalling),
+    })
+}
+
+/// The stage and reason of an update failure.
+pub(crate) fn failure_reason(kind: FailureKind) -> (UpdateFailureStage, UpdateFailureReason) {
+    use UpdateFailureReason as R;
+    match kind {
+        FailureKind::Install(failure) => (
+            UpdateFailureStage::Install,
+            match failure {
+                InstallFailure::DiskFull => R::DiskFull,
+                InstallFailure::Download => R::Download,
+                InstallFailure::Verification => R::Verification,
+            },
+        ),
+        FailureKind::Start(failure) => (
+            UpdateFailureStage::Start,
+            match failure {
+                StartFailure::NotReady => R::NotReady,
+                StartFailure::PortInUse => R::PortInUse,
+                StartFailure::DiskFull => R::DiskFull,
+                StartFailure::Interrupted => R::Interrupted,
+            },
+        ),
+    }
+}
+
+/// The last update failure of `facts`, as `status` reports it.
+pub(crate) fn last_failure(facts: &UpdateFacts) -> Option<UpdateFailureStatus> {
+    let failure = facts.last_failure.as_ref()?;
+    let (stage, reason) = failure_reason(failure.kind);
+    Some(UpdateFailureStatus {
+        at: rfc3339(failure.at),
+        version: failure.version.to_string(),
+        stage,
+        reason,
     })
 }
 
@@ -201,6 +286,8 @@ pub(crate) fn update_check(facts: Option<&UpdateFacts>) -> UpdateCheckStatus {
                 CheckFailure::Proxy => UpdateCheckReason::Proxy,
                 CheckFailure::Verification => UpdateCheckReason::Verification,
                 CheckFailure::SystemTooOld => UpdateCheckReason::SystemTooOld,
+                CheckFailure::ClockBehind => UpdateCheckReason::ClockBehind,
+                CheckFailure::SteppingStoneSkipped => UpdateCheckReason::SteppingStoneSkipped,
             });
         }
     }
@@ -212,15 +299,24 @@ pub(crate) fn update_check(facts: Option<&UpdateFacts>) -> UpdateCheckStatus {
     status
 }
 
+/// What the `status` text tells the person to run.
+pub(crate) struct Commands<'a> {
+    /// The command line that restarts this machine's SpaceTerm Core.
+    pub(crate) restart: &'a str,
+    /// The machine is this one, so `spaceterm start` runs here.
+    pub(crate) local: bool,
+}
+
 /// The `status` envelope and its text, from the lane's status and this CLI's held outcomes.
-/// `restart` is the command line that restarts this machine's SpaceTerm Core.
 pub(crate) fn envelope(
     core: MachineRef,
     status: &LaneStatus,
     held_outcomes: Vec<HeldOutcomes>,
     recovered: Vec<crate::contract::RecoveredOperation>,
-    restart: &str,
+    commands: &Commands<'_>,
+    now: u64,
 ) -> (Envelope<CoreStatus>, String) {
+    let facts = status.update.as_deref();
     let data = CoreStatus {
         running: status.running,
         stopped: status.stopped,
@@ -228,8 +324,11 @@ pub(crate) fn envelope(
         automatic_start: status.automatic_start,
         linger: status.linger,
         runtime: version(&status.runtime),
-        pending: status.update.as_deref().and_then(pending),
-        update_check: update_check(status.update.as_deref()),
+        pending: facts.and_then(|facts| pending(facts, now)),
+        update_check: update_check(facts),
+        operation: facts.and_then(operation),
+        skipped: facts.and_then(|facts| facts.skipped.as_ref().map(ToString::to_string)),
+        last_failure: facts.and_then(last_failure),
         activation: match status.activation {
             LaneActivation::Settled => Activation::Settled,
             LaneActivation::Unresolved => Activation::Unresolved,
@@ -255,14 +354,14 @@ pub(crate) fn envelope(
         lane_major: status.lane_major,
         terminal_counters: status.terminal_counters,
     };
-    let text = text(&core, &data, restart);
+    let text = text(&core, &data, commands);
     (
         super::with_recovered(Envelope::ok(COMMAND, Some(core), data), recovered),
         text,
     )
 }
 
-fn text(core: &MachineRef, data: &CoreStatus, restart: &str) -> String {
+fn text(core: &MachineRef, data: &CoreStatus, commands: &Commands<'_>) -> String {
     let state = if !data.installed {
         "not installed"
     } else if data.running {
@@ -293,11 +392,35 @@ fn text(core: &MachineRef, data: &CoreStatus, restart: &str) -> String {
         ));
     }
     if let Some(pending) = &data.pending {
-        out.push_str(&pending_text(pending, restart));
+        out.push_str(&pending_text(pending, commands.restart));
     }
     out.push_str(&check_text(&data.update_check));
-    if data.activation == Activation::Unresolved {
-        out.push_str("Update: unresolved. Run spaceterm update on that machine.\n");
+    let restarting = data.operation.as_ref().is_some_and(|operation| {
+        matches!(
+            operation.kind,
+            UpdateOperationKind::Restarting | UpdateOperationKind::RestartingSameVersion
+        )
+    });
+    if let Some(operation) = &data.operation {
+        out.push_str(&operation_text(operation, &data.runtime.version));
+    }
+    if data.activation == Activation::Unresolved && !restarting {
+        let finish = if commands.local {
+            "finish it with: spaceterm start"
+        } else {
+            "finish it on that machine with: spaceterm start"
+        };
+        out.push_str(&format!(
+            "Update: the update to the Pending Version has not finished. Check again in a minute. If it still has not finished, {finish}\n"
+        ));
+    }
+    if let Some(skipped) = &data.skipped {
+        out.push_str(&format!(
+            "Skipped: {skipped} failed to start, so SpaceTerm Core refuses it until a newer version appears.\n"
+        ));
+    }
+    if let Some(failure) = &data.last_failure {
+        out.push_str(&failure_text(failure));
     }
     out.push_str(&format!("Terminal Sessions: {}\n", data.sessions));
     let network = match (&data.network.bind, data.network.enabled) {
@@ -331,12 +454,12 @@ fn text(core: &MachineRef, data: &CoreStatus, restart: &str) -> String {
 
 fn pending_text(pending: &PendingStatus, restart: &str) -> String {
     let overdue = if pending.overdue_since.is_some() {
-        ", restart overdue"
+        ", update overdue"
     } else {
         ""
     };
     let mut out = format!(
-        "Pending: {}, installed {}{overdue}. Restart to use it: {restart}\n",
+        "Pending: {}, installed {}{overdue}. Update with: {restart}\n",
         pending.version, pending.installed_at
     );
     if pending.breaking {
@@ -355,12 +478,74 @@ fn pending_text(pending: &PendingStatus, restart: &str) -> String {
     out
 }
 
+/// The line of an update operation other than a feed check, which the update check line names.
+fn operation_text(operation: &UpdateOperation, running: &str) -> String {
+    let version = operation.version.as_deref().unwrap_or_default();
+    match operation.kind {
+        UpdateOperationKind::Checking => String::new(),
+        UpdateOperationKind::Installing => {
+            let (received, total) = (
+                operation.received.unwrap_or_default(),
+                operation.total.unwrap_or_default(),
+            );
+            if total > 0 && received < total {
+                format!(
+                    "In progress: installing {version}, {}% received\n",
+                    received.saturating_mul(100) / total
+                )
+            } else {
+                format!("In progress: installing {version}, verifying and unpacking\n")
+            }
+        }
+        UpdateOperationKind::Restarting => {
+            format!("In progress: restarting from {running} to {version}\n")
+        }
+        UpdateOperationKind::RestartingSameVersion => {
+            format!("In progress: restarting {running} without updating\n")
+        }
+        UpdateOperationKind::Stopping => "In progress: stopping\n".to_owned(),
+        UpdateOperationKind::Uninstalling => "In progress: removing SpaceTerm Core\n".to_owned(),
+    }
+}
+
+fn failure_text(failure: &UpdateFailureStatus) -> String {
+    let version = &failure.version;
+    let what = match (failure.stage, failure.reason) {
+        (UpdateFailureStage::Install, UpdateFailureReason::DiskFull) => {
+            format!("installing {version} failed because the disk is full. Nothing changed")
+        }
+        (UpdateFailureStage::Install, UpdateFailureReason::Download) => {
+            format!("downloading {version} failed. Nothing changed")
+        }
+        (UpdateFailureStage::Install, _) => {
+            format!("{version} did not verify. Nothing changed")
+        }
+        (UpdateFailureStage::Start, UpdateFailureReason::NotReady) => format!(
+            "{version} did not become ready, so SpaceTerm Core returned to the version it ran before"
+        ),
+        (UpdateFailureStage::Start, UpdateFailureReason::PortInUse) => format!(
+            "{version} couldn\u{2019}t listen on the Network Access port because another program holds it, so SpaceTerm Core returned to the version it ran before. It tries {version} again at the next restart"
+        ),
+        (UpdateFailureStage::Start, UpdateFailureReason::DiskFull) => format!(
+            "{version} couldn\u{2019}t start because the disk is full, so SpaceTerm Core returned to the version it ran before. It tries {version} again at the next restart"
+        ),
+        (UpdateFailureStage::Start, _) => format!(
+            "a reboot, logout or crash interrupted the restart into {version}. It tries {version} again at the next restart"
+        ),
+    };
+    format!("Last update failure: {}, {what}.\n", failure.at)
+}
+
 fn check_text(check: &UpdateCheckStatus) -> String {
     let reason = |reason: Option<UpdateCheckReason>| match reason {
         Some(UpdateCheckReason::Network) => "the update feed is unreachable",
         Some(UpdateCheckReason::Proxy) => "the proxy is unreachable",
         Some(UpdateCheckReason::Verification) => "the update feed did not verify",
         Some(UpdateCheckReason::SystemTooOld) => "the newest version needs a newer system",
+        Some(UpdateCheckReason::ClockBehind) => "the machine's clock is behind",
+        Some(UpdateCheckReason::SteppingStoneSkipped) => {
+            "the version the newest one needs first failed to start"
+        }
         None => "unknown",
     };
     match check.state {

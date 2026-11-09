@@ -26,17 +26,25 @@ def cask(version, digest):
 
   app "SpaceTerm.app"
 
-  zap trash: [
-    "~/.cache/spaceterm",
-    "~/.config/spaceterm",
-    "~/.local/share/spaceterm",
-    "~/.local/state/spaceterm",
-    "~/Library/Caches/com.peblon.spaceterm",
-    "~/Library/HTTPStorages/com.peblon.spaceterm",
-    "~/Library/HTTPStorages/com.peblon.spaceterm.binarycookies",
-    "~/Library/Preferences/com.peblon.spaceterm.plist",
-    "~/Library/Saved Application State/com.peblon.spaceterm.savedState",
-  ]
+  uninstall on_upgrade: :signal,
+            signal:     ["TERM", "com.peblon.spaceterm"]
+
+  zap launchctl: [
+        "com.peblon.spaceterm.core",
+        "com.peblon.spaceterm.core.recovery",
+      ],
+      delete:    "~/.local/bin/spaceterm",
+      trash:     [
+        "~/.cache/spaceterm",
+        "~/.config/spaceterm",
+        "~/.local/share/spaceterm",
+        "~/.local/state/spaceterm",
+        "~/Library/Caches/com.peblon.spaceterm",
+        "~/Library/HTTPStorages/com.peblon.spaceterm",
+        "~/Library/HTTPStorages/com.peblon.spaceterm.binarycookies",
+        "~/Library/Preferences/com.peblon.spaceterm.plist",
+        "~/Library/Saved Application State/com.peblon.spaceterm.savedState",
+      ]
 end
 '''
 

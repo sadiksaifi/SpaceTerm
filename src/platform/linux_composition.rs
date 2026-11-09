@@ -173,7 +173,7 @@ fn desktop_profile(
                 reveal_file: "Show in Folder",
                 read_only_update: (
                     "Reinstall SpaceTerm to Update",
-                    "Run the SpaceTerm install script to install the update.",
+                    crate::updates::presentation::READ_ONLY_REMEDY,
                 ),
                 uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this computer.",
                 uninstall_app_remedy: "run install.sh --uninstall",
@@ -200,7 +200,7 @@ fn compose(
     desktop_events: super::linux_desktop_events::LinuxDesktopEvents,
     relaunch: super::linux_updates::Relaunch,
 ) -> Result<HostComposition, DesktopProfileError> {
-    let updates = update_adapter(identity, events.clone(), relaunch);
+    let updates = update_adapter(identity, events.clone(), relaunch.clone());
     let appearance = Rc::new(super::linux_appearance::LinuxAppearancePlatform::new(
         bus.clone(),
     ));
@@ -288,7 +288,11 @@ fn compose(
             ),
             desktop_events: Rc::new(desktop_events),
             application_quit: Rc::new(
-                super::linux_application_quit::LinuxApplicationQuitAdapter::new(|cx| cx.quit()),
+                super::linux_application_quit::LinuxApplicationQuitAdapter::new(move |cx| {
+                    // Only the relaunch the person approved starts the installed release.
+                    relaunch.exiting(crate::updates::relaunch_approval(cx).is_some());
+                    cx.quit();
+                }),
             ),
             local_filesystem,
             key_input: Rc::new(super::linux_keyboard::LinuxTerminalKeyInputAdapterFactory::new()),

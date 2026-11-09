@@ -562,6 +562,33 @@ fn fresh_desktop_state_admits_current_shared_core_clients_without_reset() {
 }
 
 #[test]
+fn an_unreadable_pane_restart_file_never_holds_the_desktop_state_back() {
+    use migration::{Area, Store};
+    let root = fixtures::scratch("desktop-unreadable-pane-restarts");
+    fixtures::write_client_records(&root.join("core/desktop-first"));
+    let store = desktop_state(&root);
+    store
+        .write(
+            Area::Root,
+            "core/desktop-first/pane-restarts.json",
+            b"{\"panes\":",
+        )
+        .unwrap();
+    let before = files(&root.join("core"));
+    assert_eq!(
+        check_state(&store, "spaceterm-development"),
+        StateCheck::Ready { reset: vec![] }
+    );
+    assert!(migration::is_current(&STATE, &store).unwrap());
+    assert_eq!(
+        files(&root.join("core")),
+        before,
+        "admission changes no client file"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fresh_desktop_state_refuses_legacy_shared_core_client_formats() {
     use migration::{Area, Store};
     for format in ["account-local-0", "account-local-2"] {

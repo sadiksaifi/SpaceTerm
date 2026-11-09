@@ -294,6 +294,9 @@ struct HostService {
     fence: Arc<AtomicBool>,
     /// The connection that fenced Session starts for a local uninstall, until it closes.
     uninstalling: Option<[u8; 32]>,
+    /// Set by each session request, a Pane claim or a Workspace edit, until the update engine
+    /// reads it. Each one starts the engine's silent-restart grace period again.
+    requested: Arc<AtomicBool>,
 }
 impl PaneService for HostService {
     fn restore(&mut self, store: crate::organization::OrganizationStore) -> Result<(), CoreError> {
@@ -324,6 +327,9 @@ impl PaneService for HostService {
             return Dispatch::reply(Ok(crate::protocol::ReplyBody::Sessions(
                 self.inner.sessions(),
             )));
+        }
+        if matches!(operation, Operation::Claim(_) | Operation::Mutate { .. }) {
+            self.requested.store(true, Ordering::Release);
         }
         if (self.fence.load(Ordering::Acquire) || self.uninstalling.is_some())
             && matches!(operation, Operation::Claim(_))
@@ -623,12 +629,14 @@ fn serve_runtime_ready(
     };
     let versions = protocol::CoreVersions::current(version);
     let fence = Arc::new(AtomicBool::new(false));
+    let requested = Arc::new(AtomicBool::new(false));
     let mut panes: Box<dyn PaneService> = Box::new(HostService {
         inner,
         paths: paths.clone(),
         stop: Arc::clone(&stop),
         fence: Arc::clone(&fence),
         uninstalling: None,
+        requested: Arc::clone(&requested),
     });
     {
         // A Git write can outlive a crashed server through its inherited lock. Restore only
@@ -725,6 +733,11 @@ fn serve_runtime_ready(
         versions,
     };
     SIGNAL_WAKE.store(ring.as_raw_fd(), Ordering::Release);
+    // A supervised Core removes what a crash or a finished update left behind before it serves
+    // a request that could stage something.
+    if supervised && let Ok(updates) = &updates {
+        updates.remove_leftovers();
+    }
     let readiness = ready();
     if readiness.is_err() {
         stop.request();
@@ -762,7 +775,10 @@ fn serve_runtime_ready(
             let host = host.upgrade()?;
             (!host.stop.stopping()).then(|| {
                 let sessions = crate::service::lane::LaneHost::sessions(&*host).len();
-                u32::try_from(sessions).unwrap_or(u32::MAX)
+                crate::service::updates::Activity {
+                    sessions: u32::try_from(sessions).unwrap_or(u32::MAX),
+                    requested: requested.swap(false, Ordering::AcqRel),
+                }
             })
         });
     }
@@ -1120,10 +1136,16 @@ struct FactsFollower {
     ended: Arc<AtomicBool>,
 }
 impl FactsFollower {
-    fn start(source: Arc<dyn crate::update::source::FactsSource>, outbox: Outbox) -> Self {
+    /// Follows `source` for a connection whose admission selected `work`, which reads the
+    /// facts as that version has them.
+    fn start(
+        source: Arc<dyn crate::update::source::FactsSource>,
+        outbox: Outbox,
+        work: crate::protocol::version::ProtocolVersion,
+    ) -> Self {
         let ended = Arc::new(AtomicBool::new(false));
         let mut sent = source.facts();
-        let _ = outbox.update_facts(sent.clone());
+        let _ = outbox.update_facts(sent.clone().for_selected(work));
         let follow = {
             let ended = Arc::clone(&ended);
             move || {
@@ -1134,7 +1156,10 @@ impl FactsFollower {
                     if facts.revision == sent.revision || ended.load(Ordering::Acquire) {
                         continue;
                     }
-                    if outbox.update_facts(facts.clone()).is_err() {
+                    if outbox
+                        .update_facts(facts.clone().for_selected(work))
+                        .is_err()
+                    {
                         return;
                     }
                     sent = facts;
@@ -1171,7 +1196,7 @@ pub(crate) fn serve_admitted(
         .facts
         .as_ref()
         .filter(|_| receives_facts)
-        .map(|source| FactsFollower::start(Arc::clone(source), outbox.clone()));
+        .map(|source| FactsFollower::start(Arc::clone(source), outbox.clone(), work));
     environment
         .panes
         .lock()
@@ -1575,6 +1600,39 @@ mod tests {
             connection.close();
         }
 
+        /// A connection whose selected work minor predates a fact value reads the nearest one
+        /// its minor has, so an older desktop's link never fails on a value it can't decode.
+        #[test]
+        fn a_work_1_0_connection_reads_a_same_version_restart_as_the_restart_it_knows() {
+            use crate::update::facts::Operation;
+            let board = Board::new();
+            board.0.lock().unwrap().operation = Some(Operation::RestartingSameVersion);
+            let environment = environment(&board);
+            let older = ProtocolVersion { major: 1, minor: 0 };
+            let connection = Connection::open(&environment, older);
+            assert_eq!(connection.events(1).first(), Some(&Some((1, 0))));
+            assert_eq!(
+                connection
+                    .link
+                    .update_facts()
+                    .and_then(|facts| facts.operation.clone()),
+                Some(Operation::Restarting {
+                    to: Version::parse("1.4.0").unwrap()
+                })
+            );
+            connection.close();
+            let current = Connection::open(&environment, crate::protocol::version::WORK);
+            assert_eq!(current.events(1).first(), Some(&Some((1, 0))));
+            assert_eq!(
+                current
+                    .link
+                    .update_facts()
+                    .and_then(|facts| facts.operation.clone()),
+                Some(Operation::RestartingSameVersion)
+            );
+            current.close();
+        }
+
         /// A selected version without the facts frame never receives it. Every capability is
         /// 1.0 today, so only a version below 1.0 lacks it.
         #[test]
@@ -1771,6 +1829,7 @@ mod tests {
         let mut host = HostService {
             fence: Arc::default(),
             uninstalling: None,
+            requested: Arc::default(),
             inner: Box::new(Running),
             paths: Paths {
                 identity: "spaceterm-development".into(),
@@ -1844,6 +1903,7 @@ mod tests {
         let mut host: Box<dyn PaneService> = Box::new(HostService {
             fence: Arc::default(),
             uninstalling: None,
+            requested: Arc::default(),
             inner: Box::new(Restoring(Arc::clone(&restored))),
             paths: Paths {
                 identity: "spaceterm-development".into(),

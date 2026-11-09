@@ -268,6 +268,50 @@ fn stopped_activation_changes_only_the_exact_runtime_and_preserves_stop() {
 }
 
 #[test]
+fn an_install_before_a_stopped_activation_first_starts_keeps_its_rollback_installation() {
+    with_service(|service, previous, candidate, _| {
+        let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+        let status = service.activate(approval).unwrap();
+        assert_eq!(status.phase, ActivationPhase::Completed { running: false });
+        // A newer version stages before the approved one ever became ready.
+        let source = service.paths.data.join("../newer-source");
+        let (archive, signature) = runtime::test_support::with_build(
+            "1.0.0",
+            crate::update::facts::Protocols::CURRENT,
+            || {
+                runtime::test_support::with_artifact(
+                    &source,
+                    &service.identity,
+                    |archive, signature| (archive.to_owned(), signature.to_owned()),
+                )
+            },
+        );
+        let sha256: String =
+            ring::digest::digest(&ring::digest::SHA256, &std::fs::read(&archive).unwrap())
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+        runtime::test_support::with_fixture_trust(|| {
+            runtime::updates::Updates::open(service.clone())
+                .unwrap()
+                .install(runtime::updates::Archive {
+                    archive: &archive,
+                    signature: &signature,
+                    sha256: &sha256,
+                    source: runtime::updates::Source::Local,
+                })
+                .unwrap()
+        });
+        assert!(
+            previous.directory.exists(),
+            "the approved version's first Start may still return to it"
+        );
+        assert!(candidate.directory.exists());
+    });
+}
+
+#[test]
 fn a_launcher_that_cannot_follow_an_update_never_blocks_it() {
     use crate::service::{CliLauncher, CliLink};
     use std::os::unix::fs::PermissionsExt;
@@ -1356,6 +1400,15 @@ fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
         admit_run(&mut state, &run).unwrap();
         state.run = Some(run);
         state.activation.as_mut().unwrap().started_at = Some(0);
+        // This process dispatched the Start, long enough ago that its deadline passed.
+        let id = state.activation.as_ref().unwrap().id;
+        watches().insert(
+            (id, Step::StartDispatched),
+            Watch {
+                since: Instant::now() - 2 * supervisor.ready_deadline(),
+                resumed: false,
+            },
+        );
         data.write_json(c"service.json", &state).unwrap();
         // The candidate's run stays recorded, as a run that fails or crashes during startup
         // leaves it, and its process is gone.
@@ -1376,6 +1429,172 @@ fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
         );
         assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
     });
+}
+
+#[test]
+fn a_return_resumed_with_no_watch_keeps_the_version_pending() {
+    for step in [Step::StartFailed, Step::ReturnStopDispatched] {
+        with_service(|service, previous, candidate, supervisor| {
+            interrupted(
+                &service,
+                &previous,
+                &candidate,
+                &supervisor,
+                Step::StartDispatched,
+                false,
+            );
+            pending_record(&service, &candidate);
+            // The helper that took over the Start ended during the return, so no process
+            // watches it any more.
+            let data = Directory::open(&service.paths.data, false).unwrap();
+            let mut state = Service::state(&data).unwrap().unwrap();
+            state.activation.as_mut().unwrap().step = step;
+            data.write_json(c"service.json", &state).unwrap();
+            supervisor.running.store(false, Ordering::SeqCst);
+            *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+            supervisor
+                .ready
+                .lock()
+                .unwrap()
+                .push(previous.directory.clone());
+            let status = service.recover_activation().unwrap().unwrap();
+            assert_eq!(
+                status.phase,
+                ActivationPhase::Returned {
+                    failure: StartFailure::Interrupted,
+                    running: true
+                },
+                "{step:?}"
+            );
+            let facts = runtime::updates::Updates::stored(&service).unwrap();
+            assert_eq!(facts.skipped, None, "{step:?}");
+            assert!(
+                facts.pending.is_some(),
+                "{step:?}: the version stays pending"
+            );
+            readable_by_0_11_2(&service);
+        });
+    }
+}
+
+/// The fields of the activation journal SpaceTerm 0.11.2 reads and writes. The previous and
+/// the next runtime of an update share the journal, so neither may change its shape.
+const JOURNAL_0_11_2: [&str; 13] = [
+    "schema",
+    "id",
+    "previous",
+    "candidate",
+    "stopped",
+    "original_run",
+    "candidate_run",
+    "step",
+    "saved",
+    "started_at",
+    "ready",
+    "failed",
+    "failure",
+];
+
+#[test]
+fn the_journal_keeps_the_shape_both_runtimes_of_an_update_read() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::StartDispatched,
+            false,
+        );
+        let path = service.paths.data.join("service.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut fields: Vec<&str> = record["activation"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        let mut expected = JOURNAL_0_11_2;
+        expected.sort_unstable();
+        assert_eq!(fields, expected, "this runtime writes what 0.11.2 reads");
+        // The 0.11.2 helper that starts this runtime as its candidate wrote the dispatch time.
+        record["activation"]["started_at"] = 1_793_750_400.into();
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let state = Service::state(&data).unwrap().unwrap();
+        assert_eq!(
+            state.activation.unwrap().started_at,
+            Some(1_793_750_400),
+            "this runtime reads what 0.11.2 writes"
+        );
+    });
+}
+
+#[test]
+fn a_start_another_process_watched_returns_as_interrupted_and_stays_pending() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::StartDispatched,
+            false,
+        );
+        pending_record(&service, &candidate);
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        // A helper before a reboot, logout or crash watched this Start, by a clock long past.
+        state.activation.as_mut().unwrap().started_at = Some(0);
+        data.write_json(c"service.json", &state).unwrap();
+        supervisor.running.store(false, Ordering::SeqCst);
+        *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+        supervisor
+            .ready
+            .lock()
+            .unwrap()
+            .push(previous.directory.clone());
+        let status = service.recover_activation().unwrap().unwrap();
+        assert_eq!(
+            status.phase,
+            ActivationPhase::Returned {
+                failure: StartFailure::Interrupted,
+                running: true
+            }
+        );
+        let facts = runtime::updates::Updates::stored(&service).unwrap();
+        assert_eq!(facts.skipped, None, "its readiness was never measured");
+        assert!(facts.pending.is_some(), "the version stays pending");
+        assert_eq!(
+            facts.last_failure.map(|failure| failure.kind),
+            Some(crate::update::facts::FailureKind::Start(
+                StartFailure::Interrupted
+            ))
+        );
+        readable_by_0_11_2(&service);
+    });
+}
+
+/// SpaceTerm 0.11.2's start failures, the only ones the runtime a return reaches may know.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StartFailure0_11_2 {
+    NotReady,
+    PortInUse,
+    DiskFull,
+}
+
+/// Asserts that a runtime of 0.11.2 reads the start failures in the journal and the update
+/// record, so a return to it can start.
+fn readable_by_0_11_2(service: &Service) {
+    let journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(service.paths.data.join("service.json")).unwrap())
+            .unwrap();
+    serde_json::from_value::<Option<StartFailure0_11_2>>(journal["activation"]["failure"].clone())
+        .expect("0.11.2 reads the journal's failure");
+    runtime::updates::tests::readable_by_0_11_2(&service.paths.data);
 }
 
 #[test]
@@ -1487,9 +1706,9 @@ impl runtime::updates::Restarter for Admitted {
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
         silent: bool,
-    ) -> Result<(), runtime::updates::RestartRefusal> {
+    ) -> Result<runtime::updates::Launch, runtime::updates::RestartRefusal> {
         self.0.lock().unwrap().push((candidate, silent));
-        Ok(())
+        Ok(Box::new(|| {}))
     }
 }
 
@@ -1516,7 +1735,7 @@ fn boot_runs_the_approved_version_first_and_then_restarts_into_the_pending_one()
             updates.run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
                 None
             })?;
-            updates.set_sessions(0);
+            quiet(&updates);
             Ok(())
         })
         .unwrap();
@@ -1540,4 +1759,15 @@ fn boot_runs_the_approved_version_first_and_then_restarts_into_the_pending_one()
         }
         assert_eq!(*admitted.0.lock().unwrap(), [(Some(pending), true)]);
     });
+}
+
+/// The server had no Terminal Session and no session request for the whole grace period.
+pub(crate) fn quiet(updates: &runtime::updates::Updates) {
+    let idle = runtime::updates::Activity {
+        sessions: 0,
+        requested: false,
+    };
+    let now = Instant::now();
+    updates.observe(idle, now);
+    updates.observe(idle, now + runtime::updates::SILENT_GRACE);
 }

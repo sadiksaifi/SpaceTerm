@@ -11,6 +11,7 @@ mod link;
 mod prediction;
 mod reading;
 mod recovery;
+pub(crate) mod restart;
 mod screen;
 mod screen_decoder;
 #[cfg(test)]
@@ -74,10 +75,10 @@ pub(crate) struct CorePaneState {
     /// Why the Pane's Session ended, as the server last said, while nobody started a new one.
     session_end: Mutex<Option<pane::SessionEnd>>,
     retry: AtomicBool,
-    selected: AtomicBool,
-    created_start: AtomicBool,
+    selected: Arc<AtomicBool>,
+    created_start: Arc<AtomicBool>,
     take_over: AtomicBool,
-    start_restored: AtomicBool,
+    start_restored: Arc<AtomicBool>,
     connection_recovery: Arc<Mutex<recovery::Recovery>>,
     /// Where this presentation leaves its view for the next one when its window closes.
     retained_view: Arc<Mutex<Option<reading::Reading>>>,
@@ -110,10 +111,10 @@ impl CorePaneState {
             controller: Mutex::default(),
             session_end: Mutex::default(),
             retry: AtomicBool::new(false),
-            selected: AtomicBool::new(false),
-            created_start: AtomicBool::new(false),
+            selected: Arc::default(),
+            created_start: Arc::default(),
             take_over: AtomicBool::new(false),
-            start_restored: AtomicBool::new(false),
+            start_restored: Arc::default(),
             connection_recovery: Arc::default(),
             retained_view: Arc::default(),
             recovery: Mutex::default(),
@@ -249,6 +250,9 @@ impl CorePaneState {
             .unwrap_or_else(|e| e.into_inner())
             .start_unconfirmed()
     }
+    pub(crate) fn start_waiting(&self) -> bool {
+        self.start_restored.load(Ordering::Acquire) || self.created_start.load(Ordering::Acquire)
+    }
     pub(crate) fn start_restored(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()
@@ -257,6 +261,8 @@ impl CorePaneState {
                 CorePaneStatus::Restored
                     | CorePaneStatus::SessionEnded(_)
                     | CorePaneStatus::Failed(CoreError::DirectoryUnavailable)
+                    | CorePaneStatus::Reconnecting
+                    | CorePaneStatus::TakeoverReconnecting
             )
             && !self.directory_busy.swap(true, Ordering::AcqRel)
         {
@@ -383,6 +389,34 @@ impl CorePaneState {
             })
             .unwrap_or(Err(CoreError::NotRunning))
     }
+    fn restart_announced(&self) -> bool {
+        self.directory_core()
+            .and_then(|core| core.update_facts())
+            .is_some_and(|facts| restart::CoreRestart::of(&facts).is_some())
+    }
+    fn retain_start_after(&self, error: CoreError) -> bool {
+        matches!(
+            error,
+            CoreError::ServiceBusy | CoreError::ActivationUnresolved
+        ) || (matches!(
+            error,
+            CoreError::NotRunning | CoreError::Protocol | CoreError::Direct(DirectError::Transport)
+        ) && self.restart_announced())
+    }
+    fn begin_restart_wait(&self) {
+        if self.restart_announced() {
+            self.connection_recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .restart_wait(std::time::Instant::now());
+        }
+    }
+    fn restart_expired(&self) -> bool {
+        self.connection_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .restart_expired(std::time::Instant::now())
+    }
     fn connection_failed(&self, error: CoreError, has_takeover: bool) -> bool {
         // An admitted server update refuses connections only until it resolves, so the Pane
         // keeps reconnecting on its backoff in every client, whoever started the update.
@@ -397,6 +431,14 @@ impl CorePaneState {
                 | CoreError::ServiceBusy
                 | CoreError::Direct(DirectError::Transport)
         );
+        let restarting = retryable
+            && (matches!(
+                error,
+                CoreError::ServiceBusy | CoreError::ActivationUnresolved
+            ) || self
+                .directory_core()
+                .and_then(|core| core.update_facts())
+                .is_some_and(|facts| restart::CoreRestart::of(&facts).is_some()));
         let error = if retryable
             && (error != CoreError::DirectoryUnavailable || self.start_unconfirmed())
         {
@@ -410,15 +452,33 @@ impl CorePaneState {
         } else {
             error
         };
+        if restarting {
+            retryable = self
+                .connection_recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .restart_wait(std::time::Instant::now());
+        }
+        let error = if self.restart_expired() {
+            retryable = false;
+            CoreError::Protocol
+        } else {
+            error
+        };
         {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-            // A click accepted before this interruption is never replayed after it.
+            // Take Over is scoped to the old control target. Unsent starts keep their intent.
             self.take_over.store(false, Ordering::Release);
-            self.start_restored.store(false, Ordering::Release);
+            if !retryable {
+                self.start_restored.store(false, Ordering::Release);
+                self.created_start.store(false, Ordering::Release);
+            }
             self.directory_busy.store(false, Ordering::Release);
             self.repair.lock().unwrap_or_else(|e| e.into_inner()).take();
 
-            self.selected.store(false, Ordering::Release);
+            if !retryable {
+                self.selected.store(false, Ordering::Release);
+            }
             *status = if error == CoreError::DirectoryUnavailable {
                 CorePaneStatus::Failed(error)
             } else if has_takeover && retryable {
@@ -582,6 +642,9 @@ impl CoreSessionFactory {
             .take();
         let state = Arc::new(CorePaneState {
             connection_recovery: Arc::clone(&control.recovery),
+            start_restored: Arc::clone(&control.queued_start),
+            created_start: Arc::clone(&control.queued_creation),
+            selected: Arc::clone(&control.queued_selection),
             retained_view: Arc::clone(&control.view),
             reading: Mutex::new(retained.unwrap_or_default()),
             ..CorePaneState::new()

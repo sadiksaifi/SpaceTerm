@@ -11,6 +11,8 @@ client = []
 test-support = ["client"]
 # Fakes for developer-tools preview builds and other crates' tests.
 developer-tools = []
+# Tests that change this account's native system state, such as Launch Services.
+native-tests = []
 
 [dependencies]
 base64 = "=0.22.1"

@@ -354,7 +354,9 @@ impl SettingsWindow {
             }
             let Err(failure) = notice.outcome else { return };
             let window = settings.update_window;
-            if failure == ActionFailure::Changed {
+            if failure == ActionFailure::Changed
+                && matches!(notice.action, MachineAction::Restart | MachineAction::Stop)
+            {
                 settings.request_machine_actions(
                     vec![(notice.machine, notice.action.clone())],
                     true,

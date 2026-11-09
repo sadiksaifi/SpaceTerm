@@ -191,7 +191,15 @@ impl WorkspaceCoreConnector for AccountConnector {
         let core = client.core.clone();
         Some(WorkspaceMachineConnection {
             edits: client.source,
-            sessions: WorkspacePaneSessions::new(core.clone(), client.controls, local_files, panes),
+            sessions: WorkspacePaneSessions::new(
+                core.clone(),
+                client.controls,
+                local_files,
+                panes,
+                crate::desktop_profile::DesktopPresentation::get(cx)
+                    .wording()
+                    .this_computer,
+            ),
             retained: Some(core),
         })
     }

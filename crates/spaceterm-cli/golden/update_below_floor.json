@@ -7,7 +7,7 @@
     "details": {
       "floor": "1.1.0"
     },
-    "message": "SpaceTerm Core on that machine is too old to update to this version directly. Update it to the version in details.floor first.",
+    "message": "SpaceTerm Core on that machine is too old to update to this version directly. Update it to its Update Floor first.",
     "retryable": false
   },
   "machine": {

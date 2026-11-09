@@ -3280,7 +3280,7 @@ impl TabView {
                     });
                 core_pane::render_screen(
                     selector(copy.screen),
-                    core_pane::ScreenCopy::new(copy.title.into(), copy.detail)
+                    core_pane::ScreenCopy::new(copy.title, copy.detail)
                         .glyph(core_pane::DORMANT_GLYPH),
                     true,
                     core_pane::ScreenActions {

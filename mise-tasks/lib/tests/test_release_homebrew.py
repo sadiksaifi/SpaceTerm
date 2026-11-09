@@ -24,6 +24,25 @@ class CaskTests(unittest.TestCase):
         ):
             self.assertNotIn(removed, text)
 
+    def test_uninstall_ends_the_app_and_zap_stops_spaceterm_core(self):
+        text = release_homebrew.cask("0.10.0", "a" * 64)
+        # SIGTERM quits SpaceTerm the ordinary way, saving and with no warning (ADR 0049).
+        # Homebrew's quit Apple Event carries no reason, which SpaceTerm reads as a Dock Quit that
+        # only closes the windows, so the cask sends no quit. An upgrade signals too, so a
+        # running SpaceTerm never keeps running from a replaced bundle.
+        self.assertIn(
+            "  uninstall on_upgrade: :signal,\n"
+            '            signal:     ["TERM", "com.peblon.spaceterm"]\n',
+            text,
+        )
+        self.assertNotIn("quit:", text)
+        zap = text[text.index("  zap ") :]
+        # Homebrew's launchctl directive unloads each agent and removes its LaunchAgents plist.
+        for label in ("com.peblon.spaceterm.core", "com.peblon.spaceterm.core.recovery"):
+            self.assertIn(f'"{label}",', zap[: zap.index("delete:")])
+        self.assertIn('delete:    "~/.local/bin/spaceterm",', zap)
+        self.assertIn('"~/.local/share/spaceterm",', zap[zap.index("trash:") :])
+
     def test_cask_refuses_legacy_versions_and_malformed_digests(self):
         for version, digest in (("0.6.8", "a" * 64), ("0.10.0", "a" * 63), ("0.10.0", "x" * 64)):
             with self.subTest(version=version, digest=digest), self.assertRaises(TaskError):

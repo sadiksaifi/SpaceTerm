@@ -1,0 +1,33 @@
+{
+  "command": "restart",
+  "data": {
+    "observed": "restarted",
+    "operation": "0123456789abcdef0123456789abcdef",
+    "receipt": {
+      "action": "restart",
+      "boot": "2222222222222222222222222222222222222222222222222222222222222222",
+      "code": "update_failed",
+      "operation": "0123456789abcdef0123456789abcdef",
+      "state": "failed"
+    }
+  },
+  "error": {
+    "class": "failed",
+    "code": "update_failed",
+    "details": {
+      "reason": "not_ready",
+      "running": "0.7.0",
+      "version": "0.8.0"
+    },
+    "message": "SpaceTerm Core couldn’t start its Pending Version, so it runs the version it ran before.",
+    "retryable": false
+  },
+  "machine": {
+    "id": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+    "name": "penguin",
+    "route": "id:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e"
+  },
+  "schema": "spaceterm.cli.v1",
+  "status": "error",
+  "warnings": []
+}

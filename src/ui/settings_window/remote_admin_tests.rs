@@ -75,7 +75,11 @@ fn pending_status(runtime: LaneVersion, pending: &str) -> LaneStatus {
             version: Version::parse(pending).unwrap(),
             protocols: Protocols::CURRENT,
             breaking: false,
-            installed_at: 1,
+            // Installed just now, so the Pending Version is not yet overdue.
+            installed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
             overdue_since: None,
             stranded: Vec::new(),
         }),

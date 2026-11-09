@@ -27,6 +27,7 @@ pub(crate) struct DirectRoutePanes {
     /// The title each of the route's Panes presents without a connection.
     titles: RefCell<BTreeMap<Id, String>>,
     generation: Cell<u64>,
+    machine: RefCell<Option<spaceterm_core::MachineConnection>>,
 }
 
 impl DirectRoutePanes {
@@ -36,12 +37,29 @@ impl DirectRoutePanes {
             connected: RefCell::new(None),
             titles: RefCell::default(),
             generation: Cell::new(0),
+            machine: RefCell::default(),
         }
     }
 
     /// Opens Panes through `connected`, or as unavailable when `None`. Every Pane opened earlier
     /// opens again.
     pub(crate) fn follow(&self, connected: Option<Rc<dyn WorkspacePaneOpener>>) {
+        if connected.is_none()
+            && self
+                .machine
+                .borrow()
+                .as_ref()
+                .and_then(|core| core.update_facts())
+                .is_some_and(|facts| {
+                    crate::terminal::core_session::restart::CoreRestart::of(&facts).is_some()
+                })
+        {
+            // Keep the Pane worker and its pending start while the route reconnects.
+            return;
+        }
+        if let Some(core) = connected.as_ref().and_then(|opener| opener.connection()) {
+            *self.machine.borrow_mut() = Some(core);
+        }
         *self.connected.borrow_mut() = connected;
         self.generation.set(self.generation.get().wrapping_add(1));
     }
@@ -53,6 +71,9 @@ impl DirectRoutePanes {
 }
 
 impl WorkspacePaneOpener for DirectRoutePanes {
+    fn connection(&self) -> Option<spaceterm_core::MachineConnection> {
+        self.machine.borrow().clone()
+    }
     fn open(&self, pane: Id) -> Option<WorkspacePaneSubscription> {
         if let Some(connected) = self.connected.borrow().as_ref() {
             return connected.open(pane);

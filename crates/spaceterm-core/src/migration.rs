@@ -452,6 +452,14 @@ pub fn is_current(registry: &Registry, store: &dyn Store) -> Result<bool, StoreE
 
 /// The reset the root in `store` waits for, as the last [`run_recorded`] that refused it
 /// recorded.
+/// Whether a newer SpaceTerm wrote the root in `store`, so this build refuses it with
+/// [`Refusal::Newer`] and changes nothing.
+pub fn newer(registry: &Registry, store: &dyn Store) -> bool {
+    marker(store, Area::Root).is_ok_and(|marker| {
+        marker.is_some_and(|generation| generation > registry.generations.current)
+    })
+}
+
 pub fn pending(store: &dyn Store) -> Result<Option<PendingReset>, StoreError> {
     Ok(store
         .read(Area::Reset, PENDING)?

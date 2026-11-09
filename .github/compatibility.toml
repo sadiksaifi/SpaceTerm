@@ -1,4 +1,5 @@
 # Published releases this commit must still talk to, oldest first. The compatibility workflow
 # pairs this commit with each one in both directions: its CLI against their Core, and their
-# CLI against its Core. ADR 0035 decides which releases belong here.
-releases = []
+# CLI against its Core. ADR 0035 decides which releases belong here, and the compatibility plan
+# refuses a list that omits one.
+releases = ["v0.11.0", "v0.11.1", "v0.11.2"]

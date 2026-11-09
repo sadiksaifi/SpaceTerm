@@ -1135,7 +1135,7 @@ fn update_facts_travel_as_their_own_kind_within_their_bound() {
             version: version("dev.0123456789ab.dirty"),
             protocols: Protocols::CURRENT,
             breaking: true,
-            installed_at: u64::MAX - OVERDUE_AFTER,
+            installed_at: u64::MAX - OVERDUE_SINCE_AFTER,
             overdue_since: Some(u64::MAX),
             stranded: (0..MAX_STRANDED)
                 .map(|n| StrandedDevice {

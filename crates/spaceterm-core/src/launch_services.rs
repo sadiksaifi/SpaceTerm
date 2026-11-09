@@ -2,7 +2,8 @@
 //!
 //! launchd starts SpaceTerm Core without Launch Services, so nothing registers its bundle on the
 //! way. System Settings resolves the bundle through Launch Services to name a privacy entry, and
-//! Login Items resolves it to name the server's background item.
+//! Login Items resolves it to name the server's background item. A retained installation that
+//! SpaceTerm deletes is unregistered first, so neither names a bundle that is gone.
 use std::path::Path;
 
 type CFTypeRef = *const std::ffi::c_void;
@@ -43,4 +44,20 @@ pub(crate) fn register(bundle: &Path) -> bool {
         CFRelease(url);
         status == 0
     }
+}
+
+/// Launch Services' own tool. Unregistering has no public function.
+pub(crate) const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister";
+
+/// Unregisters the bundle at `bundle` from Launch Services. Returns whether Launch Services
+/// accepted it.
+pub(crate) fn unregister(bundle: &Path) -> bool {
+    std::process::Command::new(LSREGISTER)
+        .arg("-u")
+        .arg(bundle)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }

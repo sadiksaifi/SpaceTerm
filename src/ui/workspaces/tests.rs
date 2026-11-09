@@ -793,7 +793,7 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
     settle(&harness, cx);
     assert_eq!(
         A11yTree::read(cx).node("Reconnecting…")["aria"]["description"],
-        "Start Session is available after reconnection."
+        "Start Session waits for SpaceTerm Core to reconnect."
     );
 }
 

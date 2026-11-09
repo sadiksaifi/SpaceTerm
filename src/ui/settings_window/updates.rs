@@ -11,7 +11,7 @@ use super::{SettingsRowId, SettingsWindow};
 use crate::application_identity::ApplicationIdentity;
 use crate::settings::SettingsDocument;
 use crate::updates::policy::{CheckInterval, UpdatePreferences};
-use crate::updates::presentation::{self, Command};
+use crate::updates::presentation::{self, Command, DesktopState};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateService, UpdateState};
 
 /// The status row's label names the running build, so the page answers "which version" first.
@@ -32,6 +32,8 @@ pub(super) struct UpdateStatusPresentation {
     pub(super) summary: SharedString,
     pub(super) action: Option<UpdateStatusAction>,
     pub(super) button: SharedString,
+    /// Check Now beside the row's own command, after an update and after a failure.
+    pub(super) check_now: bool,
 }
 
 /// How long ago the service last completed a check. A stamp after `now` reads as just now.
@@ -82,10 +84,16 @@ impl SettingsWindow {
                     )
                 },
             );
+            // A failure the updater still holds offers only Relaunch, which no check can replace.
+            let check_now = matches!(
+                shared.desktop,
+                DesktopState::WhatsNew { .. } | DesktopState::InstallFailed { held: false, .. }
+            );
             return UpdateStatusPresentation {
                 summary: row.sentence,
                 action,
                 button,
+                check_now,
             };
         }
         let Some(updates) = service(cx) else {
@@ -93,6 +101,7 @@ impl SettingsWindow {
                 summary: UpdateError::Unavailable.to_string().into(),
                 action: None,
                 button: SharedString::default(),
+                check_now: false,
             };
         };
         let updates = updates.read(cx);
@@ -101,6 +110,7 @@ impl SettingsWindow {
                 summary: UpdateError::Unavailable.to_string().into(),
                 action: None,
                 button: SharedString::default(),
+                check_now: false,
             };
         }
         let checking = matches!(updates.state(), UpdateState::Checking);
@@ -117,12 +127,28 @@ impl SettingsWindow {
             },
             action: Some(UpdateStatusAction::CheckNow { enabled: !checking }),
             button: "Check Now".into(),
+            check_now: false,
         }
     }
 
     pub(super) fn render_update_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let owner = cx.weak_entity();
         let status = self.update_status(cx);
+        let checking = service(cx)
+            .is_some_and(|updates| matches!(updates.read(cx).state(), UpdateState::Checking));
+        let check_now = status.check_now.then(|| {
+            Button::new(CHECK_NOW_SELECTOR, "Check Now")
+                .tab_stop(true)
+                .variant(ButtonVariant::Outline)
+                .size(ButtonSize::Regular)
+                .disabled(checking)
+                .debug_selector(CHECK_NOW_SELECTOR)
+                .on_activate(|_, _, cx| {
+                    if let Some(updates) = service(cx) {
+                        updates.update(cx, |updates, cx| updates.check(true, cx));
+                    }
+                })
+        });
         let button = status.action.map(|action| {
             let (selector, enabled) = match &action {
                 UpdateStatusAction::CheckNow { enabled } => (CHECK_NOW_SELECTOR, *enabled),
@@ -151,6 +177,9 @@ impl SettingsWindow {
         });
         gpui::div()
             .debug_selector(|| "settings-row-update-status-control".to_owned())
+            .flex()
+            .gap_2()
+            .children(check_now)
             .children(button)
             .into_any_element()
     }

@@ -53,7 +53,7 @@ pub(crate) fn init(cx: &mut App) {
     }));
     subscriptions.extend(UpdateReminders::global(cx).map(|reminders| {
         cx.subscribe(&reminders, |_, clicked: &ReminderActivated, cx| {
-            commands::reminder_clicked(clicked.0, cx);
+            commands::reminder_clicked(clicked.key, clicked.token.as_deref(), cx);
         })
     }));
     cx.set_global(UpdatePrompts {
@@ -112,7 +112,7 @@ impl CheckResults {
         }
         match state {
             UpdateState::Checking => None,
-            UpdateState::UpToDate | UpdateState::Available { .. } | UpdateState::Failed { .. } => {
+            state if answers_check(state) => {
                 if self.awaiting {
                     self.claim(state)
                 } else {
@@ -145,16 +145,27 @@ impl CheckResults {
     }
 
     fn claim(&mut self, state: &UpdateState) -> Option<UpdateState> {
-        if !matches!(
-            state,
-            UpdateState::UpToDate | UpdateState::Available { .. } | UpdateState::Failed { .. }
-        ) {
+        if !answers_check(state) {
             return None;
         }
         self.awaiting = false;
         self.presented = Some(state.clone());
         Some(state.clone())
     }
+}
+
+/// Whether `state` answers a check. With automatic downloads, the check's release is already
+/// downloading or downloaded when the answer arrives.
+fn answers_check(state: &UpdateState) -> bool {
+    matches!(
+        state,
+        UpdateState::UpToDate
+            | UpdateState::Available { .. }
+            | UpdateState::Downloading { .. }
+            | UpdateState::Verifying { .. }
+            | UpdateState::Ready { .. }
+            | UpdateState::Failed { .. }
+    )
 }
 
 fn update_results<R>(update: impl FnOnce(&mut CheckResults) -> R, cx: &mut App) -> Option<R> {
@@ -194,9 +205,7 @@ fn check_for_updates(cx: &mut App) {
         UpdateState::Unavailable => present_in_front_window(cx, |window, cx| {
             present_failure(UpdateError::Unavailable, window, cx)
         }),
-        UpdateState::Failed {
-            error: UpdateError::Relaunch,
-        } => present_relaunch_failure(cx),
+        UpdateState::Failed { error } if error.relaunch_failed() => present_relaunch_failure(cx),
         UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed { .. } => {
             update_results(CheckResults::request, cx);
             updates.update(cx, |updates, cx| updates.check(true, cx));
@@ -272,9 +281,13 @@ fn present_result(state: UpdateState, cx: &mut App) {
         UpdateState::Available { version } => present_in_front_window(cx, move |window, cx| {
             present_available(&version, window, cx)
         }),
-        UpdateState::Failed {
-            error: UpdateError::Relaunch,
-        } => present_relaunch_failure(cx),
+        UpdateState::Downloading { version, .. } | UpdateState::Verifying { version } => {
+            present_in_front_window(cx, move |window, cx| {
+                present_downloading(&version, window, cx)
+            });
+        }
+        UpdateState::Ready { .. } => present_in_front_window(cx, present_install),
+        UpdateState::Failed { error } if error.relaunch_failed() => present_relaunch_failure(cx),
         UpdateState::Failed { error } => {
             present_in_front_window(cx, move |window, cx| present_failure(error, window, cx))
         }
@@ -419,6 +432,42 @@ fn present_available<T: 'static>(version: &str, window: &mut Window, cx: &mut Co
     );
 }
 
+fn downloading_alert(version: &str) -> Alert<PromptAction> {
+    Alert::new(
+        ModalId::new("update-downloading"),
+        "Update downloading",
+        format!("SpaceTerm {version} Is Available"),
+        format!(
+            "You have version {CURRENT_VERSION}. SpaceTerm is downloading it. Relaunch when it is ready."
+        ),
+        vec![
+            action(
+                PromptAction::Acknowledge,
+                "OK",
+                ModalActionRole::Affirmative,
+                "update-downloading-ok",
+            )
+            .with_emphasis(ModalActionEmphasis::Prominent)
+            .default_action(true),
+            action(
+                PromptAction::ReleaseNotes,
+                RELEASE_NOTES_TITLE,
+                ModalActionRole::Auxiliary,
+                "update-downloading-release-notes",
+            ),
+        ],
+    )
+}
+
+/// Answers a check whose release automatic downloads already began to download.
+fn present_downloading<T: 'static>(version: &str, window: &mut Window, cx: &mut Context<T>) {
+    present(downloading_alert(version), window, cx, |action, cx| {
+        if action == Some(PromptAction::ReleaseNotes) {
+            cx.open_url(RELEASE_NOTES_URL);
+        }
+    });
+}
+
 /// Choosing Later quiets the reminder until it comes due again. The update stays pending and the
 /// Updates menu keeps offering it.
 fn put_off(cx: &mut App) {
@@ -454,8 +503,18 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
             true,
             AlertIntent::Warning,
         ),
+        UpdateError::DiskFull => (
+            "Not Enough Disk Space for the Update",
+            true,
+            AlertIntent::Warning,
+        ),
+        UpdateError::SystemTooOld => (
+            "Update Needs a Newer System",
+            false,
+            AlertIntent::Informational,
+        ),
         UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
-        UpdateError::Relaunch => (
+        UpdateError::Relaunch | UpdateError::SettingsUnsaved => (
             "Couldn\u{2019}t Relaunch SpaceTerm",
             true,
             AlertIntent::Warning,
@@ -499,15 +558,23 @@ fn present_failure<T: 'static>(error: UpdateError, window: &mut Window, cx: &mut
     });
 }
 
-fn relaunch_failure_alert(version: &str) -> Alert<PromptAction> {
+/// `unsaved` names a relaunch that failed because Settings couldn't be saved.
+fn relaunch_failure_alert(version: &str, unsaved: bool) -> Alert<PromptAction> {
     Alert::new(
         ModalId::new("update-relaunch-failure"),
         "Couldn\u{2019}t relaunch SpaceTerm",
         "Couldn\u{2019}t Relaunch SpaceTerm",
-        format!(
-            "SpaceTerm {version} is downloaded, but SpaceTerm couldn\u{2019}t quit to install it. \
-             Your Terminal Sessions are still running."
-        ),
+        if unsaved {
+            format!(
+                "SpaceTerm {version} is downloaded, but SpaceTerm couldn\u{2019}t save Settings, \
+                 so it didn\u{2019}t relaunch. Your Terminal Sessions are still running."
+            )
+        } else {
+            format!(
+                "SpaceTerm {version} is downloaded, but SpaceTerm couldn\u{2019}t quit to install \
+                 it. Your Terminal Sessions are still running."
+            )
+        },
         vec![
             action(
                 PromptAction::TryAgain,
@@ -537,13 +604,19 @@ fn present_relaunch_failure(cx: &mut App) {
         .pending_version()
         .unwrap_or_default()
         .to_owned();
+    let unsaved = matches!(
+        updates.read(cx).state(),
+        UpdateState::Failed {
+            error: UpdateError::SettingsUnsaved
+        }
+    );
     if front_workspace_window(cx).is_none() {
         crate::app::activate_default_window(cx, None);
         cx.activate(true);
     }
     present_in_front_window(cx, move |window, cx| {
         present(
-            relaunch_failure_alert(&version),
+            relaunch_failure_alert(&version, unsaved),
             window,
             cx,
             |action, cx| match action {
@@ -801,9 +874,37 @@ mod tests {
                 "{order}"
             );
 
+            // Automatic downloads begin the found release before the answer arrives. The menu
+            // check still hears it once, and the download's progress adds nothing.
+            let downloading = |received| UpdateState::Downloading {
+                version: "0.4.2".to_owned(),
+                received,
+                total: 10,
+            };
+            let mut results = CheckResults::default();
+            results.request();
+            assert_eq!(
+                deliver(
+                    &mut results,
+                    &downloading(0),
+                    Some(UpdateNotice::CheckFinished),
+                    observer_first
+                ),
+                [downloading(0)],
+                "{order}"
+            );
+            assert_eq!(
+                deliver(&mut results, &downloading(5), None, observer_first),
+                []
+            );
+
             // Scheduled results stay silent.
             let mut results = CheckResults::default();
             assert_eq!(deliver(&mut results, &up_to_date, None, observer_first), []);
+            assert_eq!(
+                deliver(&mut results, &downloading(0), None, observer_first),
+                []
+            );
         }
     }
 
@@ -851,7 +952,9 @@ mod tests {
             available_alert("0.4.2"),
             stop_download_alert("0.4.2"),
             install_alert("0.4.2"),
-            relaunch_failure_alert("0.4.2"),
+            downloading_alert("0.4.2"),
+            relaunch_failure_alert("0.4.2", false),
+            relaunch_failure_alert("0.4.2", true),
         ];
         alerts.extend(
             [
@@ -860,8 +963,11 @@ mod tests {
                 UpdateError::Download,
                 UpdateError::Verification,
                 UpdateError::Installation,
+                UpdateError::DiskFull,
+                UpdateError::SystemTooOld,
                 UpdateError::ReadOnly,
                 UpdateError::Relaunch,
+                UpdateError::SettingsUnsaved,
             ]
             .map(|error| failure_alert(error, testing_wording())),
         );
@@ -936,7 +1042,7 @@ mod tests {
 
     #[gpui::test]
     fn the_relaunch_failure_alert_offers_try_again_and_later(cx: &mut gpui::TestAppContext) {
-        let tree = presented(relaunch_failure_alert("0.4.2"), cx);
+        let tree = presented(relaunch_failure_alert("0.4.2", false), cx);
         tree.text("Couldn\u{2019}t Relaunch SpaceTerm");
         tree.text(
             "SpaceTerm 0.4.2 is downloaded, but SpaceTerm couldn\u{2019}t quit to install it. \

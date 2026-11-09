@@ -84,6 +84,23 @@ def main():
                     }
                 )
             )
+            # The fixture answers quit requests and runs the relaunch quit with the app's policy.
+            policy = root / "libspt_quit_policy.a"
+            run(
+                "rustc",
+                "--edition",
+                "2024",
+                "--crate-type",
+                "staticlib",
+                "--crate-name",
+                "spt_quit_policy",
+                "-C",
+                "opt-level=1",
+                str(ROOT / "tests/macos_updater_fixture_policy.rs"),
+                "-o",
+                str(policy),
+                env={**os.environ, "MACOSX_DEPLOYMENT_TARGET": "26.0"},
+            )
             binary = root / "fixture"
             run(
                 "xcrun",
@@ -102,6 +119,7 @@ def main():
                 "-Wl,-rpath,@executable_path/../Frameworks",
                 str(ROOT / "tests/macos_updater_fixture.m"),
                 str(ROOT / "src/platform/macos_updater.m"),
+                str(policy),
                 "-o",
                 str(binary),
             )
@@ -115,6 +133,8 @@ def main():
                 ("cancel", "cancel", False, ("0.1.0", "0.1.1")),
                 ("install", "install", False, ("0.1.0", "0.1.1")),
                 ("quit", "quit", False, ("0.1.0", "0.1.1")),
+                # Settings fail to save on Relaunch, then the person quits SpaceTerm.
+                ("relaunch-failed", "relaunch-failed", False, ("0.1.0", "0.1.1")),
                 ("certificate-install", "install", True, ("0.1.0", "0.1.1")),
                 # 0.1.2's floor is 0.1.1, so 0.1.0 must step to 0.1.1 first.
                 ("stepping-stone", "install", False, ("0.1.0", "0.1.1", "0.1.2")),
@@ -208,7 +228,7 @@ def main():
                         events = log.read_text()
                         if mode == "install" and "relaunched" in events:
                             break
-                        if mode == "quit" and process.poll() is not None:
+                        if mode in ("quit", "relaunch-failed") and process.poll() is not None:
                             installed = plistlib.loads(
                                 (apps[0] / "Contents/Info.plist").read_bytes()
                             )["CFBundleVersion"]
@@ -223,6 +243,8 @@ def main():
                         time.sleep(
                             1
                         )  # Detect an installer that incorrectly survived ordinary quit.
+                    if mode == "relaunch-failed":
+                        time.sleep(3)  # Detect a relaunch the ordinary quit must not start.
                     events = log.read_text()
                     version = plistlib.loads((apps[0] / "Contents/Info.plist").read_bytes())[
                         "CFBundleVersion"
@@ -247,6 +269,18 @@ def main():
                         # A later explicit launch uses the updated bundle without an update prompt.
                         run(str(apps[0] / "Contents/MacOS/Fixture"))
                         assert "relaunched" in log.read_text()
+                    elif mode == "relaunch-failed":
+                        # The failed relaunch handed Sparkle no relaunch, so the ordinary quit
+                        # installs the update and SpaceTerm stays quit.
+                        assert (
+                            events.count("confirmed") == 1
+                            and "save-failed" in events
+                            and "exit" in events
+                            and "relaunch-quit" not in events
+                            and "dismissed" not in events
+                            and "relaunched" not in events
+                            and version == "0.1.1"
+                        ), events
                     else:
                         # One Relaunch quits through the quit policy and relaunches, with no
                         # dismissal and no second click.

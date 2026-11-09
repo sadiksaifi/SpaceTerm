@@ -11,6 +11,8 @@ use std::time::Duration;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long an archive download may receive no byte before it fails.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_REDIRECTS: u32 = 4;
 
 /// A feed and its detached signature, exactly as served.
@@ -145,9 +147,54 @@ impl FeedSource for Releases {
             .build()
             .call()
             .map_err(|error| self.failure(&error))?;
-        let mut reader = response.into_body().into_with_config().limit(size).reader();
-        copy_exactly(&mut reader, into, size)
+        let reader = response.into_body().into_with_config().limit(size).reader();
+        copy_within(reader, into, size, IDLE_TIMEOUT)
     }
+}
+
+/// [`copy_exactly`], failing as the network's when `from` gives no byte for `idle`. The reads
+/// run on their own thread, which a stalled read leaves behind until its connection ends.
+pub fn copy_within(
+    mut from: impl Read + Send + 'static,
+    into: &mut dyn Write,
+    size: u64,
+    idle: Duration,
+) -> Result<(), FetchError> {
+    let (sender, chunks) = std::sync::mpsc::sync_channel::<Option<Vec<u8>>>(4);
+    std::thread::Builder::new()
+        .name("spaceterm-core-download".into())
+        .spawn(move || {
+            let mut remaining = size;
+            while remaining > 0 {
+                let mut buffer = vec![0; 64 * 1024];
+                let wanted = usize::try_from(remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(buffer.len());
+                let chunk = match from.read(&mut buffer[..wanted]) {
+                    Ok(0) | Err(_) => None,
+                    Ok(read) => {
+                        buffer.truncate(read);
+                        Some(buffer)
+                    }
+                };
+                let ended = chunk.is_none();
+                remaining -= chunk.as_ref().map_or(0, |chunk| chunk.len() as u64);
+                if sender.send(chunk).is_err() || ended {
+                    return;
+                }
+            }
+        })
+        .map_err(|_| FetchError::Network)?;
+    let mut remaining = size;
+    while remaining > 0 {
+        let chunk = match chunks.recv_timeout(idle) {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) | Err(_) => return Err(FetchError::Network),
+        };
+        into.write_all(&chunk).map_err(|error| storage(&error))?;
+        remaining -= chunk.len() as u64;
+    }
+    Ok(())
 }
 
 /// Copies exactly `size` bytes, refusing a shorter source. A read failure is the network's, a
@@ -189,6 +236,44 @@ pub fn storage(error: &std::io::Error) -> FetchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_download_that_stalls_fails_after_its_idle_limit() {
+        /// Gives two bytes, then blocks until the test releases it.
+        struct Blocking(std::sync::mpsc::Receiver<()>, bool);
+        impl Read for Blocking {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !self.1 {
+                    self.1 = true;
+                    buffer[..2].copy_from_slice(b"ab");
+                    return Ok(2);
+                }
+                let _ = self.0.recv();
+                Ok(0)
+            }
+        }
+        let (release, block) = std::sync::mpsc::channel();
+        let mut out = Vec::new();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            copy_within(
+                Blocking(block, false),
+                &mut out,
+                4,
+                Duration::from_millis(100)
+            ),
+            Err(FetchError::Network)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(out, b"ab");
+        drop(release);
+        let mut out = Vec::new();
+        assert_eq!(
+            copy_within(&b"abcd"[..], &mut out, 4, Duration::from_secs(5)),
+            Ok(())
+        );
+        assert_eq!(out, b"abcd");
+    }
 
     #[test]
     fn copying_an_archive_refuses_a_short_source_and_stops_at_its_size() {

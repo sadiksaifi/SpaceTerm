@@ -8,31 +8,7 @@ pub(crate) enum ApplicationQuitDecision {
     Cancel,
 }
 
-/// Why the host asked the application to quit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ApplicationQuitRequest {
-    /// The person asked to quit, such as from the Dock. Close windows when the status item
-    /// remains available; otherwise confirm exiting the client.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "Linux commands invoke dismissal directly; only macOS reports Dock requests"
-        )
-    )]
-    Dismissal,
-    /// The client chose to exit, such as from its status item or an installed update.
-    Exit,
-    /// The operating system is logging out, restarting, or shutting down. Never prompt.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "Linux session shutdown terminates the process outside application Quit"
-        )
-    )]
-    SessionEnd,
-}
+pub(crate) use super::quit_policy::ApplicationQuitRequest;
 
 /// The host's name for the place a windowless client stays reachable.
 #[cfg_attr(
@@ -179,6 +155,20 @@ impl ApplicationQuitHandler {
         (self.request)(cx, request)
     }
 
+    /// Hands each termination signal from `signals` to the quit policy as
+    /// [`ApplicationQuitRequest::Terminate`], on the main thread.
+    #[cfg(unix)]
+    pub(crate) fn follow_termination(&self, signals: async_channel::Receiver<()>) {
+        let handler = self.clone();
+        self.app
+            .spawn(async move |cx| {
+                while signals.recv().await.is_ok() {
+                    cx.update(|cx| handler.handle(ApplicationQuitRequest::Terminate, cx));
+                }
+            })
+            .detach();
+    }
+
     #[cfg_attr(
         not(target_os = "macos"),
         allow(
@@ -236,6 +226,11 @@ pub(crate) trait ApplicationQuitAdapter {
     ) -> Option<Task<Option<QuitAnswer>>> {
         None
     }
+
+    /// Delivers each termination signal the process receives to `handler` as
+    /// [`ApplicationQuitRequest::Terminate`], so the signal saves and quits instead of killing
+    /// the process.
+    fn follow_termination_signals(&self, _handler: &ApplicationQuitHandler) {}
 
     /// Asks the application to exit through the quit policy.
     fn request_quit(&self, cx: &mut App);
@@ -323,6 +318,20 @@ pub(crate) mod testing {
 
         pub(crate) fn confirmations(&self) -> usize {
             self.confirmations.get()
+        }
+
+        /// Delivers `request` as the platform does from inside the application, such as a
+        /// termination signal the main thread reads.
+        pub(crate) fn simulate_request(
+            &self,
+            request: ApplicationQuitRequest,
+            cx: &mut App,
+        ) -> ApplicationQuitDecision {
+            self.requests.set(self.requests.get() + 1);
+            let handler = self.handler.borrow().clone();
+            handler.map_or(ApplicationQuitDecision::Proceed, |handler| {
+                handler.handle(request, cx)
+            })
         }
 
         pub(crate) fn simulate_native_request(

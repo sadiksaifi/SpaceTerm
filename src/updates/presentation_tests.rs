@@ -172,20 +172,13 @@ fn the_desktop_relaunch_never_asks() {
 }
 
 #[test]
-fn after_one_day_the_desktop_update_is_overdue_and_reminds() {
+fn only_after_two_days_the_desktop_update_is_overdue_and_reminds() {
     let ready = UpdateState::Ready {
         version: "0.9.0".into(),
     };
-    for (stage, body) in [
-        (
-            UpdateStage::Warning,
-            "Relaunch to install SpaceTerm 0.9.0. Your Terminal Sessions keep running.",
-        ),
-        (
-            UpdateStage::Overdue,
-            "SpaceTerm 0.9.0 has waited more than two days. Relaunch to install it. Your Terminal Sessions keep running.",
-        ),
-    ] {
+    {
+        let stage = UpdateStage::Overdue;
+        let body = "SpaceTerm 0.9.0 has waited more than two days. Relaunch to install it. Your Terminal Sessions keep running.";
         let presentation = Presentation::new(desktop(&ready, stage), &[], &Dismissed::new(), NOW);
         let item = single(&presentation);
         assert_eq!(item.label.as_ref(), "Relaunch");
@@ -201,7 +194,7 @@ fn after_one_day_the_desktop_update_is_overdue_and_reminds() {
 
 #[test]
 fn an_overdue_core_restart_names_the_machine_and_its_sessions() {
-    let presentation = present(&[waiting(machine(PENGUIN, "penguin", 3), NOW - DAY - 60)]);
+    let presentation = present(&[waiting(machine(PENGUIN, "penguin", 3), NOW - 2 * DAY - 60)]);
     let item = single(&presentation);
     assert_eq!(item.label.as_ref(), "Update penguin…");
     assert_eq!(item.tone, Tone::Problem);
@@ -210,13 +203,13 @@ fn an_overdue_core_restart_names_the_machine_and_its_sessions() {
         presentation.reminders(),
         vec![Reminder {
             key: ItemKey::Machine(PENGUIN),
-            title: "Restart overdue on penguin".into(),
-            body: "SpaceTerm Core 0.9.0 has waited 1 day. Restarting closes 3 running sessions."
+            title: "Update penguin".into(),
+            body: "SpaceTerm Core 0.9.0 has waited 2 days. Updating ends 3 Terminal Sessions."
                 .into(),
         }]
     );
     let rows = presentation.machine_rows();
-    assert_eq!(rows[0].status.as_ref(), "Overdue · 3 sessions");
+    assert_eq!(rows[0].status.as_ref(), "Overdue · 3 Terminal Sessions");
     assert_eq!(
         rows[0].button.as_ref().unwrap().label.as_ref(),
         "Update penguin…"
@@ -235,15 +228,15 @@ fn two_items_open_a_menu_with_restart_all() {
     else {
         panic!("two items open a menu");
     };
-    assert_eq!(label.as_ref(), "2 updates");
+    assert_eq!(label.as_ref(), "2 Updates");
     assert_eq!(tone, Tone::Action);
     assert_eq!(glyph, Glyph::UpdateCore);
     let all = presentation.restart_all().unwrap();
     assert_eq!(all.label.as_ref(), "Update All…");
-    assert_eq!(all.trailing.as_ref(), "7 sessions");
+    assert_eq!(all.trailing.as_ref(), "7 Terminal Sessions");
     assert_eq!(
         all.subtitle.as_ref(),
-        "Updates 2 machines, closes 7 sessions"
+        "Updates 2 Machines, ends 7 Terminal Sessions"
     );
     let Command::Confirm(confirmation) = all.command else {
         panic!("Restart All asks");
@@ -301,13 +294,13 @@ fn a_failed_update_explains_with_the_agreed_sentence_and_ok_dismisses_it() {
     });
     let presentation = present(&[failed]);
     let item = single(&presentation);
-    assert_eq!(item.label.as_ref(), "penguin update failed");
+    assert_eq!(item.label.as_ref(), "penguin Update Failed");
     let Some(Command::Explain(explanation)) = item.command else {
         panic!("a failure explains");
     };
     assert_eq!(
         explanation.title.as_ref(),
-        "SpaceTerm Core 0.9.0 couldn't start on penguin"
+        "Couldn't Start SpaceTerm Core 0.9.0 on penguin"
     );
     assert_eq!(
         explanation.message.as_ref(),
@@ -349,8 +342,11 @@ fn the_named_states_match_the_mockup() {
         reason: CheckFailure::Network,
     };
     let item = single(&present(std::slice::from_ref(&cant_check)));
-    assert_eq!(item.label.as_ref(), "Can't check penguin");
-    assert!(matches!(item.command, Some(Command::Explain(_))));
+    assert_eq!(item.label.as_ref(), "Can't Check penguin");
+    assert_eq!(
+        item.command,
+        Some(Command::Machine(PENGUIN, MachineAction::CheckAgain))
+    );
     cant_check.push = Some(version("0.9.0"));
     assert_eq!(
         single(&present(&[cant_check])).command,
@@ -365,7 +361,7 @@ fn the_named_states_match_the_mockup() {
         kind: FailureKind::Install(InstallFailure::Download),
     });
     let item = single(&present(&[install_failed]));
-    assert_eq!(item.label.as_ref(), "penguin install failed");
+    assert_eq!(item.label.as_ref(), "penguin Install Failed");
     let Some(Command::Explain(explanation)) = item.command else {
         panic!("Install failed explains");
     };
@@ -384,7 +380,7 @@ fn the_named_states_match_the_mockup() {
     assert_eq!(
         (item.label.as_ref(), item.command),
         (
-            "Can't confirm build-box",
+            "Can't Confirm build-box",
             Some(Command::Machine(BUILD_BOX, MachineAction::CheckAgain))
         )
     );
@@ -466,6 +462,9 @@ fn every_core_label_names_its_subject() {
             running: Some(version("0.8.0")),
             sessions: 3,
             pending: None,
+            unobserved: false,
+            core_too_old: false,
+            skipped: None,
             state,
         };
         assert!(
@@ -488,7 +487,10 @@ fn the_menu_bar_extra_uses_one_line_pattern_and_offers_stop_only_on_the_local_ma
     ]);
     let rows = presentation.extra_rows();
     assert_eq!(rows[0].line.as_ref(), "Version 0.8.0 · Update ready");
-    assert_eq!(rows[1].line.as_ref(), "Version 0.8.0 · No sessions");
+    assert_eq!(
+        rows[1].line.as_ref(),
+        "Version 0.8.0 · No Terminal Sessions"
+    );
     let local = rows[0].items.as_ref().unwrap();
     let ExtraItem::Action {
         title, subtitle, ..
@@ -497,15 +499,17 @@ fn the_menu_bar_extra_uses_one_line_pattern_and_offers_stop_only_on_the_local_ma
         panic!("the update action leads");
     };
     assert_eq!(title.as_ref(), "Update This Mac…");
-    assert_eq!(subtitle.as_ref().unwrap().as_ref(), "Closes 3 sessions");
+    assert_eq!(
+        subtitle.as_ref().unwrap().as_ref(),
+        "Ends 3 Terminal Sessions"
+    );
     let Some(ExtraItem::Action { title, .. }) = local.last() else {
         panic!("Stop ends the local submenu");
     };
     assert_eq!(title.as_ref(), "Stop SpaceTerm Core…");
-    let remote = rows[1].items.as_ref().unwrap();
     assert!(
-        remote.is_empty(),
-        "same-version restart appears only in Settings"
+        rows[1].items.is_none(),
+        "a remote Machine with no actions has no submenu"
     );
 }
 
@@ -599,10 +603,7 @@ fn a_confirmation_names_the_sessions_each_core_previews() {
     let stop = presentation
         .previewed(&[preview(PENGUIN, MachineAction::Stop, 2)], false)
         .expect("two sessions ask");
-    assert!(
-        stop.message
-            .starts_with("This will close your 2 running sessions.")
-    );
+    assert!(stop.message.starts_with("This ends 2 Terminal Sessions."));
     assert!(stop.approval.holds(&[unreported]));
 }
 
@@ -667,7 +668,7 @@ fn offline_and_unconfirmed_updates_name_the_machine_and_target() {
             .unwrap()
             .sentence()
             .as_ref(),
-        "penguin is offline. It last ran SpaceTerm Core 0.8.0. SpaceTerm installs 0.9.0 when it reconnects."
+        "penguin is offline. It last ran SpaceTerm Core 0.8.0. SpaceTerm Core 0.9.0 is available. Reconnect, then choose Update penguin."
     );
     let mut unconfirmed = machine(PENGUIN, "penguin", 0);
     unconfirmed.link = MachineLink::Unconfirmed {
@@ -728,6 +729,88 @@ fn desktop_actions_share_relaunch_copy_and_never_claim_a_core_restart() {
     assert_eq!(title.as_ref(), "Download SpaceTerm 0.11.1");
 }
 
+/// An installation SpaceTerm can't replace names its remedy wherever the failure shows, and
+/// acknowledging it leaves it in place, since no later check can install the update.
+#[test]
+fn an_unreplaceable_installation_names_its_remedy_on_every_surface() {
+    let failed = UpdateState::Failed {
+        error: UpdateError::ReadOnly,
+    };
+    let shown = Presentation::new(
+        DesktopFacts {
+            pending: Some("0.11.1"),
+            ..desktop(&failed, UpdateStage::Optional)
+        },
+        &[],
+        &Dismissed::new(),
+        NOW,
+    );
+    let sentence = format!(
+        "SpaceTerm can't replace its installation to install SpaceTerm 0.11.1. {READ_ONLY_REMEDY}"
+    );
+    let item = single(&shown);
+    assert_eq!(item.sentence.as_ref(), sentence);
+    let Some(Command::Explain(explanation)) = item.command else {
+        panic!("the failure explains");
+    };
+    assert_eq!(explanation.message.as_ref(), sentence);
+    assert!(
+        explanation.then.is_none(),
+        "acknowledging keeps the failure"
+    );
+    assert_eq!(shown.desktop_row().unwrap().sentence.as_ref(), sentence);
+    let ExtraItem::Action { subtitle, .. } = &shown.extra_actions()[0] else {
+        panic!("the menu bar extra offers a retry");
+    };
+    assert_eq!(subtitle.as_ref().unwrap().as_ref(), sentence);
+}
+
+#[test]
+fn a_full_disk_asks_for_space() {
+    let failed = UpdateState::Failed {
+        error: UpdateError::DiskFull,
+    };
+    let shown = Presentation::new(
+        DesktopFacts {
+            pending: Some("0.11.1"),
+            ..desktop(&failed, UpdateStage::Optional)
+        },
+        &[],
+        &Dismissed::new(),
+        NOW,
+    );
+    let Some(Command::Explain(explanation)) = single(&shown).command else {
+        panic!("the failure explains");
+    };
+    assert_eq!(
+        explanation.message.as_ref(),
+        "There isn't enough disk space to install SpaceTerm 0.11.1. Free up disk space. \
+         SpaceTerm tries again later."
+    );
+}
+
+/// A newer release this computer's system can't run is never "up to date", and claims no title
+/// bar space, since SpaceTerm can't install it.
+#[test]
+fn a_release_for_a_newer_system_is_never_called_up_to_date() {
+    let failed = UpdateState::Failed {
+        error: UpdateError::SystemTooOld,
+    };
+    let shown = Presentation::new(
+        desktop(&failed, UpdateStage::Optional),
+        &[],
+        &Dismissed::new(),
+        NOW,
+    );
+    assert_eq!(shown.control(), Control::Hidden);
+    assert_eq!(
+        shown.desktop.sentence().as_ref(),
+        "The newest SpaceTerm needs a newer system than this computer runs. Update its \
+         operating system to install it."
+    );
+    assert!(shown.extra_header().line.ends_with("Needs a newer system"));
+}
+
 #[test]
 fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
     for state in [
@@ -757,16 +840,16 @@ fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
         &Dismissed::new(),
         NOW,
     );
-    assert_eq!(single(&shown).label.as_ref(), "Relaunch failed");
+    assert_eq!(single(&shown).label.as_ref(), "Relaunch Failed");
     let Some(Command::Explain(explanation)) = single(&shown).command.clone() else {
         panic!("Relaunch failed explains");
     };
-    // The updater ended its cycle, so only a new check can download the release again.
+    // The updater ended its cycle, so only a new download can install the release.
     assert_eq!(
         explanation.message.as_ref(),
         "SpaceTerm 0.11.1 is downloaded, but SpaceTerm couldn't quit to install it. Your \
-         Terminal Sessions are still running. Choose Check Now in SpaceTerm Settings to download \
-         it again."
+         Terminal Sessions are still running. Choose Download SpaceTerm 0.11.1 to download it \
+         again."
     );
     let held = Presentation::new(
         DesktopFacts {
@@ -933,4 +1016,293 @@ fn a_failure_notice_does_not_hide_a_breaking_restarts_consequences() {
             .message
             .contains("SpaceTerm on old-mini will stop working with penguin until it updates.")
     );
+}
+
+#[test]
+fn a_preview_that_overtakes_the_facts_asks_until_its_consequences_are_known() {
+    // Settings requests Restart Core while another desktop installs a breaking 0.9.1: the
+    // preview names it before the facts do, whether the cache shows no Pending Version or an
+    // older one.
+    for cached in [
+        machine(PENGUIN, "penguin", 0),
+        waiting(machine(PENGUIN, "penguin", 0), NOW - 60),
+    ] {
+        let shown = present(std::slice::from_ref(&cached));
+        let preview = MachinePreview {
+            target: Some(version("0.9.1")),
+            ..crate::updates::machines::testing::preview(PENGUIN, MachineAction::Restart, 0)
+        };
+        let confirmation = shown
+            .previewed(&[preview], false)
+            .expect("an unobserved target may be breaking, so its restart asks");
+        assert_eq!(confirmation.button.as_ref(), "Update Core");
+
+        let mut breaking = waiting(cached.clone(), NOW - 30);
+        let pending = breaking.facts.as_mut().unwrap().pending.as_mut().unwrap();
+        pending.version = version("0.9.1");
+        pending.breaking = true;
+        pending.stranded = vec![StrandedDevice {
+            pairing: [4; 32],
+            name: "old-mini".into(),
+        }];
+        assert!(
+            !confirmation.approval.holds(&[breaking]),
+            "the approval never covered the Paired Devices the breaking facts name"
+        );
+    }
+}
+
+#[test]
+fn background_checks_preserve_problem_states_and_the_local_stop_control() {
+    for mut update in [
+        waiting(machine(LOCAL, "This Mac", 2), NOW - 3 * DAY),
+        {
+            let mut update = machine(LOCAL, "This Mac", 2);
+            update.link = MachineLink::Incompatible(Incompatible::ListenerTooOld);
+            update
+        },
+        {
+            let mut update = waiting(machine(LOCAL, "This Mac", 0), NOW - 120);
+            update.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+                id: 9,
+                at: NOW - 60,
+                version: version("0.9.0"),
+                kind: FailureKind::Start(StartFailure::DiskFull),
+            });
+            update
+        },
+    ] {
+        let before = MachineView::new(&update, &Dismissed::new(), NOW);
+        update.facts.as_mut().unwrap().operation = Some(Operation::Checking);
+        let checking = MachineView::new(&update, &Dismissed::new(), NOW);
+        assert_eq!(checking.state, before.state);
+        assert_eq!(checking.tone(), Tone::Problem);
+        assert!(
+            checking
+                .extra_row()
+                .items
+                .unwrap()
+                .iter()
+                .any(|item| matches!(
+                    item,
+                    ExtraItem::Action {
+                        command: Command::Machine(_, MachineAction::Stop) | Command::Confirm(_),
+                        ..
+                    }
+                ))
+        );
+    }
+}
+
+#[test]
+fn a_too_old_core_keeps_its_problem_tone_after_installing_with_no_sessions() {
+    let mut update = waiting(machine(PENGUIN, "penguin", 0), NOW - 60);
+    update.link = MachineLink::Incompatible(Incompatible::ListenerTooOld);
+    let shown = present(&[update]);
+    let item = single(&shown);
+    assert_eq!(item.tone, Tone::Problem);
+    assert!(item.sentence.contains("can't open Workspaces"));
+    assert_eq!(
+        item.command,
+        Some(Command::Machine(PENGUIN, MachineAction::Restart))
+    );
+}
+
+#[test]
+fn transient_start_failures_keep_an_update_control_without_open_sessions() {
+    for reason in [
+        StartFailure::DiskFull,
+        StartFailure::PortInUse,
+        StartFailure::Interrupted,
+    ] {
+        let mut update = waiting(machine(PENGUIN, "penguin", 0), NOW - 120);
+        update.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+            id: 9,
+            at: NOW - 60,
+            version: version("0.9.0"),
+            kind: FailureKind::Start(reason),
+        });
+        let shown = present(&[update]);
+        assert_eq!(
+            single(&shown).command,
+            Some(Command::Machine(PENGUIN, MachineAction::Restart))
+        );
+    }
+}
+
+#[test]
+fn a_remote_machine_without_actions_has_no_submenu() {
+    let update = machine(PENGUIN, "penguin", 1);
+    let view = MachineView::new(&update, &Dismissed::new(), NOW);
+    assert!(view.extra_row().items.is_none());
+}
+
+#[test]
+fn one_day_old_updates_are_not_overdue() {
+    let shown = Presentation::new(
+        desktop(
+            &UpdateState::Ready {
+                version: "0.9.0".into(),
+            },
+            UpdateStage::Warning,
+        ),
+        &[waiting(machine(PENGUIN, "penguin", 2), NOW - DAY - 60)],
+        &Dismissed::new(),
+        NOW,
+    );
+    assert!(matches!(shown.desktop, DesktopState::Ready { .. }));
+    assert!(matches!(
+        shown.machine(PENGUIN).unwrap().state,
+        MachineState::Ready { .. }
+    ));
+    assert!(shown.reminders().is_empty());
+}
+
+#[test]
+fn a_routine_local_check_keeps_stop_in_the_menu_bar_extra() {
+    let mut update = machine(LOCAL, "This Mac", 0);
+    update.facts.as_mut().unwrap().operation = Some(Operation::Checking);
+    let view = MachineView::new(&update, &Dismissed::new(), NOW);
+    assert!(view.extra_row().items.unwrap().iter().any(|item| matches!(
+        item,
+        ExtraItem::Action {
+            command: Command::Machine(_, MachineAction::Stop),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn clock_and_skipped_intermediate_failures_are_shown_immediately() {
+    for reason in [
+        CheckFailure::ClockBehind,
+        CheckFailure::SteppingStoneSkipped,
+    ] {
+        let mut update = machine(PENGUIN, "penguin", 0);
+        update.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+            since: NOW,
+            last_success: None,
+            reason,
+        };
+        update.facts.as_mut().unwrap().skipped = Some(version("0.9.0"));
+        let shown = present(&[update]);
+        assert!(matches!(
+            shown.machine(PENGUIN).unwrap().state,
+            MachineState::CantCheck { .. }
+        ));
+        if reason == CheckFailure::SteppingStoneSkipped {
+            let item = single(&shown);
+            assert!(item.sentence.contains("SpaceTerm Core 0.9.0"));
+            assert!(matches!(item.command, Some(Command::Explain(_))));
+        }
+    }
+}
+
+#[test]
+fn replacing_a_pending_version_supersedes_a_failure_without_resetting_its_age() {
+    let mut update = waiting(machine(PENGUIN, "penguin", 2), NOW - 120);
+    let facts = update.facts.as_mut().unwrap();
+    facts.pending.as_mut().unwrap().version = version("0.9.1");
+    facts.last_failure = Some(UpdateFailure {
+        id: 1,
+        at: NOW - 60,
+        version: version("0.9.0"),
+        kind: FailureKind::Start(StartFailure::DiskFull),
+    });
+    let shown = present(&[update]);
+    assert!(
+        matches!(&shown.machine(PENGUIN).unwrap().state, MachineState::Ready { to, .. } if to == &version("0.9.1"))
+    );
+}
+
+#[test]
+fn a_replacement_that_installs_on_retry_settles_its_install_failure_but_not_a_start_failure() {
+    for (kind, settled) in [
+        (FailureKind::Install(InstallFailure::DiskFull), true),
+        (FailureKind::Start(StartFailure::DiskFull), false),
+    ] {
+        // 0.9.1 replaced a 0.9.0 waiting since long before its failed first try.
+        let mut update = waiting(machine(PENGUIN, "penguin", 2), NOW - 3_600);
+        let facts = update.facts.as_mut().unwrap();
+        facts.pending.as_mut().unwrap().version = version("0.9.1");
+        facts.last_failure = Some(UpdateFailure {
+            id: 1,
+            at: NOW - 60,
+            version: version("0.9.1"),
+            kind,
+        });
+        let state = present(&[update]).machine(PENGUIN).unwrap().state.clone();
+        assert_eq!(
+            matches!(&state, MachineState::Ready { to, .. } if to == &version("0.9.1")),
+            settled,
+            "{kind:?}: {state:?}"
+        );
+    }
+}
+
+#[test]
+fn an_older_version_installed_after_a_newer_one_failed_keeps_that_failure() {
+    for kind in [
+        FailureKind::Install(InstallFailure::Download),
+        FailureKind::Start(StartFailure::DiskFull),
+    ] {
+        // 0.9.1 failed, then a desktop pushed its 0.9.0, installed after the failure.
+        let mut update = waiting(machine(PENGUIN, "penguin", 2), NOW - 60);
+        update.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+            id: 1,
+            at: NOW - 120,
+            version: version("0.9.1"),
+            kind,
+        });
+        let state = present(&[update]).machine(PENGUIN).unwrap().state.clone();
+        assert!(
+            !matches!(state, MachineState::Ready { .. }),
+            "{kind:?}: {state:?}"
+        );
+    }
+}
+
+/// A known release stays visible, with a Download that only downloads, after Stop Download, a
+/// dismissed failure, a failed check and an offline launch. Nothing says "up to date" then.
+#[test]
+fn a_known_desktop_release_stays_visible_and_its_download_only_downloads() {
+    for state in [
+        UpdateState::Idle,
+        UpdateState::Checking,
+        UpdateState::Failed {
+            error: UpdateError::Check,
+        },
+    ] {
+        let shown = Presentation::new(
+            DesktopFacts {
+                pending: Some("0.11.1"),
+                ..desktop(&state, UpdateStage::Optional)
+            },
+            &[],
+            &Dismissed::new(),
+            NOW,
+        );
+        assert_eq!(
+            shown.desktop,
+            DesktopState::Available {
+                version: "0.11.1".into()
+            },
+            "{state:?}"
+        );
+        assert_ne!(
+            shown.desktop.sentence().as_ref(),
+            "SpaceTerm is up to date."
+        );
+        let item = single(&shown);
+        assert_eq!(item.label.as_ref(), "Download SpaceTerm 0.11.1");
+        assert_eq!(
+            item.command,
+            Some(Command::Desktop(DesktopAction::Download))
+        );
+        let row = shown.desktop_row().expect("Settings shows the release");
+        assert_eq!(
+            row.button.map(|button| button.command),
+            Some(Command::Desktop(DesktopAction::Download))
+        );
+    }
 }

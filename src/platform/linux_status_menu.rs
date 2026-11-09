@@ -25,7 +25,8 @@ const ITEM_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
 
 enum Message {
-    Command(Command),
+    /// A clicked menu row, with the activation token the host provided for the click.
+    Command(Command, Option<String>),
     /// Whether a status-area host now shows the item.
     Hosted(bool),
 }
@@ -38,6 +39,8 @@ struct Published {
     /// Whether the item shows the attention glyph, as the macOS menu bar extra does.
     attention: bool,
     revision: u32,
+    /// The XDG activation token the host provided for the click it is about to deliver.
+    activation: Option<String>,
 }
 
 type Shared = Arc<Mutex<Published>>;
@@ -95,7 +98,7 @@ pub(crate) fn install(
         while let Ok(message) = messages.recv().await {
             cx.update(|cx| match message {
                 Message::Hosted(hosted) => status_menu::set_available(cx, hosted),
-                Message::Command(command) => menu.perform(command, cx),
+                Message::Command(command, activation) => menu.perform(command, activation, cx),
             });
         }
     })
@@ -153,9 +156,16 @@ impl StatusHost for LinuxStatusItem {
         publish(&self.connection, &self.shared, presentation);
     }
 
-    /// A status area has no alerts of its own, so the alert opens in the front Workspace window.
-    fn alert(&self, alert: Alert, answered: Box<dyn FnOnce(bool) + Send>, cx: &mut App) {
-        crate::app::activate_default_window(cx, None);
+    /// A status area has no alerts of its own, so the alert opens in the front Workspace window,
+    /// which comes forward with the click's activation token.
+    fn alert(
+        &self,
+        alert: Alert,
+        activation: Option<String>,
+        answered: Box<dyn FnOnce(bool) + Send>,
+        cx: &mut App,
+    ) {
+        crate::app::activate_default_window(cx, activation.as_deref());
         let Some(handle) = crate::ui::updates::front_workspace_window(cx) else {
             return answered(false);
         };
@@ -297,6 +307,13 @@ impl StatusItem {
 
     // The item is only a menu. Hosts that still send activation get no separate behavior.
     fn activate(&self, _x: i32, _y: i32) {}
+
+    /// Hosts such as GNOME's AppIndicator extension and KDE Plasma provide a token before they
+    /// deliver a click, so the window the click brings forward may take focus on Wayland.
+    fn provide_xdg_activation_token(&self, token: String) {
+        let token = (!token.is_empty() && token.len() <= 4096).then_some(token);
+        lock(&self.shared).activation = token;
+    }
 
     fn secondary_activate(&self, _x: i32, _y: i32) {}
 
@@ -442,10 +459,13 @@ impl Menu {
     }
 
     fn event(&self, id: i32, event_id: &str, _data: OwnedValue, _timestamp: u32) {
-        if event_id == "clicked"
-            && let Some(command) = self.command(id)
-        {
-            self.send(Message::Command(command));
+        if event_id != "clicked" {
+            return;
+        }
+        // A provided token belongs to the next click only.
+        let activation = lock(&self.shared).activation.take();
+        if let Some(command) = self.command(id) {
+            self.send(Message::Command(command, activation));
         }
     }
 
@@ -475,8 +495,13 @@ impl Menu {
 
 #[cfg(test)]
 mod tests {
-    use super::Icons;
+    use super::{ITEM_PATH, Icons, MENU_PATH, Menu, Message, Published, StatusItem};
+    use crate::status_menu::model::{Command, FlatRow};
+    use std::io::{BufRead as _, BufReader};
     use std::path::Path;
+    use std::process::{Child, Command as Process, Stdio};
+    use std::sync::{Arc, Mutex};
+    use zbus::zvariant::Value;
 
     const APPLICATION_ID: &str = "com.peblon.spaceterm";
 
@@ -520,5 +545,96 @@ mod tests {
         let icons = Icons::under(Some(Path::new("/nonexistent/prefix")), APPLICATION_ID);
         assert_eq!(icons.theme_path, "");
         assert_eq!(icons.name(false), "com.peblon.spaceterm-symbolic");
+    }
+
+    /// A session bus of the test's own, so nothing reaches the person's desktop session.
+    struct PrivateBus(Child, String);
+
+    impl PrivateBus {
+        fn new() -> Self {
+            let mut child = Process::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("private session bus");
+            let mut address = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut address)
+                .unwrap();
+            Self(child, address.trim().to_owned())
+        }
+
+        fn connection(&self) -> zbus::blocking::connection::Builder<'_> {
+            zbus::blocking::connection::Builder::address(self.1.as_str()).unwrap()
+        }
+    }
+
+    impl Drop for PrivateBus {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A host that provides an activation token before it delivers a menu click, as GNOME's
+    /// AppIndicator extension does, hands that token to the clicked command. The token belongs
+    /// to that click only.
+    #[test]
+    fn a_tray_click_carries_the_activation_token_the_host_provided() {
+        let bus = PrivateBus::new();
+        let shared = Arc::new(Mutex::new(Published {
+            rows: vec![
+                FlatRow::Text("SpaceTerm".into()),
+                FlatRow::Action {
+                    title: "SpaceTerm Settings…".into(),
+                    command: Command::Settings,
+                },
+            ],
+            revision: 1,
+            ..Published::default()
+        }));
+        let (sender, messages) = async_channel::unbounded();
+        let item = bus
+            .connection()
+            .serve_at(
+                ITEM_PATH,
+                StatusItem {
+                    shared: shared.clone(),
+                    identity: "spaceterm",
+                    icons: Icons::under(None, APPLICATION_ID),
+                },
+            )
+            .unwrap()
+            .serve_at(MENU_PATH, Menu { shared, sender })
+            .unwrap()
+            .build()
+            .unwrap();
+        let host = bus.connection().build().unwrap();
+        let owner = item.unique_name().unwrap().to_owned();
+        let status = zbus::blocking::Proxy::new(
+            &host,
+            owner.as_str(),
+            ITEM_PATH,
+            "org.kde.StatusNotifierItem",
+        )
+        .unwrap();
+        let menu =
+            zbus::blocking::Proxy::new(&host, owner.as_str(), MENU_PATH, "com.canonical.dbusmenu")
+                .unwrap();
+        let click = || {
+            menu.call_method("Event", &(2i32, "clicked", Value::from(0i32), 0u32))
+                .unwrap();
+            match messages.try_recv() {
+                Ok(Message::Command(command, activation)) => (command, activation),
+                _ => panic!("the click reaches the menu's commands"),
+            }
+        };
+
+        status
+            .call_method("ProvideXdgActivationToken", &("tray-token",))
+            .unwrap();
+        assert_eq!(click(), (Command::Settings, Some("tray-token".to_owned())));
+        assert_eq!(click(), (Command::Settings, None));
     }
 }

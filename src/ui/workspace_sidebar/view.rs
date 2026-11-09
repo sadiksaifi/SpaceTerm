@@ -415,10 +415,10 @@ impl WorkspaceSidebar {
         } else {
             crate::ui::workspace_frame::base_surface(&appearance.colors)
         });
-        let workspace_status = binding.as_ref().and_then(|binding| binding.status);
+        let workspace_status = binding.as_ref().and_then(|binding| binding.status.as_ref());
         let (detail, detail_color, detail_selector) = if let Some(status) = workspace_status {
             (
-                status.text.into(),
+                status.label(),
                 // Work in progress keeps the directory's quiet color; only a problem warns.
                 status.warning.then_some(row_colors.warning),
                 Some(format!("workspace-row-status-{}", workspace_id.get())),
@@ -473,7 +473,10 @@ impl WorkspaceSidebar {
             .map_or_else(String::new, |machine| format!(" on {machine}"));
         let accessibility_name = match (workspace_status, remote_status) {
             (Some(status), _) => {
-                format!("Workspace actions for {name}{on_machine}, {}", status.text)
+                format!(
+                    "Workspace actions for {name}{on_machine}, {}",
+                    status.label()
+                )
             }
             (None, Some(status)) if binding.is_none() => {
                 format!("Workspace actions for {name}{on_machine}, connection {status}")

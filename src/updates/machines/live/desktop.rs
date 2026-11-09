@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use spaceterm_core::protocol::capability::Unavailable;
 use spaceterm_core::protocol::version::{self as protocol, Incompatible, ProtocolVersion};
 use spaceterm_core::service::control::Controller;
 use spaceterm_core::service::lane::admin;
@@ -210,8 +211,16 @@ impl Machine for LocalMachine {
                     work,
                     refused: false,
                 },
+                Err(ActionFailure::Unavailable(Unavailable::ClientTooOld)) => {
+                    Reach::Incompatible(Incompatible::CallerTooOld)
+                }
+                Err(ActionFailure::Unavailable(Unavailable::CoreTooOld)) => {
+                    Reach::Incompatible(Incompatible::ListenerTooOld)
+                }
                 Err(_) => Reach::Offline,
             },
+            Err(CoreError::IncompatibleState) => Reach::Incompatible(Incompatible::CallerTooOld),
+            Err(CoreError::IncompatibleProtocol(incompatible)) => Reach::Incompatible(incompatible),
             _ => Reach::Offline,
         }
     }
@@ -295,6 +304,12 @@ impl Machine for PairedMachine {
                 lane: lane as Arc<dyn MachineLane>,
                 refused: true,
             },
+            Err(ActionFailure::Unavailable(Unavailable::ClientTooOld)) => {
+                Reach::Incompatible(Incompatible::CallerTooOld)
+            }
+            Err(ActionFailure::Unavailable(Unavailable::CoreTooOld)) => {
+                Reach::Incompatible(Incompatible::ListenerTooOld)
+            }
             Err(_) => Reach::Offline,
         }
     }
@@ -445,9 +460,15 @@ impl MachineLane for CoreLane {
         let mut session = self.open()?;
         match build {
             Some(build) => push::push(&mut session, build, &mut |_, _| {}).map(drop),
-            None => admin::install_from_feed(&mut session)
-                .map(drop)
-                .map_err(lane_failure),
+            None => match admin::install_from_feed(&mut session) {
+                Ok(_) => Ok(()),
+                Err(LaneError::Code(code)) if code == "version_skipped" => Err(self
+                    .facts()
+                    .ok()
+                    .and_then(|observed| observed.facts.skipped?.release())
+                    .map_or(ActionFailure::Failed, ActionFailure::SteppingStoneSkipped)),
+                Err(error) => Err(lane_failure(error)),
+            },
         }
     }
 
@@ -496,6 +517,18 @@ impl MachineLane for CoreLane {
 }
 
 fn core_failure(error: &CoreError) -> ActionFailure {
+    match error {
+        CoreError::IncompatibleProtocol(incompatible) => {
+            return ActionFailure::Unavailable(match incompatible {
+                Incompatible::CallerTooOld => Unavailable::ClientTooOld,
+                Incompatible::ListenerTooOld => Unavailable::CoreTooOld,
+            });
+        }
+        CoreError::IncompatibleState => {
+            return ActionFailure::Unavailable(Unavailable::ClientTooOld);
+        }
+        _ => {}
+    }
     failure_of_code(spaceterm_core::service::lane_codes::code(error))
 }
 
@@ -576,6 +609,32 @@ mod tests {
                 dialed.fetch_add(1, Ordering::SeqCst);
                 Ok((Arc::new(Lane { major: 1 }) as Arc<dyn MachineLane>, Ok(())))
             }),
+        }
+    }
+
+    #[test]
+    fn incompatible_local_admission_keeps_the_update_direction() {
+        for (failure, expected) in [
+            (CoreError::IncompatibleState, Incompatible::CallerTooOld),
+            (
+                CoreError::IncompatibleProtocol(Incompatible::CallerTooOld),
+                Incompatible::CallerTooOld,
+            ),
+            (
+                CoreError::IncompatibleProtocol(Incompatible::ListenerTooOld),
+                Incompatible::ListenerTooOld,
+            ),
+        ] {
+            let machine = LocalMachine {
+                service: Arc::new(Service(ServiceStatus {
+                    installed: true,
+                    enabled: true,
+                    running: true,
+                    stopped: false,
+                })),
+                connect: Arc::new(move || Err(core_failure(&failure))),
+            };
+            assert!(matches!(machine.reach(), Reach::Incompatible(actual) if actual == expected));
         }
     }
 

@@ -36,7 +36,7 @@ SpaceTerm Core on this machine. [--machine] marks commands that also reach a pai
   status            Show SpaceTerm Core status [--machine]
   start             Start SpaceTerm Core on this machine
   stop              Stop SpaceTerm Core on this machine. Every Terminal Session ends
-  restart           Restart SpaceTerm Core. Every Terminal Session ends [--machine]
+  restart           Restart SpaceTerm Core, or update it to its Pending Version. Every Terminal Session ends [--machine]
   update            Install a SpaceTerm Core update beside the running version [--machine]
   network           Show or change Network Access [--machine]
   pair              Let another device pair with this machine
@@ -151,19 +151,24 @@ pub enum CoreCommand {
     },
     /// Show SpaceTerm Core status.
     ///
-    /// Its service, version, Network Access and paired devices, on this machine or with
-    /// --machine on a paired one.
+    /// Its service, version, Pending Version, update checks and failures, Network Access and
+    /// Paired Devices, on this machine or with --machine on a paired one.
     Status,
     /// Start SpaceTerm Core on this machine.
     Start,
     /// Stop SpaceTerm Core on this machine. Every Terminal Session ends.
     Stop(Confirm),
-    /// Restart SpaceTerm Core. Every Terminal Session ends.
+    /// Restart SpaceTerm Core, or update it to its Pending Version. Every Terminal Session ends.
+    ///
+    /// With a Pending Version installed, SpaceTerm Core restarts into it. Otherwise it restarts
+    /// the running version. Workspaces, Tabs and Panes stay, and each Pane starts a new shell
+    /// when you select it.
     Restart(Confirm),
     /// Install a SpaceTerm Core update beside the running version.
     ///
-    /// Installing ends nothing. Restart SpaceTerm Core to use the new version. The desktop
-    /// updates itself.
+    /// Installing ends nothing. SpaceTerm Core updates to the new version by itself once no
+    /// Terminal Session is open, unless the version changes a protocol major. To update now,
+    /// run `spaceterm restart`, which ends every Terminal Session. The desktop updates itself.
     Update {
         /// Install this signed SpaceTerm Core archive instead of the release the feed names.
         #[arg(long, value_name = "FILE", requires = "signature")]

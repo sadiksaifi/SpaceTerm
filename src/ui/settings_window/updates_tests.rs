@@ -231,8 +231,13 @@ fn an_acknowledged_relaunch_failure_still_relaunches_from_settings(cx: &mut Test
     );
     assert_eq!(status.button.as_ref(), "Try Again");
 
+    let before = quits.get();
     click(RESTART_SELECTOR, cx);
-    assert_eq!(quits.get(), 1, "Try Again quits into the held installer");
+    assert_eq!(
+        quits.get(),
+        before + 1,
+        "Try Again quits into the held installer"
+    );
     assert!(
         cx.update(|_, cx| crate::updates::relaunch_approval(cx))
             .is_some()

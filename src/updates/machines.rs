@@ -34,7 +34,7 @@ pub(crate) struct MachineUpdate {
     pub(crate) facts: Option<UpdateFacts>,
     pub(crate) capabilities: Capabilities,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
-    /// `facts.running` and not `facts.skipped`. It drives "Update from This Mac".
+    /// `facts.running` and not `facts.skipped`. It drives "Update {Machine}".
     pub(crate) push: Option<Version>,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
     /// every version the Core has and not `facts.skipped`, whether or not its Update Floor
@@ -97,6 +97,12 @@ pub(crate) enum ActionFailure {
     /// This Mac's Core is off in Login Items, so it refused to start. Only the person turns it on,
     /// there, and the surface opens that list instead of explaining a failure.
     LoginItemOff,
+    /// The running app's embedded Core was replaced on disk.
+    RelaunchRequired,
+    ClockBehind,
+    SteppingStoneSkipped([u64; 3]),
+    /// The Machine must fetch this release before it can accept the bundled Core.
+    NeedsFloor(spaceterm_core::update::ordering::Floor),
     Failed,
 }
 

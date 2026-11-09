@@ -396,7 +396,7 @@ pub(super) fn present(status: LocalCoreStatus) -> LocalCorePresentation {
                     CaptionTone::Error,
                 ),
                 CoreError::ActivationUnresolved => guidance(
-                    "Choose Finish Update to complete the SpaceTerm Core update and reconnect.",
+                    "Choose Check Now to check whether the SpaceTerm Core update finished.",
                 ),
                 // Another service operation is still running. It is not a fault.
                 CoreError::ServiceBusy => guidance(
@@ -483,7 +483,7 @@ fn failure(error: CoreError) -> (&'static str, &'static str, bool) {
         // Only a fresh SpaceTerm process uses its replaced installation's server package, so
         // checking again from this one says nothing new.
         CoreError::CandidateChanged => (
-            "Restart SpaceTerm",
+            "Relaunch SpaceTerm",
             "settings-local-server-state-candidate-changed",
             false,
         ),
@@ -553,7 +553,7 @@ fn failure(error: CoreError) -> (&'static str, &'static str, bool) {
         // answers afresh.
         CoreError::Direct(_) => ("Refused", "settings-local-server-state-direct", true),
         // An update the person confirmed has not resolved, so the server admits no connection
-        // until Finish Update resolves it. A check reports whether it has since.
+        // until the update resolves. A check reports whether it has since.
         CoreError::ActivationUnresolved => (
             "Update unfinished",
             "settings-local-server-state-update-unfinished",

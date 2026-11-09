@@ -1775,11 +1775,8 @@ fn command_q_without_a_status_area_confirms_actual_exit(cx: &mut TestAppContext)
     let (title, detail) = cx.pending_prompt().expect("actual exit always asks");
     assert_eq!(title, format!("Quit {name}?"));
     assert_eq!(
-        detail,
-        format!(
-            "{name} leaves the menu bar. Your Terminal Sessions keep running, so everything is where you left it."
-        ),
-        "the installed-build quit prompt says what keeps running"
+        detail, "Your Terminal Sessions keep running, so everything is where you left it.",
+        "with no status area, the quit prompt names only what keeps running"
     );
     cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();

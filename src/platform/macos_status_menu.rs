@@ -6,7 +6,10 @@
 use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
 use crate::status_menu::{
     self, Alert, StatusHost, StatusMenu,
-    model::{Command, HEADER_TITLE, MachineKind, MachineRow, Menu, QUIT_TITLE, SETTINGS_TITLE},
+    model::{
+        Command, HEADER_TITLE, MachineKind, MachineRow, Menu, QUIT_TITLE, RECENT_TITLE,
+        SETTINGS_TITLE,
+    },
 };
 use crate::updates::presentation::{ExtraItem, ExtraTile, Tone};
 use block2::RcBlock;
@@ -35,7 +38,6 @@ type Sender = async_channel::Sender<Command>;
 
 /// The section label over the Machine rows, as Bluetooth labels "Devices".
 const MACHINES_TITLE: &str = "Machines";
-const RECENT_TITLE: &str = "Recent Updates";
 
 /// The brand's 16-point menu bar glyph, and the variant that marks the outer orbit when an item
 /// needs attention. Both are templates, so AppKit tints them for the menu bar's appearance.
@@ -73,7 +75,7 @@ pub(crate) fn install(
     let menu = StatusMenu::install(item, cx);
     cx.spawn(async move |cx| {
         while let Ok(command) = messages.recv().await {
-            cx.update(|cx| menu.perform(command, cx));
+            cx.update(|cx| menu.perform(command, None, cx));
         }
     })
     .detach();
@@ -141,7 +143,13 @@ impl StatusHost for StatusItem {
         button.setToolTip(Some(&summary));
     }
 
-    fn alert(&self, alert: Alert, answered: Box<dyn FnOnce(bool) + Send>, cx: &mut App) {
+    fn alert(
+        &self,
+        alert: Alert,
+        _activation: Option<String>,
+        answered: Box<dyn FnOnce(bool) + Send>,
+        cx: &mut App,
+    ) {
         let alert = native_alert(&alert, self.mtm);
         present(alert, self.activation, cx.windows().is_empty(), answered);
     }

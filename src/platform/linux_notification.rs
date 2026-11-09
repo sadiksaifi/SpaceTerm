@@ -484,27 +484,49 @@ impl LinuxUpdateReminders {
 }
 
 impl crate::updates::reminders::UpdateReminderAdapter for LinuxUpdateReminders {
-    /// Follows ActionInvoked for the reminders' own ids. Another service's signal, or one for an
-    /// id this service did not show, is ignored.
-    fn activations(&self, activated: async_channel::Sender<String>) {
+    /// Follows ActionInvoked for the reminders' own ids, with the ActivationToken the service
+    /// sends just before it, so the window that answers the click can come forward on Wayland.
+    /// Another service's signal, or one for an id this service did not show, is ignored.
+    fn activations(
+        &self,
+        activated: async_channel::Sender<crate::updates::reminders::ReminderClick>,
+    ) {
         let Some(bus) = &self.bus else { return };
         let Some(rule) = zbus::MatchRule::builder()
             .msg_type(zbus::message::Type::Signal)
             .path(PATH)
             .ok()
             .and_then(|rule| rule.interface(NAME).ok())
-            .and_then(|rule| rule.member("ActionInvoked").ok())
             .map(|rule| rule.build().to_owned())
         else {
             return;
         };
         let shown = Arc::clone(&self.shown);
+        // The token of the click being delivered, by notification id.
+        let mut token: Option<(u32, String)> = None;
         let subscription = bus.subscribe(rule.into(), move |message| {
-            if let Ok((id, action)) = message.body().deserialize::<(u32, String)>()
-                && action == "default"
-                && let Some(key) = lock_shown(&shown).remove(&id)
-            {
-                let _ = activated.try_send(key);
+            match message.header().member().map(|name| name.as_str()) {
+                Some("ActivationToken") => {
+                    if let Ok((id, value)) = message.body().deserialize::<(u32, String)>()
+                        && lock_shown(&shown).contains_key(&id)
+                        && !value.is_empty()
+                        && value.len() <= 4096
+                    {
+                        token = Some((id, value));
+                    }
+                }
+                Some("ActionInvoked") => {
+                    if let Ok((id, action)) = message.body().deserialize::<(u32, String)>()
+                        && action == "default"
+                        && let Some(key) = lock_shown(&shown).remove(&id)
+                    {
+                        let token = token
+                            .take()
+                            .and_then(|(owner, value)| (owner == id).then_some(value));
+                        let _ = activated.try_send((key, token));
+                    }
+                }
+                _ => {}
             }
         });
         *self._subscription.borrow_mut() = subscription.ok();

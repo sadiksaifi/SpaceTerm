@@ -69,19 +69,33 @@ pub(crate) const STATE: Registry = Registry {
         // Core's account-wide client records can predate a fresh desktop data directory.
         // Their strict format readers, rather than this desktop's marker, admit them.
         current_unmarked: |path| path.starts_with("core/"),
-        artifacts: &[ArtifactRule {
-            matches: |path| {
-                path.strip_prefix("data/background-image-")
-                    .is_some_and(|digest| {
-                        digest.len() == 64
-                            && digest
-                                .bytes()
-                                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                    })
+        artifacts: &[
+            ArtifactRule {
+                matches: |path| {
+                    path.strip_prefix("data/background-image-")
+                        .is_some_and(|digest| {
+                            digest.len() == 64
+                                && digest.bytes().all(|byte| {
+                                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                                })
+                        })
+                },
+                kind: DataKind::BackgroundImages,
+                current: true,
             },
-            kind: DataKind::BackgroundImages,
-            current: true,
-        }],
+            // A client's Pane restart facts only explain presentation. Their store reads an
+            // unreadable copy as empty, so admission never reads them, and a reset of the
+            // client's view takes them along.
+            ArtifactRule {
+                matches: |path| {
+                    path.starts_with("core/")
+                        && path.rsplit('/').next()
+                            == Some(spaceterm_core::client_view::PANE_RESTARTS)
+                },
+                kind: DataKind::View,
+                current: true,
+            },
+        ],
     },
     generations: generations::DESKTOP_STATE,
     steps: &[],

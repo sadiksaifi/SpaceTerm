@@ -10,13 +10,15 @@ pub struct ProtocolVersion {
     pub minor: u16,
 }
 
-/// This build's work protocol version. Each version is 1.0 at the first release.
-pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+/// This build's work protocol version. Each version is 1.0 at the first release. Work 1.1 adds
+/// the update fact values of [`crate::update::facts::MINOR_RESTART_FACTS`].
+pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
 // The build document's major is the work major.
 const _: () = assert!(super::MAJOR == WORK.major);
 
-/// This build's service lane version.
-pub const SERVICE: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+/// This build's service lane version. Service 1.1 adds the update fact values of
+/// [`crate::update::facts::MINOR_RESTART_FACTS`] and the `clock_behind` code.
+pub const SERVICE: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
 /// This build's Desktop Channel version.
 pub const DESKTOP_CHANNEL: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
 

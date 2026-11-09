@@ -1331,9 +1331,12 @@ pub(super) fn present(
         }
         state.retry.store(false, Ordering::Release);
         let mut connected_link = None;
+        state.begin_restart_wait();
         let connected = (|| {
             let link = if core.is_account_local() {
-                core.link_cancellable(&|| !alive.load(Ordering::Acquire))?
+                core.link_cancellable(&|| {
+                    !alive.load(Ordering::Acquire) || state.restart_expired()
+                })?
             } else {
                 // The saved route owns paired dials and their backoff. A Pane neither dials
                 // nor queues behind the owner, and can close while its probe is in flight.

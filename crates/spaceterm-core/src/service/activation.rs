@@ -80,7 +80,7 @@ impl ActivationApproval {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Step {
     Admitted,
@@ -163,13 +163,50 @@ pub(super) struct Operation {
     step: Step,
     /// The digest of the retained-state snapshot taken once the server was quiescent.
     saved: Option<[u8; 32]>,
-    /// Unix seconds when the candidate's Start was dispatched, for the readiness deadline.
+    /// Unix seconds when the last Start was dispatched. Every runtime an update moves between
+    /// reads this record, so its fields stay as they are. The readiness deadline does not read
+    /// this time: the process that watches a Start keeps it in [`watches`].
     started_at: Option<u64>,
     ready: bool,
     failed: bool,
     /// Why the candidate did not become ready, once the return began.
     failure: Option<StartFailure>,
 }
+/// A Start this process dispatched, or took over watching from a process that ended.
+struct Watch {
+    /// When the readiness window began, on the monotonic clock that stops while the computer
+    /// sleeps and ignores clock changes.
+    since: Instant,
+    /// A reboot, logout or crash ended the process that dispatched the Start, so its readiness
+    /// was never measured. A miss then says nothing about the version.
+    resumed: bool,
+}
+
+/// The Starts this process watches, by activation and step.
+type Watches = std::collections::HashMap<([u8; 32], Step), Watch>;
+
+/// [`Watches`] of this process. They stay out of the journal: the previous and the next
+/// runtime of an update both read it, so its shape never changes, and no other process can
+/// read this process's clock.
+fn watches() -> std::sync::MutexGuard<'static, Watches> {
+    static WATCHES: std::sync::OnceLock<std::sync::Mutex<Watches>> = std::sync::OnceLock::new();
+    WATCHES
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// This process dispatched the Start that moved activation `id` to `step` now.
+fn dispatched(id: [u8; 32], step: Step) {
+    watches().insert(
+        (id, step),
+        Watch {
+            since: Instant::now(),
+            resumed: false,
+        },
+    );
+}
+
 /// How an activation ended, as the update record must name it.
 pub(super) enum Outcome<'a> {
     /// The candidate became ready and runs now.
@@ -210,6 +247,16 @@ impl Operation {
     pub(super) fn pending(&self) -> bool {
         !matches!(self.step, Step::Completed | Step::Returned)
     }
+    /// The digests of the installations the activation moves between: the previous one, then
+    /// the candidate.
+    pub(super) fn installations(&self) -> [&str; 2] {
+        [&self.previous.digest, &self.candidate.digest]
+    }
+    /// Whether the activation may still return to its previous installation, which therefore
+    /// stays on disk.
+    pub(super) fn retains_previous(&self) -> bool {
+        self.pending() || (self.step == Step::Completed && !self.ready)
+    }
     pub(super) fn settled(&self) -> bool {
         matches!(self.step, Step::Returned) || (!self.pending() && !self.failed)
     }
@@ -227,6 +274,9 @@ impl Operation {
         if returning {
             self.step = Step::StartFailed;
             self.stopped = stopped;
+            // The caller ran that Start and watched it fail, so the failure measured the
+            // version.
+            dispatched(self.id, Step::StartDispatched);
         }
         returning
     }
@@ -444,9 +494,18 @@ impl Service {
             (Step::Completed, _) => running()
                 .map(|running| ActivationPhase::Completed { running })
                 .unwrap_or(ActivationPhase::Uncertain),
-            (Step::Returned, Some(failure)) => running()
-                .map(|running| ActivationPhase::Returned { failure, running })
-                .unwrap_or(ActivationPhase::Uncertain),
+            (Step::Returned, Some(failure)) => {
+                // The journal names an interruption as a failure every runtime knows; the
+                // update record keeps what it was.
+                let failure = if runtime::updates::interrupted(data, operation.id) {
+                    StartFailure::Interrupted
+                } else {
+                    failure
+                };
+                running()
+                    .map(|running| ActivationPhase::Returned { failure, running })
+                    .unwrap_or(ActivationPhase::Uncertain)
+            }
             _ if operation.failed => ActivationPhase::Uncertain,
             _ => ActivationPhase::Activating,
         };
@@ -564,6 +623,7 @@ impl Service {
                         operation.step = Step::StartDispatched;
                         operation.started_at = Some(unix_now());
                     })?;
+                    dispatched(operation.id, Step::StartDispatched);
                     if self.supervisor.start().is_err() {
                         // The candidate may have become ready before its Start reported failure.
                         self.transition(
@@ -597,6 +657,8 @@ impl Service {
                         runtime::updates::record_completed(data, &operation.candidate.digest)?;
                         remove_snapshot(data)?;
                         self.supervisor.disarm_recovery()?;
+                        // No return is left, so the previous installation goes.
+                        let _ = runtime::updates::retire_obsolete(self);
                     }
                     return policy;
                 }
@@ -615,7 +677,13 @@ impl Service {
                 }
                 Step::ReturnStopDispatched => {
                     self.wait_quiescent(data, &operation, operation.candidate_run.as_ref(), true)?;
-                    let failure = self.classify();
+                    // Only a Start this process watched to its end measured the version. A
+                    // helper that resumes the return after a reboot, logout or crash finds no
+                    // watch, so the version stays pending.
+                    let resumed = watches()
+                        .get(&(operation.id, Step::StartDispatched))
+                        .is_none_or(|watch| watch.resumed);
+                    let failure = self.classify(resumed);
                     let _intent = data.lock("service-intent.lock", false)?;
                     state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
                     let _writes = data
@@ -641,7 +709,24 @@ impl Service {
                         .as_mut()
                         .ok_or(CoreError::ActivationUnresolved)?;
                     current.step = Step::ReturnApproved;
-                    current.failure = Some(failure);
+                    // The runtime this returns to reads the journal and the update record, and
+                    // one of 0.11.2 or earlier knows no `Interrupted`. The update record keeps
+                    // the interruption where only this runtime reads it, before the journal
+                    // names a transient failure every runtime knows, so whichever runtime
+                    // applies the journal's outcome finds it already recorded.
+                    if failure == StartFailure::Interrupted {
+                        runtime::updates::record_start_failure(
+                            data,
+                            operation.id,
+                            &operation.candidate.digest,
+                            &operation.candidate.version,
+                            failure,
+                        )?;
+                    }
+                    current.failure = Some(match failure {
+                        StartFailure::Interrupted => StartFailure::PortInUse,
+                        failure => failure,
+                    });
                     data.write_json(c"service.json", &state)?;
                     runtime::updates::record_start_failure(
                         data,
@@ -664,6 +749,7 @@ impl Service {
                         operation.step = Step::ReturnStartDispatched;
                         operation.started_at = Some(unix_now());
                     })?;
+                    dispatched(operation.id, Step::ReturnStartDispatched);
                     self.supervisor.start()?;
                     if let Err(error) = self.supervisor.set_automatic_start(state.automatic_start) {
                         policy = Err(error);
@@ -680,6 +766,8 @@ impl Service {
                     self.repoint_cli_locked(&self.runtime(&state));
                     remove_snapshot(data)?;
                     self.supervisor.disarm_recovery()?;
+                    // A skipped candidate goes; one that stays pending stays.
+                    let _ = runtime::updates::retire_obsolete(self);
                     return policy;
                 }
             }
@@ -687,16 +775,24 @@ impl Service {
     }
     /// Waits until the started server's own run moves `operation` on from `step`, or until the
     /// readiness deadline from its dispatch. Returns whether it moved on.
+    ///
+    /// The deadline runs on this process's monotonic clock. A Start that another process watched
+    /// was interrupted by a reboot, logout or crash, so its window starts again now, and a miss
+    /// counts as [`StartFailure::Interrupted`], never as a version that is not ready.
     fn await_step(
         &self,
         data: &Directory,
         operation: &Operation,
         step: Step,
     ) -> Result<bool, CoreError> {
-        let deadline = operation
-            .started_at
-            .unwrap_or(0)
-            .saturating_add(self.supervisor.ready_deadline().as_secs());
+        let deadline = watches()
+            .entry((operation.id, step))
+            .or_insert_with(|| Watch {
+                since: Instant::now(),
+                resumed: true,
+            })
+            .since
+            + self.supervisor.ready_deadline();
         loop {
             let current = Self::state(data)?
                 .and_then(|state| state.activation)
@@ -705,7 +801,7 @@ impl Service {
             if current != Some(step) {
                 return Ok(true);
             }
-            if unix_now() >= deadline {
+            if Instant::now() >= deadline {
                 return Ok(false);
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -749,9 +845,9 @@ impl Service {
             }
         }
     }
-    /// Why the candidate did not become ready. Disk full and a network port another program
-    /// holds are transient: they say nothing about the version.
-    fn classify(&self) -> StartFailure {
+    /// Why the candidate did not become ready. Disk full, a network port another program holds
+    /// and a `resumed` watch are transient: they say nothing about the version.
+    fn classify(&self, resumed: bool) -> StartFailure {
         if runtime::updates::storage_full(&self.paths.data, 64 * 1024 * 1024) {
             return StartFailure::DiskFull;
         }
@@ -760,6 +856,9 @@ impl Service {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
         {
             return StartFailure::PortInUse;
+        }
+        if resumed {
+            return StartFailure::Interrupted;
         }
         StartFailure::NotReady
     }
@@ -817,12 +916,6 @@ impl Service {
         operation.failed = false;
         data.write_json(c"service.json", &state)
     }
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
 }
 
 /// Copies the retained state beside itself and returns the copy's digest.
@@ -963,4 +1056,10 @@ pub(super) fn admit_run(state: &mut State, run: &Run) -> Result<(), CoreError> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}

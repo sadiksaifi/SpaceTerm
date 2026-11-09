@@ -1,5 +1,6 @@
 //! The client's bounded connected intent, separate from the transport's durable Original Operation.
 use super::core_workspaces::{WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason};
+use crate::terminal::core_session::restart::RECONNECT_LIMIT;
 use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_core::hierarchy::{
     CloseTarget, Id, Inventory, Mutation, Outcome, Pane, PaneDestination, RetainedOutcome, Side,
@@ -7,6 +8,7 @@ use spaceterm_core::hierarchy::{
 };
 use spaceterm_core::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
+use std::time::Instant;
 
 const CAPACITY: usize = 32;
 type Reply = async_channel::Sender<Result<RetainedOutcome, WorkspaceRefusalReason>>;
@@ -65,9 +67,34 @@ pub(super) struct PendingEdits {
     retiring: Vec<Id>,
     observed: Option<u64>,
     pub disconnected: bool,
+    waiting_for_restart: bool,
+    /// When the intents retained for a Core restart stop waiting, counted from the moment the
+    /// wait began. It stays while the restart facts last, so an expired wait does not start again.
+    restart_deadline: Option<Instant>,
 }
 
 impl PendingEdits {
+    /// Follows a Core restart at `now`. Intents wait for the reconnect until
+    /// [`RECONNECT_LIMIT`] after the wait began, and are refused once it passes, even when fresh
+    /// facts no longer report the restart. Returns the deadline while intents wait.
+    pub fn follow_restart(&mut self, restarting: bool, now: Instant) -> Option<Instant> {
+        let expired = self
+            .restart_deadline
+            .is_some_and(|deadline| now >= deadline);
+        if expired && self.waiting_for_restart {
+            self.waiting_for_restart = false;
+            self.disconnect();
+        }
+        if !restarting {
+            self.restart_deadline = None;
+            self.waiting_for_restart = false;
+            return None;
+        }
+        let deadline = *self.restart_deadline.get_or_insert(now + RECONNECT_LIMIT);
+        self.waiting_for_restart = !expired;
+        self.waiting_for_restart.then_some(deadline)
+    }
+
     pub fn full(&self) -> bool {
         self.edits.len() + self.completed.len() + self.close_intents.len() + self.unread_conflicts
             >= CAPACITY
@@ -170,29 +197,39 @@ impl PendingEdits {
             .any(|ids| ids.ids().any(|created| created == id))
     }
 
-    /// Retains an unapproved close only while its exact target depends on creation.
+    /// Retains an unapproved close while its Core restarts or its target depends on creation.
     pub fn defer_close(
         &mut self,
         intent: WorkspaceCloseIntent,
     ) -> Result<bool, WorkspaceRefusalReason> {
+        if !self.waiting_for_restart
+            && !close_references(intent.core)
+                .iter()
+                .any(|id| self.provisional(*id))
+        {
+            return Ok(false);
+        }
+        self.queue_close(intent)?;
+        Ok(true)
+    }
+
+    /// Retains a close that must capture fresh confirmation after reconnecting.
+    pub fn queue_close(
+        &mut self,
+        intent: WorkspaceCloseIntent,
+    ) -> Result<(), WorkspaceRefusalReason> {
         if self
             .close_intents
             .iter()
             .any(|pending| pending.core == intent.core)
         {
-            return Ok(true);
-        }
-        if !close_references(intent.core)
-            .iter()
-            .any(|id| self.provisional(*id))
-        {
-            return Ok(false);
+            return Ok(());
         }
         if self.full() {
             return Err(WorkspaceRefusalReason::Pending);
         }
         self.close_intents.push_back(intent);
-        Ok(true)
+        Ok(())
     }
 
     pub fn take_close_intent(&mut self) -> Option<WorkspaceCloseIntent> {
@@ -318,6 +355,13 @@ impl PendingEdits {
                 .front()
                 .is_some_and(|edit| edit.dispatched && &edit.mutation == rejected)
         {
+            if self.waiting_for_restart {
+                self.edits
+                    .front_mut()
+                    .expect("matched rejected operation")
+                    .dispatched = false;
+                return owned;
+            }
             let edit = self.edits.pop_front().expect("matched rejected operation");
             if let Some(reply) = edit.reply {
                 let _ = reply.try_send(Err(WorkspaceRefusalReason::Offline));
@@ -434,6 +478,9 @@ impl PendingEdits {
     }
 
     pub fn disconnect(&mut self) {
+        if self.waiting_for_restart {
+            return;
+        }
         let before = self.edits.len();
         let had_close_intents = !self.close_intents.is_empty();
         self.close_intents.clear();

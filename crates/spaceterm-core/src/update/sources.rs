@@ -52,6 +52,8 @@ pub trait Engine: Send + Sync {
         total: u64,
     ) -> Result<Self::Installing, InstallError>;
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError>;
+    /// Whether `candidate` is a version the Core installs, whatever update operation runs now.
+    fn admits_version(&self, candidate: &Candidate) -> Result<(), InstallError>;
     /// Busy while another install, check or restart owns the update operation.
     fn begin_check(&self) -> Result<Self::Checking<'_>, InstallError>;
     /// Whether the Core runs a Stepping Stone its feed check installed and has not checked
@@ -99,6 +101,9 @@ impl Engine for Updates {
     }
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError> {
         Updates::install(self, archive)
+    }
+    fn admits_version(&self, candidate: &Candidate) -> Result<(), InstallError> {
+        Updates::admits_version(self, candidate)
     }
     fn begin_check(&self) -> Result<updates::Checking<'_>, InstallError> {
         Updates::begin_check(self)
@@ -173,6 +178,8 @@ impl SourceError {
             Self::Check(CheckFailure::Proxy) => "proxy_unreachable",
             Self::Check(CheckFailure::Verification) => "candidate_unverified",
             Self::Check(CheckFailure::SystemTooOld) => "system_too_old",
+            Self::Check(CheckFailure::ClockBehind) => crate::service::lane::CLOCK_BEHIND,
+            Self::Check(CheckFailure::SteppingStoneSkipped) => "version_skipped",
             Self::Install(error) => install_code(error),
             Self::Protocol => "protocol_error",
         }
@@ -298,8 +305,12 @@ impl FeedCheck {
         let next = feed::walk(&running, |release| {
             let signed = source.feed(self.target, release).map_err(check_failure)?;
             let trust = self.trust.as_ref().ok_or(CheckFailure::Verification)?;
-            feed::read(self.target, &signed.feed, &signed.signature, trust, at)
-                .map_err(|_| CheckFailure::Verification)
+            feed::read(self.target, &signed.feed, &signed.signature, trust, at).map_err(|error| {
+                match error {
+                    feed::FeedError::ClockBehind => CheckFailure::ClockBehind,
+                    _ => CheckFailure::Verification,
+                }
+            })
         })
         .and_then(|next| next.ok_or(CheckFailure::Verification));
         let (verified, stepping_stone) = match next {
@@ -310,6 +321,12 @@ impl FeedCheck {
         };
         match checking.admits(&verified.candidate()) {
             Ok(()) => {}
+            // The newest release waits behind a Stepping Stone that failed to start, so the
+            // Core can't reach it. That is no current Core.
+            Err(InstallError::Skipped) if stepping_stone => {
+                return finish(&checking, Err(CheckFailure::SteppingStoneSkipped))
+                    .map(|()| Outcome::Current);
+            }
             Err(InstallError::NotNewer | InstallError::Skipped) => {
                 return finish(&checking, Ok(())).map(|()| Outcome::Current);
             }
@@ -438,9 +455,15 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The pushes a running Core receives over its service lane: a desktop's embedded build, or a
-/// local archive the CLI sends. One push at a time; a new one replaces an unfinished one, and a
-/// push whose connection closes ends with it. A push that breaks off tells its sender alone; the
-/// Core records a failure only for a completed push that fails verification.
+/// local archive the CLI sends. One push at a time. A push whose connection closes ends with it.
+/// A push that breaks off tells its sender alone; the Core records a failure only for a completed
+/// push that fails verification.
+///
+/// Two desktops may push to one Machine at once. A newer version replaces an unfinished push,
+/// whose next chunk then fails `changed`, because the Machine no longer needs it. A push of the
+/// same or an older version waits: it fails `service_busy` while the unfinished one still
+/// receives, and its sender tries again later. An unfinished push that received nothing for
+/// [`PUSH_IDLE`] is abandoned, and any push replaces it.
 pub struct Pushes {
     data: PathBuf,
     slot: Mutex<Option<Push>>,
@@ -455,9 +478,21 @@ pub enum Received {
     Installed(PendingVersion),
 }
 
+/// Whether release `version` is newer than release `than`. Development versions have no order.
+fn newer(version: &super::facts::Version, than: &super::facts::Version) -> bool {
+    matches!((version.release(), than.release()), (Some(a), Some(b)) if a > b)
+}
+
+/// How long an unfinished push may receive nothing before another push may replace it.
+pub const PUSH_IDLE: Duration = Duration::from_secs(60);
+
 struct Push {
     id: String,
     connection: u64,
+    /// The version it installs.
+    version: super::facts::Version,
+    /// When its last chunk, or its start, arrived.
+    received: std::time::Instant,
     length: u64,
     sha256: [u8; 32],
     next: u64,
@@ -520,8 +555,19 @@ impl Pushes {
             return Err(SourceError::Protocol);
         }
         let mut slot = self.slot();
-        // A new push replaces an unfinished one, which records nothing.
+        // A newer version replaces an unfinished push, which records nothing. Any other waits
+        // for it, unless it stalled.
+        if let Some(unfinished) = slot.as_ref() {
+            if unfinished.received.elapsed() < PUSH_IDLE
+                && !newer(candidate.version(), &unfinished.version)
+            {
+                return Err(SourceError::Install(InstallError::Busy));
+            }
+            // A version the Core refuses replaces nothing.
+            engine.admits_version(&candidate)?;
+        }
         *slot = None;
+        let candidate_version = candidate.version().clone();
         let installing: Box<dyn BoxedInstalling> =
             Box::new(engine.begin_install(candidate, length)?);
         let staging = Staging::create(&self.data)?;
@@ -531,6 +577,8 @@ impl Pushes {
         *slot = Some(Push {
             id: id.clone(),
             connection,
+            version: candidate_version,
+            received: std::time::Instant::now(),
             length,
             sha256,
             next: 0,
@@ -565,6 +613,7 @@ impl Pushes {
         }
         push.digest.update(data);
         push.next += data.len() as u64;
+        push.received = std::time::Instant::now();
         if push.next < push.length {
             if push.reported.elapsed() >= PROGRESS_INTERVAL {
                 push.reported = std::time::Instant::now();
@@ -657,10 +706,95 @@ impl<P: Fn(u64)> Write for Digesting<'_, P> {
     }
 }
 
-/// One install's private files in `<data>/staging`, removed when it ends.
+/// Removes the files in `<data>/staging` whose install ended without removing them, as a crash
+/// leaves them. A live install of this release holds its owner lock, in this process or
+/// another, such as a stopped Core's CLI downloading from the feed, so its files stay. An
+/// install of an earlier release takes no owner lock and leaves no other sign that it ended,
+/// so its files stay here; [`clear_unowned_staging`] removes them once no such release can
+/// run.
+pub(crate) fn clear_staging(data: &Path) {
+    let directory = data.join("staging");
+    let Ok(staging) = crate::storage::Directory::open(&directory, false) else {
+        return;
+    };
+    for id in staged_ids(&directory) {
+        let names = Staging::names(&id);
+        let [_, _, owner] = &names;
+        // Taking a lock creates its file, so only a lock file that exists proves an owner, and
+        // only a free one proves that owner ended.
+        let ended = directory.join(owner).exists()
+            && staging.try_lock(owner).is_ok_and(|lock| lock.is_some());
+        if ended {
+            for name in &names {
+                let _ = std::fs::remove_file(directory.join(name));
+            }
+        }
+    }
+}
+
+/// The lock every CLI command of 0.11.2 and later holds shared on its state root until it
+/// ends, and alone only to migrate or reset it.
+const CLI_STATE_LOCK: &str = "state.lock";
+
+/// Removes the files in `<data>/staging` of installs without an owner lock, while holding the
+/// lock of the CLI state root `cli_state` alone. Only an offline install by the CLI of a
+/// release before this one writes those, and every such CLI command holds that lock shared,
+/// so none of them runs. The caller first proves that no such CLI can start. Returns whether
+/// it ran; a CLI command that holds the lock leaves the files for a later call.
+pub(crate) fn clear_unowned_staging(data: &Path, cli_state: &Path) -> bool {
+    let directory = data.join("staging");
+    if crate::storage::Directory::open(&directory, false).is_err() {
+        return true;
+    }
+    // A CLI that never ran has no state root, so no CLI command runs.
+    let _commands = match crate::storage::Directory::open(cli_state, false) {
+        Ok(state) => match state.try_lock(CLI_STATE_LOCK) {
+            Ok(Some(lock)) => Some(lock),
+            _ => return false,
+        },
+        Err(CoreError::NotSetUp) => None,
+        Err(_) => return false,
+    };
+    for id in staged_ids(&directory) {
+        let names = Staging::names(&id);
+        if !directory.join(&names[2]).exists() {
+            for name in &names {
+                let _ = std::fs::remove_file(directory.join(name));
+            }
+        }
+    }
+    true
+}
+
+/// The install IDs of the files in the staging `directory`.
+fn staged_ids(directory: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let id = name.split('.').next()?;
+            (id.len() == 32
+                && id
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+            .then(|| id.to_owned())
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// One install's private files in `<data>/staging`, removed when it ends. Its owner lock lasts
+/// as long as the install, so another process's cleanup leaves them.
 struct Staging {
     archive: PathBuf,
     signature: PathBuf,
+    owner: PathBuf,
+    _lock: crate::storage::Lock,
 }
 
 impl Staging {
@@ -671,12 +805,26 @@ impl Staging {
             .recursive(true)
             .create(&directory)
             .map_err(|_| CoreError::StorageUnavailable)?;
-        crate::storage::Directory::open(&directory, false)?;
+        let staging = crate::storage::Directory::open(&directory, false)?;
         let id = hex(&crate::protocol::random()?[..16]);
+        // The owner lock comes first, so no file of this install exists without it.
+        let [archive, signature, owner] = Self::names(&id);
+        let lock = staging.lock(&owner, true)?;
         Ok(Self {
-            archive: directory.join(format!("{id}.tar.gz")),
-            signature: directory.join(format!("{id}.sig")),
+            archive: directory.join(archive),
+            signature: directory.join(signature),
+            owner: directory.join(owner),
+            _lock: lock,
         })
+    }
+
+    /// The archive, signature and owner lock names of the install `id`.
+    fn names(id: &str) -> [String; 3] {
+        [
+            format!("{id}.tar.gz"),
+            format!("{id}.sig"),
+            format!("{id}.lock"),
+        ]
     }
 
     fn archive_file(&self) -> Result<std::fs::File, CoreError> {
@@ -703,6 +851,7 @@ impl Drop for Staging {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.archive);
         let _ = std::fs::remove_file(&self.signature);
+        let _ = std::fs::remove_file(&self.owner);
     }
 }
 

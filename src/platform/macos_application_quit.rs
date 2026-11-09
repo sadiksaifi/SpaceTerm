@@ -19,12 +19,11 @@ use super::application_quit::{
     ApplicationQuitRequest, QuitAnswer, QuitButtons, QuitPrompt, present_window_quit,
 };
 use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
+use super::quit_policy::quit_request;
 
 const NS_TERMINATE_CANCEL: NSInteger = 0;
 const NS_TERMINATE_NOW: NSInteger = 1;
-/// `kCoreEventClass`, `kAEQuitApplication`, and `kAEQuitReason` from the Apple Event Manager.
-const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
-const QUIT_APPLICATION_EVENT: u32 = u32::from_be_bytes(*b"quit");
+/// `kAEQuitReason` from the Apple Event Manager.
 const QUIT_REASON_KEYWORD: u32 = u32::from_be_bytes(*b"why?");
 static QUIT_STATE_ASSOCIATION: u8 = 0;
 const OBJC_ASSOCIATION_RETAIN_NONATOMIC: usize = 1;
@@ -177,6 +176,13 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
             mtm,
         );
         Some(cx.spawn(async move |_| answers.recv().await.ok()))
+    }
+
+    fn follow_termination_signals(&self, handler: &ApplicationQuitHandler) {
+        match super::unix_quit_signal::watch(libc::SIGTERM) {
+            Ok(signals) => handler.follow_termination(signals),
+            Err(_) => eprintln!("failed to follow termination signals"),
+        }
     }
 
     fn request_quit(&self, cx: &mut gpui::App) {
@@ -403,11 +409,7 @@ unsafe extern "C-unwind" fn should_terminate(
     }
 }
 
-/// A Quit Apple Event without a reason comes from the Dock's Quit, and from Sparkle when an
-/// approved update relaunches the client; the quit coordinator tells the two apart by whether a
-/// relaunch is approved. One with a reason means the session is logging out, restarting, or
-/// shutting down. A termination outside any Apple Event comes from the client itself, such as
-/// Command-Q or a confirmed quit.
+/// Reads the current Apple Event with [`quit_request`], the policy the macOS updater test shares.
 fn termination_request() -> ApplicationQuitRequest {
     let Some(manager_class) = AnyClass::get(c"NSAppleEventManager") else {
         return ApplicationQuitRequest::Exit;
@@ -432,16 +434,9 @@ fn request_from_event(event: &AnyObject) -> ApplicationQuitRequest {
     unsafe {
         let class: u32 = msg_send![event, eventClass];
         let id: u32 = msg_send![event, eventID];
-        if class != CORE_EVENT_CLASS || id != QUIT_APPLICATION_EVENT {
-            return ApplicationQuitRequest::Exit;
-        }
         let reason: *mut AnyObject =
             msg_send![event, paramDescriptorForKeyword: QUIT_REASON_KEYWORD];
-        if reason.is_null() {
-            ApplicationQuitRequest::Dismissal
-        } else {
-            ApplicationQuitRequest::SessionEnd
-        }
+        quit_request(Some((class, id, !reason.is_null())))
     }
 }
 
@@ -464,8 +459,8 @@ pub(in crate::platform) mod tests {
             // SAFETY: Foundation constructs a local descriptor; this sends no Apple Event.
             let event: Retained<AnyObject> = unsafe {
                 msg_send![class,
-                    appleEventWithEventClass: CORE_EVENT_CLASS,
-                    eventID: QUIT_APPLICATION_EVENT,
+                    appleEventWithEventClass: u32::from_be_bytes(*b"aevt"),
+                    eventID: u32::from_be_bytes(*b"quit"),
                     targetDescriptor: std::ptr::null_mut::<AnyObject>(),
                     returnID: -1_i16,
                     transactionID: 0_i32

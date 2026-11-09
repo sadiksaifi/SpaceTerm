@@ -14,8 +14,8 @@ use spaceterm_core::service::lane::{
     LaneReceipt, LaneStatus, LaneVersion,
 };
 use spaceterm_core::update::facts::{
-    CheckFailure, Operation, PendingVersion, Platform, Protocols, StrandedDevice, UpdateCheck,
-    UpdateFacts, Version as CoreVersion,
+    CheckFailure, FailureKind, InstallFailure, Operation, PendingVersion, Platform, Protocols,
+    StartFailure, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure, Version as CoreVersion,
 };
 
 const EXPIRES: &str = "2026-10-30T12:10:00Z";
@@ -68,23 +68,15 @@ fn assert_exit<D: serde::Serialize>(envelope: &Envelope<D>, exit: u8) {
     assert_eq!(envelope.exit(), exit);
 }
 
-#[test]
-fn status_reports_service_network_devices_and_held_outcomes() {
-    let lane = LaneStatus {
+fn lane_status(update: UpdateFacts) -> LaneStatus {
+    LaneStatus {
         running: true,
         stopped: false,
         installed: true,
         automatic_start: true,
         linger: Some(true),
         runtime: lane_version("0.7.0", 'a'),
-        update: Some(Box::new(facts(
-            Some(pending(true, true)),
-            UpdateCheck::Failing {
-                since: FAILING,
-                last_success: Some(SUCCEEDED),
-                reason: CheckFailure::Proxy,
-            },
-        ))),
+        update: Some(Box::new(update)),
         activation: LaneActivation::Settled,
         sessions: 2,
         network: LaneNetwork {
@@ -111,17 +103,51 @@ fn status_reports_service_network_devices_and_held_outcomes() {
             },
             ..TerminalCounterSnapshot::default()
         }),
-    };
+    }
+}
+
+const COMMANDS: status::Commands<'static> = status::Commands {
+    restart: RESTART,
+    local: false,
+};
+
+fn status_text(lane: &LaneStatus) -> String {
+    status::envelope(core(), lane, Vec::new(), Vec::new(), &COMMANDS, NOW).1
+}
+
+#[test]
+fn status_reports_service_network_devices_and_held_outcomes() {
+    let mut update = facts(
+        Some(pending(true, true)),
+        UpdateCheck::Failing {
+            since: FAILING,
+            last_success: Some(SUCCEEDED),
+            reason: CheckFailure::Proxy,
+        },
+    );
+    update.operation = Some(Operation::Installing {
+        version: CoreVersion::parse("0.8.1").unwrap(),
+        received: 512,
+        total: 2048,
+    });
+    update.skipped = Some(CoreVersion::parse("0.7.5").unwrap());
+    update.last_failure = Some(UpdateFailure {
+        id: 3,
+        at: FAILING,
+        version: CoreVersion::parse("0.7.5").unwrap(),
+        kind: FailureKind::Start(StartFailure::NotReady),
+    });
+    let lane = lane_status(update);
     let held = vec![HeldOutcomes {
         identity: RecoveredIdentity::Agent("agent-1".parse().unwrap()),
         count: 3,
     }];
-    let (envelope, text) = status::envelope(core(), &lane, held, recovered(), RESTART);
+    let (envelope, text) = status::envelope(core(), &lane, held, recovered(), &COMMANDS, NOW);
     assert_exit(&envelope, 0);
     assert_golden("status", &envelope);
     assert!(
         text.contains(
-            "Pending: 0.8.0, installed 2026-11-03T09:12:00Z, restart overdue. Restart to use it: \
+            "Pending: 0.8.0, installed 2026-11-03T09:12:00Z, update overdue. Update with: \
              spaceterm --machine penguin restart\n  It changes the protocol. These devices stop \
              working until they update: old-mini\n"
         ),
@@ -129,13 +155,181 @@ fn status_reports_service_network_devices_and_held_outcomes() {
     );
     assert!(
         text.contains(
-            "Update check: failing since 2026-11-02T08:00:00Z, the proxy is unreachable\n"
+            "Update check: failing since 2026-11-02T08:00:00Z, the proxy is unreachable\n\
+             In progress: installing 0.8.1, 25% received\n\
+             Skipped: 0.7.5 failed to start, so SpaceTerm Core refuses it until a newer version \
+             appears.\n\
+             Last update failure: 2026-11-02T08:00:00Z, 0.7.5 did not become ready, so \
+             SpaceTerm Core returned to the version it ran before.\n"
         ),
         "{text}"
     );
 }
 
+#[test]
+fn status_calls_a_pending_version_overdue_after_two_days_whichever_core_reported_it() {
+    // A Core of 0.11.2 marks `overdue_since` one day after the install.
+    let lane = lane_status(facts(Some(pending(false, true)), UpdateCheck::Never));
+    let read = |now: u64| {
+        let (envelope, text) =
+            status::envelope(core(), &lane, Vec::new(), Vec::new(), &COMMANDS, now);
+        let value = serde_json::to_value(&envelope).unwrap();
+        (value["data"]["pending"]["overdue_since"].clone(), text)
+    };
+    let (marker, text) = read(INSTALLED + 86_400 + 43_200);
+    assert_eq!(marker, serde_json::Value::Null);
+    assert!(!text.contains("update overdue"), "{text}");
+    let (marker, text) = read(INSTALLED + 2 * 86_400);
+    assert_eq!(marker, "2026-11-05T09:12:00Z");
+    assert!(text.contains("update overdue"), "{text}");
+}
+
+#[test]
+fn status_names_every_update_operation_and_failure() {
+    let with = |operation: Option<Operation>, failure: Option<FailureKind>| {
+        let mut update = facts(None, UpdateCheck::Never);
+        update.operation = operation;
+        update.last_failure = failure.map(|kind| UpdateFailure {
+            id: 1,
+            at: FAILING,
+            version: CoreVersion::parse("0.8.0").unwrap(),
+            kind,
+        });
+        status_text(&lane_status(update))
+    };
+    let to = CoreVersion::parse("0.8.0").unwrap();
+    for (operation, line) in [
+        (
+            Operation::Restarting { to: to.clone() },
+            "In progress: restarting from 0.7.0 to 0.8.0\n",
+        ),
+        (
+            Operation::RestartingSameVersion,
+            "In progress: restarting 0.7.0 without updating\n",
+        ),
+        (Operation::Stopping, "In progress: stopping\n"),
+        (
+            Operation::Uninstalling,
+            "In progress: removing SpaceTerm Core\n",
+        ),
+        (
+            Operation::Installing {
+                version: to.clone(),
+                received: 10,
+                total: 10,
+            },
+            "In progress: installing 0.8.0, verifying and unpacking\n",
+        ),
+    ] {
+        let text = with(Some(operation), None);
+        assert!(text.contains(line), "{text}");
+    }
+    assert!(!with(Some(Operation::Checking), None).contains("In progress"));
+    for (kind, sentence) in [
+        (
+            FailureKind::Install(InstallFailure::DiskFull),
+            "installing 0.8.0 failed because the disk is full. Nothing changed.",
+        ),
+        (
+            FailureKind::Install(InstallFailure::Download),
+            "downloading 0.8.0 failed. Nothing changed.",
+        ),
+        (
+            FailureKind::Install(InstallFailure::Verification),
+            "0.8.0 did not verify. Nothing changed.",
+        ),
+        (
+            FailureKind::Start(StartFailure::PortInUse),
+            "0.8.0 couldn\u{2019}t listen on the Network Access port because another program \
+             holds it, so SpaceTerm Core returned to the version it ran before. It tries 0.8.0 \
+             again at the next restart.",
+        ),
+        (
+            FailureKind::Start(StartFailure::DiskFull),
+            "0.8.0 couldn\u{2019}t start because the disk is full, so SpaceTerm Core returned to \
+             the version it ran before. It tries 0.8.0 again at the next restart.",
+        ),
+        (
+            FailureKind::Start(StartFailure::Interrupted),
+            "a reboot, logout or crash interrupted the restart into 0.8.0. It tries 0.8.0 again \
+             at the next restart.",
+        ),
+    ] {
+        let text = with(None, Some(kind));
+        assert!(
+            text.contains(&format!(
+                "Last update failure: 2026-11-02T08:00:00Z, {sentence}\n"
+            )),
+            "{text}"
+        );
+    }
+    let mut update = facts(None, UpdateCheck::Never);
+    update.last_failure = Some(UpdateFailure {
+        id: 1,
+        at: FAILING,
+        version: to,
+        kind: FailureKind::Start(StartFailure::PortInUse),
+    });
+    let (envelope, _) = status::envelope(
+        core(),
+        &lane_status(update),
+        Vec::new(),
+        Vec::new(),
+        &COMMANDS,
+        NOW,
+    );
+    let value = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(
+        value["data"]["last_failure"],
+        serde_json::json!({
+            "at": "2026-11-02T08:00:00Z",
+            "version": "0.8.0",
+            "stage": "start",
+            "reason": "port_in_use",
+        })
+    );
+    assert_eq!(value["data"]["operation"], serde_json::Value::Null);
+    assert_eq!(value["data"]["skipped"], serde_json::Value::Null);
+}
+
+#[test]
+fn an_unfinished_restart_reads_as_restarting_or_names_the_command_that_finishes_it() {
+    let mut restarting = facts(Some(pending(false, false)), UpdateCheck::Never);
+    restarting.operation = Some(Operation::Restarting {
+        to: CoreVersion::parse("0.8.0").unwrap(),
+    });
+    let mut lane = lane_status(restarting);
+    lane.activation = LaneActivation::Unresolved;
+    let text = status_text(&lane);
+    assert!(
+        text.contains("In progress: restarting from 0.7.0 to 0.8.0\n"),
+        "{text}"
+    );
+    assert!(!text.contains("has not finished"), "{text}");
+    lane.update = None;
+    assert!(
+        status_text(&lane).contains(
+            "Update: the update to the Pending Version has not finished. Check again in a \
+             minute. If it still has not finished, finish it on that machine with: spaceterm \
+             start\n"
+        ),
+        "{}",
+        status_text(&lane)
+    );
+    let here = status::Commands {
+        restart: "spaceterm restart",
+        local: true,
+    };
+    let (_, text) = status::envelope(local(), &lane, Vec::new(), Vec::new(), &here, NOW);
+    assert!(
+        text.contains("If it still has not finished, finish it with: spaceterm start\n"),
+        "{text}"
+    );
+}
+
 const INSTALLED: u64 = 1_793_697_120;
+/// When the command reads the facts: three days after the install.
+const NOW: u64 = INSTALLED + 3 * 86_400;
 const SUCCEEDED: u64 = 1_793_520_000;
 const FAILING: u64 = 1_793_606_400;
 const RESTART: &str = "spaceterm --machine penguin restart";
@@ -287,9 +481,9 @@ fn a_breaking_restart_preview_names_its_versions_and_stranded_devices_and_warns(
     let previewed = lifecycle::service_effects(&restart_effects(next), Some(&facts));
     assert_eq!(
         lifecycle::summary(lifecycle::Kind::Restart, "penguin", &previewed),
-        "Restart SpaceTerm Core on penguin from 0.7.0 into 0.8.0?\nAll Terminal Sessions on it \
-         end for every client. Workspaces are kept, and each Pane starts a new shell when you use \
-         it.\n0.8.0 changes the protocol. These devices can\u{2019}t connect until they update: \
+        "Update SpaceTerm Core on penguin?\nSpaceTerm Core restarts from 0.7.0 to 0.8.0. This \
+         ends 1 Terminal Session on penguin. Your Workspaces, Tabs and Panes stay, and each Pane \
+         starts a new shell when you select it.\n0.8.0 changes the protocol. These devices can\u{2019}t connect until they update: \
          old-mini\n"
     );
     let envelope = lifecycle::preview_envelope(
@@ -319,9 +513,9 @@ fn a_restart_into_a_compatible_pending_version_names_it_without_a_warning() {
     assert!(!target.breaking && target.stranded.is_empty());
     assert_eq!(
         lifecycle::summary(lifecycle::Kind::Restart, "penguin", &previewed),
-        "Restart SpaceTerm Core on penguin from 0.7.0 into 0.8.0?\nAll Terminal Sessions on it \
-         end for every client. Workspaces are kept, and each Pane starts a new shell when you use \
-         it.\n"
+        "Update SpaceTerm Core on penguin?\nSpaceTerm Core restarts from 0.7.0 to 0.8.0. This \
+         ends 1 Terminal Session on penguin. Your Workspaces, Tabs and Panes stay, and each Pane \
+         starts a new shell when you select it.\n"
     );
     let envelope = lifecycle::preview_envelope(
         "restart",
@@ -348,6 +542,127 @@ fn a_restart_into_a_compatible_pending_version_names_it_without_a_warning() {
             .pending,
         None
     );
+}
+
+#[test]
+fn a_same_version_restart_and_a_stop_name_the_sessions_they_end() {
+    let mut effects = stop_effects();
+    effects.ends_sessions = 3;
+    let running = facts(None, UpdateCheck::Never);
+    assert_eq!(
+        lifecycle::summary(
+            lifecycle::Kind::Restart,
+            "penguin",
+            &lifecycle::service_effects(&effects, Some(&running))
+        ),
+        "Restart SpaceTerm Core on penguin?\nSpaceTerm Core 0.7.0 restarts without updating. This \
+         ends 3 Terminal Sessions on penguin.\n"
+    );
+    assert_eq!(
+        lifecycle::summary(
+            lifecycle::Kind::Stop,
+            "penguin",
+            &lifecycle::service_effects(&stop_effects(), None)
+        ),
+        "Stop SpaceTerm Core on penguin?\nThis ends 1 Terminal Session on penguin. Your \
+         Workspaces, Tabs and Panes stay, and SpaceTerm Core stays stopped until you start it \
+         again with: spaceterm start\n"
+    );
+}
+
+#[test]
+fn a_failed_update_names_why_and_the_version_that_runs() {
+    let failed = |id, kind| UpdateFailure {
+        id,
+        at: FAILING,
+        version: CoreVersion::parse("0.8.0").unwrap(),
+        kind,
+    };
+    let mut before = facts(Some(pending(false, false)), UpdateCheck::Never);
+    before.last_failure = Some(failed(1, FailureKind::Start(StartFailure::PortInUse)));
+    let mut after = facts(None, UpdateCheck::Never);
+    after.skipped = Some(CoreVersion::parse("0.8.0").unwrap());
+    after.last_failure = Some(failed(2, FailureKind::Start(StartFailure::NotReady)));
+    let failure = lifecycle::update_failure("0.8.0", Some(&before), Some(&after));
+    let crate::contract::Details::UpdateFailed(details) = &failure.details else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(
+        lifecycle::update_failure_text("penguin", details, RESTART),
+        "SpaceTerm Core 0.8.0 did not become ready, so SpaceTerm Core on penguin runs 0.7.0 \
+         again. It skips 0.8.0 until a newer version appears.\n"
+    );
+    let settled = lifecycle::settle(
+        ServiceAction::Restart,
+        Outcome::Settled {
+            receipt: receipt(
+                LaneAction::Restart,
+                LaneOperationState::Failed,
+                Some("startup_failed"),
+                NEW_BOOT,
+            ),
+            boot: BOOT.into(),
+        },
+    );
+    let mut settled = settled;
+    settled.receipt.code = Some(failure.code);
+    settled.failure = Some(failure);
+    let envelope = lifecycle::operation_envelope("restart", core(), settled, Vec::new());
+    assert_exit(&envelope, 1);
+    assert_golden("restart_update_failed", &envelope);
+    // A failure the facts held before this restart says nothing about it.
+    let mut stale = after.clone();
+    stale.last_failure = before.last_failure.clone();
+    let failure = lifecycle::update_failure("0.8.0", Some(&before), Some(&stale));
+    let crate::contract::Details::UpdateFailed(details) = &failure.details else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(details.reason, None);
+    assert_eq!(
+        lifecycle::update_failure_text("penguin", details, RESTART),
+        "SpaceTerm Core 0.8.0 did not start, so SpaceTerm Core on penguin runs 0.7.0 again.\n"
+    );
+    // Without facts after the restart, the text names neither.
+    let failure = lifecycle::update_failure("0.8.0", Some(&before), None);
+    let crate::contract::Details::UpdateFailed(details) = &failure.details else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(
+        lifecycle::update_failure_text("penguin", details, RESTART),
+        "SpaceTerm Core 0.8.0 did not start, so SpaceTerm Core on penguin returned to the version \
+         it ran before.\n"
+    );
+    for (kind, text) in [
+        (
+            StartFailure::PortInUse,
+            "SpaceTerm Core 0.8.0 couldn\u{2019}t listen on the Network Access port because \
+             another program holds it, so SpaceTerm Core on penguin runs 0.7.0 again. 0.8.0 stays \
+             pending. Free the port, then try again with: spaceterm --machine penguin restart\n",
+        ),
+        (
+            StartFailure::DiskFull,
+            "SpaceTerm Core 0.8.0 couldn\u{2019}t start because the disk is full, so SpaceTerm \
+             Core on penguin runs 0.7.0 again. 0.8.0 stays pending. Free some space, then try \
+             again with: spaceterm --machine penguin restart\n",
+        ),
+        (
+            StartFailure::Interrupted,
+            "A reboot, logout or crash interrupted the restart into SpaceTerm Core 0.8.0, so \
+             SpaceTerm Core on penguin runs 0.7.0 again. 0.8.0 stays pending. Try again with: \
+             spaceterm --machine penguin restart\n",
+        ),
+    ] {
+        let mut after = facts(Some(pending(false, false)), UpdateCheck::Never);
+        after.last_failure = Some(failed(1, FailureKind::Start(kind)));
+        let failure = lifecycle::update_failure("0.8.0", None, Some(&after));
+        let crate::contract::Details::UpdateFailed(details) = &failure.details else {
+            panic!("{failure:?}");
+        };
+        assert_eq!(
+            lifecycle::update_failure_text("penguin", details, RESTART),
+            text
+        );
+    }
 }
 
 fn receipt(
@@ -457,40 +772,40 @@ fn update_reports_the_version_it_installed_and_how_to_use_it() {
         Some(pending(false, false)),
         UpdateCheck::Succeeded { at: SUCCEEDED },
     );
-    let envelope = update::envelope(core(), true, &installed, Vec::new());
+    let envelope = update::envelope(core(), true, &installed, Vec::new(), INSTALLED);
     assert_exit(&envelope, 0);
     assert_golden("update_installed", &envelope);
     assert_eq!(
-        update::text(true, &installed, RESTART),
-        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Restart to use it; restarting ends 2 \
-         Terminal Sessions: spaceterm --machine penguin restart\n"
+        update::text(true, &installed, "penguin", RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Updating to it ends 2 Terminal Sessions on \
+         penguin. Update with: spaceterm --machine penguin restart\n"
     );
     assert_eq!(
-        update::text(false, &installed, RESTART),
-        "SpaceTerm Core 0.8.0 is already installed beside 0.7.0. Restart to use it; restarting \
-         ends 2 Terminal Sessions: spaceterm --machine penguin restart\n"
+        update::text(false, &installed, "penguin", RESTART),
+        "SpaceTerm Core 0.8.0 is already installed beside 0.7.0. Updating to it ends 2 Terminal \
+         Sessions on penguin. Update with: spaceterm --machine penguin restart\n"
     );
     let mut idle = installed.clone();
     idle.sessions = 0;
     assert_eq!(
-        update::text(true, &idle, RESTART),
-        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. SpaceTerm Core restarts into it by itself \
-         while no Terminal Session is open.\n"
+        update::text(true, &idle, "penguin", RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. SpaceTerm Core updates to it by itself \
+         once no Terminal Session is open.\n"
     );
     let mut breaking = idle.clone();
     breaking.pending = Some(pending(true, false));
     assert_eq!(
-        update::text(true, &breaking, RESTART),
-        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Restart to use it: spaceterm --machine \
-         penguin restart\n",
+        update::text(true, &breaking, "penguin", RESTART),
+        "Installed SpaceTerm Core 0.8.0 beside 0.7.0. Update with: spaceterm --machine penguin \
+         restart\n",
         "a breaking version never restarts by itself"
     );
     let current = facts(None, UpdateCheck::Succeeded { at: SUCCEEDED });
-    let envelope = update::envelope(local(), false, &current, Vec::new());
+    let envelope = update::envelope(local(), false, &current, Vec::new(), NOW);
     assert_exit(&envelope, 0);
     assert_golden("update_current", &envelope);
     assert_eq!(
-        update::text(false, &current, RESTART),
+        update::text(false, &current, "penguin", RESTART),
         "SpaceTerm Core 0.7.0 is up to date.\n"
     );
 }

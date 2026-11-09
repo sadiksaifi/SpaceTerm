@@ -15,7 +15,11 @@ pub const MAX_DEVICE_NAME_BYTES: usize = 192;
 /// The most [`PendingVersion::stranded`] entries: one per Paired Device a Core keeps.
 pub const MAX_STRANDED: usize = 256;
 /// Seconds from [`PendingVersion::installed_at`] until a waiting Pending Version is overdue.
-pub const OVERDUE_AFTER: u64 = 86_400;
+pub const OVERDUE_AFTER: u64 = 2 * 86_400;
+/// Seconds from [`PendingVersion::installed_at`] to the value of
+/// [`PendingVersion::overdue_since`]. Work and service 1.x fix it at one day, and every peer
+/// refuses another value, so it stays apart from [`OVERDUE_AFTER`].
+pub const OVERDUE_SINCE_AFTER: u64 = 86_400;
 
 /// What one Machine's SpaceTerm Core reports about its updates.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +40,11 @@ pub struct UpdateFacts {
     pub last_failure: Option<UpdateFailure>,
 }
 
+/// The work and service minor of major 1 that first carries [`Operation::RestartingSameVersion`],
+/// [`CheckFailure::ClockBehind`], [`CheckFailure::SteppingStoneSkipped`] and
+/// [`StartFailure::Interrupted`].
+pub const MINOR_RESTART_FACTS: u16 = 1;
+
 /// Facts that break a bound or an invariant of their types. A receiver treats them as a
 /// protocol violation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -43,6 +52,38 @@ pub struct UpdateFacts {
 pub struct InvalidFacts;
 
 impl UpdateFacts {
+    /// These facts as a connection whose admission selected `selected` reads them. A sender
+    /// never sends a value the selected minor lacks (ADR 0035), so each value a later minor
+    /// added becomes the nearest one the selected minor has. The work and service lanes add
+    /// fact values at the same minors.
+    #[must_use]
+    pub fn for_selected(mut self, selected: ProtocolVersion) -> Self {
+        if selected.minor >= MINOR_RESTART_FACTS {
+            return self;
+        }
+        if self.operation == Some(Operation::RestartingSameVersion) {
+            self.operation = Some(Operation::Restarting {
+                to: self.running.clone(),
+            });
+        }
+        if let UpdateCheck::Failing { reason, .. } = &mut self.check
+            && matches!(
+                reason,
+                CheckFailure::ClockBehind | CheckFailure::SteppingStoneSkipped
+            )
+        {
+            *reason = CheckFailure::Verification;
+        }
+        if self
+            .last_failure
+            .as_ref()
+            .is_some_and(|failure| failure.kind == FailureKind::Start(StartFailure::Interrupted))
+        {
+            self.last_failure = None;
+        }
+        self
+    }
+
     /// Checks the bounds and invariants that decoding alone does not.
     pub fn validate(&self) -> Result<(), InvalidFacts> {
         if let Some(pending) = &self.pending {
@@ -195,7 +236,9 @@ pub struct PendingVersion {
     pub breaking: bool,
     /// Unix seconds when it finished installing.
     pub installed_at: u64,
-    /// `installed_at + OVERDUE_AFTER` once that time has passed and the version still waits.
+    /// `installed_at + OVERDUE_SINCE_AFTER` once the version is overdue. This Core sets it once
+    /// [`OVERDUE_AFTER`] passed; a Core of 0.11.2 or earlier, after one day. A reader decides
+    /// with [`PendingVersion::overdue`].
     /// None before that time.
     pub overdue_since: Option<u64>,
     /// Paired Devices that cannot connect after the restart: those whose last admitted Hello
@@ -204,10 +247,16 @@ pub struct PendingVersion {
 }
 
 impl PendingVersion {
+    /// Whether the version waited [`OVERDUE_AFTER`] at `now`, Unix seconds, whichever Core
+    /// reported it.
+    pub fn overdue(&self, now: u64) -> bool {
+        now.saturating_sub(self.installed_at) >= OVERDUE_AFTER
+    }
+
     fn validate(&self) -> Result<(), InvalidFacts> {
         let overdue = self
             .overdue_since
-            .is_none_or(|since| Some(since) == self.installed_at.checked_add(OVERDUE_AFTER));
+            .is_none_or(|since| Some(since) == self.installed_at.checked_add(OVERDUE_SINCE_AFTER));
         let stranded = self.stranded.len() <= MAX_STRANDED
             && (self.breaking || self.stranded.is_empty())
             && self
@@ -285,12 +334,18 @@ pub enum Operation {
         received: u64,
         total: u64,
     },
-    /// The helper restarts the Core into `to`. The Core closes its connections next.
+    /// The helper restarts the Core into its Pending Version `to`: Update Core. The Core closes
+    /// its connections next.
     Restarting {
         to: Version,
     },
     Stopping,
+    /// Remove Machine: the Core stops, revokes every pairing and removes itself. It does not
+    /// come back.
     Uninstalling,
+    /// The helper restarts the Core into the version it runs: Restart Core, with no version
+    /// change. Since [`MINOR_RESTART_FACTS`].
+    RestartingSameVersion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,6 +376,13 @@ pub enum CheckFailure {
     Verification,
     /// The newest release needs a newer system than this host, per `minimum_system`.
     SystemTooOld,
+    /// The feed verified, but it was published more than [`super::feed::MAX_CLOCK_SKEW`]
+    /// seconds after this Machine's clock: the clock is behind. Since [`MINOR_RESTART_FACTS`].
+    ClockBehind,
+    /// The newest release needs a Stepping Stone first, and that Stepping Stone is `skipped`
+    /// because it failed to start. The Core can't reach the newest release from its feed until
+    /// a newer Stepping Stone appears. Since [`MINOR_RESTART_FACTS`].
+    SteppingStoneSkipped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +424,9 @@ pub enum StartFailure {
     PortInUse,
     /// Transient, as `PortInUse`.
     DiskFull,
+    /// Transient: a reboot, logout or crash ended the restart before the version could become
+    /// ready, so its readiness was never measured. Since [`MINOR_RESTART_FACTS`].
+    Interrupted,
 }
 
 #[cfg(test)]
@@ -382,7 +447,7 @@ mod tests {
             },
             breaking,
             installed_at: 1_793_750_400,
-            overdue_since: Some(1_793_750_400 + 86_400),
+            overdue_since: Some(1_793_750_400 + OVERDUE_SINCE_AFTER),
             stranded: if breaking {
                 vec![StrandedDevice {
                     pairing: [0x9c; 32],
@@ -443,6 +508,68 @@ mod tests {
             let bytes = postcard::to_allocvec(&facts).unwrap();
             assert_eq!(postcard::from_bytes::<UpdateFacts>(&bytes).unwrap(), facts);
         }
+    }
+
+    #[test]
+    fn a_connection_at_minor_0_reads_each_later_value_as_the_nearest_one_it_has() {
+        let older = ProtocolVersion { major: 1, minor: 0 };
+        let current = ProtocolVersion {
+            major: 1,
+            minor: MINOR_RESTART_FACTS,
+        };
+        let later = UpdateFacts {
+            operation: Some(Operation::RestartingSameVersion),
+            check: UpdateCheck::Failing {
+                since: 100,
+                last_success: None,
+                reason: CheckFailure::SteppingStoneSkipped,
+            },
+            last_failure: Some(UpdateFailure {
+                id: 5,
+                at: 90,
+                version: version("1.4.0"),
+                kind: FailureKind::Start(StartFailure::Interrupted),
+            }),
+            ..facts()
+        };
+        assert_eq!(later.clone().for_selected(current), later);
+        let read = later.for_selected(older);
+        assert_eq!(
+            read.operation,
+            Some(Operation::Restarting {
+                to: version("dev.0123456789ab.dirty")
+            })
+        );
+        assert!(matches!(
+            read.check,
+            UpdateCheck::Failing {
+                reason: CheckFailure::Verification,
+                ..
+            }
+        ));
+        assert_eq!(read.last_failure, None);
+        // Values minor 0 has pass unchanged.
+        assert_eq!(facts().for_selected(older), facts());
+        let bytes = postcard::to_allocvec(&read).unwrap();
+        assert_eq!(postcard::from_bytes::<UpdateFacts>(&bytes).unwrap(), read);
+    }
+
+    #[test]
+    fn overdue_facts_keep_the_value_every_1_x_peer_accepts() {
+        // A Core of 0.11.2 sets `overdue_since` one day after the install.
+        let released = PendingVersion {
+            overdue_since: Some(1_793_750_400 + 86_400),
+            ..pending(false)
+        };
+        assert_eq!(released.validate(), Ok(()));
+        // Overdue follows the two days, whichever Core reported the version.
+        assert!(!released.overdue(1_793_750_400 + 86_400));
+        assert!(released.overdue(1_793_750_400 + OVERDUE_AFTER));
+        let two_days = PendingVersion {
+            overdue_since: Some(1_793_750_400 + OVERDUE_AFTER),
+            ..pending(false)
+        };
+        assert_eq!(two_days.validate(), Err(InvalidFacts));
     }
 
     #[test]
@@ -512,7 +639,7 @@ mod tests {
             },
             UpdateFacts {
                 pending: Some(PendingVersion {
-                    overdue_since: Some(1_793_750_400 + 86_399),
+                    overdue_since: Some(1_793_750_400 + OVERDUE_SINCE_AFTER - 1),
                     ..pending(false)
                 }),
                 ..facts()

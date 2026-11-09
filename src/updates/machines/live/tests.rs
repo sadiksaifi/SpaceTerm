@@ -51,6 +51,7 @@ struct ScriptedLane {
     waits: Mutex<mpsc::Receiver<Result<Observed, ActionFailure>>>,
     answer: Mutex<mpsc::Sender<Result<Observed, ActionFailure>>>,
     previewed: Mutex<u32>,
+    install_result: Mutex<Result<(), ActionFailure>>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -62,6 +63,7 @@ impl ScriptedLane {
             waits: Mutex::new(waits),
             answer: Mutex::new(answer),
             previewed: Mutex::new(0),
+            install_result: Mutex::new(Ok(())),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -136,7 +138,7 @@ impl MachineLane for ScriptedLane {
             || "install".into(),
             |build| format!("push {}", build.candidate.version()),
         ));
-        Ok(())
+        *self.install_result.lock().unwrap()
     }
 
     fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure> {
@@ -1006,6 +1008,15 @@ fn a_core_below_the_embedded_floor_offers_its_feed_update() {
         lane.requests().contains(&"install".into()),
         "Install asks the Core to update from its own feed"
     );
+
+    *lane.install_result.lock().unwrap() = Err(ActionFailure::Unreachable);
+    adapter.perform(PENGUIN, MachineAction::Install);
+    assert_eq!(
+        finished(&events, &MachineAction::Install),
+        Err(ActionFailure::NeedsFloor(
+            spaceterm_core::update::ordering::Floor::parse("1.1.0").unwrap()
+        ))
+    );
 }
 
 #[test]
@@ -1081,4 +1092,101 @@ fn offers_follow_pending_running_and_skipped_versions_and_survive_offline() {
         finished(&events, &MachineAction::Install),
         Err(ActionFailure::Unreachable)
     );
+}
+
+#[test]
+fn a_restart_announced_by_another_desktop_retries_until_it_returns() {
+    let mut announced = facts(1, 0, Some("0.9.0"));
+    announced.facts.operation = Some(Operation::Restarting {
+        to: version("0.9.0"),
+    });
+    let lane = ScriptedLane::new([Ok(announced)]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (_adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "announced restart", |update| {
+        update.facts.is_some()
+    });
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    eventually("retry of another desktop's restart", || {
+        *machine.retries.lock().unwrap() > 0
+    });
+    let mut returned = facts(2, 0, None);
+    returned.boot = "boot-2".into();
+    returned.facts.running = version("0.9.0");
+    lane.facts.lock().unwrap().push_back(Ok(returned));
+    machine.set(Script::Lane);
+    sources.change();
+    changed(&events, "returned version", |update| {
+        update
+            .facts
+            .as_ref()
+            .is_some_and(|facts| facts.running == version("0.9.0"))
+    });
+}
+
+#[test]
+fn a_restart_that_settles_in_the_same_run_leaves_a_later_outage_offline() {
+    let mut announced = facts(1, 0, Some("0.9.0"));
+    announced.facts.operation = Some(Operation::Restarting {
+        to: version("0.9.0"),
+    });
+    let lane = ScriptedLane::new([Ok(announced)]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (_adapter, events) = started(&sources, Duration::from_millis(100));
+    changed(&events, "announced restart", |update| {
+        update.facts.is_some()
+    });
+    lane.answer(Ok(facts(2, 1, Some("0.9.0"))));
+    changed(&events, "restart refused", |update| {
+        update
+            .facts
+            .as_ref()
+            .is_some_and(|facts| facts.revision == 2)
+    });
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    changed(&events, "ordinary outage", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    assert_eq!(*machine.retries.lock().unwrap(), 0);
+}
+
+#[test]
+fn removing_a_machine_does_not_leave_a_restart_wait_on_other_desktops() {
+    let mut removing = facts(1, 2, Some("0.9.0"));
+    removing.facts.operation = Some(Operation::Uninstalling);
+    let lane = ScriptedLane::new([Ok(removing)]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (_adapter, events) = started(&sources, Duration::from_millis(100));
+    changed(&events, "uninstall announced", |update| {
+        update.facts.is_some()
+    });
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    let removed = changed(&events, "removed machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    assert_eq!(
+        MachineView::new(&removed, &Dismissed::new(), 1).state,
+        MachineState::Unpaired
+    );
+    assert_eq!(*machine.retries.lock().unwrap(), 0);
+}
+
+#[test]
+fn check_again_retries_an_unreachable_machine_without_waiting_for_its_backoff() {
+    let lane = ScriptedLane::new([]);
+    let machine = ScriptedMachine::new(Script::Offline, lane);
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "offline machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    adapter.perform(PENGUIN, MachineAction::CheckAgain);
+    assert_eq!(finished(&events, &MachineAction::CheckAgain), Ok(()));
+    assert_eq!(*machine.retries.lock().unwrap(), 1);
 }

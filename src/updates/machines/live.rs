@@ -102,6 +102,8 @@ pub(crate) enum Reach {
     Stopped,
     /// No route answers.
     Offline,
+    /// Admission refused the protocol or retained state; connectivity is known.
+    Incompatible(Incompatible),
     /// Its service lane may answer. `work` says whether it shares a work major.
     Lane {
         lane: Arc<dyn MachineLane>,
@@ -337,6 +339,7 @@ struct Target {
     facts: Option<UpdateFacts>,
     /// The embedded Core build Install pushes, when one is offered.
     push: Option<Arc<EmbeddedCore>>,
+    floor: Option<spaceterm_core::update::ordering::Floor>,
 }
 
 fn change_of(local: bool, action: &MachineAction) -> Result<LaneChange, ActionFailure> {
@@ -413,11 +416,27 @@ fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
         }
         MachineAction::Install | MachineAction::CheckAgain => {}
     }
+    if *action == MachineAction::CheckAgain {
+        target.known.machine.retry();
+    }
     let Reach::Lane { lane, .. } = target.known.machine.reach() else {
-        return Err(ActionFailure::Unreachable);
+        // Retrying routes is asynchronous. The follower reads the new reach when they answer.
+        return if *action == MachineAction::CheckAgain {
+            Ok(())
+        } else {
+            Err(ActionFailure::Unreachable)
+        };
     };
     match action {
-        MachineAction::Install => lane.install(target.push.as_deref()),
+        MachineAction::Install => {
+            lane.install(target.push.as_deref())
+                .map_err(|failure| match (target.floor, failure) {
+                    (Some(floor), ActionFailure::Failed | ActionFailure::Unreachable) => {
+                        ActionFailure::NeedsFloor(floor)
+                    }
+                    _ => failure,
+                })
+        }
         _ => lane.check(),
     }
 }
@@ -521,8 +540,8 @@ struct Entry {
 struct Awaited {
     /// The Pending Version, when the facts or the preview named one.
     expected: Option<Version>,
-    /// The run that restarts. Facts from another run end the wait.
     boot: Option<String>,
+    announced: bool,
     deadline: Instant,
     /// When the follower last asked the Machine's routes to retry now.
     retried: Option<Instant>,
@@ -564,6 +583,10 @@ impl Shared {
         Some(Target {
             known: entry.known.clone(),
             facts: entry.update.facts.clone(),
+            floor: entry.update.facts.as_ref().and_then(|facts| {
+                let floor = self.embedded.build(facts.platform)?.candidate.floor()?;
+                (!floor.admits(&facts.running)).then_some(floor)
+            }),
             push: entry.update.facts.as_ref().and_then(|facts| {
                 entry.update.push.as_ref()?;
                 self.embedded.build(facts.platform)
@@ -741,22 +764,29 @@ impl Shared {
             entry.update.facts = Some(observed.facts.clone());
             entry.boot = Some(observed.boot.clone());
             let restarting = match &observed.facts.operation {
-                Some(Operation::Restarting { to }) => Some(to.clone()),
+                Some(Operation::Restarting { to }) => Some(Some(to.clone())),
+                Some(Operation::RestartingSameVersion) => Some(None),
                 _ => None,
             };
-            match (&entry.restart, restarting) {
+            match (&mut entry.restart, restarting) {
                 // The Core began a restart this desktop didn't ask for.
                 (None, Some(to)) => {
                     entry.restart = Some(Awaited {
-                        expected: Some(to),
+                        expected: to,
                         boot: Some(observed.boot.clone()),
+                        announced: true,
                         deadline: Instant::now() + limit,
                         retried: None,
                     });
                 }
-                // A new run answered, so the restart came back. A version it didn't start on
-                // reaches the facts as their last failure.
-                (Some(awaited), None) if awaited.boot.as_deref() != Some(&observed.boot) => {
+                (Some(awaited), Some(_)) => {
+                    awaited.announced = true;
+                }
+                // The announced operation settled, including a refused silent restart in the
+                // same run. An explicit request keeps waiting until announced or a new run.
+                (Some(awaited), None)
+                    if awaited.announced || awaited.boot.as_deref() != Some(&observed.boot) =>
+                {
                     entry.restart = None;
                 }
                 _ => {}
@@ -853,6 +883,7 @@ impl Shared {
                         .map(|pending| pending.version.clone())
                 }),
                 boot: entry.boot.clone(),
+                announced: false,
                 deadline: Instant::now() + limit,
                 retried: None,
             });
@@ -919,6 +950,14 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
                 None
             }
             Reach::Offline => shared.unreachable(id, machine.as_ref()),
+            Reach::Incompatible(incompatible) => {
+                shared.publish(id, |entry| {
+                    entry.update.link = MachineLink::Incompatible(incompatible);
+                    entry.update.capabilities = reached(Err(incompatible));
+                    entry.restart = None;
+                });
+                None
+            }
             Reach::Lane { lane, work, .. } => match lane.facts() {
                 Ok(observed) => {
                     shared.observed(id, &observed, work);
@@ -953,6 +992,13 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
                     shared.unreported(id, work);
                     None
                 }
+                Err(ActionFailure::Unavailable(Unavailable::ClientTooOld)) => {
+                    shared.publish(id, |entry| {
+                        entry.update.link = MachineLink::Incompatible(Incompatible::CallerTooOld);
+                        entry.restart = None;
+                    });
+                    None
+                }
                 Err(_) => shared.unreachable(id, machine.as_ref()),
             },
         };
@@ -984,14 +1030,19 @@ fn reached(work: Result<(), Incompatible>) -> Capabilities {
 /// The typed failure a lane or ledger code names.
 pub(crate) fn failure_of_code(code: &str) -> ActionFailure {
     match code {
+        "clock_behind" => ActionFailure::ClockBehind,
         "unsupported" => ActionFailure::Unavailable(Unavailable::CoreTooOld),
         "service_busy" | "capacity" | "activation_unresolved" => ActionFailure::Busy,
         "changed" | "candidate_changed" => ActionFailure::Changed,
         "login_item_off" => ActionFailure::LoginItemOff,
         "disk_full" => ActionFailure::DiskFull,
-        "unreachable" | "not_running" | "stopped" | "network_off" | "service_unavailable" => {
-            ActionFailure::Unreachable
-        }
+        "feed_unreachable"
+        | "proxy_unreachable"
+        | "unreachable"
+        | "not_running"
+        | "stopped"
+        | "network_off"
+        | "service_unavailable" => ActionFailure::Unreachable,
         _ => ActionFailure::Failed,
     }
 }

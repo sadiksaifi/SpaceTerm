@@ -108,7 +108,10 @@ impl LinkSink for ControlWatch {
             }
             // The next request learns how the link ended.
             LinkEvent::Health(_) => true,
-            LinkEvent::UpdateFacts(_) => false,
+            LinkEvent::UpdateFacts(_) => {
+                self.state.changed();
+                true
+            }
         };
         if changed {
             self.state.wake.notify();
@@ -179,6 +182,13 @@ fn bookkept(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .observed(&reply)?;
+    if !state.start_unconfirmed() {
+        state
+            .directory_note
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    }
     Ok(reply)
 }
 
@@ -199,6 +209,11 @@ impl ClaimWorker<'_> {
             takeover,
             paste_unconfirmed,
         } = self;
+        // A restart wait that ran out while no worker ran, as with its window closed, fails its
+        // retained intent before any request reaches the Core, on every route.
+        if state.restart_expired() {
+            return Err(CoreError::Protocol);
+        }
         let mut grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
         let grant_update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut grant_appearance = Some(grant_update.generation);
@@ -229,18 +244,23 @@ impl ClaimWorker<'_> {
                 other => other,
             })?,
         };
-        // Creation grants no control acquisition. Only the first authenticated observation of a
-        // fresh, creator-controlled Pane can consume this intent. Reconnect never rearms it.
-        let created_start = state.created_start.swap(false, Ordering::AcqRel)
+        // The creation's first-use intent survives a restart before its claim. A passive
+        // observation still precedes the start, so only the Core can grant control.
+        let mut created_start = state.created_start.load(Ordering::Acquire)
+            && !state.start_unconfirmed()
             && matches!(
-                &reply,
+                reply,
                 Reply::Restored {
-                    fresh: true,
+                    session_ended: None,
+                    ..
+                } | Reply::Takeover {
                     session_ended: None,
                     ..
                 }
             );
-        let mut created_start = created_start && !state.start_unconfirmed();
+        if !created_start {
+            state.created_start.store(false, Ordering::Release);
+        }
         while matches!(reply, Reply::Restored { .. } | Reply::Takeover { .. }) {
             let mut dormant = false;
             while let Reply::Restored {
@@ -259,14 +279,15 @@ impl ClaimWorker<'_> {
                     *takeover = false;
                     *paste_unconfirmed = false;
                     state.invalidate();
-                    if state.directory_busy.swap(false, Ordering::AcqRel) {
+                    if state.directory_busy.swap(false, Ordering::AcqRel)
+                        && state.start_unconfirmed()
+                    {
                         *state
                             .directory_note
                             .lock()
                             .unwrap_or_else(|e| e.into_inner()) =
                             Some("Starting the shell was not confirmed.");
                     }
-                    state.start_restored.store(false, Ordering::Release);
                     discard_presentation();
                 }
                 *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) = recovery.clone();
@@ -295,6 +316,9 @@ impl ClaimWorker<'_> {
                 // These requests authorize the same first use. Consume them together even
                 // when creation or repair already supplies that authorization.
                 let created = std::mem::take(&mut created_start);
+                if created {
+                    state.created_start.store(false, Ordering::Release);
+                }
                 let start_restored = state.start_restored.swap(false, Ordering::AcqRel);
                 // Selection never starts a Session that ended in this server run.
                 let selected =
@@ -345,7 +369,13 @@ impl ClaimWorker<'_> {
                             state.invalidate();
                             reply
                         }
-                        result => result?,
+                        Err(error) => {
+                            if state.retain_start_after(error) {
+                                state.start_restored.store(true, Ordering::Release);
+                            }
+                            return Err(error);
+                        }
+                        Ok(reply) => reply,
                     };
                 } else {
                     // Start, selection, repair and dismissal wake this wait, and so does
@@ -388,7 +418,17 @@ impl ClaimWorker<'_> {
                 {
                     return Ok(None);
                 }
-                if state.take_over.swap(false, Ordering::AcqRel) {
+                let dormant_target = session_ended.is_some() || target.session == pane_id;
+                if !dormant_target {
+                    // Another client already started a shell. No retained intent may replace it.
+                    state.start_restored.store(false, Ordering::Release);
+                    state.created_start.store(false, Ordering::Release);
+                    created_start = false;
+                }
+                let queued_start = dormant_target
+                    && !state.start_unconfirmed()
+                    && state.start_restored.swap(false, Ordering::AcqRel);
+                if state.take_over.swap(false, Ordering::AcqRel) || queued_start {
                     state.admission(Admission::Pending);
                     state.set(CorePaneStatus::TakingOver);
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
@@ -398,6 +438,11 @@ impl ClaimWorker<'_> {
                         target,
                         size: grant_size,
                         style: Some(encode_style(&update)),
+                    })
+                    .inspect_err(|error| {
+                        if dormant_target && state.retain_start_after(*error) {
+                            state.start_restored.store(true, Ordering::Release);
+                        }
                     })?;
                 } else {
                     // Take Over, selection and dismissal wake this wait, and so does anything
@@ -426,6 +471,7 @@ impl ClaimWorker<'_> {
             // made after admission but before the first hidden screen arrives.
             let _status = state.status.lock().unwrap_or_else(|e| e.into_inner());
             state.admission(Admission::Granted);
+            state.created_start.store(false, Ordering::Release);
             state.selected.store(false, Ordering::Release);
             state.start_restored.store(false, Ordering::Release);
         }
@@ -491,6 +537,225 @@ mod tests {
             },
             next_sequence: 1,
         })));
+    }
+
+    #[test]
+    fn a_start_queued_past_its_restart_deadline_never_reaches_the_core() {
+        let state = CorePaneState::new();
+        assert!(state.connection_failed(CoreError::ServiceBusy, false));
+        state.start_restored();
+        assert!(state.start_waiting());
+        // The restart wait ran out while the Pane had no worker, as with its window closed.
+        {
+            let mut recovery = state
+                .connection_recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            recovery.retry();
+            recovery.restart_wait(
+                std::time::Instant::now()
+                    .checked_sub(super::super::restart::RECONNECT_LIMIT)
+                    .unwrap(),
+            );
+        }
+        let mut requests = Vec::new();
+        let result = run_claim(&state, |request| {
+            requests.push(request.clone());
+            Err(CoreError::NotRunning)
+        });
+        assert_eq!(result.err(), Some(CoreError::Protocol));
+        assert!(requests.is_empty(), "the old click reached the Core");
+        assert!(!state.connection_failed(CoreError::Protocol, false));
+        assert!(!state.start_waiting());
+    }
+
+    #[test]
+    fn start_session_in_another_clients_ended_pane_waits_for_reconnect() {
+        let state = CorePaneState::new();
+        let end = pane::SessionEnd::Exited { code: 1 };
+        state.offered_take_over(pane::control::Controller::Nobody, Some(end));
+        assert!(state.connection_failed(CoreError::ServiceBusy, true));
+        state.start_restored();
+        assert!(state.start_waiting());
+        let mut requests = 0;
+        let granted = run_claim(&state, |request| {
+            requests += 1;
+            match requests {
+                1 => Ok(Reply::Takeover {
+                    target: pane::PaneTarget {
+                        core: [2; 32],
+                        session: [2; 32],
+                    },
+                    controller: pane::control::Controller::Nobody,
+                    session_ended: Some(end),
+                }),
+                2 => {
+                    assert!(matches!(request, Request::TakeOver { .. }));
+                    Ok(Reply::Attached {
+                        lease: Lease {
+                            core: [2; 32],
+                            session: [3; 32],
+                            control: [4; 32],
+                            connection: [5; 32],
+                        },
+                    })
+                }
+                _ => panic!("unexpected claim {request:?}"),
+            }
+        })
+        .unwrap();
+        assert!(granted.is_some());
+        assert!(!state.start_waiting());
+    }
+
+    #[test]
+    fn a_start_session_click_survives_replacement_of_its_presentation() {
+        let core = MachineConnection::for_identity("spaceterm-development").unwrap();
+        let controls = PaneControls::default();
+        let open = || {
+            CoreSessionFactory::for_remote_pane(
+                core.clone(),
+                &controls,
+                "penguin".into(),
+                [2; 32],
+                Arc::default(),
+            )
+        };
+        let (_first, state) = open();
+        state.set(CorePaneStatus::Restored);
+        state.start_restored();
+        assert!(state.connection_failed(CoreError::ServiceBusy, false));
+        let (_replacement, state) = open();
+        let mut requests = 0;
+        let granted = run_claim(&state, |request| {
+            requests += 1;
+            match requests {
+                1 => Ok(restored(2)),
+                2 => {
+                    assert!(
+                        matches!(request, Request::StartRestored { .. }),
+                        "queued start did not reach the replacement: {request:?}"
+                    );
+                    Ok(Reply::Attached {
+                        lease: Lease {
+                            core: [2; 32],
+                            session: [3; 32],
+                            control: [4; 32],
+                            connection: [5; 32],
+                        },
+                    })
+                }
+                _ => panic!("unexpected claim {request:?}"),
+            }
+        })
+        .unwrap();
+        assert!(granted.is_some());
+        let (_, reopened) = open();
+        assert!(
+            !reopened.start_waiting(),
+            "the completed intent must not start a later shell"
+        );
+    }
+
+    #[test]
+    fn a_busy_created_start_completes_after_reconnecting_to_a_new_boot() {
+        for busy_on_observation in [false, true] {
+            let state = CorePaneState::new();
+            state.start_created();
+            let mut requests = 0;
+            assert!(matches!(
+                run_claim(&state, |request| {
+                    requests += 1;
+                    match requests {
+                        1 => {
+                            assert!(matches!(
+                                request,
+                                Request::SelectPane {
+                                    explicit: false,
+                                    ..
+                                }
+                            ));
+                            if busy_on_observation {
+                                return Err(CoreError::ServiceBusy);
+                            }
+                            let mut reply = restored(1);
+                            if let Reply::Restored { fresh, .. } = &mut reply {
+                                *fresh = true;
+                            }
+                            Ok(reply)
+                        }
+                        2 => {
+                            assert!(matches!(request, Request::StartRestored { .. }));
+                            Err(CoreError::ServiceBusy)
+                        }
+                        _ => panic!("unexpected claim {request:?}"),
+                    }
+                }),
+                Err(CoreError::ServiceBusy)
+            ));
+            assert!(state.connection_failed(CoreError::ServiceBusy, false));
+            assert!(!state.start_unconfirmed());
+            requests = 0;
+            let granted = run_claim(&state, |request| {
+                requests += 1;
+                match requests {
+                    1 => Ok(restored(2)),
+                    2 => {
+                        assert!(
+                            matches!(request, Request::StartRestored { core: [2, ..], .. }),
+                            "queued start was lost: {request:?}"
+                        );
+                        Ok(Reply::Attached {
+                            lease: Lease {
+                                core: [2; 32],
+                                session: [3; 32],
+                                control: [4; 32],
+                                connection: [5; 32],
+                            },
+                        })
+                    }
+                    _ => panic!("unexpected claim {request:?}"),
+                }
+            })
+            .unwrap();
+            assert!(granted.is_some());
+            assert_eq!(state.directory_progress(), (false, None));
+        }
+    }
+
+    #[test]
+    fn a_start_session_click_waits_through_a_connection_loss_before_dispatch() {
+        let state = CorePaneState::new();
+        state.set(CorePaneStatus::Restored);
+        state.start_restored();
+        assert!(state.connection_failed(CoreError::ServiceBusy, false));
+        let mut requests = 0;
+        state.wake.notify();
+        assert!(
+            run_claim(&state, |request| {
+                requests += 1;
+                match requests {
+                    1 => Ok(restored(2)),
+                    2 => {
+                        assert!(
+                            matches!(request, Request::StartRestored { .. }),
+                            "queued click was lost: {request:?}"
+                        );
+                        Ok(Reply::Attached {
+                            lease: Lease {
+                                core: [2; 32],
+                                session: [3; 32],
+                                control: [4; 32],
+                                connection: [5; 32],
+                            },
+                        })
+                    }
+                    _ => panic!("unexpected claim {request:?}"),
+                }
+            })
+            .unwrap()
+            .is_some()
+        );
     }
 
     /// The exchange double changes reachability without opening a network connection. A long
@@ -599,7 +864,7 @@ mod tests {
                             };
                             let copy = DormantCopy::of(ended);
                             assert_eq!(
-                                (copy.title, copy.label),
+                                (copy.title.as_ref(), copy.label),
                                 ("SpaceTerm Core Restarted", "Start Session")
                             );
                             // Teardown only after the live claim chose observation over Start.
@@ -1064,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn creation_intent_does_not_start_retained_or_taken_over_work() {
+    fn creation_intent_does_not_restart_ended_or_take_over_running_work() {
         for taken_over in [false, true] {
             let state = CorePaneState::new();
             state.start_created();
@@ -1078,7 +1343,7 @@ mod tests {
                             ..
                         }
                     ),
-                    "creation must neither start retained work nor acquire control"
+                    "creation must not restart an ended shell or take over another client's running shell"
                 );
                 observations += 1;
                 if observations > 1 {
@@ -1092,13 +1357,17 @@ mod tests {
                     Reply::Takeover {
                         target: pane::PaneTarget {
                             core: [1; 32],
-                            session: [2; 32],
+                            session: [5; 32],
                         },
                         controller: pane::control::Controller::Nobody,
                         session_ended: None,
                     }
                 } else {
-                    restored(1)
+                    let mut reply = restored(1);
+                    if let Reply::Restored { session_ended, .. } = &mut reply {
+                        *session_ended = Some(pane::SessionEnd::Exited { code: 1 });
+                    }
+                    reply
                 })
             });
             assert!(!state.created_start.load(Ordering::Acquire));

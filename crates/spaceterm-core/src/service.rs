@@ -144,6 +144,10 @@ trait Supervisor: Send + Sync {
     /// Change startup activation only. Never stop, start or unregister the service.
     fn set_automatic_start(&self, enabled: bool) -> Result<(), CoreError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), CoreError>;
+    /// Forgets the retained installation at `runtime` before SpaceTerm deletes it: on macOS,
+    /// Launch Services unregisters its bundle. It never stops, starts or unregisters the
+    /// service. Best effort, because the installation goes either way.
+    fn retire(&self, _runtime: &Path) {}
     fn running(&self) -> Result<bool, CoreError>;
     /// The running server's process identifier, as the service manager reports it.
     fn process(&self) -> Result<Option<u32>, CoreError> {
@@ -670,7 +674,7 @@ impl Service {
         if self.supervisor.login_item_off() {
             return Err(CoreError::LoginItemOff);
         }
-        check_cleanup(state)?;
+        self.check_stopped(state)?;
         self.prove_quiescent()?;
         state.run = None;
         data.read()?; // Unavailable or missing identity is never replaced by service controls.
@@ -693,6 +697,9 @@ impl Service {
                 {
                     // The runtime refused data it can't read and recorded why.
                     CoreError::DataResetRequired
+                } else if crate::migration::core_data::newer_at(&self.paths.data) {
+                    // A newer SpaceTerm Core wrote the data, and this runtime refused it.
+                    CoreError::IncompatibleState
                 } else {
                     error
                 }
@@ -882,7 +889,7 @@ impl Service {
             return Err(CoreError::CleanupUnresolved);
         }
         if !running {
-            check_cleanup(state)?;
+            self.check_stopped(state)?;
         }
         Ok(ServiceStatus {
             installed: state.installed,
@@ -912,6 +919,18 @@ impl Service {
                 });
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    /// [`check_cleanup`], except that a run of this boot that never recorded its end counts as
+    /// ended once its server is proven stopped: the service manager runs none, and
+    /// [`Self::prove_quiescent`] finds its instance lock free and its endpoint refusing. A
+    /// force-killed Core leaves such a run, and starts again in the same boot.
+    fn check_stopped(&self, state: &State) -> Result<(), CoreError> {
+        match check_cleanup(state) {
+            Err(CoreError::CleanupUnresolved) if !self.supervisor.running()? => {
+                self.prove_quiescent()
+            }
+            result => result,
         }
     }
     fn prove_quiescent(&self) -> Result<(), CoreError> {
@@ -1077,7 +1096,13 @@ fn run_approved(
     {
         return Err(refuse(&state));
     }
-    check_cleanup(&state)?;
+    // A run of this boot that never recorded its end belongs to a server that was killed.
+    // This process is the service manager's run now, so only the instance lock and the
+    // endpoint prove that server gone.
+    match check_cleanup(&state) {
+        Err(CoreError::CleanupUnresolved) => service.prove_quiescent()?,
+        result => result?,
+    }
     let layout = runtime::Layout::host(identity).ok_or(CoreError::RuntimeUnavailable)?;
     if executable != service.runtime(&state).join(layout.executable()) {
         return Err(CoreError::RuntimeUnavailable);
@@ -1151,26 +1176,34 @@ fn check_cleanup(state: &State) -> Result<(), CoreError> {
     }
     Ok(())
 }
+/// This boot's identity. A clock change never changes it.
 fn boot() -> Result<String, CoreError> {
     #[cfg(target_os = "macos")]
     {
-        // SAFETY: sysctlbyname fills a correctly sized timeval for the fixed kernel key.
-        let mut value: libc::timeval = unsafe { std::mem::zeroed() };
-        let mut size = std::mem::size_of_val(&value);
+        // SAFETY: sysctlbyname fills at most the buffer's size for the fixed kernel key, and
+        // reports the bytes it wrote, a terminated UUID string.
+        let mut value = [0_u8; 64];
+        let mut size = value.len();
         if unsafe {
             libc::sysctlbyname(
-                c"kern.boottime".as_ptr(),
-                (&raw mut value).cast(),
+                c"kern.bootsessionuuid".as_ptr(),
+                value.as_mut_ptr().cast(),
                 &mut size,
                 std::ptr::null_mut(),
                 0,
             )
         } != 0
-            || size != std::mem::size_of_val(&value)
+            || size == 0
+            || size > value.len()
         {
             return Err(CoreError::StorageUnavailable);
         }
-        Ok(format!("{}:{}", value.tv_sec, value.tv_usec))
+        let text = std::ffi::CStr::from_bytes_until_nul(&value[..size])
+            .ok()
+            .and_then(|text| text.to_str().ok())
+            .filter(|text| !text.is_empty())
+            .ok_or(CoreError::StorageUnavailable)?;
+        Ok(text.to_owned())
     }
     #[cfg(target_os = "linux")]
     {
@@ -1567,6 +1600,39 @@ mod tests {
                 }
             },
         );
+    }
+    #[test]
+    fn a_force_killed_core_counts_as_stopped_once_its_instance_lock_is_free() {
+        let fixture = Fixture::new();
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            std::sync::Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                ..Default::default()
+            }),
+        );
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        // A run of this boot that never recorded its end, as SIGKILL leaves it.
+        state.run = Some(Run {
+            boot: boot().unwrap(),
+            token: [7; 32],
+        });
+        data.write_json(c"service.json", &state).unwrap();
+        let runtime = Directory::open(&fixture.paths.runtime, true).unwrap();
+        // While its instance lock is held, its server may still run.
+        let instance = runtime.lock("server.lock", true).unwrap();
+        assert_eq!(service.passive_status(), Err(CoreError::CleanupUnresolved));
+        drop(instance);
+        let status = service.passive_status().unwrap();
+        assert!(status.installed && !status.running);
+    }
+    #[test]
+    fn the_boot_identity_is_stable_within_a_boot() {
+        let first = boot().unwrap();
+        assert!(!first.is_empty());
+        assert_eq!(boot().unwrap(), first);
     }
     #[test]
     fn automatic_start_changes_preserve_the_running_core_and_its_retained_state() {

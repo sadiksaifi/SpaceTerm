@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -98,6 +98,9 @@ pub(super) struct PaneControl {
     refusal: Option<CoreError>,
     /// An interrupted start belongs to the retained Pane, including across window replacement.
     pub(super) recovery: Arc<Mutex<super::recovery::Recovery>>,
+    pub(super) queued_start: Arc<AtomicBool>,
+    pub(super) queued_creation: Arc<AtomicBool>,
+    pub(super) queued_selection: Arc<AtomicBool>,
     /// The view a closed window left of this Pane, which the next presentation reads from.
     pub(super) view: Arc<Mutex<Option<super::reading::Reading>>>,
     /// Held across each request, so a successor's claim waits for an in-flight request.

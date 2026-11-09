@@ -75,11 +75,15 @@ pub(crate) mod notification_access;
     )
 )]
 pub(crate) mod permission_access;
+#[cfg(feature = "desktop")]
+pub(crate) mod quit_policy;
 /// A Linux server's Git facts watch, through `notify`.
 #[cfg(target_os = "linux")]
 pub(crate) mod repository_watch;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod unix_desktop_channel;
+#[cfg(all(unix, feature = "desktop"))]
+pub(crate) mod unix_quit_signal;
 
 /// The watch sets a server's Git facts reader uses: kqueue on macOS, which needs no FSEvents, and
 /// inotify through `notify` on Linux.

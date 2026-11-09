@@ -272,6 +272,10 @@ impl Engine for Fake {
         unreachable!("local archives install through the engine directly")
     }
 
+    fn admits_version(&self, candidate: &Candidate) -> Result<(), InstallError> {
+        self.ordered(candidate)
+    }
+
     fn begin_check(&self) -> Result<FakeChecking, InstallError> {
         self.take()?;
         self.record(Event::BeginCheck);
@@ -569,6 +573,60 @@ fn a_core_below_the_newest_floor_installs_the_release_at_that_floor_as_a_steppin
         ]);
         assert_eq!(fake.events(), expected, "{running}");
     }
+}
+
+#[test]
+fn a_stepping_stone_that_failed_to_start_fails_the_check_instead_of_reading_current() {
+    let key = TestKey::generate();
+    let newest = floored_release(&key, "1.2.2", "1.2.0", OLD_GLIBC, b"newest");
+    let stone = floored_release(&key, "1.2.0", "1.0.0", OLD_GLIBC, b"stone");
+    let data = Data::new();
+    let host = Host::serving(&newest).publishing("1.2.0", &stone);
+    let check = feed_check(
+        &data,
+        Some(trust(&key, &TestKey::generate())),
+        host,
+        host_system,
+    );
+    let fake = Fake::with(&["1.1.0"]);
+    fake.state().skipped = Some(version("1.2.0"));
+    assert_eq!(
+        check.check.run(&fake),
+        Err(SourceError::Check(CheckFailure::SteppingStoneSkipped))
+    );
+    assert!(matches!(
+        fake.events().last(),
+        Some(Event::Finish(UpdateCheck::Failing {
+            reason: CheckFailure::SteppingStoneSkipped,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn a_machine_clock_behind_the_feed_fails_the_check_as_a_clock_problem() {
+    let key = TestKey::generate();
+    let release = release(&key, "1.5.0", OLD_GLIBC, b"newest");
+    let data = Data::new();
+    let mut check = feed_check(
+        &data,
+        Some(trust(&key, &TestKey::generate())),
+        Host::serving(&release),
+        host_system,
+    );
+    check.check.clock = || NOW - crate::update::feed::MAX_CLOCK_SKEW - 1;
+    let fake = Fake::with(&["1.4.0"]);
+    assert_eq!(
+        check.check.run(&fake),
+        Err(SourceError::Check(CheckFailure::ClockBehind))
+    );
+    assert!(matches!(
+        fake.events().last(),
+        Some(Event::Finish(UpdateCheck::Failing {
+            reason: CheckFailure::ClockBehind,
+            ..
+        }))
+    ));
 }
 
 #[test]
@@ -929,6 +987,38 @@ fn a_malformed_push_is_refused_before_the_engine_is_asked() {
 }
 
 #[test]
+fn a_newer_push_the_core_refuses_leaves_the_unfinished_push_receiving() {
+    let data = Data::new();
+    let pushes = Pushes::new(data.0.clone());
+    let fake = Fake::with(&["1.4.0"]);
+    fake.state().skipped = Some(version("1.6.0"));
+    let first = pushes
+        .begin(&fake, 1, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
+        .unwrap();
+    pushes.chunk(&first, 0, b"a").unwrap();
+    let above_floor = Candidate::new(version("1.7.0"), Some(floor("1.7.0"))).unwrap();
+    for (refused, error) in [
+        (
+            above_floor,
+            InstallError::BelowFloor {
+                floor: floor("1.7.0"),
+            },
+        ),
+        (candidate("1.6.0"), InstallError::Skipped),
+    ] {
+        assert_eq!(
+            pushes.begin(&fake, 2, refused, 3, &digest(b"abc"), &[3; 64]),
+            Err(SourceError::Install(error))
+        );
+    }
+    assert!(!fake.events().contains(&Event::Dropped));
+    assert!(matches!(
+        pushes.chunk(&first, 1, b"bc"),
+        Ok(Received::Installed(_))
+    ));
+}
+
+#[test]
 fn a_completed_push_whose_digest_differs_records_a_verification_failure() {
     let data = Data::new();
     let pushes = Pushes::new(data.0.clone());
@@ -950,7 +1040,7 @@ fn a_completed_push_whose_digest_differs_records_a_verification_failure() {
 }
 
 #[test]
-fn a_push_that_breaks_off_records_nothing() {
+fn a_push_that_breaks_off_records_nothing_and_only_a_newer_push_replaces_one() {
     let data = Data::new();
     let pushes = Pushes::new(data.0.clone());
     let fake = Fake::with(&["1.4.0"]);
@@ -970,12 +1060,25 @@ fn a_push_that_breaks_off_records_nothing() {
     let replaced = pushes
         .begin(&fake, 3, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
         .unwrap();
+    // Another desktop's push of the same or an older version waits for the unfinished one.
+    for waits in ["1.5.0", "1.4.5"] {
+        assert_eq!(
+            pushes.begin(&fake, 4, candidate(waits), 3, &digest(b"abc"), &[3; 64]),
+            Err(SourceError::Install(InstallError::Busy)),
+            "{waits}"
+        );
+    }
+    assert_eq!(
+        SourceError::Install(InstallError::Busy).code(),
+        "service_busy"
+    );
+    // A newer one replaces it, because the Machine no longer needs the older one.
     let second = pushes
-        .begin(&fake, 4, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
+        .begin(&fake, 5, candidate("1.6.0"), 3, &digest(b"abc"), &[3; 64])
         .unwrap();
     assert_eq!(
         fake.events().last(),
-        Some(&Event::BeginInstall(version("1.5.0"), 3))
+        Some(&Event::BeginInstall(version("1.6.0"), 3))
     );
     assert_eq!(
         fake.events()
@@ -983,7 +1086,7 @@ fn a_push_that_breaks_off_records_nothing() {
             .filter(|event| **event == Event::Dropped)
             .count(),
         2,
-        "a new push replaces the unfinished one"
+        "a newer push replaces the unfinished one"
     );
     assert_eq!(
         pushes.chunk(&replaced, 0, b"a"),
@@ -1002,6 +1105,52 @@ fn a_push_that_breaks_off_records_nothing() {
 }
 
 #[test]
+fn startup_cleanup_leaves_a_live_install_and_removes_an_abandoned_one() {
+    let data = Data::new();
+    // A stopped Core's CLI downloads from the feed while a starting Core cleans up.
+    let live = Staging::create(&data.0).unwrap();
+    live.archive_file().unwrap().write_all(b"partial").unwrap();
+    live.write_signature(&[3; 64]).unwrap();
+    let staged = |id: &str, name: &str| data.0.join(format!("staging/{id}.{name}"));
+    // A crash left another install's files, with the owner lock no process holds.
+    let abandoned = "ab".repeat(16);
+    for name in ["tar.gz", "sig", "lock"] {
+        create_private(&staged(&abandoned, name)).unwrap();
+    }
+    // A CLI of 0.11.2, which takes no owner lock, downloads now.
+    let released = "cd".repeat(16);
+    std::fs::write(staged(&released, "tar.gz"), b"partial").unwrap();
+    // Another such download looks idle for two hours, as after a forward clock correction.
+    let quiet = "ef".repeat(16);
+    for name in ["tar.gz", "sig"] {
+        let file = std::fs::File::create(staged(&quiet, name)).unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60))
+            .unwrap();
+    }
+    clear_staging(&data.0);
+    assert!(live.archive.exists() && live.signature.exists());
+    for name in ["tar.gz", "sig", "lock"] {
+        assert!(!staged(&abandoned, name).exists(), "{name}");
+    }
+    // Nothing proves that a writer without an owner lock ended, however old its files look.
+    assert!(staged(&released, "tar.gz").exists());
+    assert!(staged(&quiet, "tar.gz").exists() && staged(&quiet, "sig").exists());
+    for id in [&released, &quiet] {
+        assert!(
+            !staged(id, "lock").exists(),
+            "cleanup claims no unowned download"
+        );
+    }
+    assert_eq!(
+        data.staged(),
+        6,
+        "the live install's files and owner lock and the unowned downloads"
+    );
+    drop(live);
+    assert_eq!(data.staged(), 3);
+}
+
+#[test]
 fn every_failure_has_its_contract_code() {
     for (error, code) in [
         (
@@ -1016,6 +1165,14 @@ fn every_failure_has_its_contract_code() {
         (
             SourceError::Check(CheckFailure::SystemTooOld),
             "system_too_old",
+        ),
+        (
+            SourceError::Check(CheckFailure::ClockBehind),
+            "clock_behind",
+        ),
+        (
+            SourceError::Check(CheckFailure::SteppingStoneSkipped),
+            "version_skipped",
         ),
         (SourceError::Install(InstallError::NotNewer), "not_newer"),
         (

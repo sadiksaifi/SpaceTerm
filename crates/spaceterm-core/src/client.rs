@@ -141,6 +141,22 @@ struct SharedLink {
     admissions: Arc<Mutex<protocol::capability::Admissions>>,
     /// The generation of the latest link connected, or 0 before the first.
     generation: std::sync::atomic::AtomicU64,
+    /// The last facts a link received while the Core restarted, and when they arrived. They
+    /// outlast that link until another link's facts arrive, or for [`RESTART_FACTS_LIMIT`].
+    restart: Mutex<Option<(std::time::Instant, Arc<crate::update::facts::UpdateFacts>)>>,
+}
+
+/// How long [`MachineConnection::update_facts`] keeps a restart's facts without a link that
+/// reports newer ones. It matches how long a client follows a Core that replaces itself.
+pub const RESTART_FACTS_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Whether `facts` say the Core is restarting, so its links are about to end.
+fn restarting(facts: &crate::update::facts::UpdateFacts) -> bool {
+    use crate::update::facts::Operation;
+    matches!(
+        facts.operation,
+        Some(Operation::Restarting { .. } | Operation::RestartingSameVersion)
+    )
 }
 
 /// Numbers every link this process connects, across all handles. A paired route's reconnect
@@ -172,6 +188,8 @@ impl LinkSink for Fanout {
                 }
             }
             LinkEvent::UpdateFacts(facts) => {
+                *shared.restart.lock().unwrap_or_else(|e| e.into_inner()) =
+                    restarting(&facts).then(|| (std::time::Instant::now(), Arc::clone(&facts)));
                 for sink in subscribers {
                     sink.deliver(LinkEvent::UpdateFacts(Arc::clone(&facts)));
                 }
@@ -621,10 +639,23 @@ impl MachineConnection {
     pub fn core_versions(&self) -> Option<protocol::CoreVersions> {
         self.admissions().core().cloned()
     }
-    /// The newest update facts the shared live connection received. None without a live
-    /// connection or before its first facts. [`LinkEvent::UpdateFacts`] reports each change.
+    /// The newest update facts the shared live connection received. While the Core restarts,
+    /// its link ends and the next one has no facts yet, so the facts that said it restarts
+    /// stay until another link's facts arrive, for at most [`RESTART_FACTS_LIMIT`]. Otherwise
+    /// None without a live connection or before its first facts. [`LinkEvent::UpdateFacts`]
+    /// reports each change.
     pub fn update_facts(&self) -> Option<Arc<crate::update::facts::UpdateFacts>> {
-        self.live_link().and_then(|link| link.update_facts())
+        self.live_link()
+            .and_then(|link| link.update_facts())
+            .or_else(|| {
+                self.shared
+                    .restart
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .filter(|(at, _)| at.elapsed() < RESTART_FACTS_LIMIT)
+                    .map(|(_, facts)| Arc::clone(facts))
+            })
     }
     /// Opens a new connection of its own, separate from the shared one. `events` receives its
     /// pushed inventory and health. Dropping every handle of the link closes it.

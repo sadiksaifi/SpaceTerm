@@ -247,6 +247,10 @@ pub enum FeedError {
     Floor,
     #[error("the feed's publication time is out of range")]
     PublishedAt,
+    /// The verified feed was published more than [`MAX_CLOCK_SKEW`] seconds after the reader's
+    /// clock: that clock is behind.
+    #[error("the reader's clock is behind the feed's publication time")]
+    ClockBehind,
     #[error("the feed's minimum system is malformed")]
     MinimumSystem,
     #[error("the feed's release notes link is wrong")]
@@ -314,8 +318,12 @@ pub fn read(
         .ok()
         .filter(|floor| Candidate::new(version.clone(), Some(*floor)).is_ok())
         .ok_or(FeedError::Floor)?;
-    if document.published_at == 0 || document.published_at > now.saturating_add(MAX_CLOCK_SKEW) {
+    if document.published_at == 0 {
         return Err(FeedError::PublishedAt);
+    }
+    // The signature verified, so the publication time is the release's own.
+    if document.published_at > now.saturating_add(MAX_CLOCK_SKEW) {
+        return Err(FeedError::ClockBehind);
     }
     let minimum_system =
         SystemVersion::parse(&document.minimum_system).ok_or(FeedError::MinimumSystem)?;
@@ -680,7 +688,7 @@ mod tests {
             (|f| f["published_at"] = 0.into(), FeedError::PublishedAt),
             (
                 |f| f["published_at"] = (NOW + MAX_CLOCK_SKEW + 1).into(),
-                FeedError::PublishedAt,
+                FeedError::ClockBehind,
             ),
             (
                 |f| f["minimum_system"] = "2".into(),
