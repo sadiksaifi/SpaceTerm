@@ -6,6 +6,7 @@ from pathlib import Path
 
 from spaceterm_tasks import TaskError
 from spaceterm_tasks.compatibility import (
+    PROTOCOLS,
     RELEASES,
     candidate_tag,
     expected,
@@ -151,10 +152,16 @@ class CompatibilityPlanTests(unittest.TestCase):
         path.write_text(text)
         return path
 
-    def planned(self, path):
+    def planned(self, path, version="2.1.0", published=(), majors=None):
         output = self.root / "output"
         output.write_text("")
-        plan(output, path)
+        plan(
+            output,
+            version,
+            path,
+            published=lambda: set(published),
+            work_major=lambda tag: (majors or {})[tag],
+        )
         return dict(line.split("=", 1) for line in output.read_text().splitlines())
 
     def test_a_listed_release_is_paired_with_this_commit_as_each_side(self):
@@ -173,6 +180,22 @@ class CompatibilityPlanTests(unittest.TestCase):
         releases(RELEASES)
         outputs = self.planned(self.listed("releases = []\n"))
         self.assertEqual(outputs, {"matrix": '{"include":[]}', "any": "false"})
+
+    def test_the_plan_refuses_a_list_that_omits_a_published_release_on_a_paired_major(self):
+        # A release published on this work major or the previous one must be paired before the
+        # next release publishes. Older majors, releases from before the greenfield line, and the
+        # planned release itself on a rerun after it published are not.
+        mine = PROTOCOLS["work"]["major"]
+        published = {"0.6.8", "1.0.0", "1.1.0", "1.2.0", "1.3.0"}
+        majors = {"v1.0.0": mine - 2, "v1.1.0": mine - 1, "v1.2.0": mine}
+        path = self.listed('releases = ["v1.1.0"]\n')
+        with self.assertRaisesRegex(TaskError, "omits published releases v1.2.0$"):
+            self.planned(path, "1.3.0", published, majors)
+        path = self.listed('releases = ["v1.1.0", "v1.2.0"]\n')
+        self.assertEqual(self.planned(path, "1.3.0", published, majors)["any"], "true")
+        for version in ("1.3", "v1.3.0"):
+            with self.subTest(version=version), self.assertRaises(TaskError):
+                self.planned(path, version, published, majors)
 
     def test_the_list_holds_distinct_stable_releases_oldest_first(self):
         for text in [

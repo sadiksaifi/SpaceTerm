@@ -156,6 +156,8 @@ jobs:
           version: 2026.10.4
           cache: false
       - id: pairs
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: mise run compat:plan
 
   compatibility:

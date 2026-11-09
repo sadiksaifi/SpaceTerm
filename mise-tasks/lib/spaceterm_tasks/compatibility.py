@@ -47,10 +47,15 @@ STARTUP = 60
 COMMAND = 60
 
 
-def releases(path=RELEASES):
-    """The listed release tags, oldest first. cliff.toml's tag_pattern decides what a release is."""
+def _release_pattern():
+    """cliff.toml's tag_pattern, which decides what a release is."""
     with open(ROOT / "cliff.toml", "rb") as config:
-        pattern = re.compile(tomllib.load(config)["git"]["tag_pattern"])
+        return re.compile(tomllib.load(config)["git"]["tag_pattern"])
+
+
+def releases(path=RELEASES):
+    """The listed release tags, oldest first."""
+    pattern = _release_pattern()
     try:
         listed = tomllib.loads(Path(path).read_text())["releases"]
     except (KeyError, tomllib.TOMLDecodeError):
@@ -69,9 +74,77 @@ def matrix(listed):
     return [{"release": tag, "candidate": side} for tag in listed for side in SIDES]
 
 
-def plan(output, path=RELEASES):
-    """Write the matrix and whether it has any job as GitHub step outputs."""
-    include = matrix(releases(path))
+def published_work_major(tag):
+    """The work protocol major of published release `tag`, from its signed Linux Core feed."""
+    name = release_feed.feed_name("core", "linux-x86_64")
+    with tempfile.TemporaryDirectory(prefix="spaceterm-compatibility-") as temporary:
+        download = Path(temporary)
+        _checked(
+            [
+                "gh",
+                "release",
+                "download",
+                tag,
+                "--pattern",
+                name,
+                "--pattern",
+                f"{name}.sig",
+                "--dir",
+                str(download),
+            ],
+            "feed download",
+        )
+        feed, signature = download / name, download / f"{name}.sig"
+        update_signing.verify(artifact_trust("spaceterm"), feed, signature)
+        document = release_feed.check(feed.read_bytes(), "core", "linux-x86_64")
+    if document["version"] != tag[1:]:
+        raise TaskError(f"the Core feed of {tag} names another release")
+    return document["protocols"]["work"]["major"]
+
+
+def _unlisted(
+    version,
+    listed,
+    *,
+    published=release_floor.published_releases,
+    work_major=published_work_major,
+    current=PROTOCOLS,
+):
+    """The published releases older than `version` that ADR 0035 requires in the list but
+    `listed` omits, oldest first: those whose work major is this commit's or the previous one."""
+    pattern = _release_pattern()
+    mine = current["work"]["major"]
+    candidates = sorted(
+        (
+            tag
+            for tag in (f"v{release}" for release in published())
+            if pattern.match(tag) and _order(tag) < _order(f"v{version}") and tag not in listed
+        ),
+        key=_order,
+    )
+    return [tag for tag in candidates if work_major(tag) in (mine, mine - 1)]
+
+
+def plan(
+    output,
+    version,
+    path=RELEASES,
+    *,
+    published=release_floor.published_releases,
+    work_major=published_work_major,
+):
+    """Write the matrix and whether it has any job as GitHub step outputs.
+
+    Release `version` publishes only after every pair passes, so the plan refuses a list that
+    omits a published release older than `version` that ADR 0035 requires. A rerun after
+    `version` itself was published plans the same pairs.
+    """
+    if not release_feed.VERSION.fullmatch(version):
+        raise TaskError("the compatibility plan needs the MAJOR.MINOR.PATCH release version")
+    listed = releases(path)
+    if missing := _unlisted(version, listed, published=published, work_major=work_major):
+        raise TaskError(f"the compatibility list omits published releases {', '.join(missing)}")
+    include = matrix(listed)
     with open(output, "a") as outputs:
         outputs.write(f"matrix={json.dumps({'include': include}, separators=(',', ':'))}\n")
         outputs.write(f"any={'true' if include else 'false'}\n")
