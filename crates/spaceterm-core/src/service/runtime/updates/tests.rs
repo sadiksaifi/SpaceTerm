@@ -369,11 +369,15 @@ fn a_starting_core_removes_what_a_crash_or_a_finished_update_left_behind() {
         std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
             .create(&staging)
             .unwrap();
-        std::fs::write(
-            staging.join(format!("{}.tar.gz", "ab".repeat(16))),
-            b"partial",
-        )
-        .unwrap();
+        // Its writer took the owner lock, which no process holds now.
+        for name in ["tar.gz", "lock"] {
+            std::os::unix::fs::OpenOptionsExt::mode(
+                std::fs::OpenOptions::new().write(true).create_new(true),
+                0o600,
+            )
+            .open(staging.join(format!("{}.{name}", "ab".repeat(16))))
+            .unwrap();
+        }
         let unfinished = machine
             .service
             .installations_directory()

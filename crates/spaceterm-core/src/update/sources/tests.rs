@@ -1111,21 +1111,43 @@ fn startup_cleanup_leaves_a_live_install_and_removes_an_abandoned_one() {
     let live = Staging::create(&data.0).unwrap();
     live.archive_file().unwrap().write_all(b"partial").unwrap();
     live.write_signature(&[3; 64]).unwrap();
-    // A crash left another install's files without an owner.
+    let staged = |id: &str, name: &str| data.0.join(format!("staging/{id}.{name}"));
+    // A crash left another install's files, with the owner lock no process holds.
     let abandoned = "ab".repeat(16);
-    std::fs::write(data.0.join(format!("staging/{abandoned}.tar.gz")), b"x").unwrap();
-    std::fs::write(data.0.join(format!("staging/{abandoned}.sig")), b"x").unwrap();
+    for name in ["tar.gz", "sig", "lock"] {
+        create_private(&staged(&abandoned, name)).unwrap();
+    }
+    // A CLI of 0.11.2, which takes no owner lock, downloads now.
+    let released = "cd".repeat(16);
+    std::fs::write(staged(&released, "tar.gz"), b"partial").unwrap();
+    // A crash of such a CLI left files that changed nothing for two hours.
+    let stale = "ef".repeat(16);
+    for name in ["tar.gz", "sig"] {
+        let file = std::fs::File::create(staged(&stale, name)).unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60))
+            .unwrap();
+    }
     clear_staging(&data.0);
     assert!(live.archive.exists() && live.signature.exists());
-    assert!(!data.0.join(format!("staging/{abandoned}.tar.gz")).exists());
-    assert!(!data.0.join(format!("staging/{abandoned}.sig")).exists());
+    for name in ["tar.gz", "sig", "lock"] {
+        assert!(!staged(&abandoned, name).exists(), "{name}");
+        assert!(!staged(&stale, name).exists(), "{name}");
+    }
+    assert!(
+        staged(&released, "tar.gz").exists(),
+        "an unowned download that is still changing stays"
+    );
+    assert!(
+        !staged(&released, "lock").exists(),
+        "cleanup claims no unowned download"
+    );
     assert_eq!(
         data.staged(),
-        3,
-        "the live install's archive, signature and lock"
+        4,
+        "the live installs' files and this one's lock"
     );
     drop(live);
-    assert_eq!(data.staged(), 0);
+    assert_eq!(data.staged(), 1);
 }
 
 #[test]

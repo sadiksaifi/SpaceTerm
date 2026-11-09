@@ -706,9 +706,16 @@ impl<P: Fn(u64)> Write for Digesting<'_, P> {
     }
 }
 
+/// How long the files of an install without an owner lock stay untouched. A release before
+/// this one writes no owner lock, and gives up within its 30-minute download limit and its
+/// wait for the service lock, so files that changed nothing for longer are a crash's.
+const UNOWNED_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
+
 /// Removes the files in `<data>/staging` whose install ended without removing them, as a crash
-/// leaves them. A live install holds its owner lock, in this process or another, such as a
-/// stopped Core's CLI downloading from the feed, so its files stay.
+/// leaves them. A live install of this release holds its owner lock, in this process or
+/// another, such as a stopped Core's CLI downloading from the feed, so its files stay. A live
+/// install of an earlier release holds none, so its files stay until [`UNOWNED_STAGING_AGE`]
+/// passed since they last changed.
 pub(crate) fn clear_staging(data: &Path) {
     let directory = data.join("staging");
     let Ok(staging) = crate::storage::Directory::open(&directory, false) else {
@@ -732,8 +739,24 @@ pub(crate) fn clear_staging(data: &Path) {
     ids.sort_unstable();
     ids.dedup();
     for id in ids {
-        if let Ok(Some(_owner)) = staging.try_lock(&format!("{id}.lock")) {
-            for name in Staging::names(&id) {
+        let names = Staging::names(&id);
+        let [archive, signature, owner] = &names;
+        // Taking a lock creates its file, so only a lock file that exists proves an owner.
+        let ended = if directory.join(owner).exists() {
+            staging.try_lock(owner).is_ok_and(|lock| lock.is_some())
+        } else {
+            [archive, signature].into_iter().all(|name| {
+                std::fs::symlink_metadata(directory.join(name))
+                    .and_then(|metadata| metadata.modified())
+                    .map_or(true, |modified| {
+                        modified
+                            .elapsed()
+                            .is_ok_and(|age| age >= UNOWNED_STAGING_AGE)
+                    })
+            })
+        };
+        if ended {
+            for name in &names {
                 let _ = std::fs::remove_file(directory.join(name));
             }
         }
