@@ -295,6 +295,7 @@ description = "Run native macOS and shared Unix Adapter tests"
 run = [
   "cargo test --package spaceterm --all-targets --features native-tests --locked -- macos unix",
   "cargo test --package spaceterm-connections --all-targets --features native-tests --locked -- macos unix",
+  "cargo test --package spaceterm-core --lib --features native-tests,client --locked -- service::macos::tests::retiring_an_installation_unregisters_its_bundle_from_launch_services --ignored --exact",
 ]
 
 [tasks."test:native:linux"]
