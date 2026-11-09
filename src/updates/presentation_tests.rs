@@ -1215,6 +1215,31 @@ fn replacing_a_pending_version_supersedes_a_failure_without_resetting_its_age() 
     );
 }
 
+#[test]
+fn a_replacement_that_installs_on_retry_settles_its_install_failure_but_not_a_start_failure() {
+    for (kind, settled) in [
+        (FailureKind::Install(InstallFailure::DiskFull), true),
+        (FailureKind::Start(StartFailure::DiskFull), false),
+    ] {
+        // 0.9.1 replaced a 0.9.0 waiting since long before its failed first try.
+        let mut update = waiting(machine(PENGUIN, "penguin", 2), NOW - 3_600);
+        let facts = update.facts.as_mut().unwrap();
+        facts.pending.as_mut().unwrap().version = version("0.9.1");
+        facts.last_failure = Some(UpdateFailure {
+            id: 1,
+            at: NOW - 60,
+            version: version("0.9.1"),
+            kind,
+        });
+        let state = present(&[update]).machine(PENGUIN).unwrap().state.clone();
+        assert_eq!(
+            matches!(&state, MachineState::Ready { to, .. } if to == &version("0.9.1")),
+            settled,
+            "{kind:?}: {state:?}"
+        );
+    }
+}
+
 /// A known release stays visible, with a Download that only downloads, after Stop Download, a
 /// dismissed failure, a failed check and an offline launch. Nothing says "up to date" then.
 #[test]

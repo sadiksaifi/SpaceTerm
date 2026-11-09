@@ -1328,9 +1328,14 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
     if let Some(failure) = &facts.last_failure
         && !dismissed.contains(&(update.machine, failure.id))
     {
+        // A Pending Version of the version whose install failed settles that failure, however
+        // long ago the version it replaced was installed. A start failure stays: only a
+        // restart settles it.
+        let installed = matches!(failure.kind, FailureKind::Install(_));
         let superseded = facts.running == failure.version
             || facts.pending.as_ref().is_some_and(|pending| {
-                pending.installed_at > failure.at
+                (installed && pending.version == failure.version)
+                    || pending.installed_at > failure.at
                     || pending
                         .version
                         .release()

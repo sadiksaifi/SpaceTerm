@@ -585,6 +585,45 @@ fn an_overdue_pending_version_keeps_the_overdue_value_every_peer_accepts() {
 }
 
 #[test]
+fn a_replacement_that_installs_on_retry_settles_its_install_failure() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Local,
+        )
+        .unwrap();
+        // Installing the replacement fails once, then succeeds.
+        updates
+            .begin_install(candidate("1.2.0"), 10)
+            .unwrap()
+            .fail(InstallFailure::DiskFull);
+        assert!(updates.facts().last_failure.is_some());
+        let first = updates.facts().pending.unwrap().installed_at;
+        install(
+            &updates,
+            &machine,
+            "1.2.0",
+            Protocols::CURRENT,
+            Source::Feed,
+        )
+        .unwrap();
+        let facts = updates.facts();
+        assert_eq!(facts.last_failure, None, "the install settled its failure");
+        let pending = facts.pending.unwrap();
+        assert_eq!(pending.version, version("1.2.0"));
+        assert_eq!(
+            pending.installed_at, first,
+            "it waits as long as the one it replaced"
+        );
+    });
+}
+
+#[test]
 fn a_pending_version_of_another_work_or_service_major_is_breaking() {
     with_fixture_trust(|| {
         let current = Protocols::CURRENT;

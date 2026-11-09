@@ -992,6 +992,17 @@ impl Updates {
             {
                 record.skipped = None;
             }
+            // Installing settles an install failure of this version or an older one. A start
+            // failure stays: only a restart settles it.
+            if record.last_failure.as_ref().is_some_and(|failure| {
+                matches!(failure.kind, FailureKind::Install(_))
+                    && matches!(
+                        order(version, &failure.version),
+                        Some(Ordering::Greater | Ordering::Equal)
+                    )
+            }) {
+                record.last_failure = None;
+            }
             record.clone()
         })
         .map_err(InstallError::Core)?;
