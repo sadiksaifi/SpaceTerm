@@ -37,12 +37,12 @@ impl EmbeddedCore {
             .ok_or(ActionFailure::Failed)?
             .join("artifact.sig");
         let captured = spaceterm_core::service::CandidateFiles::read(&self.archive, &signature)
-            .map_err(|_| ActionFailure::Failed)?;
+            .map_err(|_| ActionFailure::RelaunchRequired)?;
         if captured.signature() != self.signature
             || captured.archive().len() as u64 != self.length
             || format!("{:x}", Sha256::digest(captured.archive())) != self.sha256
         {
-            return Err(ActionFailure::Changed);
+            return Err(ActionFailure::RelaunchRequired);
         }
         Ok(captured)
     }
@@ -342,13 +342,13 @@ mod tests {
         assert_eq!(streamed, bytes);
         assert!(matches!(
             build.capture_for_push(),
-            Err(ActionFailure::Failed)
+            Err(ActionFailure::RelaunchRequired)
         ));
         std::fs::remove_file(&archive).unwrap();
         std::fs::write(&archive, vec![0; bytes.len()]).unwrap();
         assert!(matches!(
             build.capture_for_push(),
-            Err(ActionFailure::Changed)
+            Err(ActionFailure::RelaunchRequired)
         ));
         std::fs::remove_dir_all(root).unwrap();
     }

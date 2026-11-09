@@ -70,7 +70,7 @@ pub enum CoreError {
     #[error("SpaceTerm Core changed. Review and confirm again.")]
     Changed,
     #[error(
-        "SpaceTerm couldn\u{2019}t confirm whether the SpaceTerm Core update finished. Check the update in Machine Settings."
+        "SpaceTerm couldn\u{2019}t confirm whether the SpaceTerm Core update finished. Open Settings > Machines to check the update."
     )]
     ActivationUnresolved,
     #[error("Couldn\u{2019}t verify this SpaceTerm Core package.")]

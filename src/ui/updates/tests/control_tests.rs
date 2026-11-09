@@ -447,7 +447,7 @@ fn an_overdue_restart_with_sessions_open_never_runs_by_itself(cx: &mut gpui::Tes
 
     let shown = reminders.shown.borrow().clone();
     assert_eq!(shown.len(), 1);
-    assert_eq!(shown[0].1, "Restart overdue on penguin");
+    assert_eq!(shown[0].1, "Update penguin");
     assert!(
         machines.executed_actions().is_empty(),
         "the reminder restarts nothing"

@@ -175,7 +175,19 @@ impl MachineUpdates {
                 _events: events,
             }
         });
-        cx.set_global(MachineUpdatesService(entity));
+        cx.set_global(MachineUpdatesService(entity.clone()));
+        if let Some(updates) = cx
+            .try_global::<crate::updates::UpdateService>()
+            .map(|service| service.0.clone())
+        {
+            entity.update(cx, |_, cx| {
+                cx.observe(&updates, |this, _, cx| this.install_bundled(cx))
+                    .detach();
+            });
+            // A Stepping Stone must find its next desktop release before any automatic Core
+            // push. A successful current check releases the waiting pushes.
+            updates.update(cx, |updates, cx| updates.check(false, cx));
+        }
     }
 
     pub(crate) fn global(cx: &App) -> Option<Entity<Self>> {
@@ -340,7 +352,7 @@ impl MachineUpdates {
                 }
             }
         }
-        self.install_bundled();
+        self.install_bundled(cx);
         cx.notify();
     }
 
@@ -386,10 +398,16 @@ impl MachineUpdates {
         match outcome {
             Ok(()) => update.failed_push = None,
             Err(failure) => {
-                let Some(version) = automatic.or_else(|| update.push.clone()) else {
+                let Some(version) = automatic.or_else(|| update.push.clone()).or_else(|| {
+                    matches!(failure, ActionFailure::NeedsFloor(_))
+                        .then(|| update.bundled.clone())
+                        .flatten()
+                }) else {
                     return;
                 };
-                if update.push.as_ref() == Some(&version) {
+                if update.push.as_ref() == Some(&version)
+                    || update.bundled.as_ref() == Some(&version)
+                {
                     update.failed_push = Some(FailedPush {
                         version,
                         failure: *failure,
@@ -401,7 +419,22 @@ impl MachineUpdates {
 
     /// Installs the bundled Core on each Machine offered one that answers and runs no update
     /// operation, once per Machine and offered version.
-    fn install_bundled(&mut self) {
+    fn install_bundled(&mut self, cx: &App) {
+        // A desktop on its way through an Update Floor must reach its newest known release
+        // before offering that release's Core to every Machine.
+        if cx
+            .try_global::<crate::updates::UpdateService>()
+            .is_some_and(|service| {
+                let updates = service.0.read(cx);
+                !matches!(
+                    updates.state(),
+                    crate::updates::UpdateState::UpToDate
+                        | crate::updates::UpdateState::Unavailable
+                ) || updates.pending_version().is_some()
+            })
+        {
+            return;
+        }
         let due: Vec<(MachineId, Version)> = self
             .machines
             .iter()
@@ -427,10 +460,10 @@ impl MachineUpdates {
 
 /// The failed push `previous` recorded, while `next` still offers its version.
 fn carried_failure(previous: &MachineUpdate, next: &MachineUpdate) -> Option<FailedPush> {
-    previous
-        .failed_push
-        .clone()
-        .filter(|failed| next.push.as_ref() == Some(&failed.version))
+    previous.failed_push.clone().filter(|failed| {
+        next.push.as_ref() == Some(&failed.version)
+            || next.bundled.as_ref() == Some(&failed.version)
+    })
 }
 
 /// What Recent says when `next` finishes an update `previous` was waiting for.
@@ -441,7 +474,13 @@ fn finished_update(previous: &MachineUpdate, next: &MachineUpdate) -> Option<Str
         return Some(format!("{name} updated to {}", after.running));
     }
     match (&before.pending, &after.pending) {
-        (None, Some(pending)) => Some(format!("{name} installed {}", pending.version)),
+        (previous, Some(pending))
+            if previous
+                .as_ref()
+                .is_none_or(|previous| previous.version != pending.version) =>
+        {
+            Some(format!("{name} installed {}", pending.version))
+        }
         _ => None,
     }
 }
@@ -462,6 +501,24 @@ mod tests {
     use spaceterm_core::update::facts::{
         Operation, PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts,
     };
+
+    #[test]
+    fn replacing_a_pending_version_records_the_new_install() {
+        assert_eq!(
+            finished_update(
+                &update("0.8.0", Some("0.9.0")),
+                &update("0.8.0", Some("0.9.1"))
+            ),
+            Some("penguin installed 0.9.1".to_owned())
+        );
+        assert_eq!(
+            finished_update(
+                &update("0.8.0", Some("0.9.1")),
+                &update("0.8.0", Some("0.9.1"))
+            ),
+            None
+        );
+    }
 
     fn update(running: &str, pending: Option<&str>) -> MachineUpdate {
         MachineUpdate {
@@ -507,9 +564,11 @@ mod tests {
     #[gpui::test]
     fn the_bundled_core_installs_once_per_machine_and_version(cx: &mut gpui::TestAppContext) {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
-        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        updater.emit(crate::updates::UpdateEvent::UpToDate);
+        cx.run_until_parked();
         let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
         let notices = Rc::new(std::cell::RefCell::new(Vec::new()));
         let _subscription = cx.update(|cx| {
@@ -590,9 +649,11 @@ mod tests {
     #[gpui::test]
     fn a_failed_automatic_install_offers_try_again_without_retrying(cx: &mut gpui::TestAppContext) {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
-        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        updater.emit(crate::updates::UpdateEvent::UpToDate);
+        cx.run_until_parked();
         let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
         let penguin = [2; 32];
         let install = MachineAction::Install;
@@ -685,9 +746,11 @@ mod tests {
     #[gpui::test]
     fn an_incompatible_core_shows_its_failed_automatic_install(cx: &mut gpui::TestAppContext) {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
-        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        updater.emit(crate::updates::UpdateEvent::UpToDate);
+        cx.run_until_parked();
         let penguin = [2; 32];
         let install = MachineAction::Install;
         let incompatible = || MachineUpdate {
@@ -737,9 +800,11 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
-        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater, cx));
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        updater.emit(crate::updates::UpdateEvent::UpToDate);
+        cx.run_until_parked();
         let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
         let notices = Rc::new(std::cell::RefCell::new(Vec::new()));
         let _subscription = cx.update(|cx| {
@@ -812,5 +877,46 @@ mod tests {
                 ([2; 32], MachineAction::DismissFailure(4)),
             ]
         );
+    }
+    #[gpui::test]
+    fn a_stepping_stone_checks_the_desktop_before_pushing_its_core(cx: &mut gpui::TestAppContext) {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        adapter.emit(MachineUpdatesEvent::Machines(vec![offered(
+            update("0.8.0", None),
+            "0.9.0",
+        )]));
+        cx.run_until_parked();
+        assert!(
+            adapter.performed().is_empty(),
+            "wait for the desktop's first check"
+        );
+        updater.emit(crate::updates::UpdateEvent::Available("0.10.0".into()));
+        cx.run_until_parked();
+        assert!(
+            adapter.performed().is_empty(),
+            "the intermediate desktop must not push its Core"
+        );
+    }
+
+    #[gpui::test]
+    fn a_current_desktop_releases_waiting_core_pushes_after_its_check(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        adapter.emit(MachineUpdatesEvent::Machines(vec![offered(
+            update("0.8.0", None),
+            "0.9.0",
+        )]));
+        cx.run_until_parked();
+        assert!(adapter.performed().is_empty());
+        updater.emit(crate::updates::UpdateEvent::UpToDate);
+        cx.run_until_parked();
+        assert_eq!(adapter.performed(), [([2; 32], MachineAction::Install)]);
     }
 }

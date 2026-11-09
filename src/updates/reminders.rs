@@ -1,10 +1,8 @@
-//! Daily notifications about overdue updates. The desktop's own reminder follows its update
-//! history: one day after the release, then daily, and once when the next launch starts to
-//! require it. A Machine whose breaking Pending Version waits a day or more is named once a day
-//! with its session count. A Pending Version that is not breaking waits only on open Terminal
-//! Sessions, because the Core restarts into it by itself once none is open, so it sends no
-//! notification and keeps only its menu row. Clicking a notification emits
-//! [`ReminderActivated`], and the window layer runs what the item's control does now.
+//! Daily notifications about overdue updates. Desktop reminders begin two days after the
+//! release. A Machine's breaking Pending Version is named daily after waiting two days, with
+//! its Terminal Session count. A nonbreaking Pending Version restarts silently after the grace
+//! period with no live Terminal Sessions, so it sends no notification. Reminder cadence stays
+//! with the shared update history.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -274,7 +272,7 @@ mod tests {
         update
     }
 
-    /// Penguin's Pending Version, which is not breaking, has waited a day on open sessions.
+    /// Penguin's Pending Version, which is not breaking, has waited two days on open Terminal Sessions.
     fn waiting_penguin(sessions: u32) -> MachineUpdate {
         let now = crate::updates::now();
         MachineUpdate {
@@ -290,8 +288,8 @@ mod tests {
                     version: Version::parse("0.9.0").unwrap(),
                     protocols: Protocols::CURRENT,
                     breaking: false,
-                    installed_at: now - DAY - 60,
-                    overdue_since: Some(now - 60),
+                    installed_at: now - 2 * DAY - 60,
+                    overdue_since: Some(now - DAY - 60),
                     stranded: Vec::new(),
                 }),
                 sessions,
@@ -322,10 +320,10 @@ mod tests {
 
         let shown = reminders.shown.borrow().clone();
         assert_eq!(shown.len(), 1, "one notification a day");
-        assert_eq!(shown[0].1, "Restart overdue on penguin");
+        assert_eq!(shown[0].1, "Update penguin");
         assert_eq!(
             shown[0].2,
-            "SpaceTerm Core 0.9.0 has waited 1 day. Restarting closes 3 running sessions."
+            "SpaceTerm Core 0.9.0 has waited 2 days. Updating ends 3 Terminal Sessions."
         );
     }
 

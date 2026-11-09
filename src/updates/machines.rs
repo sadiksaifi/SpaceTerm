@@ -97,6 +97,12 @@ pub(crate) enum ActionFailure {
     /// This Mac's Core is off in Login Items, so it refused to start. Only the person turns it on,
     /// there, and the surface opens that list instead of explaining a failure.
     LoginItemOff,
+    /// The running app's embedded Core was replaced on disk.
+    RelaunchRequired,
+    ClockBehind,
+    SteppingStoneSkipped([u64; 3]),
+    /// The Machine must fetch this release before it can accept the bundled Core.
+    NeedsFloor(spaceterm_core::update::ordering::Floor),
     Failed,
 }
 
