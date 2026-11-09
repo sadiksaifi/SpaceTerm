@@ -497,6 +497,7 @@ struct Record {
     core: Id,
     client: Id,
     view: ClientView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pane_restarts: Vec<PaneRestart>,
 }
 
