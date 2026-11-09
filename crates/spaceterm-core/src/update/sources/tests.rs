@@ -272,6 +272,10 @@ impl Engine for Fake {
         unreachable!("local archives install through the engine directly")
     }
 
+    fn admits_version(&self, candidate: &Candidate) -> Result<(), InstallError> {
+        self.ordered(candidate)
+    }
+
     fn begin_check(&self) -> Result<FakeChecking, InstallError> {
         self.take()?;
         self.record(Event::BeginCheck);
@@ -980,6 +984,38 @@ fn a_malformed_push_is_refused_before_the_engine_is_asked() {
         );
     }
     assert!(fake.events().is_empty());
+}
+
+#[test]
+fn a_newer_push_the_core_refuses_leaves_the_unfinished_push_receiving() {
+    let data = Data::new();
+    let pushes = Pushes::new(data.0.clone());
+    let fake = Fake::with(&["1.4.0"]);
+    fake.state().skipped = Some(version("1.6.0"));
+    let first = pushes
+        .begin(&fake, 1, candidate("1.5.0"), 3, &digest(b"abc"), &[3; 64])
+        .unwrap();
+    pushes.chunk(&first, 0, b"a").unwrap();
+    let above_floor = Candidate::new(version("1.7.0"), Some(floor("1.7.0"))).unwrap();
+    for (refused, error) in [
+        (
+            above_floor,
+            InstallError::BelowFloor {
+                floor: floor("1.7.0"),
+            },
+        ),
+        (candidate("1.6.0"), InstallError::Skipped),
+    ] {
+        assert_eq!(
+            pushes.begin(&fake, 2, refused, 3, &digest(b"abc"), &[3; 64]),
+            Err(SourceError::Install(error))
+        );
+    }
+    assert!(!fake.events().contains(&Event::Dropped));
+    assert!(matches!(
+        pushes.chunk(&first, 1, b"bc"),
+        Ok(Received::Installed(_))
+    ));
 }
 
 #[test]

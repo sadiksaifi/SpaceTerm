@@ -52,6 +52,8 @@ pub trait Engine: Send + Sync {
         total: u64,
     ) -> Result<Self::Installing, InstallError>;
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError>;
+    /// Whether `candidate` is a version the Core installs, whatever update operation runs now.
+    fn admits_version(&self, candidate: &Candidate) -> Result<(), InstallError>;
     /// Busy while another install, check or restart owns the update operation.
     fn begin_check(&self) -> Result<Self::Checking<'_>, InstallError>;
     /// Whether the Core runs a Stepping Stone its feed check installed and has not checked
@@ -99,6 +101,9 @@ impl Engine for Updates {
     }
     fn install(&self, archive: Archive<'_>) -> Result<PendingVersion, InstallError> {
         Updates::install(self, archive)
+    }
+    fn admits_version(&self, candidate: &Candidate) -> Result<(), InstallError> {
+        Updates::admits_version(self, candidate)
     }
     fn begin_check(&self) -> Result<updates::Checking<'_>, InstallError> {
         Updates::begin_check(self)
@@ -552,11 +557,14 @@ impl Pushes {
         let mut slot = self.slot();
         // A newer version replaces an unfinished push, which records nothing. Any other waits
         // for it, unless it stalled.
-        if let Some(unfinished) = slot.as_ref()
-            && unfinished.received.elapsed() < PUSH_IDLE
-            && !newer(candidate.version(), &unfinished.version)
-        {
-            return Err(SourceError::Install(InstallError::Busy));
+        if let Some(unfinished) = slot.as_ref() {
+            if unfinished.received.elapsed() < PUSH_IDLE
+                && !newer(candidate.version(), &unfinished.version)
+            {
+                return Err(SourceError::Install(InstallError::Busy));
+            }
+            // A version the Core refuses replaces nothing.
+            engine.admits_version(&candidate)?;
         }
         *slot = None;
         let candidate_version = candidate.version().clone();

@@ -499,6 +499,15 @@ impl Updates {
         self.shared.admits(&live, candidate)
     }
 
+    /// Whether `candidate` is a version this Core installs, whatever update operation runs now.
+    ///
+    /// # Errors
+    /// Returns NotNewer, Skipped or BelowFloor.
+    pub fn admits_version(&self, candidate: &Candidate) -> Result<(), InstallError> {
+        let live = self.shared.lock();
+        self.shared.admits_version(&live, candidate)
+    }
+
     /// Begin installing `candidate` of `total` archive bytes. Facts report `Installing` from
     /// now.
     ///
