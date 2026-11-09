@@ -38,17 +38,33 @@ const DOWNLOAD_CHUNK: usize = 64 * 1024;
 const CLAIM_TIMEOUT: Duration = Duration::from_secs(10);
 const CLAIM_RETRY: Duration = Duration::from_millis(100);
 
-/// The executable a completed update asks the exiting process to become.
+/// The executable a completed update asks the exiting process to become. The process becomes it
+/// only when its exit is the update relaunch the person approved, so an ordinary quit after a
+/// failed relaunch exits without starting SpaceTerm again.
 #[derive(Clone, Default)]
-pub(super) struct Relaunch(Rc<RefCell<Option<PathBuf>>>);
+pub(super) struct Relaunch(Rc<RefCell<RelaunchRequest>>);
+
+#[derive(Default)]
+struct RelaunchRequest {
+    executable: Option<PathBuf>,
+    approved: bool,
+}
 
 impl Relaunch {
+    /// Records whether the exit now starting is the approved update relaunch.
+    pub(super) fn exiting(&self, approved: bool) {
+        self.0.borrow_mut().approved = approved;
+    }
+
+    /// The executable the exited process becomes, only after an approved relaunch.
     pub(super) fn take(&self) -> Option<PathBuf> {
-        self.0.borrow_mut().take()
+        let mut request = self.0.borrow_mut();
+        let executable = request.executable.take();
+        executable.filter(|_| std::mem::take(&mut request.approved))
     }
 
     fn request(&self, executable: PathBuf) {
-        *self.0.borrow_mut() = Some(executable);
+        self.0.borrow_mut().executable = Some(executable);
     }
 }
 
@@ -921,6 +937,23 @@ mod tests {
             unpack_failure(&io::Error::from_raw_os_error(libc::EACCES)),
             UpdateError::Installation
         );
+    }
+
+    #[test]
+    fn linux_relaunch_should_follow_only_the_approved_exit() {
+        let relaunch = Relaunch::default();
+        relaunch.request(PathBuf::from("/opt/spaceterm/bin/spaceterm-desktop"));
+        // The approved relaunch failed, then the person quit SpaceTerm.
+        relaunch.exiting(false);
+        assert_eq!(relaunch.take(), None);
+
+        relaunch.request(PathBuf::from("/opt/spaceterm/bin/spaceterm-desktop"));
+        relaunch.exiting(true);
+        assert_eq!(
+            relaunch.take(),
+            Some(PathBuf::from("/opt/spaceterm/bin/spaceterm-desktop"))
+        );
+        assert_eq!(relaunch.take(), None);
     }
 
     /// Serves fixed responses for the feed, its signature, and the archive.

@@ -200,7 +200,7 @@ fn compose(
     desktop_events: super::linux_desktop_events::LinuxDesktopEvents,
     relaunch: super::linux_updates::Relaunch,
 ) -> Result<HostComposition, DesktopProfileError> {
-    let updates = update_adapter(identity, events.clone(), relaunch);
+    let updates = update_adapter(identity, events.clone(), relaunch.clone());
     let appearance = Rc::new(super::linux_appearance::LinuxAppearancePlatform::new(
         bus.clone(),
     ));
@@ -288,7 +288,11 @@ fn compose(
             ),
             desktop_events: Rc::new(desktop_events),
             application_quit: Rc::new(
-                super::linux_application_quit::LinuxApplicationQuitAdapter::new(|cx| cx.quit()),
+                super::linux_application_quit::LinuxApplicationQuitAdapter::new(move |cx| {
+                    // Only the relaunch the person approved starts the installed release.
+                    relaunch.exiting(crate::updates::relaunch_approval(cx).is_some());
+                    cx.quit();
+                }),
             ),
             local_filesystem,
             key_input: Rc::new(super::linux_keyboard::LinuxTerminalKeyInputAdapterFactory::new()),
