@@ -572,6 +572,10 @@ fn unowned_staged_downloads_go_once_no_earlier_release_can_run() {
         for path in &unowned {
             std::fs::write(path, b"partial").unwrap();
         }
+        // A CLI of that release still runs its offline install from the installation, which
+        // holds the CLI state root's lock shared, as every CLI command does.
+        let cli = Directory::open(&machine.fixture.paths.data.join("clients/cli"), true).unwrap();
+        let command = cli.lock_shared("state.lock").unwrap();
         // The activation that started this server still holds the service lock.
         let helper = data.lock("service.lock", true).unwrap();
         updates.remove_leftovers();
@@ -580,6 +584,12 @@ fn unowned_staged_downloads_go_once_no_earlier_release_can_run() {
         drop(helper);
         updates.observe(sessions(1), Instant::now());
         assert_eq!(installations(&machine), ["1.0.0"]);
+        assert!(
+            unowned.iter().all(|path| path.exists()),
+            "the CLI may still write its download from the removed installation"
+        );
+        drop(command);
+        updates.observe(sessions(1), Instant::now());
         assert!(unowned.iter().all(|path| !path.exists()));
     });
 }

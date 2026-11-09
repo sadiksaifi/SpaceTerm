@@ -454,6 +454,9 @@ struct Live {
     /// Retained installations may still wait for removal, because another service operation,
     /// such as the activation that started this server, held the service lock.
     retire_pending: bool,
+    /// Staged downloads without an owner lock may still wait for removal, because a CLI
+    /// command held its state root.
+    unowned_pending: bool,
 }
 
 impl Live {
@@ -521,6 +524,7 @@ impl Updates {
                 silent_after: None,
                 stopped: false,
                 retire_pending: false,
+                unowned_pending: false,
             }),
             running,
             build,
@@ -847,8 +851,12 @@ impl Updates {
         };
         self.refresh();
         // The activation that started this server has settled once its lock is free.
-        if self.shared.lock().retire_pending && self.retire_installations() {
-            self.shared.lock().retire_pending = false;
+        let pending = {
+            let live = self.shared.lock();
+            live.retire_pending || live.unowned_pending
+        };
+        if pending {
+            self.retire_step();
         }
         if due {
             let _ = self.restart(Restart::Silent);
@@ -1018,35 +1026,50 @@ impl Updates {
     /// download or push of its own is staged yet.
     pub(crate) fn remove_leftovers(&self) {
         crate::update::sources::clear_staging(self.shared.service.paths.data.as_path());
-        let retired = self.retire_installations();
-        self.shared.lock().retire_pending = !retired;
+        self.shared.lock().retire_pending = true;
+        self.retire_step();
     }
 
-    /// Removes the retained installations no longer needed, once no other service operation
-    /// holds the service lock. An activation holds it until it settles: the helper of a release
-    /// before this one removes nothing itself. Returns whether it ran.
+    /// Takes the next step of removing what an earlier release left, and leaves the rest for
+    /// a later watch.
     ///
-    /// Once only this server's installation and the Pending Version remain, no release before
-    /// this one can run here: every CLI and helper runs from an installation, the CLI launcher
-    /// names the approved one, and the desktop carries only archives. The staged downloads such
-    /// a release left without an owner lock then go too.
-    fn retire_installations(&self) -> bool {
-        match self.shared.data.try_lock("service.lock") {
-            Ok(Some(_operation)) => match retire_obsolete(&self.shared.service) {
-                Ok(alone) => {
-                    if alone {
-                        crate::update::sources::clear_unowned_staging(
-                            self.shared.service.paths.data.as_path(),
-                        );
-                    }
-                    true
-                }
-                Err(_) => false,
-            },
-            _ => false,
+    /// First the retained installations no longer needed go, once no other service operation
+    /// holds the service lock. An activation holds it until it settles: the helper of a release
+    /// before this one removes nothing itself.
+    ///
+    /// Then, once only this server's installation and the Pending Version remain, no release
+    /// before this one can start here: every CLI and helper runs from an installation, the CLI
+    /// launcher names the approved one, and the desktop carries only archives. A CLI of such a
+    /// release may still run from its removed installation, and it alone stages without an
+    /// owner lock, for its offline install. Every CLI command of 0.11.2 and later holds its
+    /// state root's lock shared until it ends, so the downloads without an owner lock go only
+    /// while that lock is held alone.
+    fn retire_step(&self) {
+        let service = &self.shared.service;
+        if self.shared.lock().retire_pending {
+            let Ok(Some(_operation)) = self.shared.data.try_lock("service.lock") else {
+                return;
+            };
+            let Ok(alone) = retire_obsolete(service) else {
+                return;
+            };
+            let mut live = self.shared.lock();
+            live.retire_pending = false;
+            live.unowned_pending = alone;
+        }
+        if self.shared.lock().unowned_pending
+            && crate::update::sources::clear_unowned_staging(
+                service.paths.data.as_path(),
+                &service.paths.data.join(CLI_STATE),
+            )
+        {
+            self.shared.lock().unowned_pending = false;
         }
     }
 }
+
+/// The CLI's state root in the Core data root, which `cli_state_root` names.
+const CLI_STATE: &str = "clients/cli";
 
 /// Removes the retained installations `service` no longer needs, unless an activation may
 /// still return to its previous one. On macOS each is unregistered from Launch Services first.

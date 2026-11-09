@@ -732,13 +732,29 @@ pub(crate) fn clear_staging(data: &Path) {
     }
 }
 
-/// Removes the files in `<data>/staging` of installs without an owner lock. Only a release
-/// before this one writes those, so the caller first proves that none can run.
-pub(crate) fn clear_unowned_staging(data: &Path) {
+/// The lock every CLI command of 0.11.2 and later holds shared on its state root until it
+/// ends, and alone only to migrate or reset it.
+const CLI_STATE_LOCK: &str = "state.lock";
+
+/// Removes the files in `<data>/staging` of installs without an owner lock, while holding the
+/// lock of the CLI state root `cli_state` alone. Only an offline install by the CLI of a
+/// release before this one writes those, and every such CLI command holds that lock shared,
+/// so none of them runs. The caller first proves that no such CLI can start. Returns whether
+/// it ran; a CLI command that holds the lock leaves the files for a later call.
+pub(crate) fn clear_unowned_staging(data: &Path, cli_state: &Path) -> bool {
     let directory = data.join("staging");
     if crate::storage::Directory::open(&directory, false).is_err() {
-        return;
+        return true;
     }
+    // A CLI that never ran has no state root, so no CLI command runs.
+    let _commands = match crate::storage::Directory::open(cli_state, false) {
+        Ok(state) => match state.try_lock(CLI_STATE_LOCK) {
+            Ok(Some(lock)) => Some(lock),
+            _ => return false,
+        },
+        Err(CoreError::NotSetUp) => None,
+        Err(_) => return false,
+    };
     for id in staged_ids(&directory) {
         let names = Staging::names(&id);
         if !directory.join(&names[2]).exists() {
@@ -747,6 +763,7 @@ pub(crate) fn clear_unowned_staging(data: &Path) {
             }
         }
     }
+    true
 }
 
 /// The install IDs of the files in the staging `directory`.
