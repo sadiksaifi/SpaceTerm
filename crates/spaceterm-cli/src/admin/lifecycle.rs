@@ -5,16 +5,17 @@
 //! through the service lane's operation flow, which survives SpaceTerm Core's own stop.
 use super::{Context, Opened, Pending, Reply, Routed};
 use crate::contract::{
-    self, Code, Confirmation, ConfirmationData, CoreStart, Envelope, Failure, MachineRef, Observed,
-    Receipt, ReceiptState, RecoveredOperation, RestartTarget, ServiceAction, ServiceEffects,
-    ServiceOperation, Warning, WarningCode, WarningDetails,
+    self, Code, Confirmation, ConfirmationData, CoreStart, Details, Envelope, Failure, MachineRef,
+    Observed, Receipt, ReceiptState, RecoveredOperation, RestartTarget, ServiceAction,
+    ServiceEffects, ServiceOperation, UpdateFailedDetails, UpdateFailureReason, Warning,
+    WarningCode, WarningDetails,
 };
 use spaceterm_core::service::Service;
 use spaceterm_core::service::control::Controller;
 use spaceterm_core::service::lane::admin::{self, Verdict};
 use spaceterm_core::service::lane::client::Outcome;
 use spaceterm_core::service::lane::{LaneAction, LaneEffects, LaneOperationState, LaneReceipt};
-use spaceterm_core::update::facts::UpdateFacts;
+use spaceterm_core::update::facts::{FailureKind, UpdateFacts};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,10 +37,12 @@ impl Kind {
             Self::Restart => LaneAction::Restart,
         }
     }
-    fn confirm_label(self) -> &'static str {
+    /// The confirmation question's label, ADR 0034's destructive button for a restart.
+    fn confirm_label(self, previewed: &Previewed) -> &'static str {
         match self {
             Self::Stop => "Stop SpaceTerm Core",
-            Self::Restart => "Restart SpaceTerm Core",
+            Self::Restart if previewed.effects.pending.is_some() => "Update Core",
+            Self::Restart => "Restart Core",
         }
     }
     /// Stop waits for SpaceTerm Core to close the lane. Restart waits for it to return.
@@ -163,7 +166,7 @@ fn preview(
             .collect();
         contract::write_warnings(&warnings, &mut std::io::stderr().lock());
         eprint!("{summary}");
-        if super::confirm(kind.confirm_label()) {
+        if super::confirm(kind.confirm_label(&previewed)) {
             return execute(context, kind, routed, opened, pending, token);
         }
         return Reply::failure(
@@ -196,29 +199,43 @@ fn preview(
     )
 }
 
-/// What a preview shows: the effects for the envelope, and the protocol major the restart
-/// moves to, for the warning.
+/// What a preview shows: the effects for the envelope, the protocol major the restart moves
+/// to, for the warning, and the version SpaceTerm Core runs, when its facts named it.
 pub(crate) struct Previewed {
     pub(crate) effects: ServiceEffects,
     pub(crate) to_major: Option<u16>,
+    pub(crate) running: Option<String>,
 }
 
-/// The preview text: the action, the machine it acts on, the Pending Version a restart moves
-/// to and whether that breaks devices, and what ends and what is kept.
+/// "1 Terminal Session" or "3 Terminal Sessions".
+pub(crate) fn terminal_sessions(n: u32) -> String {
+    format!("{n} Terminal Session{}", if n == 1 { "" } else { "s" })
+}
+
+/// The preview text in ADR 0034's wording: the action, the machine it acts on, the versions an
+/// update moves between and whether that breaks devices, and what ends and what is kept.
 pub(crate) fn summary(kind: Kind, machine: &str, previewed: &Previewed) -> String {
-    const ENDS: &str = "All Terminal Sessions on it end for every client.";
+    let ends = format!(
+        "This ends {} on {machine}.",
+        terminal_sessions(previewed.effects.ends_sessions)
+    );
     match kind {
         Kind::Stop => format!(
-            "Stop SpaceTerm Core on {machine}?\n{ENDS} Workspaces are kept, and SpaceTerm Core stays stopped until you start it again with: spaceterm start\n"
+            "Stop SpaceTerm Core on {machine}?\n{ends} Your Workspaces, Tabs and Panes stay, and SpaceTerm Core stays stopped until you start it again with: spaceterm start\n"
         ),
         Kind::Restart => {
             let Some(target) = &previewed.effects.pending else {
+                let running = previewed
+                    .running
+                    .as_ref()
+                    .map(|running| format!(" {running}"))
+                    .unwrap_or_default();
                 return format!(
-                    "Restart SpaceTerm Core on {machine}?\n{ENDS} Workspaces are kept, and each Pane starts a new shell when you use it.\n"
+                    "Restart SpaceTerm Core on {machine}?\nSpaceTerm Core{running} restarts without updating. {ends}\n"
                 );
             };
             let mut text = format!(
-                "Restart SpaceTerm Core on {machine} from {} into {}?\n{ENDS} Workspaces are kept, and each Pane starts a new shell when you use it.\n",
+                "Update SpaceTerm Core on {machine}?\nSpaceTerm Core restarts from {} to {}. {ends} Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.\n",
                 target.from, target.to
             );
             if target.breaking {
@@ -314,6 +331,7 @@ pub(crate) fn service_effects(effects: &LaneEffects, facts: Option<&UpdateFacts>
             pending,
         },
         to_major: effects.to_major,
+        running: facts.map(|facts| facts.running.to_string()),
     }
 }
 
@@ -328,9 +346,18 @@ fn execute(
     let command = kind.command();
     let Opened {
         lane,
-        session,
-        recovered,
+        mut session,
+        mut recovered,
     } = opened;
+    // A restart moves into the Pending Version when one waits, so its outcome names it.
+    let before = match kind {
+        Kind::Restart => admin::facts(&mut session).ok().map(|(_, facts)| facts),
+        Kind::Stop => None,
+    };
+    let target = before
+        .as_ref()
+        .and_then(|facts| facts.pending.as_ref())
+        .map(|pending| pending.version.to_string());
     let deadline = Instant::now() + context.timeout(kind.wait());
     let outcome = admin::execute(
         &lane,
@@ -368,19 +395,110 @@ fn execute(
     if routed.local && settled.observed == Some(Observed::Shutdown) {
         settled = confirm_local_stop(context, settled, deadline);
     }
+    let machine = super::display_name(&routed.machine);
+    if let Some(version) = &target
+        && settled
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.code == Code::StartupFailed)
+    {
+        // SpaceTerm Core returned to the version it ran before. Its update facts say why.
+        let after = super::open_lane(context, &routed.connection, &routed.route, pending)
+            .ok()
+            .and_then(|mut opened| {
+                recovered.append(&mut opened.recovered);
+                admin::facts(&mut opened.session).ok()
+            })
+            .map(|(_, facts)| facts);
+        let failure = update_failure(version, before.as_ref(), after.as_ref());
+        settled.receipt.code = Some(failure.code);
+        settled.failure = Some(failure);
+    }
     let text = match (&settled.observed, settled.failure.as_ref()) {
         (Some(Observed::Shutdown), None) => "SpaceTerm Core stopped.\n".to_owned(),
         (Some(Observed::Shutdown), _) => {
             "Stop is in progress. Check it with: spaceterm status\n".to_owned()
         }
-        (_, None) if kind == Kind::Restart => "SpaceTerm Core restarted.\n".to_owned(),
+        (_, None) if kind == Kind::Restart => match &target {
+            Some(version) => format!("SpaceTerm Core on {machine} updated to {version}.\n"),
+            None => "SpaceTerm Core restarted.\n".to_owned(),
+        },
         (_, None) => "SpaceTerm Core stopped.\n".to_owned(),
+        (
+            _,
+            Some(Failure {
+                details: Details::UpdateFailed(details),
+                ..
+            }),
+        ) => update_failure_text(
+            machine,
+            details,
+            &context.command_line(&routed.machine, &["restart"]),
+        ),
         (_, Some(_)) => String::new(),
     };
     Reply::new(
         &operation_envelope(command, routed.machine, settled, recovered),
         text,
     )
+}
+
+/// `update_failed` for a restart into the Pending Version `version` that returned to the version
+/// SpaceTerm Core ran before. `after` are the update facts read once it returned: the failure
+/// they record since `before` says why.
+pub(crate) fn update_failure(
+    version: &str,
+    before: Option<&UpdateFacts>,
+    after: Option<&UpdateFacts>,
+) -> Failure {
+    let earlier = before
+        .and_then(|facts| facts.last_failure.as_ref())
+        .map(|failure| failure.id);
+    let reason = after
+        .and_then(|facts| facts.last_failure.as_ref())
+        .filter(|failure| {
+            earlier.is_none_or(|earlier| failure.id > earlier)
+                && failure.version.as_str() == version
+                && matches!(failure.kind, FailureKind::Start(_))
+        })
+        .map(|failure| super::status::failure_reason(failure.kind).1);
+    Failure::with(
+        Code::UpdateFailed,
+        Details::UpdateFailed(UpdateFailedDetails {
+            version: version.to_owned(),
+            running: after.map(|facts| facts.running.to_string()),
+            reason,
+        }),
+    )
+}
+
+/// The text of `update_failed`: why the Pending Version did not start, the version that runs,
+/// and what happens to the Pending Version.
+pub(crate) fn update_failure_text(
+    machine: &str,
+    details: &UpdateFailedDetails,
+    restart: &str,
+) -> String {
+    let version = &details.version;
+    let runs = match &details.running {
+        Some(running) => format!("SpaceTerm Core on {machine} runs {running} again"),
+        None => format!("SpaceTerm Core on {machine} returned to the version it ran before"),
+    };
+    match details.reason {
+        Some(UpdateFailureReason::NotReady) => format!(
+            "SpaceTerm Core {version} did not become ready, so {runs}. It skips {version} until a newer version appears.\n"
+        ),
+        Some(UpdateFailureReason::PortInUse) => format!(
+            "SpaceTerm Core {version} couldn\u{2019}t listen on the Network Access port because another program holds it, so {runs}. {version} stays pending. Free the port, then try again with: {restart}\n"
+        ),
+        Some(UpdateFailureReason::DiskFull) => format!(
+            "SpaceTerm Core {version} couldn\u{2019}t start because the disk is full, so {runs}. {version} stays pending. Free some space, then try again with: {restart}\n"
+        ),
+        Some(UpdateFailureReason::Interrupted) => format!(
+            "A reboot, logout or crash interrupted the restart into SpaceTerm Core {version}, so {runs}. {version} stays pending. Try again with: {restart}\n"
+        ),
+        _ => format!("SpaceTerm Core {version} did not start, so {runs}.\n"),
+    }
 }
 
 /// The envelope of a confirmed Stop or Restart, from its settled flow.

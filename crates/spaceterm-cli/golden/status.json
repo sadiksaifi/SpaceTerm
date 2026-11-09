@@ -19,6 +19,12 @@
     ],
     "installed": true,
     "lane_major": 1,
+    "last_failure": {
+      "at": "2026-11-02T08:00:00Z",
+      "reason": "not_ready",
+      "stage": "start",
+      "version": "0.7.5"
+    },
     "linger": true,
     "network": {
       "addresses": [
@@ -27,6 +33,12 @@
       "bind": "0.0.0.0:9231",
       "enabled": true,
       "listening": true
+    },
+    "operation": {
+      "kind": "installing",
+      "received": 512,
+      "total": 2048,
+      "version": "0.8.1"
     },
     "pending": {
       "breaking": true,
@@ -57,6 +69,7 @@
       "version": "0.7.0"
     },
     "sessions": 2,
+    "skipped": "0.7.5",
     "stopped": false,
     "terminal_counters": {
       "accessibility_rebinds": 0,

@@ -246,8 +246,17 @@ pub fn render<D: Serialize>(
             {
                 let _ = writeln!(stderr, "argument: {argument}");
             }
-            if let Details::StateTooOld(StateTooOldDetails { floor, .. }) = &error.details {
-                let _ = writeln!(stderr, "install first: SpaceTerm Core {floor}");
+            match &error.details {
+                Details::StateTooOld(StateTooOldDetails { floor, .. }) => {
+                    let _ = writeln!(stderr, "install first: SpaceTerm Core {floor}");
+                }
+                Details::Floor(FloorDetails { floor }) => {
+                    let _ = writeln!(stderr, "update first: SpaceTerm Core {floor}");
+                }
+                Details::Incompatible(IncompatibleDetails { update }) => {
+                    let _ = writeln!(stderr, "update: {}", update.name());
+                }
+                _ => {}
             }
         }
         write_warnings(&envelope.warnings, stderr);
@@ -461,6 +470,8 @@ pub enum Details {
     StateReset(StateResetDetails),
     /// `state_too_old`.
     StateTooOld(StateTooOldDetails),
+    /// `update_failed`.
+    UpdateFailed(UpdateFailedDetails),
 }
 
 impl Serialize for Details {
@@ -482,6 +493,7 @@ impl Serialize for Details {
             Self::Floor(details) => details.serialize(serializer),
             Self::StateReset(details) => details.serialize(serializer),
             Self::StateTooOld(details) => details.serialize(serializer),
+            Self::UpdateFailed(details) => details.serialize(serializer),
         }
     }
 }
@@ -731,6 +743,20 @@ pub struct StateTooOldDetails {
     pub kinds: Vec<DataKind>,
 }
 
+/// `details` when a restart into the Pending Version `version` returned to the version
+/// SpaceTerm Core ran before.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UpdateFailedDetails {
+    /// The Pending Version that did not start.
+    pub version: String,
+    /// The version SpaceTerm Core runs now. `null` when this CLI couldn't read it after the
+    /// restart.
+    pub running: Option<String>,
+    /// Why the Pending Version did not start. `null` when this CLI couldn't read it after the
+    /// restart.
+    pub reason: Option<UpdateFailureReason>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Update {
@@ -740,6 +766,17 @@ pub enum Update {
     Desktop,
     /// SpaceTerm Core on this machine, which ships this CLI.
     Core,
+}
+
+impl Update {
+    /// What the text-mode `update:` line names.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Machine => "SpaceTerm Core on that machine",
+            Self::Desktop => "the SpaceTerm app on this machine",
+            Self::Core => "SpaceTerm Core on this machine, which includes this CLI",
+        }
+    }
 }
 
 // Exit classes and codes
@@ -912,7 +949,7 @@ codes! {
     NoCandidate = "no_candidate", Target, false, "There is no SpaceTerm Core package to install.";
     // Update sources.
     NotNewer = "not_newer", Target, false, "SpaceTerm Core on that machine already has this version or a newer one.";
-    BelowFloor = "below_floor", Target, false, "SpaceTerm Core on that machine is too old to update to this version directly. Update it to the version in details.floor first.";
+    BelowFloor = "below_floor", Target, false, "SpaceTerm Core on that machine is too old to update to this version directly. Update it to its Update Floor first.";
     VersionSkipped = "version_skipped", Target, false, "This SpaceTerm Core version failed to start on that machine, so it is skipped until a newer one appears.";
     NoUpdateFeed = "no_update_feed", Unavailable, false, "This SpaceTerm Core build takes updates only from the desktop or a local archive.";
     FeedUnreachable = "feed_unreachable", Unavailable, true, "SpaceTerm Core couldn\u{2019}t reach its update feed. Check the network.";
@@ -921,6 +958,7 @@ codes! {
     ClockBehind = "clock_behind", ActionRequired, true, "The clock on that machine is behind, so SpaceTerm Core can\u{2019}t trust its update feed. Set the clock, then try again.";
     DiskFull = "disk_full", Failed, true, "SpaceTerm Core couldn\u{2019}t install the update because the disk is full. Nothing changed.";
     DownloadFailed = "download_failed", Failed, true, "SpaceTerm Core couldn\u{2019}t download the update. Nothing changed.";
+    UpdateFailed = "update_failed", Failed, false, "SpaceTerm Core couldn\u{2019}t start its Pending Version, so it runs the version it ran before.";
     AuthorizationRequired = "authorization_required", ActionRequired, false, "Administrator authorization is required.";
     LingerRequired = "linger_required", ActionRequired, false, "Paired devices need SpaceTerm Core to keep running after you log out. Authorize it with: spaceterm setup.";
     NotRunning = "not_running", Unavailable, true, "SpaceTerm Core is not running.";
@@ -928,7 +966,7 @@ codes! {
     IncompatibleState = "incompatible_state", Unavailable, false, "The saved state is from an incompatible SpaceTerm.";
     DataResetRequired = "data_reset_required", ActionRequired, false, "Saved data on this machine needs a reset before SpaceTerm can read it.";
     StateResetRequired = "state_reset_required", ActionRequired, false, "This version can\u{2019}t read some of this CLI\u{2019}s saved data. Review its reset with: spaceterm reset.";
-    StateTooOld = "state_too_old", ActionRequired, false, "This CLI\u{2019}s saved data is too old for this version. Install the version in details.floor first, or review its reset with: spaceterm reset.";
+    StateTooOld = "state_too_old", ActionRequired, false, "This CLI\u{2019}s saved data is too old for this version. Install its Update Floor first, or review its reset with: spaceterm reset.";
     UnsafeStorage = "unsafe_storage", Unavailable, false, "Storage has unsafe permissions.";
     AuthenticationRefused = "authentication_refused", ActionRequired, false, "SpaceTerm couldn\u{2019}t verify the machine or account for this connection.";
     IncompatibleProtocol = "incompatible_protocol", Unavailable, false, "This CLI and SpaceTerm Core on that machine are incompatible. Update the older one.";
@@ -1696,6 +1734,70 @@ pub enum UpdateCheckReason {
     SteppingStoneSkipped,
 }
 
+/// `operation` of `status`: the update operation SpaceTerm Core runs now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UpdateOperation {
+    pub kind: UpdateOperationKind,
+    /// `installing`: the version it installs. `restarting`: the Pending Version it moves into.
+    /// `null` otherwise.
+    pub version: Option<String>,
+    /// `installing`: the bytes received, equal to `total` while it verifies and unpacks.
+    /// `null` otherwise.
+    pub received: Option<u64>,
+    /// `installing`: the bytes of the whole package. `null` otherwise.
+    pub total: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateOperationKind {
+    Checking,
+    Installing,
+    /// A restart into the Pending Version.
+    Restarting,
+    /// A restart into the running version.
+    RestartingSameVersion,
+    Stopping,
+    /// Remove Machine. SpaceTerm Core does not come back.
+    Uninstalling,
+}
+
+/// `last_failure` of `status`: the last install or restart into a Pending Version that failed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UpdateFailureStatus {
+    /// RFC 3339.
+    pub at: String,
+    /// The version that failed to install or start.
+    pub version: String,
+    pub stage: UpdateFailureStage,
+    pub reason: UpdateFailureReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateFailureStage {
+    /// Nothing changed, and SpaceTerm Core tries the install again later.
+    Install,
+    /// The Pending Version did not start, and SpaceTerm Core runs the version it ran before.
+    Start,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateFailureReason {
+    DiskFull,
+    /// `install` only.
+    Download,
+    /// `install` only.
+    Verification,
+    /// `start` only: the version is now `skipped`.
+    NotReady,
+    /// `start` only: another program holds the Network Access port. The version stays pending.
+    PortInUse,
+    /// `start` only: a reboot, logout or crash ended the restart. The version stays pending.
+    Interrupted,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activation {
@@ -1737,6 +1839,12 @@ pub struct CoreStatus {
     pub runtime: Version,
     pub pending: Option<PendingStatus>,
     pub update_check: UpdateCheckStatus,
+    /// The update operation SpaceTerm Core runs now. `null` when it runs none.
+    pub operation: Option<UpdateOperation>,
+    /// A version SpaceTerm Core refuses from every source until a newer one appears.
+    pub skipped: Option<String>,
+    pub last_failure: Option<UpdateFailureStatus>,
+    /// `unresolved` while a restart into a Pending Version has not finished.
     pub activation: Activation,
     pub sessions: u32,
     pub network: StatusNetwork,
@@ -2697,6 +2805,52 @@ mod tests {
                 Code::StateTooOld.message()
             )
         );
+    }
+
+    #[test]
+    fn below_floor_and_incompatible_name_the_version_and_side_to_update_in_text() {
+        let stderr = |failure: Failure| {
+            let envelope = Envelope::error("update", None, failure, Empty {});
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            render(
+                &envelope,
+                "",
+                "",
+                Mode::default(),
+                false,
+                &mut stdout,
+                &mut stderr,
+            );
+            String::from_utf8(stderr).unwrap()
+        };
+        assert_eq!(
+            stderr(below_floor(Floor::parse("0.9.0").unwrap())),
+            format!(
+                "error: {} (below_floor)\nupdate first: SpaceTerm Core 0.9.0\n",
+                Code::BelowFloor.message()
+            )
+        );
+        for (older, side) in [
+            (
+                Incompatible::ListenerTooOld,
+                "SpaceTerm Core on that machine",
+            ),
+            (
+                Incompatible::CallerTooOld,
+                "SpaceTerm Core on this machine, which includes this CLI",
+            ),
+        ] {
+            assert_eq!(
+                stderr(from_core_error(CoreError::IncompatibleProtocol(older))),
+                format!(
+                    "error: {} (incompatible_protocol)\nupdate: {side}\n",
+                    Code::IncompatibleProtocol.message()
+                )
+            );
+        }
+        for code in [Code::BelowFloor, Code::StateTooOld] {
+            assert!(!code.message().contains("details"), "{code}");
+        }
     }
 
     #[test]
