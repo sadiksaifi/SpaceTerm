@@ -50,9 +50,9 @@ impl Restarter for Admitted {
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
         silent: bool,
-    ) -> Result<(), RestartRefusal> {
+    ) -> Result<Launch, RestartRefusal> {
         self.0.lock().unwrap().push((candidate, silent));
-        Ok(())
+        Ok(Box::new(|| {}))
     }
 }
 
@@ -714,9 +714,59 @@ fn a_silent_restart_waits_for_a_quiet_grace_period_and_tries_each_pending_versio
 /// The fence refuses every restart its admission finds sessions for.
 struct Refusing;
 impl Restarter for Refusing {
-    fn restart(self: Arc<Self>, _: Option<[u8; 32]>, _: bool) -> Result<(), RestartRefusal> {
+    fn restart(self: Arc<Self>, _: Option<[u8; 32]>, _: bool) -> Result<Launch, RestartRefusal> {
         Err(RestartRefusal::SessionsOpen)
     }
+}
+
+/// A helper that stops the server the moment it launches: it reads the facts every follower
+/// heard by then.
+#[derive(Default)]
+struct StopsAtOnce {
+    updates: OnceLock<Updates>,
+    heard: Mutex<Option<Option<Operation>>>,
+}
+impl Restarter for StopsAtOnce {
+    fn restart(self: Arc<Self>, _: Option<[u8; 32]>, _: bool) -> Result<Launch, RestartRefusal> {
+        Ok(Box::new(move || {
+            let updates = self.updates.get().unwrap();
+            *self.heard.lock().unwrap() = Some(updates.facts().operation);
+            updates.stop();
+        }))
+    }
+}
+
+#[test]
+fn a_silent_restart_shows_before_its_helper_can_stop_the_server() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let helper = Arc::new(StopsAtOnce::default());
+        let _ = helper.updates.set(updates.clone());
+        let restarter: Arc<dyn Restarter> = helper.clone();
+        updates
+            .run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
+                None
+            })
+            .unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Feed,
+        )
+        .unwrap();
+        let start = Instant::now();
+        updates.observe(sessions(0), start);
+        updates.observe(sessions(0), start + SILENT_GRACE);
+        assert_eq!(
+            *helper.heard.lock().unwrap(),
+            Some(Some(Operation::Restarting {
+                to: version("1.1.0")
+            }))
+        );
+    });
 }
 
 #[test]

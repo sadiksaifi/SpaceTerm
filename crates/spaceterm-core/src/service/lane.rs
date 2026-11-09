@@ -1549,12 +1549,12 @@ pub(crate) fn device(info: &crate::direct::DeviceInfo) -> LaneDevice {
 
 impl runtime::updates::Restarter for LaneCore {
     /// Admits a restart the Core decided on, as Execute admits one a client confirmed, and
-    /// launches its helper from this runtime.
+    /// returns the launch of its helper from this runtime.
     fn restart(
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
         silent: bool,
-    ) -> Result<(), runtime::updates::RestartRefusal> {
+    ) -> Result<runtime::updates::Launch, runtime::updates::RestartRefusal> {
         use runtime::updates::RestartRefusal;
         let id = OperationId::random().map_err(RestartRefusal::Core)?;
         let record = Record {
@@ -1592,10 +1592,12 @@ impl runtime::updates::Restarter for LaneCore {
                 Err(error) => return Err(RestartRefusal::Core(error)),
             }
         };
-        if matches!(admitted, Some(Admission::New(_))) {
-            self.launch_helper(&id);
-        }
-        Ok(())
+        let new = matches!(admitted, Some(Admission::New(_)));
+        Ok(Box::new(move || {
+            if new {
+                self.launch_helper(&id);
+            }
+        }))
     }
 }
 

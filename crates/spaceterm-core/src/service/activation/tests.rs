@@ -1727,9 +1727,9 @@ impl runtime::updates::Restarter for Admitted {
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
         silent: bool,
-    ) -> Result<(), runtime::updates::RestartRefusal> {
+    ) -> Result<runtime::updates::Launch, runtime::updates::RestartRefusal> {
         self.0.lock().unwrap().push((candidate, silent));
-        Ok(())
+        Ok(Box::new(|| {}))
     }
 }
 

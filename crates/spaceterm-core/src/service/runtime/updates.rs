@@ -114,17 +114,23 @@ pub struct Restarting {
     pub to: Version,
 }
 
-/// Admits a restart in the running server: it sets the membership fence, records the operation
-/// and launches the helper from this runtime. The service lane implements it.
+/// Admits a restart in the running server: it sets the membership fence and records the
+/// operation, then returns the launch of the helper from this runtime. The service lane
+/// implements it.
 pub(crate) trait Restarter: Send + Sync {
-    /// Restart into the installation named by `candidate`, or into the running version.
+    /// Admit a restart into the installation named by `candidate`, or into the running version.
     /// `silent` refuses with SessionsOpen unless no Terminal Session is live under the fence.
+    /// The engine publishes the restart before it calls the returned launch, because the helper
+    /// may stop the server at once.
     fn restart(
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
         silent: bool,
-    ) -> Result<(), RestartRefusal>;
+    ) -> Result<Launch, RestartRefusal>;
 }
+
+/// Launches the helper of an admitted restart.
+pub(crate) type Launch = Box<dyn FnOnce() + Send>;
 
 /// What the running server reports to the engine on each watch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -655,7 +661,8 @@ impl Updates {
         let admitted = restarter.restart(candidate, request == Restart::Silent);
         let mut live = self.shared.lock();
         live.reserved = false;
-        if let Err(refusal) = admitted {
+        if let Err(refusal) = &admitted {
+            let refusal = *refusal;
             if request == Restart::Silent
                 && let Ok(record) = change(&self.shared.data, |record| {
                     record.silent = None;
@@ -671,6 +678,10 @@ impl Updates {
         live.operation = Some(operation);
         drop(live);
         self.refresh();
+        // Every follower hears the restart before the helper can stop this server.
+        if let Ok(launch) = admitted {
+            launch();
+        }
         Ok(Restarting { to })
     }
 

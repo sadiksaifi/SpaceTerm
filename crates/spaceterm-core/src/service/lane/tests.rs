@@ -1302,13 +1302,16 @@ fn a_restart_the_core_decides_on_waits_for_zero_sessions_and_leaves_no_record() 
     with_lane(|lane| {
         lane.host.sessions.lock().unwrap().push([3; 32]);
         assert_eq!(
-            Arc::clone(&lane.lane).restart(None, true),
-            Err(RestartRefusal::SessionsOpen)
+            Arc::clone(&lane.lane).restart(None, true).err(),
+            Some(RestartRefusal::SessionsOpen)
         );
         assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
         assert!(!lane.host.fenced.load(Ordering::SeqCst));
         lane.host.sessions.lock().unwrap().clear();
-        assert_eq!(Arc::clone(&lane.lane).restart(None, true), Ok(()));
+        let launch = Arc::clone(&lane.lane).restart(None, true).ok().unwrap();
+        // Admission launches nothing: the engine publishes the restart first.
+        assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+        launch();
         assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
         assert!(lane.host.fenced.load(Ordering::SeqCst));
         let records = lane.lane.ledger().unwrap().records().unwrap();
