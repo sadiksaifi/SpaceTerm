@@ -1695,7 +1695,8 @@ pub struct PendingStatus {
     pub breaking: bool,
     /// RFC 3339.
     pub installed_at: String,
-    /// RFC 3339, one day after `installed_at`. `null` before then.
+    /// RFC 3339, two days after `installed_at`, once that time passed and the version is
+    /// overdue. `null` before then.
     pub overdue_since: Option<String>,
     pub stranded: Vec<DeviceRef>,
 }

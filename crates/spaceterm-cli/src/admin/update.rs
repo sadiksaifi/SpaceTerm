@@ -181,7 +181,10 @@ fn finish(
 ) -> Reply {
     let restart = context.command_line(&machine, &["restart"]);
     let text = text(installed, facts, &restart);
-    Reply::new(&envelope(machine, installed, facts, recovered), text)
+    Reply::new(
+        &envelope(machine, installed, facts, recovered, crate::notice::now()),
+        text,
+    )
 }
 
 /// The `update` envelope.
@@ -190,11 +193,12 @@ pub(crate) fn envelope(
     installed: bool,
     facts: &UpdateFacts,
     recovered: Vec<contract::RecoveredOperation>,
+    now: u64,
 ) -> Envelope<CoreUpdate> {
     let data = CoreUpdate {
         installed,
         running: facts.running.to_string(),
-        pending: super::status::pending(facts),
+        pending: super::status::pending(facts, now),
         sessions: facts.sessions,
     };
     super::with_recovered(Envelope::ok(COMMAND, Some(machine), data), recovered)

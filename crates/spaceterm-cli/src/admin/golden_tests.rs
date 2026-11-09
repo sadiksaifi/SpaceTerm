@@ -112,7 +112,7 @@ const COMMANDS: status::Commands<'static> = status::Commands {
 };
 
 fn status_text(lane: &LaneStatus) -> String {
-    status::envelope(core(), lane, Vec::new(), Vec::new(), &COMMANDS).1
+    status::envelope(core(), lane, Vec::new(), Vec::new(), &COMMANDS, NOW).1
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn status_reports_service_network_devices_and_held_outcomes() {
         identity: RecoveredIdentity::Agent("agent-1".parse().unwrap()),
         count: 3,
     }];
-    let (envelope, text) = status::envelope(core(), &lane, held, recovered(), &COMMANDS);
+    let (envelope, text) = status::envelope(core(), &lane, held, recovered(), &COMMANDS, NOW);
     assert_exit(&envelope, 0);
     assert_golden("status", &envelope);
     assert!(
@@ -164,6 +164,24 @@ fn status_reports_service_network_devices_and_held_outcomes() {
         ),
         "{text}"
     );
+}
+
+#[test]
+fn status_calls_a_pending_version_overdue_after_two_days_whichever_core_reported_it() {
+    // A Core of 0.11.2 marks `overdue_since` one day after the install.
+    let lane = lane_status(facts(Some(pending(false, true)), UpdateCheck::Never));
+    let read = |now: u64| {
+        let (envelope, text) =
+            status::envelope(core(), &lane, Vec::new(), Vec::new(), &COMMANDS, now);
+        let value = serde_json::to_value(&envelope).unwrap();
+        (value["data"]["pending"]["overdue_since"].clone(), text)
+    };
+    let (marker, text) = read(INSTALLED + 86_400 + 43_200);
+    assert_eq!(marker, serde_json::Value::Null);
+    assert!(!text.contains("restart overdue"), "{text}");
+    let (marker, text) = read(INSTALLED + 2 * 86_400);
+    assert_eq!(marker, "2026-11-05T09:12:00Z");
+    assert!(text.contains("restart overdue"), "{text}");
 }
 
 #[test]
@@ -258,6 +276,7 @@ fn status_names_every_update_operation_and_failure() {
         Vec::new(),
         Vec::new(),
         &COMMANDS,
+        NOW,
     );
     let value = serde_json::to_value(&envelope).unwrap();
     assert_eq!(
@@ -301,7 +320,7 @@ fn an_unfinished_restart_reads_as_restarting_or_names_the_command_that_finishes_
         restart: "spaceterm restart",
         local: true,
     };
-    let (_, text) = status::envelope(local(), &lane, Vec::new(), Vec::new(), &here);
+    let (_, text) = status::envelope(local(), &lane, Vec::new(), Vec::new(), &here, NOW);
     assert!(
         text.contains("If it still has not finished, finish it with: spaceterm start\n"),
         "{text}"
@@ -309,6 +328,8 @@ fn an_unfinished_restart_reads_as_restarting_or_names_the_command_that_finishes_
 }
 
 const INSTALLED: u64 = 1_793_697_120;
+/// When the command reads the facts: three days after the install.
+const NOW: u64 = INSTALLED + 3 * 86_400;
 const SUCCEEDED: u64 = 1_793_520_000;
 const FAILING: u64 = 1_793_606_400;
 const RESTART: &str = "spaceterm --machine penguin restart";
@@ -751,7 +772,7 @@ fn update_reports_the_version_it_installed_and_how_to_use_it() {
         Some(pending(false, false)),
         UpdateCheck::Succeeded { at: SUCCEEDED },
     );
-    let envelope = update::envelope(core(), true, &installed, Vec::new());
+    let envelope = update::envelope(core(), true, &installed, Vec::new(), INSTALLED);
     assert_exit(&envelope, 0);
     assert_golden("update_installed", &envelope);
     assert_eq!(
@@ -780,7 +801,7 @@ fn update_reports_the_version_it_installed_and_how_to_use_it() {
         "a breaking version never restarts by itself"
     );
     let current = facts(None, UpdateCheck::Succeeded { at: SUCCEEDED });
-    let envelope = update::envelope(local(), false, &current, Vec::new());
+    let envelope = update::envelope(local(), false, &current, Vec::new(), NOW);
     assert_exit(&envelope, 0);
     assert_golden("update_current", &envelope);
     assert_eq!(

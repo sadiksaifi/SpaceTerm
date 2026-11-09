@@ -1361,21 +1361,21 @@ fn base_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Machin
             .iter()
             .map(|device| device.name.clone())
             .collect();
-        return match pending
-            .overdue_since
-            .filter(|_| now.saturating_sub(pending.installed_at) >= 2 * DAY)
-        {
-            Some(_) => MachineState::Overdue {
+        // The two-day policy, whichever Core reported the version: one of 0.11.2 or earlier
+        // marks `overdue_since` after one day.
+        return if pending.overdue(now) {
+            MachineState::Overdue {
                 to: pending.version.clone(),
                 days: (now.saturating_sub(pending.installed_at) / DAY).max(1),
                 breaking: pending.breaking,
                 stranded,
-            },
-            None => MachineState::Ready {
+            }
+        } else {
+            MachineState::Ready {
                 to: pending.version.clone(),
                 breaking: pending.breaking,
                 stranded,
-            },
+            }
         };
     }
     if let UpdateCheck::Failing { since, reason, .. } = facts.check

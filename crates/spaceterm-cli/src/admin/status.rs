@@ -15,7 +15,8 @@ use spaceterm_core::service::lane::{
     LaneActivation, LaneReply, LaneRequest, LaneStatus, LaneVersion, Offline,
 };
 use spaceterm_core::update::facts::{
-    CheckFailure, FailureKind, InstallFailure, Operation, StartFailure, UpdateCheck, UpdateFacts,
+    CheckFailure, FailureKind, InstallFailure, OVERDUE_AFTER, Operation, StartFailure, UpdateCheck,
+    UpdateFacts,
 };
 use std::time::{Duration, Instant};
 
@@ -146,7 +147,14 @@ fn report(
         restart: &restart,
         local: *route == RouteKey::Local,
     };
-    let (envelope, text) = envelope(core, status, held(context, route), recovered, &commands);
+    let (envelope, text) = envelope(
+        core,
+        status,
+        held(context, route),
+        recovered,
+        &commands,
+        crate::notice::now(),
+    );
     Reply::new(&envelope, text)
 }
 
@@ -158,14 +166,18 @@ pub(crate) fn rfc3339(seconds: u64) -> String {
         .map_or_else(String::new, |at| at.to_string())
 }
 
-/// The Pending Version of `facts`, as `status` and `update` report it.
-pub(crate) fn pending(facts: &UpdateFacts) -> Option<PendingStatus> {
+/// The Pending Version of `facts` at `now`, Unix seconds, as `status` and `update` report it.
+/// It is overdue by the two-day policy, whichever Core reported it: one of 0.11.2 or earlier
+/// marks `overdue_since` after one day.
+pub(crate) fn pending(facts: &UpdateFacts, now: u64) -> Option<PendingStatus> {
     let pending = facts.pending.as_ref()?;
     Some(PendingStatus {
         version: pending.version.to_string(),
         breaking: pending.breaking,
         installed_at: rfc3339(pending.installed_at),
-        overdue_since: pending.overdue_since.map(rfc3339),
+        overdue_since: pending
+            .overdue(now)
+            .then(|| rfc3339(pending.installed_at.saturating_add(OVERDUE_AFTER))),
         stranded: pending
             .stranded
             .iter()
@@ -302,6 +314,7 @@ pub(crate) fn envelope(
     held_outcomes: Vec<HeldOutcomes>,
     recovered: Vec<crate::contract::RecoveredOperation>,
     commands: &Commands<'_>,
+    now: u64,
 ) -> (Envelope<CoreStatus>, String) {
     let facts = status.update.as_deref();
     let data = CoreStatus {
@@ -311,7 +324,7 @@ pub(crate) fn envelope(
         automatic_start: status.automatic_start,
         linger: status.linger,
         runtime: version(&status.runtime),
-        pending: facts.and_then(pending),
+        pending: facts.and_then(|facts| pending(facts, now)),
         update_check: update_check(facts),
         operation: facts.and_then(operation),
         skipped: facts.and_then(|facts| facts.skipped.as_ref().map(ToString::to_string)),
