@@ -228,7 +228,7 @@ fn two_items_open_a_menu_with_restart_all() {
     else {
         panic!("two items open a menu");
     };
-    assert_eq!(label.as_ref(), "2 updates");
+    assert_eq!(label.as_ref(), "2 Updates");
     assert_eq!(tone, Tone::Action);
     assert_eq!(glyph, Glyph::UpdateCore);
     let all = presentation.restart_all().unwrap();
@@ -294,7 +294,7 @@ fn a_failed_update_explains_with_the_agreed_sentence_and_ok_dismisses_it() {
     });
     let presentation = present(&[failed]);
     let item = single(&presentation);
-    assert_eq!(item.label.as_ref(), "penguin update failed");
+    assert_eq!(item.label.as_ref(), "penguin Update Failed");
     let Some(Command::Explain(explanation)) = item.command else {
         panic!("a failure explains");
     };
@@ -342,7 +342,7 @@ fn the_named_states_match_the_mockup() {
         reason: CheckFailure::Network,
     };
     let item = single(&present(std::slice::from_ref(&cant_check)));
-    assert_eq!(item.label.as_ref(), "Can't check penguin");
+    assert_eq!(item.label.as_ref(), "Can't Check penguin");
     assert_eq!(
         item.command,
         Some(Command::Machine(PENGUIN, MachineAction::CheckAgain))
@@ -361,7 +361,7 @@ fn the_named_states_match_the_mockup() {
         kind: FailureKind::Install(InstallFailure::Download),
     });
     let item = single(&present(&[install_failed]));
-    assert_eq!(item.label.as_ref(), "penguin install failed");
+    assert_eq!(item.label.as_ref(), "penguin Install Failed");
     let Some(Command::Explain(explanation)) = item.command else {
         panic!("Install failed explains");
     };
@@ -380,7 +380,7 @@ fn the_named_states_match_the_mockup() {
     assert_eq!(
         (item.label.as_ref(), item.command),
         (
-            "Can't confirm build-box",
+            "Can't Confirm build-box",
             Some(Command::Machine(BUILD_BOX, MachineAction::CheckAgain))
         )
     );
@@ -839,7 +839,7 @@ fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
         &Dismissed::new(),
         NOW,
     );
-    assert_eq!(single(&shown).label.as_ref(), "Relaunch failed");
+    assert_eq!(single(&shown).label.as_ref(), "Relaunch Failed");
     let Some(Command::Explain(explanation)) = single(&shown).command.clone() else {
         panic!("Relaunch failed explains");
     };

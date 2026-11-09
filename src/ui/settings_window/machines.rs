@@ -483,7 +483,7 @@ fn failure(error: CoreError) -> (&'static str, &'static str, bool) {
         // Only a fresh SpaceTerm process uses its replaced installation's server package, so
         // checking again from this one says nothing new.
         CoreError::CandidateChanged => (
-            "Restart SpaceTerm",
+            "Relaunch SpaceTerm",
             "settings-local-server-state-candidate-changed",
             false,
         ),

@@ -267,7 +267,7 @@ fn two_items_open_a_compact_menu_with_one_line_per_machine_and_restart_all(
     let trigger = visual
         .debug_bounds("update-control-menu")
         .expect("two items open a menu");
-    A11yTree::read(visual).node("2 updates");
+    A11yTree::read(visual).node("2 Updates");
 
     visual.simulate_click(trigger.center(), gpui::Modifiers::none());
     visual.run_until_parked();
@@ -487,7 +487,7 @@ fn a_core_install_stays_out_of_the_title_bar_and_is_readable_in_the_menu(
         waiting([4; 32], "builder", 2),
     ]));
     visual.run_until_parked();
-    A11yTree::read(visual).node("2 updates");
+    A11yTree::read(visual).node("2 Updates");
     click("update-control-menu", visual);
     let tree = A11yTree::read(visual);
     let row = tree.node("penguin");
@@ -545,7 +545,7 @@ fn the_menu_reads_in_full_and_its_information_stays_reachable(cx: &mut gpui::Tes
     visual.run_until_parked();
 
     let tree = A11yTree::read(visual);
-    let trigger = tree.node("2 updates");
+    let trigger = tree.node("2 Updates");
     assert_ne!(
         trigger["aria"]["disabled"], true,
         "two working items still open the menu"

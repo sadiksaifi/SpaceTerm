@@ -87,7 +87,7 @@ impl EmbeddedCores {
             .clone()
     }
 
-    /// The version "Update from This Mac" offers a Machine with `facts`: the embedded build for
+    /// The version "Update {Machine}" offers a Machine with `facts`: the embedded build for
     /// its platform, when its Core would install it. It is newer than every version the Core has,
     /// is not the skipped one, and its Update Floor admits the running version.
     pub(crate) fn offer(&self, facts: &UpdateFacts) -> Option<Version> {

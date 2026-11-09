@@ -34,7 +34,7 @@ pub(crate) struct MachineUpdate {
     pub(crate) facts: Option<UpdateFacts>,
     pub(crate) capabilities: Capabilities,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
-    /// `facts.running` and not `facts.skipped`. It drives "Update from This Mac".
+    /// `facts.running` and not `facts.skipped`. It drives "Update {Machine}".
     pub(crate) push: Option<Version>,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
     /// every version the Core has and not `facts.skipped`, whether or not its Update Floor

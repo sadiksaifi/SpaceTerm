@@ -737,7 +737,8 @@ impl MachineView {
             }
             MachineState::CoreTooOld { .. }
             | MachineState::Available { .. }
-            | MachineState::BelowFloor { .. } => format!("Update {name}"),
+            | MachineState::BelowFloor { .. }
+            | MachineState::CantCheck { push: Some(_), .. } => format!("Update {name}"),
             MachineState::Installing { .. } => format!("Installing on {name}…"),
             MachineState::Restarting { to } if self.running.as_ref() == Some(to) => {
                 format!("Restarting {name}…")
@@ -746,12 +747,12 @@ impl MachineView {
             MachineState::Checking | MachineState::Connecting => format!("Checking {name}…"),
             MachineState::Stopping => format!("Stopping {name}…"),
             MachineState::Uninstalling => format!("Uninstalling on {name}…"),
-            MachineState::UpdateFailed { .. } => format!("{name} update failed"),
+            MachineState::UpdateFailed { .. } => format!("{name} Update Failed"),
             MachineState::InstallFailed { .. } | MachineState::PushFailed { .. } => {
-                format!("{name} install failed")
+                format!("{name} Install Failed")
             }
-            MachineState::CantConfirm { .. } => format!("Can't confirm {name}"),
-            MachineState::CantCheck { .. } => format!("Can't check {name}"),
+            MachineState::CantConfirm { .. } => format!("Can't Confirm {name}"),
+            MachineState::CantCheck { .. } => format!("Can't Check {name}"),
             MachineState::DesktopTooOld => "Update SpaceTerm".to_owned(),
             MachineState::Current => format!("{name} is current"),
             MachineState::Stopped => format!("{name} is stopped"),
@@ -857,7 +858,7 @@ impl MachineView {
             MachineState::CoreTooOld { .. } => (
                 "Too old".to_owned(),
                 Some((
-                    "Update".to_owned(),
+                    self.control_label(),
                     Command::Machine(self.machine, MachineAction::Install),
                 )),
             ),
@@ -908,7 +909,7 @@ impl MachineView {
                         if *reason == CheckProblem::Failing(CheckFailure::SteppingStoneSkipped) {
                             "How to Update".to_owned()
                         } else if push.is_some() {
-                            UPDATE_FROM_LOCAL.to_owned()
+                            self.control_label()
                         } else {
                             "Check Again".to_owned()
                         },
@@ -1082,7 +1083,7 @@ impl MachineView {
                     None => "This SpaceTerm needs a newer SpaceTerm Core.".to_owned(),
                 }),
                 Some(vec![action(
-                    "Install Update",
+                    &self.control_label(),
                     Some("Terminal Sessions stay open"),
                     MachineAction::Install,
                 )]),
@@ -1130,7 +1131,7 @@ impl MachineView {
                 Some(self.sentence()),
                 Some(match push {
                     Some(_) => vec![action(
-                        UPDATE_FROM_LOCAL,
+                        &self.control_label(),
                         Some("Terminal Sessions stay open"),
                         MachineAction::Install,
                     )],
@@ -1197,10 +1198,6 @@ const LOCAL_PLACE: &str = "This Computer";
 pub(crate) const READ_ONLY_REMEDY: &str = "Install SpaceTerm in Applications to update.";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const READ_ONLY_REMEDY: &str = "Run the SpaceTerm install script to install the update.";
-#[cfg(target_os = "macos")]
-const UPDATE_FROM_LOCAL: &str = "Update from This Mac";
-#[cfg(not(target_os = "macos"))]
-const UPDATE_FROM_LOCAL: &str = "Update from This Computer";
 
 fn machine_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> MachineState {
     let facts = update.facts.as_ref();
@@ -1557,8 +1554,8 @@ impl DesktopState {
             Self::Downloading { .. } => "Downloading SpaceTerm…",
             Self::Ready { .. } | Self::Overdue { .. } | Self::RelaunchHeld { .. } => "Relaunch",
             Self::TooOld { .. } => "Update SpaceTerm",
-            Self::InstallFailed { error, .. } if error.relaunch_failed() => "Relaunch failed",
-            Self::InstallFailed { .. } => "SpaceTerm install failed",
+            Self::InstallFailed { error, .. } if error.relaunch_failed() => "Relaunch Failed",
+            Self::InstallFailed { .. } => "SpaceTerm Install Failed",
             Self::Relaunching { .. } => "Relaunching…",
             Self::WhatsNew { .. } => "What's new in SpaceTerm",
             Self::NeedsNewerSystem => "SpaceTerm needs a newer system",
@@ -1634,8 +1631,8 @@ impl DesktopState {
                     {
                         "Couldn't Relaunch SpaceTerm".to_owned()
                     }
-                    Some(version) => format!("Couldn't install SpaceTerm {version}"),
-                    None => "Couldn't install the SpaceTerm update".to_owned(),
+                    Some(version) => format!("Couldn't Install SpaceTerm {version}"),
+                    None => "Couldn't Install the SpaceTerm Update".to_owned(),
                 }
                 .into(),
                 // A failed relaunch waits for the person: nothing retries it by itself. An
@@ -1975,7 +1972,7 @@ impl Presentation {
                     .min_by_key(|item| item.urgency)
                     .expect("two or more items");
                 Control::Menu {
-                    label: format!("{n} updates").into(),
+                    label: format!("{n} Updates").into(),
                     tone: if items.iter().any(|item| item.tone == Tone::Problem) {
                         Tone::Problem
                     } else {
@@ -2132,9 +2129,17 @@ impl Presentation {
             DesktopState::TooOld { machine, .. } => {
                 (running, Some(format!("Too old for {machine}")))
             }
-            DesktopState::InstallFailed { .. } => {
-                (running, Some(self.desktop.control_label().to_owned()))
-            }
+            DesktopState::InstallFailed { error, .. } => (
+                running,
+                Some(
+                    if error.relaunch_failed() {
+                        "Relaunch failed"
+                    } else {
+                        "SpaceTerm install failed"
+                    }
+                    .to_owned(),
+                ),
+            ),
             DesktopState::RelaunchHeld { .. } => (running, Some("Relaunch failed".to_owned())),
             DesktopState::Relaunching { .. } => (running, Some("Relaunching…".to_owned())),
             DesktopState::WhatsNew { .. } => (running, Some("Updated".to_owned())),
