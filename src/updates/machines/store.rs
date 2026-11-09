@@ -140,6 +140,8 @@ pub(crate) struct MachineUpdates {
     /// Machines whose automatic install has not finished, and the version it pushes. Its
     /// finish reaches no surface, and a failure stays in the Machine's `failed_push`.
     installing: Vec<(MachineId, Version)>,
+    /// Whether the desktop's startup check may still find a newer release of this desktop.
+    startup_check: bool,
     _events: Task<()>,
 }
 
@@ -172,6 +174,7 @@ impl MachineUpdates {
                 performed: Vec::new(),
                 offered: HashSet::new(),
                 installing: Vec::new(),
+                startup_check: false,
                 _events: events,
             }
         });
@@ -180,7 +183,8 @@ impl MachineUpdates {
             .try_global::<crate::updates::UpdateService>()
             .map(|service| service.0.clone())
         {
-            entity.update(cx, |_, cx| {
+            entity.update(cx, |this, cx| {
+                this.startup_check = true;
                 cx.observe(&updates, |this, _, cx| this.install_bundled(cx))
                     .detach();
             });
@@ -420,14 +424,20 @@ impl MachineUpdates {
     /// Installs the bundled Core on each Machine offered one that answers and runs no update
     /// operation, once per Machine and offered version.
     fn install_bundled(&mut self, cx: &App) {
-        // A desktop that knows a newer release of itself waits, so a Stepping Stone does not
-        // push its intermediate Core to every Machine. Every other desktop pushes, also while its
-        // check runs and after it failed.
-        if cx
-            .try_global::<crate::updates::UpdateService>()
-            .is_some_and(|service| service.0.read(cx).pending_version().is_some())
-        {
-            return;
+        // Automatic pushes wait for the desktop's startup check, and a desktop that knows a newer
+        // release of itself keeps waiting, so a Stepping Stone does not push its intermediate
+        // Core to every Machine. A check that fails or ends without a result releases them.
+        if let Some(service) = cx.try_global::<crate::updates::UpdateService>() {
+            let updates = service.0.read(cx);
+            if self.startup_check {
+                if matches!(updates.state(), crate::updates::UpdateState::Checking) {
+                    return;
+                }
+                self.startup_check = false;
+            }
+            if updates.pending_version().is_some() {
+                return;
+            }
         }
         let due: Vec<(MachineId, Version)> = self
             .machines
@@ -880,12 +890,16 @@ mod tests {
         cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
-        updater.emit(crate::updates::UpdateEvent::Available("0.10.0".into()));
-        cx.run_until_parked();
         adapter.emit(MachineUpdatesEvent::Machines(vec![offered(
             update("0.8.0", None),
             "0.9.0",
         )]));
+        cx.run_until_parked();
+        assert!(
+            adapter.performed().is_empty(),
+            "wait for the desktop's startup check"
+        );
+        updater.emit(crate::updates::UpdateEvent::Available("0.10.0".into()));
         cx.run_until_parked();
         assert!(
             adapter.performed().is_empty(),
@@ -899,14 +913,15 @@ mod tests {
         cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
-        updater.emit(crate::updates::UpdateEvent::Failed(
-            crate::updates::UpdateError::Check,
-        ));
-        cx.run_until_parked();
         adapter.emit(MachineUpdatesEvent::Machines(vec![offered(
             update("0.8.0", None),
             "0.9.0",
         )]));
+        cx.run_until_parked();
+        assert!(adapter.performed().is_empty());
+        updater.emit(crate::updates::UpdateEvent::Failed(
+            crate::updates::UpdateError::Check,
+        ));
         cx.run_until_parked();
         assert_eq!(adapter.performed(), [([2; 32], MachineAction::Install)]);
     }
