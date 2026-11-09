@@ -238,6 +238,9 @@ pub(crate) enum DesktopState {
     WhatsNew {
         version: String,
     },
+    /// The newer release needs a newer system than this computer runs, so nothing waits that
+    /// SpaceTerm can install.
+    NeedsNewerSystem,
 }
 
 /// What the desktop's update service knows.
@@ -1068,6 +1071,12 @@ impl MachineView {
 const LOCAL_PLACE: &str = "this Mac";
 #[cfg(not(target_os = "macos"))]
 const LOCAL_PLACE: &str = "this computer";
+/// How to update an installation SpaceTerm can't replace, as each platform installs SpaceTerm.
+/// The failure alert's own wording comes from the platform's desktop wording.
+#[cfg(target_os = "macos")]
+const READ_ONLY_REMEDY: &str = "Install SpaceTerm in Applications to update.";
+#[cfg(not(target_os = "macos"))]
+const READ_ONLY_REMEDY: &str = "Run the SpaceTerm install script to install the update.";
 #[cfg(target_os = "macos")]
 const UPDATE_FROM_LOCAL: &str = "Update from This Mac";
 #[cfg(not(target_os = "macos"))]
@@ -1272,10 +1281,14 @@ impl DesktopState {
                 version: version.clone(),
             },
             UpdateState::Failed {
+                error: UpdateError::SystemTooOld,
+            } => Self::NeedsNewerSystem,
+            UpdateState::Failed {
                 error:
                     error @ (UpdateError::Download
                     | UpdateError::Verification
                     | UpdateError::Installation
+                    | UpdateError::DiskFull
                     | UpdateError::ReadOnly
                     | UpdateError::Relaunch),
             } => Self::InstallFailed {
@@ -1321,6 +1334,7 @@ impl DesktopState {
                 | Self::Downloading { .. }
                 | Self::WhatsNew { .. }
                 | Self::Relaunching { .. }
+                | Self::NeedsNewerSystem
         )
     }
 
@@ -1335,7 +1349,7 @@ impl DesktopState {
 
     fn glyph(&self) -> Option<Glyph> {
         Some(match self {
-            Self::Current => return None,
+            Self::Current | Self::NeedsNewerSystem => return None,
             Self::Available { .. } => Glyph::Download,
             Self::Downloading { .. } | Self::Relaunching { .. } => Glyph::Working,
             Self::Ready { .. } | Self::Overdue { .. } | Self::RelaunchHeld { .. } => Glyph::Restart,
@@ -1380,6 +1394,7 @@ impl DesktopState {
             Self::InstallFailed { .. } => "SpaceTerm install failed",
             Self::Relaunching { .. } => "Relaunching…",
             Self::WhatsNew { .. } => "What's new in SpaceTerm",
+            Self::NeedsNewerSystem => "SpaceTerm needs a newer system",
         }
         .to_owned()
     }
@@ -1418,6 +1433,7 @@ impl DesktopState {
             Self::RelaunchHeld { version: v } => desktop_failure(&version(v), UpdateError::Relaunch),
             Self::Relaunching { .. } => "SpaceTerm is relaunching. Terminal Sessions keep running.".to_owned(),
             Self::WhatsNew { version } => format!("SpaceTerm updated to {version}."),
+            Self::NeedsNewerSystem => UpdateError::SystemTooOld.to_string(),
         }
         .into()
     }
@@ -1446,41 +1462,57 @@ impl DesktopState {
                     None => "Couldn't install the SpaceTerm update".to_owned(),
                 }
                 .into(),
-                // A failed relaunch waits for the person: nothing retries it by itself.
-                message: if matches!(
-                    self,
+                // A failed relaunch waits for the person: nothing retries it by itself. An
+                // installation SpaceTerm can't replace names its remedy in the sentence.
+                message: match self {
                     Self::InstallFailed {
                         error: UpdateError::Relaunch,
                         held: true,
                         ..
-                    }
-                ) {
-                    format!("{} Choose Relaunch to try again.", self.sentence())
-                } else if matches!(
-                    self,
+                    } => format!("{} Choose Relaunch to try again.", self.sentence()),
                     Self::InstallFailed {
                         error: UpdateError::Relaunch,
                         ..
-                    }
-                ) {
-                    format!(
+                    } => format!(
                         "{} Choose Check Now in SpaceTerm Settings to download it again.",
                         self.sentence()
-                    )
-                } else {
-                    format!("{} SpaceTerm tries again later.", self.sentence())
+                    ),
+                    Self::InstallFailed {
+                        error: UpdateError::ReadOnly,
+                        ..
+                    } => self.sentence().to_string(),
+                    Self::InstallFailed {
+                        error: UpdateError::DiskFull,
+                        ..
+                    } => format!(
+                        "{} Free up disk space. SpaceTerm tries again later.",
+                        self.sentence()
+                    ),
+                    _ => format!("{} SpaceTerm tries again later.", self.sentence()),
                 }
                 .into(),
-                then: Some(Box::new(Command::Desktop(DesktopAction::DismissFailure))),
+                // SpaceTerm stops trying to replace an installation it can't replace, so the
+                // failure stays until the person tries again.
+                then: (!matches!(
+                    self,
+                    Self::InstallFailed {
+                        error: UpdateError::ReadOnly,
+                        ..
+                    }
+                ))
+                .then(|| Box::new(Command::Desktop(DesktopAction::DismissFailure))),
             }),
-            Self::Current | Self::Downloading { .. } | Self::Relaunching { .. } => return None,
+            Self::Current
+            | Self::Downloading { .. }
+            | Self::Relaunching { .. }
+            | Self::NeedsNewerSystem => return None,
         })
     }
 
     fn menu_row(&self) -> Option<MenuRow> {
         let update = || Some(("Relaunch", Command::Desktop(DesktopAction::Update)));
         let (status, button) = match self {
-            Self::Current => return None,
+            Self::Current | Self::NeedsNewerSystem => return None,
             Self::Available { .. } => (
                 "Not downloaded".to_owned(),
                 Some(("Download", Command::Desktop(DesktopAction::Update))),
@@ -1889,6 +1921,7 @@ impl Presentation {
             DesktopState::RelaunchHeld { .. } => (running, Some("Relaunch failed".to_owned())),
             DesktopState::Relaunching { .. } => (running, Some("Relaunching…".to_owned())),
             DesktopState::WhatsNew { .. } => (running, Some("Updated".to_owned())),
+            DesktopState::NeedsNewerSystem => (running, Some("Needs a newer system".to_owned())),
         };
         ExtraHeader {
             line: version_line(Some(version), state.as_deref()),
@@ -1954,7 +1987,9 @@ impl Presentation {
                 subtitle: None,
                 command: Command::Desktop(DesktopAction::WhatsNew),
             }),
-            DesktopState::Current | DesktopState::Relaunching { .. } => {}
+            DesktopState::Current
+            | DesktopState::Relaunching { .. }
+            | DesktopState::NeedsNewerSystem => {}
         }
         if let Some(all) = self.restart_all() {
             actions.push(ExtraItem::Action {
@@ -2180,12 +2215,18 @@ fn desktop_failure(release: &str, error: UpdateError) -> String {
         UpdateError::Verification => {
             format!("{release} failed signature verification, so SpaceTerm didn't install it.")
         }
+        UpdateError::DiskFull => {
+            format!("There isn't enough disk space to install {release}.")
+        }
         UpdateError::ReadOnly => {
-            format!("SpaceTerm can't replace its installation to install {release}.")
+            format!(
+                "SpaceTerm can't replace its installation to install {release}. {READ_ONLY_REMEDY}"
+            )
         }
         UpdateError::Relaunch => format!(
             "{release} is downloaded, but SpaceTerm couldn't quit to install it. Your Terminal Sessions are still running."
         ),
+        UpdateError::SystemTooOld => UpdateError::SystemTooOld.to_string(),
         UpdateError::Installation | UpdateError::Check | UpdateError::Unavailable => {
             format!("{release} didn't install.")
         }

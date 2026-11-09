@@ -64,6 +64,26 @@ pub(crate) enum UpdateError {
     Verification,
     #[error("Try the update again.")]
     Installation,
+    /// The update ran out of disk space while it unpacked or staged the release.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(dead_code, reason = "only the Linux updater stages releases itself")
+    )]
+    #[error("Free up disk space, then try the update again.")]
+    DiskFull,
+    /// The newer release needs a newer system library than this computer has, so SpaceTerm
+    /// can't install it.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "Sparkle skips a release for a newer macOS by itself"
+        )
+    )]
+    #[error(
+        "The newest SpaceTerm needs a newer system than this computer runs. Update its operating system to install it."
+    )]
+    SystemTooOld,
     /// Desktop wording names the remedy, which differs by platform.
     #[error("SpaceTerm can’t replace its installation.")]
     ReadOnly,
@@ -329,7 +349,10 @@ impl UpdateModel {
                 }
             }
             UpdateEvent::Failed(error) => {
-                let visible = self.manual_check || self.version.is_some();
+                // A release this computer's system can't run is news only to a person who
+                // asked. A scheduled check finds the same one again.
+                let visible = self.manual_check
+                    || (self.version.is_some() && error != UpdateError::SystemTooOld);
                 self.install_authorized = false;
                 self.state = UpdateState::Failed { error };
                 return visible.then_some(UpdateNotice::Failed);
@@ -719,7 +742,17 @@ impl ApplicationUpdates {
             self.automatic_download = true;
             self.download(cx);
         }
-        if time.saturating_sub(self.last_attempt) >= preferences.check_interval.seconds() {
+        // An installation SpaceTerm can't replace fails every update the same way, so scheduled
+        // checks stop until the person tries again.
+        let unreplaceable = matches!(
+            self.model.state,
+            UpdateState::Failed {
+                error: UpdateError::ReadOnly
+            }
+        );
+        if !unreplaceable
+            && time.saturating_sub(self.last_attempt) >= preferences.check_interval.seconds()
+        {
             self.check(false, cx);
         }
         cx.notify();
@@ -905,6 +938,11 @@ impl ApplicationUpdates {
                 .observe(env!("SPACETERM_VERSION"), version, self.publication, time);
             self.history.last_check = Some(time);
             self.stage = self.history.stage(time);
+            self.save_history();
+        }
+        // The check succeeded: it found only a release this computer's system can't run.
+        if matches!(event, UpdateEvent::Failed(UpdateError::SystemTooOld)) {
+            self.history.last_check = Some(time);
             self.save_history();
         }
         if current {
@@ -1646,6 +1684,43 @@ mod tests {
         adapter.emit(UpdateEvent::Available("0.1.1".into()));
         cx.run_until_parked();
         assert_eq!(adapter.downloads.get(), 2);
+    }
+
+    /// An installation SpaceTerm can't replace fails every download the same way, so scheduled
+    /// checks stop and the failure stays. The person's Try Again still checks.
+    #[gpui::test]
+    fn an_unreplaceable_installation_stops_scheduled_checks(cx: &mut gpui::TestAppContext) {
+        let adapter = Rc::new(RecordingAdapter::available());
+        let executor = cx.executor();
+        let began = executor.now();
+        *adapter.clock.borrow_mut() = Some(Box::new(move || {
+            1_000_000 + (executor.now() - began).as_secs()
+        }));
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(adapter.checks.get(), 1);
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        cx.run_until_parked();
+        assert_eq!(adapter.downloads.get(), 1);
+        adapter.emit(UpdateEvent::Failed(UpdateError::ReadOnly));
+        adapter.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+
+        cx.executor()
+            .advance_clock(Duration::from_secs(3 * policy::DAY));
+        cx.run_until_parked();
+        assert_eq!(adapter.checks.get(), 1);
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.state().clone()),
+            UpdateState::Failed {
+                error: UpdateError::ReadOnly
+            }
+        );
+
+        service.update(cx, |updates, cx| updates.retry_download(cx));
+        assert_eq!(adapter.checks.get(), 2);
     }
 
     #[gpui::test]

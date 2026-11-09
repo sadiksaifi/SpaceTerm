@@ -728,6 +728,85 @@ fn desktop_actions_share_relaunch_copy_and_never_claim_a_core_restart() {
     assert_eq!(title.as_ref(), "Download SpaceTerm 0.11.1");
 }
 
+/// An installation SpaceTerm can't replace names its remedy wherever the failure shows, and
+/// acknowledging it leaves it in place, since no later check can install the update.
+#[test]
+fn an_unreplaceable_installation_names_its_remedy_on_every_surface() {
+    let failed = UpdateState::Failed {
+        error: UpdateError::ReadOnly,
+    };
+    let shown = Presentation::new(
+        DesktopFacts {
+            pending: Some("0.11.1"),
+            ..desktop(&failed, UpdateStage::Optional)
+        },
+        &[],
+        &Dismissed::new(),
+        NOW,
+    );
+    let sentence = format!(
+        "SpaceTerm can't replace its installation to install SpaceTerm 0.11.1. {READ_ONLY_REMEDY}"
+    );
+    let item = single(&shown);
+    assert_eq!(item.sentence.as_ref(), sentence);
+    let Some(Command::Explain(explanation)) = item.command else {
+        panic!("the failure explains");
+    };
+    assert_eq!(explanation.message.as_ref(), sentence);
+    assert!(explanation.then.is_none(), "acknowledging keeps the failure");
+    assert_eq!(shown.desktop_row().unwrap().sentence.as_ref(), sentence);
+    let ExtraItem::Action { subtitle, .. } = &shown.extra_actions()[0] else {
+        panic!("the menu bar extra offers a retry");
+    };
+    assert_eq!(subtitle.as_ref().unwrap().as_ref(), sentence);
+}
+
+#[test]
+fn a_full_disk_asks_for_space() {
+    let failed = UpdateState::Failed {
+        error: UpdateError::DiskFull,
+    };
+    let shown = Presentation::new(
+        DesktopFacts {
+            pending: Some("0.11.1"),
+            ..desktop(&failed, UpdateStage::Optional)
+        },
+        &[],
+        &Dismissed::new(),
+        NOW,
+    );
+    let Some(Command::Explain(explanation)) = single(&shown).command else {
+        panic!("the failure explains");
+    };
+    assert_eq!(
+        explanation.message.as_ref(),
+        "There isn't enough disk space to install SpaceTerm 0.11.1. Free up disk space. \
+         SpaceTerm tries again later."
+    );
+}
+
+/// A newer release this computer's system can't run is never "up to date", and claims no title
+/// bar space, since SpaceTerm can't install it.
+#[test]
+fn a_release_for_a_newer_system_is_never_called_up_to_date() {
+    let failed = UpdateState::Failed {
+        error: UpdateError::SystemTooOld,
+    };
+    let shown = Presentation::new(
+        desktop(&failed, UpdateStage::Optional),
+        &[],
+        &Dismissed::new(),
+        NOW,
+    );
+    assert_eq!(shown.control(), Control::Hidden);
+    assert_eq!(
+        shown.desktop.sentence().as_ref(),
+        "The newest SpaceTerm needs a newer system than this computer runs. Update its \
+         operating system to install it."
+    );
+    assert!(shown.extra_header().line.ends_with("Needs a newer system"));
+}
+
 #[test]
 fn unread_notes_and_a_running_installer_do_not_claim_title_bar_space() {
     for state in [

@@ -187,7 +187,7 @@ impl UpdateAdapter for LinuxUpdates {
             cycle.reset();
             drop(cycle);
             shared.discard_staging_in_background();
-            shared.fail(replacement_failure(&error));
+            shared.fail(installation_failure(&error));
             return Ok(());
         }
         cycle.phase = Phase::Installed;
@@ -208,7 +208,7 @@ impl UpdateAdapter for LinuxUpdates {
         shared
             .installation
             .replace()
-            .map_err(|error| replacement_failure(&error))?;
+            .map_err(|error| installation_failure(&error))?;
         cycle.phase = Phase::Installed;
         Ok(())
     }
@@ -238,14 +238,35 @@ impl UpdateAdapter for LinuxUpdates {
     }
 }
 
-/// A filesystem without exchange support can never replace the installation, so its failure names
-/// the install script remedy instead of offering a retry.
-fn replacement_failure(error: &io::Error) -> UpdateError {
+/// Classifies a failure to stage or replace the installation. A filesystem without exchange
+/// support can never replace it, so its failure names the install script remedy instead of
+/// offering a retry. A full disk or quota asks for space.
+fn installation_failure(error: &io::Error) -> UpdateError {
     if error.kind() == io::ErrorKind::Unsupported {
         UpdateError::ReadOnly
+    } else if disk_full(error) {
+        UpdateError::DiskFull
     } else {
         UpdateError::Installation
     }
+}
+
+/// Classifies a failure to unpack a verified archive: a full disk asks for space, and an archive
+/// that does not hold one well-formed installation fails verification.
+fn unpack_failure(error: &io::Error) -> UpdateError {
+    match error.kind() {
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof => {
+            UpdateError::Verification
+        }
+        _ => installation_failure(error),
+    }
+}
+
+fn disk_full(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+    ) || matches!(error.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT))
 }
 
 fn spawn(
@@ -353,8 +374,14 @@ impl Shared {
             return;
         }
         match result {
-            // A release that needs a newer system is not offered, as Sparkle skips one on macOS.
-            Ok(feed) if feed.supersedes(self.current_version) && feed.runs_on((self.system)()) => {
+            // A release that needs a newer glibc than this computer has is not offered. The
+            // check says so instead of reporting this release as current.
+            Ok(feed) if feed.supersedes(self.current_version) && !feed.runs_on((self.system)()) => {
+                cycle.reset();
+                drop(cycle);
+                self.fail(UpdateError::SystemTooOld);
+            }
+            Ok(feed) if feed.supersedes(self.current_version) => {
                 let (version, published_at) = (feed.version.clone(), feed.published_at);
                 cycle.phase = Phase::Available(feed);
                 drop(cycle);
@@ -426,15 +453,15 @@ impl Shared {
         let installation = &self.installation;
         installation
             .create_staging()
-            .map_err(|_| UpdateError::Installation)?;
+            .map_err(|error| installation_failure(&error))?;
         installation
             .confirm_exchange()
-            .map_err(|error| replacement_failure(&error))?;
+            .map_err(|error| installation_failure(&error))?;
         let archive = self.fetch_archive(feed, generation)?;
         self.send_current(generation, UpdateEvent::Verifying)?;
         feed.archive.verify(&self.trust, &archive)?;
         unpack(&archive, self.archive_root, &installation.staged_tree())
-            .map_err(|_| UpdateError::Verification)?;
+            .map_err(|error| unpack_failure(&error))?;
         if !Installation::executable_in(&installation.staged_tree()).is_file() {
             return Err(UpdateError::Verification);
         }
@@ -874,8 +901,25 @@ mod tests {
         );
         assert_eq!(installed_contents(installation), "old");
         assert_eq!(
-            replacement_failure(&io::ErrorKind::Unsupported.into()),
+            installation_failure(&io::ErrorKind::Unsupported.into()),
             UpdateError::ReadOnly
+        );
+    }
+
+    #[test]
+    fn linux_full_disk_should_ask_for_space_instead_of_failing_verification() {
+        for full in [libc::ENOSPC, libc::EDQUOT] {
+            let error = io::Error::from_raw_os_error(full);
+            assert_eq!(installation_failure(&error), UpdateError::DiskFull);
+            assert_eq!(unpack_failure(&error), UpdateError::DiskFull);
+        }
+        assert_eq!(
+            unpack_failure(&io::ErrorKind::InvalidData.into()),
+            UpdateError::Verification
+        );
+        assert_eq!(
+            unpack_failure(&io::Error::from_raw_os_error(libc::EACCES)),
+            UpdateError::Installation
         );
     }
 
@@ -1089,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_stepping_stone_for_a_newer_system_should_not_be_offered() {
+    fn linux_stepping_stone_for_a_newer_system_should_say_the_system_is_too_old() {
         let fixture = installed("old");
         let signer = ReleaseSigner::new(3);
         let newer = SystemVersion {
@@ -1108,7 +1152,7 @@ mod tests {
             .begin(Phase::Idle, Phase::Checking, UpdateError::Check)
             .unwrap();
         shared.check(generation);
-        assert_eq!(drained(&receiver), ["UpToDate", "Finished"]);
+        assert_eq!(drained(&receiver), ["Failed(SystemTooOld)", "Finished"]);
         assert!(matches!(shared.lock().phase, Phase::Idle));
     }
 

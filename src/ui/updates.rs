@@ -454,6 +454,16 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
             true,
             AlertIntent::Warning,
         ),
+        UpdateError::DiskFull => (
+            "Not Enough Disk Space for the Update",
+            true,
+            AlertIntent::Warning,
+        ),
+        UpdateError::SystemTooOld => (
+            "Update Needs a Newer System",
+            false,
+            AlertIntent::Informational,
+        ),
         UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
         UpdateError::Relaunch => (
             "Couldn\u{2019}t Relaunch SpaceTerm",
@@ -860,6 +870,8 @@ mod tests {
                 UpdateError::Download,
                 UpdateError::Verification,
                 UpdateError::Installation,
+                UpdateError::DiskFull,
+                UpdateError::SystemTooOld,
                 UpdateError::ReadOnly,
                 UpdateError::Relaunch,
             ]
