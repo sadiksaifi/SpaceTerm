@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use crate::platform::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitHandler,
     ApplicationQuitRequest, QuitAnswer, QuitButtons, QuitPrompt, StatusAreaName,
 };
-use crate::platform::quit_policy::{QuitStep, RelaunchPhase, quit_step};
+use crate::platform::quit_policy::{QuitAction, RelaunchQuit};
 use crate::ssh::command::OpenSshExecutable;
 use crate::ssh::host_config::HostConfigFilesystem;
 use crate::ssh::process::SshProcessAdapter;
@@ -435,7 +435,7 @@ fn install_application_quit(
         adapter: Rc::downgrade(&adapter),
         state: RefCell::new(ApplicationQuitCoordinatorState::Idle),
         status_area: adapter.status_area_name(),
-        relaunch: Cell::default(),
+        relaunch: RefCell::default(),
         sessions: crate::local_startup::owned_foreground()
             .then(|| Arc::new(DevelopmentQuitSessions) as Arc<dyn QuitSessions>),
     });
@@ -486,20 +486,16 @@ enum ApplicationQuitCoordinatorState {
     WaitingForUpdater,
     /// A confirmed quit waits for This Mac's SpaceTerm Core to finish its restart.
     WaitingForCore,
-    /// An approved update relaunch is saving Settings before it quits.
+    /// An approved update relaunch quits. [`RelaunchQuit`] holds how far it got.
     Relaunching,
-    /// Settings are saved and the updater holds the relaunch. Its quit request quits SpaceTerm.
-    RelaunchReleased,
-    /// SpaceTerm confirmed its quit for the relaunch.
-    RelaunchQuitting,
 }
 
 struct ApplicationQuitCoordinator {
     adapter: Weak<dyn ApplicationQuitAdapter>,
     state: RefCell<ApplicationQuitCoordinatorState>,
     status_area: StatusAreaName,
-    /// The update relaunch this coordinator already began quitting for.
-    relaunch: Cell<Option<crate::updates::RelaunchApproval>>,
+    /// The quit of the approved update relaunch.
+    relaunch: RefCell<RelaunchQuit<crate::updates::RelaunchApproval>>,
     /// Source Development's foreground Server and its Terminal Sessions end with the client.
     /// An installed client exits while its independently supervised Server keeps running.
     sessions: Option<Arc<dyn QuitSessions>>,
@@ -552,120 +548,93 @@ impl ApplicationQuitSnapshot {
 }
 
 impl ApplicationQuitCoordinator {
-    /// Answers every quit request through [`quit_step`], the policy the macOS updater test
-    /// shares.
+    /// Answers every quit request through [`RelaunchQuit`], the policy the macOS updater test
+    /// runs against Sparkle.
     fn request(
         self: &Rc<Self>,
         request: ApplicationQuitRequest,
         cx: &mut App,
     ) -> ApplicationQuitDecision {
-        let (phase, approval) = self.relaunch_phase(cx);
-        match quit_step(request, phase) {
-            QuitStep::Proceed => {
+        let approval = crate::updates::relaunch_approval(cx);
+        let action = self.relaunch.borrow_mut().request(request, approval);
+        self.perform(action, approval, cx)
+    }
+
+    /// Performs the next step of a quit. An approved update relaunch closes no window and asks
+    /// nothing: it saves Settings, hands the relaunch to the updater and quits once. A failed
+    /// save fails the relaunch at once, so an ordinary quit afterwards installs the release
+    /// without starting SpaceTerm again.
+    fn perform(
+        self: &Rc<Self>,
+        action: QuitAction,
+        approval: Option<crate::updates::RelaunchApproval>,
+        cx: &mut App,
+    ) -> ApplicationQuitDecision {
+        // An open quit warning sees the changed state when answered and closes without acting.
+        let relaunching = self.relaunch.borrow().active();
+        let mut state = self.state.borrow_mut();
+        if relaunching {
+            *state = ApplicationQuitCoordinatorState::Relaunching;
+        } else if *state == ApplicationQuitCoordinatorState::Relaunching {
+            *state = ApplicationQuitCoordinatorState::Idle;
+        }
+        drop(state);
+        match action {
+            QuitAction::Proceed => {
                 *self.state.borrow_mut() = ApplicationQuitCoordinatorState::SessionEnding;
                 return ApplicationQuitDecision::Proceed;
             }
-            QuitStep::BeginRelaunch => {
+            QuitAction::Nothing => {}
+            QuitAction::SaveSettings => {
+                let coordinator = Rc::clone(self);
+                // The native request is still being answered. Saving follows it.
+                cx.defer(move |cx| {
+                    crate::ui::settings_window::quit_when_saved(
+                        cx,
+                        ApplicationQuitAfterSave::new(move |cx, outcome| {
+                            let approval = crate::updates::relaunch_approval(cx);
+                            let action = coordinator
+                                .relaunch
+                                .borrow_mut()
+                                .saved(outcome == ApplicationQuitSaveOutcome::Saved, approval);
+                            coordinator.perform(action, approval, cx);
+                        }),
+                    );
+                });
+            }
+            QuitAction::Release => {
+                let coordinator = Rc::clone(self);
+                // The save completion can run inside the Settings Window's update.
+                cx.defer(move |cx| {
+                    let approval = crate::updates::relaunch_approval(cx);
+                    let updater_quits = approval
+                        .is_some_and(|approval| crate::updates::release_relaunch(approval, cx));
+                    let action = coordinator
+                        .relaunch
+                        .borrow_mut()
+                        .released(updater_quits, approval);
+                    coordinator.perform(action, approval, cx);
+                });
+            }
+            QuitAction::Quit => {
+                let coordinator = Rc::clone(self);
+                cx.defer(move |cx| {
+                    if crate::updates::relaunch_approval(cx).is_some()
+                        && let Some(adapter) = coordinator.adapter.upgrade()
+                    {
+                        adapter.confirm_quit(cx);
+                    }
+                });
+            }
+            QuitAction::FailUnsaved => {
                 if let Some(approval) = approval {
-                    self.relaunch(approval, cx);
+                    crate::updates::fail_unsaved_relaunch(approval, cx);
                 }
             }
-            QuitStep::Wait => {}
-            QuitStep::QuitForRelaunch => self.quit_for_relaunch(cx),
-            QuitStep::Dismiss => self.dismiss_now(cx),
-            QuitStep::Exit => self.exit_now(cx),
+            QuitAction::Dismiss => self.dismiss_now(cx),
+            QuitAction::Exit => self.exit_now(cx),
         }
         ApplicationQuitDecision::Cancel
-    }
-
-    /// The update relaunch the person approved, while it is in progress. A relaunch that failed
-    /// or was cancelled leaves quitting to ADR 0049 again.
-    fn relaunching(&self, cx: &App) -> Option<crate::updates::RelaunchApproval> {
-        let approval = crate::updates::relaunch_approval(cx);
-        if approval.is_none()
-            && matches!(
-                *self.state.borrow(),
-                ApplicationQuitCoordinatorState::Relaunching
-                    | ApplicationQuitCoordinatorState::RelaunchReleased
-                    | ApplicationQuitCoordinatorState::RelaunchQuitting
-            )
-        {
-            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-        }
-        approval
-    }
-
-    fn relaunch_phase(
-        &self,
-        cx: &App,
-    ) -> (RelaunchPhase, Option<crate::updates::RelaunchApproval>) {
-        let Some(approval) = self.relaunching(cx) else {
-            return (RelaunchPhase::None, None);
-        };
-        let phase = if self.relaunch.get() != Some(approval) {
-            RelaunchPhase::Approved
-        } else if *self.state.borrow() == ApplicationQuitCoordinatorState::RelaunchReleased {
-            RelaunchPhase::Released
-        } else {
-            RelaunchPhase::Quitting
-        };
-        (phase, Some(approval))
-    }
-
-    /// An approved update relaunch closes no window and asks nothing: it saves Settings, then
-    /// hands the relaunch to the updater and quits once. A failed save fails the relaunch at
-    /// once, so an ordinary quit afterwards installs the release without starting SpaceTerm
-    /// again.
-    fn relaunch(self: &Rc<Self>, approval: crate::updates::RelaunchApproval, cx: &mut App) {
-        self.relaunch.set(Some(approval));
-        // An open quit warning sees the changed state when answered and closes without acting.
-        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Relaunching;
-        let coordinator = Rc::clone(self);
-        // The native request is still being answered. Saving and quitting follow it.
-        cx.defer(move |cx| {
-            crate::ui::settings_window::quit_when_saved(
-                cx,
-                ApplicationQuitAfterSave::new(move |cx, outcome| {
-                    if *coordinator.state.borrow() != ApplicationQuitCoordinatorState::Relaunching {
-                        return;
-                    }
-                    if outcome == ApplicationQuitSaveOutcome::Failed {
-                        *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                        crate::updates::fail_unsaved_relaunch(approval, cx);
-                        return;
-                    }
-                    let coordinator = Rc::clone(&coordinator);
-                    cx.defer(move |cx| {
-                        // The relaunch may have failed while Settings were saving.
-                        if coordinator.relaunching(cx) != Some(approval)
-                            || *coordinator.state.borrow()
-                                != ApplicationQuitCoordinatorState::Relaunching
-                        {
-                            return;
-                        }
-                        if crate::updates::release_relaunch(approval, cx) {
-                            *coordinator.state.borrow_mut() =
-                                ApplicationQuitCoordinatorState::RelaunchReleased;
-                        } else {
-                            coordinator.quit_for_relaunch(cx);
-                        }
-                    });
-                }),
-            );
-        });
-    }
-
-    /// Quits for the relaunch once, after the request that asked returns.
-    fn quit_for_relaunch(self: &Rc<Self>, cx: &mut App) {
-        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::RelaunchQuitting;
-        let coordinator = Rc::clone(self);
-        cx.defer(move |cx| {
-            if *coordinator.state.borrow() == ApplicationQuitCoordinatorState::RelaunchQuitting
-                && let Some(adapter) = coordinator.adapter.upgrade()
-            {
-                adapter.confirm_quit(cx);
-            }
-        });
     }
 
     fn ready(&self, cx: &App) -> bool {
@@ -2440,7 +2409,7 @@ mod tests {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::Idle),
             status_area: StatusAreaName::MenuBar,
-            relaunch: Cell::default(),
+            relaunch: RefCell::default(),
             sessions: Some(Arc::new(ScriptedQuitSessions(std::sync::Mutex::new(
                 readings.into(),
             )))),
@@ -4504,7 +4473,7 @@ mod runtime_tests {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
             status_area: StatusAreaName::MenuBar,
-            relaunch: Cell::default(),
+            relaunch: RefCell::default(),
             sessions: None,
         });
 
@@ -4523,7 +4492,7 @@ mod runtime_tests {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
             status_area: StatusAreaName::MenuBar,
-            relaunch: Cell::default(),
+            relaunch: RefCell::default(),
             sessions: None,
         });
 

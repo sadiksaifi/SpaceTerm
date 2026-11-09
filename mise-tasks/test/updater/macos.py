@@ -84,7 +84,7 @@ def main():
                     }
                 )
             )
-            # The fixture answers quit requests with the app's own quit policy.
+            # The fixture answers quit requests and runs the relaunch quit with the app's policy.
             policy = root / "libspt_quit_policy.a"
             run(
                 "rustc",
@@ -96,7 +96,7 @@ def main():
                 "spt_quit_policy",
                 "-C",
                 "opt-level=1",
-                str(ROOT / "src/platform/quit_policy.rs"),
+                str(ROOT / "tests/macos_updater_fixture_policy.rs"),
                 "-o",
                 str(policy),
                 env={**os.environ, "MACOSX_DEPLOYMENT_TARGET": "26.0"},

@@ -6,14 +6,17 @@ static void *session;
 static NSString *mode;
 static NSString *logFile;
 
-// SpaceTerm's quit policy (ADR 0049), compiled from src/platform/quit_policy.rs. The fixture
-// keeps only what the app acts on: its relaunch phase, the Settings save and the quit itself.
-uint8_t spt_quit_request(uint32_t event_class, uint32_t event_id, bool has_reason, bool in_event);
-uint8_t spt_quit_step(uint8_t request, uint8_t relaunch);
-enum { SPTRelaunchNone = 0, SPTRelaunchApproved, SPTRelaunchQuitting, SPTRelaunchReleased };
-enum { SPTStepProceed = 0, SPTStepBeginRelaunch, SPTStepWait, SPTStepQuitForRelaunch,
-       SPTStepDismiss, SPTStepExit };
-static uint8_t relaunch = SPTRelaunchNone;
+// SpaceTerm's quit policy (ADR 0049) and its relaunch quit, compiled from
+// src/platform/quit_policy.rs through tests/macos_updater_fixture_policy.rs. The fixture only
+// performs each action the policy returns, as SpaceTerm's quit coordinator does.
+uint8_t spt_fixture_quit_request(uint32_t event_class, uint32_t event_id, bool has_reason,
+                                 bool in_event, uint64_t approval);
+uint8_t spt_fixture_settings_saved(bool saved, uint64_t approval);
+uint8_t spt_fixture_relaunch_released(bool updater_quits, uint64_t approval);
+enum { SPTProceed = 0, SPTNothing, SPTSaveSettings, SPTRelease, SPTQuit, SPTFailUnsaved,
+       SPTDismiss, SPTExit };
+/// The approved relaunch as SpaceTerm's update service holds it, or 0 for none.
+static uint64_t approval;
 /// The fixture confirmed its own quit, as SpaceTerm's confirm_quit does.
 static BOOL confirmed;
 
@@ -23,21 +26,41 @@ static void record(NSString *message) {
     [file writeData:[[message stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
     [file closeFile];
 }
-static void confirmQuit(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{ confirmed = YES; [NSApp terminate:nil]; });
-}
-// SpaceTerm's Settings save before a relaunch. The relaunch-failed mode fails it, so the relaunch
-// fails at once and the person then quits SpaceTerm ordinarily.
-static void saveSettingsForRelaunch(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if ([mode isEqualToString:@"relaunch-failed"]) {
-            record(@"save-failed");
-            relaunch = SPTRelaunchNone;
-            dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
-            return;
-        }
-        relaunch = spt_updater_release(session) ? SPTRelaunchReleased : SPTRelaunchNone;
-    });
+static NSApplicationTerminateReply perform(uint8_t action) {
+    switch (action) {
+    case SPTProceed:
+        return NSTerminateNow;
+    case SPTSaveSettings:
+        // The relaunch-failed mode's Settings can't be saved.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            perform(spt_fixture_settings_saved(![mode isEqualToString:@"relaunch-failed"], approval));
+        });
+        return NSTerminateCancel;
+    case SPTRelease:
+        dispatch_async(dispatch_get_main_queue(), ^{
+            perform(spt_fixture_relaunch_released(spt_updater_release(session), approval));
+        });
+        return NSTerminateCancel;
+    case SPTQuit:
+        record(@"relaunch-quit");
+        dispatch_async(dispatch_get_main_queue(), ^{ confirmed = YES; [NSApp terminate:nil]; });
+        return NSTerminateCancel;
+    case SPTFailUnsaved:
+        // The update service fails the relaunch, then the person quits SpaceTerm.
+        record(@"save-failed");
+        approval = 0;
+        dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+        return NSTerminateCancel;
+    case SPTDismiss:
+        record(@"dismissed");
+        return NSTerminateCancel;
+    case SPTExit:
+        // The person confirms the quit warning.
+        record(@"exit");
+        return NSTerminateNow;
+    default:
+        return NSTerminateCancel;
+    }
 }
 @interface SPTFixtureDelegate : NSObject <NSApplicationDelegate>
 @end
@@ -45,30 +68,8 @@ static void saveSettingsForRelaunch(void) {
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
     if (confirmed) return NSTerminateNow;
     NSAppleEventDescriptor *event = NSAppleEventManager.sharedAppleEventManager.currentAppleEvent;
-    uint8_t request = spt_quit_request(event.eventClass, event.eventID,
-        [event paramDescriptorForKeyword:'why?'] != nil, event != nil);
-    switch (spt_quit_step(request, relaunch)) {
-    case SPTStepProceed:
-        return NSTerminateNow;
-    case SPTStepBeginRelaunch:
-        relaunch = SPTRelaunchQuitting;
-        saveSettingsForRelaunch();
-        return NSTerminateCancel;
-    case SPTStepQuitForRelaunch:
-        record(@"relaunch-quit");
-        relaunch = SPTRelaunchQuitting;
-        confirmQuit();
-        return NSTerminateCancel;
-    case SPTStepDismiss:
-        record(@"dismissed");
-        return NSTerminateCancel;
-    case SPTStepExit:
-        // The person confirms the quit warning.
-        record(@"exit");
-        return NSTerminateNow;
-    default:
-        return NSTerminateCancel;
-    }
+    return perform(spt_fixture_quit_request(event.eventClass, event.eventID,
+        [event paramDescriptorForKeyword:'why?'] != nil, event != nil, approval));
 }
 @end
 
@@ -83,7 +84,7 @@ static void event(void *context, uint32_t kind, const char *version, uint64_t fi
         if ([mode isEqualToString:@"install"] || [mode isEqualToString:@"relaunch-failed"]) {
             // The person chose Relaunch: SpaceTerm installs, then asks to quit.
             record(@"confirmed");
-            relaunch = SPTRelaunchApproved;
+            approval = 1;
             dispatch_async(dispatch_get_main_queue(), ^{
                 spt_updater_install(session);
                 [NSApp terminate:nil];

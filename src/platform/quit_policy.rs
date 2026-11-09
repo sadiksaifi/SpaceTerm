@@ -1,10 +1,9 @@
-//! SpaceTerm's answer to each native quit request (ADR 0049), apart from the windows, warnings
-//! and Settings it then acts on. The macOS updater test compiles this file by itself and answers
-//! the quit requests Sparkle sends with these same functions, so it uses nothing outside this
-//! file.
+//! SpaceTerm's answer to each native quit request (ADR 0049) and the sequence of an approved
+//! update relaunch's quit, apart from the windows, warnings, Settings and updater it acts on. The
+//! macOS updater test compiles this file into its fixture and answers the quit requests Sparkle
+//! sends with it, so it uses nothing outside this file.
 
 /// Why the host asked the application to quit.
-#[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ApplicationQuitRequest {
     /// The person asked to quit, such as from the Dock. Close windows when the status item
@@ -16,9 +15,9 @@ pub(crate) enum ApplicationQuitRequest {
             reason = "Linux commands invoke dismissal directly; only macOS reports Dock requests"
         )
     )]
-    Dismissal = 0,
+    Dismissal,
     /// The client chose to exit, such as from its status item or an installed update.
-    Exit = 1,
+    Exit,
     /// The operating system is logging out, restarting, or shutting down. Never prompt.
     #[cfg_attr(
         not(target_os = "macos"),
@@ -27,39 +26,138 @@ pub(crate) enum ApplicationQuitRequest {
             reason = "Linux session shutdown terminates the process outside application Quit"
         )
     )]
-    SessionEnd = 2,
+    SessionEnd,
 }
 
-/// Where the update relaunch the person approved stands when a quit request arrives.
+/// What SpaceTerm does next for a quit request, or for a step of the relaunch quit it began.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RelaunchPhase {
-    /// No relaunch is approved.
-    None = 0,
-    /// The person approved a relaunch that has not begun to quit.
-    Approved = 1,
-    /// Settings are saving for the relaunch, or SpaceTerm already quits for it.
-    Quitting = 2,
-    /// Settings are saved and the updater holds the relaunch. Its quit request quits SpaceTerm.
-    Released = 3,
-}
-
-/// What SpaceTerm does with one quit request.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QuitStep {
+pub(crate) enum QuitAction {
     /// Terminate inside the request, with no warning: the session is ending.
     Proceed = 0,
-    /// Save Settings, then hand the relaunch to the updater. Nothing closes and nothing asks.
-    BeginRelaunch = 1,
-    /// Nothing more: the relaunch already quits SpaceTerm.
-    Wait = 2,
-    /// Quit for the relaunch after the request returns, with no warning.
-    QuitForRelaunch = 3,
+    /// Nothing more for now.
+    Nothing = 1,
+    /// Save Settings for the relaunch, then report with [`RelaunchQuit::saved`].
+    SaveSettings = 2,
+    /// Hand the relaunch to the updater, then report with [`RelaunchQuit::released`].
+    Release = 3,
+    /// Quit once for the relaunch, after the current request returns, with no warning.
+    Quit = 4,
+    /// Settings couldn't be saved: fail the relaunch now and say why.
+    FailUnsaved = 5,
     /// Close the windows, or warn about quitting when nothing would stay reachable.
-    Dismiss = 4,
+    Dismiss = 6,
     /// Warn about quitting.
-    Exit = 5,
+    Exit = 7,
+}
+
+/// The quit of an approved update relaunch, from the first quit request through the Settings
+/// save and the updater to the one quit. `A` names one approval; each call passes the approval
+/// the update service still holds. While one holds, no quit request is a dismissal or an exit,
+/// and a relaunch that failed or was cancelled leaves quitting to ADR 0049 again.
+#[derive(Debug)]
+pub(crate) struct RelaunchQuit<A> {
+    /// The approval this quit began for, and how far it got.
+    begun: Option<(A, RelaunchStage)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelaunchStage {
+    /// Settings are saving, then the updater receives the relaunch.
+    Saving,
+    /// The updater holds the relaunch. Its quit request quits SpaceTerm.
+    Released,
+    /// SpaceTerm quits for the relaunch.
+    Quitting,
+}
+
+impl<A> Default for RelaunchQuit<A> {
+    fn default() -> Self {
+        Self { begun: None }
+    }
+}
+
+impl<A: Copy + Eq> RelaunchQuit<A> {
+    /// Whether a relaunch quit is under way, so no other quit flow may act.
+    pub(crate) fn active(&self) -> bool {
+        self.begun.is_some()
+    }
+
+    pub(crate) fn request(
+        &mut self,
+        request: ApplicationQuitRequest,
+        approval: Option<A>,
+    ) -> QuitAction {
+        self.settle(approval);
+        if request == ApplicationQuitRequest::SessionEnd {
+            return QuitAction::Proceed;
+        }
+        let Some(approval) = approval else {
+            return match request {
+                ApplicationQuitRequest::Dismissal => QuitAction::Dismiss,
+                _ => QuitAction::Exit,
+            };
+        };
+        match &mut self.begun {
+            Some((begun, stage)) if *begun == approval => match stage {
+                RelaunchStage::Released => {
+                    *stage = RelaunchStage::Quitting;
+                    QuitAction::Quit
+                }
+                RelaunchStage::Saving | RelaunchStage::Quitting => QuitAction::Nothing,
+            },
+            _ => {
+                self.begun = Some((approval, RelaunchStage::Saving));
+                QuitAction::SaveSettings
+            }
+        }
+    }
+
+    /// Settings finished saving for the relaunch, or couldn't be saved.
+    pub(crate) fn saved(&mut self, saved: bool, approval: Option<A>) -> QuitAction {
+        self.settle(approval);
+        if !self.saving(approval) {
+            return QuitAction::Nothing;
+        }
+        if saved {
+            QuitAction::Release
+        } else {
+            self.begun = None;
+            QuitAction::FailUnsaved
+        }
+    }
+
+    /// The updater received the relaunch. `updater_quits` when it asks to quit by itself once it
+    /// holds the relaunch; otherwise SpaceTerm quits now.
+    pub(crate) fn released(&mut self, updater_quits: bool, approval: Option<A>) -> QuitAction {
+        self.settle(approval);
+        if !self.saving(approval) {
+            return QuitAction::Nothing;
+        }
+        let (stage, action) = if updater_quits {
+            (RelaunchStage::Released, QuitAction::Nothing)
+        } else {
+            (RelaunchStage::Quitting, QuitAction::Quit)
+        };
+        if let Some((_, current)) = &mut self.begun {
+            *current = stage;
+        }
+        action
+    }
+
+    fn saving(&self, approval: Option<A>) -> bool {
+        matches!(
+            (self.begun, approval),
+            (Some((begun, RelaunchStage::Saving)), Some(approval)) if begun == approval
+        )
+    }
+
+    /// A relaunch the update service no longer holds leaves quitting to ADR 0049.
+    fn settle(&mut self, approval: Option<A>) {
+        if approval.is_none() {
+            self.begun = None;
+        }
+    }
 }
 
 /// `kCoreEventClass`, `kAEQuitApplication` from the Apple Event Manager.
@@ -86,45 +184,42 @@ pub(crate) fn quit_request(event: Option<(u32, u32, bool)>) -> ApplicationQuitRe
     }
 }
 
-/// While an approved update relaunch holds, no quit request is a dismissal or an exit: the
-/// relaunch quits once, after Settings are saved and the updater holds the relaunch. A relaunch
-/// that failed or was cancelled leaves quitting to ADR 0049 again.
-pub(crate) fn quit_step(request: ApplicationQuitRequest, relaunch: RelaunchPhase) -> QuitStep {
-    match (request, relaunch) {
-        (ApplicationQuitRequest::SessionEnd, _) => QuitStep::Proceed,
-        (_, RelaunchPhase::Approved) => QuitStep::BeginRelaunch,
-        (_, RelaunchPhase::Quitting) => QuitStep::Wait,
-        (_, RelaunchPhase::Released) => QuitStep::QuitForRelaunch,
-        (ApplicationQuitRequest::Dismissal, RelaunchPhase::None) => QuitStep::Dismiss,
-        (ApplicationQuitRequest::Exit, RelaunchPhase::None) => QuitStep::Exit,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One approved relaunch quits once: it saves Settings, hands the relaunch to the updater,
+    /// and quits on the updater's request. A failed save fails it, and quitting follows ADR 0049
+    /// again once the update service no longer holds the relaunch.
+    #[test]
+    fn a_relaunch_saves_releases_and_quits_once() {
+        use ApplicationQuitRequest::{Dismissal, Exit, SessionEnd};
+        let mut quit = RelaunchQuit::default();
+        assert_eq!(quit.request(Dismissal, None), QuitAction::Dismiss);
+        assert_eq!(quit.request(Exit, Some(1)), QuitAction::SaveSettings);
+        assert_eq!(quit.request(Dismissal, Some(1)), QuitAction::Nothing);
+        assert_eq!(quit.saved(true, Some(1)), QuitAction::Release);
+        assert_eq!(quit.released(true, Some(1)), QuitAction::Nothing);
+        assert_eq!(quit.request(Dismissal, Some(1)), QuitAction::Quit);
+        assert_eq!(
+            quit.request(Exit, Some(1)),
+            QuitAction::Nothing,
+            "it quits once"
+        );
+        assert_eq!(quit.request(SessionEnd, Some(1)), QuitAction::Proceed);
+
+        // An updater that leaves the quit to SpaceTerm quits as soon as it holds the relaunch.
+        assert_eq!(quit.request(Exit, Some(2)), QuitAction::SaveSettings);
+        assert_eq!(quit.saved(true, Some(2)), QuitAction::Release);
+        assert_eq!(quit.released(false, Some(2)), QuitAction::Quit);
+
+        assert_eq!(quit.request(Exit, Some(3)), QuitAction::SaveSettings);
+        assert_eq!(quit.saved(false, Some(3)), QuitAction::FailUnsaved);
+        assert!(!quit.active());
+        assert_eq!(quit.request(Exit, None), QuitAction::Exit);
+        // A relaunch that failed while Settings saved goes no further.
+        assert_eq!(quit.request(Exit, Some(4)), QuitAction::SaveSettings);
+        assert_eq!(quit.saved(true, None), QuitAction::Nothing);
+        assert!(!quit.active());
     }
-}
-
-/// [`quit_request`] for the macOS updater test, which has no Rust of its own. `in_event` is
-/// false outside any Apple Event.
-#[unsafe(no_mangle)]
-pub extern "C" fn spt_quit_request(
-    event_class: u32,
-    event_id: u32,
-    has_reason: bool,
-    in_event: bool,
-) -> u8 {
-    quit_request(in_event.then_some((event_class, event_id, has_reason))) as u8
-}
-
-/// [`quit_step`] for the macOS updater test. An unknown value reads as no relaunch and an exit.
-#[unsafe(no_mangle)]
-pub extern "C" fn spt_quit_step(request: u8, relaunch: u8) -> u8 {
-    let request = match request {
-        0 => ApplicationQuitRequest::Dismissal,
-        2 => ApplicationQuitRequest::SessionEnd,
-        _ => ApplicationQuitRequest::Exit,
-    };
-    let relaunch = match relaunch {
-        1 => RelaunchPhase::Approved,
-        2 => RelaunchPhase::Quitting,
-        3 => RelaunchPhase::Released,
-        _ => RelaunchPhase::None,
-    };
-    quit_step(request, relaunch) as u8
 }
