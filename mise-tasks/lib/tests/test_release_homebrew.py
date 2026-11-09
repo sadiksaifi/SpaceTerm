@@ -24,9 +24,16 @@ class CaskTests(unittest.TestCase):
         ):
             self.assertNotIn(removed, text)
 
-    def test_cask_quits_the_app_on_uninstall_and_zap_stops_spaceterm_core(self):
+    def test_uninstall_ends_the_app_and_zap_stops_spaceterm_core(self):
         text = release_homebrew.cask("0.10.0", "a" * 64)
-        self.assertIn('uninstall quit: "com.peblon.spaceterm"\n', text)
+        # A Quit Apple Event without a reason is a Dock Quit, which only closes the windows while
+        # the status item stays (ADR 0049). SIGTERM then ends the client before Homebrew removes
+        # the app; Homebrew sends it after its quit attempts, to the app's processes only.
+        self.assertIn(
+            '  uninstall quit:   "com.peblon.spaceterm",\n'
+            '            signal: ["TERM", "com.peblon.spaceterm"]\n',
+            text,
+        )
         zap = text[text.index("  zap ") :]
         # Homebrew's launchctl directive unloads each agent and removes its LaunchAgents plist.
         for label in ("com.peblon.spaceterm.core", "com.peblon.spaceterm.core.recovery"):

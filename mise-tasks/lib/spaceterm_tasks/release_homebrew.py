@@ -26,7 +26,8 @@ def cask(version, digest):
 
   app "SpaceTerm.app"
 
-  uninstall quit: "com.peblon.spaceterm"
+  uninstall quit:   "com.peblon.spaceterm",
+            signal: ["TERM", "com.peblon.spaceterm"]
 
   zap launchctl: [
         "com.peblon.spaceterm.core",
