@@ -797,7 +797,9 @@ impl ApplicationQuitCoordinator {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
             return;
         };
-        let prompt = quit_prompt(self.status_area, snapshot.sessions.as_ref());
+        // Without a status area, quitting leaves nothing the warning could name.
+        let status_area = crate::status_menu::available(cx).then_some(self.status_area);
+        let prompt = quit_prompt(status_area, snapshot.sessions.as_ref());
         let Some((answer, place)) = present_quit_prompt(adapter.as_ref(), &prompt, cx) else {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
             return;
@@ -1123,8 +1125,10 @@ fn cancel_quit_prompt(place: QuitPromptPlace, cx: &mut App) {
     close_quit_prompt_host(place, cx);
 }
 
+/// `status_area` names where the client shows its status item, or None when the session shows
+/// none.
 fn quit_prompt(
-    status_area: StatusAreaName,
+    status_area: Option<StatusAreaName>,
     sessions: Option<&spaceterm_core::hierarchy::CloseInventory>,
 ) -> QuitPrompt {
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
@@ -1135,16 +1139,21 @@ fn quit_prompt(
             .filter(|pane| pane.session.is_some())
             .count()
     });
-    let place = status_area.phrase();
-    let detail = match (sessions, count) {
-        (None, _) => format!(
+    let detail = match (sessions, count, status_area.map(StatusAreaName::phrase)) {
+        (None, _, Some(place)) => format!(
             "{name} leaves the {place}. Your Terminal Sessions keep running, so everything is where you left it."
         ),
-        (Some(_), 0) => format!(
+        (None, _, None) => {
+            "Your Terminal Sessions keep running, so everything is where you left it.".to_owned()
+        }
+        (Some(_), 0, Some(place)) => format!(
             "{name} leaves the {place} and stops its development SpaceTerm Core. No Terminal Sessions are running."
         ),
-        (Some(_), 1) => "This development build runs its own SpaceTerm Core. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
-        (Some(_), count) => format!(
+        (Some(_), 0, None) => {
+            "Quitting stops this development build's SpaceTerm Core. No Terminal Sessions are running.".to_owned()
+        }
+        (Some(_), 1, _) => "This development build runs its own SpaceTerm Core. Quitting ends its 1 Terminal Session and stops its running commands.".to_owned(),
+        (Some(_), count, _) => format!(
             "This development build runs its own SpaceTerm Core. Quitting ends its {count} Terminal Sessions and stops their running commands."
         ),
     };
@@ -2024,7 +2033,7 @@ mod tests {
             (StatusAreaName::MenuBar, "menu bar"),
             (StatusAreaName::StatusArea, "status area"),
         ] {
-            let prompt = quit_prompt(status_area, None);
+            let prompt = quit_prompt(Some(status_area), None);
             assert_eq!(prompt.title, format!("Quit {name}?"));
             assert_eq!(
                 prompt.detail,
@@ -2037,9 +2046,26 @@ mod tests {
     }
 
     #[test]
+    fn quit_warning_without_a_status_area_names_no_place_to_leave() {
+        let prompt = quit_prompt(None, None);
+        assert_eq!(
+            prompt.detail,
+            "Your Terminal Sessions keep running, so everything is where you left it."
+        );
+        let idle = quit_prompt(None, Some(&quit_sessions(1, &[None])));
+        assert_eq!(
+            idle.detail,
+            "Quitting stops this development build's SpaceTerm Core. No Terminal Sessions are running."
+        );
+    }
+
+    #[test]
     fn development_quit_warning_counts_the_terminal_sessions_it_ends() {
         let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        let idle = quit_prompt(StatusAreaName::MenuBar, Some(&quit_sessions(1, &[None])));
+        let idle = quit_prompt(
+            Some(StatusAreaName::MenuBar),
+            Some(&quit_sessions(1, &[None])),
+        );
         assert_eq!(
             idle.detail,
             format!(
@@ -2051,15 +2077,20 @@ mod tests {
             QuitButtons::Quit,
             "quitting ends no Terminal Session"
         );
-        let status_area_idle =
-            quit_prompt(StatusAreaName::StatusArea, Some(&quit_sessions(1, &[None])));
+        let status_area_idle = quit_prompt(
+            Some(StatusAreaName::StatusArea),
+            Some(&quit_sessions(1, &[None])),
+        );
         assert_eq!(
             status_area_idle.detail,
             format!(
                 "{name} leaves the status area and stops its development SpaceTerm Core. No Terminal Sessions are running."
             )
         );
-        let one = quit_prompt(StatusAreaName::MenuBar, Some(&quit_sessions(1, &[Some(1)])));
+        let one = quit_prompt(
+            Some(StatusAreaName::MenuBar),
+            Some(&quit_sessions(1, &[Some(1)])),
+        );
         assert_eq!(
             one.detail,
             "This development build runs its own SpaceTerm Core. Quitting ends its 1 Terminal Session and stops its running commands."
