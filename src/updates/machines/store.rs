@@ -184,8 +184,8 @@ impl MachineUpdates {
                 cx.observe(&updates, |this, _, cx| this.install_bundled(cx))
                     .detach();
             });
-            // A Stepping Stone must find its next desktop release before any automatic Core
-            // push. A successful current check releases the waiting pushes.
+            // A Stepping Stone finds its next desktop release, which holds back automatic Core
+            // pushes, as early as possible.
             updates.update(cx, |updates, cx| updates.check(false, cx));
         }
     }
@@ -420,18 +420,12 @@ impl MachineUpdates {
     /// Installs the bundled Core on each Machine offered one that answers and runs no update
     /// operation, once per Machine and offered version.
     fn install_bundled(&mut self, cx: &App) {
-        // A desktop on its way through an Update Floor must reach its newest known release
-        // before offering that release's Core to every Machine.
+        // A desktop that knows a newer release of itself waits, so a Stepping Stone does not
+        // push its intermediate Core to every Machine. Every other desktop pushes, also while its
+        // check runs and after it failed.
         if cx
             .try_global::<crate::updates::UpdateService>()
-            .is_some_and(|service| {
-                let updates = service.0.read(cx);
-                !matches!(
-                    updates.state(),
-                    crate::updates::UpdateState::UpToDate
-                        | crate::updates::UpdateState::Unavailable
-                ) || updates.pending_version().is_some()
-            })
+            .is_some_and(|service| service.0.read(cx).pending_version().is_some())
         {
             return;
         }
@@ -879,21 +873,19 @@ mod tests {
         );
     }
     #[gpui::test]
-    fn a_stepping_stone_checks_the_desktop_before_pushing_its_core(cx: &mut gpui::TestAppContext) {
+    fn a_desktop_with_a_newer_release_waiting_does_not_push_its_core(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
         cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        updater.emit(crate::updates::UpdateEvent::Available("0.10.0".into()));
+        cx.run_until_parked();
         adapter.emit(MachineUpdatesEvent::Machines(vec![offered(
             update("0.8.0", None),
             "0.9.0",
         )]));
-        cx.run_until_parked();
-        assert!(
-            adapter.performed().is_empty(),
-            "wait for the desktop's first check"
-        );
-        updater.emit(crate::updates::UpdateEvent::Available("0.10.0".into()));
         cx.run_until_parked();
         assert!(
             adapter.performed().is_empty(),
@@ -902,20 +894,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_current_desktop_releases_waiting_core_pushes_after_its_check(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_desktop_whose_check_fails_still_pushes_its_core(cx: &mut gpui::TestAppContext) {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
         cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
         cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        updater.emit(crate::updates::UpdateEvent::Failed(
+            crate::updates::UpdateError::Check,
+        ));
+        cx.run_until_parked();
         adapter.emit(MachineUpdatesEvent::Machines(vec![offered(
             update("0.8.0", None),
             "0.9.0",
         )]));
-        cx.run_until_parked();
-        assert!(adapter.performed().is_empty());
-        updater.emit(crate::updates::UpdateEvent::UpToDate);
         cx.run_until_parked();
         assert_eq!(adapter.performed(), [([2; 32], MachineAction::Install)]);
     }
