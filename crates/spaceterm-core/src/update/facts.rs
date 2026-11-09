@@ -15,7 +15,7 @@ pub const MAX_DEVICE_NAME_BYTES: usize = 192;
 /// The most [`PendingVersion::stranded`] entries: one per Paired Device a Core keeps.
 pub const MAX_STRANDED: usize = 256;
 /// Seconds from [`PendingVersion::installed_at`] until a waiting Pending Version is overdue.
-pub const OVERDUE_AFTER: u64 = 86_400;
+pub const OVERDUE_AFTER: u64 = 2 * 86_400;
 
 /// What one Machine's SpaceTerm Core reports about its updates.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,9 +70,11 @@ impl UpdateFacts {
         {
             *reason = CheckFailure::Verification;
         }
-        if self.last_failure.as_ref().is_some_and(|failure| {
-            failure.kind == FailureKind::Start(StartFailure::Interrupted)
-        }) {
+        if self
+            .last_failure
+            .as_ref()
+            .is_some_and(|failure| failure.kind == FailureKind::Start(StartFailure::Interrupted))
+        {
             self.last_failure = None;
         }
         self
@@ -433,7 +435,7 @@ mod tests {
             },
             breaking,
             installed_at: 1_793_750_400,
-            overdue_since: Some(1_793_750_400 + 86_400),
+            overdue_since: Some(1_793_750_400 + OVERDUE_AFTER),
             stranded: if breaking {
                 vec![StrandedDevice {
                     pairing: [0x9c; 32],
@@ -607,7 +609,7 @@ mod tests {
             },
             UpdateFacts {
                 pending: Some(PendingVersion {
-                    overdue_since: Some(1_793_750_400 + 86_399),
+                    overdue_since: Some(1_793_750_400 + OVERDUE_AFTER - 1),
                     ..pending(false)
                 }),
                 ..facts()

@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn after_one_day_the_notice_escalates_with_the_wait_and_the_sessions() {
+    fn once_overdue_the_notice_escalates_with_the_wait_and_the_sessions() {
         assert_eq!(
             line(
                 &facts(4, true),
@@ -148,7 +148,7 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "notice: SpaceTerm Core 0.7.2 has waited 1 day for a restart on This Mac. \
+                "notice: SpaceTerm Core 0.7.2 has waited 2 days for a restart on This Mac. \
                  Restarting ends 1 Terminal Session: spaceterm --machine penguin restart"
             )
         );
@@ -161,7 +161,7 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "notice: SpaceTerm Core 0.7.2 has waited 1 day for a restart on penguin. \
+                "notice: SpaceTerm Core 0.7.2 has waited 2 days for a restart on penguin. \
                  Restart to use it: spaceterm --machine penguin restart"
             ),
             "the CLI's clock escalates even before the Core's facts do"
