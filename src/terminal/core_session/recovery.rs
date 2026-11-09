@@ -142,6 +142,7 @@ impl Recovery {
 
     /// A same-boot dormant observation can overtake the original request on its old transport.
     /// Only a live grant or proof that the original server run ended unlocks another start.
+    /// Any validated observation ends a restart wait, also for a Pane that stays dormant.
     pub fn observed(&mut self, reply: &Reply) -> Result<(), CoreError> {
         let boot = match reply {
             Reply::Attached { lease } => {
@@ -160,6 +161,7 @@ impl Recovery {
                 return Err(start.cause.unwrap_or(CoreError::Protocol));
             }
         }
+        self.restart_since = None;
         Ok(())
     }
 }
@@ -178,6 +180,32 @@ mod tests {
             assert!(recovery.restart_wait(now + Duration::from_secs(seconds)));
         }
         assert!(!recovery.restart_wait(now + Duration::from_secs(180)));
+    }
+
+    #[test]
+    fn a_dormant_reconnect_ends_the_restart_wait() {
+        let mut recovery = Recovery::default();
+        let now = Instant::now();
+        assert!(recovery.restart_wait(now));
+        let restored = Reply::Restored {
+            fresh: false,
+            core: [7; 32],
+            pane: [2; 32],
+            workspace: [3; 32],
+            tab: [4; 32],
+            recovery: None,
+            directory_unavailable: false,
+            session_ended: None,
+        };
+        recovery.observed(&restored).unwrap();
+        // The connection drops again after the first wait's deadline.
+        let later = now + Duration::from_secs(200);
+        assert!(!recovery.restart_expired(later));
+        assert!(recovery.failed(CoreError::NotRunning, later).1);
+        assert!(
+            recovery.restart_wait(later),
+            "a new restart gets its own wait"
+        );
     }
 
     #[test]
