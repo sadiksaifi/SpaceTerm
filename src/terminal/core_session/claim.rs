@@ -209,6 +209,11 @@ impl ClaimWorker<'_> {
             takeover,
             paste_unconfirmed,
         } = self;
+        // A restart wait that ran out while no worker ran, as with its window closed, fails its
+        // retained intent before any request reaches the Core, on every route.
+        if state.restart_expired() {
+            return Err(CoreError::Protocol);
+        }
         let mut grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
         let grant_update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut grant_appearance = Some(grant_update.generation);
@@ -532,6 +537,36 @@ mod tests {
             },
             next_sequence: 1,
         })));
+    }
+
+    #[test]
+    fn a_start_queued_past_its_restart_deadline_never_reaches_the_core() {
+        let state = CorePaneState::new();
+        assert!(state.connection_failed(CoreError::ServiceBusy, false));
+        state.start_restored();
+        assert!(state.start_waiting());
+        // The restart wait ran out while the Pane had no worker, as with its window closed.
+        {
+            let mut recovery = state
+                .connection_recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            recovery.retry();
+            recovery.restart_wait(
+                std::time::Instant::now()
+                    .checked_sub(super::super::restart::RECONNECT_LIMIT)
+                    .unwrap(),
+            );
+        }
+        let mut requests = Vec::new();
+        let result = run_claim(&state, |request| {
+            requests.push(request.clone());
+            Err(CoreError::NotRunning)
+        });
+        assert_eq!(result.err(), Some(CoreError::Protocol));
+        assert!(requests.is_empty(), "the old click reached the Core");
+        assert!(!state.connection_failed(CoreError::Protocol, false));
+        assert!(!state.start_waiting());
     }
 
     #[test]
