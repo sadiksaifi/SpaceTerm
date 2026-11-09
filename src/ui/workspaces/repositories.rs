@@ -128,18 +128,21 @@ impl CoreRepositories {
     /// contains the row's directory then locates the repository, when the server reads it. The
     /// saved Main Worktree is only where to look: what the server reads there decides the listing,
     /// and a row the server reads outside any repository lists nothing.
+    ///
+    /// The server publishes an unpinned Root Pane's new directory before it reads Git there, and
+    /// keeps the Root Tab's saved membership until it does. Until then the row lists the
+    /// repository the Root Tab is still in, so a `cd` into another repository switches the row
+    /// once, when the read finishes.
     pub(crate) fn workspace_worktrees(&self, workspace: &Workspace) -> Option<&WorktreeInventory> {
         let directory = workspace_directory(workspace)?;
         if let Some(inventory) = self.worktrees(directory) {
             return Some(inventory);
         }
-        if self
-            .facts(directory)
-            .is_some_and(|facts| facts.failure.is_none())
-        {
+        let facts = self.facts(directory);
+        if facts.is_some_and(|facts| facts.failure.is_none()) {
             return None;
         }
-        workspace
+        let containing = workspace
             .tabs
             .iter()
             .filter_map(|tab| {
@@ -150,7 +153,21 @@ impl CoreRepositories {
             })
             .filter(|(worktree, _)| directory.starts_with(worktree))
             .max_by_key(|(worktree, _)| worktree.components().count())
-            .and_then(|(_, repository)| self.worktrees(repository))
+            .map(|(_, repository)| repository);
+        let followed = || {
+            if workspace.pinned_directory.is_some() || facts.is_some() {
+                return None;
+            }
+            workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.id == workspace.root_tab)?
+                .worktree_repository
+                .as_deref()
+        };
+        containing
+            .or_else(followed)
+            .and_then(|repository| self.worktrees(repository))
     }
 
     /// The Pull Request lookups the presented repositories need, one per branch and upstream.
