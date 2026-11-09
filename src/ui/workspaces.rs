@@ -206,6 +206,8 @@ mod core_workspaces {
         edits: Rc<std::cell::RefCell<Rc<dyn WorkspaceEdits>>>,
         machine: Rc<std::cell::RefCell<Option<MachineConnection>>>,
         restart_since: Rc<std::cell::Cell<Option<std::time::Instant>>>,
+        /// The deadline of the last restart wait that wakes subscribers when it passes.
+        restart_wake: Rc<std::cell::Cell<Option<std::time::Instant>>>,
         /// Counts transport replacements, so a subscription knows to follow the new one.
         generation: Rc<std::cell::Cell<u64>>,
         /// The inventory a paired route last confirmed, presented while its transport has none.
@@ -371,6 +373,7 @@ mod core_workspaces {
                 edits: Rc::new(std::cell::RefCell::new(edits)),
                 machine: Rc::default(),
                 restart_since: Rc::default(),
+                restart_wake: Rc::default(),
                 generation: Rc::default(),
                 stand_in: Rc::default(),
                 standing_in: Rc::default(),
@@ -491,6 +494,33 @@ mod core_workspaces {
             }
         }
 
+        /// Follows the Core restart for the intents waiting on it. A wait that begins wakes every
+        /// subscriber at its deadline, so it expires without another publication.
+        fn follow_restart(&self) -> Option<CoreRestart> {
+            let restart = self.restart_progress();
+            let deadline = self
+                .pending
+                .borrow_mut()
+                .follow_restart(restart.is_some(), std::time::Instant::now());
+            if let Some(deadline) = deadline
+                && self.restart_wake.replace(Some(deadline)) != Some(deadline)
+            {
+                let subscribers = self.subscribers.borrow().clone();
+                // Without the thread, the wait still expires at the next reading.
+                let _ = std::thread::Builder::new()
+                    .name("spaceterm-restart-wait".into())
+                    .spawn(move || {
+                        std::thread::sleep(
+                            deadline.saturating_duration_since(std::time::Instant::now()),
+                        );
+                        for subscriber in subscribers {
+                            let _ = subscriber.try_send(());
+                        }
+                    });
+            }
+            restart
+        }
+
         fn restart_expired(&self) -> bool {
             self.restart_since
                 .get()
@@ -600,9 +630,7 @@ mod core_workspaces {
                 snapshot.inventory.clone_from(&self.stand_in.borrow());
             }
             self.standing_in.set(standing_in);
-            self.pending
-                .borrow_mut()
-                .wait_for_restart(self.restart_progress().is_some());
+            self.follow_restart();
             if self.restart_expired() {
                 self.pending.borrow_mut().disconnect();
             }
@@ -2405,18 +2433,17 @@ mod core_workspaces {
             &self,
             intent: WorkspaceCloseIntent,
         ) -> Result<bool, WorkspaceRefusalReason> {
-            let restarting = self.edits.restart_progress().is_some();
+            let restarting = self.edits.follow_restart().is_some();
             if (!self.edits.transport().availability().0 || self.edits.restart_expired())
                 && !restarting
             {
                 return Err(WorkspaceRefusalReason::Offline);
             }
-            self.edits.pending.borrow_mut().wait_for_restart(restarting);
             self.edits.pending.borrow_mut().defer_close(intent)
         }
 
         pub(crate) fn take_close_intent(&self) -> Option<WorkspaceCloseIntent> {
-            if self.edits.restart_progress().is_some() || !self.edits.transport().availability().0 {
+            if self.edits.follow_restart().is_some() || !self.edits.transport().availability().0 {
                 return None;
             }
             self.edits.pending.borrow_mut().take_close_intent()
@@ -4377,6 +4404,44 @@ mod restart_tests {
             assert!(binding.next_refusal().is_none());
         }
     }
+    #[test]
+    fn intents_waiting_for_a_restart_expire_at_their_own_deadline() {
+        use crate::terminal::core_session::restart::RECONNECT_LIMIT;
+        let began = Instant::now();
+        for (reconnected, dispatches) in [
+            (
+                began + RECONNECT_LIMIT - std::time::Duration::from_secs(1),
+                true,
+            ),
+            (began + RECONNECT_LIMIT, false),
+        ] {
+            let mut pending = super::pending::PendingEdits::default();
+            assert_eq!(
+                pending.follow_restart(true, began),
+                Some(began + RECONNECT_LIMIT)
+            );
+            let (reply, answer) = async_channel::bounded(1);
+            let mutation = Mutation::CreateTab {
+                workspace: [1; 32],
+                source: Some([3; 32]),
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
+            };
+            pending.push(mutation.clone(), Some(reply), None).unwrap();
+            // Fresh facts no longer report the restart once the Core reconnects.
+            assert_eq!(pending.follow_restart(false, reconnected), None);
+            if dispatches {
+                assert_eq!(pending.next_dispatch(), Some(mutation));
+                assert!(answer.try_recv().is_err());
+            } else {
+                assert_eq!(pending.next_dispatch(), None, "the wait ran out");
+                assert_eq!(
+                    answer.try_recv().unwrap().unwrap_err(),
+                    WorkspaceRefusalReason::Offline
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_close_fenced_before_the_restart_announcement_waits_for_fresh_confirmation() {
         use super::tests::{inventory, pane, tab};

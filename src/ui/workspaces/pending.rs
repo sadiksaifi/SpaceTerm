@@ -1,5 +1,6 @@
 //! The client's bounded connected intent, separate from the transport's durable Original Operation.
 use super::core_workspaces::{WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason};
+use crate::terminal::core_session::restart::RECONNECT_LIMIT;
 use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_core::hierarchy::{
     CloseTarget, Id, Inventory, Mutation, Outcome, Pane, PaneDestination, RetainedOutcome, Side,
@@ -7,6 +8,7 @@ use spaceterm_core::hierarchy::{
 };
 use spaceterm_core::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
+use std::time::Instant;
 
 const CAPACITY: usize = 32;
 type Reply = async_channel::Sender<Result<RetainedOutcome, WorkspaceRefusalReason>>;
@@ -66,11 +68,30 @@ pub(super) struct PendingEdits {
     observed: Option<u64>,
     pub disconnected: bool,
     waiting_for_restart: bool,
+    /// When the intents retained for a Core restart stop waiting, counted from the moment the
+    /// wait began. It stays while the restart facts last, so an expired wait does not start again.
+    restart_deadline: Option<Instant>,
 }
 
 impl PendingEdits {
-    pub fn wait_for_restart(&mut self, waiting: bool) {
-        self.waiting_for_restart = waiting;
+    /// Follows a Core restart at `now`. Intents wait for the reconnect until
+    /// [`RECONNECT_LIMIT`] after the wait began, and are refused once it passes, even when fresh
+    /// facts no longer report the restart. Returns the deadline while intents wait.
+    pub fn follow_restart(&mut self, restarting: bool, now: Instant) -> Option<Instant> {
+        let expired = self
+            .restart_deadline
+            .is_some_and(|deadline| now >= deadline);
+        if expired && self.waiting_for_restart {
+            self.waiting_for_restart = false;
+            self.disconnect();
+        }
+        if !restarting {
+            self.restart_deadline = None;
+            return None;
+        }
+        let deadline = *self.restart_deadline.get_or_insert(now + RECONNECT_LIMIT);
+        self.waiting_for_restart = !expired;
+        self.waiting_for_restart.then_some(deadline)
     }
 
     pub fn full(&self) -> bool {
