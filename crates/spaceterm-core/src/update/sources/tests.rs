@@ -1120,10 +1120,10 @@ fn startup_cleanup_leaves_a_live_install_and_removes_an_abandoned_one() {
     // A CLI of 0.11.2, which takes no owner lock, downloads now.
     let released = "cd".repeat(16);
     std::fs::write(staged(&released, "tar.gz"), b"partial").unwrap();
-    // A crash of such a CLI left files that changed nothing for two hours.
-    let stale = "ef".repeat(16);
+    // Another such download looks idle for two hours, as after a forward clock correction.
+    let quiet = "ef".repeat(16);
     for name in ["tar.gz", "sig"] {
-        let file = std::fs::File::create(staged(&stale, name)).unwrap();
+        let file = std::fs::File::create(staged(&quiet, name)).unwrap();
         file.set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60))
             .unwrap();
     }
@@ -1131,23 +1131,23 @@ fn startup_cleanup_leaves_a_live_install_and_removes_an_abandoned_one() {
     assert!(live.archive.exists() && live.signature.exists());
     for name in ["tar.gz", "sig", "lock"] {
         assert!(!staged(&abandoned, name).exists(), "{name}");
-        assert!(!staged(&stale, name).exists(), "{name}");
     }
-    assert!(
-        staged(&released, "tar.gz").exists(),
-        "an unowned download that is still changing stays"
-    );
-    assert!(
-        !staged(&released, "lock").exists(),
-        "cleanup claims no unowned download"
-    );
+    // Nothing proves that a writer without an owner lock ended, however old its files look.
+    assert!(staged(&released, "tar.gz").exists());
+    assert!(staged(&quiet, "tar.gz").exists() && staged(&quiet, "sig").exists());
+    for id in [&released, &quiet] {
+        assert!(
+            !staged(id, "lock").exists(),
+            "cleanup claims no unowned download"
+        );
+    }
     assert_eq!(
         data.staged(),
-        4,
-        "the live installs' files and this one's lock"
+        6,
+        "the live install's files and owner lock and the unowned downloads"
     );
     drop(live);
-    assert_eq!(data.staged(), 1);
+    assert_eq!(data.staged(), 3);
 }
 
 #[test]
