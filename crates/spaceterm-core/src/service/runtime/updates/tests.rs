@@ -369,7 +369,11 @@ fn a_starting_core_removes_what_a_crash_or_a_finished_update_left_behind() {
         std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
             .create(&staging)
             .unwrap();
-        std::fs::write(staging.join("ab.tar.gz"), b"partial").unwrap();
+        std::fs::write(
+            staging.join(format!("{}.tar.gz", "ab".repeat(16))),
+            b"partial",
+        )
+        .unwrap();
         let unfinished = machine
             .service
             .installations_directory()

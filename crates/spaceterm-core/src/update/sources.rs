@@ -706,27 +706,47 @@ impl<P: Fn(u64)> Write for Digesting<'_, P> {
     }
 }
 
-/// Removes every file in `<data>/staging`. A running server calls it once at start, before any
-/// download or push, so each file it finds is one a crash left.
+/// Removes the files in `<data>/staging` whose install ended without removing them, as a crash
+/// leaves them. A live install holds its owner lock, in this process or another, such as a
+/// stopped Core's CLI downloading from the feed, so its files stay.
 pub(crate) fn clear_staging(data: &Path) {
     let directory = data.join("staging");
-    if crate::storage::Directory::open(&directory, false).is_err() {
+    let Ok(staging) = crate::storage::Directory::open(&directory, false) else {
         return;
-    }
+    };
     let Ok(entries) = std::fs::read_dir(&directory) else {
         return;
     };
-    for entry in entries.flatten() {
-        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
-            let _ = std::fs::remove_file(entry.path());
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let id = name.split('.').next()?;
+            (id.len() == 32
+                && id
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+            .then(|| id.to_owned())
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    for id in ids {
+        if let Ok(Some(_owner)) = staging.try_lock(&format!("{id}.lock")) {
+            for name in Staging::names(&id) {
+                let _ = std::fs::remove_file(directory.join(name));
+            }
         }
     }
 }
 
-/// One install's private files in `<data>/staging`, removed when it ends.
+/// One install's private files in `<data>/staging`, removed when it ends. Its owner lock lasts
+/// as long as the install, so another process's cleanup leaves them.
 struct Staging {
     archive: PathBuf,
     signature: PathBuf,
+    owner: PathBuf,
+    _lock: crate::storage::Lock,
 }
 
 impl Staging {
@@ -737,12 +757,26 @@ impl Staging {
             .recursive(true)
             .create(&directory)
             .map_err(|_| CoreError::StorageUnavailable)?;
-        crate::storage::Directory::open(&directory, false)?;
+        let staging = crate::storage::Directory::open(&directory, false)?;
         let id = hex(&crate::protocol::random()?[..16]);
+        // The owner lock comes first, so no file of this install exists without it.
+        let [archive, signature, owner] = Self::names(&id);
+        let lock = staging.lock(&owner, true)?;
         Ok(Self {
-            archive: directory.join(format!("{id}.tar.gz")),
-            signature: directory.join(format!("{id}.sig")),
+            archive: directory.join(archive),
+            signature: directory.join(signature),
+            owner: directory.join(owner),
+            _lock: lock,
         })
+    }
+
+    /// The archive, signature and owner lock names of the install `id`.
+    fn names(id: &str) -> [String; 3] {
+        [
+            format!("{id}.tar.gz"),
+            format!("{id}.sig"),
+            format!("{id}.lock"),
+        ]
     }
 
     fn archive_file(&self) -> Result<std::fs::File, CoreError> {
@@ -769,6 +803,7 @@ impl Drop for Staging {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.archive);
         let _ = std::fs::remove_file(&self.signature);
+        let _ = std::fs::remove_file(&self.owner);
     }
 }
 

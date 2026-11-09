@@ -1105,6 +1105,30 @@ fn a_push_that_breaks_off_records_nothing_and_only_a_newer_push_replaces_one() {
 }
 
 #[test]
+fn startup_cleanup_leaves_a_live_install_and_removes_an_abandoned_one() {
+    let data = Data::new();
+    // A stopped Core's CLI downloads from the feed while a starting Core cleans up.
+    let live = Staging::create(&data.0).unwrap();
+    live.archive_file().unwrap().write_all(b"partial").unwrap();
+    live.write_signature(&[3; 64]).unwrap();
+    // A crash left another install's files without an owner.
+    let abandoned = "ab".repeat(16);
+    std::fs::write(data.0.join(format!("staging/{abandoned}.tar.gz")), b"x").unwrap();
+    std::fs::write(data.0.join(format!("staging/{abandoned}.sig")), b"x").unwrap();
+    clear_staging(&data.0);
+    assert!(live.archive.exists() && live.signature.exists());
+    assert!(!data.0.join(format!("staging/{abandoned}.tar.gz")).exists());
+    assert!(!data.0.join(format!("staging/{abandoned}.sig")).exists());
+    assert_eq!(
+        data.staged(),
+        3,
+        "the live install's archive, signature and lock"
+    );
+    drop(live);
+    assert_eq!(data.staged(), 0);
+}
+
+#[test]
 fn every_failure_has_its_contract_code() {
     for (error, code) in [
         (
