@@ -2406,8 +2406,14 @@ fn a_lane_of_service_1_0_reads_only_the_facts_and_codes_that_minor_has() {
         let clock = LaneReply::Error {
             code: "clock_behind".into(),
         };
-        assert_eq!(code(clock.clone().for_selected(older)), "candidate_unverified");
-        assert_eq!(code(clock.for_selected(crate::protocol::version::SERVICE)), "clock_behind");
+        assert_eq!(
+            code(clock.clone().for_selected(older)),
+            "candidate_unverified"
+        );
+        assert_eq!(
+            code(clock.for_selected(crate::protocol::version::SERVICE)),
+            "clock_behind"
+        );
         let failing = UpdateCheck::Failing {
             since: 1,
             last_success: None,

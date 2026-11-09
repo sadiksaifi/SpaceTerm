@@ -591,8 +591,7 @@ fn a_stopped_core_reports_the_facts_it_persisted() {
 }
 
 #[test]
-fn a_silent_restart_waits_for_a_quiet_grace_period_and_tries_each_pending_version_once_per_boot()
-{
+fn a_silent_restart_waits_for_a_quiet_grace_period_and_tries_each_pending_version_once_per_boot() {
     with_fixture_trust(|| {
         let machine = machine("1.0.0");
         let updates = Updates::open(machine.service.clone()).unwrap();
@@ -621,7 +620,10 @@ fn a_silent_restart_waits_for_a_quiet_grace_period_and_tries_each_pending_versio
         // The last session ended. The grace period runs from here.
         updates.observe(sessions(0), start);
         updates.observe(sessions(0), start + SILENT_GRACE / 2);
-        assert!(admitted.0.lock().unwrap().is_empty(), "the grace period runs");
+        assert!(
+            admitted.0.lock().unwrap().is_empty(),
+            "the grace period runs"
+        );
         // A session request starts it again, even when no session started.
         let requested = Activity {
             sessions: 0,
@@ -694,9 +696,8 @@ fn a_restart_the_fence_refuses_never_shows_in_the_facts() {
         .unwrap();
         let before = updates.facts();
         let waiting = updates.clone();
-        let waiter = std::thread::spawn(move || {
-            waiting.wait(before.revision, Duration::from_millis(500))
-        });
+        let waiter =
+            std::thread::spawn(move || waiting.wait(before.revision, Duration::from_millis(500)));
         let start = Instant::now();
         updates.observe(sessions(0), start);
         updates.observe(sessions(0), start + SILENT_GRACE);

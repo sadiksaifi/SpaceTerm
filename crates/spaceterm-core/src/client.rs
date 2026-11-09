@@ -188,8 +188,8 @@ impl LinkSink for Fanout {
                 }
             }
             LinkEvent::UpdateFacts(facts) => {
-                *shared.restart.lock().unwrap_or_else(|e| e.into_inner()) = restarting(&facts)
-                    .then(|| (std::time::Instant::now(), Arc::clone(&facts)));
+                *shared.restart.lock().unwrap_or_else(|e| e.into_inner()) =
+                    restarting(&facts).then(|| (std::time::Instant::now(), Arc::clone(&facts)));
                 for sink in subscribers {
                     sink.deliver(LinkEvent::UpdateFacts(Arc::clone(&facts)));
                 }

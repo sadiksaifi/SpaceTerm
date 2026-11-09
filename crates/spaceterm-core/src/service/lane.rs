@@ -158,7 +158,10 @@ impl LaneReply {
                 boot,
                 facts: facts(f),
             },
-            Self::Installed { installed, facts: f } => Self::Installed {
+            Self::Installed {
+                installed,
+                facts: f,
+            } => Self::Installed {
                 installed,
                 facts: facts(f),
             },

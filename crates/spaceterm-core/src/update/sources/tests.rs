@@ -1032,7 +1032,10 @@ fn a_push_that_breaks_off_records_nothing_and_only_a_newer_push_replaces_one() {
             "{waits}"
         );
     }
-    assert_eq!(SourceError::Install(InstallError::Busy).code(), "service_busy");
+    assert_eq!(
+        SourceError::Install(InstallError::Busy).code(),
+        "service_busy"
+    );
     // A newer one replaces it, because the Machine no longer needs the older one.
     let second = pushes
         .begin(&fake, 5, candidate("1.6.0"), 3, &digest(b"abc"), &[3; 64])
@@ -1081,7 +1084,10 @@ fn every_failure_has_its_contract_code() {
             SourceError::Check(CheckFailure::SystemTooOld),
             "system_too_old",
         ),
-        (SourceError::Check(CheckFailure::ClockBehind), "clock_behind"),
+        (
+            SourceError::Check(CheckFailure::ClockBehind),
+            "clock_behind",
+        ),
         (
             SourceError::Check(CheckFailure::SteppingStoneSkipped),
             "version_skipped",

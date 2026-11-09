@@ -845,8 +845,12 @@ impl Updates {
         // Obsolete installations go first, so the space check counts what they free. A waiting
         // Pending Version stays until this one has staged.
         let waiting = replaced.as_ref().map(|pending| pending.digest.as_str());
-        prune(service, &installations, &[Some(state.installation.as_str()), waiting])
-            .map_err(InstallError::Core)?;
+        prune(
+            service,
+            &installations,
+            &[Some(state.installation.as_str()), waiting],
+        )
+        .map_err(InstallError::Core)?;
         if storage_full(
             &installations,
             size.saturating_mul(2).saturating_add(INSTALL_MARGIN),
@@ -897,7 +901,10 @@ impl Updates {
         prune(
             service,
             &installations,
-            &[Some(state.installation.as_str()), Some(stored.digest.as_str())],
+            &[
+                Some(state.installation.as_str()),
+                Some(stored.digest.as_str()),
+            ],
         )
         .map_err(InstallError::Core)?;
         Ok(stored)
@@ -1236,7 +1243,10 @@ fn prune_unfinished(parent: &Path) -> Result<(), CoreError> {
 /// The name of an unpacking that never published: `.prepare-` and 32 hex digits.
 fn unfinished(text: &str) -> bool {
     text.strip_prefix(".prepare-").is_some_and(|rest| {
-        rest.len() == 32 && rest.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        rest.len() == 32
+            && rest
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
     })
 }
 

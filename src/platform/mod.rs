@@ -28,8 +28,6 @@ pub(crate) mod application_menu_model;
 #[cfg(feature = "desktop")]
 pub(crate) mod application_quit;
 #[cfg(feature = "desktop")]
-pub(crate) mod quit_policy;
-#[cfg(feature = "desktop")]
 pub(crate) mod capture_access;
 #[cfg(feature = "desktop")]
 pub(crate) mod desktop_events;
@@ -77,6 +75,8 @@ pub(crate) mod notification_access;
     )
 )]
 pub(crate) mod permission_access;
+#[cfg(feature = "desktop")]
+pub(crate) mod quit_policy;
 /// A Linux server's Git facts watch, through `notify`.
 #[cfg(target_os = "linux")]
 pub(crate) mod repository_watch;

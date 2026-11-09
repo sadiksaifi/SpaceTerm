@@ -201,7 +201,10 @@ fn observer() -> Result<&'static str, CoreError> {
         return Ok(observer);
     }
     let random = crate::protocol::random()?;
-    let text: String = random[..16].iter().map(|byte| format!("{byte:02x}")).collect();
+    let text: String = random[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     Ok(OBSERVER.get_or_init(|| text))
 }
 
@@ -900,7 +903,6 @@ impl Service {
         data.write_json(c"service.json", &state)
     }
 }
-
 
 /// Copies the retained state beside itself and returns the copy's digest.
 fn take_snapshot(data: &Directory) -> Result<[u8; 32], CoreError> {

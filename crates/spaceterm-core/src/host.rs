@@ -1156,7 +1156,10 @@ impl FactsFollower {
                     if facts.revision == sent.revision || ended.load(Ordering::Acquire) {
                         continue;
                     }
-                    if outbox.update_facts(facts.clone().for_selected(work)).is_err() {
+                    if outbox
+                        .update_facts(facts.clone().for_selected(work))
+                        .is_err()
+                    {
                         return;
                     }
                     sent = facts;
@@ -1609,7 +1612,10 @@ mod tests {
             let connection = Connection::open(&environment, older);
             assert_eq!(connection.events(1).first(), Some(&Some((1, 0))));
             assert_eq!(
-                connection.link.update_facts().and_then(|facts| facts.operation.clone()),
+                connection
+                    .link
+                    .update_facts()
+                    .and_then(|facts| facts.operation.clone()),
                 Some(Operation::Restarting {
                     to: Version::parse("1.4.0").unwrap()
                 })
@@ -1618,7 +1624,10 @@ mod tests {
             let current = Connection::open(&environment, crate::protocol::version::WORK);
             assert_eq!(current.events(1).first(), Some(&Some((1, 0))));
             assert_eq!(
-                current.link.update_facts().and_then(|facts| facts.operation.clone()),
+                current
+                    .link
+                    .update_facts()
+                    .and_then(|facts| facts.operation.clone()),
                 Some(Operation::RestartingSameVersion)
             );
             current.close();
