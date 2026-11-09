@@ -247,6 +247,11 @@ impl Operation {
     pub(super) fn pending(&self) -> bool {
         !matches!(self.step, Step::Completed | Step::Returned)
     }
+    /// The digests of the installations the activation moves between: the previous one, then
+    /// the candidate.
+    pub(super) fn installations(&self) -> [&str; 2] {
+        [&self.previous.digest, &self.candidate.digest]
+    }
     /// Whether the activation may still return to its previous installation, which therefore
     /// stays on disk.
     pub(super) fn retains_previous(&self) -> bool {

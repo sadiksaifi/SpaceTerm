@@ -268,6 +268,50 @@ fn stopped_activation_changes_only_the_exact_runtime_and_preserves_stop() {
 }
 
 #[test]
+fn an_install_before_a_stopped_activation_first_starts_keeps_its_rollback_installation() {
+    with_service(|service, previous, candidate, _| {
+        let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+        let status = service.activate(approval).unwrap();
+        assert_eq!(status.phase, ActivationPhase::Completed { running: false });
+        // A newer version stages before the approved one ever became ready.
+        let source = service.paths.data.join("../newer-source");
+        let (archive, signature) = runtime::test_support::with_build(
+            "1.0.0",
+            crate::update::facts::Protocols::CURRENT,
+            || {
+                runtime::test_support::with_artifact(
+                    &source,
+                    &service.identity,
+                    |archive, signature| (archive.to_owned(), signature.to_owned()),
+                )
+            },
+        );
+        let sha256: String =
+            ring::digest::digest(&ring::digest::SHA256, &std::fs::read(&archive).unwrap())
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+        runtime::test_support::with_fixture_trust(|| {
+            runtime::updates::Updates::open(service.clone())
+                .unwrap()
+                .install(runtime::updates::Archive {
+                    archive: &archive,
+                    signature: &signature,
+                    sha256: &sha256,
+                    source: runtime::updates::Source::Local,
+                })
+                .unwrap()
+        });
+        assert!(
+            previous.directory.exists(),
+            "the approved version's first Start may still return to it"
+        );
+        assert!(candidate.directory.exists());
+    });
+}
+
+#[test]
 fn a_launcher_that_cannot_follow_an_update_never_blocks_it() {
     use crate::service::{CliLauncher, CliLink};
     use std::os::unix::fs::PermissionsExt;

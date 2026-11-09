@@ -846,12 +846,7 @@ impl Updates {
         // Obsolete installations go first, so the space check counts what they free. A waiting
         // Pending Version stays until this one has staged.
         let waiting = replaced.as_ref().map(|pending| pending.digest.as_str());
-        prune(
-            service,
-            &installations,
-            &[Some(state.installation.as_str()), waiting],
-        )
-        .map_err(InstallError::Core)?;
+        prune(service, &state, &[waiting]).map_err(InstallError::Core)?;
         if storage_full(
             &installations,
             size.saturating_mul(2).saturating_add(INSTALL_MARGIN),
@@ -899,15 +894,7 @@ impl Updates {
         .map_err(InstallError::Core)?;
         self.shared.lock().record = record;
         // At most two versions stay on disk: the running one and the one installed now.
-        prune(
-            service,
-            &installations,
-            &[
-                Some(state.installation.as_str()),
-                Some(stored.digest.as_str()),
-            ],
-        )
-        .map_err(InstallError::Core)?;
+        prune(service, &state, &[Some(stored.digest.as_str())]).map_err(InstallError::Core)?;
         Ok(stored)
     }
 
@@ -930,22 +917,8 @@ impl Updates {
 /// The caller holds the service lock, so no install or activation changes them meanwhile.
 pub(in crate::service) fn retire_obsolete(service: &Service) -> Result<(), CoreError> {
     let (data, state) = service.read()?.ok_or(CoreError::NotInstalled)?;
-    let installations = service.installations_directory();
     let pending = load(&data)?.pending.map(|pending| pending.digest);
-    let keep = if state
-        .activation
-        .as_ref()
-        .is_some_and(super::super::activation::Operation::retains_previous)
-    {
-        // Every valid installation stays: only unfinished unpackings go.
-        None
-    } else {
-        Some([Some(state.installation.as_str()), pending.as_deref()])
-    };
-    match keep {
-        Some(keep) => prune(service, &installations, &keep),
-        None => prune_unfinished(&installations),
-    }
+    prune(service, &state, &[pending.as_deref()])
 }
 
 impl Shared {
@@ -1223,23 +1196,29 @@ fn verification(archive: &Path, error: CoreError) -> InstallError {
     }
 }
 
-/// Removes every retained installation except those `keep` names, and every unfinished
-/// unpacking, under the store's lock. On macOS each installation is unregistered from Launch
-/// Services before it goes, so System Settings never names a bundle that no longer exists.
-fn prune(service: &Service, parent: &Path, keep: &[Option<&str>]) -> Result<(), CoreError> {
-    remove_entries(parent, |text| {
+/// Removes every unfinished unpacking and every retained installation except the one `state`
+/// approves, both installations of an activation that may still return to its previous one,
+/// and those `keep` names. It runs under the store's lock, which every unpacking holds until
+/// it publishes, so each unfinished one is a crash's. On macOS each installation is
+/// unregistered from Launch Services before it goes, so System Settings never names a bundle
+/// that no longer exists.
+fn prune(service: &Service, state: &State, keep: &[Option<&str>]) -> Result<(), CoreError> {
+    let rollback = state
+        .activation
+        .as_ref()
+        .filter(|operation| operation.retains_previous())
+        .map(super::super::activation::Operation::installations);
+    let kept = |text: &str| {
+        text == state.installation
+            || keep.contains(&Some(text))
+            || rollback.is_some_and(|digests| digests.contains(&text))
+    };
+    remove_entries(&service.installations_directory(), |text| {
         if unfinished(text) {
             return Some(None);
         }
-        let obsolete = super::digest_valid(text) && !keep.contains(&Some(text));
-        obsolete.then(|| Some(service.supervisor.as_ref()))
+        (super::digest_valid(text) && !kept(text)).then(|| Some(service.supervisor.as_ref()))
     })
-}
-
-/// Removes every unfinished unpacking under the store's lock, which every unpacking holds
-/// until it publishes, so each one found is a crash's.
-fn prune_unfinished(parent: &Path) -> Result<(), CoreError> {
-    remove_entries(parent, |text| unfinished(text).then_some(None))
 }
 
 /// The name of an unpacking that never published: `.prepare-` and 32 hex digits.
