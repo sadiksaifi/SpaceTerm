@@ -274,6 +274,9 @@ impl Operation {
         if returning {
             self.step = Step::StartFailed;
             self.stopped = stopped;
+            // The caller ran that Start and watched it fail, so the failure measured the
+            // version.
+            dispatched(self.id, Step::StartDispatched);
         }
         returning
     }
@@ -665,9 +668,12 @@ impl Service {
                 }
                 Step::ReturnStopDispatched => {
                     self.wait_quiescent(data, &operation, operation.candidate_run.as_ref(), true)?;
+                    // Only a Start this process watched to its end measured the version. A
+                    // helper that resumes the return after a reboot, logout or crash finds no
+                    // watch, so the version stays pending.
                     let resumed = watches()
                         .get(&(operation.id, Step::StartDispatched))
-                        .is_some_and(|watch| watch.resumed);
+                        .is_none_or(|watch| watch.resumed);
                     let failure = self.classify(resumed);
                     let _intent = data.lock("service-intent.lock", false)?;
                     state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;

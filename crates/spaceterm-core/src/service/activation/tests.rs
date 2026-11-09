@@ -1431,6 +1431,51 @@ fn a_candidate_that_exited_during_startup_returns_in_the_same_boot() {
     });
 }
 
+#[test]
+fn a_return_resumed_with_no_watch_keeps_the_version_pending() {
+    for step in [Step::StartFailed, Step::ReturnStopDispatched] {
+        with_service(|service, previous, candidate, supervisor| {
+            interrupted(
+                &service,
+                &previous,
+                &candidate,
+                &supervisor,
+                Step::StartDispatched,
+                false,
+            );
+            pending_record(&service, &candidate);
+            // The helper that took over the Start ended during the return, so no process
+            // watches it any more.
+            let data = Directory::open(&service.paths.data, false).unwrap();
+            let mut state = Service::state(&data).unwrap().unwrap();
+            state.activation.as_mut().unwrap().step = step;
+            data.write_json(c"service.json", &state).unwrap();
+            supervisor.running.store(false, Ordering::SeqCst);
+            *supervisor.paths.lock().unwrap() = Some(service.paths.clone());
+            supervisor
+                .ready
+                .lock()
+                .unwrap()
+                .push(previous.directory.clone());
+            let status = service.recover_activation().unwrap().unwrap();
+            assert_eq!(
+                status.phase,
+                ActivationPhase::Returned {
+                    failure: StartFailure::Interrupted,
+                    running: true
+                },
+                "{step:?}"
+            );
+            let facts = runtime::updates::Updates::stored(&service).unwrap();
+            assert_eq!(facts.skipped, None, "{step:?}");
+            assert!(
+                facts.pending.is_some(),
+                "{step:?}: the version stays pending"
+            );
+        });
+    }
+}
+
 /// The fields of the activation journal SpaceTerm 0.11.2 reads and writes. The previous and
 /// the next runtime of an update share the journal, so neither may change its shape.
 const JOURNAL_0_11_2: [&str; 13] = [
