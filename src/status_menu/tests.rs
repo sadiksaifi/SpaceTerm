@@ -409,6 +409,76 @@ fn the_flat_menu_names_the_machine_each_pending_action_affects(cx: &mut TestAppC
     }
 }
 
+/// A flat menu has no submenus, so each Machine's information line follows its status line, and
+/// Recent Updates follows the Machines. An action that already names its Machine keeps one name.
+#[gpui::test]
+fn the_flat_menu_keeps_reasons_and_recent_updates_and_names_each_machine_once(
+    cx: &mut TestAppContext,
+) {
+    use crate::updates::ApplicationUpdates;
+    use crate::updates::testing::RecordingAdapter;
+    use spaceterm_core::update::facts::{FailureKind, StartFailure, UpdateFailure};
+    let updater = Rc::new(RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
+    cx.update(|cx| crate::updates::record_recent("penguin updated to 0.8.0".into(), cx));
+    let mut below = machine(PENGUIN, "penguin", 0);
+    below.bundled = Some(Version::parse("0.9.0").unwrap());
+    let mut failed = machine(BUILD_BOX, "build-box", 0);
+    failed.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+        id: 7,
+        at: crate::updates::now() - 60,
+        version: Version::parse("0.9.0").unwrap(),
+        kind: FailureKind::Start(StartFailure::NotReady),
+    });
+    let fixture = start(vec![below, failed], cx);
+    let menu = fixture.host.menu();
+    let flat = menu.flat();
+    let texts: Vec<&str> = flat
+        .iter()
+        .filter_map(|row| match row {
+            FlatRow::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let titles: Vec<&str> = flat
+        .iter()
+        .filter_map(|row| match row {
+            FlatRow::Action { title, .. } => Some(title.as_str()),
+            _ => None,
+        })
+        .collect();
+    let info = |machine: MachineId| {
+        menu.machines
+            .iter()
+            .find(|row| row.row.machine == machine)
+            .and_then(|row| row.row.info.clone())
+            .expect("the row explains itself")
+            .to_string()
+    };
+    let line = |name: &str| {
+        texts
+            .iter()
+            .position(|text| text.starts_with(&format!("{name} \u{b7} ")))
+            .expect("the Machine has a status line")
+    };
+    assert_eq!(texts[line("penguin") + 1], info(PENGUIN));
+    assert_eq!(texts[line("build-box") + 1], info(BUILD_BOX));
+    let recent = texts
+        .iter()
+        .position(|text| *text == super::model::RECENT_TITLE)
+        .expect("Recent Updates is listed");
+    assert!(
+        texts[recent + 1].starts_with("penguin updated to 0.8.0 \u{b7} "),
+        "{texts:?}"
+    );
+    assert!(titles.contains(&"Update penguin"), "{titles:?}");
+    assert!(titles.contains(&"Dismiss Notice on build-box"), "{titles:?}");
+    assert!(
+        !titles.iter().any(|title| title.contains("penguin on penguin")),
+        "{titles:?}"
+    );
+}
+
 #[gpui::test]
 fn updating_the_desktop_relaunches_without_asking(cx: &mut TestAppContext) {
     use crate::updates::testing::RecordingAdapter;

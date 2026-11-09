@@ -2,12 +2,13 @@
 //! desktop's own status, a Machines section with one row per Machine, Recent Updates, the actions
 //! that apply now, then Settings and Quit. There is no "Open SpaceTerm". Each row's wording comes
 //! from [`crate::updates::presentation`]; hosts render this tree natively.
-use crate::updates::machines::{MachineAction, MachineId, MachineUpdate};
-use crate::updates::presentation::{self, ExtraHeader, ExtraItem, ExtraRow, Tone};
+use crate::updates::machines::{MachineId, MachineUpdate};
+use crate::updates::presentation::{self, DesktopState, ExtraHeader, ExtraItem, ExtraRow, Tone};
 use spaceterm_core::update::facts::Platform;
 
 pub(crate) const HEADER_TITLE: &str = "SpaceTerm";
 pub(crate) const SETTINGS_TITLE: &str = "SpaceTerm Settings\u{2026}";
+pub(crate) const RECENT_TITLE: &str = "Recent Updates";
 pub(crate) const QUIT_TITLE: &str = "Quit SpaceTerm";
 
 /// One person-chosen operation the menu offers.
@@ -34,6 +35,8 @@ pub(crate) enum MachineKind {
 pub(crate) struct MachineRow {
     pub(crate) row: ExtraRow,
     pub(crate) kind: MachineKind,
+    /// The Machine's own update control label, such as "Update penguin", which names it.
+    control_label: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +46,9 @@ pub(crate) struct Menu {
     /// Something in the menu is a problem, so the item's symbol shows it.
     pub(crate) attention: bool,
     pub(crate) header: ExtraHeader,
+    /// Why the desktop's update failed or can't happen, for a menu without subtitles. The menu
+    /// bar extra shows it as its action's subtitle.
+    header_info: Option<String>,
     pub(crate) machines: Vec<MachineRow>,
     /// Recent history, newest first. Hosts show Recent Updates only when it has any.
     pub(crate) recent: Vec<String>,
@@ -74,9 +80,21 @@ impl Menu {
             .into_iter()
             .map(|row| MachineRow {
                 kind: kind(row.machine, row.local, machines),
+                control_label: update
+                    .machine(row.machine)
+                    .map(presentation::MachineView::control_label)
+                    .unwrap_or_default(),
                 row,
             })
             .collect();
+        let header_info = matches!(
+            update.desktop,
+            DesktopState::InstallFailed { .. }
+                | DesktopState::RelaunchHeld { .. }
+                | DesktopState::TooOld { .. }
+                | DesktopState::NeedsNewerSystem
+        )
+        .then(|| update.desktop.sentence().to_string());
         let attention = header.tone == Tone::Problem
             || machines
                 .iter()
@@ -85,6 +103,7 @@ impl Menu {
             summary: format!("{HEADER_TITLE}, {}", header.line),
             attention,
             header,
+            header_info,
             machines,
             recent,
             actions: update.extra_actions(),
@@ -111,8 +130,8 @@ impl Menu {
     }
 
     /// The same menu without submenus or subtitles: one status line each for the desktop and every
-    /// Machine, then every available Machine action, naming the Machine, then the actions group,
-    /// Settings and Quit.
+    /// Machine, each followed by its information line, then Recent Updates, then every available
+    /// Machine action, naming the Machine, then the actions group, Settings and Quit.
     #[cfg_attr(
         not(any(target_os = "linux", test)),
         allow(dead_code, reason = "only the Linux status area shows a flat menu")
@@ -122,26 +141,39 @@ impl Menu {
             "{HEADER_TITLE} \u{b7} {}",
             self.header.line
         ))];
-        rows.extend(self.machines.iter().map(|machine| {
-            FlatRow::Text(format!("{} \u{b7} {}", machine.row.name, machine.row.line))
-        }));
+        rows.extend(self.header_info.iter().cloned().map(FlatRow::Text));
+        for machine in &self.machines {
+            rows.push(FlatRow::Text(format!(
+                "{} \u{b7} {}",
+                machine.row.name, machine.row.line
+            )));
+            rows.extend(
+                machine
+                    .row
+                    .info
+                    .iter()
+                    .map(|info| FlatRow::Text(info.to_string())),
+            );
+        }
+        if !self.recent.is_empty() {
+            rows.push(FlatRow::Separator);
+            rows.push(FlatRow::Text(RECENT_TITLE.to_owned()));
+            rows.extend(self.recent.iter().cloned().map(FlatRow::Text));
+        }
         let machines = self.machines.iter().flat_map(|machine| {
             machine.row.items.iter().flatten().filter_map(move |item| {
                 let (title, command) = action(item)?;
-                // Update actions already name their Machine. Other submenu actions get their
-                // Machine from the row and need it added when flattened.
-                let names_machine = match command {
-                    presentation::Command::Machine(_, MachineAction::Restart) => true,
-                    presentation::Command::Confirm(confirmation) => confirmation
-                        .actions
-                        .iter()
-                        .all(|(_, action)| *action == MachineAction::Restart),
-                    _ => false,
-                };
                 let (title, asks) = match title.strip_suffix('\u{2026}') {
                     Some(title) => (title, "\u{2026}"),
                     None => (title, ""),
                 };
+                // The Machine's own update control already names it. Other submenu actions get
+                // their Machine from the row and need it added when flattened.
+                let names_machine = machine
+                    .control_label
+                    .strip_suffix('\u{2026}')
+                    .unwrap_or(&machine.control_label)
+                    == title;
                 Some(FlatRow::Action {
                     title: if names_machine {
                         format!("{title}{asks}")
