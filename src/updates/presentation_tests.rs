@@ -462,6 +462,7 @@ fn every_core_label_names_its_subject() {
             running: Some(version("0.8.0")),
             sessions: 3,
             pending: None,
+            unobserved: false,
             core_too_old: false,
             skipped: None,
             state,
@@ -1015,6 +1016,40 @@ fn a_failure_notice_does_not_hide_a_breaking_restarts_consequences() {
             .message
             .contains("SpaceTerm on old-mini will stop working with penguin until it updates.")
     );
+}
+
+#[test]
+fn a_preview_that_overtakes_the_facts_asks_until_its_consequences_are_known() {
+    // Settings requests Restart Core while another desktop installs a breaking 0.9.1: the
+    // preview names it before the facts do, whether the cache shows no Pending Version or an
+    // older one.
+    for cached in [
+        machine(PENGUIN, "penguin", 0),
+        waiting(machine(PENGUIN, "penguin", 0), NOW - 60),
+    ] {
+        let shown = present(std::slice::from_ref(&cached));
+        let preview = MachinePreview {
+            target: Some(version("0.9.1")),
+            ..crate::updates::machines::testing::preview(PENGUIN, MachineAction::Restart, 0)
+        };
+        let confirmation = shown
+            .previewed(&[preview], false)
+            .expect("an unobserved target may be breaking, so its restart asks");
+        assert_eq!(confirmation.button.as_ref(), "Update Core");
+
+        let mut breaking = waiting(cached.clone(), NOW - 30);
+        let pending = breaking.facts.as_mut().unwrap().pending.as_mut().unwrap();
+        pending.version = version("0.9.1");
+        pending.breaking = true;
+        pending.stranded = vec![StrandedDevice {
+            pairing: [4; 32],
+            name: "old-mini".into(),
+        }];
+        assert!(
+            !confirmation.approval.holds(&[breaking]),
+            "the approval never covered the Paired Devices the breaking facts name"
+        );
+    }
 }
 
 #[test]

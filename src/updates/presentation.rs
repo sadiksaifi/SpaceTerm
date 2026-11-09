@@ -108,7 +108,8 @@ struct Described {
     sessions: u32,
     running: Option<Version>,
     target: Option<Version>,
-    breaking: bool,
+    /// None while the target is unobserved, so no facts match it.
+    breaking: Option<bool>,
 }
 
 impl Described {
@@ -120,7 +121,7 @@ impl Described {
             sessions: facts.map_or(0, |facts| facts.sessions),
             running: facts.map(|facts| facts.running.clone()),
             target: pending.map(|pending| pending.version.clone()),
-            breaking: pending.is_some_and(|pending| pending.breaking),
+            breaking: Some(pending.is_some_and(|pending| pending.breaking)),
         }
     }
 }
@@ -137,10 +138,7 @@ impl Approval {
                     sessions: view.sessions,
                     running: view.running.clone(),
                     target: view.pending.as_ref().map(|pending| pending.version.clone()),
-                    breaking: view
-                        .pending
-                        .as_ref()
-                        .is_some_and(|pending| pending.breaking),
+                    breaking: view.breaking(),
                 })
                 .collect(),
         }
@@ -462,6 +460,9 @@ pub(crate) struct MachineView {
     pub(crate) sessions: u32,
     /// Pending restart consequences remain available while a failure notice takes precedence.
     pending: Option<PendingVersion>,
+    /// A restart preview named `pending` before the Machine's update facts described it, so
+    /// whether it breaks Paired Devices is unknown.
+    unobserved: bool,
     core_too_old: bool,
     skipped: Option<Version>,
     pub(crate) state: MachineState,
@@ -480,6 +481,7 @@ impl MachineView {
             running: facts.map(|facts| facts.running.clone()),
             sessions: facts.map_or(0, |facts| facts.sessions),
             pending: facts.and_then(|facts| facts.pending.clone()),
+            unobserved: false,
             core_too_old: update.link == MachineLink::Incompatible(Incompatible::ListenerTooOld),
             skipped: facts.and_then(|facts| facts.skipped.clone()),
             state: machine_state(update, dismissed, now),
@@ -503,11 +505,16 @@ impl MachineView {
 
     /// Whether restarting asks first: it closes sessions or crosses a breaking change.
     fn restart_asks(&self) -> bool {
-        self.sessions > 0
-            || self
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.breaking)
+        self.sessions > 0 || self.unobserved || self.breaking() == Some(true)
+    }
+
+    /// Whether the Pending Version breaks Paired Devices: None while it is unobserved, and
+    /// `Some(false)` without one.
+    fn breaking(&self) -> Option<bool> {
+        match &self.pending {
+            Some(_) if self.unobserved => None,
+            pending => Some(pending.as_ref().is_some_and(|pending| pending.breaking)),
+        }
     }
 
     /// Restarts at once, or asks first when sessions close or other devices stop working.
@@ -2051,51 +2058,32 @@ impl Presentation {
                     view.running = Some(running.clone());
                 }
                 if preview.action == MachineAction::Restart {
-                    view.pending = preview.target.as_ref().map(|to| PendingVersion {
-                        version: to.clone(),
-                        protocols: spaceterm_core::update::facts::Protocols::CURRENT,
-                        breaking: view
-                            .pending
-                            .as_ref()
-                            .is_some_and(|pending| pending.version == *to && pending.breaking),
-                        installed_at: 0,
-                        overdue_since: None,
-                        stranded: view
-                            .pending
-                            .as_ref()
-                            .filter(|pending| pending.version == *to)
-                            .map_or_else(Vec::new, |pending| pending.stranded.clone()),
+                    let observed = view
+                        .pending
+                        .take()
+                        .filter(|pending| Some(&pending.version) == preview.target.as_ref());
+                    // An unobserved target asks until matching facts describe its consequences.
+                    view.unobserved = preview.target.is_some() && observed.is_none();
+                    view.pending = observed.or_else(|| {
+                        preview.target.as_ref().map(|to| PendingVersion {
+                            version: to.clone(),
+                            protocols: spaceterm_core::update::facts::Protocols::CURRENT,
+                            breaking: false,
+                            installed_at: 0,
+                            overdue_since: None,
+                            stranded: Vec::new(),
+                        })
                     });
-                    view.state = match &preview.target {
-                        Some(to) => {
-                            let pending = view
-                                .pending
-                                .as_ref()
-                                .filter(|pending| pending.version == *to);
-                            let waiting = view.state.waiting().filter(|(known, _, _)| *known == to);
-                            MachineState::Ready {
-                                to: to.clone(),
-                                // An unobserved target asks until its consequences are known.
-                                breaking: pending.map_or_else(
-                                    || waiting.is_none_or(|(_, breaking, _)| breaking),
-                                    |pending| pending.breaking,
-                                ),
-                                stranded: pending.map_or_else(
-                                    || {
-                                        waiting.map_or_else(Vec::new, |(_, _, stranded)| {
-                                            stranded.to_vec()
-                                        })
-                                    },
-                                    |pending| {
-                                        pending
-                                            .stranded
-                                            .iter()
-                                            .map(|device| device.name.clone())
-                                            .collect()
-                                    },
-                                ),
-                            }
-                        }
+                    view.state = match &view.pending {
+                        Some(pending) => MachineState::Ready {
+                            to: pending.version.clone(),
+                            breaking: view.breaking() != Some(false),
+                            stranded: pending
+                                .stranded
+                                .iter()
+                                .map(|device| device.name.clone())
+                                .collect(),
+                        },
                         None => MachineState::Current,
                     };
                 }
