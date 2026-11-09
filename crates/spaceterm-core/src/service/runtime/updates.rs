@@ -157,6 +157,17 @@ struct Record {
     /// The version a feed check installed as a Stepping Stone. A Core that runs it checks its
     /// feed at once, and that check clears it.
     stepping_stone: Option<Version>,
+    /// The last restart a reboot, logout or crash interrupted. It stays apart from
+    /// `last_failure`, whose values every runtime an update moves between decodes: one of
+    /// 0.11.2 or earlier knows no `Interrupted`, and skips this field.
+    interrupted: Option<Interruption>,
+}
+
+/// A restart whose readiness a reboot, logout or crash left unmeasured.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Interruption {
+    activation: [u8; 32],
+    failure: UpdateFailure,
 }
 
 impl Default for Record {
@@ -170,6 +181,7 @@ impl Default for Record {
             silent: None,
             activation: None,
             stepping_stone: None,
+            interrupted: None,
         }
     }
 }
@@ -251,12 +263,20 @@ pub(in crate::service) fn record_start_failure(
         }
         record.activation = Some(activation);
         record.failures += 1;
-        record.last_failure = Some(UpdateFailure {
+        let recorded = UpdateFailure {
             id: record.failures,
             at: now(),
             version: version.clone(),
             kind: FailureKind::Start(failure),
-        });
+        };
+        if failure == StartFailure::Interrupted {
+            record.interrupted = Some(Interruption {
+                activation,
+                failure: recorded,
+            });
+            return;
+        }
+        record.last_failure = Some(recorded);
         if failure == StartFailure::NotReady {
             record.skipped = Some(version);
             if record
@@ -267,6 +287,15 @@ pub(in crate::service) fn record_start_failure(
                 record.pending = None;
             }
         }
+    })
+}
+
+/// Whether the update record names the restart of `activation` as interrupted.
+pub(in crate::service) fn interrupted(data: &Directory, activation: [u8; 32]) -> bool {
+    load(data).is_ok_and(|record| {
+        record
+            .interrupted
+            .is_some_and(|interrupted| interrupted.activation == activation)
     })
 }
 
@@ -1001,7 +1030,14 @@ impl Shared {
                 UpdateCheck::Disabled
             },
             skipped: live.record.skipped.clone(),
-            last_failure: live.record.last_failure.clone(),
+            // The newest failure, whichever field holds it.
+            last_failure: live
+                .record
+                .last_failure
+                .iter()
+                .chain(live.record.interrupted.iter().map(|i| &i.failure))
+                .max_by_key(|failure| failure.id)
+                .cloned(),
         }
     }
 }

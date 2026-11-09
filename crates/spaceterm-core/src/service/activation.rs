@@ -494,9 +494,18 @@ impl Service {
             (Step::Completed, _) => running()
                 .map(|running| ActivationPhase::Completed { running })
                 .unwrap_or(ActivationPhase::Uncertain),
-            (Step::Returned, Some(failure)) => running()
-                .map(|running| ActivationPhase::Returned { failure, running })
-                .unwrap_or(ActivationPhase::Uncertain),
+            (Step::Returned, Some(failure)) => {
+                // The journal names an interruption as a failure every runtime knows; the
+                // update record keeps what it was.
+                let failure = if runtime::updates::interrupted(data, operation.id) {
+                    StartFailure::Interrupted
+                } else {
+                    failure
+                };
+                running()
+                    .map(|running| ActivationPhase::Returned { failure, running })
+                    .unwrap_or(ActivationPhase::Uncertain)
+            }
             _ if operation.failed => ActivationPhase::Uncertain,
             _ => ActivationPhase::Activating,
         };
@@ -700,7 +709,24 @@ impl Service {
                         .as_mut()
                         .ok_or(CoreError::ActivationUnresolved)?;
                     current.step = Step::ReturnApproved;
-                    current.failure = Some(failure);
+                    // The runtime this returns to reads the journal and the update record, and
+                    // one of 0.11.2 or earlier knows no `Interrupted`. The update record keeps
+                    // the interruption where only this runtime reads it, before the journal
+                    // names a transient failure every runtime knows, so whichever runtime
+                    // applies the journal's outcome finds it already recorded.
+                    if failure == StartFailure::Interrupted {
+                        runtime::updates::record_start_failure(
+                            data,
+                            operation.id,
+                            &operation.candidate.digest,
+                            &operation.candidate.version,
+                            failure,
+                        )?;
+                    }
+                    current.failure = Some(match failure {
+                        StartFailure::Interrupted => StartFailure::PortInUse,
+                        failure => failure,
+                    });
                     data.write_json(c"service.json", &state)?;
                     runtime::updates::record_start_failure(
                         data,

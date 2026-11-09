@@ -1472,6 +1472,7 @@ fn a_return_resumed_with_no_watch_keeps_the_version_pending() {
                 facts.pending.is_some(),
                 "{step:?}: the version stays pending"
             );
+            readable_by_0_11_2(&service);
         });
     }
 }
@@ -1566,7 +1567,55 @@ fn a_start_another_process_watched_returns_as_interrupted_and_stays_pending() {
         let facts = runtime::updates::Updates::stored(&service).unwrap();
         assert_eq!(facts.skipped, None, "its readiness was never measured");
         assert!(facts.pending.is_some(), "the version stays pending");
+        assert_eq!(
+            facts.last_failure.map(|failure| failure.kind),
+            Some(crate::update::facts::FailureKind::Start(
+                StartFailure::Interrupted
+            ))
+        );
+        readable_by_0_11_2(&service);
     });
+}
+
+/// SpaceTerm 0.11.2's start failures, the only ones the runtime a return reaches may know.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StartFailure0_11_2 {
+    NotReady,
+    PortInUse,
+    DiskFull,
+}
+
+/// Asserts that a runtime of 0.11.2 reads the start failures in the journal and the update
+/// record, so a return to it can start.
+fn readable_by_0_11_2(service: &Service) {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum Kind {
+        Install(crate::update::facts::InstallFailure),
+        Start(StartFailure0_11_2),
+    }
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Failure {
+        id: u64,
+        at: u64,
+        version: String,
+        kind: Kind,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Record {
+        last_failure: Option<Failure>,
+    }
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(service.paths.data.join(name)).unwrap()).unwrap()
+    };
+    let journal = read("service.json");
+    serde_json::from_value::<Option<StartFailure0_11_2>>(journal["activation"]["failure"].clone())
+        .expect("0.11.2 reads the journal's failure");
+    serde_json::from_value::<Record>(read("updates.json")).expect("0.11.2 reads the update record");
 }
 
 #[test]
