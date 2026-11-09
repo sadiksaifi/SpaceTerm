@@ -2301,6 +2301,120 @@ mod tests {
         assert!(dock.borrow().is_empty(), "the client never joins the Dock");
     }
 
+    /// This Mac's Machine update, restarting into `to` while it runs `running`.
+    fn this_mac(
+        running: &str,
+        restarting_to: Option<&str>,
+    ) -> crate::updates::machines::MachineUpdate {
+        use spaceterm_core::protocol::capability::{Capabilities, Capability};
+        use spaceterm_core::update::facts::{
+            Operation, Platform, UpdateCheck, UpdateFacts, Version,
+        };
+        crate::updates::machines::MachineUpdate {
+            machine: [1; 32],
+            name: "This Mac".into(),
+            local: true,
+            link: crate::updates::machines::MachineLink::Connected,
+            facts: Some(UpdateFacts {
+                revision: 1,
+                platform: Platform::MacosArm64,
+                running: Version::parse(running).unwrap(),
+                pending: None,
+                sessions: 0,
+                operation: restarting_to.map(|to| Operation::Restarting {
+                    to: Version::parse(to).unwrap(),
+                }),
+                check: UpdateCheck::Succeeded {
+                    at: crate::updates::now(),
+                },
+                skipped: None,
+                last_failure: None,
+            }),
+            capabilities: Capabilities::fake(&Capability::ALL),
+            push: None,
+            bundled: None,
+            failed_push: None,
+        }
+    }
+
+    /// A confirmed quit during This Mac's Core update waits for the Core to come back, so Recent
+    /// Updates records "This Mac updated to X", and quits at the deadline when it doesn't.
+    #[gpui::test]
+    fn a_quit_during_this_macs_core_update_waits_for_it_to_finish(cx: &mut TestAppContext) {
+        use crate::updates::machines::{MachineUpdatesAdapter, MachineUpdatesEvent};
+        let updates = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        let machines = Rc::new(crate::updates::machines::testing::ScriptedMachines::default());
+        cx.update(|cx| {
+            crate::updates::ApplicationUpdates::install(updates.clone(), cx);
+            crate::updates::machines::store::MachineUpdates::install(
+                Rc::clone(&machines) as Rc<dyn MachineUpdatesAdapter>,
+                cx,
+            );
+        });
+        // The update check the Machine store starts finds nothing.
+        updates.emit(crate::updates::UpdateEvent::UpToDate);
+        updates.emit(crate::updates::UpdateEvent::Finished);
+        let (quit, _) = windowless_client_asking_alone(cx);
+        let quit_now = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            quit.simulate_native_request(ApplicationQuitRequest::Exit);
+            cx.run_until_parked();
+            let prompts = quit.windowless_prompts();
+            assert!(
+                prompts[0]
+                    .detail
+                    .contains("SpaceTerm Core on This Mac is updating to 0.9.0"),
+                "{prompts:?}"
+            );
+            quit.answer_windowless(Some(QuitAnswer::Quit));
+            cx.run_until_parked();
+        };
+        let recent = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.global::<crate::updates::UpdateService>()
+                    .0
+                    .read(cx)
+                    .recent()
+                    .iter()
+                    .map(|entry| entry.text.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        machines.emit(MachineUpdatesEvent::Machines(vec![this_mac(
+            "0.8.0",
+            Some("0.9.0"),
+        )]));
+        quit_now(cx);
+        assert_eq!(quit.confirmations(), 0, "the quit waits for the restart");
+        machines.emit(MachineUpdatesEvent::Changed(Box::new(this_mac(
+            "0.9.0", None,
+        ))));
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 0, "the wait checks again shortly");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 1);
+        assert_eq!(recent(cx), ["This Mac updated to 0.9.0"]);
+
+        // A restart that doesn't finish holds the quit only until the deadline.
+        machines.emit(MachineUpdatesEvent::Changed(Box::new(this_mac(
+            "0.8.0",
+            Some("0.9.0"),
+        ))));
+        cx.run_until_parked();
+        quit_now(cx);
+        cx.executor()
+            .advance_clock(LOCAL_RESTART_WAIT - std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 1);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 2);
+    }
+
     /// The coordinator takes the keyboard before it makes the window key and presents the
     /// warning on it, because the menu bar item can ask while another app is in front.
     const ASKING_ON_A_WINDOW: [AskingOnWindow; 2] =
