@@ -532,7 +532,10 @@ impl WorkspaceManager {
                     presentation,
                 })
             }
-            Err(_) => self.sidebar_worktrees.removal = None,
+            Err(_) => {
+                self.sidebar_worktrees.removal = None;
+                cx.notify();
+            }
         }
     }
     pub(in crate::ui::workspace_manager) fn revalidate_machine_removal(
