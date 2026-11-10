@@ -669,6 +669,29 @@ fn work_1_1_carries_the_git_directory_fact_in_its_own_kind() {
     );
 }
 
+/// Worktree errors keep their v0.11 positions, and work 1.0 reads the error 1.1 added as the
+/// nearest one it has (ADR 0035).
+#[test]
+fn worktree_errors_keep_their_work_1_0_positions() {
+    use crate::worktree::Error;
+    let position = |error: Error| postcard::to_allocvec(&error).unwrap()[0];
+    assert_eq!(position(Error::Changed), 4);
+    assert_eq!(position(Error::Location), 5);
+    assert_eq!(position(Error::Unavailable), 11);
+    assert_eq!(position(Error::Interrupted), 12);
+    assert_eq!(position(Error::ChangedAfterClosing), 14);
+    let older = version::ProtocolVersion { major: 1, minor: 0 };
+    assert_eq!(
+        Error::ChangedAfterClosing.for_selected(older),
+        Error::Changed
+    );
+    assert_eq!(
+        Error::ChangedAfterClosing.for_selected(version::WORK),
+        Error::ChangedAfterClosing
+    );
+    assert_eq!(Error::Location.for_selected(older), Error::Location);
+}
+
 #[test]
 fn every_core_message_round_trips() {
     let restored = Restored {

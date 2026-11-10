@@ -248,7 +248,11 @@ pub fn encode_inventory(
     revision: InventoryRevision,
     work: ProtocolVersion,
 ) -> Result<WireMessage, EncodeError> {
-    if work.minor >= super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY {
+    let since = ProtocolVersion {
+        major: 1,
+        minor: super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY,
+    };
+    if work >= since {
         encode(Kind::GitDirectoryInventory, &revision)
     } else {
         encode(

@@ -219,6 +219,7 @@ impl Outbox {
         result: Result<ReplyBody, Refusal>,
     ) -> Result<(), OutboxError> {
         let bulk = matches!(&result, Ok(body) if body.bulk());
+        let result = result.map(|body| body.for_selected(self.shared.work));
         let frames = encode(&CoreMessage::Reply(Box::new(Reply { id, result })))?;
         self.with(|state| {
             state.open()?;

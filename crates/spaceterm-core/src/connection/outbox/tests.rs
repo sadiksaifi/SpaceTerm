@@ -891,3 +891,29 @@ fn inventory_goes_out_as_the_selected_work_version_has_it() {
         assert_eq!(frame[4], kind as u8);
     }
 }
+
+#[test]
+fn replies_go_out_as_the_selected_work_version_has_them() {
+    use crate::worktree::Error;
+    for (work, read) in [
+        (ProtocolVersion { major: 1, minor: 0 }, Error::Changed),
+        (crate::protocol::version::WORK, Error::ChangedAfterClosing),
+    ] {
+        let outbox = Outbox::new(Arc::new(|| {}), work);
+        outbox.begin(RequestId(1)).unwrap();
+        outbox
+            .reply(
+                RequestId(1),
+                Ok(ReplyBody::Worktree(Err(Error::ChangedAfterClosing))),
+            )
+            .unwrap();
+        let (frame, _) = outbox.next_frame().unwrap();
+        let message = Assembler::default()
+            .core(RawFrame::parse(&frame).unwrap())
+            .unwrap();
+        let Some(CoreMessage::Reply(reply)) = message else {
+            panic!("not a reply");
+        };
+        assert!(matches!(reply.result, Ok(ReplyBody::Worktree(Err(error))) if error == read));
+    }
+}
