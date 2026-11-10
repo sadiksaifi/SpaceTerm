@@ -1423,8 +1423,8 @@ impl TabManager {
         self.tabs.active_scope()
     }
 
-    /// Whether any Tab sits outside every Worktree, as the Root Tab does after its Workspace
-    /// leaves a repository.
+    /// Whether any Tab sits outside every listed Worktree, as a Tab does until the server reads
+    /// which Worktree it joins.
     pub(crate) fn has_unscoped_tabs(&self) -> bool {
         self.tabs.tabs_in(None).next().is_some()
     }

@@ -12955,23 +12955,14 @@ mod workspace_repositories {
                 .row(cx)
                 .worktrees
                 .expect("the Workspace lists its Worktrees");
-            let former = section
-                .groups
-                .iter()
-                .filter_map(|group| group.former_repository.as_ref().map(ToString::to_string))
-                .collect::<Vec<_>>();
             let rows = section
                 .rows()
                 .map(|row| (row.name.to_string(), row.missing, row.has_tabs))
                 .collect::<Vec<_>>();
-            (
-                section.repository.map(|root| root.to_string()),
-                former,
-                rows,
-            )
+            (section.repository.map(|root| root.to_string()), rows)
         };
 
-        let before_reads = rows(cx);
+        let before_reads = harness.row(cx).worktrees;
         harness.publish(
             restarted_in_removed_feature(
                 2,
@@ -13000,19 +12991,13 @@ mod workspace_repositories {
             .expect("the removed Worktree keeps its row");
 
         assert_eq!(
-            before_reads,
-            (
-                None,
-                vec!["app".to_owned()],
-                vec![("app-feature".to_owned(), true, true)],
-            ),
-            "before the server reads any directory, the Tab keeps its saved repository"
+            before_reads, None,
+            "before the server reads any directory, one saved Worktree lists nothing"
         );
         assert_eq!(
             after_restart,
             (
                 Some(MAIN_ROOT.to_owned()),
-                Vec::new(),
                 vec![
                     ("app".to_owned(), false, false),
                     ("app-extra".to_owned(), false, false),
@@ -13026,7 +13011,6 @@ mod workspace_repositories {
             after_prune,
             (
                 Some(MAIN_ROOT.to_owned()),
-                Vec::new(),
                 vec![
                     ("app".to_owned(), false, false),
                     ("app-feature".to_owned(), true, true),
@@ -13098,25 +13082,66 @@ mod workspace_repositories {
         facts
     }
 
-    /// The issue #663 Workspace: its Root Tab followed its Root Pane into `orbit`, while its
-    /// second Tab keeps its `app` membership with its Pane in `second_pane`.
-    fn moved_to_orbit(revision: u64, second_pane: &str) -> Inventory {
-        let mut inventory = published(revision, "main", false);
+    /// The Workspace in `app` whose Root Tab stays in the Main Worktree while its Root Pane is in
+    /// `root_pane`: a directory of `app`, or the other repository `orbit`.
+    fn root_pane_in(revision: u64, root_pane: &str) -> Inventory {
+        let mut inventory = published(revision, "main", true);
         inventory.revision = revision;
-        let workspace = &mut inventory.workspaces[0];
-        workspace.tabs[0].worktree = Some(ORBIT_ROOT.into());
-        workspace.tabs[0].worktree_repository = Some(ORBIT_ROOT.into());
-        workspace.tabs[0].panes = vec![pane(ROOT_PANE, ORBIT_ROOT)];
-        workspace.tabs[1].worktree = Some(MAIN_ROOT.into());
-        workspace.tabs[1].panes = vec![pane(FEATURE_PANE, second_pane)];
+        inventory.workspaces[0].tabs[0].panes = vec![pane(ROOT_PANE, root_pane)];
         if let Some(snapshot) = &mut inventory.repositories {
-            snapshot.directories = vec![
-                facts_within(ORBIT_ROOT, ORBIT_ROOT, "trunk"),
-                facts_within(MAIN_ROOT, MAIN_ROOT, "main"),
-                facts_within("/srv/app/src", MAIN_ROOT, "main"),
+            let listed = [
+                record(MAIN_ROOT, "main", false),
+                record(FEATURE_ROOT, "feature", false),
             ];
+            let mut source = facts("/srv/app/src", "main", &listed);
+            if let Some(repository) = &mut source.repository {
+                repository.root = MAIN_ROOT.into();
+            }
+            if let Some(worktrees) = &mut source.worktrees {
+                worktrees.current = Some(0);
+            }
+            snapshot
+                .directories
+                .extend([facts_within(ORBIT_ROOT, ORBIT_ROOT, "trunk"), source]);
         }
         inventory
+    }
+
+    /// A repository with only its Main Worktree discloses no section. Its Workspace row still
+    /// describes that Worktree while the Root Pane is in another repository.
+    #[gpui::test]
+    fn a_workspace_row_should_describe_its_only_worktree_while_its_pane_is_outside(
+        cx: &mut TestAppContext,
+    ) {
+        let mut outside = published(1, "main", false);
+        let workspace = &mut outside.workspaces[0];
+        workspace.tabs[0].panes = vec![pane(ROOT_PANE, ORBIT_ROOT)];
+        workspace.tabs[1].worktree = Some(MAIN_ROOT.into());
+        workspace.tabs[1].panes = vec![pane(FEATURE_PANE, MAIN_ROOT)];
+        if let Some(snapshot) = &mut outside.repositories {
+            snapshot
+                .directories
+                .push(facts_within(ORBIT_ROOT, ORBIT_ROOT, "trunk"));
+        }
+        let (harness, cx) = harness(cx, outside);
+
+        let row = harness.row(cx);
+
+        assert_eq!(row.worktrees, None);
+        assert_eq!(
+            (
+                row.path.to_string(),
+                row.repository.map(|badge| badge.text().to_owned())
+            ),
+            (MAIN_ROOT.to_owned(), Some("main".to_owned())),
+            "the row keeps its repository's directory and branch"
+        );
+        assert!(
+            row.tooltip
+                .contains(&format!("{OUTSIDE_PANE_LABEL}: {ORBIT_ROOT}")),
+            "the tooltip names where the Pane is, got {:?}",
+            row.tooltip
+        );
     }
 
     /// A Worktree row kept for a Tab whose Pane left it names the Worktree's own directory and
@@ -13124,15 +13149,18 @@ mod workspace_repositories {
     /// the Pane. Selecting the row shows the Tab it keeps.
     #[gpui::test]
     fn a_worktree_row_should_describe_its_worktree_after_its_pane_leaves(cx: &mut TestAppContext) {
-        let (harness, cx) = harness(cx, moved_to_orbit(1, "/srv/app/src"));
+        let (harness, cx) = harness(cx, root_pane_in(1, "/srv/app/src"));
         let app_row = |cx: &mut VisualTestContext| {
             let section = harness.row(cx).worktrees.expect("the Worktree rows");
-            let group = section
-                .groups
-                .iter()
-                .find(|group| group.former_repository.as_deref() == Some("app"))
-                .expect("the former repository keeps the second Tab");
-            let row = group.rows.first().cloned().expect("the app Worktree row");
+            assert_eq!(
+                section
+                    .rows()
+                    .map(|row| row.name.to_string())
+                    .collect::<Vec<_>>(),
+                ["app", "app-feature"],
+                "the Workspace lists its own repository wherever its Root Pane is"
+            );
+            let row = section.rows().next().cloned().expect("the app Worktree row");
             (
                 row.worktree_id,
                 (
@@ -13147,7 +13175,7 @@ mod workspace_repositories {
         };
 
         let (_, inside) = app_row(cx);
-        harness.publish(moved_to_orbit(2, ORBIT_ROOT), cx);
+        harness.publish(root_pane_in(2, ORBIT_ROOT), cx);
         let (app, outside) = app_row(cx);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
@@ -13223,7 +13251,7 @@ mod workspace_repositories {
     /// reports the directory's repository before it lists that repository's Worktrees, and the
     /// server keeps the Root Tab's saved membership until the listing arrives. Through that window
     /// the row presents the repository the Tab is still in, so a `cd` between repositories, or out
-    /// of one and back, never flashes a former-repository group.
+    /// of one and back, never flashes a Worktree group.
     #[gpui::test]
     fn a_root_tab_moving_between_repositories_should_flash_no_worktree_group(
         cx: &mut TestAppContext,
@@ -13287,7 +13315,7 @@ mod workspace_repositories {
             record(NESTED_ROOT, "nested", false),
         ];
         let nested = |revision: u64, failure: Option<RepositoryReadError>| {
-            let mut inventory = moved_to_orbit(revision, NESTED_ROOT);
+            let mut inventory = root_pane_in(revision, NESTED_ROOT);
             if let Some(snapshot) = &mut inventory.repositories {
                 // The server keeps a failed read's last repository and Worktree listing.
                 snapshot.directories.push(DirectoryFacts {
@@ -13308,7 +13336,7 @@ mod workspace_repositories {
                         .find(|row| row.name.as_ref() == "app")
                         .cloned()
                 })
-                .expect("the Main Worktree keeps the second Tab");
+                .expect("the Main Worktree keeps the Root Tab");
             (
                 row.directory.to_string(),
                 row.repository.map(|badge| badge.text().to_owned()),
@@ -13848,17 +13876,6 @@ mod workspace_repositories {
         inventory
     }
 
-    /// Changes each listing of `inventory` with `change`.
-    fn relisted_into(inventory: &mut Inventory, change: impl Fn(&mut Vec<WorktreeRecord>)) {
-        if let Some(snapshot) = &mut inventory.repositories {
-            for facts in &mut snapshot.directories {
-                if let Some(worktrees) = &mut facts.worktrees {
-                    change(&mut worktrees.worktrees);
-                }
-            }
-        }
-    }
-
     /// The Workspace with only its Main Worktree and its Root Tab, so it has no Worktree
     /// section, at organization revision `revision`.
     fn single_worktree(revision: u64) -> Inventory {
@@ -14199,33 +14216,6 @@ mod workspace_repositories {
                 group_bounds(harness.binding, cx)
             ),
             alone
-        );
-    }
-
-    #[gpui::test]
-    fn a_former_repository_label_should_grow_in_with_its_worktree_rows(cx: &mut TestAppContext) {
-        let (harness, cx) = harness(cx, published(1, "main", true));
-        finish_slides(cx);
-        animate(cx);
-        let rest = group_bounds(harness.binding, cx).size.height;
-
-        harness.publish(moved_to_orbit(2, "/srv/app/src"), cx);
-        let arriving = group_bounds(harness.binding, cx).size.height;
-        quarter_frame(cx);
-        let growing = group_bounds(harness.binding, cx).size.height;
-        finish_slides(cx);
-        let label = cx
-            .debug_bounds("worktree-former-repository-app")
-            .expect("the former repository's label");
-        let grown = group_bounds(harness.binding, cx).size.height;
-
-        assert_eq!(
-            arriving, rest,
-            "the label and the Root Tab's new Worktree must grow from nothing"
-        );
-        assert!(
-            growing > rest && growing < grown && grown - rest == label.size.height,
-            "the group must grow by the label from {rest:?} to {grown:?}, got {growing:?}"
         );
     }
 
@@ -14585,24 +14575,19 @@ mod workspace_repositories {
         );
     }
 
-    /// With Reduce Motion on, each step of a Root Tab following into another repository shows
-    /// its final layout at once. The server publishes the steps apart, so each is a layout.
+    /// With Reduce Motion on, a Workspace that follows its only Tab into another repository
+    /// shows each layout the server publishes at once.
     #[gpui::test]
-    fn reduce_motion_should_show_each_step_of_a_root_tab_following_at_rest(
+    fn reduce_motion_should_show_each_step_of_a_workspace_following_at_rest(
         cx: &mut TestAppContext,
     ) {
         let (harness, cx) = active_harness(cx);
         finish_slides(cx);
-        let layout = |cx: &mut VisualTestContext| {
-            (
-                group_bounds(harness.binding, cx),
-                cx.debug_bounds("worktree-former-repository-app"),
-            )
-        };
+        let layout = |cx: &mut VisualTestContext| group_bounds(harness.binding, cx);
 
         let mut steps = Vec::new();
         for inventory in [
-            moved_to_orbit(2, "/srv/app/src"),
+            root_pane_in(2, ORBIT_ROOT),
             followed_into_orbit_with_worktrees(3),
         ] {
             harness.publish(inventory, cx);
@@ -14619,7 +14604,7 @@ mod workspace_repositories {
         }
     }
 
-    /// When every Worktree row is replaced, as when a Root Tab follows into a repository with
+    /// When every Worktree row is replaced, as when an only Tab takes its Workspace into a repository with
     /// several Worktrees, the rows that leave keep drawing below the Workspace row while their
     /// place closes, take no clicks, and are not announced.
     #[gpui::test]
@@ -14694,67 +14679,6 @@ mod workspace_repositories {
             "a leaving row must take no click"
         );
         assert!(cx.debug_bounds(departing.leak()).is_none());
-    }
-
-    /// When the first Worktree row under a former repository's label leaves, as the Root Tab's
-    /// old Worktree does once its last Tab moves away, the label stays and the row keeps drawing
-    /// while its place closes, so no frame shows an empty place.
-    #[gpui::test]
-    fn a_former_repository_should_keep_its_label_while_its_first_row_leaves(
-        cx: &mut TestAppContext,
-    ) {
-        let mut with_main_tab = moved_to_orbit(1, "/srv/app/src");
-        let mut feature = with_main_tab.workspaces[0].tabs[1].clone();
-        feature.id = [70; 32];
-        feature.root_pane = [71; 32];
-        feature.worktree = Some(FEATURE_ROOT.into());
-        feature.panes = vec![pane([71; 32], FEATURE_ROOT)];
-        with_main_tab.workspaces[0].tabs.push(feature.clone());
-        relisted_into(&mut with_main_tab, |records| {
-            records.push(record(FEATURE_ROOT, "feature", false));
-        });
-        let (harness, cx) = harness(cx, with_main_tab.clone());
-        finish_slides(cx);
-        let main = harness
-            .row(cx)
-            .worktrees
-            .expect("the Worktree rows")
-            .rows()
-            .find(|row| row.name.as_ref() == "app")
-            .map(|row| row.worktree_id)
-            .expect("the Main Worktree row under its former repository");
-        let label = cx
-            .debug_bounds("worktree-former-repository-app")
-            .expect("the former repository's label");
-        animate(cx);
-        let mut without_main_tab = with_main_tab;
-        without_main_tab.revision = 2;
-        without_main_tab.workspaces[0]
-            .tabs
-            .retain(|tab| tab.id != FEATURE_TAB);
-
-        harness.publish(without_main_tab, cx);
-        let departing = cx
-            .debug_bounds(format!("worktree-row-{}-{main}-closing", harness.binding.get()).leak());
-        let label_leaving = cx.debug_bounds("worktree-former-repository-app");
-        finish_slides(cx);
-
-        assert!(
-            !harness
-                .row(cx)
-                .worktrees
-                .is_some_and(|section| section.rows().any(|row| row.worktree_id == main)),
-            "the Main Worktree row must have left"
-        );
-        assert!(
-            departing.is_some(),
-            "the leaving row must draw while its place closes"
-        );
-        assert_eq!(
-            label_leaving.map(|bounds| bounds.origin),
-            Some(label.origin),
-            "the label must keep its place"
-        );
     }
 
     /// As the Worktree section leaves, the Workspace row's line 2 returns inside the row and never

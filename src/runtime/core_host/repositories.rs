@@ -15,7 +15,7 @@ use crate::{
 };
 use spaceterm_core::{
     connection::Wake,
-    hierarchy::{Id, State, WorktreeMembership},
+    hierarchy::{Id, State},
     repository::*,
 };
 use std::{

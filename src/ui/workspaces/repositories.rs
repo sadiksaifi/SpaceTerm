@@ -111,7 +111,7 @@ impl CoreRepositories {
         self.snapshot.as_ref()?.repository_worktrees(main_root)
     }
 
-    /// The Worktrees of the repository a Workspace's row reads, as git on the server lists them.
+    /// The Worktrees of the repository a Workspace is in, as git on the server lists them.
     /// [`spaceterm_core::organize::workspace_listing`] owns the rule the CLI shares.
     pub(crate) fn workspace_worktrees(&self, workspace: &Workspace) -> Option<&WorktreeInventory> {
         spaceterm_core::organize::workspace_listing(workspace, self.snapshot.as_ref()?)
@@ -706,18 +706,11 @@ mod tests {
             workspace.tabs[0].panes[0].confirmed_directory.as_deref(),
             Some(Path::new("/srv/restore"))
         );
-        // The owning server's next protected source update moves both repository views.
+        // The owning server's next protected source update moves the Pane's Repository Status.
+        // The Workspace lists the repository its Tabs are in until the server moves them.
         workspace.tabs[0].panes[0].repository_directory = Some("/srv/nested".into());
         let view = repositories.view(pane_directory(&workspace.tabs[0].panes[0]), &presentation);
         assert_eq!(status(&view).head, RepositoryHead::Branch("nested".into()));
-        assert_eq!(
-            repositories
-                .workspace_worktrees(&workspace)
-                .unwrap()
-                .main_root,
-            Path::new("/srv/nested")
-        );
-        workspace.pinned_directory = Some("/srv/app/src".into());
         assert_eq!(
             repositories
                 .workspace_worktrees(&workspace)
@@ -791,8 +784,11 @@ mod tests {
         );
         assert_eq!(
             workspace_listing(&outside_git),
-            None,
-            "a directory the server reads outside Git stays outside"
+            Some(vec![
+                PathBuf::from("/srv/app"),
+                PathBuf::from("/srv/app-extra")
+            ]),
+            "the Workspace lists the repository its Tab is saved in until the server moves the Tab"
         );
         assert_eq!(
             workspace_listing(&main_unread),

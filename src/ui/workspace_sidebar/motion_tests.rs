@@ -61,10 +61,7 @@ fn workspace(worktrees: Vec<WorktreeRowViewModel>) -> WorkspaceRowViewModel {
         worktrees: Some(WorktreeSection {
             expanded: true,
             repository: None,
-            groups: vec![WorktreeGroup {
-                former_repository: None,
-                rows: worktrees,
-            }],
+            worktrees,
         }),
         creates_worktrees: false,
         active: true,

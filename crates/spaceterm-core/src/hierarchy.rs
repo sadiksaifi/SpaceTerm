@@ -2554,7 +2554,7 @@ mod tests {
             )
             .unwrap();
         let survivor = state.inventory.workspaces[0].tabs[1].id;
-        // As when the Tab opened in a Worktree; the promoted Root Tab follows its Root Pane.
+        // As when the Tab opened in a Worktree.
         state.inventory.workspaces[0].tabs[1].worktree_membership = WorktreeMembership::Opened;
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         state.inventory.close = Some(CloseInventory {

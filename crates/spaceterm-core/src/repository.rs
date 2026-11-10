@@ -217,8 +217,8 @@ pub struct DirectoryFacts {
     pub inside_git_directory: bool,
 }
 impl DirectoryFacts {
-    /// Whether a successful read placed the directory outside any repository. Only then does an
-    /// unpinned Root Tab leave its Worktree (ADR 0020).
+    /// Whether a successful read placed the directory outside any repository. Only then does a
+    /// Tab leave its Worktree (ADR 0020).
     pub fn outside_repository(&self) -> bool {
         self.failure.is_none() && self.repository.is_none() && !self.inside_git_directory
     }

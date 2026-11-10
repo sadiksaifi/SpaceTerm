@@ -49,7 +49,6 @@ const ICON_COLUMN_WIDTH: f32 = 18.0;
 const ROW_CONTENT_GAP: f32 = 10.0;
 const SINGLE_LINE_ROW_HEIGHT: f32 = 32.0;
 const WORKTREE_LEVEL_INDENT: f32 = 14.0;
-const FORMER_REPOSITORY_ROW_HEIGHT: f32 = 22.0;
 
 /// The chip carrying a Workspace row's hover and persistent selection. An emphasized selection
 /// marks a sidebar with keyboard focus.
@@ -171,11 +170,6 @@ fn worktree_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &Ap
     row_padding(appearance, cx).0 + appearance.spacing(WORKTREE_LEVEL_INDENT)
 }
 
-/// Where a Worktree row's text starts, after its icon.
-fn worktree_text_indent(appearance: &crate::ui::appearance::ChromeAppearance, cx: &App) -> Pixels {
-    worktree_indent(appearance, cx) + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP)
-}
-
 /// The one muted line an empty Workspace list shows where its first row would be. It speaks for
 /// the whole list, never for one server, so the list keeps no per-server placeholder. The stage
 /// beside it already says no Workspace is attached, so the line only says where they appear.
@@ -233,10 +227,6 @@ fn workspace_row_height(
     }
 }
 
-/// The height of a former repository's label.
-fn former_repository_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
-    appearance.spacing(FORMER_REPOSITORY_ROW_HEIGHT)
-}
 
 /// How much taller line 2 makes a row, with the gap above it.
 fn detail_line_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
@@ -697,7 +687,8 @@ impl WorkspaceSidebar {
                                 name,
                                 first_line,
                                 if renaming { None } else { machine },
-                                pinned && disclosing && !renaming,
+                                (pinned && disclosing && !renaming)
+                                    .then_some(text::TitleMark::Pinned),
                                 workspace_id.get(),
                                 row_text_appearance.clone(),
                             )))
@@ -815,7 +806,6 @@ impl WorkspaceSidebar {
                         workspace_row_height(appearance, group.frame.disclosed.reveal)
                     }
                     GroupRow::Worktree(_) => row_height(appearance),
-                    GroupRow::FormerRepository(_) => former_repository_height(appearance),
                 };
                 let motion = group.rows.motion(row, cx);
                 let face = top + motion.leading_gap;
@@ -1110,7 +1100,7 @@ impl WorkspaceSidebar {
                         GroupRow::Worktree(worktree_id) => {
                             Some(SidebarRowKey::Worktree(workspace_id, *worktree_id))
                         }
-                        GroupRow::Workspace | GroupRow::FormerRepository(_) => None,
+                        GroupRow::Workspace => None,
                     }))
                     .collect();
             let mut fades = open
@@ -1119,17 +1109,18 @@ impl WorkspaceSidebar {
                 .into_iter()
                 .flatten();
             let mut elements = vec![(GroupRow::Workspace, parent)];
-            for (row, content) in worktree_rows {
-                let fade = match content {
-                    GroupRowContent::Worktree(..) if open.is_some() => match fades.next() {
+            for (row, (worktree, position)) in worktree_rows {
+                let fade = match open {
+                    Some(_) => match fades.next() {
                         Some(fade) => Some(fade),
                         None => break,
                     },
-                    _ => None,
+                    None => None,
                 };
-                let element = self.render_group_row(
+                let element = self.render_worktree_row(
                     workspace_id,
-                    content,
+                    worktree,
+                    position,
                     fade,
                     sidebar.clone(),
                     window,
@@ -1141,7 +1132,7 @@ impl WorkspaceSidebar {
             // Every row holds a slot that grows it in, and draws the rows that left beside it,
             // each clipped to what showed of it, while their places close. Their faces take no
             // input and present no accessible element.
-            let departed = |rows: Vec<(Option<&DepartedRow>, Pixels)>| {
+            let departed = |rows: Vec<(Option<&WorktreeRowViewModel>, Pixels)>| {
                 (!rows.is_empty()).then(|| {
                     div()
                         .w_full()
@@ -1154,9 +1145,10 @@ impl WorkspaceSidebar {
                                 .flex_shrink_0()
                                 .overflow_hidden()
                                 .children(departed.map(|departed| {
-                                    self.render_group_row(
+                                    self.render_worktree_row(
                                         workspace_id,
-                                        departed.content(),
+                                        departed,
+                                        (1, 1),
                                         None,
                                         sidebar.clone(),
                                         window,
@@ -1528,58 +1520,8 @@ impl WorkspaceSidebar {
             .into_any_element()
     }
 
-    /// One row below a Workspace row: a Worktree row, or the label above a former repository's
-    /// Worktrees. A Worktree row without `fade` is closing or has left, so it takes no input.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one row render step needs its content, hover, owner, and host geometry"
-    )]
-    fn render_group_row(
-        &self,
-        workspace_id: WorkspaceId,
-        content: GroupRowContent<'_>,
-        fade: Option<RowFade>,
-        sidebar: WeakEntity<Self>,
-        window: &Window,
-        appearance: &crate::ui::appearance::ChromeAppearance,
-        cx: &App,
-    ) -> AnyElement {
-        match content {
-            GroupRowContent::Worktree(worktree, position) => self.render_worktree_row(
-                workspace_id,
-                worktree,
-                position,
-                fade,
-                sidebar,
-                window,
-                appearance,
-                cx,
-            ),
-            GroupRowContent::FormerRepository(name) => div()
-                .debug_selector({
-                    let name = name.clone();
-                    move || format!("worktree-former-repository-{name}")
-                })
-                .relative()
-                .w_full()
-                .h(former_repository_height(appearance))
-                .flex_shrink_0()
-                .flex()
-                .items_end()
-                .pl(worktree_text_indent(appearance, cx))
-                .pr(row_padding(appearance, cx).1)
-                .truncate()
-                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                .text_color(gpui_color(
-                    appearance
-                        .host_colors(spaceterm_ui::ControlHost::Panel)
-                        .row_secondary,
-                ))
-                .child(name.clone())
-                .into_any_element(),
-        }
-    }
-
+    /// A Worktree row below a Workspace row. Without `fade` it is closing or has left, so it
+    /// takes no input.
     #[expect(
         clippy::too_many_arguments,
         reason = "one row render step needs its model, set position, hover, owner, and host geometry"
@@ -1783,7 +1725,10 @@ impl WorkspaceSidebar {
                             .child(worktree.name.clone())
                             .into_any_element(),
                         None,
-                        false,
+                        worktree
+                            .outside_pane_directory
+                            .is_some()
+                            .then_some(text::TitleMark::OutsidePane),
                         text_id,
                         text_appearance.clone(),
                     ))
