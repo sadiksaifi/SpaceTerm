@@ -474,7 +474,12 @@ fn worktree_group_rows(section: &WorktreeSection) -> Vec<(GroupRow, WorktreeRowC
         .worktrees
         .iter()
         .enumerate()
-        .map(|(index, row)| (GroupRow::Worktree(row.worktree_id), (row, (index + 1, count))))
+        .map(|(index, row)| {
+            (
+                GroupRow::Worktree(row.worktree_id),
+                (row, (index + 1, count)),
+            )
+        })
         .collect()
 }
 

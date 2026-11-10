@@ -227,7 +227,6 @@ fn workspace_row_height(
     }
 }
 
-
 /// How much taller line 2 makes a row, with the gap above it.
 fn detail_line_height(appearance: &crate::ui::appearance::ChromeAppearance) -> Pixels {
     appearance.typography.style(TextRole::Secondary).line_height
@@ -683,15 +682,17 @@ impl WorkspaceSidebar {
                         div()
                             .flex()
                             .gap(appearance.spacing(ROW_CONTENT_GAP))
-                            .child(div().min_w_0().flex_1().child(text::title(
-                                name,
-                                first_line,
-                                if renaming { None } else { machine },
-                                (pinned && disclosing && !renaming)
-                                    .then_some(text::TitleMark::Pinned),
-                                workspace_id.get(),
-                                row_text_appearance.clone(),
-                            )))
+                            .child(
+                                div().min_w_0().flex_1().child(text::title(
+                                    name,
+                                    first_line,
+                                    if renaming { None } else { machine },
+                                    (pinned && disclosing && !renaming)
+                                        .then_some(text::TitleMark::Pinned),
+                                    workspace_id.get(),
+                                    row_text_appearance.clone(),
+                                )),
+                            )
                             .children(trailing),
                     )
                     .when(shows_detail, |lines| {

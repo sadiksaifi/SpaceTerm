@@ -2566,7 +2566,15 @@ impl WorkspaceManager {
                 if worktrees.is_none()
                     && let Some(worktree) = self.core_only_worktree(workspace.id(), cx)
                 {
-                    path = worktree.directory.clone();
+                    // Another computer's directory is shown as that computer reports it.
+                    path = if binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.machine.is_some())
+                    {
+                        worktree.directory_tooltip.clone()
+                    } else {
+                        worktree.directory.clone()
+                    };
                     repository = worktree.repository.clone();
                     if let Some(pane) = &worktree.outside_pane_directory {
                         tooltip.push_str(&format!("\n{OUTSIDE_PANE_LABEL}: {pane}"));

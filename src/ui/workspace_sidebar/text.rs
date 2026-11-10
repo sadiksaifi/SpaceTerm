@@ -226,7 +226,9 @@ pub(super) fn detail(
                 .flex_1()
                 .flex()
                 .items_center()
-                .when(pinned, |path| path.child(title_mark(TitleMark::Pinned, id, &appearance)))
+                .when(pinned, |path| {
+                    path.child(title_mark(TitleMark::Pinned, id, &appearance))
+                })
                 .child(
                     div()
                         .min_w_0()

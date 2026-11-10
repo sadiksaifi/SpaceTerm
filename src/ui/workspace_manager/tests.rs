@@ -13160,7 +13160,11 @@ mod workspace_repositories {
                 ["app", "app-feature"],
                 "the Workspace lists its own repository wherever its Root Pane is"
             );
-            let row = section.rows().next().cloned().expect("the app Worktree row");
+            let row = section
+                .rows()
+                .next()
+                .cloned()
+                .expect("the app Worktree row");
             (
                 row.worktree_id,
                 (

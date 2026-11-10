@@ -29,9 +29,7 @@ mod core_repositories {
         HeadGlyph, MAXIMUM_NAME_CHARS, SidebarBadge, chip_tooltip_line, sanitize_for_display,
     };
     use crate::ui::repository_status_store::{CorePullRequestsChanged, InstalledRepositoryStatus};
-    use crate::ui::workspace_sidebar::{
-        WorktreeRemoval, WorktreeRowViewModel, WorktreeSection,
-    };
+    use crate::ui::workspace_sidebar::{WorktreeRemoval, WorktreeRowViewModel, WorktreeSection};
     use crate::ui::workspaces::{
         CoreRepositories, LocalPresentation, pane_directory, workspace_directory,
     };
@@ -270,7 +268,8 @@ mod core_repositories {
                 let key = membership_key(root, saved, inventory, state, repositories);
                 // The Workspace lists one repository. A Core older than that rule can keep a Tab
                 // in another, which has no row here, so the Tab shows with the Workspace row.
-                if inventory.is_some_and(|inventory| key.repository().main_root() != inventory.main_root)
+                if inventory
+                    .is_some_and(|inventory| key.repository().main_root() != inventory.main_root)
                 {
                     continue;
                 }
