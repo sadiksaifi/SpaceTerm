@@ -58,16 +58,10 @@ fn root_directory(tab: &Tab) -> Option<&Path> {
         .map(Pane::repository_directory)
 }
 
-/// The repository a Workspace is in and the Worktree a Tab without one joins: the Root Tab's
-/// when it has one, else the first Tab's that does.
+/// The repository a Workspace is in and the Worktree a Tab without one joins.
 fn home(workspace: &Workspace) -> Option<(PathBuf, PathBuf)> {
-    let placed = |tab: &Tab| Some((tab.worktree_repository.clone()?, tab.worktree.clone()?));
-    workspace
-        .tabs
-        .iter()
-        .find(|tab| tab.id == workspace.root_tab)
-        .and_then(placed)
-        .or_else(|| workspace.tabs.iter().find_map(placed))
+    let tab = workspace.placed_tab()?;
+    Some((tab.worktree_repository.clone()?, tab.worktree.clone()?))
 }
 
 fn leave(tab: &mut Tab) -> bool {
@@ -206,16 +200,18 @@ impl Workspace {
 
     /// The Main Worktree of the repository this Workspace is in.
     pub fn repository(&self) -> Option<&Path> {
-        fn placed(tab: &Tab) -> Option<&Path> {
-            tab.worktree
-                .as_ref()
-                .and(tab.worktree_repository.as_deref())
-        }
+        self.placed_tab()?.worktree_repository.as_deref()
+    }
+
+    /// The Tab whose saved membership names this Workspace's repository: the Root Tab when it
+    /// has a Worktree, else the first Tab that does.
+    fn placed_tab(&self) -> Option<&Tab> {
+        let placed = |tab: &&Tab| tab.worktree.is_some() && tab.worktree_repository.is_some();
         self.tabs
             .iter()
             .find(|tab| tab.id == self.root_tab)
-            .and_then(placed)
-            .or_else(|| self.tabs.iter().find_map(placed))
+            .filter(placed)
+            .or_else(|| self.tabs.iter().find(placed))
     }
 }
 
