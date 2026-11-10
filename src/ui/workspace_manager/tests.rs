@@ -12062,6 +12062,66 @@ mod workspace_repositories {
         );
     }
 
+    /// A removal that discards changes and submodules and closes Tabs in other Workspaces gets
+    /// the specific confirmation. It names everything `--force` deletes.
+    #[gpui::test]
+    fn the_specific_removal_confirmation_should_name_submodule_directories(
+        cx: &mut TestAppContext,
+    ) {
+        use spaceterm_core::hierarchy::ConfirmedPane;
+        use spaceterm_core::worktree::AffectedTab;
+
+        let close = spaceterm_core::hierarchy::CloseInventory {
+            boot: [1; 32],
+            sessions: Vec::new(),
+            controls: Vec::new(),
+        };
+        let mut initial = published(1, "main", true);
+        initial.close = Some(close.clone());
+        let (harness, _, reads, cx) = paired_harness(cx, initial);
+        // Tabs in two Workspaces this window doesn't present, each with a running Session.
+        let tab = |id: u8| AffectedTab {
+            workspace: [id; 32],
+            tab: [id; 32],
+            panes: vec![ConfirmedPane {
+                id: [id; 32],
+                session: Some([id; 32]),
+            }],
+        };
+        reads.review_removals_as(spaceterm_core::worktree::Removal {
+            boot: close.boot,
+            confirmation: [5; 32],
+            root: MAIN_ROOT.into(),
+            path: FEATURE_ROOT.into(),
+            changes: true,
+            submodules: true,
+            tabs: vec![tab(40), tab(41)],
+        });
+        let feature = harness
+            .row(cx)
+            .worktrees
+            .and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.name.as_ref() == "app-feature")
+                    .map(|row| row.worktree_id)
+            })
+            .expect("the feature Worktree has a row");
+
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.request_machine_worktree_removal(harness.binding, feature, window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(form_reports(
+            "This deletes its uncommitted changes, untracked files, and submodule directories on \u{201C}penguin\u{201D}, closes 2 Tabs, and ends 2 Terminal Sessions for every client. The branch \u{201C}feature\u{201D} is kept.",
+            cx
+        ));
+    }
+
     /// Git found changes after the removal closed the feature Worktree's Tabs. The alert says
     /// the Tabs closed instead of saying nothing was removed.
     #[gpui::test]
