@@ -149,8 +149,9 @@ fn reconcile(workspace: &mut Workspace, snapshot: &Snapshot) -> bool {
                 (Place::Outside, WorktreeMembership::Following | WorktreeMembership::Repaired) => {
                     changed |= leave(tab)
                 }
-                // A repaired Tab keeps the Worktree it has and joins no other (ADR 0044). One
-                // with no Worktree has none to keep.
+                // As the leader, a repaired Tab keeps the Worktree it has and follows its shell
+                // into no other (ADR 0044). One with no Worktree has none to keep. A change of
+                // Pinned Directory still moves every Tab below.
                 (Place::Worktree { root, repository }, membership)
                     if membership == WorktreeMembership::Following
                         || (membership == WorktreeMembership::Repaired
@@ -564,6 +565,26 @@ mod tests {
         pin(&mut state, Some("/var"));
         state.reconcile_worktrees(&reads());
         assert_eq!((worktrees(&state), name(&state)), (vec![None, None], "var"));
+    }
+
+    #[test]
+    fn changing_the_pin_moves_a_repaired_tab_and_keeps_it_repaired() {
+        let mut state = workspace_in("/repo");
+        state.reconcile_worktrees(&reads());
+        open_in_feature(&mut state);
+        state
+            .repair_directory(root_pane(&state, 1), "/feature".into())
+            .unwrap();
+        state.reconcile_worktrees(&reads());
+
+        pin(&mut state, Some("/other"));
+        state.reconcile_worktrees(&reads());
+
+        assert_eq!(worktrees(&state), [Some("/other"), Some("/other")]);
+        assert_eq!(
+            state.inventory.workspaces[0].tabs[1].worktree_membership,
+            WorktreeMembership::Repaired
+        );
     }
 
     #[test]
