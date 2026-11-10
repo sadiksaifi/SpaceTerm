@@ -13144,6 +13144,83 @@ mod workspace_repositories {
         );
     }
 
+    /// A Core older than ADR 0020's one-repository rule lets the Root Tab leave while another Tab
+    /// stays in a repository with only its Main Worktree. Both Tabs keep a row that shows them.
+    #[gpui::test]
+    fn a_tab_an_older_core_left_outside_should_keep_a_row_beside_the_only_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        const NOTES: &str = "/srv/notes";
+        let mut older = published(1, "main", false);
+        let workspace = &mut older.workspaces[0];
+        workspace.tabs[0].worktree = None;
+        workspace.tabs[0].worktree_repository = None;
+        workspace.tabs[0].panes = vec![pane(ROOT_PANE, NOTES)];
+        workspace.tabs[1].worktree = Some(MAIN_ROOT.into());
+        workspace.tabs[1].panes = vec![pane(FEATURE_PANE, MAIN_ROOT)];
+        if let Some(snapshot) = &mut older.repositories {
+            snapshot.directories.push(DirectoryFacts {
+                inside_git_directory: false,
+                directory: NOTES.into(),
+                repository: None,
+                worktrees: None,
+                failure: None,
+            });
+        }
+        let (harness, cx) = harness(cx, older);
+        let active_worktree = |cx: &mut VisualTestContext| {
+            harness.manager.read_with(cx, |manager, cx| {
+                manager
+                    .workspaces
+                    .workspace(harness.binding)
+                    .and_then(|workspace| workspace.payload().read(cx).active_worktree())
+            })
+        };
+        let activate = |event: SidebarEvent, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                harness.manager.update(cx, |manager, cx| {
+                    manager.handle_sidebar_event(event, window, cx);
+                });
+            });
+            cx.run_until_parked();
+        };
+
+        let rows = harness
+            .row(cx)
+            .worktrees
+            .expect("the only Worktree keeps a row beside the Tab outside it")
+            .rows()
+            .map(|row| (row.name.to_string(), row.worktree_id, row.has_tabs))
+            .collect::<Vec<_>>();
+        let outside = active_worktree(cx);
+        let [(_, app, _)] = rows.as_slice() else {
+            panic!("one Worktree row, got {rows:?}");
+        };
+        activate(
+            SidebarEvent::ActivateWorktree {
+                workspace_id: harness.binding,
+                worktree_id: *app,
+                focus_pane: false,
+            },
+            cx,
+        );
+        let inside = active_worktree(cx);
+        activate(
+            SidebarEvent::Activate {
+                workspace_id: harness.binding,
+                focus_pane: false,
+            },
+            cx,
+        );
+
+        assert_eq!(rows, [("app".to_owned(), *app, true)]);
+        assert_eq!(
+            (outside, inside, active_worktree(cx)),
+            (None, Some(*app), None),
+            "the Worktree row shows its Tab and the Workspace row shows the Tab outside it"
+        );
+    }
+
     /// A Worktree row kept for a Tab whose Pane left it names the Worktree's own directory and
     /// branch, and tells where that Pane is instead. Inside the Worktree, the row still follows
     /// the Pane. Selecting the row shows the Tab it keeps.

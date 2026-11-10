@@ -317,7 +317,25 @@ mod core_repositories {
             cx: &App,
         ) -> Option<WorktreeSection> {
             self.core_worktrees(workspace_id, cx)
-                .filter(|section| section.worktrees.len() > 1)
+                .filter(|section| self.discloses(workspace_id, section, cx))
+        }
+
+        /// Whether a Workspace's Worktrees take rows of their own: two or more do, and so does
+        /// one whose Tabs share the Workspace with a Tab outside every Worktree. Each set of
+        /// Tabs then has a row that shows it. Only a Core older than ADR 0020's one-repository
+        /// rule keeps a Tab outside for longer than one read.
+        fn discloses(
+            &self,
+            workspace_id: WorkspaceId,
+            section: &WorktreeSection,
+            cx: &App,
+        ) -> bool {
+            section.worktrees.len() > 1
+                || (section.rows().any(|row| row.has_tabs)
+                    && self
+                        .workspaces
+                        .workspace(workspace_id)
+                        .is_some_and(|workspace| workspace.payload().read(cx).has_unscoped_tabs()))
         }
 
         /// The only Worktree of the repository a Workspace is in, which its row describes in
@@ -327,8 +345,10 @@ mod core_repositories {
             workspace_id: WorkspaceId,
             cx: &App,
         ) -> Option<WorktreeRowViewModel> {
-            let mut worktrees = self.core_worktrees(workspace_id, cx)?.worktrees;
-            (worktrees.len() == 1).then(|| worktrees.remove(0))
+            let section = self.core_worktrees(workspace_id, cx)?;
+            (!self.discloses(workspace_id, &section, cx))
+                .then(|| section.worktrees.into_iter().next())
+                .flatten()
         }
 
         /// Every Worktree of the repository a Workspace is in, or `None` outside a repository.
