@@ -36,68 +36,18 @@ pub fn workspace_worktrees<'a>(
     workspace_listing(inv.workspaces.iter().find(|w| w.id == workspace)?, repos)
 }
 
-/// The Worktrees of the repository a Workspace's row reads, as git on the server lists them.
+/// The Worktrees of the repository a Workspace is in, as git on the server lists them.
 ///
-/// A restarted server keeps no facts for a directory it cannot read, so a row in a removed
-/// Worktree has no listing of its own. The Main Worktree saved with the Tab membership that
-/// contains the row's directory then locates the repository, when the server reads it. The saved
-/// Main Worktree is only where to look: what the server reads there decides the listing, and a
-/// row the server reads outside any repository lists nothing.
-///
-/// The server publishes an unpinned Root Pane's new directory before it reads Git there. Its read
-/// reports the directory's repository before it lists that repository's Worktrees, and the server
-/// keeps the Root Tab's saved membership until the listing arrives, or after the read fails. Until
-/// a read succeeds the row lists the repository the Root Tab is still in, so a `cd` into another
-/// repository switches the row once, when the listing arrives.
+/// The Workspace is in the repository its Tabs' saved memberships name
+/// ([`Workspace::repository`]), wherever its shells and its Pinned Directory are. The saved Main
+/// Worktree is only where to look: what the server reads there decides the listing, so a
+/// Worktree removed outside SpaceTerm leaves it, and a restarted server lists a repository again
+/// once it reads any directory in it.
 pub fn workspace_listing<'a>(
     workspace: &Workspace,
     repos: &'a repository::Snapshot,
 ) -> Option<&'a repository::WorktreeInventory> {
-    let root_tab = workspace.tabs.iter().find(|t| t.id == workspace.root_tab);
-    let directory = match &workspace.pinned_directory {
-        Some(pinned) => pinned.as_path(),
-        None => {
-            let root_tab = root_tab?;
-            root_tab
-                .panes
-                .iter()
-                .find(|p| p.id == root_tab.root_pane)?
-                .repository_directory()
-        }
-    };
-    if let Some(inventory) = repos.directory_worktrees(directory) {
-        return Some(inventory);
-    }
-    // A successful read outside any repository decides the listing. Pending and failed reads,
-    // a repository's listing that has not arrived yet, and a Git directory keep the server's
-    // saved membership.
-    if repos
-        .facts(directory)
-        .is_some_and(repository::DirectoryFacts::outside_repository)
-    {
-        return None;
-    }
-    let containing = workspace
-        .tabs
-        .iter()
-        .filter_map(|tab| {
-            Some((
-                tab.worktree.as_deref()?,
-                tab.worktree_repository.as_deref()?,
-            ))
-        })
-        .filter(|(worktree, _)| directory.starts_with(worktree))
-        .max_by_key(|(worktree, _)| worktree.components().count())
-        .map(|(_, repository)| repository);
-    let followed = || {
-        if workspace.pinned_directory.is_some() {
-            return None;
-        }
-        root_tab?.worktree_repository.as_deref()
-    };
-    containing
-        .or_else(followed)
-        .and_then(|repository| repos.repository_worktrees(repository))
+    repos.repository_worktrees(workspace.repository()?)
 }
 
 pub fn new_tab(
@@ -504,7 +454,10 @@ mod tests {
     /// no longer lists it.
     #[test]
     fn a_failed_read_lists_the_repository_another_directory_still_reads() {
-        let state = state(None);
+        let mut state = state(None);
+        let workspace = &mut state.inventory.workspaces[0];
+        workspace.tabs[0].worktree = Some("/repo/source".into());
+        workspace.tabs[0].worktree_repository = Some("/repo".into());
         let mut repos = trees();
         repos.directories = vec![
             DirectoryFacts {
@@ -520,25 +473,40 @@ mod tests {
         );
     }
 
-    /// A pinned Workspace outside any repository whose Root Tab still names the repository its
-    /// Root Pane is in lists nothing, as the desktop does.
+    /// The first Tab ran `cd /tmp` while another Tab stayed in `/feature`. The Workspace is
+    /// still in the repository, so it lists it.
     #[test]
-    fn a_workspace_read_outside_any_repository_lists_nothing() {
-        let mut state = state(Some("/outside"));
+    fn a_workspace_lists_the_repository_its_tabs_are_in_wherever_its_shell_is() {
+        let mut state = state(None);
         let workspace = &mut state.inventory.workspaces[0];
         workspace.tabs[0].worktree = Some("/repo".into());
         workspace.tabs[0].worktree_repository = Some("/repo".into());
+        workspace.tabs[0].panes[0].repository_directory = Some("/tmp".into());
         let mut repos = trees();
         repos.directories = vec![
             DirectoryFacts {
                 inside_git_directory: false,
-                directory: "/outside".into(),
+                directory: "/tmp".into(),
                 repository: None,
                 worktrees: None,
                 failure: None,
             },
-            listing("/repo", "/repo", &["/repo"]),
+            listing("/feature", "/repo", &["/repo", "/feature"]),
         ];
+
+        assert_eq!(
+            listed(&state.inventory, &repos),
+            Some(vec![PathBuf::from("/repo"), PathBuf::from("/feature")])
+        );
+    }
+
+    /// No Tab is in a Worktree, so the Workspace is in no repository, even while another
+    /// Tab's shell sits in one.
+    #[test]
+    fn a_workspace_in_no_repository_lists_nothing() {
+        let state = state(None);
+        let mut repos = trees();
+        repos.directories = vec![listing("/repo/source", "/repo", &["/repo"])];
 
         assert_eq!(listed(&state.inventory, &repos), None);
     }
