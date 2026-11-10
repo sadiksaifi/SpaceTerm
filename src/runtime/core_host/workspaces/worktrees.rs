@@ -1459,4 +1459,35 @@ mod tests {
         assert!(!tree.exists());
         host.shutdown().unwrap();
     }
+
+    /// New Worktree reads a repository with more branches than it offers, and offers as many as
+    /// it can.
+    #[test]
+    fn a_repository_with_more_branches_than_the_bound_still_reads_its_context() {
+        let git = GitFixture::new();
+        let head = std::process::Command::new("git")
+            .args(["-C", git.0.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let head = String::from_utf8(head.stdout).unwrap();
+        let refs: String = (0..=crate::worktrees::git::MAXIMUM_BRANCHES)
+            .map(|index| format!("{} refs/heads/branch-{index:05}\n", head.trim()))
+            .collect();
+        std::fs::write(git.0.join(".git/packed-refs"), refs).unwrap();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = WorkspaceHost::new(prototype);
+        create_workspace(&mut host, 1);
+
+        let context = read_worktree(&mut host, Read::Context { root: git.0.clone() });
+
+        let Ok(ReadReply::Context { branches, .. }) = context else {
+            panic!("the Context read failed: {context:?}");
+        };
+        assert_eq!(
+            (branches.local.len(), branches.remote.len()),
+            (crate::worktrees::git::MAXIMUM_BRANCHES, 0)
+        );
+        host.shutdown().unwrap();
+    }
 }

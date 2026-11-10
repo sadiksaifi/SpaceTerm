@@ -29,6 +29,8 @@ const NUL_LIST_VERSION: ToolVersion = ToolVersion {
 };
 /// Discovery prints a few short paths; a listing holds a few hundred bytes per Worktree.
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+/// The most branches a branch listing offers.
+pub(crate) const MAXIMUM_BRANCHES: usize = 4096;
 
 pub(crate) use spaceterm_core::worktree::{
     Branch as WorktreeBranch, BranchName, Branches as BranchList,
@@ -215,18 +217,33 @@ impl LocalWorktreeGit {
         ))
     }
 
-    /// Lists the local and fetched remote-tracking branches of the repository at `root`.
+    /// Lists the local and fetched remote-tracking branches of the repository at `root`, newest
+    /// commit first. Past [`MAXIMUM_BRANCHES`], local branches come before remote-tracking ones,
+    /// so the branches a new branch usually starts from stay listed.
     pub(crate) fn branches(
         &self,
         root: &Path,
         cancellation: &CancellationToken,
     ) -> Result<BranchList, RepositoryReadError> {
-        let mut output = Vec::new();
-        let exit = self.git(root, &BRANCH_ARGUMENTS, &mut output, cancellation)?;
-        if !exit.success() {
-            return Err(RepositoryReadError::Unavailable);
+        let mut branches = BranchList::default();
+        for namespace in ["refs/heads", "refs/remotes"] {
+            let remaining = MAXIMUM_BRANCHES - branches.local.len() - branches.remote.len();
+            if remaining == 0 {
+                break;
+            }
+            let count = format!("--count={remaining}");
+            let mut arguments = BRANCH_ARGUMENTS.to_vec();
+            arguments.extend([count.as_str(), namespace]);
+            let mut output = Vec::new();
+            let exit = self.git(root, &arguments, &mut output, cancellation)?;
+            if !exit.success() {
+                return Err(RepositoryReadError::Unavailable);
+            }
+            let listed = parse_branches(&output)?;
+            branches.local.extend(listed.local);
+            branches.remote.extend(listed.remote);
         }
-        parse_branches(&output)
+        Ok(branches)
     }
 
     /// Creates a Worktree at `path` from the repository at `root`. Git creates missing parent
@@ -615,12 +632,10 @@ const SUBMODULE_PATH_ARGUMENTS: [&str; 6] = [
 ];
 
 /// Newest first, so the branches people work on lead the pickers.
-const BRANCH_ARGUMENTS: [&str; 5] = [
+const BRANCH_ARGUMENTS: [&str; 3] = [
     "for-each-ref",
     "--sort=-committerdate",
     "--format=%(refname)",
-    "refs/heads",
-    "refs/remotes",
 ];
 
 /// Parses one full reference name per line. A remote's `HEAD` names no branch of its own.
@@ -780,27 +795,36 @@ mod tests {
 
     #[test]
     fn branches_should_list_local_and_fetched_remote_branches_without_remote_heads() {
-        let runner = FakeRunner::new([exit(
-            0,
-            "refs/heads/feature/login\nrefs/remotes/origin/HEAD\nrefs/heads/main\n\
-             refs/remotes/origin/main\nrefs/remotes/upstream/fix/HEAD\n",
-        )]);
+        let runner = FakeRunner::new([
+            exit(0, "refs/heads/feature/login\nrefs/heads/main\n"),
+            exit(
+                0,
+                "refs/remotes/origin/HEAD\nrefs/remotes/origin/main\n\
+                 refs/remotes/upstream/fix/HEAD\n",
+            ),
+        ]);
 
         let branches = git(&runner, 47)
             .branches(Path::new("/src/app"), &CancellationToken::default())
             .unwrap();
 
+        let requests = runner.requests();
         assert_eq!(
-            tail(&runner.requests()[0], 7),
-            [
-                "-C",
-                "/src/app",
-                "for-each-ref",
-                "--sort=-committerdate",
-                "--format=%(refname)",
-                "refs/heads",
-                "refs/remotes"
-            ]
+            (tail(&requests[0], 7), tail(&requests[1], 2)),
+            (
+                [
+                    "-C",
+                    "/src/app",
+                    "for-each-ref",
+                    "--sort=-committerdate",
+                    "--format=%(refname)",
+                    "--count=4096",
+                    "refs/heads",
+                ]
+                .map(String::from)
+                .to_vec(),
+                ["--count=4094", "refs/remotes"].map(String::from).to_vec(),
+            )
         );
         assert_eq!(
             (branches.local, branches.remote),
