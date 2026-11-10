@@ -1,7 +1,9 @@
 //! The title-bar update control. It appears only while something needs doing or reading and shows
 //! one glyph: blue for action and progress, orange for problems and overdue states. One pending
 //! item is a plain button that performs its action, or a status while it works. Two or more open
-//! a compact menu with one line per Machine, "Restart All…" and Recent.
+//! a compact menu with one line per Machine, "Restart All…" and Recent. Work shows only when a
+//! person started it on this desktop, or when it is a Core restart. The presentation decides
+//! that.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Pixels, Rgba, SharedString, Window, div};

@@ -11,15 +11,19 @@
 //! not retried automatically and raises no notice. It stays in the Machine's `failed_push`,
 //! because a push that breaks off or runs out of disk space records nothing in the Core's
 //! facts, so every surface explains it and offers Try Again.
+//!
+//! It also marks each Machine with what only this desktop knows: the check or install a person
+//! started here that the Core has not ended, and when the Core's own download first failed while
+//! the Core keeps trying. The presentation shows the first and keeps quiet about the second.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
-use spaceterm_core::update::facts::Version;
+use spaceterm_core::update::facts::{FailureKind, InstallFailure, Version};
 
 use super::{
-    ActionFailure, FailedPush, MachineAction, MachineId, MachineLink, MachinePreview,
+    ActionFailure, Asked, FailedPush, MachineAction, MachineId, MachineLink, MachinePreview,
     MachineUpdate, MachineUpdatesAdapter, MachineUpdatesEvent,
 };
 use crate::updates::presentation::{self, Approval, Confirmation, Dismissed};
@@ -135,6 +139,13 @@ pub(crate) struct MachineUpdates {
     dismissed: Dismissed,
     /// Actions performed that have not finished, oldest first.
     performed: Vec<(MachineId, MachineAction, Surface)>,
+    /// Each check or install a person started, and whether its request answered. It stays
+    /// until the request answered and the Core's facts report no operation, because the answer
+    /// and the facts that end the work arrive in either order.
+    asked: Vec<(MachineId, Asked, bool)>,
+    /// When each Machine's own download first failed, while its Core tries again by itself.
+    /// None once a person tried it from this desktop, so that failure shows at once.
+    retrying: HashMap<MachineId, Option<u64>>,
     /// Each bundled Core version installed automatically in this run, by Machine.
     offered: HashSet<(MachineId, Version)>,
     /// Machines whose automatic install has not finished, and the version it pushes. Its
@@ -172,6 +183,8 @@ impl MachineUpdates {
                 machines: Vec::new(),
                 dismissed: Dismissed::new(),
                 performed: Vec::new(),
+                asked: Vec::new(),
+                retrying: HashMap::new(),
                 offered: HashSet::new(),
                 installing: Vec::new(),
                 startup_check: false,
@@ -216,12 +229,62 @@ impl MachineUpdates {
         surface: Surface,
         cx: &mut Context<Self>,
     ) {
-        if let MachineAction::DismissFailure(id) = action {
-            self.dismissed.insert((machine, id));
-            cx.notify();
+        match action {
+            MachineAction::DismissFailure(id) => {
+                self.dismissed.insert((machine, id));
+            }
+            MachineAction::CheckAgain => self.asked.push((machine, Asked::Check, false)),
+            MachineAction::Install => self.asked.push((machine, Asked::Install, false)),
+            MachineAction::Restart | MachineAction::Start | MachineAction::Stop => {}
         }
+        self.mark();
+        cx.notify();
         self.performed.push((machine, action.clone(), surface));
         self.adapter.perform(machine, action);
+    }
+
+    /// Writes what only this desktop knows onto each Machine: the work a person started here
+    /// and when the Core's own download first failed. The adapter's updates carry neither.
+    fn mark(&mut self) {
+        for update in &mut self.machines {
+            let machine = update.machine;
+            let facts = update.facts.as_ref();
+            let asked = self
+                .asked
+                .iter()
+                .find(|(id, ..)| *id == machine)
+                .map(|(_, asked, _)| *asked);
+            let failure = facts
+                .and_then(|facts| facts.last_failure.as_ref())
+                .filter(|failure| failure.kind == FailureKind::Install(InstallFailure::Download));
+            match failure {
+                None => {
+                    self.retrying.remove(&machine);
+                }
+                Some(_) if asked.is_some() => {
+                    self.retrying.insert(machine, None);
+                }
+                Some(failure) => {
+                    self.retrying.entry(machine).or_insert(Some(failure.at));
+                }
+            }
+            let working = matches!(
+                update.link,
+                MachineLink::Connected | MachineLink::Incompatible(_)
+            ) && facts.is_some_and(|facts| facts.operation.is_some());
+            self.asked
+                .retain(|(id, _, answered)| *id != machine || !answered || working);
+            update.asked = self
+                .asked
+                .iter()
+                .find(|(id, ..)| *id == machine)
+                .map(|(_, asked, _)| *asked);
+            update.retrying_since = self.retrying.get(&machine).copied().flatten();
+        }
+        let machines = &self.machines;
+        let known = |machine: &MachineId| machines.iter().any(|update| update.machine == *machine);
+        self.asked.retain(|(machine, ..)| known(machine));
+        self.retrying.retain(|machine, _| known(machine));
     }
 
     /// Asks each affected Core to preview its Restart or Stop, all at once. Each preview that
@@ -352,10 +415,25 @@ impl MachineUpdates {
                     self.record_push(machine, automatic.clone(), &outcome);
                 }
                 if automatic.is_none() {
+                    let answered = match action {
+                        MachineAction::CheckAgain => Some(Asked::Check),
+                        MachineAction::Install => Some(Asked::Install),
+                        _ => None,
+                    };
+                    if let Some(entry) = self
+                        .asked
+                        .iter_mut()
+                        .find(|(id, asked, done)| {
+                            *id == machine && Some(*asked) == answered && !done
+                        })
+                    {
+                        entry.2 = true;
+                    }
                     self.finish_performed(machine, action, outcome, cx);
                 }
             }
         }
+        self.mark();
         self.install_bundled(cx);
         cx.notify();
     }
@@ -503,7 +581,8 @@ mod tests {
     use crate::updates::presentation::Command;
     use spaceterm_core::protocol::capability::{Capabilities, Capability};
     use spaceterm_core::update::facts::{
-        Operation, PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts,
+        FailureKind, InstallFailure, Operation, PendingVersion, Platform, Protocols, UpdateCheck,
+        UpdateFacts, UpdateFailure,
     };
 
     #[test]
@@ -562,6 +641,154 @@ mod tests {
             push: Some(Version::parse(push).unwrap()),
             ..update
         }
+    }
+
+    fn installed(cx: &mut gpui::TestAppContext) -> (Rc<ScriptedMachines>, Entity<MachineUpdates>) {
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
+        (adapter, store)
+    }
+
+    /// A check or install a person starts is marked from the click until the Core's facts show
+    /// the work ended, whichever of the request's answer and those facts arrives first.
+    #[gpui::test]
+    fn work_a_person_starts_is_marked_until_the_core_ends_it(cx: &mut gpui::TestAppContext) {
+        let (adapter, store) = installed(cx);
+        let penguin = update("0.8.0", None);
+        let machine = penguin.machine;
+        let mut checking = penguin.clone();
+        checking.facts.as_mut().unwrap().operation = Some(Operation::Checking);
+        let asked = |cx: &mut gpui::TestAppContext| {
+            store.read_with(cx, |store, _| store.machines()[0].asked)
+        };
+        let check_again = |cx: &mut gpui::TestAppContext| {
+            store.update(cx, |store, cx| {
+                store.perform(machine, MachineAction::CheckAgain, Surface::Window, cx);
+            });
+        };
+        let finished = |action| MachineUpdatesEvent::Finished {
+            machine,
+            action,
+            outcome: Ok(()),
+        };
+        adapter.emit(MachineUpdatesEvent::Machines(vec![penguin.clone()]));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None);
+
+        check_again(cx);
+        assert_eq!(asked(cx), Some(Asked::Check), "from the click");
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(checking.clone())));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), Some(Asked::Check));
+        // The request answers before the facts that end the check arrive.
+        adapter.emit(finished(MachineAction::CheckAgain));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), Some(Asked::Check));
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(penguin.clone())));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None);
+
+        // The facts that end the check arrive before the request answers.
+        check_again(cx);
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(checking.clone())));
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(penguin.clone())));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), Some(Asked::Check));
+        adapter.emit(finished(MachineAction::CheckAgain));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None);
+
+        store.update(cx, |store, cx| {
+            store.perform(machine, MachineAction::Install, Surface::Settings, cx);
+        });
+        assert_eq!(asked(cx), Some(Asked::Install));
+        adapter.emit(finished(MachineAction::Install));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None);
+
+        // The Core's own check is nobody's.
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(checking)));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None);
+    }
+
+    /// The bundled Core's automatic install is not a person's, so it is not marked.
+    #[gpui::test]
+    fn an_automatic_install_is_not_marked(cx: &mut gpui::TestAppContext) {
+        let (adapter, store) = installed(cx);
+        let penguin = offered(update("0.8.0", None), "0.9.0");
+        let machine = penguin.machine;
+        adapter.emit(MachineUpdatesEvent::Machines(vec![penguin.clone()]));
+        cx.run_until_parked();
+        assert_eq!(adapter.performed(), [(machine, MachineAction::Install)]);
+        let mut installing = penguin;
+        installing.facts.as_mut().unwrap().operation = Some(Operation::Installing {
+            version: Version::parse("0.9.0").unwrap(),
+            received: 1,
+            total: 2,
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(installing)));
+        cx.run_until_parked();
+        assert_eq!(store.read_with(cx, |store, _| store.machines()[0].asked), None);
+    }
+
+    /// A Core's own failed download is dated from its first failure while the Core keeps
+    /// trying, until a person tries it from this desktop.
+    #[gpui::test]
+    fn a_cores_own_failed_download_is_dated_until_a_person_tries_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (adapter, store) = installed(cx);
+        let failed = |id, at, reason| {
+            let mut update = update("0.8.0", None);
+            update.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+                id,
+                at,
+                version: Version::parse("0.9.0").unwrap(),
+                kind: FailureKind::Install(reason),
+            });
+            update
+        };
+        let machine = update("0.8.0", None).machine;
+        let since = |cx: &mut gpui::TestAppContext| {
+            store.read_with(cx, |store, _| store.machines()[0].retrying_since)
+        };
+        let changed = |update, cx: &mut gpui::TestAppContext| {
+            adapter.emit(MachineUpdatesEvent::Changed(Box::new(update)));
+            cx.run_until_parked();
+        };
+        adapter.emit(MachineUpdatesEvent::Machines(vec![failed(
+            1,
+            500,
+            InstallFailure::Download,
+        )]));
+        cx.run_until_parked();
+        assert_eq!(since(cx), Some(500));
+        // The Core tries again and fails again.
+        changed(failed(2, 900, InstallFailure::Download), cx);
+        assert_eq!(since(cx), Some(500));
+        // Only a download is tried again by itself.
+        changed(failed(3, 950, InstallFailure::DiskFull), cx);
+        assert_eq!(since(cx), None);
+        changed(failed(4, 2_000, InstallFailure::Download), cx);
+        assert_eq!(since(cx), Some(2_000));
+
+        store.update(cx, |store, cx| {
+            store.perform(machine, MachineAction::Install, Surface::Window, cx);
+        });
+        assert_eq!(since(cx), None, "the person tries it");
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::Install,
+            outcome: Err(ActionFailure::Failed),
+        });
+        changed(failed(5, 2_100, InstallFailure::Download), cx);
+        assert_eq!(since(cx), None, "the person's own try failed");
+        // A download that works ends it, and a later failure is dated anew.
+        changed(update("0.8.0", None), cx);
+        changed(failed(6, 3_000, InstallFailure::Download), cx);
+        assert_eq!(since(cx), Some(3_000));
     }
 
     /// The bundled Core installs with no click on each Machine offered it, once per Machine and

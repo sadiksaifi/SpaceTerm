@@ -464,6 +464,42 @@ fn an_install_shows_in_the_title_bar_only_when_a_person_started_it() {
 }
 
 #[test]
+fn a_download_a_core_retries_by_itself_stays_out_of_the_title_bar_for_a_day() {
+    let failed = |reason, retrying_since| {
+        let mut update = machine(PENGUIN, "penguin", 0);
+        update.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+            id: 7,
+            at: NOW - 60,
+            version: version("0.9.0"),
+            kind: FailureKind::Install(reason),
+        });
+        update.retrying_since = retrying_since;
+        update
+    };
+    let quiet = present(&[failed(InstallFailure::Download, Some(NOW - DAY + 1))]);
+    assert_eq!(quiet.control(), Control::Hidden);
+    // Settings and the menu bar extra show it at once.
+    let row = quiet.machine(PENGUIN).unwrap().settings_row();
+    assert_eq!(row.status.as_ref(), "Install failed");
+    assert_eq!(row.button.unwrap().label.as_ref(), "Try Again");
+    assert_eq!(quiet.extra_rows()[0].tone, Tone::Problem);
+
+    for shown in [
+        // It kept failing for a day.
+        failed(InstallFailure::Download, Some(NOW - DAY)),
+        // A person tried it from this desktop.
+        failed(InstallFailure::Download, None),
+        // Nothing but a download is tried again by itself.
+        failed(InstallFailure::DiskFull, Some(NOW - 60)),
+    ] {
+        assert_eq!(
+            single(&present(&[shown])).label.as_ref(),
+            "penguin Install Failed"
+        );
+    }
+}
+
+#[test]
 fn a_cores_own_check_changes_no_surface() {
     let quiet = machine(PENGUIN, "penguin", 3);
     let mut checking = quiet.clone();
@@ -589,6 +625,7 @@ fn every_core_label_names_its_subject() {
             core_too_old: false,
             skipped: None,
             asked: None,
+            retrying: false,
             state,
         };
         assert!(

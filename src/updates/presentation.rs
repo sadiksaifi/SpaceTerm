@@ -459,6 +459,9 @@ pub(crate) struct MachineView {
     skipped: Option<Version>,
     /// The work a person started on this desktop that the Core has not ended.
     asked: Option<Asked>,
+    /// The Core tries its own failed download again by itself and has for less than
+    /// [`RETRY_QUIETLY_FOR`].
+    retrying: bool,
     pub(crate) state: MachineState,
 }
 
@@ -479,14 +482,18 @@ impl MachineView {
             core_too_old: update.link == MachineLink::Incompatible(Incompatible::ListenerTooOld),
             skipped: facts.and_then(|facts| facts.skipped.clone()),
             asked: update.asked,
+            retrying: update
+                .retrying_since
+                .is_some_and(|since| now.saturating_sub(since) < RETRY_QUIETLY_FOR),
             state: machine_state(update, dismissed, now),
         }
     }
 
     /// Whether the title-bar control counts this Machine as an item. A state that needs the
     /// person is one. Work in progress is one only when the person started it on this desktop,
-    /// so a Core's own check or install stays quiet. A restart is always one, because the
-    /// Machine's Workspaces wait for it.
+    /// so a Core's own check or install stays quiet, and so does its failed download while the
+    /// Core still tries again by itself. A restart is always one, because the Machine's
+    /// Workspaces wait for it.
     fn in_title_bar(&self) -> bool {
         match &self.state {
             MachineState::Current
@@ -505,6 +512,10 @@ impl MachineView {
             MachineState::Ready { .. } | MachineState::Overdue { .. } => {
                 self.restart_asks() || self.core_too_old
             }
+            MachineState::InstallFailed {
+                reason: InstallFailure::Download,
+                ..
+            } => !self.retrying,
             MachineState::Restarting { .. }
             | MachineState::Checking
             | MachineState::CoreTooOld { .. }
