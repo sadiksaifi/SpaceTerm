@@ -659,7 +659,7 @@ mod core_repositories {
     ) -> Option<&'a WorktreeInventory> {
         repositories
             .worktrees(root)
-            .or_else(|| repositories.worktrees(saved?))
+            .or_else(|| repositories.repository_worktrees(saved?))
     }
 
     /// The record a Worktree this window never saw listed presents: the server's listing of it

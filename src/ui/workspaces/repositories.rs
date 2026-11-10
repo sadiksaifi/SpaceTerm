@@ -106,6 +106,11 @@ impl CoreRepositories {
         self.snapshot.as_ref()?.directory_worktrees(directory)
     }
 
+    /// The Worktrees of the repository whose Main Worktree is `main_root`, including a bare one.
+    pub(crate) fn repository_worktrees(&self, main_root: &Path) -> Option<&WorktreeInventory> {
+        self.snapshot.as_ref()?.repository_worktrees(main_root)
+    }
+
     /// The Worktrees of the repository a Workspace's row reads, as git on the server lists them.
     /// [`spaceterm_core::organize::workspace_listing`] owns the rule the CLI shares.
     pub(crate) fn workspace_worktrees(&self, workspace: &Workspace) -> Option<&WorktreeInventory> {

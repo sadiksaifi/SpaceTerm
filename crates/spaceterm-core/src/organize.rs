@@ -95,7 +95,7 @@ pub fn workspace_listing<'a>(
     };
     containing
         .or_else(followed)
-        .and_then(|repository| repos.directory_worktrees(repository))
+        .and_then(|repository| repos.repository_worktrees(repository))
 }
 
 pub fn new_tab(
@@ -536,5 +536,33 @@ mod tests {
         ];
 
         assert_eq!(listed(&state.inventory, &repos), None);
+    }
+
+    /// The Root Pane ran `cd` into a directory the server has not read yet. The Root Tab is
+    /// still in a linked Worktree of a bare repository, whose directory the server reads outside
+    /// any work tree.
+    #[test]
+    fn a_pending_read_lists_the_root_tab_repository_when_its_main_worktree_is_bare() {
+        let mut state = state(None);
+        let workspace = &mut state.inventory.workspaces[0];
+        workspace.tabs[0].worktree = Some("/wt".into());
+        workspace.tabs[0].worktree_repository = Some("/app.git".into());
+        let mut repos = trees();
+        let mut linked = listing("/wt", "/app.git", &["/app.git", "/wt"]);
+        linked.worktrees.as_mut().unwrap().worktrees[0].head = WorktreeHead::Bare;
+        repos.directories = vec![
+            DirectoryFacts {
+                directory: "/app.git".into(),
+                repository: None,
+                worktrees: None,
+                failure: None,
+            },
+            linked,
+        ];
+
+        assert_eq!(
+            listed(&state.inventory, &repos),
+            Some(vec![PathBuf::from("/app.git"), PathBuf::from("/wt")])
+        );
     }
 }
