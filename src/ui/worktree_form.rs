@@ -509,6 +509,8 @@ impl WorktreeForm {
         self.answered();
         match action {
             FormAction::Cancel if self.pending && !self.backend.connected() => {
+                // A Create that has not written yet must not write once the connection returns.
+                self.backend.cancel();
                 DialogCloseDecision::Allow
             }
             FormAction::Cancel if self.pending => {
@@ -1609,6 +1611,26 @@ mod tests {
         assert_eq!(lost, creating(CONNECTION_LOST));
         assert_eq!(*held.events.borrow(), [WorktreeFormEvent::Cancelled]);
         assert!(!held.form.read_with(cx, |form, _| form.is_open()));
+    }
+
+    /// The connection drops while the location is checked. Cancel closes the form at once, and
+    /// the Create must not write once the connection returns.
+    #[gpui::test]
+    fn cancel_while_offline_should_stop_a_create_that_has_not_written(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(cx);
+        held.backend.stoppable.set(true);
+        held.backend.disconnected.set(true);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(150));
+        cx.run_until_parked();
+
+        click("modal-action-new-worktree-cancel", cx);
+
+        assert!(!held.form.read_with(cx, |form, _| form.is_open()));
+        assert!(
+            !held.backend.stoppable.get(),
+            "Cancel stopped the Create before its write"
+        );
     }
 
     #[gpui::test]
