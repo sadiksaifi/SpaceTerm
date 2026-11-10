@@ -2562,8 +2562,10 @@ impl WorkspaceManager {
                 };
                 let worktrees = self.worktree_section(workspace.id(), cx);
                 // A Workspace in a repository with one Worktree describes that Worktree, wherever
-                // its shells are, as a collapsed row describes its Active Worktree.
+                // its shells are, as a collapsed row describes its Active Worktree. A pinned one
+                // keeps its Pinned Directory, which its pin marks.
                 if worktrees.is_none()
+                    && !binding.as_ref().is_some_and(|binding| binding.pinned)
                     && let Some(worktree) = self.core_only_worktree(workspace.id(), cx)
                 {
                     // Another computer's directory is shown as that computer reports it.

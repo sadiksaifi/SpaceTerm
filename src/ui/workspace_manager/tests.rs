@@ -13221,6 +13221,25 @@ mod workspace_repositories {
         );
     }
 
+    /// A pinned Workspace in a repository with only its Main Worktree keeps its Pinned Directory
+    /// on its row while its Pane is elsewhere in the Worktree.
+    #[gpui::test]
+    fn a_pinned_workspace_row_should_keep_its_pinned_directory_in_its_only_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        let mut pinned = published(1, "main", false);
+        let workspace = &mut pinned.workspaces[0];
+        workspace.pinned_directory = Some(MAIN_ROOT.into());
+        workspace.tabs.retain(|tab| tab.id == ROOT_TAB);
+        workspace.tabs[0].panes = vec![pane(ROOT_PANE, "/srv/app/src")];
+        let (harness, cx) = harness(cx, pinned);
+
+        let row = harness.row(cx);
+
+        assert!(row.pinned && row.worktrees.is_none());
+        assert_eq!(row.path.as_ref(), MAIN_ROOT);
+    }
+
     /// A Worktree row kept for a Tab whose Pane left it names the Worktree's own directory and
     /// branch, and tells where that Pane is instead. Inside the Worktree, the row still follows
     /// the Pane. Selecting the row shows the Tab it keeps.
