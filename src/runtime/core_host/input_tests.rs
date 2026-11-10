@@ -138,7 +138,7 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
     let mut served = Served::new(binding);
     // Terminal Sessions ask the connection to publish.
     served.ticker(Arc::new(|| {}));
-    let outbox = Outbox::new(Arc::new(|| {}));
+    let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
     served.admitted(&PEER, "Test".into(), outbox.clone());
     let claim = reply(
         &mut served,

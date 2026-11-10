@@ -114,7 +114,7 @@ impl HostCommands for Host {
 fn served() -> (Served<Host>, Arc<Mutex<Sessions>>, Outbox) {
     let sessions = Arc::new(Mutex::new(Sessions::default()));
     let mut served = Served::new(Host(Arc::clone(&sessions)));
-    let outbox = Outbox::new(Arc::new(|| {}));
+    let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
     served.admitted(&PEER, "Test".into(), outbox.clone());
     (served, sessions, outbox)
 }

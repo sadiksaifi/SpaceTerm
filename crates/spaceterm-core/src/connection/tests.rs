@@ -147,7 +147,7 @@ impl Harness {
             connection: [8; 32],
             pairing,
         };
-        let outbox = Outbox::new(Arc::new(|| {}));
+        let outbox = Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK);
         let recorded = Arc::new(Mutex::new(Recorded::default()));
         let mut service: Box<dyn PaneService> = Box::new(Toy(Arc::clone(&recorded)));
         service.admitted(&peer, "Build Mac".into(), outbox.clone());

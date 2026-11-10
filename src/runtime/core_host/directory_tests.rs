@@ -101,7 +101,7 @@ fn a_directory_read_replies_when_it_settles_without_being_polled() {
         pairing: None,
     };
     let mut served = super::dispatch::Served::new(WorkspaceHost::new(host()));
-    let outbox = Outbox::new(Arc::new(|| {}));
+    let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
     served.admitted(&PEER, "Test".into(), outbox.clone());
     let replies = |outbox: &Outbox| {
         let mut assembler = Assembler::default();

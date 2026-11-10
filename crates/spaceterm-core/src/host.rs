@@ -1070,7 +1070,7 @@ fn serve_local(
             name,
             work: status.work,
         },
-        Outbox::new(wake),
+        Outbox::new(wake, status.work),
         waker,
         environment,
     );
@@ -1291,7 +1291,7 @@ mod tests {
                         name: "Test".into(),
                         work: crate::protocol::version::WORK,
                     },
-                    Outbox::new(wake),
+                    Outbox::new(wake, crate::protocol::version::WORK),
                     waker,
                     &environment,
                 )
@@ -1387,7 +1387,7 @@ mod tests {
                         name: "Test".into(),
                         work: crate::protocol::version::WORK,
                     },
-                    Outbox::new(wake),
+                    Outbox::new(wake, crate::protocol::version::WORK),
                     waker,
                     &environment,
                 )
@@ -1526,7 +1526,7 @@ mod tests {
                                 name: "Test".into(),
                                 work,
                             },
-                            Outbox::new(wake),
+                            Outbox::new(wake, work),
                             waker,
                             &environment,
                         );

@@ -7,6 +7,7 @@
 mod admission;
 pub mod capability;
 pub mod frame;
+pub mod inventory_1_0;
 pub mod limits;
 mod major;
 pub mod message;

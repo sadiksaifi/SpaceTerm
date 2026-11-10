@@ -814,7 +814,7 @@ mod tests {
                 connection: [2; 32],
                 pairing: None,
             },
-            super::super::outbox::Outbox::new(wake),
+            super::super::outbox::Outbox::new(wake, crate::protocol::version::WORK),
             sync,
             None,
             Instant::now(),

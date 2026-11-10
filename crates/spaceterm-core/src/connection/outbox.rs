@@ -18,8 +18,9 @@
 //! lock, and so are semantic updates, one message per L1 turn.
 use super::Wake;
 use super::carrier::Priority;
-use crate::protocol::frame::{EncodeError, encode_core};
+use crate::protocol::frame::{EncodeError, encode_core, encode_inventory};
 use crate::protocol::screen::ScreenUpdate;
+use crate::protocol::version::ProtocolVersion;
 use crate::protocol::{
     AccessibilityMessage, Channel, CoreMessage, Fatal, Frame, InventoryRevision, PaneEvent,
     PaneMessage, Ping, Pong, Refusal, Reply, ReplyBody, RequestId, limits,
@@ -101,6 +102,8 @@ pub struct Outbox {
 struct Shared {
     state: Mutex<State>,
     wake: Arc<dyn Wake>,
+    /// The work version this connection's admission selected.
+    work: ProtocolVersion,
     /// Set by [`Outbox::request_publication`] until the I/O thread takes it.
     publication: AtomicBool,
 }
@@ -167,11 +170,14 @@ enum Taken {
 }
 
 impl Outbox {
-    pub fn new(wake: Arc<dyn Wake>) -> Self {
+    /// The outbox of a connection whose admission selected the work version `work`. It sends
+    /// each message as that version has it.
+    pub fn new(wake: Arc<dyn Wake>, work: ProtocolVersion) -> Self {
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State::default()),
                 wake,
+                work,
                 publication: AtomicBool::new(false),
             }),
         }
@@ -266,7 +272,9 @@ impl Outbox {
     /// Replaces any inventory revision not yet written. A reply queued after this call is
     /// written after the revision, so a deferred outcome never precedes the revision holding it.
     pub fn inventory(&self, revision: InventoryRevision) -> Result<(), OutboxError> {
-        let frames = encode(&CoreMessage::Inventory(Box::new(revision)))?;
+        let frames = encode_inventory(revision, self.shared.work)
+            .map(|wire| wire.frames)
+            .map_err(OutboxError::Encode)?;
         self.with(|state| {
             state.open()?;
             if !state.inventory_queued {

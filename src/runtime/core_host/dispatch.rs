@@ -1697,7 +1697,10 @@ mod routes_tests {
     #[test]
     fn only_a_session_that_loses_its_last_route_rings_the_host() {
         let (routes, rings) = routes();
-        let (first, second) = (Outbox::new(Arc::new(|| {})), Outbox::new(Arc::new(|| {})));
+        let (first, second) = (
+            Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK),
+            Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK),
+        );
         routes.replace(BTreeMap::from([([1; 32], vec![first.clone()])]));
         routes.replace(BTreeMap::from([([1; 32], vec![second.clone()])]));
         assert_eq!(

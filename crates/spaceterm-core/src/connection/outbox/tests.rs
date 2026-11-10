@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::frame::Assembler;
-use crate::protocol::{RawFrame, ScreenUpdate};
+use crate::protocol::{Kind, RawFrame, ScreenUpdate};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct State(u64);
@@ -51,9 +51,12 @@ fn fresh() -> (Outbox, Arc<AtomicUsize>) {
     let wakes = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&wakes);
     (
-        Outbox::new(Arc::new(move || {
-            counter.fetch_add(1, Ordering::Relaxed);
-        })),
+        Outbox::new(
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }),
+            crate::protocol::version::WORK,
+        ),
         wakes,
     )
 }
@@ -870,4 +873,21 @@ fn semantic_messages_are_encoded_one_per_turn() {
         assert_eq!(encoded.load(Ordering::Relaxed), turn);
     }
     assert!(take(&outbox).is_none());
+}
+
+#[test]
+fn inventory_goes_out_as_the_selected_work_version_has_it() {
+    let revision = || InventoryRevision {
+        inventory: crate::hierarchy::State::empty().inventory,
+        next_sequence: 1,
+    };
+    for (work, kind) in [
+        (ProtocolVersion { major: 1, minor: 0 }, Kind::Inventory),
+        (crate::protocol::version::WORK, Kind::GitDirectoryInventory),
+    ] {
+        let outbox = Outbox::new(Arc::new(|| {}), work);
+        outbox.inventory(revision()).unwrap();
+        let (frame, _) = outbox.next_frame().unwrap();
+        assert_eq!(frame[4], kind as u8);
+    }
 }

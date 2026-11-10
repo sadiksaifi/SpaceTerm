@@ -1573,7 +1573,7 @@ mod tests {
         use spaceterm_core::protocol::{CoreMessage, ReplyBody};
         let (mut host, memory) = journaled();
         let device = [1; 32];
-        let outbox = Outbox::new(Arc::new(|| {}));
+        let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
         HostCommands::connected(&mut host, device, device, &outbox);
         assert!(matches!(
             drain(&outbox).as_slice(),
@@ -1709,7 +1709,7 @@ mod tests {
         use std::sync::atomic::Ordering;
         let (mut host, memory) = journaled();
         let device = [1; 32];
-        let outbox = Outbox::new(Arc::new(|| {}));
+        let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
         HostCommands::connected(&mut host, device, device, &outbox);
         drain(&outbox);
         memory.fail.store(true, Ordering::SeqCst);
@@ -1745,7 +1745,7 @@ mod tests {
         use spaceterm_core::protocol::CoreMessage;
         let mut host = WorkspaceHost::new(host());
         host.prepare_initial_organization().unwrap();
-        let outbox = Outbox::new(Arc::new(|| {}));
+        let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
         // A subscriber without Git facts, so nothing else is due.
         host.publication.subscribe([1; 32], [1; 32], outbox.clone());
         let start = Instant::now();
@@ -1858,7 +1858,7 @@ mod tests {
     fn a_failing_synchronization_waits_a_tick_before_trying_again() {
         use std::sync::atomic::Ordering;
         let (mut host, memory) = journaled();
-        let outbox = Outbox::new(Arc::new(|| {}));
+        let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
         // A subscriber's Git facts are due at once.
         HostCommands::connected(&mut host, [1; 32], [1; 32], &outbox);
         memory.fail.store(true, Ordering::SeqCst);

@@ -307,7 +307,7 @@ impl Fixture {
                     name: "Local".into(),
                     work: crate::protocol::version::WORK,
                 },
-                Outbox::new(wake),
+                Outbox::new(wake, crate::protocol::version::WORK),
                 waker,
                 &environment,
             )
@@ -1362,7 +1362,7 @@ fn a_retired_network_access_generation_refuses_inflight_proof_and_late_registrat
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
     let challenge = fixture.state.lock().unwrap().challenge().unwrap();
-    let outbox = Outbox::new(Arc::new(|| {}));
+    let outbox = Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK);
     fixture
         .state
         .lock()
@@ -1416,7 +1416,7 @@ fn a_retired_network_access_generation_refuses_inflight_proof_and_late_registrat
             [6; 32],
             paired.client,
             None,
-            Some(Outbox::new(Arc::new(|| {}))),
+            Some(Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK)),
             Box::new(Quiet)
         ),
         Err(DirectError::Disabled)

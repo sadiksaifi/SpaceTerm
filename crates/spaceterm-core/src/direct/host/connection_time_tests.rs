@@ -7,7 +7,8 @@ fn metadata_write_failure_preserves_the_live_connection_and_its_exact_authority(
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
-    let outbox = crate::connection::outbox::Outbox::new(Arc::new(|| {}));
+    let outbox =
+        crate::connection::outbox::Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK);
     let mut state = fixture.state.lock().unwrap();
     let generation = state.generation;
     state
