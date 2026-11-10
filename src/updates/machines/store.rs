@@ -420,13 +420,9 @@ impl MachineUpdates {
                         MachineAction::Install => Some(Asked::Install),
                         _ => None,
                     };
-                    if let Some(entry) = self
-                        .asked
-                        .iter_mut()
-                        .find(|(id, asked, done)| {
-                            *id == machine && Some(*asked) == answered && !done
-                        })
-                    {
+                    if let Some(entry) = self.asked.iter_mut().find(|(id, asked, done)| {
+                        *id == machine && Some(*asked) == answered && !done
+                    }) {
                         entry.2 = true;
                     }
                     self.finish_performed(machine, action, outcome, cx);
@@ -730,15 +726,16 @@ mod tests {
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(installing)));
         cx.run_until_parked();
-        assert_eq!(store.read_with(cx, |store, _| store.machines()[0].asked), None);
+        assert_eq!(
+            store.read_with(cx, |store, _| store.machines()[0].asked),
+            None
+        );
     }
 
     /// A Core's own failed download is dated from its first failure while the Core keeps
     /// trying, until a person tries it from this desktop.
     #[gpui::test]
-    fn a_cores_own_failed_download_is_dated_until_a_person_tries_it(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_cores_own_failed_download_is_dated_until_a_person_tries_it(cx: &mut gpui::TestAppContext) {
         let (adapter, store) = installed(cx);
         let failed = |id, at, reason| {
             let mut update = update("0.8.0", None);

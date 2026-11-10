@@ -521,10 +521,7 @@ fn check_again_turns_the_control_into_a_checking_status_until_the_check_ends(
     visual.run_until_parked();
 
     click("update-control", visual);
-    assert_eq!(
-        machines.performed(),
-        [(PENGUIN, MachineAction::CheckAgain)]
-    );
+    assert_eq!(machines.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
     let tree = A11yTree::read(visual);
     assert_eq!(tree.node("Checking penguin…")["aria"]["role"], "Status");
     assert!(tree.with_role("Button").is_empty(), "nothing to press");

@@ -484,6 +484,11 @@ fn a_download_a_core_retries_by_itself_stays_out_of_the_title_bar_for_a_day() {
     assert_eq!(row.button.unwrap().label.as_ref(), "Try Again");
     assert_eq!(quiet.extra_rows()[0].tone, Tone::Problem);
 
+    // A Pending Version that waits behind the failure still needs the person.
+    let mut behind = waiting(failed(InstallFailure::Download, Some(NOW - 60)), NOW - 120);
+    let facts = behind.facts.as_mut().unwrap();
+    facts.sessions = 2;
+    facts.last_failure.as_mut().unwrap().version = version("0.9.1");
     for shown in [
         // It kept failing for a day.
         failed(InstallFailure::Download, Some(NOW - DAY)),
@@ -491,6 +496,7 @@ fn a_download_a_core_retries_by_itself_stays_out_of_the_title_bar_for_a_day() {
         failed(InstallFailure::Download, None),
         // Nothing but a download is tried again by itself.
         failed(InstallFailure::DiskFull, Some(NOW - 60)),
+        behind,
     ] {
         assert_eq!(
             single(&present(&[shown])).label.as_ref(),
@@ -1042,6 +1048,23 @@ fn a_failed_download_spaceterm_retries_by_itself_stays_out_of_the_title_bar() {
         single(&shown(&disk_full, true)).label.as_ref(),
         "SpaceTerm Install Failed"
     );
+    // An overdue release, and one a Machine needs, are the person's to act on.
+    let facts = |stage| DesktopFacts {
+        pending: Some("0.9.0"),
+        retrying: true,
+        ..desktop(&failed, stage)
+    };
+    let overdue = Presentation::new(facts(UpdateStage::Overdue), &[], &Dismissed::new(), NOW);
+    assert_eq!(single(&overdue).label.as_ref(), "SpaceTerm Install Failed");
+    let mut newer = machine(PENGUIN, "penguin", 0);
+    newer.link = MachineLink::Incompatible(Incompatible::CallerTooOld);
+    let needed = Presentation::new(
+        facts(UpdateStage::Optional),
+        &[newer],
+        &Dismissed::new(),
+        NOW,
+    );
+    assert_eq!(single(&needed).label.as_ref(), "SpaceTerm Install Failed");
 }
 
 #[test]

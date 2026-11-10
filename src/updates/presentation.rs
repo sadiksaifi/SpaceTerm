@@ -512,10 +512,11 @@ impl MachineView {
             MachineState::Ready { .. } | MachineState::Overdue { .. } => {
                 self.restart_asks() || self.core_too_old
             }
+            // A Pending Version that waits behind the failure still needs the person.
             MachineState::InstallFailed {
                 reason: InstallFailure::Download,
                 ..
-            } => !self.retrying,
+            } => !self.retrying || self.pending.is_some(),
             MachineState::Restarting { .. }
             | MachineState::Checking
             | MachineState::CoreTooOld { .. }
@@ -1458,6 +1459,8 @@ impl DesktopState {
     pub(crate) fn new(facts: DesktopFacts<'_>, too_old_for: Option<SharedString>) -> Self {
         let pending = facts.pending.map(str::to_owned);
         let overdue = facts.stage == UpdateStage::Overdue;
+        // An overdue release, and one a Machine needs, are the person's to act on.
+        let retrying = facts.retrying && !overdue && too_old_for.is_none();
         let state = match facts.state {
             // Acknowledging the failure hides its notice, not the way to finish the relaunch.
             UpdateState::Idle if facts.relaunch_held => Self::RelaunchHeld {
@@ -1512,14 +1515,14 @@ impl DesktopState {
                 version: pending,
                 error: *error,
                 held: facts.relaunch_held,
-                retrying: facts.retrying && *error == UpdateError::Download,
+                retrying: retrying && *error == UpdateError::Download,
             },
             // SpaceTerm tries the failed download again by itself. Its check for that, or that
             // check failing, keeps the failure rather than offering the download for a moment.
             UpdateState::Checking
             | UpdateState::Failed {
                 error: UpdateError::Check,
-            } if facts.retrying && pending.is_some() => Self::InstallFailed {
+            } if retrying && pending.is_some() => Self::InstallFailed {
                 version: pending,
                 error: UpdateError::Download,
                 held: false,
