@@ -12,7 +12,7 @@ use super::ref_format::validate_branch_name;
 use crate::cancellation::CancellationToken;
 use crate::domain::{RepositoryIdentity, ValidatedLocalDirectory};
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
-use crate::repository_status::discovery::{Discovery, parse_discovery};
+use crate::repository_status::discovery::{DiscoveredRepository, Discovery, parse_discovery};
 use crate::repository_status::local_read::{
     DISCOVERY_ARGUMENTS, git_arguments, git_environment, repository_program_error,
 };
@@ -146,6 +146,42 @@ impl LocalWorktreeGit {
         directory: &Path,
         cancellation: &CancellationToken,
     ) -> Result<Option<WorktreeSnapshot>, RepositoryReadError> {
+        match self.discover(directory, cancellation)? {
+            Discovery::Repository(repository) => {
+                self.list_from(&repository, cancellation).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Lists the Worktrees of the repository whose Main Worktree is `root`: a work tree's top
+    /// level, or a bare repository's directory. Returns `None` when `root` is in neither. The
+    /// caller compares the listed Main Worktree with `root`.
+    pub(crate) fn list_repository(
+        &self,
+        root: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<WorktreeSnapshot>, RepositoryReadError> {
+        match self.discover(root, cancellation)? {
+            Discovery::Repository(repository) => {
+                self.list_from(&repository, cancellation).map(Some)
+            }
+            // A bare repository has no work tree, so git lists it from its own directory.
+            Discovery::Bare => {
+                let worktrees = self.list_records(root, cancellation)?;
+                Ok(Some(snapshot(worktrees, root.to_owned(), root.to_owned())))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// What git finds at `directory`. A successful exit is required only for a work tree
+    /// repository: git fails after the first lines in a git directory or a bare repository.
+    fn discover(
+        &self,
+        directory: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<Discovery, RepositoryReadError> {
         let directory_text = directory.to_str().ok_or(RepositoryReadError::Unavailable)?;
         let mut output = Vec::new();
         let exit = self.run(
@@ -154,24 +190,29 @@ impl LocalWorktreeGit {
             &mut output,
             cancellation,
         )?;
-        let repository = match parse_discovery(
+        let discovery = parse_discovery(
             &output,
             directory_text,
             &self.physical_home.to_string_lossy(),
-        )? {
-            Discovery::NotRepository | Discovery::Hidden => return Ok(None),
-            Discovery::Repository(repository) => repository,
-        };
-        if !exit.success() {
+        )?;
+        if matches!(discovery, Discovery::Repository(_)) && !exit.success() {
             return Err(RepositoryReadError::Unavailable);
         }
+        Ok(discovery)
+    }
+
+    fn list_from(
+        &self,
+        repository: &DiscoveredRepository,
+        cancellation: &CancellationToken,
+    ) -> Result<WorktreeSnapshot, RepositoryReadError> {
         let current = PathBuf::from(&*repository.toplevel);
         let worktrees = self.list_records(&current, cancellation)?;
-        Ok(Some(snapshot(
+        Ok(snapshot(
             worktrees,
             current,
             PathBuf::from(&*repository.common_directory),
-        )))
+        ))
     }
 
     /// Lists the local and fetched remote-tracking branches of the repository at `root`.

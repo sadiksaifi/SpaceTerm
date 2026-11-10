@@ -197,7 +197,8 @@ impl LocalRepositoryReader {
             &self.physical_home.to_string_lossy(),
         )? {
             Discovery::NotRepository => return Ok(ProbeOutcome::NotRepository),
-            Discovery::Hidden => return Ok(ProbeOutcome::Hidden),
+            Discovery::GitDirectory => return Ok(ProbeOutcome::GitDirectory),
+            Discovery::Bare | Discovery::Hidden => return Ok(ProbeOutcome::Hidden),
             Discovery::Repository(repository) => repository,
         };
         if !exit.success() {
@@ -568,10 +569,10 @@ mod tests {
     #[test]
     fn probe_should_hide_git_directories_bare_repositories_and_home_subdirectories() {
         let home_below = format!("false\nfalse\n{HOME}/.git\n../.git\n{HOME}\nProjects/\n");
-        for output in [
-            "true\nfalse\n/src/app/.git\n.\n",
-            "true\ntrue\n/src/bare.git\n.\n",
-            home_below.as_str(),
+        for (output, expected) in [
+            ("true\nfalse\n/src/app/.git\n.\n", ProbeOutcome::GitDirectory),
+            ("true\ntrue\n/src/bare.git\n.\n", ProbeOutcome::Hidden),
+            (home_below.as_str(), ProbeOutcome::Hidden),
         ] {
             let code = if output.starts_with("true") { 128 } else { 0 };
             let runner = FakeRunner::new([exit(code, output)]);
@@ -581,7 +582,7 @@ mod tests {
                 .probe(Path::new("/src/x"), &CancellationToken::default())
                 .unwrap();
 
-            assert_eq!(outcome, ProbeOutcome::Hidden, "{output:?}");
+            assert_eq!(outcome, expected, "{output:?}");
             assert_eq!(runner.requests().len(), 1);
         }
     }

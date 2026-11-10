@@ -172,7 +172,7 @@ fn list(
         .validate_directory(root)
         .map_err(|_| Error::Unavailable)?;
     let list = git
-        .list(directory.path(), token)
+        .list_repository(directory.path(), token)
         .map_err(|_| Error::Unavailable)?
         .ok_or(Error::Missing)?;
     if list.repository.main_root() != root {
@@ -543,7 +543,7 @@ fn removal_error(error: WorktreeRemoveError) -> Error {
 mod tests {
     use super::*;
     use crate::runtime::core_host::{
-        repository_tests::{GitFixture, finish_write, git_facts, review_removal},
+        repository_tests::{GitFixture, finish_write, git_facts, read_worktree, review_removal},
         tests::{create_workspace, host, screen, size, workspace_inventory},
     };
 
@@ -1409,6 +1409,54 @@ mod tests {
                 .iter()
                 .all(|p| p.session.is_none())
         );
+        host.shutdown().unwrap();
+    }
+
+    /// `git clone --bare` then `git worktree add`: the Main Worktree is the bare repository's
+    /// directory, where git finds no work tree.
+    #[test]
+    fn a_bare_main_worktree_reads_its_branches_and_removes_a_linked_worktree() {
+        let git = GitFixture::new();
+        let bare = git.0.join("app.git");
+        git.git(&["clone", "--quiet", "--bare", ".", bare.to_str().unwrap()]);
+        let add = |name: &str| {
+            let tree = git.0.join(name);
+            git.git(&[
+                "--git-dir",
+                bare.to_str().unwrap(),
+                "worktree",
+                "add",
+                "-b",
+                name,
+                tree.to_str().unwrap(),
+            ]);
+            tree
+        };
+        let open = add("open");
+        let tree = add("linked");
+        let mut prototype = host();
+        prototype.directory = open;
+        let mut host = WorkspaceHost::new(prototype);
+        create_workspace(&mut host, 1);
+
+        let context = read_worktree(&mut host, Read::Context { root: bare.clone() });
+        let review = review_removal(&mut host, &bare, &tree);
+        let removed = finish_write(
+            &mut host,
+            2,
+            Operation::Remove {
+                root: bare.clone(),
+                path: tree.clone(),
+                boot: review.boot,
+                confirmation: review.confirmation,
+            },
+        );
+
+        assert!(
+            matches!(context, Ok(ReadReply::Context { branches, .. }) if branches.local.contains(&"linked".to_owned())),
+        );
+        assert!(matches!(removed, Outcome::Accepted { .. }));
+        assert!(!tree.exists());
         host.shutdown().unwrap();
     }
 }

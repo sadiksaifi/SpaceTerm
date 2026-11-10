@@ -179,8 +179,11 @@ pub(crate) struct ProbedRepository {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProbeOutcome {
     NotRepository,
-    /// A repository Repository Status deliberately does not show: bare, inside a git directory,
-    /// or rooted at home while the directory is below home.
+    /// Inside a work tree repository's git directory, such as `.git/hooks`. Repository Status
+    /// shows nothing there, but the directory is inside its repository.
+    GitDirectory,
+    /// A repository Repository Status deliberately does not show: bare, or rooted at home while
+    /// the directory is below home.
     Hidden,
     Repository(Box<ProbedRepository>),
 }
