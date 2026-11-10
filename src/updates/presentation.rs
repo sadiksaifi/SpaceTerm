@@ -1247,17 +1247,21 @@ pub(crate) const READ_ONLY_REMEDY: &str = "Install SpaceTerm in Applications to 
 pub(crate) const READ_ONLY_REMEDY: &str = "Run the SpaceTerm install script to install the update.";
 
 /// Only a check a person asked for on this desktop reads as Checking, until the Core ends it or
-/// turns it into an install. A Core's own check changes no surface.
+/// turns it into an install. A Core's own check changes no surface. A Machine that changes or
+/// went out of reach during the check reads as that.
 fn machine_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> MachineState {
     let state = base_state(update, dismissed, now);
-    let changing = matches!(
+    let outranks = matches!(
         state,
         MachineState::Installing { .. }
             | MachineState::Restarting { .. }
             | MachineState::Stopping
             | MachineState::Uninstalling
+            | MachineState::Stopped
+            | MachineState::Unpaired
+            | MachineState::Offline { .. }
     );
-    if update.asked == Some(Asked::Check) && !changing {
+    if update.asked == Some(Asked::Check) && !outranks {
         MachineState::Checking
     } else {
         state

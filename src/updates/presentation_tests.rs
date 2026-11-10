@@ -553,6 +553,15 @@ fn check_again_shows_checking_until_the_check_ends() {
             ("Checking penguin…", Glyph::Working, Tone::Action, None)
         );
     }
+
+    // A Machine that went offline during the check reads as offline.
+    let mut offline = machine(PENGUIN, "penguin", 0);
+    offline.link = MachineLink::Offline { since: NOW - 60 };
+    offline.asked = Some(Asked::Check);
+    assert_eq!(
+        present(&[offline]).machine(PENGUIN).unwrap().state,
+        MachineState::Offline { offered: None }
+    );
 }
 
 #[test]
