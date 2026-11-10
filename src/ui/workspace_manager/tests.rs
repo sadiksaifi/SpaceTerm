@@ -12914,6 +12914,84 @@ mod workspace_repositories {
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 
+    /// The Workspace with only its Root Tab, whose Root Pane is in `directory`. The server keeps
+    /// the Tab's `membership` and has read `directories`. It keeps reading the Worktree a Tab is
+    /// in, so a pending read of the Root Pane's new directory leaves the old repository's facts.
+    fn following_root_pane(
+        revision: u64,
+        directory: &str,
+        membership: Option<&str>,
+        directories: Vec<DirectoryFacts>,
+    ) -> Inventory {
+        let mut inventory = published(revision, "main", false);
+        inventory.revision = revision;
+        let workspace = &mut inventory.workspaces[0];
+        workspace.tabs.retain(|tab| tab.id == ROOT_TAB);
+        workspace.tabs[0].worktree = membership.map(PathBuf::from);
+        workspace.tabs[0].worktree_repository = membership.map(PathBuf::from);
+        workspace.tabs[0].panes = vec![pane(ROOT_PANE, directory)];
+        if let Some(snapshot) = &mut inventory.repositories {
+            snapshot.directories = directories;
+        }
+        inventory
+    }
+
+    /// The server publishes a Root Pane's new directory before it reads Git there. Its read then
+    /// reports the directory's repository before it lists that repository's Worktrees, and the
+    /// server keeps the Root Tab's saved membership until the listing arrives. Through that window
+    /// the row presents the repository the Tab is still in, so a `cd` between repositories, or out
+    /// of one and back, never flashes a former-repository group.
+    #[gpui::test]
+    fn a_root_tab_moving_between_repositories_should_flash_no_worktree_group(
+        cx: &mut TestAppContext,
+    ) {
+        const OUTSIDE: &str = "/srv/notes";
+        let app = || facts_within(MAIN_ROOT, MAIN_ROOT, "main");
+        let orbit = || facts_within(ORBIT_ROOT, ORBIT_ROOT, "trunk");
+        let unlisted = |facts: DirectoryFacts| DirectoryFacts {
+            worktrees: None,
+            ..facts
+        };
+        let outside = DirectoryFacts {
+            directory: OUTSIDE.into(),
+            repository: None,
+            worktrees: None,
+            failure: None,
+        };
+        let steps = [
+            following_root_pane(2, ORBIT_ROOT, Some(MAIN_ROOT), vec![app()]),
+            following_root_pane(
+                3,
+                ORBIT_ROOT,
+                Some(MAIN_ROOT),
+                vec![app(), unlisted(orbit())],
+            ),
+            following_root_pane(4, ORBIT_ROOT, Some(ORBIT_ROOT), vec![orbit()]),
+            following_root_pane(5, OUTSIDE, Some(ORBIT_ROOT), vec![orbit()]),
+            following_root_pane(6, OUTSIDE, None, vec![outside]),
+            following_root_pane(7, MAIN_ROOT, None, vec![]),
+            following_root_pane(8, MAIN_ROOT, None, vec![unlisted(app())]),
+            following_root_pane(9, MAIN_ROOT, Some(MAIN_ROOT), vec![app()]),
+        ];
+        let (harness, cx) = harness(
+            cx,
+            following_root_pane(1, MAIN_ROOT, Some(MAIN_ROOT), vec![app()]),
+        );
+
+        let mut presented = vec![harness.row(cx).worktrees.is_some()];
+        for step in steps {
+            harness.publish(step, cx);
+            presented.push(harness.row(cx).worktrees.is_some());
+        }
+
+        assert_eq!(
+            presented,
+            vec![false; 9],
+            "no Worktree group appears before, during, or after any read"
+        );
+        assert_eq!(harness.edits.submitted(), Vec::new());
+    }
+
     /// A linked Worktree inside the Main Worktree's directory is its own: a Pane that moved into
     /// it has left the Main Worktree, though its directory starts with the Main Worktree's root.
     /// A later failed read keeps the nested Worktree the server last read there.
