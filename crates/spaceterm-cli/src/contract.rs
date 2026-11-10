@@ -2351,7 +2351,8 @@ pub struct Shown {
 #[cfg(test)]
 pub(crate) mod golden {
     //! Golden envelopes in `crates/spaceterm-cli/golden/`. Set `SPACETERM_GOLDEN_UPDATE=1` to
-    //! write the current output instead of comparing.
+    //! write the current output instead of comparing. `pair_interaction_required.json` is read
+    //! only by `tests/provision.rs` and is not rewritten that way.
     use serde::Serialize;
     use std::path::PathBuf;
 

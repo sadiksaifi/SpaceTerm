@@ -8267,8 +8267,10 @@ fn public_dialog_replacement_retires_owned_menu_before_successor_open(cx: &mut T
         root.read_with(cx, |root, _| root.outcome.borrow().clone()),
         Some(DialogOutcome::Dismissed(ModalCloseReason::Replaced))
     );
-    assert_eq!(trace.borrow().first(), Some(&"menu-closed"));
-    assert!(trace.borrow().contains(&"successor-opened"));
+    assert_eq!(
+        *trace.borrow(),
+        ["menu-closed", "dialog-outcome", "successor-opened"]
+    );
     cx.update(|window, cx| {
         replacement
             .complete(window, None, cx)

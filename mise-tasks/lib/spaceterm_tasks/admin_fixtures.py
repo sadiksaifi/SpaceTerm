@@ -137,6 +137,9 @@ def _broken_verification(destination, target, result):
                 target=target,
                 native=False,
             )
+        except core_package.ArtifactVerificationError:
+            # The fixture could not be read or copied, so its contents were never judged.
+            raise
         except TaskError:
             pass
         else:
