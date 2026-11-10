@@ -203,6 +203,20 @@ impl Workspace {
         self.placed_tab()?.worktree_repository.as_deref()
     }
 
+    /// The directory this Workspace's repository is named for: its Main Worktree, or that
+    /// directory's parent when the Main Worktree is a bare repository kept in `.bare` or `.git`,
+    /// as `git clone --bare <url> project/.bare` leaves it. The saved membership does not say
+    /// whether the Main Worktree is bare, so the two conventional names stand for it.
+    pub(super) fn repository_name_directory(&self) -> Option<&Path> {
+        let main = self.repository()?;
+        let kept_inside = main
+            .file_name()
+            .is_some_and(|name| name == ".bare" || name == ".git");
+        main.parent()
+            .filter(|parent| kept_inside && parent.file_name().is_some())
+            .or(Some(main))
+    }
+
     /// The Tab whose saved membership names this Workspace's repository: the Root Tab when it
     /// has a Worktree, else the first Tab that does.
     fn placed_tab(&self) -> Option<&Tab> {
@@ -575,6 +589,42 @@ mod tests {
         let mut state = workspace_in("/feature");
         state.reconcile_worktrees(&reads());
         assert_eq!(name(&state), "repo");
+    }
+
+    /// `git clone --bare <url> /proj/.bare` with linked Worktrees: git lists the bare directory
+    /// first, so it is the Main Worktree.
+    #[test]
+    fn a_bare_repository_kept_in_dot_bare_names_its_workspace_for_the_parent() {
+        let mut reads = reads();
+        reads.directories.extend([
+            inside(
+                "/proj/main",
+                "/proj/.bare",
+                "/proj/main",
+                &["/proj/.bare", "/proj/main"],
+            ),
+            inside(
+                "/home/.dotfiles",
+                "/home/.dotfiles",
+                "/home/.dotfiles",
+                &["/home/.dotfiles"],
+            ),
+        ]);
+
+        let mut bare = workspace_in("/proj/main");
+        bare.reconcile_worktrees(&reads);
+        let mut dotfiles = workspace_in("/home/.dotfiles");
+        dotfiles.reconcile_worktrees(&reads);
+
+        assert_eq!(
+            (worktrees(&bare), name(&bare)),
+            (vec![Some("/proj/main")], "proj")
+        );
+        assert_eq!(
+            name(&dotfiles),
+            ".dotfiles",
+            "an ordinary repository in a dot-named directory keeps its own name"
+        );
     }
 
     /// A Core before this rule let the Root Tab leave while other Tabs stayed, and let a Tab

@@ -1500,7 +1500,7 @@ impl State {
                 .find(|t| t.id == workspace.root_tab)
                 .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane));
             // A Workspace in a repository is named for it, wherever its shells are.
-            let directory = workspace.repository().or_else(|| {
+            let directory = workspace.repository_name_directory().or_else(|| {
                 workspace
                     .pinned_directory
                     .as_deref()
