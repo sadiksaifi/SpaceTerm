@@ -351,8 +351,8 @@ pub enum WorktreeMembership {
     Following,
     /// The Tab stays in its Worktree. A `cd` as its Workspace's only Tab ends this.
     Opened,
-    /// Directory repair kept the Tab's Worktree. Only leaving every repository as its
-    /// Workspace's only Tab ends this.
+    /// Directory repair kept the Tab's Worktree. Leaving every repository as its Workspace's
+    /// only Tab ends this. A change of Pinned Directory moves the Tab and keeps this.
     Repaired,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
