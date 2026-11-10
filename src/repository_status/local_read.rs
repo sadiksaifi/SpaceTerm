@@ -570,7 +570,10 @@ mod tests {
     fn probe_should_hide_git_directories_bare_repositories_and_home_subdirectories() {
         let home_below = format!("false\nfalse\n{HOME}/.git\n../.git\n{HOME}\nProjects/\n");
         for (output, expected) in [
-            ("true\nfalse\n/src/app/.git\n.\n", ProbeOutcome::GitDirectory),
+            (
+                "true\nfalse\n/src/app/.git\n.\n",
+                ProbeOutcome::GitDirectory,
+            ),
             ("true\ntrue\n/src/bare.git\n.\n", ProbeOutcome::Hidden),
             (home_below.as_str(), ProbeOutcome::Hidden),
         ] {

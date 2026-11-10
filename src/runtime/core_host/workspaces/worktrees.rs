@@ -1479,7 +1479,12 @@ mod tests {
         let mut host = WorkspaceHost::new(prototype);
         create_workspace(&mut host, 1);
 
-        let context = read_worktree(&mut host, Read::Context { root: git.0.clone() });
+        let context = read_worktree(
+            &mut host,
+            Read::Context {
+                root: git.0.clone(),
+            },
+        );
 
         let Ok(ReadReply::Context { branches, .. }) = context else {
             panic!("the Context read failed: {context:?}");

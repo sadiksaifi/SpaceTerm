@@ -554,7 +554,11 @@ impl WorkspaceManager {
         let missing = self
             .binding
             .owning(review.workspace)
-            .and_then(|binding| binding.repositories().repository_worktrees(&review.review.root))
+            .and_then(|binding| {
+                binding
+                    .repositories()
+                    .repository_worktrees(&review.review.root)
+            })
             .is_some_and(|i| !i.worktrees.iter().any(|r| r.root == review.review.path));
         if missing || !review.review.matches_inventory(inventory) {
             let Some(review) = self.sidebar_worktrees.core_review.take() else {

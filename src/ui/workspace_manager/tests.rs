@@ -11921,7 +11921,10 @@ mod workspace_repositories {
             path: FEATURE_ROOT.into(),
             changes: false,
             submodules: false,
-            tabs: initial.affected_worktree_tabs(std::path::Path::new(MAIN_ROOT), std::path::Path::new(FEATURE_ROOT)),
+            tabs: initial.affected_worktree_tabs(
+                std::path::Path::new(MAIN_ROOT),
+                std::path::Path::new(FEATURE_ROOT),
+            ),
         });
         let feature = harness
             .row(cx)
@@ -11940,7 +11943,9 @@ mod workspace_repositories {
             })
         });
         cx.run_until_parked();
-        let asked = cx.debug_bounds("modal-action-worktree-removal-confirm").is_some();
+        let asked = cx
+            .debug_bounds("modal-action-worktree-removal-confirm")
+            .is_some();
 
         let mut moved = published(2, "main", true);
         moved.close = Some(close);
@@ -11962,7 +11967,8 @@ mod workspace_repositories {
 
         assert!(asked, "the removal alert opened");
         assert!(
-            cx.debug_bounds("modal-action-worktree-removal-confirm").is_some(),
+            cx.debug_bounds("modal-action-worktree-removal-confirm")
+                .is_some(),
             "the alert stays open"
         );
         assert!(
