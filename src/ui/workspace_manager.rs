@@ -2561,6 +2561,17 @@ impl WorkspaceManager {
                     None => None,
                 };
                 let worktrees = self.worktree_section(workspace.id(), cx);
+                // A Workspace in a repository with one Worktree describes that Worktree, wherever
+                // its shells are, as a collapsed row describes its Active Worktree.
+                if worktrees.is_none()
+                    && let Some(worktree) = self.core_only_worktree(workspace.id(), cx)
+                {
+                    path = worktree.directory.clone();
+                    repository = worktree.repository.clone();
+                    if let Some(pane) = &worktree.outside_pane_directory {
+                        tooltip.push_str(&format!("\n{OUTSIDE_PANE_LABEL}: {pane}"));
+                    }
+                }
                 // A disclosing row describes the Workspace. Its directory and branch belong to
                 // its Worktrees, and a collapsed row shows its Active Worktree's.
                 if let Some(section) = worktrees.as_ref() {

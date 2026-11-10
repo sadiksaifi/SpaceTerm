@@ -22,12 +22,21 @@ const PIN_GLYPH_REDUCTION: f32 = 2.0;
 /// beside lowercase text.
 const PIN_OPTICAL_OFFSET: f32 = 0.5;
 
-/// A row's first line. `pinned` marks a Workspace whose row leaves line 2 to its Worktrees.
+/// What follows a row's name on its first line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TitleMark {
+    /// A Workspace with a Pinned Directory, whose row leaves line 2 to its Worktrees.
+    Pinned,
+    /// A Worktree whose last-used Pane is outside it. The Tab stays in the Worktree.
+    OutsidePane,
+}
+
+/// A row's first line.
 pub(super) fn title(
     name: SharedString,
     name_element: AnyElement,
     machine: Option<SharedString>,
-    pinned: bool,
+    mark: Option<TitleMark>,
     id: u64,
     appearance: ChromeAppearance,
 ) -> AnyElement {
@@ -44,7 +53,7 @@ pub(super) fn title(
                     .measure(TextRole::Navigation, &name, window),
                 window,
             );
-            let pin_width = if pinned {
+            let pin_width = if mark.is_some() {
                 window.pixel_snap(appearance.spacing(NAME_PIN_GAP + PIN_WIDTH))
             } else {
                 px(0.0)
@@ -59,10 +68,10 @@ pub(super) fn title(
                 machine_width(bounds.size.width, name_width + pin_width, full_width)
                     .map(|width| (machine, width))
             });
-            // A pin follows the name it marks, so the name takes only its text's width and the
+            // A mark follows the name it marks, so the name takes only its text's width and the
             // rest of the line stays empty.
             let name_column = div().min_w_0().child(name_element);
-            let name_column = if pinned {
+            let name_column = if mark.is_some() {
                 name_column.w(name_width).flex_shrink_1()
             } else {
                 name_column.flex_1()
@@ -73,12 +82,12 @@ pub(super) fn title(
                 .flex()
                 .items_center()
                 .child(name_column)
-                .when(pinned, |row| {
+                .when_some(mark, |row, mark| {
                     row.child(
                         div()
                             .flex_shrink_0()
                             .pl(appearance.spacing(NAME_PIN_GAP))
-                            .child(pin(id, &appearance)),
+                            .child(title_mark(mark, id, &appearance)),
                     )
                     .child(div().flex_1())
                 })
@@ -108,18 +117,26 @@ pub(super) fn title(
     .into_any_element()
 }
 
-/// The mark of a Pinned Directory.
-fn pin(id: u64, appearance: &ChromeAppearance) -> AnyElement {
+/// The glyph that follows a marked row's name.
+fn title_mark(mark: TitleMark, id: u64, appearance: &ChromeAppearance) -> AnyElement {
+    let (element, selector, icon) = match mark {
+        TitleMark::Pinned => ("workspace-row-pin", "workspace-row-pin", IconName::Pin),
+        TitleMark::OutsidePane => (
+            "worktree-row-outside-pane",
+            "worktree-row-outside-pane",
+            IconName::ExternalLink,
+        ),
+    };
     div()
         .w(appearance.spacing(PIN_WIDTH))
         .flex_shrink_0()
         .relative()
         .top(px(PIN_OPTICAL_OFFSET))
-        .id(("workspace-row-pin", id))
-        .debug_selector(move || format!("workspace-row-pin-{id}"))
+        .id((element, id))
+        .debug_selector(move || format!("{selector}-{id}"))
         .text_color(gpui_color(appearance.colors.row_secondary))
         .child(Icon::inherited(
-            IconName::Pin,
+            icon,
             appearance.icons.metrics(IconRole::Caption).glyph_size - px(PIN_GLYPH_REDUCTION),
         ))
         .into_any_element()
@@ -209,7 +226,7 @@ pub(super) fn detail(
                 .flex_1()
                 .flex()
                 .items_center()
-                .when(pinned, |path| path.child(pin(id, &appearance)))
+                .when(pinned, |path| path.child(title_mark(TitleMark::Pinned, id, &appearance)))
                 .child(
                     div()
                         .min_w_0()
@@ -439,11 +456,61 @@ mod tests {
                 "Workspace".into(),
                 div().child("Workspace").into_any_element(),
                 Some(self.machine.into()),
-                false,
+                None,
                 1,
                 ChromeAppearance::default(),
             ))
         }
+    }
+
+    struct MarkedTitleFixture {
+        mark: Option<TitleMark>,
+    }
+
+    impl gpui::Render for MarkedTitleFixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div().w(px(200.0)).child(title(
+                "app".into(),
+                div().child("app").into_any_element(),
+                None,
+                self.mark,
+                1,
+                ChromeAppearance::default(),
+            ))
+        }
+    }
+
+    /// A Worktree row whose Pane left it marks its name. The mark follows the name, as a pin
+    /// does, and a row whose Pane is inside draws none.
+    #[gpui::test]
+    fn a_title_should_draw_the_outside_pane_mark_after_its_name(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| MarkedTitleFixture { mark: None });
+        cx.run_until_parked();
+        let unmarked = cx.debug_bounds("worktree-row-outside-pane-1");
+
+        view.update(cx, |view, cx| {
+            view.mark = Some(TitleMark::OutsidePane);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let mark = cx.debug_bounds("worktree-row-outside-pane-1");
+        let name_width = cx.update(|window, _| {
+            ChromeAppearance::default()
+                .typography
+                .measure(TextRole::Navigation, "app", window)
+        });
+
+        assert_eq!(unmarked, None);
+        let mark = mark.expect("the outside-Pane mark");
+        assert!(
+            mark.origin.x >= name_width && mark.size.width > px(0.0),
+            "the mark must follow the name, got {mark:?} after {name_width:?}"
+        );
+        assert_eq!(cx.debug_bounds("workspace-row-pin-1"), None);
     }
 
     #[gpui::test]
