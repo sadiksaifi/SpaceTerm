@@ -212,6 +212,16 @@ pub struct DirectoryFacts {
     pub repository: Option<Repository>,
     pub worktrees: Option<WorktreeInventory>,
     pub failure: Option<RepositoryReadError>,
+    /// The directory is inside a work tree repository's Git directory, such as `.git/hooks`.
+    /// Repository Status shows nothing there, but the directory is inside its repository.
+    pub inside_git_directory: bool,
+}
+impl DirectoryFacts {
+    /// Whether a successful read placed the directory outside any repository. Only then does an
+    /// unpinned Root Tab leave its Worktree (ADR 0020).
+    pub fn outside_repository(&self) -> bool {
+        self.failure.is_none() && self.repository.is_none() && !self.inside_git_directory
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repository {

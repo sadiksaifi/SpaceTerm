@@ -289,6 +289,7 @@ mod tests {
             pinned_worktrees: Vec::new(),
             pin_check: PinCheckState::Ready,
             directories: vec![DirectoryFacts {
+                inside_git_directory: false,
                 directory: "/server/main".into(),
                 repository: None,
                 failure: None,

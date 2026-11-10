@@ -264,6 +264,7 @@ mod tests {
         failure: Option<RepositoryReadError>,
     ) -> DirectoryFacts {
         DirectoryFacts {
+            inside_git_directory: false,
             directory: "/srv/app/src".into(),
             repository,
             worktrees: None,
@@ -740,6 +741,7 @@ mod tests {
     #[test]
     fn a_workspace_in_a_removed_worktree_should_list_what_its_saved_main_worktree_reads() {
         let unreadable = DirectoryFacts {
+            inside_git_directory: false,
             directory: "/srv/app-gone".into(),
             repository: None,
             worktrees: None,

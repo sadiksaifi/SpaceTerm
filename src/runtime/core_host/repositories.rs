@@ -411,9 +411,7 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
                     .find(|pane| pane.id == tab.root_pane)
                     .is_some_and(|pane| {
                         snapshot.directories.iter().any(|facts| {
-                            facts.directory == pane_directory(pane)
-                                && facts.failure.is_none()
-                                && facts.repository.is_none()
+                            facts.directory == pane_directory(pane) && facts.outside_repository()
                         })
                     })
             {
@@ -737,6 +735,7 @@ fn read_sources(sources: Sources, readers: Option<Readers>, status: GitToolStatu
                 (
                     status,
                     DirectoryFacts {
+                        inside_git_directory: false,
                         directory,
                         repository: None,
                         worktrees: None,
@@ -1332,6 +1331,7 @@ fn discover(
 ) {
     let mut git = None;
     let mut facts = DirectoryFacts {
+        inside_git_directory: false,
         directory,
         repository: None,
         worktrees: None,
@@ -1349,7 +1349,9 @@ fn discover(
         if removing() {
             return Err(RepositoryReadError::Unavailable);
         }
-        if let ProbeOutcome::Repository(probe) = repository.probe(directory, cancellation)? {
+        let probe = repository.probe(directory, cancellation)?;
+        facts.inside_git_directory = matches!(probe, ProbeOutcome::GitDirectory);
+        if let ProbeOutcome::Repository(probe) = probe {
             let RepositoryRoot::Local(root) = &probe.root else {
                 return Err(RepositoryReadError::InvalidResponse);
             };
@@ -1439,6 +1441,7 @@ fn discover(
     // A failed read reports no repository. The host keeps the last one it published.
     if let Err(failure) = result {
         facts.failure = Some(failure);
+        facts.inside_git_directory = false;
         facts.repository = None;
         facts.worktrees = None;
         git = None;

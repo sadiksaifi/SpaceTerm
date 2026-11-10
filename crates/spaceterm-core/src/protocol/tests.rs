@@ -539,6 +539,7 @@ fn inventory() -> hierarchy::Inventory {
             revision: 2,
             git: GitToolStatus::NotFound,
             directories: vec![DirectoryFacts {
+                inside_git_directory: false,
                 directory: PathBuf::from("/repo"),
                 repository: Some(Repository {
                     root: PathBuf::from("/repo"),

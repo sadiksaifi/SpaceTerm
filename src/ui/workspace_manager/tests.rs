@@ -128,6 +128,7 @@ fn a_pull_request_should_end_its_row_and_open_in_the_browser(cx: &mut TestAppCon
             patch: 0,
         }),
         directories: vec![DirectoryFacts {
+            inside_git_directory: false,
             directory: directory.clone(),
             repository: Some(Repository {
                 root: directory,
@@ -10711,6 +10712,7 @@ mod workspace_repositories {
 
     fn facts(directory: &str, branch: &str, listed: &[WorktreeRecord]) -> DirectoryFacts {
         DirectoryFacts {
+            inside_git_directory: false,
             directory: directory.into(),
             repository: Some(Repository {
                 root: directory.into(),
@@ -10812,6 +10814,7 @@ mod workspace_repositories {
             vec![
                 facts(MAIN_ROOT, "main", main_listing),
                 DirectoryFacts {
+                    inside_git_directory: false,
                     directory: FEATURE_ROOT.into(),
                     repository: None,
                     worktrees: None,
@@ -12953,6 +12956,7 @@ mod workspace_repositories {
             ..facts
         };
         let outside = DirectoryFacts {
+            inside_git_directory: false,
             directory: OUTSIDE.into(),
             repository: None,
             worktrees: None,

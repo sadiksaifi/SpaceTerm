@@ -68,11 +68,13 @@ pub fn workspace_listing<'a>(
     if let Some(inventory) = repos.directory_worktrees(directory) {
         return Some(inventory);
     }
-    // A successful read decides the listing, except a repository's listing that has not
-    // arrived yet. Pending and failed reads keep the server's saved membership.
-    if repos.facts(directory).is_some_and(|facts| {
-        facts.failure.is_none() && (facts.repository.is_none() || facts.worktrees.is_some())
-    }) {
+    // A successful read outside any repository decides the listing. Pending and failed reads,
+    // a repository's listing that has not arrived yet, and a Git directory keep the server's
+    // saved membership.
+    if repos
+        .facts(directory)
+        .is_some_and(repository::DirectoryFacts::outside_repository)
+    {
         return None;
     }
     let containing = workspace
@@ -283,6 +285,7 @@ mod tests {
             pinned_worktrees: Vec::new(),
             pin_check: PinCheckState::Ready,
             directories: vec![DirectoryFacts {
+                inside_git_directory: false,
                 directory: "/repo/source".into(),
                 repository: None,
                 failure: None,
@@ -471,6 +474,7 @@ mod tests {
 
     fn listing(directory: &str, main_root: &str, roots: &[&str]) -> DirectoryFacts {
         DirectoryFacts {
+            inside_git_directory: false,
             directory: directory.into(),
             repository: None,
             failure: None,
@@ -527,6 +531,7 @@ mod tests {
         let mut repos = trees();
         repos.directories = vec![
             DirectoryFacts {
+                inside_git_directory: false,
                 directory: "/outside".into(),
                 repository: None,
                 worktrees: None,
@@ -552,6 +557,7 @@ mod tests {
         linked.worktrees.as_mut().unwrap().worktrees[0].head = WorktreeHead::Bare;
         repos.directories = vec![
             DirectoryFacts {
+                inside_git_directory: false,
                 directory: "/app.git".into(),
                 repository: None,
                 worktrees: None,
@@ -578,10 +584,38 @@ mod tests {
         let mut repos = trees();
         repos.directories = vec![
             DirectoryFacts {
+                inside_git_directory: false,
                 directory: "/big".into(),
                 repository: None,
                 worktrees: None,
                 failure: Some(repository::RepositoryReadError::TimedOut),
+            },
+            listing("/repo", "/repo", &["/repo", "/feature"]),
+        ];
+
+        assert_eq!(
+            listed(&state.inventory, &repos),
+            Some(vec![PathBuf::from("/repo"), PathBuf::from("/feature")])
+        );
+    }
+
+    /// The Root Pane ran `cd .git/hooks`. The server keeps the Root Tab's membership there, so
+    /// the row keeps listing the repository.
+    #[test]
+    fn a_root_pane_inside_its_git_directory_lists_its_repository() {
+        let mut state = state(None);
+        let workspace = &mut state.inventory.workspaces[0];
+        workspace.tabs[0].worktree = Some("/repo".into());
+        workspace.tabs[0].worktree_repository = Some("/repo".into());
+        workspace.tabs[0].panes[0].repository_directory = Some("/repo/.git/hooks".into());
+        let mut repos = trees();
+        repos.directories = vec![
+            DirectoryFacts {
+                directory: "/repo/.git/hooks".into(),
+                repository: None,
+                worktrees: None,
+                failure: None,
+                inside_git_directory: true,
             },
             listing("/repo", "/repo", &["/repo", "/feature"]),
         ];
