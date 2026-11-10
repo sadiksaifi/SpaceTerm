@@ -46,9 +46,9 @@ pub fn workspace_worktrees<'a>(
 ///
 /// The server publishes an unpinned Root Pane's new directory before it reads Git there. Its read
 /// reports the directory's repository before it lists that repository's Worktrees, and the server
-/// keeps the Root Tab's saved membership until the listing arrives. Until then the row lists the
-/// repository the Root Tab is still in, so a `cd` into another repository switches the row once,
-/// when the listing arrives.
+/// keeps the Root Tab's saved membership until the listing arrives, or after the read fails. Until
+/// a read succeeds the row lists the repository the Root Tab is still in, so a `cd` into another
+/// repository switches the row once, when the listing arrives.
 pub fn workspace_listing<'a>(
     workspace: &Workspace,
     repos: &'a repository::Snapshot,
@@ -68,11 +68,11 @@ pub fn workspace_listing<'a>(
     if let Some(inventory) = repos.directory_worktrees(directory) {
         return Some(inventory);
     }
-    let facts = repos.facts(directory);
-    let listing_pending = facts.is_none_or(|facts| {
-        facts.failure.is_none() && facts.repository.is_some() && facts.worktrees.is_none()
-    });
-    if facts.is_some_and(|facts| facts.failure.is_none()) && !listing_pending {
+    // A successful read decides the listing, except a repository's listing that has not
+    // arrived yet. Pending and failed reads keep the server's saved membership.
+    if repos.facts(directory).is_some_and(|facts| {
+        facts.failure.is_none() && (facts.repository.is_none() || facts.worktrees.is_some())
+    }) {
         return None;
     }
     let containing = workspace
@@ -88,7 +88,7 @@ pub fn workspace_listing<'a>(
         .max_by_key(|(worktree, _)| worktree.components().count())
         .map(|(_, repository)| repository);
     let followed = || {
-        if workspace.pinned_directory.is_some() || !listing_pending {
+        if workspace.pinned_directory.is_some() {
             return None;
         }
         root_tab?.worktree_repository.as_deref()
@@ -563,6 +563,32 @@ mod tests {
         assert_eq!(
             listed(&state.inventory, &repos),
             Some(vec![PathBuf::from("/app.git"), PathBuf::from("/wt")])
+        );
+    }
+
+    /// The unpinned Root Tab is in `/repo`. Its Root Pane ran `cd` into another directory,
+    /// and the server's first read there failed. The server keeps the Root Tab's membership.
+    #[test]
+    fn a_failed_read_after_cd_lists_the_repository_the_root_tab_is_still_in() {
+        let mut state = state(None);
+        let workspace = &mut state.inventory.workspaces[0];
+        workspace.tabs[0].worktree = Some("/repo".into());
+        workspace.tabs[0].worktree_repository = Some("/repo".into());
+        workspace.tabs[0].panes[0].repository_directory = Some("/big".into());
+        let mut repos = trees();
+        repos.directories = vec![
+            DirectoryFacts {
+                directory: "/big".into(),
+                repository: None,
+                worktrees: None,
+                failure: Some(repository::RepositoryReadError::TimedOut),
+            },
+            listing("/repo", "/repo", &["/repo", "/feature"]),
+        ];
+
+        assert_eq!(
+            listed(&state.inventory, &repos),
+            Some(vec![PathBuf::from("/repo"), PathBuf::from("/feature")])
         );
     }
 }
