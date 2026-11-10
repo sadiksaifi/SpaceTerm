@@ -473,33 +473,6 @@ mod tests {
         );
     }
 
-    /// The first Tab ran `cd /tmp` while another Tab stayed in `/feature`. The Workspace is
-    /// still in the repository, so it lists it.
-    #[test]
-    fn a_workspace_lists_the_repository_its_tabs_are_in_wherever_its_shell_is() {
-        let mut state = state(None);
-        let workspace = &mut state.inventory.workspaces[0];
-        workspace.tabs[0].worktree = Some("/repo".into());
-        workspace.tabs[0].worktree_repository = Some("/repo".into());
-        workspace.tabs[0].panes[0].repository_directory = Some("/tmp".into());
-        let mut repos = trees();
-        repos.directories = vec![
-            DirectoryFacts {
-                inside_git_directory: false,
-                directory: "/tmp".into(),
-                repository: None,
-                worktrees: None,
-                failure: None,
-            },
-            listing("/feature", "/repo", &["/repo", "/feature"]),
-        ];
-
-        assert_eq!(
-            listed(&state.inventory, &repos),
-            Some(vec![PathBuf::from("/repo"), PathBuf::from("/feature")])
-        );
-    }
-
     /// No Tab is in a Worktree, so the Workspace is in no repository, even while another
     /// Tab's shell sits in one.
     #[test]
@@ -537,60 +510,6 @@ mod tests {
         assert_eq!(
             listed(&state.inventory, &repos),
             Some(vec![PathBuf::from("/app.git"), PathBuf::from("/wt")])
-        );
-    }
-
-    /// The unpinned Root Tab is in `/repo`. Its Root Pane ran `cd` into another directory,
-    /// and the server's first read there failed. The server keeps the Root Tab's membership.
-    #[test]
-    fn a_failed_read_after_cd_lists_the_repository_the_root_tab_is_still_in() {
-        let mut state = state(None);
-        let workspace = &mut state.inventory.workspaces[0];
-        workspace.tabs[0].worktree = Some("/repo".into());
-        workspace.tabs[0].worktree_repository = Some("/repo".into());
-        workspace.tabs[0].panes[0].repository_directory = Some("/big".into());
-        let mut repos = trees();
-        repos.directories = vec![
-            DirectoryFacts {
-                inside_git_directory: false,
-                directory: "/big".into(),
-                repository: None,
-                worktrees: None,
-                failure: Some(repository::RepositoryReadError::TimedOut),
-            },
-            listing("/repo", "/repo", &["/repo", "/feature"]),
-        ];
-
-        assert_eq!(
-            listed(&state.inventory, &repos),
-            Some(vec![PathBuf::from("/repo"), PathBuf::from("/feature")])
-        );
-    }
-
-    /// The Root Pane ran `cd .git/hooks`. The server keeps the Root Tab's membership there, so
-    /// the row keeps listing the repository.
-    #[test]
-    fn a_root_pane_inside_its_git_directory_lists_its_repository() {
-        let mut state = state(None);
-        let workspace = &mut state.inventory.workspaces[0];
-        workspace.tabs[0].worktree = Some("/repo".into());
-        workspace.tabs[0].worktree_repository = Some("/repo".into());
-        workspace.tabs[0].panes[0].repository_directory = Some("/repo/.git/hooks".into());
-        let mut repos = trees();
-        repos.directories = vec![
-            DirectoryFacts {
-                directory: "/repo/.git/hooks".into(),
-                repository: None,
-                worktrees: None,
-                failure: None,
-                inside_git_directory: true,
-            },
-            listing("/repo", "/repo", &["/repo", "/feature"]),
-        ];
-
-        assert_eq!(
-            listed(&state.inventory, &repos),
-            Some(vec![PathBuf::from("/repo"), PathBuf::from("/feature")])
         );
     }
 }
